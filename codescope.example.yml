@@ -1,0 +1,79 @@
+# CodeScope Configuration Example
+# Copy this file to codescope.yml and customize for your project
+
+project:
+  key: "my-project"
+  name: "My Project"
+
+analysis:
+  # Languages to analyze (auto-detect if empty)
+  languages: []
+
+  # Paths to include/exclude
+  sources:
+    include:
+      - "**/*"
+    exclude:
+      - "**/node_modules/**"
+      - "**/venv/**"
+      - "**/.venv/**"
+      - "**/__pycache__/**"
+      - "**/dist/**"
+      - "**/build/**"
+      - "**/.git/**"
+      - "**/vendor/**"
+      - "**/*.min.js"
+      - "**/*.bundle.js"
+
+# Rules configuration
+rules:
+  # Disable specific rules by ID
+  disabled:
+    # - "python:S100"  # Function naming convention
+
+  # Override rule severities
+  severities:
+    # "python:S3776": "MINOR"  # Cognitive complexity
+
+  # Rule-specific parameters
+  parameters:
+    "python:S138":  # Function length
+      max_lines: 100
+    "python:S3776":  # Cognitive complexity
+      threshold: 15
+    "python:S1541":  # Cyclomatic complexity
+      threshold: 10
+    "python:S134":  # Deep nesting
+      max_depth: 4
+    "python:S107":  # Too many parameters
+      max_params: 7
+
+# Quality gate configuration
+quality_gate:
+  name: "default"
+  conditions:
+    # Fail if any bugs are found
+    - metric: "bugs"
+      operator: "GT"
+      threshold: 0
+
+    # Fail if any vulnerabilities are found
+    - metric: "vulnerabilities"
+      operator: "GT"
+      threshold: 0
+
+    # Fail if more than 10 code smells
+    - metric: "code_smells"
+      operator: "GT"
+      threshold: 10
+
+    # Optional: Fail if reliability rating is worse than B
+    # - metric: "reliability_rating"
+    #   operator: "GT"
+    #   threshold: "B"
+
+# Output settings
+output:
+  format: "console"  # console, json, sarif
+  verbose: false
+  show_snippet: true
