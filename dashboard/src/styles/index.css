@@ -1,0 +1,143 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply antialiased;
+  }
+}
+
+@layer components {
+  .card {
+    @apply bg-white rounded-lg shadow-sm border border-gray-200;
+  }
+
+  .card-header {
+    @apply px-6 py-4 border-b border-gray-200;
+  }
+
+  .card-body {
+    @apply px-6 py-4;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center px-4 py-2 rounded-md font-medium transition-colors;
+  }
+
+  .btn-primary {
+    @apply bg-primary-600 text-white hover:bg-primary-700;
+  }
+
+  .btn-secondary {
+    @apply bg-gray-100 text-gray-700 hover:bg-gray-200;
+  }
+
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-blocker {
+    @apply bg-red-100 text-red-800;
+  }
+
+  .badge-critical {
+    @apply bg-orange-100 text-orange-800;
+  }
+
+  .badge-major {
+    @apply bg-amber-100 text-amber-800;
+  }
+
+  .badge-minor {
+    @apply bg-lime-100 text-lime-800;
+  }
+
+  .badge-info {
+    @apply bg-cyan-100 text-cyan-800;
+  }
+
+  .quality-badge {
+    @apply inline-flex items-center justify-center w-8 h-8 rounded-full text-white font-bold text-sm;
+  }
+
+  .quality-A {
+    @apply bg-green-500;
+  }
+
+  .quality-B {
+    @apply bg-lime-500;
+  }
+
+  .quality-C {
+    @apply bg-amber-500;
+  }
+
+  .quality-D {
+    @apply bg-orange-500;
+  }
+
+  .quality-E {
+    @apply bg-red-500;
+  }
+
+  .metric-card {
+    @apply card p-4 flex flex-col;
+  }
+
+  .metric-value {
+    @apply text-3xl font-bold text-gray-900;
+  }
+
+  .metric-label {
+    @apply text-sm text-gray-500 mt-1;
+  }
+
+  .nav-link {
+    @apply flex items-center px-3 py-2 text-sm font-medium rounded-md transition-colors;
+  }
+
+  .nav-link-active {
+    @apply bg-primary-100 text-primary-700;
+  }
+
+  .nav-link-inactive {
+    @apply text-gray-600 hover:bg-gray-100;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c1c1c1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1a1;
+}
+
+/* Code highlighting */
+.code-line {
+  @apply font-mono text-sm;
+}
+
+.code-line-issue {
+  @apply bg-red-50 border-l-4 border-red-500;
+}
+
+.code-line-covered {
+  @apply bg-green-50 border-l-4 border-green-500;
+}
+
+.code-line-uncovered {
+  @apply bg-red-50 border-l-4 border-red-500;
+}
