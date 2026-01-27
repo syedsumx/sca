@@ -4,13 +4,25 @@ A powerful Software Composition Analysis (SCA) tool for code quality and securit
 
 ## Features
 
-- **Multi-language Support**: Python, JavaScript/TypeScript (more coming soon)
-- **Security Vulnerability Detection**: SQL injection, command injection, XSS, hardcoded secrets, and more
+- **Multi-language Support**: 12 languages supported
+  - Python
+  - JavaScript/TypeScript
+  - Java
+  - Go
+  - C/C++
+  - C#
+  - Ruby
+  - PHP
+  - Rust
+  - Swift
+  - Kotlin
+  - Scala
+- **Security Vulnerability Detection**: SQL injection, command injection, XSS, XXE, deserialization, hardcoded secrets, and more
 - **Code Smell Detection**: Long functions, deep nesting, high complexity, dead code
 - **Code Metrics**: Cyclomatic complexity, cognitive complexity, lines of code, maintainability index
 - **Technical Debt Calculation**: Estimates time to fix issues
 - **Quality Gates**: Configurable pass/fail criteria for CI/CD
-- **Multiple Output Formats**: Console, JSON, SARIF, HTML
+- **Multiple Output Formats**: Console, JSON, SARIF
 
 ## Installation
 
