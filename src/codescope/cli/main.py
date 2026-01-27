@@ -282,5 +282,370 @@ def show(
     console.print(Panel(Markdown(details), title=rule_id))
 
 
+@app.command()
+def duplications(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to analyze (file or directory).",
+        exists=True,
+    ),
+    min_lines: int = typer.Option(
+        6,
+        "--min-lines",
+        "-l",
+        help="Minimum number of lines for a duplicate block.",
+    ),
+    min_tokens: int = typer.Option(
+        50,
+        "--min-tokens",
+        "-t",
+        help="Minimum number of tokens for a duplicate block.",
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    threshold: Optional[float] = typer.Option(
+        None,
+        "--threshold",
+        help="Fail if duplication percentage exceeds threshold.",
+    ),
+) -> None:
+    """Detect code duplications in the codebase."""
+    import json
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.analyzers.duplication import analyze_duplication
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Code Duplication Analysis")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Analyzing duplications...", total=None)
+        result = analyze_duplication(path, min_lines=min_lines, min_tokens=min_tokens)
+        progress.update(task, description="Analysis complete")
+
+    if format == "json":
+        output_content = json.dumps(result.to_dict(), indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        # Summary
+        summary_table = Table(title="Duplication Summary", show_header=False)
+        summary_table.add_column("Metric", style="cyan")
+        summary_table.add_column("Value", style="white")
+
+        summary_table.add_row("Files Analyzed", str(result.files_analyzed))
+        summary_table.add_row("Total Lines", str(result.total_lines))
+        summary_table.add_row("Duplicated Lines", str(result.duplicated_lines))
+
+        dup_pct = result.duplication_percentage
+        pct_color = "green" if dup_pct < 3 else "yellow" if dup_pct < 10 else "red"
+        summary_table.add_row("Duplication %", f"[{pct_color}]{dup_pct:.1f}%[/{pct_color}]")
+        summary_table.add_row("Duplicate Blocks", str(result.duplication_count))
+
+        console.print(summary_table)
+        console.print()
+
+        # Show top duplications
+        if result.duplications:
+            console.print("[bold]Top Duplications:[/bold]")
+            console.print()
+
+            for i, dup in enumerate(result.duplications[:10], 1):
+                console.print(f"[cyan]#{i}[/cyan] - {dup.duplicated_lines} lines duplicated in {len(dup.blocks)} locations:")
+                for block in dup.blocks[:5]:
+                    console.print(f"   • {block.file_path}:{block.start_line}-{block.end_line}")
+                if len(dup.blocks) > 5:
+                    console.print(f"   ... and {len(dup.blocks) - 5} more")
+                console.print()
+
+        if output:
+            output.write_text(json.dumps(result.to_dict(), indent=2))
+            console.print(f"Detailed report written to: {output}")
+
+    # Check threshold
+    if threshold is not None:
+        if result.duplication_percentage > threshold:
+            console.print(f"[red]FAILED: Duplication {result.duplication_percentage:.1f}% exceeds threshold {threshold}%[/red]")
+            raise typer.Exit(1)
+        else:
+            console.print(f"[green]PASSED: Duplication {result.duplication_percentage:.1f}% is below threshold {threshold}%[/green]")
+
+
+@app.command()
+def dependencies(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for dependencies.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    no_check: bool = typer.Option(
+        False,
+        "--no-check",
+        help="Skip online vulnerability check.",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Fail if vulnerabilities of this severity or higher exist (critical, high, medium, low).",
+    ),
+) -> None:
+    """Scan dependencies for known vulnerabilities."""
+    import json
+    from rich.table import Table
+
+    from codescope.analyzers.dependencies import scan_dependencies
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Dependency Vulnerability Scanner")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scanning dependencies...", total=None)
+        result = scan_dependencies(path, check_vulnerabilities=not no_check)
+        progress.update(task, description="Scan complete")
+
+    if format == "json":
+        output_content = json.dumps(result.to_dict(), indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        # Summary table
+        summary_table = Table(title="Dependency Scan Summary", show_header=False)
+        summary_table.add_column("Metric", style="cyan")
+        summary_table.add_column("Value", style="white")
+
+        summary_table.add_row("Files Scanned", str(len(result.files_scanned)))
+        summary_table.add_row("Total Dependencies", str(result.total_dependencies))
+        summary_table.add_row("Vulnerable Dependencies", str(len(result.vulnerable_dependencies)))
+        summary_table.add_row("Total Vulnerabilities", str(result.vulnerability_count))
+
+        if result.critical_count > 0:
+            summary_table.add_row("Critical", f"[red]{result.critical_count}[/red]")
+        if result.high_count > 0:
+            summary_table.add_row("High", f"[orange1]{result.high_count}[/orange1]")
+        if result.medium_count > 0:
+            summary_table.add_row("Medium", f"[yellow]{result.medium_count}[/yellow]")
+        if result.low_count > 0:
+            summary_table.add_row("Low", f"[blue]{result.low_count}[/blue]")
+
+        console.print(summary_table)
+        console.print()
+
+        # Vulnerable dependencies
+        if result.vulnerable_dependencies:
+            vuln_table = Table(title="Vulnerable Dependencies")
+            vuln_table.add_column("Package", style="cyan")
+            vuln_table.add_column("Version", style="white")
+            vuln_table.add_column("Ecosystem", style="dim")
+            vuln_table.add_column("Severity", style="red")
+            vuln_table.add_column("Vulnerability", style="yellow")
+            vuln_table.add_column("Fixed In", style="green")
+
+            for dep in result.vulnerable_dependencies:
+                for vuln in dep.vulnerabilities:
+                    severity_color = {
+                        "CRITICAL": "red",
+                        "HIGH": "orange1",
+                        "MEDIUM": "yellow",
+                        "LOW": "blue",
+                    }.get(vuln.severity, "white")
+
+                    vuln_table.add_row(
+                        dep.name,
+                        dep.version or "unknown",
+                        dep.ecosystem,
+                        f"[{severity_color}]{vuln.severity}[/{severity_color}]",
+                        f"{vuln.id}: {vuln.title[:50]}...",
+                        vuln.fixed_version or "N/A",
+                    )
+
+            console.print(vuln_table)
+        else:
+            console.print("[green]No vulnerable dependencies found![/green]")
+
+        # Show scanned files
+        console.print()
+        console.print("[dim]Scanned files:[/dim]")
+        for f in result.files_scanned:
+            console.print(f"  [dim]• {f}[/dim]")
+
+        if output:
+            output.write_text(json.dumps(result.to_dict(), indent=2))
+            console.print(f"\nDetailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on:
+        severity_levels = ["low", "medium", "high", "critical"]
+        fail_level = fail_on.lower()
+        if fail_level in severity_levels:
+            fail_index = severity_levels.index(fail_level)
+            counts = [result.low_count, result.medium_count, result.high_count, result.critical_count]
+            if any(counts[fail_index:]):
+                console.print(f"[red]FAILED: Found vulnerabilities of severity {fail_on} or higher[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: No vulnerabilities of severity {fail_on} or higher[/green]")
+
+
+@app.command()
+def coverage(
+    report_path: Path = typer.Argument(
+        ...,
+        help="Path to coverage report file.",
+        exists=True,
+    ),
+    format: Optional[str] = typer.Option(
+        None,
+        "--format",
+        "-f",
+        help="Coverage format: cobertura, lcov, coverage.py, jacoco, clover",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path for JSON report.",
+    ),
+    threshold: Optional[float] = typer.Option(
+        None,
+        "--threshold",
+        "-t",
+        help="Fail if coverage is below threshold percentage.",
+    ),
+    show_uncovered: bool = typer.Option(
+        False,
+        "--show-uncovered",
+        help="Show uncovered line numbers for each file.",
+    ),
+) -> None:
+    """Parse and display code coverage reports."""
+    import json
+    from rich.table import Table
+
+    from codescope.analyzers.coverage import parse_coverage
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Code Coverage Analysis")
+    console.print()
+
+    try:
+        report = parse_coverage(report_path, format=format)
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    summary = report.summary
+
+    # Summary table
+    summary_table = Table(title="Coverage Summary", show_header=False)
+    summary_table.add_column("Metric", style="cyan")
+    summary_table.add_column("Value", style="white")
+
+    summary_table.add_row("Format", report.format)
+    summary_table.add_row("Files", str(summary.total_files))
+    summary_table.add_row("Total Lines", str(summary.total_lines))
+    summary_table.add_row("Covered Lines", str(summary.covered_lines))
+    summary_table.add_row("Uncovered Lines", str(summary.uncovered_lines))
+
+    pct = summary.line_coverage_percent
+    pct_color = "green" if pct >= 80 else "yellow" if pct >= 50 else "red"
+    summary_table.add_row("Line Coverage", f"[{pct_color}]{pct:.1f}%[/{pct_color}]")
+
+    if summary.branch_coverage_percent is not None:
+        branch_pct = summary.branch_coverage_percent
+        branch_color = "green" if branch_pct >= 80 else "yellow" if branch_pct >= 50 else "red"
+        summary_table.add_row("Branch Coverage", f"[{branch_color}]{branch_pct:.1f}%[/{branch_color}]")
+
+    rating_color = {"A": "green", "B": "bright_green", "C": "yellow", "D": "orange1", "E": "red"}.get(summary.coverage_rating, "white")
+    summary_table.add_row("Rating", f"[{rating_color}]{summary.coverage_rating}[/{rating_color}]")
+
+    console.print(summary_table)
+    console.print()
+
+    # Files with low coverage
+    low_coverage = report.low_coverage_files
+    if low_coverage:
+        files_table = Table(title="Files with Low Coverage (<50%)")
+        files_table.add_column("File", style="cyan")
+        files_table.add_column("Lines", style="white")
+        files_table.add_column("Covered", style="green")
+        files_table.add_column("Coverage", style="red")
+
+        for file_cov in sorted(low_coverage, key=lambda f: f.line_coverage_percent)[:15]:
+            files_table.add_row(
+                file_cov.file_path[-60:],
+                str(file_cov.total_lines),
+                str(file_cov.covered_lines),
+                f"{file_cov.line_coverage_percent:.1f}%",
+            )
+
+        console.print(files_table)
+
+        if show_uncovered:
+            console.print()
+            console.print("[bold]Uncovered Lines:[/bold]")
+            for file_cov in sorted(low_coverage, key=lambda f: f.line_coverage_percent)[:10]:
+                uncovered = file_cov.uncovered_line_numbers
+                if uncovered:
+                    lines_str = ", ".join(str(n) for n in uncovered[:20])
+                    if len(uncovered) > 20:
+                        lines_str += f" ... ({len(uncovered) - 20} more)"
+                    console.print(f"  [cyan]{file_cov.file_path}[/cyan]: {lines_str}")
+
+    if output:
+        output.write_text(json.dumps(report.to_dict(), indent=2))
+        console.print(f"\nDetailed report written to: {output}")
+
+    # Check threshold
+    if threshold is not None:
+        if summary.line_coverage_percent < threshold:
+            console.print(f"\n[red]FAILED: Coverage {summary.line_coverage_percent:.1f}% is below threshold {threshold}%[/red]")
+            raise typer.Exit(1)
+        else:
+            console.print(f"\n[green]PASSED: Coverage {summary.line_coverage_percent:.1f}% meets threshold {threshold}%[/green]")
+
+
 if __name__ == "__main__":
     app()
