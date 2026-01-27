@@ -647,5 +647,56 @@ def coverage(
             console.print(f"\n[green]PASSED: Coverage {summary.line_coverage_percent:.1f}% meets threshold {threshold}%[/green]")
 
 
+@app.command()
+def server(
+    host: str = typer.Option(
+        "0.0.0.0",
+        "--host",
+        "-h",
+        help="Host to bind to.",
+    ),
+    port: int = typer.Option(
+        8000,
+        "--port",
+        "-p",
+        help="Port to bind to.",
+    ),
+    reload: bool = typer.Option(
+        False,
+        "--reload",
+        "-r",
+        help="Enable auto-reload for development.",
+    ),
+    workers: int = typer.Option(
+        1,
+        "--workers",
+        "-w",
+        help="Number of worker processes.",
+    ),
+) -> None:
+    """Start the CodeScope REST API server."""
+    try:
+        import uvicorn
+    except ImportError:
+        console.print("[red]Error: uvicorn is required for the server.[/red]")
+        console.print("Install it with: pip install uvicorn")
+        raise typer.Exit(1)
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - REST API Server")
+    console.print()
+    console.print(f"Starting server on http://{host}:{port}")
+    console.print("API docs available at http://{host}:{port}/api/docs")
+    console.print()
+
+    uvicorn.run(
+        "codescope.api.app:app",
+        host=host,
+        port=port,
+        reload=reload,
+        workers=workers if not reload else 1,
+    )
+
+
 if __name__ == "__main__":
     app()
