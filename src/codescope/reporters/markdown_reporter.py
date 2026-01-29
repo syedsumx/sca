@@ -22,16 +22,16 @@ class MarkdownReporter:
     def _render_markdown(self, results: AnalysisResults) -> str:
         """Render Markdown from results."""
         # Issue counts
-        bugs = sum(1 for i in results.issues if i.issue_type.value == 'BUG')
-        vulns = sum(1 for i in results.issues if i.issue_type.value == 'VULNERABILITY')
-        smells = sum(1 for i in results.issues if i.issue_type.value == 'CODE_SMELL')
+        bugs = sum(1 for i in results.all_issues if i.issue_type.value == 'BUG')
+        vulns = sum(1 for i in results.all_issues if i.issue_type.value == 'VULNERABILITY')
+        smells = sum(1 for i in results.all_issues if i.issue_type.value == 'CODE_SMELL')
 
         # Severity counts
-        blockers = sum(1 for i in results.issues if i.severity.value == 'BLOCKER')
-        criticals = sum(1 for i in results.issues if i.severity.value == 'CRITICAL')
-        majors = sum(1 for i in results.issues if i.severity.value == 'MAJOR')
-        minors = sum(1 for i in results.issues if i.severity.value == 'MINOR')
-        infos = sum(1 for i in results.issues if i.severity.value == 'INFO')
+        blockers = sum(1 for i in results.all_issues if i.severity.value == 'BLOCKER')
+        criticals = sum(1 for i in results.all_issues if i.severity.value == 'CRITICAL')
+        majors = sum(1 for i in results.all_issues if i.severity.value == 'MAJOR')
+        minors = sum(1 for i in results.all_issues if i.severity.value == 'MINOR')
+        infos = sum(1 for i in results.all_issues if i.severity.value == 'INFO')
 
         # Quality gate status
         qg_status = "PASSED"
@@ -58,7 +58,7 @@ class MarkdownReporter:
 
 | Metric | Count |
 |--------|-------|
-| **Total Issues** | {len(results.issues)} |
+| **Total Issues** | {len(results.all_issues)} |
 | Bugs | {bugs} |
 | Vulnerabilities | {vulns} |
 | Code Smells | {smells} |
@@ -93,7 +93,7 @@ class MarkdownReporter:
 
         # Group issues by severity
         for severity in ['BLOCKER', 'CRITICAL', 'MAJOR', 'MINOR', 'INFO']:
-            issues = [i for i in results.issues if i.severity.value == severity]
+            issues = [i for i in results.all_issues if i.severity.value == severity]
             if issues:
                 md += f"### {severity} ({len(issues)})\n\n"
 

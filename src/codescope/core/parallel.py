@@ -35,13 +35,13 @@ class ParallelProcessor:
         """Initialize parallel processor."""
         self.config = config or ParallelConfig()
 
-    def map(
+    def run_parallel(
         self,
         func: Callable[[T], Any],
         items: list[T],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> list[Any]:
-        """Map a function over items in parallel.
+        """Apply a function to items in parallel.
 
         Args:
             func: Function to apply to each item
@@ -114,7 +114,7 @@ class ParallelProcessor:
         batch_size = batch_size or self.config.chunk_size
         batches = [items[i:i + batch_size] for i in range(0, len(items), batch_size)]
 
-        batch_results = self.map(func, batches, progress_callback)
+        batch_results = self.run_parallel(func, batches, progress_callback)
 
         # Flatten results
         results = []

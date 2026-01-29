@@ -1,9 +1,12 @@
 """Coverage report format parsers."""
 
 import json
+import logging
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 from codescope.analyzers.coverage.parser import (
     CoverageParser,
@@ -69,8 +72,8 @@ class CoberturaParser(CoverageParser):
                     if file_cov.lines:
                         report.files.append(file_cov)
 
-        except ET.ParseError:
-            pass
+        except ET.ParseError as exc:
+            logger.debug("Failed to parse Cobertura XML %s: %s", file_path, exc)
 
         return report
 
@@ -153,8 +156,8 @@ class LcovParser(CoverageParser):
                         report.files.append(current_file)
                     current_file = None
 
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Failed to parse LCOV file %s: %s", file_path, exc)
 
         return report
 
@@ -200,8 +203,8 @@ class CoveragePyParser(CoverageParser):
                 if file_cov.lines:
                     report.files.append(file_cov)
 
-        except (json.JSONDecodeError, KeyError):
-            pass
+        except (json.JSONDecodeError, KeyError) as exc:
+            logger.debug("Failed to parse coverage.py JSON %s: %s", file_path, exc)
 
         return report
 
@@ -262,8 +265,8 @@ class JacocoParser(CoverageParser):
                     if file_cov.lines:
                         report.files.append(file_cov)
 
-        except ET.ParseError:
-            pass
+        except ET.ParseError as exc:
+            logger.debug("Failed to parse JaCoCo XML %s: %s", file_path, exc)
 
         return report
 
@@ -323,8 +326,8 @@ class CloverParser(CoverageParser):
                 if file_cov.lines:
                     report.files.append(file_cov)
 
-        except ET.ParseError:
-            pass
+        except ET.ParseError as exc:
+            logger.debug("Failed to parse Clover XML %s: %s", file_path, exc)
 
         return report
 

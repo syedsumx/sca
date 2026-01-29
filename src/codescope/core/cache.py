@@ -148,8 +148,8 @@ class AnalysisCache:
             self.delete(key)
             return None
 
-    def set(self, key: str, value: Any, content_hash: str) -> None:
-        """Set cached value.
+    def put(self, key: str, value: Any, content_hash: str) -> None:
+        """Store a value in the cache.
 
         Args:
             key: Cache key

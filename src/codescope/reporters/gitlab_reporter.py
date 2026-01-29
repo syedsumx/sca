@@ -29,11 +29,11 @@ class GitLabReporter:
         """Build GitLab Code Quality report structure."""
         issues = []
 
-        for issue in results.issues:
-            # Generate fingerprint for deduplication
-            fingerprint = hashlib.md5(
+        for issue in results.all_issues:
+            # Generate fingerprint for deduplication (using SHA-256 for security)
+            fingerprint = hashlib.sha256(
                 f"{issue.rule_id}:{issue.location.file_path}:{issue.location.start_line}:{issue.message}".encode()
-            ).hexdigest()
+            ).hexdigest()[:32]  # Truncate to 32 chars like MD5
 
             gl_issue = {
                 "description": issue.message,

@@ -26,16 +26,16 @@ class HTMLReporter:
     def _render_html(self, results: AnalysisResults) -> str:
         """Render HTML from results."""
         # Issue counts by type
-        bugs = sum(1 for i in results.issues if i.issue_type.value == 'BUG')
-        vulns = sum(1 for i in results.issues if i.issue_type.value == 'VULNERABILITY')
-        smells = sum(1 for i in results.issues if i.issue_type.value == 'CODE_SMELL')
+        bugs = sum(1 for i in results.all_issues if i.issue_type.value == 'BUG')
+        vulns = sum(1 for i in results.all_issues if i.issue_type.value == 'VULNERABILITY')
+        smells = sum(1 for i in results.all_issues if i.issue_type.value == 'CODE_SMELL')
 
         # Severity counts
-        blockers = sum(1 for i in results.issues if i.severity.value == 'BLOCKER')
-        criticals = sum(1 for i in results.issues if i.severity.value == 'CRITICAL')
-        majors = sum(1 for i in results.issues if i.severity.value == 'MAJOR')
-        minors = sum(1 for i in results.issues if i.severity.value == 'MINOR')
-        infos = sum(1 for i in results.issues if i.severity.value == 'INFO')
+        blockers = sum(1 for i in results.all_issues if i.severity.value == 'BLOCKER')
+        criticals = sum(1 for i in results.all_issues if i.severity.value == 'CRITICAL')
+        majors = sum(1 for i in results.all_issues if i.severity.value == 'MAJOR')
+        minors = sum(1 for i in results.all_issues if i.severity.value == 'MINOR')
+        infos = sum(1 for i in results.all_issues if i.severity.value == 'INFO')
 
         # Quality gate status
         qg_status = "PASSED"
@@ -46,7 +46,7 @@ class HTMLReporter:
 
         # Generate issues table rows
         issues_rows = ""
-        for issue in results.issues:
+        for issue in results.all_issues:
             sev_class = {
                 "BLOCKER": "danger",
                 "CRITICAL": "danger",
@@ -193,13 +193,13 @@ class HTMLReporter:
                 <div class="card metric-card h-100">
                     <div class="card-body">
                         <h6 class="text-muted mb-2">Total Issues</h6>
-                        <div class="metric-value text-primary">{len(results.issues)}</div>
+                        <div class="metric-value text-primary">{len(results.all_issues)}</div>
                         <div class="severity-chart">
-                            <div class="severity-blocker" style="width: {blockers / max(len(results.issues), 1) * 100}%"></div>
-                            <div class="severity-critical" style="width: {criticals / max(len(results.issues), 1) * 100}%"></div>
-                            <div class="severity-major" style="width: {majors / max(len(results.issues), 1) * 100}%"></div>
-                            <div class="severity-minor" style="width: {minors / max(len(results.issues), 1) * 100}%"></div>
-                            <div class="severity-info" style="width: {infos / max(len(results.issues), 1) * 100}%"></div>
+                            <div class="severity-blocker" style="width: {blockers / max(len(results.all_issues), 1) * 100}%"></div>
+                            <div class="severity-critical" style="width: {criticals / max(len(results.all_issues), 1) * 100}%"></div>
+                            <div class="severity-major" style="width: {majors / max(len(results.all_issues), 1) * 100}%"></div>
+                            <div class="severity-minor" style="width: {minors / max(len(results.all_issues), 1) * 100}%"></div>
+                            <div class="severity-info" style="width: {infos / max(len(results.all_issues), 1) * 100}%"></div>
                         </div>
                     </div>
                 </div>
@@ -302,7 +302,7 @@ class HTMLReporter:
         <div class="table-container mb-4">
             <div class="card-header bg-white py-3">
                 <h5 class="mb-0">
-                    <i class="bi bi-list-check me-2"></i>All Issues ({len(results.issues)})
+                    <i class="bi bi-list-check me-2"></i>All Issues ({len(results.all_issues)})
                 </h5>
             </div>
             <div class="table-responsive">
