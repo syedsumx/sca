@@ -1,5 +1,7 @@
 """FastAPI application factory."""
 
+import os
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -28,13 +30,18 @@ def create_app() -> FastAPI:
         openapi_url="/api/openapi.json",
     )
 
-    # CORS middleware
+    # CORS middleware — defaults to localhost for development;
+    # set CODESCOPE_CORS_ORIGINS env var for production (comma-separated).
+    cors_origins = os.environ.get(
+        "CODESCOPE_CORS_ORIGINS",
+        "http://localhost:3000,http://localhost:5173",
+    ).split(",")
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],  # Configure appropriately for production
+        allow_origins=[o.strip() for o in cors_origins],
         allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     # Include routers
