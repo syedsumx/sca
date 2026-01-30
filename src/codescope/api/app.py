@@ -13,6 +13,7 @@ from codescope.api.routes import (
     rules,
     git,
     export,
+    aivetting,
 )
 
 
@@ -46,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(rules.router, prefix="/api/v1", tags=["Rules"])
     app.include_router(git.router, prefix="/api/v1", tags=["Git"])
     app.include_router(export.router, prefix="/api/v1", tags=["Export"])
+    app.include_router(aivetting.router, prefix="/api/v1", tags=["AI Vetting"])
 
     @app.get("/api/health")
     async def health_check():

@@ -10,6 +10,7 @@ from codescope.api.routes import (
     rules,
     git,
     export,
+    aivetting,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "rules",
     "git",
     "export",
+    "aivetting",
 ]

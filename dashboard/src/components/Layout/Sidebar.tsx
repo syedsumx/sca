@@ -9,6 +9,7 @@ import {
   ChartBarIcon,
   Cog6ToothIcon,
   BookOpenIcon,
+  SparklesIcon,
 } from '@heroicons/react/24/outline';
 
 interface NavItem {
@@ -25,6 +26,7 @@ const navigation: NavItem[] = [
   { name: 'Dependencies', href: '/dependencies', icon: CubeIcon },
   { name: 'Coverage', href: '/coverage', icon: ChartBarIcon },
   { name: 'Rules', href: '/rules', icon: BookOpenIcon },
+  { name: 'AI Vetting', href: '/ai-vetting', icon: SparklesIcon },
   { name: 'Settings', href: '/settings', icon: Cog6ToothIcon },
 ];
 

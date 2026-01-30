@@ -647,6 +647,218 @@ def coverage(
             console.print(f"\n[green]PASSED: Coverage {summary.line_coverage_percent:.1f}% meets threshold {threshold}%[/green]")
 
 
+@app.command(name="ai-vet")
+def ai_vet(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for AI-generated code issues.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    min_confidence: float = typer.Option(
+        0.5,
+        "--min-confidence",
+        help="Minimum confidence threshold (0.0-1.0).",
+    ),
+    category: Optional[str] = typer.Option(
+        None,
+        "--category",
+        "-c",
+        help="Filter by category: placeholder, hallucination, security, quality, incomplete, overengineered, license_risk",
+    ),
+    fail_on_risk: Optional[str] = typer.Option(
+        None,
+        "--fail-on-risk",
+        help="Fail if risk level is this or higher: LOW, MEDIUM, HIGH",
+    ),
+) -> None:
+    """Vet code for AI-generated code issues (hallucinations, placeholders, security)."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.analyzers.aivetting import AIVettingAnalyzer, PatternCategory
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - AI Code Vetting")
+    console.print()
+
+    analyzer = AIVettingAnalyzer(min_confidence=min_confidence)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Vetting code for AI patterns...", total=None)
+
+        def on_progress(current: int, total: int) -> None:
+            progress.update(task, description=f"Scanning file {current}/{total}...")
+
+        report = analyzer.analyze_directory(path, progress_callback=on_progress)
+        progress.update(task, description="Vetting complete")
+
+    findings = report.findings
+
+    # Filter by category if requested
+    if category:
+        findings = [f for f in findings if f.category == category]
+
+    if format == "json":
+        data = {
+            "files_scanned": report.files_scanned,
+            "total_findings": len(findings),
+            "risk_score": round(report.risk_score, 1),
+            "risk_level": report.risk_level,
+            "summary": report.summary,
+            "findings": [
+                {
+                    "pattern_id": f.pattern_id,
+                    "name": f.name,
+                    "category": f.category,
+                    "severity": f.severity,
+                    "message": f.message,
+                    "file_path": f.file_path,
+                    "start_line": f.start_line,
+                    "end_line": f.end_line,
+                    "confidence": f.confidence,
+                }
+                for f in findings
+            ],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Risk score banner
+        risk = report.risk_level
+        risk_color = {"NONE": "green", "LOW": "blue", "MEDIUM": "yellow", "HIGH": "red"}.get(risk, "white")
+        console.print(Panel(
+            f"[bold {risk_color}]Risk Level: {risk}[/bold {risk_color}]  |  "
+            f"Score: {report.risk_score:.1f}/100  |  "
+            f"Files: {report.files_scanned}  |  "
+            f"Findings: {len(findings)}",
+            title="AI Code Vetting Results",
+        ))
+        console.print()
+
+        # Summary by category
+        summary_table = Table(title="Findings by Category")
+        summary_table.add_column("Category", style="cyan")
+        summary_table.add_column("Count", style="white", justify="right")
+
+        category_names = {
+            "placeholder": "Placeholder / Stub Code",
+            "hallucination": "Hallucinated APIs / Imports",
+            "security": "Security Issues",
+            "quality": "Code Quality Issues",
+            "incomplete": "Incomplete / Truncated Code",
+            "overengineered": "Over-Engineered Patterns",
+            "license_risk": "License Risk",
+        }
+        for cat in PatternCategory:
+            count = sum(1 for f in findings if f.category == cat.value)
+            if count > 0:
+                summary_table.add_row(category_names.get(cat.value, cat.value), str(count))
+
+        console.print(summary_table)
+        console.print()
+
+        # Findings by severity
+        severity_order = ["BLOCKER", "CRITICAL", "MAJOR", "MINOR", "INFO"]
+        severity_colors = {
+            "BLOCKER": "red bold",
+            "CRITICAL": "red",
+            "MAJOR": "yellow",
+            "MINOR": "blue",
+            "INFO": "dim",
+        }
+
+        for severity in severity_order:
+            sev_findings = [f for f in findings if f.severity == severity]
+            if not sev_findings:
+                continue
+
+            findings_table = Table(title=f"{severity} ({len(sev_findings)})")
+            findings_table.add_column("#", style="dim", width=4)
+            findings_table.add_column("Pattern", style="cyan", width=28)
+            findings_table.add_column("File", style="white", width=40)
+            findings_table.add_column("Line", style="dim", width=6)
+            findings_table.add_column("Message", style=severity_colors.get(severity, "white"))
+
+            for idx, f in enumerate(sev_findings[:25], 1):
+                fpath = f.file_path
+                if len(fpath) > 40:
+                    fpath = "..." + fpath[-37:]
+                findings_table.add_row(
+                    str(idx),
+                    f.name,
+                    fpath,
+                    str(f.start_line),
+                    f.message[:80],
+                )
+
+            console.print(findings_table)
+            console.print()
+
+            if len(sev_findings) > 25:
+                console.print(f"  [dim]... and {len(sev_findings) - 25} more {severity} findings[/dim]")
+                console.print()
+
+        if output:
+            data = {
+                "files_scanned": report.files_scanned,
+                "total_findings": len(findings),
+                "risk_score": round(report.risk_score, 1),
+                "risk_level": report.risk_level,
+                "summary": report.summary,
+                "findings": [
+                    {
+                        "pattern_id": f.pattern_id,
+                        "name": f.name,
+                        "category": f.category,
+                        "severity": f.severity,
+                        "message": f.message,
+                        "file_path": f.file_path,
+                        "start_line": f.start_line,
+                        "end_line": f.end_line,
+                        "confidence": f.confidence,
+                    }
+                    for f in findings
+                ],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"Detailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on_risk:
+        risk_levels = ["LOW", "MEDIUM", "HIGH"]
+        fail_level = fail_on_risk.upper()
+        if fail_level in risk_levels:
+            current_index = risk_levels.index(report.risk_level) if report.risk_level in risk_levels else -1
+            fail_index = risk_levels.index(fail_level)
+            if current_index >= fail_index:
+                console.print(f"[red]FAILED: Risk level {report.risk_level} meets or exceeds threshold {fail_level}[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: Risk level {report.risk_level} is below threshold {fail_level}[/green]")
+
+
 @app.command()
 def server(
     host: str = typer.Option(

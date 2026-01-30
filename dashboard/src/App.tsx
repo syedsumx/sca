@@ -8,6 +8,7 @@ import Duplications from './pages/Duplications';
 import Dependencies from './pages/Dependencies';
 import Coverage from './pages/Coverage';
 import Rules from './pages/Rules';
+import AIVetting from './pages/AIVetting';
 import Settings from './pages/Settings';
 
 const App: React.FC = () => {
@@ -22,6 +23,7 @@ const App: React.FC = () => {
         <Route path="dependencies" element={<Dependencies />} />
         <Route path="coverage" element={<Coverage />} />
         <Route path="rules" element={<Rules />} />
+        <Route path="ai-vetting" element={<AIVetting />} />
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
