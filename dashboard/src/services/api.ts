@@ -198,6 +198,74 @@ class ApiService {
     });
     return response.data;
   }
+
+  // Auth
+  async login(username: string, password: string): Promise<{
+    access_token: string;
+    refresh_token: string;
+    user: any;
+  }> {
+    const response = await this.client.post('/auth/login', { username, password });
+    return response.data;
+  }
+
+  async register(username: string, email: string, password: string, displayName?: string): Promise<{
+    access_token: string;
+    refresh_token: string;
+    user: any;
+  }> {
+    const response = await this.client.post('/auth/register', {
+      username, email, password, display_name: displayName || username,
+    });
+    return response.data;
+  }
+
+  async refreshToken(refreshToken: string): Promise<{
+    access_token: string;
+    refresh_token: string;
+    user: any;
+  }> {
+    const response = await this.client.post('/auth/refresh', { refresh_token: refreshToken });
+    return response.data;
+  }
+
+  async logout(): Promise<void> {
+    await this.client.post('/auth/logout');
+  }
+
+  async getMe(): Promise<any> {
+    const response = await this.client.get('/auth/me');
+    return response.data;
+  }
+
+  async getSSOProviders(): Promise<Array<{ name: string; authorize_url: string }>> {
+    const response = await this.client.get('/auth/sso/providers');
+    return response.data;
+  }
+
+  async changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await this.client.put('/auth/password', {
+      current_password: currentPassword,
+      new_password: newPassword,
+    });
+  }
+
+  // API Keys
+  async createAPIKey(name: string, role: string = 'ci', expiresDays?: number): Promise<any> {
+    const response = await this.client.post('/auth/api-keys', {
+      name, role, expires_days: expiresDays,
+    });
+    return response.data;
+  }
+
+  async listAPIKeys(): Promise<any[]> {
+    const response = await this.client.get('/auth/api-keys');
+    return response.data;
+  }
+
+  async revokeAPIKey(keyId: string): Promise<void> {
+    await this.client.delete(`/auth/api-keys/${keyId}`);
+  }
 }
 
 export const api = new ApiService();

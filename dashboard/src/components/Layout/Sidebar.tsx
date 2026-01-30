@@ -10,7 +10,10 @@ import {
   Cog6ToothIcon,
   BookOpenIcon,
   SparklesIcon,
+  ArrowRightOnRectangleIcon,
+  UserCircleIcon,
 } from '@heroicons/react/24/outline';
+import { useAuth } from '../../contexts/AuthContext';
 
 interface NavItem {
   name: string;
@@ -31,6 +34,8 @@ const navigation: NavItem[] = [
 ];
 
 const Sidebar: React.FC = () => {
+  const { user, logout } = useAuth();
+
   return (
     <div className="flex flex-col w-64 bg-white border-r border-gray-200">
       {/* Logo */}
@@ -59,11 +64,30 @@ const Sidebar: React.FC = () => {
         ))}
       </nav>
 
-      {/* Footer */}
+      {/* User & Logout */}
       <div className="p-4 border-t border-gray-200">
-        <div className="text-xs text-gray-500">
+        {user && (
+          <div className="flex items-center justify-between">
+            <div className="flex items-center min-w-0">
+              <UserCircleIcon className="w-8 h-8 text-gray-400 flex-shrink-0" />
+              <div className="ml-2 min-w-0">
+                <p className="text-sm font-medium text-gray-900 truncate">
+                  {user.display_name || user.username}
+                </p>
+                <p className="text-xs text-gray-500 truncate">{user.role}</p>
+              </div>
+            </div>
+            <button
+              onClick={logout}
+              className="p-1.5 text-gray-400 hover:text-red-600 rounded-md hover:bg-gray-100"
+              title="Sign out"
+            >
+              <ArrowRightOnRectangleIcon className="w-5 h-5" />
+            </button>
+          </div>
+        )}
+        <div className="text-xs text-gray-500 mt-3">
           <p>CodeScope v0.1.0</p>
-          <p className="mt-1">Static Code Analysis</p>
         </div>
       </div>
     </div>

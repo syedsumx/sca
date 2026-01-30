@@ -1,6 +1,8 @@
 import React from 'react';
-import { Routes, Route } from 'react-router-dom';
+import { Routes, Route, Navigate } from 'react-router-dom';
 import { MainLayout } from './components/Layout';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
+import Login from './pages/Login';
 import Dashboard from './pages/Dashboard';
 import Projects from './pages/Projects';
 import Issues from './pages/Issues';
@@ -11,10 +13,36 @@ import Rules from './pages/Rules';
 import AIVetting from './pages/AIVetting';
 import Settings from './pages/Settings';
 
-const App: React.FC = () => {
+const ProtectedRoute: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gray-50">
+        <div className="text-gray-500">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
+
+  return <>{children}</>;
+};
+
+const AppRoutes: React.FC = () => {
   return (
     <Routes>
-      <Route path="/" element={<MainLayout />}>
+      <Route path="/login" element={<Login />} />
+      <Route
+        path="/"
+        element={
+          <ProtectedRoute>
+            <MainLayout />
+          </ProtectedRoute>
+        }
+      >
         <Route index element={<Dashboard />} />
         <Route path="projects" element={<Projects />} />
         <Route path="projects/:projectId" element={<Dashboard />} />
@@ -27,6 +55,14 @@ const App: React.FC = () => {
         <Route path="settings" element={<Settings />} />
       </Route>
     </Routes>
+  );
+};
+
+const App: React.FC = () => {
+  return (
+    <AuthProvider>
+      <AppRoutes />
+    </AuthProvider>
   );
 };
 

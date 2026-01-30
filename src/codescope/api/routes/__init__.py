@@ -11,6 +11,7 @@ from codescope.api.routes import (
     git,
     export,
     aivetting,
+    auth,
 )
 
 __all__ = [
@@ -24,4 +25,5 @@ __all__ = [
     "git",
     "export",
     "aivetting",
+    "auth",
 ]
