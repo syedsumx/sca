@@ -71,6 +71,7 @@ const Login: React.FC = () => {
   const ssoLabels: Record<string, { label: string; bg: string }> = {
     github: { label: 'Continue with GitHub', bg: 'bg-gray-900 hover:bg-gray-800' },
     gitlab: { label: 'Continue with GitLab', bg: 'bg-orange-600 hover:bg-orange-500' },
+    azure: { label: 'Continue with Microsoft', bg: 'bg-blue-600 hover:bg-blue-500' },
   };
 
   return (

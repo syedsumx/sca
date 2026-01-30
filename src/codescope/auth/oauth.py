@@ -1,4 +1,4 @@
-"""OAuth SSO providers for GitHub and GitLab."""
+"""OAuth SSO providers for GitHub, GitLab, and Azure Entra ID."""
 
 from __future__ import annotations
 
@@ -219,10 +219,92 @@ class GitLabOAuth(OAuthProvider):
         )
 
 
+class AzureEntraOAuth(OAuthProvider):
+    """Azure Entra ID (formerly Azure AD) OAuth 2.0 provider."""
+
+    @property
+    def name(self) -> str:
+        return "azure"
+
+    @property
+    def client_id(self) -> str:
+        return os.environ.get("CODESCOPE_AZURE_CLIENT_ID", "")
+
+    @property
+    def client_secret(self) -> str:
+        return os.environ.get("CODESCOPE_AZURE_CLIENT_SECRET", "")
+
+    @property
+    def tenant_id(self) -> str:
+        return os.environ.get("CODESCOPE_AZURE_TENANT_ID", "common")
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.client_id and self.client_secret)
+
+    @property
+    def _authority(self) -> str:
+        return f"https://login.microsoftonline.com/{self.tenant_id}"
+
+    def get_authorize_url(self, redirect_uri: str, state: str) -> str:
+        params = urlencode({
+            "client_id": self.client_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "scope": "openid profile email User.Read",
+            "state": state,
+            "response_mode": "query",
+        })
+        return f"{self._authority}/oauth2/v2.0/authorize?{params}"
+
+    def exchange_code(self, code: str, redirect_uri: str) -> Optional[str]:
+        # Azure token endpoint expects form-encoded POST, not JSON
+        form_data = urlencode({
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "code": code,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+            "scope": "openid profile email User.Read",
+        }).encode()
+        try:
+            req = urllib.request.Request(
+                f"{self._authority}/oauth2/v2.0/token",
+                data=form_data,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                return data.get("access_token")
+        except Exception as exc:
+            logger.error("Azure Entra token exchange failed: %s", exc)
+            return None
+
+    def get_user_info(self, access_token: str) -> Optional[OAuthUserInfo]:
+        headers = {"Authorization": f"Bearer {access_token}"}
+        user_data = self._http_get("https://graph.microsoft.com/v1.0/me", headers)
+        if not user_data:
+            return None
+
+        # Azure may return 'id', 'displayName', 'mail', 'userPrincipalName'
+        email = user_data.get("mail", "") or user_data.get("userPrincipalName", "")
+        username = email.split("@")[0] if email else user_data.get("id", "")
+
+        return OAuthUserInfo(
+            provider="azure",
+            sso_id=str(user_data.get("id", "")),
+            username=username,
+            email=email,
+            display_name=user_data.get("displayName", "") or username,
+        )
+
+
 # Provider registry
 _PROVIDERS: dict[str, OAuthProvider] = {
     "github": GitHubOAuth(),
     "gitlab": GitLabOAuth(),
+    "azure": AzureEntraOAuth(),
 }
 
 
