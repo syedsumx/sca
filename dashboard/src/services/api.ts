@@ -191,6 +191,13 @@ class ApiService {
     });
     return response.data;
   }
+
+  async exportPdf(analysisId: string): Promise<Blob> {
+    const response = await this.client.get(`/export/pdf/${analysisId}`, {
+      responseType: 'blob',
+    });
+    return response.data;
+  }
 }
 
 export const api = new ApiService();

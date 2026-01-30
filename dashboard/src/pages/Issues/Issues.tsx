@@ -3,6 +3,7 @@ import {
   FunnelIcon,
   MagnifyingGlassIcon,
   ChevronDownIcon,
+  ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
 import {
   Card,
@@ -14,6 +15,7 @@ import {
 } from '../../components/common';
 import { Issue, Severity, IssueType } from '../../types';
 import { formatFilePath } from '../../utils/format';
+import api from '../../services/api';
 
 // Mock data
 const mockIssues: Issue[] = [
@@ -119,6 +121,27 @@ const Issues: React.FC = () => {
   const [selectedSeverities, setSelectedSeverities] = useState<Severity[]>([]);
   const [selectedTypes, setSelectedTypes] = useState<IssueType[]>([]);
   const [expandedIssue, setExpandedIssue] = useState<string | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  const handleExportPdf = async () => {
+    setExporting(true);
+    try {
+      // Use the most recent analysis — in a real app this would come from context/route params
+      const blob = await api.exportPdf('latest');
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'codescope-issues-report.pdf';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      alert('Failed to export PDF. Make sure the analysis is complete and the server is running.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const filteredIssues = useMemo(() => {
     return mockIssues.filter((issue) => {
@@ -161,11 +184,21 @@ const Issues: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Page Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Issues</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Browse and filter all detected issues
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Issues</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Browse and filter all detected issues
+          </p>
+        </div>
+        <button
+          onClick={handleExportPdf}
+          disabled={exporting}
+          className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+        >
+          <ArrowDownTrayIcon className="w-4 h-4" />
+          {exporting ? 'Exporting...' : 'Export PDF'}
+        </button>
       </div>
 
       {/* Filters */}

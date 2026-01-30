@@ -6,11 +6,13 @@ import {
   DocumentDuplicateIcon,
   CheckCircleIcon,
   XCircleIcon,
+  ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
 import { Card, CardHeader, CardBody, MetricCard, LoadingPage, StatusBadge } from '../../components/common';
 import { IssuesByTypeChart, IssuesBySeverityChart } from '../../components/charts';
 import { formatRelativeTime, formatNumber } from '../../utils/format';
 import { DashboardStats, Issue, QualityGateStatus } from '../../types';
+import api from '../../services/api';
 
 // Mock data for demonstration
 const mockStats: DashboardStats = {
@@ -58,6 +60,7 @@ const mockIssues: Issue[] = [
 const Dashboard: React.FC = () => {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => {
     // Simulate API call
@@ -67,6 +70,25 @@ const Dashboard: React.FC = () => {
     }, 500);
   }, []);
 
+  const handleExportPdf = async (analysisId: string) => {
+    setExporting(true);
+    try {
+      const blob = await api.exportPdf(analysisId);
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `codescope-report-${analysisId}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      alert('Failed to export PDF. Make sure the analysis is complete and the server is running.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   if (loading || !stats) {
     return <LoadingPage message="Loading dashboard..." />;
   }
@@ -74,11 +96,23 @@ const Dashboard: React.FC = () => {
   return (
     <div className="space-y-6">
       {/* Page Header */}
-      <div>
-        <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
-        <p className="mt-1 text-sm text-gray-500">
-          Overview of your code quality and security analysis
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Dashboard</h1>
+          <p className="mt-1 text-sm text-gray-500">
+            Overview of your code quality and security analysis
+          </p>
+        </div>
+        {stats.recent_analyses.length > 0 && (
+          <button
+            onClick={() => handleExportPdf(stats.recent_analyses[0].analysis_id)}
+            disabled={exporting}
+            className="inline-flex items-center gap-2 px-4 py-2 bg-primary-600 text-white text-sm font-medium rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <ArrowDownTrayIcon className="w-4 h-4" />
+            {exporting ? 'Exporting...' : 'Export PDF'}
+          </button>
+        )}
       </div>
 
       {/* Summary Metrics */}
@@ -149,6 +183,9 @@ const Dashboard: React.FC = () => {
                   <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                     Analyzed
                   </th>
+                  <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
+                    Actions
+                  </th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
@@ -177,6 +214,17 @@ const Dashboard: React.FC = () => {
                     </td>
                     <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                       {formatRelativeTime(analysis.timestamp)}
+                    </td>
+                    <td className="px-6 py-4 whitespace-nowrap text-right">
+                      <button
+                        onClick={() => handleExportPdf(analysis.analysis_id)}
+                        disabled={exporting}
+                        className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-primary-600 bg-primary-50 rounded-md hover:bg-primary-100 disabled:opacity-50 transition-colors"
+                        title="Export as PDF"
+                      >
+                        <ArrowDownTrayIcon className="w-3.5 h-3.5" />
+                        PDF
+                      </button>
                     </td>
                   </tr>
                 ))}
