@@ -1,0 +1,192 @@
+{
+  "name": "codescope",
+  "displayName": "CodeScope",
+  "description": "Static Code Analysis - Code Quality & Security",
+  "version": "0.1.0",
+  "publisher": "codescope",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages",
+    "Other"
+  ],
+  "keywords": [
+    "code analysis",
+    "static analysis",
+    "security",
+    "code quality",
+    "linter"
+  ],
+  "activationEvents": [
+    "onLanguage:python",
+    "onLanguage:javascript",
+    "onLanguage:typescript",
+    "onLanguage:java",
+    "onLanguage:go",
+    "onLanguage:csharp",
+    "onLanguage:ruby",
+    "onLanguage:php",
+    "onLanguage:rust",
+    "onLanguage:swift",
+    "onLanguage:kotlin",
+    "onLanguage:scala",
+    "workspaceContains:codescope.yml"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codescope.analyze",
+        "title": "CodeScope: Analyze Current File"
+      },
+      {
+        "command": "codescope.analyzeWorkspace",
+        "title": "CodeScope: Analyze Workspace"
+      },
+      {
+        "command": "codescope.showIssues",
+        "title": "CodeScope: Show All Issues"
+      },
+      {
+        "command": "codescope.showDuplications",
+        "title": "CodeScope: Show Duplications"
+      },
+      {
+        "command": "codescope.scanDependencies",
+        "title": "CodeScope: Scan Dependencies"
+      },
+      {
+        "command": "codescope.showCoverage",
+        "title": "CodeScope: Show Coverage"
+      },
+      {
+        "command": "codescope.clearDiagnostics",
+        "title": "CodeScope: Clear All Diagnostics"
+      }
+    ],
+    "configuration": {
+      "title": "CodeScope",
+      "properties": {
+        "codescope.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable CodeScope analysis"
+        },
+        "codescope.analyzeOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Analyze file on save"
+        },
+        "codescope.analyzeOnChange": {
+          "type": "boolean",
+          "default": false,
+          "description": "Analyze file on change (may impact performance)"
+        },
+        "codescope.serverUrl": {
+          "type": "string",
+          "default": "",
+          "description": "CodeScope server URL (leave empty for local analysis)"
+        },
+        "codescope.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to Python interpreter"
+        },
+        "codescope.severity.blocker": {
+          "type": "string",
+          "enum": ["Error", "Warning", "Information", "Hint"],
+          "default": "Error",
+          "description": "Diagnostic severity for BLOCKER issues"
+        },
+        "codescope.severity.critical": {
+          "type": "string",
+          "enum": ["Error", "Warning", "Information", "Hint"],
+          "default": "Error",
+          "description": "Diagnostic severity for CRITICAL issues"
+        },
+        "codescope.severity.major": {
+          "type": "string",
+          "enum": ["Error", "Warning", "Information", "Hint"],
+          "default": "Warning",
+          "description": "Diagnostic severity for MAJOR issues"
+        },
+        "codescope.severity.minor": {
+          "type": "string",
+          "enum": ["Error", "Warning", "Information", "Hint"],
+          "default": "Information",
+          "description": "Diagnostic severity for MINOR issues"
+        },
+        "codescope.severity.info": {
+          "type": "string",
+          "enum": ["Error", "Warning", "Information", "Hint"],
+          "default": "Hint",
+          "description": "Diagnostic severity for INFO issues"
+        },
+        "codescope.excludePatterns": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": ["**/node_modules/**", "**/.git/**", "**/dist/**", "**/build/**"],
+          "description": "Glob patterns to exclude from analysis"
+        },
+        "codescope.rules.disabled": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "List of rule IDs to disable"
+        }
+      }
+    },
+    "views": {
+      "explorer": [
+        {
+          "id": "codescopeIssues",
+          "name": "CodeScope Issues"
+        }
+      ]
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codescope",
+          "title": "CodeScope",
+          "icon": "resources/icon.svg"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codescope.analyze",
+          "group": "codescope"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "codescope.analyze",
+          "group": "codescope"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.80.0",
+    "@types/node": "^20.x",
+    "@typescript-eslint/eslint-plugin": "^6.x",
+    "@typescript-eslint/parser": "^6.x",
+    "eslint": "^8.x",
+    "typescript": "^5.x"
+  },
+  "dependencies": {
+    "axios": "^1.6.0"
+  }
+}
