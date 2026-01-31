@@ -12,6 +12,11 @@ import {
   SparklesIcon,
   ArrowRightOnRectangleIcon,
   UserCircleIcon,
+  ArrowTrendingUpIcon,
+  KeyIcon,
+  ListBulletIcon,
+  CommandLineIcon,
+  ArrowsRightLeftIcon,
 } from '@heroicons/react/24/outline';
 import { useAuth } from '../../contexts/AuthContext';
 
@@ -28,6 +33,11 @@ const navigation: NavItem[] = [
   { name: 'Duplications', href: '/duplications', icon: DocumentDuplicateIcon },
   { name: 'Dependencies', href: '/dependencies', icon: CubeIcon },
   { name: 'Coverage', href: '/coverage', icon: ChartBarIcon },
+  { name: 'Trends', href: '/trends', icon: ArrowTrendingUpIcon },
+  { name: 'Secrets', href: '/secrets', icon: KeyIcon },
+  { name: 'SBOM', href: '/sbom', icon: ListBulletIcon },
+  { name: 'PR Compare', href: '/compare', icon: ArrowsRightLeftIcon },
+  { name: 'CI/CD', href: '/cicd', icon: CommandLineIcon },
   { name: 'Rules', href: '/rules', icon: BookOpenIcon },
   { name: 'AI Vetting', href: '/ai-vetting', icon: SparklesIcon },
   { name: 'Settings', href: '/settings', icon: Cog6ToothIcon },

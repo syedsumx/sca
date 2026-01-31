@@ -12,6 +12,16 @@ from codescope.api.routes import (
     export,
     aivetting,
     auth,
+    cicd,
+    webhooks,
+    trends,
+    sarif_import,
+    custom_rules,
+    compare,
+    secrets,
+    sbom,
+    teams,
+    remediation,
 )
 
 __all__ = [
@@ -26,4 +36,14 @@ __all__ = [
     "export",
     "aivetting",
     "auth",
+    "cicd",
+    "webhooks",
+    "trends",
+    "sarif_import",
+    "custom_rules",
+    "compare",
+    "secrets",
+    "sbom",
+    "teams",
+    "remediation",
 ]
