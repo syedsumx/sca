@@ -6,6 +6,7 @@ from codescope.api.models.schemas import (
     AnalysisResponse,
     AnalysisSummary,
     # Issues
+    LocationSchema,
     IssueResponse,
     IssueListResponse,
     IssueFilters,
@@ -42,6 +43,7 @@ __all__ = [
     "AnalysisRequest",
     "AnalysisResponse",
     "AnalysisSummary",
+    "LocationSchema",
     "IssueResponse",
     "IssueListResponse",
     "IssueFilters",

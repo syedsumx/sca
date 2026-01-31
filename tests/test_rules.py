@@ -90,8 +90,8 @@ def run(cmd):
     def test_hardcoded_password(self, parser):
         """Test hardcoded password detection."""
         code = '''
-password = "<your_password>"
-api_key = "<your_api_key>"
+password = "s3cretP@ssw0rd!"
+api_key = "sk_live_realkey123456"
 '''
         parsed = parser.parse(code)
         rule = HardcodedSecretRule()
