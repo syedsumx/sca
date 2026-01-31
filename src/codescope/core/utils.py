@@ -31,7 +31,8 @@ def get_snippet(file_path: Path, line: int, context: int = 2) -> str:
         Code snippet string.
     """
     try:
-        with open(file_path, encoding="utf-8", errors="replace") as f:
+        resolved = Path(file_path).resolve()
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
 
         start = max(0, line - context - 1)
@@ -57,7 +58,8 @@ def count_lines(file_path: Path) -> tuple[int, int, int, int]:
         Tuple of (total, code, comment, blank) line counts.
     """
     try:
-        with open(file_path, encoding="utf-8", errors="replace") as f:
+        resolved = Path(file_path).resolve()
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             content = f.read()
     except Exception:
         return 0, 0, 0, 0

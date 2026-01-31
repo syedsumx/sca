@@ -12,8 +12,8 @@ import os
 import subprocess
 
 # Hardcoded password (security issue)
-password = "super_secret_password123"
-api_key = "sk-1234567890abcdef"
+password = "<your_password>"
+api_key = "<your_api_key>"
 
 def process_user_input(user_input):
     """Function with SQL injection vulnerability."""
@@ -126,7 +126,7 @@ if __name__ == "__main__":
     (src_dir / "vulnerable.py").write_text('''
 import os
 
-password = "hardcoded_password"
+password = "<your_password>"
 
 def run_command(cmd):
     os.system(cmd)

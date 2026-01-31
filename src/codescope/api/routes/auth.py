@@ -365,7 +365,7 @@ async def create_api_key(
     if not user.can(role):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Cannot create API key with role '{role.value}' — exceeds your permissions",
+            detail="Cannot create API key — the requested role exceeds your permissions",
         )
 
     auth_db = _get_auth_db()

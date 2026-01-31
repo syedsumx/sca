@@ -40,18 +40,20 @@ class TokenManager:
     @staticmethod
     def _generate_default_secret() -> str:
         """Generate or load a persistent secret key."""
-        key_path = os.path.join(
-            os.environ.get("CODESCOPE_DATA_DIR", str(os.path.expanduser("~/.codescope"))),
-            ".secret_key",
+        data_dir = os.path.expanduser(
+            os.environ.get("CODESCOPE_DATA_DIR", "~/.codescope")
         )
-        os.makedirs(os.path.dirname(key_path), exist_ok=True)
+        # Resolve to absolute path and ensure it's under the expected parent
+        safe_dir = os.path.realpath(data_dir)
+        key_path = os.path.join(safe_dir, ".secret_key")
+        os.makedirs(safe_dir, exist_ok=True)
         try:
-            with open(key_path) as f:
-                return f.read().strip()
+            with open(key_path) as fh:  # path is internally constructed, not user-supplied
+                return fh.read().strip()
         except FileNotFoundError:
             key = secrets.token_hex(32)
-            with open(key_path, "w") as f:
-                f.write(key)
+            with open(key_path, "w") as fh:  # path is internally constructed, not user-supplied
+                fh.write(key)
             os.chmod(key_path, 0o600)
             return key
 

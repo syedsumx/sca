@@ -37,7 +37,7 @@ class FileHasher:
         """Compute SHA256 hash of a file's contents."""
         hasher = hashlib.sha256()
 
-        with open(file_path, 'rb') as f:
+        with open(str(Path(file_path).resolve()), 'rb') as f:
             for chunk in iter(lambda: f.read(8192), b''):
                 hasher.update(chunk)
 

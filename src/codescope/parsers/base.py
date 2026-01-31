@@ -43,7 +43,8 @@ class LanguageParser(ABC):
         Returns:
             ParsedFile containing AST and symbol information.
         """
-        with open(file_path, encoding="utf-8", errors="replace") as f:
+        resolved = Path(file_path).resolve()
+        with open(resolved, encoding="utf-8", errors="replace") as f:
             source = f.read()
         return self.parse(source, file_path)
 

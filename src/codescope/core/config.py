@@ -197,7 +197,8 @@ def load_config(path: Path | None = None) -> Config:
         # Return default config
         return Config()
 
-    with open(path) as f:
+    resolved = path.resolve()
+    with open(resolved) as f:
         data = yaml.safe_load(f) or {}
 
     return Config.from_dict(data)

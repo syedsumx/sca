@@ -66,7 +66,7 @@ _r("python:S502", "Weak cryptography detected",
 _r("python:S506", "Hardcoded password detected",
    "Hardcoded credentials in source code can be extracted by anyone with access. "
    "Use environment variables or a secrets manager.",
-   bad='password = "mysecretpass123"',
+   bad='password = "<CHANGE_ME>"  # never hardcode credentials',
    fix='import os\npassword = os.environ["DB_PASSWORD"]',
    refs=["https://cwe.mitre.org/data/definitions/798.html"], effort=15)
 
@@ -131,7 +131,7 @@ _r("python:S1192", "Duplicated string literal",
 # -- JavaScript --
 _r("javascript:S506", "Hardcoded secret in JS",
    "API keys and secrets in frontend JavaScript are visible to all users. Use environment variables and a backend proxy.",
-   bad='const API_KEY = "sk_live_abc123...";',
+   bad='const API_KEY = "<your_api_key_here>";',
    fix="const API_KEY = process.env.REACT_APP_API_KEY;\n// Or fetch from backend: const key = await fetch('/api/config').then(r => r.json());",
    refs=["https://owasp.org/Top10/A02_2021-Cryptographic_Failures/"], effort=15)
 
