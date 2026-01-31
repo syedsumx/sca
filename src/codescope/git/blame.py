@@ -87,14 +87,11 @@ class GitBlame:
         result = BlameResult(file_path=str(file_path))
 
         try:
-            # Build command — uses list-form (no shell injection risk)
-            args = ["git", "blame", "--line-porcelain"]
-            if end_line:
-                args.extend(["-L", str(start_line) + "," + str(end_line)])
-            args.append(str(file_path))
+            # Build line-range flag if needed
+            line_range = ["-L", str(start_line) + "," + str(end_line)] if end_line else []
 
-            proc = subprocess.run(  # safe: list-form args, no shell=True
-                args,
+            proc = subprocess.run(
+                ["git", "blame", "--line-porcelain", *line_range, str(file_path)],
                 cwd=str(self.repo_path),
                 capture_output=True,
                 text=True,

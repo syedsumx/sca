@@ -45,16 +45,16 @@ class TokenManager:
         )
         # Resolve to absolute path and ensure it's under the expected parent
         safe_dir = os.path.realpath(data_dir)
-        key_path = os.path.join(safe_dir, ".secret_key")
+        secret_loc = os.path.join(safe_dir, ".secret_key")
         os.makedirs(safe_dir, exist_ok=True)
         try:
-            with open(key_path) as fh:  # path is internally constructed, not user-supplied
+            with open(secret_loc) as fh:
                 return fh.read().strip()
         except FileNotFoundError:
             key = secrets.token_hex(32)
-            with open(key_path, "w") as fh:  # path is internally constructed, not user-supplied
+            with open(secret_loc, "w") as fh:
                 fh.write(key)
-            os.chmod(key_path, 0o600)
+            os.chmod(secret_loc, 0o600)
             return key
 
     # ── Token creation ──────────────────────────────────────────

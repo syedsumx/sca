@@ -90,9 +90,8 @@ def get_repo_info(path: Path) -> GitRepo | None:
 
     def run_git(*args: str) -> str:
         try:
-            cmd = ["git", *args]  # safe: list-form, no shell=True
             result = subprocess.run(
-                cmd,
+                ["git", *args],
                 cwd=str(cwd),
                 capture_output=True,
                 text=True,

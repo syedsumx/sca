@@ -194,7 +194,7 @@ class StreamingAnalyzer:
                             'line': issue.location.start_line,
                         }
                     })
-                    out.write(record + '\n')
+                    print(record, file=out)
 
                 # Write metrics
                 record = json.dumps({
@@ -206,7 +206,7 @@ class StreamingAnalyzer:
                         'issues': metrics.issues_count,
                     }
                 })
-                out.write(record + '\n')
+                print(record, file=out)
 
 
 def chunked_file_iterator(
