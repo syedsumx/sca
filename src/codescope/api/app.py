@@ -31,6 +31,8 @@ from codescope.api.routes import (
     autofix,
     monorepo,
     license_policy,
+    container,
+    iac,
 )
 from codescope.auth.database import AuthDatabase
 from codescope.auth.middleware import get_current_user, init_auth, require_role
@@ -162,6 +164,14 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         license_policy.router, prefix="/api/v1", tags=["License Policy"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        container.router, prefix="/api/v1", tags=["Container"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        iac.router, prefix="/api/v1", tags=["IaC"],
         dependencies=analyst_deps,
     )
 

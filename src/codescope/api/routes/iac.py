@@ -1,0 +1,151 @@
+"""Infrastructure-as-Code Scanning API routes."""
+
+from pathlib import Path
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
+
+from codescope.iac import IaCScanner
+
+router = APIRouter()
+
+
+class IaCScanRequest(BaseModel):
+    project_path: str
+    platforms: list[str] | None = None
+
+
+class IaCFileRequest(BaseModel):
+    file_path: str
+
+
+@router.post("/iac/scan")
+async def scan_iac(request: IaCScanRequest):
+    """Scan a project for IaC misconfigurations across all platforms."""
+    scan_path = Path(request.project_path)
+    if not scan_path.exists():
+        raise HTTPException(status_code=404, detail="Project path not found")
+
+    scanner = IaCScanner()
+    result = scanner.scan(scan_path)
+
+    # Filter by platform if specified
+    if request.platforms:
+        allowed = {p.upper() for p in request.platforms}
+        result.findings = [f for f in result.findings if f.platform.value in allowed]
+
+    return result.to_dict()
+
+
+@router.post("/iac/scan-terraform")
+async def scan_terraform(request: IaCFileRequest):
+    """Scan Terraform files in a directory."""
+    scan_path = Path(request.file_path)
+    if not scan_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    scanner = IaCScanner()
+    findings = scanner.scan_terraform(scan_path)
+    return {
+        "platform": "TERRAFORM",
+        "path": str(scan_path),
+        "findings": [f.to_dict() for f in findings],
+        "total": len(findings),
+    }
+
+
+@router.post("/iac/scan-cloudformation")
+async def scan_cloudformation(request: IaCFileRequest):
+    """Scan CloudFormation templates in a directory."""
+    scan_path = Path(request.file_path)
+    if not scan_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    scanner = IaCScanner()
+    findings = scanner.scan_cloudformation(scan_path)
+    return {
+        "platform": "CLOUDFORMATION",
+        "path": str(scan_path),
+        "findings": [f.to_dict() for f in findings],
+        "total": len(findings),
+    }
+
+
+@router.post("/iac/scan-kubernetes")
+async def scan_kubernetes(request: IaCFileRequest):
+    """Scan Kubernetes manifests in a directory."""
+    scan_path = Path(request.file_path)
+    if not scan_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    scanner = IaCScanner()
+    findings = scanner.scan_kubernetes(scan_path)
+    return {
+        "platform": "KUBERNETES",
+        "path": str(scan_path),
+        "findings": [f.to_dict() for f in findings],
+        "total": len(findings),
+    }
+
+
+@router.post("/iac/scan-helm")
+async def scan_helm(request: IaCFileRequest):
+    """Scan Helm charts in a directory."""
+    scan_path = Path(request.file_path)
+    if not scan_path.exists():
+        raise HTTPException(status_code=404, detail="Path not found")
+
+    scanner = IaCScanner()
+    findings = scanner.scan_helm(scan_path)
+    return {
+        "platform": "HELM",
+        "path": str(scan_path),
+        "findings": [f.to_dict() for f in findings],
+        "total": len(findings),
+    }
+
+
+@router.get("/iac/rules")
+async def list_iac_rules():
+    """List all IaC scanning rules."""
+    rules = [
+        # Terraform
+        {"id": "TF0001", "severity": "CRITICAL", "title": "S3 bucket without encryption", "platform": "TERRAFORM"},
+        {"id": "TF0002", "severity": "CRITICAL", "title": "S3 bucket public access", "platform": "TERRAFORM"},
+        {"id": "TF0003", "severity": "HIGH", "title": "Security group open to world", "platform": "TERRAFORM"},
+        {"id": "TF0004", "severity": "HIGH", "title": "RDS without encryption", "platform": "TERRAFORM"},
+        {"id": "TF0005", "severity": "CRITICAL", "title": "RDS publicly accessible", "platform": "TERRAFORM"},
+        {"id": "TF0006", "severity": "HIGH", "title": "IAM wildcard policy", "platform": "TERRAFORM"},
+        {"id": "TF0007", "severity": "MEDIUM", "title": "Missing logging/monitoring", "platform": "TERRAFORM"},
+        {"id": "TF0008", "severity": "HIGH", "title": "Unencrypted EBS volume", "platform": "TERRAFORM"},
+        {"id": "TF0009", "severity": "MEDIUM", "title": "Default VPC used", "platform": "TERRAFORM"},
+        {"id": "TF0010", "severity": "CRITICAL", "title": "Hardcoded secrets", "platform": "TERRAFORM"},
+        # CloudFormation
+        {"id": "CF0001", "severity": "CRITICAL", "title": "S3 without encryption", "platform": "CLOUDFORMATION"},
+        {"id": "CF0002", "severity": "HIGH", "title": "Open security group ingress", "platform": "CLOUDFORMATION"},
+        {"id": "CF0003", "severity": "HIGH", "title": "IAM wildcard actions", "platform": "CLOUDFORMATION"},
+        {"id": "CF0004", "severity": "HIGH", "title": "RDS without encryption", "platform": "CLOUDFORMATION"},
+        {"id": "CF0005", "severity": "CRITICAL", "title": "Secrets in parameters", "platform": "CLOUDFORMATION"},
+        {"id": "CF0006", "severity": "MEDIUM", "title": "Lambda without VPC", "platform": "CLOUDFORMATION"},
+        {"id": "CF0007", "severity": "MEDIUM", "title": "CloudFront without HTTPS", "platform": "CLOUDFORMATION"},
+        {"id": "CF0008", "severity": "LOW", "title": "ELB without access logs", "platform": "CLOUDFORMATION"},
+        # Kubernetes
+        {"id": "K80001", "severity": "HIGH", "title": "Running as root", "platform": "KUBERNETES"},
+        {"id": "K80002", "severity": "CRITICAL", "title": "Privileged container", "platform": "KUBERNETES"},
+        {"id": "K80003", "severity": "MEDIUM", "title": "No resource limits", "platform": "KUBERNETES"},
+        {"id": "K80004", "severity": "MEDIUM", "title": "Using latest tag", "platform": "KUBERNETES"},
+        {"id": "K80005", "severity": "HIGH", "title": "Host network", "platform": "KUBERNETES"},
+        {"id": "K80006", "severity": "HIGH", "title": "Host PID", "platform": "KUBERNETES"},
+        {"id": "K80007", "severity": "LOW", "title": "Writable root filesystem", "platform": "KUBERNETES"},
+        {"id": "K80008", "severity": "CRITICAL", "title": "All capabilities", "platform": "KUBERNETES"},
+        {"id": "K80009", "severity": "LOW", "title": "No liveness/readiness probes", "platform": "KUBERNETES"},
+        {"id": "K80010", "severity": "INFO", "title": "Default namespace", "platform": "KUBERNETES"},
+        {"id": "K80011", "severity": "CRITICAL", "title": "Secrets in env", "platform": "KUBERNETES"},
+        {"id": "K80012", "severity": "MEDIUM", "title": "Allow privilege escalation", "platform": "KUBERNETES"},
+        # Helm
+        {"id": "HM0001", "severity": "CRITICAL", "title": "Hardcoded secrets in values", "platform": "HELM"},
+        {"id": "HM0002", "severity": "MEDIUM", "title": "No resource limits", "platform": "HELM"},
+        {"id": "HM0003", "severity": "MEDIUM", "title": "Image tag set to latest", "platform": "HELM"},
+        {"id": "HM0004", "severity": "MEDIUM", "title": "No securityContext", "platform": "HELM"},
+    ]
+    return {"rules": rules, "total": len(rules)}
