@@ -30,6 +30,7 @@ from codescope.api.routes import (
     suppressions,
     autofix,
     monorepo,
+    license_policy,
 )
 from codescope.auth.database import AuthDatabase
 from codescope.auth.middleware import get_current_user, init_auth, require_role
@@ -157,6 +158,10 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         monorepo.router, prefix="/api/v1", tags=["Monorepo"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        license_policy.router, prefix="/api/v1", tags=["License Policy"],
         dependencies=analyst_deps,
     )
 

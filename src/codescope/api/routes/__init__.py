@@ -25,6 +25,7 @@ from codescope.api.routes import (
     suppressions,
     autofix,
     monorepo,
+    license_policy,
 )
 
 __all__ = [
@@ -52,4 +53,5 @@ __all__ = [
     "suppressions",
     "autofix",
     "monorepo",
+    "license_policy",
 ]
