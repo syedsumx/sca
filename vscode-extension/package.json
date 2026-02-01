@@ -1,0 +1,162 @@
+{
+  "name": "codescope-vscode",
+  "displayName": "CodeScope - Static Code Analysis",
+  "description": "Real-time static code analysis, vulnerability detection, and auto-fix suggestions",
+  "publisher": "codescope",
+  "version": "0.1.0",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Linters",
+    "Programming Languages"
+  ],
+  "keywords": [
+    "static analysis",
+    "security",
+    "vulnerability",
+    "linter",
+    "code quality"
+  ],
+  "icon": "images/codescope-icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/codescope/codescope-sca"
+  },
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codescope.analyzeFile",
+        "title": "CodeScope: Analyze Current File"
+      },
+      {
+        "command": "codescope.analyzeWorkspace",
+        "title": "CodeScope: Analyze Workspace"
+      },
+      {
+        "command": "codescope.showRuleInfo",
+        "title": "CodeScope: Show Rule Info"
+      },
+      {
+        "command": "codescope.applyFix",
+        "title": "CodeScope: Apply Fix Suggestion"
+      },
+      {
+        "command": "codescope.ignoreRule",
+        "title": "CodeScope: Ignore Rule for This Line"
+      },
+      {
+        "command": "codescope.toggleOnSave",
+        "title": "CodeScope: Toggle Scan on Save"
+      }
+    ],
+    "configuration": {
+      "title": "CodeScope",
+      "properties": {
+        "codescope.enable": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable or disable CodeScope analysis."
+        },
+        "codescope.scanOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically scan files when saved."
+        },
+        "codescope.scanOnOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically scan files when opened."
+        },
+        "codescope.severity.minimum": {
+          "type": "string",
+          "default": "MINOR",
+          "enum": [
+            "BLOCKER",
+            "CRITICAL",
+            "MAJOR",
+            "MINOR",
+            "INFO"
+          ],
+          "enumDescriptions": [
+            "Show only BLOCKER issues",
+            "Show CRITICAL and above",
+            "Show MAJOR and above",
+            "Show MINOR and above",
+            "Show all issues including INFO"
+          ],
+          "description": "Minimum severity level to display."
+        },
+        "codescope.rules.disabled": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "List of rule IDs to disable."
+        },
+        "codescope.python.path": {
+          "type": "string",
+          "default": "python3",
+          "description": "Path to the Python interpreter used to run CodeScope."
+        },
+        "codescope.autoFix.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable auto-fix suggestions in code actions."
+        },
+        "codescope.statusBar.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show CodeScope status bar item."
+        }
+      }
+    },
+    "problemMatchers": [
+      {
+        "name": "codescope",
+        "owner": "codescope",
+        "fileLocation": [
+          "absolute"
+        ],
+        "pattern": [
+          {
+            "regexp": "^(.+):(\\d+):(\\d+):\\s+(BLOCKER|CRITICAL|MAJOR|MINOR|INFO)\\s+(.+)\\s+\\[(.+)\\]$",
+            "file": 1,
+            "line": 2,
+            "column": 3,
+            "severity": 4,
+            "message": 5,
+            "code": 6
+          }
+        ],
+        "severity": "warning"
+      }
+    ],
+    "languages": [
+      {
+        "id": "codescope-output",
+        "mimetypes": [
+          "text/x-codescope-output"
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "eslint src --ext ts"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.85.0",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.3.0",
+    "@vscode/vsce": "^2.22.0"
+  }
+}
