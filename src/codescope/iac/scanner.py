@@ -200,12 +200,23 @@ class IaCScanner:
         files_scanned = 0
         platforms: list[IaCPlatform] = []
 
-        # Detect Terraform
+        # Detect Terraform (AWS + multi-cloud: Azure, GCP, OCI)
         tf_files = list(path.rglob("*.tf"))
         if tf_files:
             platforms.append(IaCPlatform.TERRAFORM)
             files_scanned += len(tf_files)
             all_findings.extend(self.scan_terraform(path))
+            # Multi-cloud Terraform rules (Azure, GCP, OCI)
+            from codescope.iac.multicloud import MultiCloudTerraformScanner
+            all_findings.extend(MultiCloudTerraformScanner().scan(path))
+
+        # Detect ARM templates and Bicep
+        arm_files = list(path.rglob("*.bicep"))
+        arm_json = [f for f in path.rglob("*.json") if self._is_arm_template(f)]
+        if arm_files or arm_json:
+            files_scanned += len(arm_files) + len(arm_json)
+            from codescope.iac.arm_bicep import ARMBicepScanner
+            all_findings.extend(ARMBicepScanner().scan(path))
 
         # Detect CloudFormation
         cfn_files = self._find_cloudformation_files(path)
@@ -236,6 +247,18 @@ class IaCScanner:
             files_scanned=files_scanned,
             platforms_detected=platforms,
         )
+
+    @staticmethod
+    def _is_arm_template(f: Path) -> bool:
+        """Check if a JSON file is an ARM template."""
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                schema = data.get("$schema", "")
+                return "deploymentTemplate" in schema
+        except Exception:
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # Terraform scanning

@@ -6,10 +6,14 @@ from codescope.iac.scanner import (
     IaCScanResult,
     IaCPlatform,
 )
+from codescope.iac.multicloud import MultiCloudTerraformScanner
+from codescope.iac.arm_bicep import ARMBicepScanner
 
 __all__ = [
     "IaCScanner",
     "IaCFinding",
     "IaCScanResult",
     "IaCPlatform",
+    "MultiCloudTerraformScanner",
+    "ARMBicepScanner",
 ]
