@@ -22,6 +22,8 @@ from codescope.api.routes import (
     sbom,
     teams,
     remediation,
+    suppressions,
+    autofix,
 )
 
 __all__ = [
@@ -46,4 +48,6 @@ __all__ = [
     "sbom",
     "teams",
     "remediation",
+    "suppressions",
+    "autofix",
 ]

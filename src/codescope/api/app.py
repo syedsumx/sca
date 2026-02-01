@@ -27,6 +27,8 @@ from codescope.api.routes import (
     sbom,
     teams,
     remediation,
+    suppressions,
+    autofix,
 )
 from codescope.auth.database import AuthDatabase
 from codescope.auth.middleware import get_current_user, init_auth, require_role
@@ -142,6 +144,14 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         cicd.router, prefix="/api/v1", tags=["CI/CD"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        suppressions.router, prefix="/api/v1", tags=["Suppressions"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        autofix.router, prefix="/api/v1", tags=["Auto-Fix"],
         dependencies=analyst_deps,
     )
 
