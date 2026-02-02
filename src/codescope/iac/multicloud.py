@@ -75,6 +75,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0038_storage_no_network_rules(all_resources))
         findings.extend(self._az0039_keyvault_no_network_acls(all_resources))
         findings.extend(self._az0040_signalr_public_access(all_resources))
+        findings.extend(self._az0041_iothub_public_access(all_resources))
+        findings.extend(self._az0042_webapp_min_tls(all_resources))
+        findings.extend(self._az0043_aks_network_policy(all_resources))
+        findings.extend(self._az0044_dns_zone_public(all_resources))
+        findings.extend(self._az0045_databricks_public_access(all_resources))
+        findings.extend(self._az0046_purview_public_access(all_resources))
+        findings.extend(self._az0047_container_app_insecure(all_resources))
+        findings.extend(self._az0048_spring_cloud_public(all_resources))
+        findings.extend(self._az0049_automation_account_public(all_resources))
+        findings.extend(self._az0050_virtual_network_no_ddos(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -693,6 +703,170 @@ class MultiCloudTerraformScanner:
                         f"Service '{res['name']}' ({res['type']}) allows public network access.",
                         IaCSeverity.HIGH, res,
                         "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0041_iothub_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_iothub":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0041", "IoT Hub publicly accessible",
+                        f"IoT Hub '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_get_value(res["body"], "min_tls_version"):
+                    findings.append(self._finding(
+                        "AZ0041", "IoT Hub without minimum TLS version",
+                        f"IoT Hub '{res['name']}' does not specify a minimum TLS version.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set min_tls_version = '1.2'.",
+                    ))
+        return findings
+
+    def _az0042_webapp_min_tls(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_app_service", "azurerm_linux_web_app", "azurerm_windows_web_app"):
+                tls_ver = _tf_body_get_value(res["body"], "min_tls_version")
+                if tls_ver and tls_ver.strip('"') in ("1.0", "1.1"):
+                    findings.append(self._finding(
+                        "AZ0042", "Web App using outdated TLS version",
+                        f"Web App '{res['name']}' minimum TLS version is {tls_ver.strip(chr(34))}.",
+                        IaCSeverity.HIGH, res,
+                        "Set min_tls_version = '1.2' in site_config.",
+                    ))
+        return findings
+
+    def _az0043_aks_network_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_get_value(res["body"], "network_policy"):
+                    if _tf_body_has_block(res["body"], "network_profile"):
+                        findings.append(self._finding(
+                            "AZ0043", "AKS without network policy",
+                            f"AKS cluster '{res['name']}' does not have a network policy configured.",
+                            IaCSeverity.MEDIUM, res,
+                            "Set network_policy = 'azure' or 'calico' in network_profile.",
+                        ))
+        return findings
+
+    def _az0044_dns_zone_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_private_dns = "azurerm_private_dns_zone" in resource_types
+        public_dns_zones = [r for r in resources if r["type"] == "azurerm_dns_zone"]
+        if public_dns_zones and not has_private_dns:
+            for res in public_dns_zones:
+                findings.append(self._finding(
+                    "AZ0044", "Public DNS zone without private DNS complement",
+                    f"DNS Zone '{res['name']}' is public with no azurerm_private_dns_zone detected.",
+                    IaCSeverity.INFO, res,
+                    "Consider using azurerm_private_dns_zone for internal service resolution.",
+                ))
+        return findings
+
+    def _az0045_databricks_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_databricks_workspace":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0045", "Databricks Workspace publicly accessible",
+                        f"Databricks Workspace '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and configure VNet injection.",
+                    ))
+                if not _tf_body_has_block(res["body"], "custom_parameters"):
+                    findings.append(self._finding(
+                        "AZ0045", "Databricks Workspace without VNet injection",
+                        f"Databricks Workspace '{res['name']}' has no custom_parameters for VNet injection.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add custom_parameters with virtual_network_id and private/public subnet details.",
+                    ))
+        return findings
+
+    def _az0046_purview_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_purview_account":
+                if _tf_body_has_key_value(res["body"], "public_network_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0046", "Purview Account publicly accessible",
+                        f"Purview Account '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_enabled = false and use managed private endpoints.",
+                    ))
+        return findings
+
+    def _az0047_container_app_insecure(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_app":
+                if _tf_body_has_key_value(res["body"], "transport", '"http"'):
+                    findings.append(self._finding(
+                        "AZ0047", "Container App using HTTP transport",
+                        f"Container App '{res['name']}' ingress uses HTTP transport.",
+                        IaCSeverity.HIGH, res,
+                        "Set transport = 'auto' or 'http2' in the ingress block for TLS.",
+                    ))
+                if _tf_body_has_key_value(res["body"], "allow_insecure_connections", "true"):
+                    findings.append(self._finding(
+                        "AZ0047", "Container App allows insecure connections",
+                        f"Container App '{res['name']}' allows insecure (HTTP) connections.",
+                        IaCSeverity.HIGH, res,
+                        "Set allow_insecure_connections = false in the ingress block.",
+                    ))
+        return findings
+
+    def _az0048_spring_cloud_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_spring_cloud_service", "azurerm_spring_cloud_app"):
+                if res["type"] == "azurerm_spring_cloud_app":
+                    if _tf_body_has_key_value(res["body"], "is_public", "true"):
+                        findings.append(self._finding(
+                            "AZ0048", "Spring Cloud App publicly accessible",
+                            f"Spring Cloud App '{res['name']}' is publicly accessible.",
+                            IaCSeverity.HIGH, res,
+                            "Set is_public = false and use private endpoints or API gateway.",
+                        ))
+                if res["type"] == "azurerm_spring_cloud_service":
+                    if not _tf_body_has_block(res["body"], "network"):
+                        findings.append(self._finding(
+                            "AZ0048", "Spring Cloud without VNet integration",
+                            f"Spring Cloud Service '{res['name']}' has no network block for VNet injection.",
+                            IaCSeverity.MEDIUM, res,
+                            "Add a network block with service_runtime_subnet_id and app_subnet_id.",
+                        ))
+        return findings
+
+    def _az0049_automation_account_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_automation_account":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0049", "Automation Account publicly accessible",
+                        f"Automation Account '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0050_virtual_network_no_ddos(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network":
+                if not _tf_body_has_block(res["body"], "ddos_protection_plan"):
+                    findings.append(self._finding(
+                        "AZ0050", "Virtual Network without DDoS protection",
+                        f"Virtual Network '{res['name']}' does not have a DDoS protection plan.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add a ddos_protection_plan block with enable = true.",
                     ))
         return findings
 
