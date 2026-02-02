@@ -85,6 +85,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0048_spring_cloud_public(all_resources))
         findings.extend(self._az0049_automation_account_public(all_resources))
         findings.extend(self._az0050_virtual_network_no_ddos(all_resources))
+        findings.extend(self._az0051_firewall_no_threat_intel(all_resources))
+        findings.extend(self._az0052_express_route_no_encryption(all_resources))
+        findings.extend(self._az0053_machine_learning_public(all_resources))
+        findings.extend(self._az0054_event_grid_public(all_resources))
+        findings.extend(self._az0055_stream_analytics_public(all_resources))
+        findings.extend(self._az0056_hdinsight_public(all_resources))
+        findings.extend(self._az0057_notification_hub_no_auth(all_resources))
+        findings.extend(self._az0058_managed_identity_missing(all_resources))
+        findings.extend(self._az0059_private_endpoint_missing(all_resources))
+        findings.extend(self._az0060_defender_for_cloud(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -868,6 +878,194 @@ class MultiCloudTerraformScanner:
                         IaCSeverity.MEDIUM, res,
                         "Add a ddos_protection_plan block with enable = true.",
                     ))
+        return findings
+
+    def _az0051_firewall_no_threat_intel(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_firewall":
+                mode = _tf_body_get_value(res["body"], "threat_intel_mode")
+                if not mode or (mode and mode.strip('"').lower() == "off"):
+                    findings.append(self._finding(
+                        "AZ0051", "Azure Firewall threat intelligence disabled",
+                        f"Firewall '{res['name']}' has threat intelligence mode off or unset.",
+                        IaCSeverity.HIGH, res,
+                        "Set threat_intel_mode = 'Alert' or 'Deny'.",
+                    ))
+        return findings
+
+    def _az0052_express_route_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_express_route_circuit":
+                sku_tier = _tf_body_get_value(res["body"], "tier")
+                if sku_tier and "premium" not in sku_tier.lower():
+                    findings.append(self._finding(
+                        "AZ0052", "ExpressRoute without Premium tier",
+                        f"ExpressRoute circuit '{res['name']}' is not using Premium tier (needed for Global Reach and MACsec).",
+                        IaCSeverity.MEDIUM, res,
+                        "Use Premium tier SKU for MACsec encryption and Global Reach support.",
+                    ))
+        return findings
+
+    def _az0053_machine_learning_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_machine_learning_workspace":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0053", "Machine Learning Workspace publicly accessible",
+                        f"ML Workspace '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_get_value(res["body"], "high_business_impact"):
+                    findings.append(self._finding(
+                        "AZ0053", "Machine Learning Workspace without high business impact flag",
+                        f"ML Workspace '{res['name']}' does not set high_business_impact for data encryption.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set high_business_impact = true to enable additional encryption controls.",
+                    ))
+        return findings
+
+    def _az0054_event_grid_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_eventgrid_topic", "azurerm_eventgrid_domain"):
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0054", "Event Grid publicly accessible",
+                        f"Event Grid '{res['name']}' ({res['type']}) allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_has_key_value(res["body"], "local_auth_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0054", "Event Grid local auth not disabled",
+                        f"Event Grid '{res['name']}' has local (key-based) authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false and use Azure AD authentication.",
+                    ))
+        return findings
+
+    def _az0055_stream_analytics_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_stream_analytics_job":
+                if not _tf_body_get_value(res["body"], "content_storage_policy"):
+                    findings.append(self._finding(
+                        "AZ0055", "Stream Analytics without content storage policy",
+                        f"Stream Analytics Job '{res['name']}' does not configure content_storage_policy.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set content_storage_policy = 'JobStorageAccount' for data isolation.",
+                    ))
+        return findings
+
+    def _az0056_hdinsight_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        hdi_types = (
+            "azurerm_hdinsight_hadoop_cluster",
+            "azurerm_hdinsight_spark_cluster",
+            "azurerm_hdinsight_hbase_cluster",
+            "azurerm_hdinsight_kafka_cluster",
+            "azurerm_hdinsight_interactive_query_cluster",
+        )
+        for res in resources:
+            if res["type"] in hdi_types:
+                if not _tf_body_has_block(res["body"], "virtual_network"):
+                    findings.append(self._finding(
+                        "AZ0056", "HDInsight cluster without VNet",
+                        f"HDInsight cluster '{res['name']}' is not deployed in a virtual network.",
+                        IaCSeverity.HIGH, res,
+                        "Add a virtual_network block with subnet_id for network isolation.",
+                    ))
+                if _tf_body_has_key_value(res["body"], "is_default", "true"):
+                    # default storage using blob, not ADLS Gen2
+                    pass
+                tls = _tf_body_get_value(res["body"], "tls_min_version")
+                if tls and tls.strip('"') in ("1.0", "1.1"):
+                    findings.append(self._finding(
+                        "AZ0056", "HDInsight cluster outdated TLS",
+                        f"HDInsight cluster '{res['name']}' uses TLS version {tls.strip(chr(34))}.",
+                        IaCSeverity.HIGH, res,
+                        "Set tls_min_version = '1.2'.",
+                    ))
+        return findings
+
+    def _az0057_notification_hub_no_auth(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_notification_hub_namespace":
+                sku = _tf_body_get_value(res["body"], "sku_name")
+                if sku and "free" in sku.lower():
+                    findings.append(self._finding(
+                        "AZ0057", "Notification Hub on Free tier",
+                        f"Notification Hub namespace '{res['name']}' uses the Free tier (no SLA or SAS policies).",
+                        IaCSeverity.MEDIUM, res,
+                        "Use Basic or Standard tier for production workloads with SAS authentication.",
+                    ))
+        return findings
+
+    def _az0058_managed_identity_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        identity_resources = (
+            "azurerm_linux_web_app", "azurerm_windows_web_app", "azurerm_app_service",
+            "azurerm_linux_function_app", "azurerm_windows_function_app", "azurerm_function_app",
+            "azurerm_container_app", "azurerm_logic_app_standard",
+        )
+        for res in resources:
+            if res["type"] in identity_resources:
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding(
+                        "AZ0058", "Azure resource without managed identity",
+                        f"Resource '{res['name']}' ({res['type']}) does not configure a managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned' or 'UserAssigned'.",
+                    ))
+        return findings
+
+    def _az0059_private_endpoint_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_private_endpoints = "azurerm_private_endpoint" in resource_types
+        pe_candidates = [
+            r for r in resources
+            if r["type"] in (
+                "azurerm_storage_account", "azurerm_mssql_server",
+                "azurerm_cosmosdb_account", "azurerm_key_vault",
+                "azurerm_container_registry",
+            )
+        ]
+        if pe_candidates and not has_private_endpoints:
+            for res in pe_candidates:
+                findings.append(self._finding(
+                    "AZ0059", "Azure resource without private endpoint",
+                    f"Resource '{res['name']}' ({res['type']}) has no azurerm_private_endpoint configured.",
+                    IaCSeverity.MEDIUM, res,
+                    "Add an azurerm_private_endpoint resource for private connectivity.",
+                ))
+        return findings
+
+    def _az0060_defender_for_cloud(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_defender = "azurerm_security_center_subscription_pricing" in resource_types
+        critical_resources = [
+            r for r in resources
+            if r["type"] in (
+                "azurerm_kubernetes_cluster", "azurerm_mssql_server",
+                "azurerm_storage_account", "azurerm_key_vault",
+            )
+        ]
+        if critical_resources and not has_defender:
+            # Report once for the first resource found
+            res = critical_resources[0]
+            findings.append(self._finding(
+                "AZ0060", "Microsoft Defender for Cloud not enabled",
+                "No azurerm_security_center_subscription_pricing resource found to enable Defender plans.",
+                IaCSeverity.MEDIUM, res,
+                "Add azurerm_security_center_subscription_pricing resources for relevant resource types.",
+            ))
         return findings
 
     # ── GCP rules (GC####) ───────────────────────────────────────────
