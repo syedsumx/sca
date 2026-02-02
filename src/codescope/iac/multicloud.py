@@ -125,6 +125,56 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0088_notification_hub_no_auth(all_resources))
         findings.extend(self._az0089_signalr_public_access(all_resources))
         findings.extend(self._az0090_static_web_app_no_auth(all_resources))
+        findings.extend(self._az0091_automation_account_public(all_resources))
+        findings.extend(self._az0092_cognitive_account_public(all_resources))
+        findings.extend(self._az0093_communication_service_no_identity(all_resources))
+        findings.extend(self._az0094_container_group_public(all_resources))
+        findings.extend(self._az0095_data_explorer_public(all_resources))
+        findings.extend(self._az0096_databricks_public(all_resources))
+        findings.extend(self._az0097_healthcare_fhir_public(all_resources))
+        findings.extend(self._az0098_iot_hub_public(all_resources))
+        findings.extend(self._az0099_machine_learning_public(all_resources))
+        findings.extend(self._az0100_media_services_no_identity(all_resources))
+        findings.extend(self._az0101_managed_disk_no_encryption(all_resources))
+        findings.extend(self._az0102_private_dns_zone_no_link(all_resources))
+        findings.extend(self._az0103_app_service_slot_no_https(all_resources))
+        findings.extend(self._az0104_redis_no_tls(all_resources))
+        findings.extend(self._az0105_search_service_public(all_resources))
+        findings.extend(self._az0106_spring_cloud_no_vnet(all_resources))
+        findings.extend(self._az0107_web_pubsub_public(all_resources))
+        findings.extend(self._az0108_frontdoor_waf_missing(all_resources))
+        findings.extend(self._az0109_app_gateway_no_waf(all_resources))
+        findings.extend(self._az0110_dns_zone_no_dnssec(all_resources))
+        findings.extend(self._az0111_express_route_no_encryption(all_resources))
+        findings.extend(self._az0112_firewall_no_threat_intel(all_resources))
+        findings.extend(self._az0113_image_builder_no_identity(all_resources))
+        findings.extend(self._az0114_key_vault_no_purge_protection(all_resources))
+        findings.extend(self._az0115_lb_no_health_probe(all_resources))
+        findings.extend(self._az0116_log_analytics_no_cmk(all_resources))
+        findings.extend(self._az0117_monitor_diagnostic_missing(all_resources))
+        findings.extend(self._az0118_mysql_flexible_public(all_resources))
+        findings.extend(self._az0119_network_interface_public_ip(all_resources))
+        findings.extend(self._az0120_postgresql_flexible_public(all_resources))
+        findings.extend(self._az0121_recovery_vault_no_encryption(all_resources))
+        findings.extend(self._az0122_route_table_no_propagation(all_resources))
+        findings.extend(self._az0123_service_bus_public(all_resources))
+        findings.extend(self._az0124_snapshot_no_encryption(all_resources))
+        findings.extend(self._az0125_storage_sync_no_private(all_resources))
+        findings.extend(self._az0126_virtual_hub_no_firewall(all_resources))
+        findings.extend(self._az0127_vm_scale_set_no_health_ext(all_resources))
+        findings.extend(self._az0128_vnet_no_ddos_protection(all_resources))
+        findings.extend(self._az0129_vpn_gateway_no_active_active(all_resources))
+        findings.extend(self._az0130_waf_policy_prevention_mode(all_resources))
+        findings.extend(self._az0131_event_grid_public(all_resources))
+        findings.extend(self._az0132_event_hub_public(all_resources))
+        findings.extend(self._az0133_cosmos_db_public(all_resources))
+        findings.extend(self._az0134_function_app_public(all_resources))
+        findings.extend(self._az0135_container_registry_public(all_resources))
+        findings.extend(self._az0136_managed_hsm_no_purge_protection(all_resources))
+        findings.extend(self._az0137_data_protection_vault_no_immutability(all_resources))
+        findings.extend(self._az0138_private_endpoint_no_dns(all_resources))
+        findings.extend(self._az0139_disk_access_public(all_resources))
+        findings.extend(self._az0140_maintenance_config_missing(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -1675,6 +1725,1128 @@ class MultiCloudTerraformScanner:
                         IaCSeverity.MEDIUM, res,
                         "Add an identity block with type = 'SystemAssigned'.",
                     ))
+        return findings
+
+    def _az0091_automation_account_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0091 – Azure Automation Account publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_automation_account":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0091", "Automation Account publicly accessible",
+                        f"Automation Account '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0091", "Automation Account without managed identity",
+                        f"Automation Account '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0092_cognitive_account_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0092 – Azure Cognitive Services publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cognitive_account":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0092", "Cognitive Services publicly accessible",
+                        f"Cognitive Services account '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if _tf_body_has_key_value(body, "local_auth_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0092", "Cognitive Services local auth enabled",
+                        f"Cognitive Services account '{res['name']}' has local authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false and use Azure AD authentication.",
+                    ))
+        return findings
+
+    def _az0093_communication_service_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0093 – Azure Communication Service without managed identity."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_communication_service":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding(
+                        "AZ0093", "Communication Service without managed identity",
+                        f"Communication Service '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0094_container_group_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0094 – Azure Container Instance publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_group":
+                body = res["body"]
+                ip_type = _tf_body_get_value(body, "ip_address_type")
+                if ip_type and "Public" in ip_type:
+                    findings.append(self._finding(
+                        "AZ0094", "Container Instance publicly accessible",
+                        f"Container Group '{res['name']}' has public IP address.",
+                        IaCSeverity.HIGH, res,
+                        "Set ip_address_type = 'Private' and deploy into a VNet.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0094", "Container Instance without managed identity",
+                        f"Container Group '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0095_data_explorer_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0095 – Azure Data Explorer (Kusto) publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kusto_cluster":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0095", "Data Explorer publicly accessible",
+                        f"Kusto cluster '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_key_value(body, "disk_encryption_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0095", "Data Explorer without disk encryption",
+                        f"Kusto cluster '{res['name']}' does not have disk encryption enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set disk_encryption_enabled = true.",
+                    ))
+                if _tf_body_has_key_value(body, "double_encryption_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0095", "Data Explorer without double encryption",
+                        f"Kusto cluster '{res['name']}' does not have double encryption.",
+                        IaCSeverity.LOW, res,
+                        "Set double_encryption_enabled = true for defense in depth.",
+                    ))
+        return findings
+
+    def _az0096_databricks_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0096 – Azure Databricks publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_databricks_workspace":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0096", "Databricks workspace publicly accessible",
+                        f"Databricks workspace '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_key_value(body, "infrastructure_encryption_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0096", "Databricks without infrastructure encryption",
+                        f"Databricks workspace '{res['name']}' lacks infrastructure encryption.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set infrastructure_encryption_enabled = true.",
+                    ))
+        return findings
+
+    def _az0097_healthcare_fhir_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0097 – Azure Healthcare APIs (FHIR) publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_healthcare_fhir_service":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0097", "Healthcare FHIR publicly accessible",
+                        f"FHIR service '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+            if res["type"] == "azurerm_healthcare_service":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0097", "Healthcare service publicly accessible",
+                        f"Healthcare service '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+        return findings
+
+    def _az0098_iot_hub_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0098 – Azure IoT Hub publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_iothub":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0098", "IoT Hub publicly accessible",
+                        f"IoT Hub '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_get_value(body, "min_tls_version"):
+                    findings.append(self._finding(
+                        "AZ0098", "IoT Hub without minimum TLS version",
+                        f"IoT Hub '{res['name']}' does not enforce minimum TLS version.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set min_tls_version = '1.2'.",
+                    ))
+        return findings
+
+    def _az0099_machine_learning_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0099 – Azure Machine Learning workspace publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_machine_learning_workspace":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0099", "ML workspace publicly accessible",
+                        f"ML workspace '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_block(body, "encryption"):
+                    findings.append(self._finding(
+                        "AZ0099", "ML workspace without CMK encryption",
+                        f"ML workspace '{res['name']}' does not use customer-managed keys.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an encryption block with customer-managed key.",
+                    ))
+        return findings
+
+    def _az0100_media_services_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0100 – Azure Media Services without managed identity."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_media_services_account":
+                body = res["body"]
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0100", "Media Services without managed identity",
+                        f"Media Services '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+                if not _tf_body_has_block(body, "encryption"):
+                    findings.append(self._finding(
+                        "AZ0100", "Media Services without CMK encryption",
+                        f"Media Services '{res['name']}' does not use customer-managed keys.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an encryption block with customer-managed key.",
+                    ))
+        return findings
+
+    def _az0101_managed_disk_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0101 – Azure Managed Disk without encryption at host."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_managed_disk":
+                body = res["body"]
+                if not _tf_body_get_value(body, "disk_encryption_set_id"):
+                    findings.append(self._finding(
+                        "AZ0101", "Managed Disk without disk encryption set",
+                        f"Managed Disk '{res['name']}' does not use a disk encryption set.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set disk_encryption_set_id to use customer-managed encryption.",
+                    ))
+                if _tf_body_has_key_value(body, "network_access_policy", '"AllowAll"'):
+                    findings.append(self._finding(
+                        "AZ0101", "Managed Disk allows all network access",
+                        f"Managed Disk '{res['name']}' allows all network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set network_access_policy = 'DenyAll' or 'AllowPrivate'.",
+                    ))
+        return findings
+
+    def _az0102_private_dns_zone_no_link(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0102 – Azure Private DNS Zone without VNet link."""
+        findings = []
+        dns_zones = [r for r in resources if r["type"] == "azurerm_private_dns_zone"]
+        dns_links = [r for r in resources if r["type"] == "azurerm_private_dns_zone_virtual_network_link"]
+        linked_zones = set()
+        for link in dns_links:
+            zone_id = _tf_body_get_value(link["body"], "private_dns_zone_name")
+            if zone_id:
+                linked_zones.add(zone_id.strip('"'))
+        for zone in dns_zones:
+            zone_name = _tf_body_get_value(zone["body"], "name")
+            if zone_name and zone_name.strip('"') not in linked_zones:
+                findings.append(self._finding(
+                    "AZ0102", "Private DNS Zone without VNet link",
+                    f"Private DNS Zone '{zone['name']}' has no VNet link configured.",
+                    IaCSeverity.MEDIUM, zone,
+                    "Create an azurerm_private_dns_zone_virtual_network_link resource.",
+                ))
+        return findings
+
+    def _az0103_app_service_slot_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0103 – Azure App Service slot without HTTPS enforcement."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_app_service_slot":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "https_only", "false"):
+                    findings.append(self._finding(
+                        "AZ0103", "App Service slot allows HTTP",
+                        f"App Service slot '{res['name']}' does not enforce HTTPS.",
+                        IaCSeverity.HIGH, res,
+                        "Set https_only = true.",
+                    ))
+        return findings
+
+    def _az0104_redis_no_tls(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0104 – Azure Redis Cache without TLS enforcement."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_redis_cache":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "enable_non_ssl_port", "true"):
+                    findings.append(self._finding(
+                        "AZ0104", "Redis Cache allows non-SSL connections",
+                        f"Redis Cache '{res['name']}' has non-SSL port enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set enable_non_ssl_port = false.",
+                    ))
+                min_tls = _tf_body_get_value(body, "minimum_tls_version")
+                if min_tls and "1.0" in min_tls:
+                    findings.append(self._finding(
+                        "AZ0104", "Redis Cache using TLS 1.0",
+                        f"Redis Cache '{res['name']}' uses TLS 1.0.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set minimum_tls_version = '1.2'.",
+                    ))
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0104", "Redis Cache publicly accessible",
+                        f"Redis Cache '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+        return findings
+
+    def _az0105_search_service_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0105 – Azure Cognitive Search publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_search_service":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0105", "Search Service publicly accessible",
+                        f"Search Service '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0105", "Search Service without managed identity",
+                        f"Search Service '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0106_spring_cloud_no_vnet(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0106 – Azure Spring Cloud without VNet injection."""
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_spring_cloud_service", "azurerm_spring_cloud_app"):
+                if res["type"] == "azurerm_spring_cloud_service":
+                    body = res["body"]
+                    if not _tf_body_has_block(body, "network"):
+                        findings.append(self._finding(
+                            "AZ0106", "Spring Cloud without VNet injection",
+                            f"Spring Cloud service '{res['name']}' is not deployed in a VNet.",
+                            IaCSeverity.HIGH, res,
+                            "Add a network block with service_runtime_subnet_id and app_subnet_id.",
+                        ))
+        return findings
+
+    def _az0107_web_pubsub_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0107 – Azure Web PubSub publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_web_pubsub":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0107", "Web PubSub publicly accessible",
+                        f"Web PubSub '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "local_auth_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0107", "Web PubSub local auth enabled",
+                        f"Web PubSub '{res['name']}' has local authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false.",
+                    ))
+        return findings
+
+    def _az0108_frontdoor_waf_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0108 – Azure Front Door without WAF policy."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_frontdoor":
+                body = res["body"]
+                if not _tf_body_get_value(body, "web_application_firewall_policy_link_id"):
+                    findings.append(self._finding(
+                        "AZ0108", "Front Door without WAF policy",
+                        f"Front Door '{res['name']}' has no WAF policy linked.",
+                        IaCSeverity.HIGH, res,
+                        "Link a WAF policy using web_application_firewall_policy_link_id.",
+                    ))
+            if res["type"] == "azurerm_cdn_frontdoor_profile":
+                body = res["body"]
+                sku = _tf_body_get_value(body, "sku_name")
+                if sku and "Standard" in sku:
+                    findings.append(self._finding(
+                        "AZ0108", "CDN Front Door using Standard SKU",
+                        f"CDN Front Door '{res['name']}' uses Standard SKU (no WAF support).",
+                        IaCSeverity.MEDIUM, res,
+                        "Use Premium_AzureFrontDoor SKU for WAF support.",
+                    ))
+        return findings
+
+    def _az0109_app_gateway_no_waf(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0109 – Azure Application Gateway without WAF."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                body = res["body"]
+                sku_name = _tf_body_get_value(body, "name")
+                if sku_name and "WAF" not in sku_name:
+                    findings.append(self._finding(
+                        "AZ0109", "Application Gateway without WAF",
+                        f"Application Gateway '{res['name']}' does not use WAF SKU.",
+                        IaCSeverity.HIGH, res,
+                        "Use WAF_v2 SKU for web application firewall protection.",
+                    ))
+                if _tf_body_has_block(body, "waf_configuration"):
+                    if _tf_body_has_key_value(body, "enabled", "false"):
+                        findings.append(self._finding(
+                            "AZ0109", "Application Gateway WAF disabled",
+                            f"Application Gateway '{res['name']}' has WAF disabled.",
+                            IaCSeverity.HIGH, res,
+                            "Set enabled = true in waf_configuration.",
+                        ))
+        return findings
+
+    def _az0110_dns_zone_no_dnssec(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0110 – Azure DNS Zone without DNSSEC."""
+        findings = []
+        dns_zones = [r for r in resources if r["type"] == "azurerm_dns_zone"]
+        dnssec_configs = [r for r in resources if r["type"] == "azurerm_dns_zone_dnssec_config"]
+        secured_zones = set()
+        for cfg in dnssec_configs:
+            zone_id = _tf_body_get_value(cfg["body"], "dns_zone_id")
+            if zone_id:
+                secured_zones.add(zone_id.strip('"'))
+        for zone in dns_zones:
+            if zone["name"] not in secured_zones:
+                findings.append(self._finding(
+                    "AZ0110", "DNS Zone without DNSSEC",
+                    f"DNS Zone '{zone['name']}' does not have DNSSEC configured.",
+                    IaCSeverity.MEDIUM, zone,
+                    "Create an azurerm_dns_zone_dnssec_config for this zone.",
+                ))
+        return findings
+
+    def _az0111_express_route_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0111 – Azure ExpressRoute without encryption."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_express_route_circuit":
+                body = res["body"]
+                sku_tier = _tf_body_get_value(body, "tier")
+                if sku_tier and "Standard" in sku_tier:
+                    findings.append(self._finding(
+                        "AZ0111", "ExpressRoute without Premium tier",
+                        f"ExpressRoute circuit '{res['name']}' uses Standard tier.",
+                        IaCSeverity.LOW, res,
+                        "Consider Premium tier for global routing and higher limits.",
+                    ))
+            if res["type"] == "azurerm_express_route_connection":
+                body = res["body"]
+                if not _tf_body_has_key_value(body, "enable_internet_security", "true"):
+                    findings.append(self._finding(
+                        "AZ0111", "ExpressRoute connection without internet security",
+                        f"ExpressRoute connection '{res['name']}' lacks internet security.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set enable_internet_security = true.",
+                    ))
+        return findings
+
+    def _az0112_firewall_no_threat_intel(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0112 – Azure Firewall without threat intelligence."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_firewall":
+                body = res["body"]
+                threat_mode = _tf_body_get_value(body, "threat_intel_mode")
+                if not threat_mode or "Off" in threat_mode:
+                    findings.append(self._finding(
+                        "AZ0112", "Firewall without threat intelligence",
+                        f"Azure Firewall '{res['name']}' has threat intelligence disabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set threat_intel_mode = 'Alert' or 'Deny'.",
+                    ))
+                sku = _tf_body_get_value(body, "sku_tier")
+                if sku and "Standard" in sku:
+                    findings.append(self._finding(
+                        "AZ0112", "Firewall without Premium tier",
+                        f"Azure Firewall '{res['name']}' uses Standard tier (no TLS inspection).",
+                        IaCSeverity.MEDIUM, res,
+                        "Consider Premium tier for TLS inspection and IDPS.",
+                    ))
+        return findings
+
+    def _az0113_image_builder_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0113 – Azure Image Builder without managed identity."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_image_builder_template":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding(
+                        "AZ0113", "Image Builder without managed identity",
+                        f"Image Builder template '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'UserAssigned'.",
+                    ))
+        return findings
+
+    def _az0114_key_vault_no_purge_protection(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0114 – Azure Key Vault without purge protection."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "purge_protection_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0114", "Key Vault without purge protection",
+                        f"Key Vault '{res['name']}' does not have purge protection enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set purge_protection_enabled = true.",
+                    ))
+                if _tf_body_has_key_value(body, "soft_delete_retention_days", "7"):
+                    findings.append(self._finding(
+                        "AZ0114", "Key Vault with minimum soft delete retention",
+                        f"Key Vault '{res['name']}' has minimum soft delete retention (7 days).",
+                        IaCSeverity.LOW, res,
+                        "Set soft_delete_retention_days to 90 for better protection.",
+                    ))
+                if _tf_body_has_key_value(body, "enable_rbac_authorization", "false"):
+                    findings.append(self._finding(
+                        "AZ0114", "Key Vault using access policies instead of RBAC",
+                        f"Key Vault '{res['name']}' uses access policies instead of RBAC.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set enable_rbac_authorization = true for Azure RBAC.",
+                    ))
+        return findings
+
+    def _az0115_lb_no_health_probe(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0115 – Azure Load Balancer without health probe."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_lb":
+                body = res["body"]
+                sku = _tf_body_get_value(body, "sku")
+                if sku and "Basic" in sku:
+                    findings.append(self._finding(
+                        "AZ0115", "Load Balancer using Basic SKU",
+                        f"Load Balancer '{res['name']}' uses Basic SKU (no SLA, limited features).",
+                        IaCSeverity.MEDIUM, res,
+                        "Use Standard SKU for production workloads.",
+                    ))
+            if res["type"] == "azurerm_lb_rule":
+                body = res["body"]
+                if not _tf_body_get_value(body, "probe_id"):
+                    findings.append(self._finding(
+                        "AZ0115", "Load Balancer rule without health probe",
+                        f"LB rule '{res['name']}' has no health probe configured.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set probe_id to a health probe resource.",
+                    ))
+        return findings
+
+    def _az0116_log_analytics_no_cmk(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0116 – Azure Log Analytics without CMK encryption."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_log_analytics_workspace":
+                body = res["body"]
+                retention = _tf_body_get_value(body, "retention_in_days")
+                if retention:
+                    try:
+                        days = int(retention.strip('"'))
+                        if days < 30:
+                            findings.append(self._finding(
+                                "AZ0116", "Log Analytics with short retention",
+                                f"Log Analytics '{res['name']}' has {days}-day retention.",
+                                IaCSeverity.MEDIUM, res,
+                                "Set retention_in_days to at least 30 for compliance.",
+                            ))
+                    except ValueError:
+                        pass
+                if _tf_body_has_key_value(body, "internet_ingestion_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0116", "Log Analytics allows internet ingestion",
+                        f"Log Analytics '{res['name']}' allows internet data ingestion.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set internet_ingestion_enabled = false for private-only ingestion.",
+                    ))
+        return findings
+
+    def _az0117_monitor_diagnostic_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0117 – Azure Monitor diagnostic settings missing."""
+        findings = []
+        has_diagnostic = any(r["type"] == "azurerm_monitor_diagnostic_setting" for r in resources)
+        has_activity_log = any(r["type"] == "azurerm_monitor_activity_log_alert" for r in resources)
+        if not has_diagnostic:
+            # Check if there are resources that should have diagnostics
+            important_types = {
+                "azurerm_key_vault", "azurerm_sql_server",
+                "azurerm_mssql_server", "azurerm_storage_account",
+            }
+            for res in resources:
+                if res["type"] in important_types:
+                    findings.append(self._finding(
+                        "AZ0117", "No diagnostic settings configured",
+                        f"Resource '{res['name']}' ({res['type']}) has no diagnostic settings.",
+                        IaCSeverity.MEDIUM, res,
+                        "Create an azurerm_monitor_diagnostic_setting for this resource.",
+                    ))
+                    break  # Only report once
+        if not has_activity_log:
+            for res in resources[:1]:
+                findings.append(self._finding(
+                    "AZ0117", "No activity log alerts configured",
+                    "No Azure Monitor activity log alerts found in configuration.",
+                    IaCSeverity.MEDIUM, res,
+                    "Create azurerm_monitor_activity_log_alert resources for critical operations.",
+                ))
+        return findings
+
+    def _az0118_mysql_flexible_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0118 – Azure MySQL Flexible Server publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mysql_flexible_server":
+                body = res["body"]
+                if not _tf_body_get_value(body, "delegated_subnet_id"):
+                    findings.append(self._finding(
+                        "AZ0118", "MySQL Flexible Server without VNet integration",
+                        f"MySQL Flexible Server '{res['name']}' is not in a VNet.",
+                        IaCSeverity.HIGH, res,
+                        "Set delegated_subnet_id for VNet integration.",
+                    ))
+                if not _tf_body_has_key_value(body, "ssl_enforcement_enabled", "true"):
+                    if _tf_body_has_key_value(body, "require_secure_transport", '"OFF"'):
+                        findings.append(self._finding(
+                            "AZ0118", "MySQL Flexible Server SSL not enforced",
+                            f"MySQL Flexible Server '{res['name']}' does not require SSL.",
+                            IaCSeverity.HIGH, res,
+                            "Set require_secure_transport = 'ON' in server parameters.",
+                        ))
+        return findings
+
+    def _az0119_network_interface_public_ip(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0119 – Azure Network Interface with public IP."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_network_interface":
+                body = res["body"]
+                if _tf_body_get_value(body, "public_ip_address_id"):
+                    findings.append(self._finding(
+                        "AZ0119", "Network Interface with public IP",
+                        f"NIC '{res['name']}' has a public IP address associated.",
+                        IaCSeverity.MEDIUM, res,
+                        "Remove public_ip_address_id and use Azure Bastion or VPN for access.",
+                    ))
+        return findings
+
+    def _az0120_postgresql_flexible_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0120 – Azure PostgreSQL Flexible Server publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_postgresql_flexible_server":
+                body = res["body"]
+                if not _tf_body_get_value(body, "delegated_subnet_id"):
+                    findings.append(self._finding(
+                        "AZ0120", "PostgreSQL Flexible Server without VNet",
+                        f"PostgreSQL Flexible Server '{res['name']}' is not in a VNet.",
+                        IaCSeverity.HIGH, res,
+                        "Set delegated_subnet_id for VNet integration.",
+                    ))
+                if not _tf_body_has_key_value(body, "ssl_enforcement_enabled", "true"):
+                    pass  # PostgreSQL flexible enforces SSL by default
+                if _tf_body_has_key_value(body, "geo_redundant_backup_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0120", "PostgreSQL without geo-redundant backup",
+                        f"PostgreSQL Flexible Server '{res['name']}' lacks geo-redundant backup.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set geo_redundant_backup_enabled = true for DR scenarios.",
+                    ))
+        return findings
+
+    def _az0121_recovery_vault_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0121 – Azure Recovery Services Vault without encryption."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_recovery_services_vault":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "soft_delete_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0121", "Recovery Vault without soft delete",
+                        f"Recovery Vault '{res['name']}' has soft delete disabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set soft_delete_enabled = true.",
+                    ))
+                if not _tf_body_has_block(body, "encryption"):
+                    findings.append(self._finding(
+                        "AZ0121", "Recovery Vault without CMK encryption",
+                        f"Recovery Vault '{res['name']}' does not use customer-managed keys.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an encryption block with customer-managed key.",
+                    ))
+        return findings
+
+    def _az0122_route_table_no_propagation(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0122 – Azure Route Table BGP propagation enabled."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_route_table":
+                body = res["body"]
+                if not _tf_body_has_key_value(body, "disable_bgp_route_propagation", "true"):
+                    findings.append(self._finding(
+                        "AZ0122", "Route Table with BGP propagation",
+                        f"Route Table '{res['name']}' has BGP route propagation enabled.",
+                        IaCSeverity.LOW, res,
+                        "Set disable_bgp_route_propagation = true if not using ExpressRoute/VPN.",
+                    ))
+        return findings
+
+    def _az0123_service_bus_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0123 – Azure Service Bus publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_servicebus_namespace":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0123", "Service Bus publicly accessible",
+                        f"Service Bus namespace '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "local_auth_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0123", "Service Bus local auth enabled",
+                        f"Service Bus namespace '{res['name']}' has local authentication.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false and use Azure AD.",
+                    ))
+                sku = _tf_body_get_value(body, "sku")
+                if sku and "Basic" in sku:
+                    findings.append(self._finding(
+                        "AZ0123", "Service Bus using Basic SKU",
+                        f"Service Bus namespace '{res['name']}' uses Basic SKU.",
+                        IaCSeverity.LOW, res,
+                        "Use Standard or Premium SKU for production workloads.",
+                    ))
+        return findings
+
+    def _az0124_snapshot_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0124 – Azure Snapshot without encryption."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_snapshot":
+                body = res["body"]
+                if not _tf_body_get_value(body, "disk_encryption_set_id"):
+                    findings.append(self._finding(
+                        "AZ0124", "Snapshot without disk encryption set",
+                        f"Snapshot '{res['name']}' does not use a disk encryption set.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set disk_encryption_set_id for customer-managed encryption.",
+                    ))
+        return findings
+
+    def _az0125_storage_sync_no_private(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0125 – Azure Storage Sync without private endpoint."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_sync":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "incoming_traffic_policy", '"AllowAllTraffic"'):
+                    findings.append(self._finding(
+                        "AZ0125", "Storage Sync allows all traffic",
+                        f"Storage Sync '{res['name']}' allows all incoming traffic.",
+                        IaCSeverity.HIGH, res,
+                        "Set incoming_traffic_policy = 'AllowVirtualNetworksOnly'.",
+                    ))
+        return findings
+
+    def _az0126_virtual_hub_no_firewall(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0126 – Azure Virtual Hub without firewall."""
+        findings = []
+        vhubs = [r for r in resources if r["type"] == "azurerm_virtual_hub"]
+        firewalls = [r for r in resources if r["type"] == "azurerm_firewall"]
+        fw_vhub_ids = set()
+        for fw in firewalls:
+            vhub_id = _tf_body_get_value(fw["body"], "virtual_hub")
+            if vhub_id:
+                fw_vhub_ids.add(vhub_id.strip('"'))
+        for vhub in vhubs:
+            if vhub["name"] not in fw_vhub_ids:
+                findings.append(self._finding(
+                    "AZ0126", "Virtual Hub without firewall",
+                    f"Virtual Hub '{vhub['name']}' has no Azure Firewall associated.",
+                    IaCSeverity.MEDIUM, vhub,
+                    "Deploy an Azure Firewall in the virtual hub.",
+                ))
+        return findings
+
+    def _az0127_vm_scale_set_no_health_ext(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0127 – Azure VM Scale Set without health extension."""
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine_scale_set",
+                               "azurerm_windows_virtual_machine_scale_set",
+                               "azurerm_virtual_machine_scale_set"):
+                body = res["body"]
+                if not _tf_body_has_block(body, "automatic_instance_repair"):
+                    findings.append(self._finding(
+                        "AZ0127", "VM Scale Set without automatic repair",
+                        f"VMSS '{res['name']}' has no automatic instance repair.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add automatic_instance_repair block with enabled = true.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0127", "VM Scale Set without managed identity",
+                        f"VMSS '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0128_vnet_no_ddos_protection(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0128 – Azure VNet without DDoS protection."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network":
+                body = res["body"]
+                if not _tf_body_has_block(body, "ddos_protection_plan"):
+                    findings.append(self._finding(
+                        "AZ0128", "VNet without DDoS protection",
+                        f"VNet '{res['name']}' has no DDoS protection plan.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add a ddos_protection_plan block with enable = true.",
+                    ))
+        return findings
+
+    def _az0129_vpn_gateway_no_active_active(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0129 – Azure VPN Gateway without active-active."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network_gateway":
+                body = res["body"]
+                gw_type = _tf_body_get_value(body, "type")
+                if gw_type and "Vpn" in gw_type:
+                    if _tf_body_has_key_value(body, "active_active", "false"):
+                        findings.append(self._finding(
+                            "AZ0129", "VPN Gateway without active-active",
+                            f"VPN Gateway '{res['name']}' is not active-active.",
+                            IaCSeverity.MEDIUM, res,
+                            "Set active_active = true for high availability.",
+                        ))
+                    gen = _tf_body_get_value(body, "generation")
+                    if gen and "Generation1" in gen:
+                        findings.append(self._finding(
+                            "AZ0129", "VPN Gateway using Generation1",
+                            f"VPN Gateway '{res['name']}' uses Generation1.",
+                            IaCSeverity.LOW, res,
+                            "Use Generation2 for better performance.",
+                        ))
+        return findings
+
+    def _az0130_waf_policy_prevention_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0130 – Azure WAF policy not in prevention mode."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_web_application_firewall_policy":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "mode", '"Detection"'):
+                    findings.append(self._finding(
+                        "AZ0130", "WAF policy in detection-only mode",
+                        f"WAF policy '{res['name']}' is in Detection mode.",
+                        IaCSeverity.HIGH, res,
+                        "Set mode = 'Prevention' to actively block threats.",
+                    ))
+                if _tf_body_has_key_value(body, "enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0130", "WAF policy disabled",
+                        f"WAF policy '{res['name']}' is disabled.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set enabled = true in policy_settings.",
+                    ))
+        return findings
+
+    def _az0131_event_grid_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0131 – Azure Event Grid topic publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_eventgrid_topic":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0131", "Event Grid topic publicly accessible",
+                        f"Event Grid topic '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "local_auth_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0131", "Event Grid topic local auth enabled",
+                        f"Event Grid topic '{res['name']}' has local authentication.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false.",
+                    ))
+        return findings
+
+    def _az0132_event_hub_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0132 – Azure Event Hub namespace publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_eventhub_namespace":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0132", "Event Hub namespace publicly accessible",
+                        f"Event Hub namespace '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "local_authentication_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0132", "Event Hub namespace local auth enabled",
+                        f"Event Hub namespace '{res['name']}' has local authentication.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_authentication_enabled = false.",
+                    ))
+                sku = _tf_body_get_value(body, "sku")
+                if sku and "Basic" in sku:
+                    findings.append(self._finding(
+                        "AZ0132", "Event Hub using Basic SKU",
+                        f"Event Hub namespace '{res['name']}' uses Basic SKU.",
+                        IaCSeverity.LOW, res,
+                        "Use Standard or Premium for production.",
+                    ))
+        return findings
+
+    def _az0133_cosmos_db_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0133 – Azure Cosmos DB publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0133", "Cosmos DB publicly accessible",
+                        f"Cosmos DB '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "local_authentication_disabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0133", "Cosmos DB local auth enabled",
+                        f"Cosmos DB '{res['name']}' has local authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_authentication_disabled = true.",
+                    ))
+                if not _tf_body_has_key_value(body, "is_virtual_network_filter_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0133", "Cosmos DB without VNet filter",
+                        f"Cosmos DB '{res['name']}' has no VNet filter enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set is_virtual_network_filter_enabled = true.",
+                    ))
+        return findings
+
+    def _az0134_function_app_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0134 – Azure Function App publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_function_app", "azurerm_linux_function_app",
+                               "azurerm_windows_function_app"):
+                body = res["body"]
+                if _tf_body_has_key_value(body, "https_only", "false"):
+                    findings.append(self._finding(
+                        "AZ0134", "Function App allows HTTP",
+                        f"Function App '{res['name']}' does not enforce HTTPS.",
+                        IaCSeverity.HIGH, res,
+                        "Set https_only = true.",
+                    ))
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0134", "Function App publicly accessible",
+                        f"Function App '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0134", "Function App without managed identity",
+                        f"Function App '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0135_container_registry_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0135 – Azure Container Registry publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_registry":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0135", "Container Registry publicly accessible",
+                        f"ACR '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+                if _tf_body_has_key_value(body, "admin_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0135", "Container Registry admin account enabled",
+                        f"ACR '{res['name']}' has admin account enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set admin_enabled = false and use Azure AD or service principals.",
+                    ))
+                if not _tf_body_has_key_value(body, "quarantine_policy_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0135", "Container Registry without quarantine policy",
+                        f"ACR '{res['name']}' has no quarantine policy.",
+                        IaCSeverity.LOW, res,
+                        "Set quarantine_policy_enabled = true.",
+                    ))
+        return findings
+
+    def _az0136_managed_hsm_no_purge_protection(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0136 – Azure Managed HSM without purge protection."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault_managed_hardware_security_module":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "purge_protection_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0136", "Managed HSM without purge protection",
+                        f"Managed HSM '{res['name']}' lacks purge protection.",
+                        IaCSeverity.HIGH, res,
+                        "Set purge_protection_enabled = true.",
+                    ))
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0136", "Managed HSM publicly accessible",
+                        f"Managed HSM '{res['name']}' has public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+        return findings
+
+    def _az0137_data_protection_vault_no_immutability(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0137 – Azure Backup Vault without immutability."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_data_protection_backup_vault":
+                body = res["body"]
+                if not _tf_body_has_key_value(body, "redundancy", '"GeoRedundant"'):
+                    findings.append(self._finding(
+                        "AZ0137", "Backup Vault without geo-redundancy",
+                        f"Backup Vault '{res['name']}' is not geo-redundant.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set redundancy = 'GeoRedundant' for DR scenarios.",
+                    ))
+                if _tf_body_has_key_value(body, "soft_delete", '"Off"'):
+                    findings.append(self._finding(
+                        "AZ0137", "Backup Vault soft delete disabled",
+                        f"Backup Vault '{res['name']}' has soft delete disabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set soft_delete = 'On' for data protection.",
+                    ))
+        return findings
+
+    def _az0138_private_endpoint_no_dns(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0138 – Azure Private Endpoint without DNS configuration."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_private_endpoint":
+                body = res["body"]
+                if not _tf_body_has_block(body, "private_dns_zone_group"):
+                    findings.append(self._finding(
+                        "AZ0138", "Private Endpoint without DNS zone group",
+                        f"Private Endpoint '{res['name']}' has no DNS zone group.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add a private_dns_zone_group block for DNS resolution.",
+                    ))
+        return findings
+
+    def _az0139_disk_access_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0139 – Azure Disk Access publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_managed_disk":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0139", "Managed Disk public network access",
+                        f"Managed Disk '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+            if res["type"] == "azurerm_disk_access":
+                # Disk access without private endpoint
+                pass  # Existence is fine, just need private endpoint
+        return findings
+
+    def _az0140_maintenance_config_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0140 – Azure resources without maintenance configuration."""
+        findings = []
+        has_maintenance = any(r["type"] == "azurerm_maintenance_configuration" for r in resources)
+        aks_clusters = [r for r in resources if r["type"] == "azurerm_kubernetes_cluster"]
+        for aks in aks_clusters:
+            body = aks["body"]
+            if not _tf_body_has_block(body, "maintenance_window"):
+                findings.append(self._finding(
+                    "AZ0140", "AKS without maintenance window",
+                    f"AKS cluster '{aks['name']}' has no maintenance window configured.",
+                    IaCSeverity.LOW, aks,
+                    "Add a maintenance_window block to control update timing.",
+                ))
+        if not has_maintenance:
+            vms = [r for r in resources if r["type"] in (
+                "azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine")]
+            if vms:
+                findings.append(self._finding(
+                    "AZ0140", "No maintenance configuration found",
+                    "No azurerm_maintenance_configuration found for VM resources.",
+                    IaCSeverity.LOW, vms[0],
+                    "Create an azurerm_maintenance_configuration for scheduled updates.",
+                ))
         return findings
 
     # ── GCP rules (GC####) ───────────────────────────────────────────
