@@ -65,6 +65,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0028_container_group_public(all_resources))
         findings.extend(self._az0029_logic_app_no_https(all_resources))
         findings.extend(self._az0030_synapse_public_access(all_resources))
+        findings.extend(self._az0031_data_factory_public_access(all_resources))
+        findings.extend(self._az0032_search_service_public(all_resources))
+        findings.extend(self._az0033_cognitive_account_public(all_resources))
+        findings.extend(self._az0034_mariadb_no_ssl(all_resources))
+        findings.extend(self._az0035_mariadb_public_access(all_resources))
+        findings.extend(self._az0036_batch_account_public(all_resources))
+        findings.extend(self._az0037_api_management_no_https(all_resources))
+        findings.extend(self._az0038_storage_no_network_rules(all_resources))
+        findings.extend(self._az0039_keyvault_no_network_acls(all_resources))
+        findings.extend(self._az0040_signalr_public_access(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -524,6 +534,165 @@ class MultiCloudTerraformScanner:
                         f"Synapse Workspace '{res['name']}' allows public network access.",
                         IaCSeverity.CRITICAL, res,
                         "Set public_network_access_enabled = false and use managed private endpoints.",
+                    ))
+        return findings
+
+    def _az0031_data_factory_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_data_factory":
+                if _tf_body_has_key_value(res["body"], "public_network_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0031", "Data Factory publicly accessible",
+                        f"Data Factory '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_enabled = false and use managed virtual network.",
+                    ))
+        return findings
+
+    def _az0032_search_service_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_search_service":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0032", "Azure Cognitive Search publicly accessible",
+                        f"Search Service '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0033_cognitive_account_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cognitive_account":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0033", "Cognitive Services publicly accessible",
+                        f"Cognitive Account '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_get_value(res["body"], "custom_subdomain_name"):
+                    findings.append(self._finding(
+                        "AZ0033", "Cognitive Services without custom subdomain",
+                        f"Cognitive Account '{res['name']}' does not set a custom subdomain (required for private endpoints).",
+                        IaCSeverity.MEDIUM, res,
+                        "Set custom_subdomain_name to enable private endpoint and managed identity support.",
+                    ))
+        return findings
+
+    def _az0034_mariadb_no_ssl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mariadb_server":
+                if _tf_body_has_key_value(res["body"], "ssl_enforcement_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0034", "MariaDB without SSL enforcement",
+                        f"MariaDB server '{res['name']}' does not enforce SSL connections.",
+                        IaCSeverity.HIGH, res,
+                        "Set ssl_enforcement_enabled = true.",
+                    ))
+        return findings
+
+    def _az0035_mariadb_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mariadb_server":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0035", "MariaDB publicly accessible",
+                        f"MariaDB server '{res['name']}' allows public network access.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0036_batch_account_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_batch_account":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0036", "Batch Account publicly accessible",
+                        f"Batch Account '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0037_api_management_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_api_management":
+                body = res["body"]
+                if _tf_body_has_block(body, "protocol_settings"):
+                    if _tf_body_has_key_value(body, "enable_http2", "false"):
+                        pass  # HTTP/2 is optional, not a security issue
+                # Check for management API exposed over HTTP
+                if _tf_body_has_key_value(body, "virtual_network_type", '"None"') or \
+                   not _tf_body_get_value(body, "virtual_network_type"):
+                    findings.append(self._finding(
+                        "AZ0037", "API Management without virtual network integration",
+                        f"API Management '{res['name']}' is not integrated with a virtual network.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set virtual_network_type to 'Internal' or 'External' and configure virtual_network_configuration.",
+                    ))
+        return findings
+
+    def _az0038_storage_no_network_rules(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                body = res["body"]
+                if not _tf_body_has_block(body, "network_rules"):
+                    findings.append(self._finding(
+                        "AZ0038", "Storage Account without network rules",
+                        f"Storage Account '{res['name']}' has no network_rules block — defaults to allowing all networks.",
+                        IaCSeverity.HIGH, res,
+                        "Add a network_rules block with default_action = 'Deny' and explicit allow rules.",
+                    ))
+                elif _tf_body_has_key_value(body, "default_action", '"Allow"'):
+                    findings.append(self._finding(
+                        "AZ0038", "Storage Account network rules allow all",
+                        f"Storage Account '{res['name']}' network_rules default_action is Allow.",
+                        IaCSeverity.HIGH, res,
+                        "Set default_action = 'Deny' in network_rules.",
+                    ))
+        return findings
+
+    def _az0039_keyvault_no_network_acls(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault":
+                body = res["body"]
+                if not _tf_body_has_block(body, "network_acls"):
+                    findings.append(self._finding(
+                        "AZ0039", "Key Vault without network ACLs",
+                        f"Key Vault '{res['name']}' has no network_acls — defaults to allowing all networks.",
+                        IaCSeverity.HIGH, res,
+                        "Add a network_acls block with default_action = 'Deny'.",
+                    ))
+                elif _tf_body_has_key_value(body, "default_action", '"Allow"'):
+                    findings.append(self._finding(
+                        "AZ0039", "Key Vault network ACLs allow all",
+                        f"Key Vault '{res['name']}' network_acls default_action is Allow.",
+                        IaCSeverity.HIGH, res,
+                        "Set default_action = 'Deny' in network_acls.",
+                    ))
+        return findings
+
+    def _az0040_signalr_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_signalr_service", "azurerm_web_pubsub"):
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0040", "SignalR/Web PubSub publicly accessible",
+                        f"Service '{res['name']}' ({res['type']}) allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
                     ))
         return findings
 
