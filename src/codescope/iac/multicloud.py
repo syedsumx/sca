@@ -115,6 +115,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0078_digital_twins_public(all_resources))
         findings.extend(self._az0079_openai_public_access(all_resources))
         findings.extend(self._az0080_managed_grafana_public(all_resources))
+        findings.extend(self._az0081_data_factory_public(all_resources))
+        findings.extend(self._az0082_logic_app_no_managed_identity(all_resources))
+        findings.extend(self._az0083_api_management_no_https(all_resources))
+        findings.extend(self._az0084_synapse_public_access(all_resources))
+        findings.extend(self._az0085_stream_analytics_no_identity(all_resources))
+        findings.extend(self._az0086_purview_public_access(all_resources))
+        findings.extend(self._az0087_batch_account_no_private(all_resources))
+        findings.extend(self._az0088_notification_hub_no_auth(all_resources))
+        findings.extend(self._az0089_signalr_public_access(all_resources))
+        findings.extend(self._az0090_static_web_app_no_auth(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -1442,6 +1452,228 @@ class MultiCloudTerraformScanner:
                         f"Managed Grafana '{res['name']}' has API key authentication enabled.",
                         IaCSeverity.MEDIUM, res,
                         "Set api_key_enabled = false and use Azure AD authentication.",
+                    ))
+        return findings
+
+    def _az0081_data_factory_public(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0081 – Azure Data Factory publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_data_factory":
+                if _tf_body_has_key_value(res["body"], "public_network_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0081", "Data Factory publicly accessible",
+                        f"Data Factory '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_get_value(res["body"], "managed_virtual_network_enabled"):
+                    findings.append(self._finding(
+                        "AZ0081", "Data Factory without managed virtual network",
+                        f"Data Factory '{res['name']}' does not use managed virtual network.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set managed_virtual_network_enabled = true.",
+                    ))
+        return findings
+
+    def _az0082_logic_app_no_managed_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0082 – Azure Logic App without managed identity."""
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_logic_app_standard", "azurerm_logic_app_workflow"):
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding(
+                        "AZ0082", "Logic App without managed identity",
+                        f"Logic App '{res['name']}' has no managed identity configured.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0083_api_management_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0083 – Azure API Management without HTTPS enforcement."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_api_management":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "sku_name", '"Consumption"'):
+                    pass  # Consumption tier is HTTPS-only by default
+                else:
+                    # Check for protocols block
+                    if _tf_body_has_key_value(body, "enable_http2", "false"):
+                        findings.append(self._finding(
+                            "AZ0083", "API Management HTTP/2 disabled",
+                            f"API Management '{res['name']}' has HTTP/2 disabled.",
+                            IaCSeverity.LOW, res,
+                            "Set enable_http2 = true for improved performance.",
+                        ))
+            if res["type"] == "azurerm_api_management_api":
+                body = res["body"]
+                protocols = _tf_body_get_value(body, "protocols")
+                if protocols and "http" in protocols.lower() and "https" not in protocols.lower():
+                    findings.append(self._finding(
+                        "AZ0083", "API Management API allows HTTP",
+                        f"API Management API '{res['name']}' allows insecure HTTP protocol.",
+                        IaCSeverity.HIGH, res,
+                        "Set protocols = ['https'] to enforce HTTPS only.",
+                    ))
+        return findings
+
+    def _az0084_synapse_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0084 – Azure Synapse Analytics publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_synapse_workspace":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "managed_virtual_network_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0084", "Synapse without managed virtual network",
+                        f"Synapse workspace '{res['name']}' does not use managed virtual network.",
+                        IaCSeverity.HIGH, res,
+                        "Set managed_virtual_network_enabled = true.",
+                    ))
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0084", "Synapse publicly accessible",
+                        f"Synapse workspace '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false.",
+                    ))
+            if res["type"] == "azurerm_synapse_sql_pool":
+                if not _tf_body_get_value(res["body"], "data_encrypted"):
+                    findings.append(self._finding(
+                        "AZ0084", "Synapse SQL pool without TDE",
+                        f"Synapse SQL pool '{res['name']}' may not have TDE enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set data_encrypted = true for transparent data encryption.",
+                    ))
+        return findings
+
+    def _az0085_stream_analytics_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0085 – Azure Stream Analytics without managed identity."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_stream_analytics_job":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding(
+                        "AZ0085", "Stream Analytics without managed identity",
+                        f"Stream Analytics job '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0086_purview_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0086 – Azure Purview (Microsoft Purview) publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_purview_account":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0086", "Purview account publicly accessible",
+                        f"Purview account '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0086", "Purview account without managed identity",
+                        f"Purview account '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0087_batch_account_no_private(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0087 – Azure Batch account without private endpoint."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_batch_account":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0087", "Batch account publicly accessible",
+                        f"Batch account '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                pool_alloc = _tf_body_get_value(body, "pool_allocation_mode")
+                if pool_alloc and "UserSubscription" not in pool_alloc:
+                    if not _tf_body_has_block(body, "encryption"):
+                        findings.append(self._finding(
+                            "AZ0087", "Batch account without encryption configuration",
+                            f"Batch account '{res['name']}' has no encryption block.",
+                            IaCSeverity.MEDIUM, res,
+                            "Add an encryption block with customer-managed key.",
+                        ))
+        return findings
+
+    def _az0088_notification_hub_no_auth(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0088 – Azure Notification Hub namespace misconfiguration."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_notification_hub_namespace":
+                body = res["body"]
+                if not _tf_body_has_key_value(body, "enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0088", "Notification Hub namespace disabled",
+                        f"Notification Hub namespace '{res['name']}' is not enabled.",
+                        IaCSeverity.LOW, res,
+                        "Set enabled = true.",
+                    ))
+                sku = _tf_body_get_value(body, "sku_name")
+                if sku and "Free" in sku:
+                    findings.append(self._finding(
+                        "AZ0088", "Notification Hub namespace on Free tier",
+                        f"Notification Hub namespace '{res['name']}' uses Free SKU (no SLA).",
+                        IaCSeverity.LOW, res,
+                        "Consider Standard or Basic SKU for production workloads.",
+                    ))
+        return findings
+
+    def _az0089_signalr_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0089 – Azure SignalR Service publicly accessible."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_signalr_service":
+                body = res["body"]
+                if _tf_body_has_key_value(body, "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0089", "SignalR Service publicly accessible",
+                        f"SignalR Service '{res['name']}' has public network access enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0089", "SignalR Service without managed identity",
+                        f"SignalR Service '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
+                    ))
+        return findings
+
+    def _az0090_static_web_app_no_auth(self, resources: list[dict]) -> list[IaCFinding]:
+        """AZ0090 – Azure Static Web App without authentication."""
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_static_web_app":
+                body = res["body"]
+                sku = _tf_body_get_value(body, "sku_tier")
+                if sku and "Free" in sku:
+                    findings.append(self._finding(
+                        "AZ0090", "Static Web App on Free tier",
+                        f"Static Web App '{res['name']}' uses Free tier (limited features).",
+                        IaCSeverity.LOW, res,
+                        "Consider Standard tier for production workloads with custom auth.",
+                    ))
+                if not _tf_body_has_block(body, "identity"):
+                    findings.append(self._finding(
+                        "AZ0090", "Static Web App without managed identity",
+                        f"Static Web App '{res['name']}' has no managed identity.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add an identity block with type = 'SystemAssigned'.",
                     ))
         return findings
 
