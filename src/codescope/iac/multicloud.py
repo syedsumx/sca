@@ -45,6 +45,26 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0008_sql_public_access(all_resources))
         findings.extend(self._az0009_aks_rbac_disabled(all_resources))
         findings.extend(self._az0010_hardcoded_secrets(all_resources))
+        findings.extend(self._az0011_cosmosdb_no_cmk(all_resources))
+        findings.extend(self._az0012_cosmosdb_public_access(all_resources))
+        findings.extend(self._az0013_function_http(all_resources))
+        findings.extend(self._az0014_acr_admin_enabled(all_resources))
+        findings.extend(self._az0015_acr_no_encryption(all_resources))
+        findings.extend(self._az0016_servicebus_no_encryption(all_resources))
+        findings.extend(self._az0017_eventhub_no_encryption(all_resources))
+        findings.extend(self._az0018_log_analytics_retention(all_resources))
+        findings.extend(self._az0019_redis_no_ssl(all_resources))
+        findings.extend(self._az0020_redis_no_encryption(all_resources))
+        findings.extend(self._az0021_appgw_no_waf(all_resources))
+        findings.extend(self._az0022_postgresql_no_ssl(all_resources))
+        findings.extend(self._az0023_postgresql_public_access(all_resources))
+        findings.extend(self._az0024_mysql_no_ssl(all_resources))
+        findings.extend(self._az0025_mysql_public_access(all_resources))
+        findings.extend(self._az0026_monitor_no_diagnostic(all_resources))
+        findings.extend(self._az0027_frontdoor_no_waf(all_resources))
+        findings.extend(self._az0028_container_group_public(all_resources))
+        findings.extend(self._az0029_logic_app_no_https(all_resources))
+        findings.extend(self._az0030_synapse_public_access(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -214,6 +234,297 @@ class MultiCloudTerraformScanner:
                             IaCSeverity.CRITICAL, res,
                             "Use variables or Azure Key Vault references instead of hardcoded secrets.",
                         ))
+        return findings
+
+    def _az0011_cosmosdb_no_cmk(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_get_value(res["body"], "key_vault_key_id"):
+                    findings.append(self._finding(
+                        "AZ0011", "Cosmos DB without customer-managed key",
+                        f"Cosmos DB account '{res['name']}' does not use a customer-managed encryption key.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set key_vault_key_id to use a customer-managed key for encryption.",
+                    ))
+        return findings
+
+    def _az0012_cosmosdb_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0012", "Cosmos DB publicly accessible",
+                        f"Cosmos DB account '{res['name']}' allows public network access.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if _tf_body_has_key_value(res["body"], "is_virtual_network_filter_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0012", "Cosmos DB publicly accessible",
+                        f"Cosmos DB account '{res['name']}' has virtual network filtering disabled.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set is_virtual_network_filter_enabled = true and configure virtual_network_rule blocks.",
+                    ))
+        return findings
+
+    def _az0013_function_http(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_function_app", "azurerm_linux_function_app", "azurerm_windows_function_app"):
+                if _tf_body_has_key_value(res["body"], "https_only", "false"):
+                    findings.append(self._finding(
+                        "AZ0013", "Azure Function allows HTTP",
+                        f"Function App '{res['name']}' does not enforce HTTPS.",
+                        IaCSeverity.HIGH, res,
+                        "Set https_only = true.",
+                    ))
+        return findings
+
+    def _az0014_acr_admin_enabled(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_registry":
+                if _tf_body_has_key_value(res["body"], "admin_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0014", "Container Registry admin account enabled",
+                        f"ACR '{res['name']}' has the admin account enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set admin_enabled = false and use Azure AD authentication or managed identities.",
+                    ))
+        return findings
+
+    def _az0015_acr_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_registry":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if sku and "premium" in sku.lower():
+                    if not _tf_body_has_block(res["body"], "encryption"):
+                        findings.append(self._finding(
+                            "AZ0015", "Container Registry without CMK encryption",
+                            f"ACR '{res['name']}' (Premium) does not configure customer-managed key encryption.",
+                            IaCSeverity.MEDIUM, res,
+                            "Add an encryption block with key_vault_key_id for customer-managed keys.",
+                        ))
+        return findings
+
+    def _az0016_servicebus_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_servicebus_namespace":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if sku and "premium" in sku.lower():
+                    if not _tf_body_has_block(res["body"], "customer_managed_key"):
+                        findings.append(self._finding(
+                            "AZ0016", "Service Bus without CMK encryption",
+                            f"Service Bus namespace '{res['name']}' (Premium) does not use customer-managed key encryption.",
+                            IaCSeverity.MEDIUM, res,
+                            "Add a customer_managed_key block with key_vault_key_id.",
+                        ))
+        return findings
+
+    def _az0017_eventhub_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_eventhub_namespace":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if sku and ("premium" in sku.lower() or "dedicated" in sku.lower()):
+                    if not _tf_body_has_block(res["body"], "customer_managed_key"):
+                        findings.append(self._finding(
+                            "AZ0017", "Event Hub without CMK encryption",
+                            f"Event Hub namespace '{res['name']}' does not use customer-managed key encryption.",
+                            IaCSeverity.MEDIUM, res,
+                            "Add a customer_managed_key block for encryption at rest.",
+                        ))
+        return findings
+
+    def _az0018_log_analytics_retention(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_log_analytics_workspace":
+                retention = _tf_body_get_value(res["body"], "retention_in_days")
+                if retention:
+                    try:
+                        days = int(retention.strip('"'))
+                        if days < 90:
+                            findings.append(self._finding(
+                                "AZ0018", "Log Analytics insufficient retention",
+                                f"Log Analytics workspace '{res['name']}' retention is {days} days (< 90).",
+                                IaCSeverity.MEDIUM, res,
+                                "Set retention_in_days to at least 90 for compliance.",
+                            ))
+                    except ValueError:
+                        pass
+        return findings
+
+    def _az0019_redis_no_ssl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_redis_cache":
+                if _tf_body_has_key_value(res["body"], "enable_non_ssl_port", "true"):
+                    findings.append(self._finding(
+                        "AZ0019", "Redis Cache non-SSL port enabled",
+                        f"Redis Cache '{res['name']}' has the non-SSL port (6379) enabled.",
+                        IaCSeverity.HIGH, res,
+                        "Set enable_non_ssl_port = false to enforce TLS connections.",
+                    ))
+        return findings
+
+    def _az0020_redis_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_redis_cache":
+                if _tf_body_has_key_value(res["body"], "minimum_tls_version", '"1.0"') or \
+                   _tf_body_has_key_value(res["body"], "minimum_tls_version", '"1.1"'):
+                    findings.append(self._finding(
+                        "AZ0020", "Redis Cache outdated TLS version",
+                        f"Redis Cache '{res['name']}' uses a TLS version lower than 1.2.",
+                        IaCSeverity.HIGH, res,
+                        "Set minimum_tls_version = '1.2'.",
+                    ))
+        return findings
+
+    def _az0021_appgw_no_waf(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                sku_tier = _tf_body_get_value(res["body"], "tier")
+                if sku_tier and "waf" not in sku_tier.lower():
+                    findings.append(self._finding(
+                        "AZ0021", "Application Gateway without WAF",
+                        f"Application Gateway '{res['name']}' does not use a WAF-enabled SKU tier.",
+                        IaCSeverity.HIGH, res,
+                        "Use SKU tier WAF_v2 and configure a WAF policy.",
+                    ))
+        return findings
+
+    def _az0022_postgresql_no_ssl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_postgresql_server", "azurerm_postgresql_flexible_server"):
+                if _tf_body_has_key_value(res["body"], "ssl_enforcement_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0022", "PostgreSQL without SSL enforcement",
+                        f"PostgreSQL server '{res['name']}' does not enforce SSL connections.",
+                        IaCSeverity.HIGH, res,
+                        "Set ssl_enforcement_enabled = true.",
+                    ))
+        return findings
+
+    def _az0023_postgresql_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_postgresql_server", "azurerm_postgresql_flexible_server"):
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0023", "PostgreSQL publicly accessible",
+                        f"PostgreSQL server '{res['name']}' allows public network access.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0024_mysql_no_ssl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_mysql_server", "azurerm_mysql_flexible_server"):
+                if _tf_body_has_key_value(res["body"], "ssl_enforcement_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0024", "MySQL without SSL enforcement",
+                        f"MySQL server '{res['name']}' does not enforce SSL connections.",
+                        IaCSeverity.HIGH, res,
+                        "Set ssl_enforcement_enabled = true.",
+                    ))
+        return findings
+
+    def _az0025_mysql_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_mysql_server", "azurerm_mysql_flexible_server"):
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0025", "MySQL publicly accessible",
+                        f"MySQL server '{res['name']}' allows public network access.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0026_monitor_no_diagnostic(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_diagnostic = "azurerm_monitor_diagnostic_setting" in resource_types
+        key_resources = [
+            r for r in resources
+            if r["type"] in (
+                "azurerm_key_vault", "azurerm_mssql_server",
+                "azurerm_cosmosdb_account", "azurerm_kubernetes_cluster",
+            )
+        ]
+        if key_resources and not has_diagnostic:
+            for res in key_resources:
+                findings.append(self._finding(
+                    "AZ0026", "Azure resource without diagnostic settings",
+                    f"Resource '{res['name']}' ({res['type']}) has no azurerm_monitor_diagnostic_setting configured.",
+                    IaCSeverity.MEDIUM, res,
+                    "Add an azurerm_monitor_diagnostic_setting resource to capture logs and metrics.",
+                ))
+        return findings
+
+    def _az0027_frontdoor_no_waf(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_frontdoor", "azurerm_cdn_frontdoor_profile"):
+                if not _tf_body_get_value(res["body"], "web_application_firewall_policy_link_id") and \
+                   not _tf_body_get_value(res["body"], "firewall_policy_id"):
+                    findings.append(self._finding(
+                        "AZ0027", "Front Door without WAF policy",
+                        f"Front Door '{res['name']}' does not have a WAF policy linked.",
+                        IaCSeverity.HIGH, res,
+                        "Link a WAF policy via web_application_firewall_policy_link_id or firewall_policy_id.",
+                    ))
+        return findings
+
+    def _az0028_container_group_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_group":
+                ip_type = _tf_body_get_value(res["body"], "ip_address_type")
+                if ip_type and "public" in ip_type.lower():
+                    findings.append(self._finding(
+                        "AZ0028", "Container Instance publicly accessible",
+                        f"Container Group '{res['name']}' has a public IP address.",
+                        IaCSeverity.HIGH, res,
+                        "Set ip_address_type = 'Private' and deploy into a virtual network.",
+                    ))
+        return findings
+
+    def _az0029_logic_app_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_logic_app_standard":
+                if _tf_body_has_key_value(res["body"], "https_only", "false"):
+                    findings.append(self._finding(
+                        "AZ0029", "Logic App allows HTTP",
+                        f"Logic App '{res['name']}' does not enforce HTTPS.",
+                        IaCSeverity.HIGH, res,
+                        "Set https_only = true.",
+                    ))
+        return findings
+
+    def _az0030_synapse_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_synapse_workspace":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0030", "Synapse Workspace publicly accessible",
+                        f"Synapse Workspace '{res['name']}' allows public network access.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set public_network_access_enabled = false and use managed private endpoints.",
+                    ))
         return findings
 
     # ── GCP rules (GC####) ───────────────────────────────────────────
