@@ -105,6 +105,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0068_policy_assignment_missing(all_resources))
         findings.extend(self._az0069_backup_vault_missing(all_resources))
         findings.extend(self._az0070_monitor_action_group_missing(all_resources))
+        findings.extend(self._az0071_vm_disk_encryption(all_resources))
+        findings.extend(self._az0072_network_watcher_missing(all_resources))
+        findings.extend(self._az0073_app_config_public(all_resources))
+        findings.extend(self._az0074_maps_account_cors(all_resources))
+        findings.extend(self._az0075_cdn_endpoint_no_https(all_resources))
+        findings.extend(self._az0076_container_app_env_internal(all_resources))
+        findings.extend(self._az0077_service_fabric_no_aad(all_resources))
+        findings.extend(self._az0078_digital_twins_public(all_resources))
+        findings.extend(self._az0079_openai_public_access(all_resources))
+        findings.extend(self._az0080_managed_grafana_public(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -1259,6 +1269,180 @@ class MultiCloudTerraformScanner:
                 IaCSeverity.MEDIUM, critical[0],
                 "Add azurerm_monitor_action_group and azurerm_monitor_metric_alert resources for monitoring.",
             ))
+        return findings
+
+    def _az0071_vm_disk_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                os_disk_enc = _tf_body_get_value(res["body"], "disk_encryption_set_id")
+                if not os_disk_enc and not _tf_body_has_block(res["body"], "os_disk"):
+                    findings.append(self._finding(
+                        "AZ0071", "VM without disk encryption set",
+                        f"Virtual Machine '{res['name']}' does not reference a disk_encryption_set_id.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set disk_encryption_set_id on os_disk and data disks for CMK encryption.",
+                    ))
+                elif _tf_body_has_block(res["body"], "os_disk"):
+                    if not _tf_body_get_value(res["body"], "disk_encryption_set_id"):
+                        findings.append(self._finding(
+                            "AZ0071", "VM OS disk without encryption set",
+                            f"Virtual Machine '{res['name']}' os_disk does not use a disk_encryption_set_id.",
+                            IaCSeverity.MEDIUM, res,
+                            "Set disk_encryption_set_id in the os_disk block for customer-managed key encryption.",
+                        ))
+        return findings
+
+    def _az0072_network_watcher_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_watcher = "azurerm_network_watcher" in resource_types
+        has_flow_log = "azurerm_network_watcher_flow_log" in resource_types
+        nsgs = [r for r in resources if r["type"] in (
+            "azurerm_network_security_group", "azurerm_network_security_rule",
+        )]
+        if nsgs and not has_watcher and not has_flow_log:
+            findings.append(self._finding(
+                "AZ0072", "No Network Watcher or NSG flow logs",
+                "NSGs detected but no azurerm_network_watcher or azurerm_network_watcher_flow_log configured.",
+                IaCSeverity.MEDIUM, nsgs[0],
+                "Add azurerm_network_watcher and azurerm_network_watcher_flow_log for network monitoring.",
+            ))
+        return findings
+
+    def _az0073_app_config_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_app_configuration":
+                if _tf_body_has_key_value(res["body"], "public_network_access", '"Enabled"'):
+                    findings.append(self._finding(
+                        "AZ0073", "App Configuration publicly accessible",
+                        f"App Configuration '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access = 'Disabled' and use private endpoints.",
+                    ))
+                if _tf_body_has_key_value(res["body"], "local_auth_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0073", "App Configuration local auth enabled",
+                        f"App Configuration '{res['name']}' has local (access key) authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_auth_enabled = false and use Azure AD authentication.",
+                    ))
+        return findings
+
+    def _az0074_maps_account_cors(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_maps_account":
+                if not _tf_body_has_key_value(res["body"], "local_authentication_enabled", "false"):
+                    findings.append(self._finding(
+                        "AZ0074", "Azure Maps local authentication enabled",
+                        f"Maps Account '{res['name']}' has local (shared key) authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set local_authentication_enabled = false and use Azure AD authentication.",
+                    ))
+        return findings
+
+    def _az0075_cdn_endpoint_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cdn_endpoint":
+                if _tf_body_has_key_value(res["body"], "is_http_allowed", "true"):
+                    findings.append(self._finding(
+                        "AZ0075", "CDN endpoint allows HTTP",
+                        f"CDN Endpoint '{res['name']}' allows HTTP traffic.",
+                        IaCSeverity.HIGH, res,
+                        "Set is_http_allowed = false to enforce HTTPS-only traffic.",
+                    ))
+        return findings
+
+    def _az0076_container_app_env_internal(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_container_app_environment":
+                if not _tf_body_has_key_value(res["body"], "internal_load_balancer_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0076", "Container App Environment not internal",
+                        f"Container App Environment '{res['name']}' does not use an internal load balancer.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set internal_load_balancer_enabled = true for private-only ingress.",
+                    ))
+        return findings
+
+    def _az0077_service_fabric_no_aad(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_service_fabric_cluster":
+                if not _tf_body_has_block(res["body"], "azure_active_directory"):
+                    findings.append(self._finding(
+                        "AZ0077", "Service Fabric without Azure AD authentication",
+                        f"Service Fabric cluster '{res['name']}' does not configure Azure AD authentication.",
+                        IaCSeverity.HIGH, res,
+                        "Add an azure_active_directory block for cluster authentication.",
+                    ))
+                security = _tf_body_get_value(res["body"], "reliability_level")
+                if security and security.strip('"').lower() == "none":
+                    findings.append(self._finding(
+                        "AZ0077", "Service Fabric with no reliability level",
+                        f"Service Fabric cluster '{res['name']}' has reliability_level set to None.",
+                        IaCSeverity.HIGH, res,
+                        "Set reliability_level to Bronze, Silver, Gold, or Platinum.",
+                    ))
+        return findings
+
+    def _az0078_digital_twins_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_digital_twins_instance":
+                if not _tf_body_has_block(res["body"], "private_endpoint"):
+                    findings.append(self._finding(
+                        "AZ0078", "Digital Twins without private endpoint",
+                        f"Digital Twins instance '{res['name']}' does not configure a private endpoint.",
+                        IaCSeverity.HIGH, res,
+                        "Add a private endpoint for secure access to the Digital Twins instance.",
+                    ))
+        return findings
+
+    def _az0079_openai_public_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cognitive_account":
+                kind = _tf_body_get_value(res["body"], "kind")
+                if kind and "openai" in kind.lower():
+                    if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                        findings.append(self._finding(
+                            "AZ0079", "Azure OpenAI publicly accessible",
+                            f"Azure OpenAI account '{res['name']}' allows public network access.",
+                            IaCSeverity.CRITICAL, res,
+                            "Set public_network_access_enabled = false and use private endpoints.",
+                        ))
+                    if not _tf_body_has_block(res["body"], "network_acls"):
+                        findings.append(self._finding(
+                            "AZ0079", "Azure OpenAI without network ACLs",
+                            f"Azure OpenAI account '{res['name']}' has no network_acls block.",
+                            IaCSeverity.HIGH, res,
+                            "Add a network_acls block with default_action = 'Deny'.",
+                        ))
+        return findings
+
+    def _az0080_managed_grafana_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_dashboard_grafana":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0080", "Managed Grafana publicly accessible",
+                        f"Managed Grafana '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+                if _tf_body_has_key_value(res["body"], "api_key_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0080", "Managed Grafana API key authentication enabled",
+                        f"Managed Grafana '{res['name']}' has API key authentication enabled.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set api_key_enabled = false and use Azure AD authentication.",
+                    ))
         return findings
 
     # ── GCP rules (GC####) ───────────────────────────────────────────
