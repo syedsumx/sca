@@ -95,6 +95,16 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0058_managed_identity_missing(all_resources))
         findings.extend(self._az0059_private_endpoint_missing(all_resources))
         findings.extend(self._az0060_defender_for_cloud(all_resources))
+        findings.extend(self._az0061_vpn_gateway_no_aad(all_resources))
+        findings.extend(self._az0062_nat_gateway_missing(all_resources))
+        findings.extend(self._az0063_load_balancer_no_backend(all_resources))
+        findings.extend(self._az0064_traffic_manager_no_https(all_resources))
+        findings.extend(self._az0065_media_services_public(all_resources))
+        findings.extend(self._az0066_data_lake_store_no_encryption(all_resources))
+        findings.extend(self._az0067_bastion_host_missing(all_resources))
+        findings.extend(self._az0068_policy_assignment_missing(all_resources))
+        findings.extend(self._az0069_backup_vault_missing(all_resources))
+        findings.extend(self._az0070_monitor_action_group_missing(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -1065,6 +1075,189 @@ class MultiCloudTerraformScanner:
                 "No azurerm_security_center_subscription_pricing resource found to enable Defender plans.",
                 IaCSeverity.MEDIUM, res,
                 "Add azurerm_security_center_subscription_pricing resources for relevant resource types.",
+            ))
+        return findings
+
+    def _az0061_vpn_gateway_no_aad(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_vpn_gateway":
+                if not _tf_body_has_block(res["body"], "bgp_settings"):
+                    findings.append(self._finding(
+                        "AZ0061", "VPN Gateway without BGP settings",
+                        f"VPN Gateway '{res['name']}' does not configure BGP settings.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add a bgp_settings block for proper routing configuration.",
+                    ))
+            if res["type"] == "azurerm_point_to_site_vpn_gateway":
+                if not _tf_body_has_block(res["body"], "connection_configuration"):
+                    findings.append(self._finding(
+                        "AZ0061", "Point-to-Site VPN Gateway misconfigured",
+                        f"P2S VPN Gateway '{res['name']}' has no connection_configuration block.",
+                        IaCSeverity.MEDIUM, res,
+                        "Add a connection_configuration block with VPN client address pool.",
+                    ))
+        return findings
+
+    def _az0062_nat_gateway_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_nat_gw = "azurerm_nat_gateway" in resource_types
+        subnets = [r for r in resources if r["type"] == "azurerm_subnet"]
+        public_vms = [
+            r for r in resources
+            if r["type"] == "azurerm_public_ip" and
+            _tf_body_get_value(r["body"], "allocation_method")
+        ]
+        if subnets and public_vms and not has_nat_gw:
+            findings.append(self._finding(
+                "AZ0062", "No NAT Gateway for outbound traffic",
+                "Subnets with public IPs detected but no azurerm_nat_gateway configured for centralized outbound.",
+                IaCSeverity.MEDIUM, subnets[0],
+                "Add an azurerm_nat_gateway and associate it with subnets via azurerm_subnet_nat_gateway_association.",
+            ))
+        return findings
+
+    def _az0063_load_balancer_no_backend(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_lb":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if sku and "basic" in sku.lower():
+                    findings.append(self._finding(
+                        "AZ0063", "Load Balancer using Basic SKU",
+                        f"Load Balancer '{res['name']}' uses Basic SKU (no SLA, no availability zones, no NSG support).",
+                        IaCSeverity.MEDIUM, res,
+                        "Upgrade to Standard SKU for zone redundancy, NSG support, and SLA.",
+                    ))
+        return findings
+
+    def _az0064_traffic_manager_no_https(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_traffic_manager_profile":
+                protocol = _tf_body_get_value(res["body"], "protocol")
+                if protocol and "http" == protocol.strip('"').lower():
+                    findings.append(self._finding(
+                        "AZ0064", "Traffic Manager using HTTP health checks",
+                        f"Traffic Manager '{res['name']}' monitor uses HTTP instead of HTTPS.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set protocol = 'HTTPS' in the monitor_config block.",
+                    ))
+        return findings
+
+    def _az0065_media_services_public(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_media_services_account":
+                if _tf_body_has_key_value(res["body"], "public_network_access_enabled", "true"):
+                    findings.append(self._finding(
+                        "AZ0065", "Media Services publicly accessible",
+                        f"Media Services Account '{res['name']}' allows public network access.",
+                        IaCSeverity.HIGH, res,
+                        "Set public_network_access_enabled = false and use private endpoints.",
+                    ))
+        return findings
+
+    def _az0066_data_lake_store_no_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_data_lake_store":
+                enc = _tf_body_get_value(res["body"], "encryption_state")
+                if enc and "disabled" in enc.lower():
+                    findings.append(self._finding(
+                        "AZ0066", "Data Lake Store encryption disabled",
+                        f"Data Lake Store '{res['name']}' has encryption disabled.",
+                        IaCSeverity.CRITICAL, res,
+                        "Set encryption_state = 'Enabled' (enabled by default).",
+                    ))
+                enc_type = _tf_body_get_value(res["body"], "encryption_type")
+                if enc_type and "servicemanaged" in enc_type.lower():
+                    findings.append(self._finding(
+                        "AZ0066", "Data Lake Store using service-managed keys",
+                        f"Data Lake Store '{res['name']}' uses service-managed keys instead of CMK.",
+                        IaCSeverity.MEDIUM, res,
+                        "Set encryption_type = 'UserManaged' and provide key vault key ID.",
+                    ))
+        return findings
+
+    def _az0067_bastion_host_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_bastion = "azurerm_bastion_host" in resource_types
+        vnets = [r for r in resources if r["type"] == "azurerm_virtual_network"]
+        vms = [r for r in resources if r["type"] in (
+            "azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine",
+            "azurerm_virtual_machine",
+        )]
+        if vnets and vms and not has_bastion:
+            findings.append(self._finding(
+                "AZ0067", "No Azure Bastion Host for VM access",
+                "Virtual machines detected but no azurerm_bastion_host for secure RDP/SSH access.",
+                IaCSeverity.MEDIUM, vnets[0],
+                "Deploy an azurerm_bastion_host in AzureBastionSubnet for secure VM access without public IPs.",
+            ))
+        return findings
+
+    def _az0068_policy_assignment_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_policy = (
+            "azurerm_policy_assignment" in resource_types
+            or "azurerm_subscription_policy_assignment" in resource_types
+            or "azurerm_resource_group_policy_assignment" in resource_types
+            or "azurerm_management_group_policy_assignment" in resource_types
+        )
+        rg_count = sum(1 for r in resources if r["type"] == "azurerm_resource_group")
+        if rg_count >= 1 and not has_policy:
+            rg = next(r for r in resources if r["type"] == "azurerm_resource_group")
+            findings.append(self._finding(
+                "AZ0068", "No Azure Policy assignments detected",
+                "Resource groups defined but no Azure Policy assignments found for governance.",
+                IaCSeverity.INFO, rg,
+                "Add azurerm_policy_assignment resources to enforce organizational standards.",
+            ))
+        return findings
+
+    def _az0069_backup_vault_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_backup = (
+            "azurerm_recovery_services_vault" in resource_types
+            or "azurerm_backup_policy_vm" in resource_types
+            or "azurerm_data_protection_backup_vault" in resource_types
+        )
+        vms = [r for r in resources if r["type"] in (
+            "azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine",
+            "azurerm_virtual_machine",
+        )]
+        if vms and not has_backup:
+            findings.append(self._finding(
+                "AZ0069", "No backup vault for virtual machines",
+                "Virtual machines detected but no Recovery Services or Backup vault configured.",
+                IaCSeverity.MEDIUM, vms[0],
+                "Add azurerm_recovery_services_vault and azurerm_backup_protected_vm for VM backups.",
+            ))
+        return findings
+
+    def _az0070_monitor_action_group_missing(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        resource_types = {r["type"] for r in resources}
+        has_action_group = "azurerm_monitor_action_group" in resource_types
+        has_alerts = (
+            "azurerm_monitor_metric_alert" in resource_types
+            or "azurerm_monitor_activity_log_alert" in resource_types
+        )
+        critical = [r for r in resources if r["type"] in (
+            "azurerm_kubernetes_cluster", "azurerm_mssql_server",
+            "azurerm_storage_account", "azurerm_key_vault",
+        )]
+        if critical and not has_action_group and not has_alerts:
+            findings.append(self._finding(
+                "AZ0070", "No Azure Monitor action groups or alerts",
+                "Critical resources found but no azurerm_monitor_action_group or alert rules configured.",
+                IaCSeverity.MEDIUM, critical[0],
+                "Add azurerm_monitor_action_group and azurerm_monitor_metric_alert resources for monitoring.",
             ))
         return findings
 
