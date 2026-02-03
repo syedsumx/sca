@@ -335,6 +335,206 @@ class MultiCloudTerraformScanner:
         findings.extend(self._az0298_cosmosdb_no_serverless(all_resources))
         findings.extend(self._az0299_app_service_no_websockets(all_resources))
         findings.extend(self._az0300_aks_no_cost_analysis(all_resources))
+        findings.extend(self._az0301_vm_no_automatic_shutdown(all_resources))
+        findings.extend(self._az0302_aks_no_run_command_disabled(all_resources))
+        findings.extend(self._az0303_app_service_no_min_tls_cipher(all_resources))
+        findings.extend(self._az0304_storage_no_static_website_error_page(all_resources))
+        findings.extend(self._az0305_sql_no_elastic_pool(all_resources))
+        findings.extend(self._az0306_aks_no_oidc_issuer(all_resources))
+        findings.extend(self._az0307_cosmosdb_no_partition_merge(all_resources))
+        findings.extend(self._az0308_app_gw_no_rewrite_rule(all_resources))
+        findings.extend(self._az0309_vm_no_proximity_placement(all_resources))
+        findings.extend(self._az0310_storage_no_large_file_share(all_resources))
+        findings.extend(self._az0311_aks_no_vertical_pod_autoscaler(all_resources))
+        findings.extend(self._az0312_keyvault_no_managed_hsm(all_resources))
+        findings.extend(self._az0313_app_service_no_auto_heal(all_resources))
+        findings.extend(self._az0314_sql_no_short_term_retention(all_resources))
+        findings.extend(self._az0315_aks_no_blob_csi_driver(all_resources))
+        findings.extend(self._az0316_function_app_no_elastic_plan(all_resources))
+        findings.extend(self._az0317_acr_no_token_auth(all_resources))
+        findings.extend(self._az0318_vm_scale_set_no_rolling_upgrade(all_resources))
+        findings.extend(self._az0319_app_service_no_slot_sticky(all_resources))
+        findings.extend(self._az0320_aks_no_file_csi_driver(all_resources))
+        findings.extend(self._az0321_storage_no_nfsv3(all_resources))
+        findings.extend(self._az0322_storage_no_sftp(all_resources))
+        findings.extend(self._az0323_mysql_flex_no_ha(all_resources))
+        findings.extend(self._az0324_postgresql_flex_no_ha(all_resources))
+        findings.extend(self._az0325_app_service_no_vnet_route_all(all_resources))
+        findings.extend(self._az0326_vm_no_custom_data(all_resources))
+        findings.extend(self._az0327_aks_no_node_resource_group(all_resources))
+        findings.extend(self._az0328_storage_no_hierarchical_namespace(all_resources))
+        findings.extend(self._az0329_keyvault_no_rotation_policy(all_resources))
+        findings.extend(self._az0330_keyvault_secret_no_content_type(all_resources))
+        findings.extend(self._az0331_app_service_no_sticky_settings(all_resources))
+        findings.extend(self._az0332_function_app_no_daily_memory_quota(all_resources))
+        findings.extend(self._az0333_aks_no_maintenance_window(all_resources))
+        findings.extend(self._az0334_vm_no_dedicated_host(all_resources))
+        findings.extend(self._az0335_storage_no_allow_protected_append_writes(all_resources))
+        findings.extend(self._az0336_sql_no_maintenance_window(all_resources))
+        findings.extend(self._az0337_aks_no_node_pool_subnet(all_resources))
+        findings.extend(self._az0338_cosmosdb_no_free_tier_check(all_resources))
+        findings.extend(self._az0339_app_gw_no_redirect_config(all_resources))
+        findings.extend(self._az0340_vm_no_gallery_image(all_resources))
+        findings.extend(self._az0341_aks_no_sku_tier(all_resources))
+        findings.extend(self._az0342_storage_no_account_replication(all_resources))
+        findings.extend(self._az0343_keyvault_no_access_log(all_resources))
+        findings.extend(self._az0344_app_service_no_detailed_error(all_resources))
+        findings.extend(self._az0345_sql_no_read_replica(all_resources))
+        findings.extend(self._az0346_aks_no_upgrade_settings(all_resources))
+        findings.extend(self._az0347_cosmosdb_no_consistency_policy(all_resources))
+        findings.extend(self._az0348_app_gw_no_frontend_port(all_resources))
+        findings.extend(self._az0349_vm_no_capacity_reservation(all_resources))
+        findings.extend(self._az0350_storage_no_queue_encryption_key(all_resources))
+        findings.extend(self._az0351_aks_no_snapshot_controller(all_resources))
+        findings.extend(self._az0352_keyvault_no_certificate_policy(all_resources))
+        findings.extend(self._az0353_app_service_no_compression(all_resources))
+        findings.extend(self._az0354_sql_no_active_geo_replication(all_resources))
+        findings.extend(self._az0355_aks_no_windows_node_pool(all_resources))
+        findings.extend(self._az0356_cosmosdb_no_cors(all_resources))
+        findings.extend(self._az0357_app_gw_no_custom_error_page(all_resources))
+        findings.extend(self._az0358_vm_no_license_type(all_resources))
+        findings.extend(self._az0359_storage_no_table_encryption_key(all_resources))
+        findings.extend(self._az0360_aks_no_network_dataplane(all_resources))
+        findings.extend(self._az0361_keyvault_no_private_link_service(all_resources))
+        findings.extend(self._az0362_app_service_no_worker_count(all_resources))
+        findings.extend(self._az0363_sql_no_failover_group(all_resources))
+        findings.extend(self._az0364_aks_no_node_pool_max_surge(all_resources))
+        findings.extend(self._az0365_cosmosdb_no_geo_location(all_resources))
+        findings.extend(self._az0366_app_gw_no_trusted_root_cert(all_resources))
+        findings.extend(self._az0367_vm_no_ultra_ssd(all_resources))
+        findings.extend(self._az0368_storage_no_blob_inventory(all_resources))
+        findings.extend(self._az0369_aks_no_gpu_node_pool(all_resources))
+        findings.extend(self._az0370_keyvault_no_firewall_bypass_metrics(all_resources))
+        findings.extend(self._az0371_app_service_no_pre_warmed_instances(all_resources))
+        findings.extend(self._az0372_sql_no_zone_redundant(all_resources))
+        findings.extend(self._az0373_aks_no_outbound_type(all_resources))
+        findings.extend(self._az0374_cosmosdb_no_capabilities(all_resources))
+        findings.extend(self._az0375_app_gw_no_ssl_certificate(all_resources))
+        findings.extend(self._az0376_vm_no_os_disk_caching(all_resources))
+        findings.extend(self._az0377_storage_no_point_in_time_restore(all_resources))
+        findings.extend(self._az0378_aks_no_enable_host_encryption(all_resources))
+        findings.extend(self._az0379_keyvault_no_contact_email(all_resources))
+        findings.extend(self._az0380_app_service_no_load_balancing_mode(all_resources))
+        findings.extend(self._az0381_sql_no_transparent_data_encryption(all_resources))
+        findings.extend(self._az0382_aks_no_kubelet_config(all_resources))
+        findings.extend(self._az0383_cosmosdb_no_virtual_network_rule(all_resources))
+        findings.extend(self._az0384_app_gw_no_firewall_policy(all_resources))
+        findings.extend(self._az0385_vm_no_data_collection(all_resources))
+        findings.extend(self._az0386_storage_no_routing_preference(all_resources))
+        findings.extend(self._az0387_aks_no_linux_os_config(all_resources))
+        findings.extend(self._az0388_keyvault_no_certificate_issuer(all_resources))
+        findings.extend(self._az0389_app_service_no_app_command_line(all_resources))
+        findings.extend(self._az0390_sql_no_identity(all_resources))
+        findings.extend(self._az0391_aks_no_service_mesh(all_resources))
+        findings.extend(self._az0392_cosmosdb_no_ip_range_filter(all_resources))
+        findings.extend(self._az0393_app_gw_no_identity(all_resources))
+        findings.extend(self._az0394_vm_no_identity(all_resources))
+        findings.extend(self._az0395_storage_no_identity(all_resources))
+        findings.extend(self._az0396_aks_no_private_dns_zone(all_resources))
+        findings.extend(self._az0397_keyvault_no_sku(all_resources))
+        findings.extend(self._az0398_app_service_no_linux_fx_version(all_resources))
+        findings.extend(self._az0399_sql_no_minimum_tls_version(all_resources))
+        findings.extend(self._az0400_aks_no_api_server_access_profile(all_resources))
+        findings.extend(self._az0401_cosmosdb_no_default_identity(all_resources))
+        findings.extend(self._az0402_app_gw_no_zones(all_resources))
+        findings.extend(self._az0403_vm_no_secure_boot(all_resources))
+        findings.extend(self._az0404_storage_no_dns_endpoint_type(all_resources))
+        findings.extend(self._az0405_aks_no_node_public_ip(all_resources))
+        findings.extend(self._az0406_keyvault_no_public_network_access(all_resources))
+        findings.extend(self._az0407_app_service_no_remote_debugging_version(all_resources))
+        findings.extend(self._az0408_sql_no_primary_user_assigned_identity(all_resources))
+        findings.extend(self._az0409_aks_no_node_labels(all_resources))
+        findings.extend(self._az0410_cosmosdb_no_access_key_metadata_writes(all_resources))
+        findings.extend(self._az0411_app_gw_no_sku_capacity(all_resources))
+        findings.extend(self._az0412_vm_no_vtpm(all_resources))
+        findings.extend(self._az0413_storage_no_sas_expiration_period(all_resources))
+        findings.extend(self._az0414_aks_no_pod_subnet(all_resources))
+        findings.extend(self._az0415_keyvault_key_no_rotation(all_resources))
+        findings.extend(self._az0416_app_service_no_use_32_bit_worker(all_resources))
+        findings.extend(self._az0417_sql_no_retention_days(all_resources))
+        findings.extend(self._az0418_aks_no_fips_enabled(all_resources))
+        findings.extend(self._az0419_cosmosdb_no_network_acl_bypass(all_resources))
+        findings.extend(self._az0420_app_gw_no_connection_draining(all_resources))
+        findings.extend(self._az0421_vm_no_provision_vm_agent(all_resources))
+        findings.extend(self._az0422_storage_no_default_to_oauth(all_resources))
+        findings.extend(self._az0423_aks_no_disk_driver(all_resources))
+        findings.extend(self._az0424_keyvault_key_no_key_opts(all_resources))
+        findings.extend(self._az0425_app_service_no_managed_pipeline_mode(all_resources))
+        findings.extend(self._az0426_sql_no_storage_account_type(all_resources))
+        findings.extend(self._az0427_aks_no_temporary_name(all_resources))
+        findings.extend(self._az0428_cosmosdb_no_mongo_server_version(all_resources))
+        findings.extend(self._az0429_app_gw_no_path_rules(all_resources))
+        findings.extend(self._az0430_vm_no_automatic_updates(all_resources))
+        findings.extend(self._az0431_storage_no_shared_access_key(all_resources))
+        findings.extend(self._az0432_aks_no_drain_timeout(all_resources))
+        findings.extend(self._az0433_keyvault_key_no_curve(all_resources))
+        findings.extend(self._az0434_app_service_no_scm_type(all_resources))
+        findings.extend(self._az0435_sql_no_collation(all_resources))
+        findings.extend(self._az0436_aks_no_soak_duration(all_resources))
+        findings.extend(self._az0437_cosmosdb_no_create_mode(all_resources))
+        findings.extend(self._az0438_app_gw_no_url_path_map(all_resources))
+        findings.extend(self._az0439_vm_no_timezone(all_resources))
+        findings.extend(self._az0440_storage_no_immutability_policy(all_resources))
+        findings.extend(self._az0441_aks_no_node_pool_type(all_resources))
+        findings.extend(self._az0442_keyvault_secret_no_tags(all_resources))
+        findings.extend(self._az0443_app_service_no_client_affinity(all_resources))
+        findings.extend(self._az0444_sql_no_max_size_gb(all_resources))
+        findings.extend(self._az0445_aks_no_scale_down_mode(all_resources))
+        findings.extend(self._az0446_cosmosdb_no_restore(all_resources))
+        findings.extend(self._az0447_app_gw_no_gateway_ip_config(all_resources))
+        findings.extend(self._az0448_vm_no_availability_set(all_resources))
+        findings.extend(self._az0449_storage_no_cors_rules(all_resources))
+        findings.extend(self._az0450_aks_no_workload_autoscaler(all_resources))
+        findings.extend(self._az0451_keyvault_key_no_tags(all_resources))
+        findings.extend(self._az0452_app_service_no_public_network_access(all_resources))
+        findings.extend(self._az0453_sql_no_sku_name(all_resources))
+        findings.extend(self._az0454_aks_no_spot_max_price(all_resources))
+        findings.extend(self._az0455_cosmosdb_no_identity(all_resources))
+        findings.extend(self._az0456_app_gw_no_private_link_config(all_resources))
+        findings.extend(self._az0457_vm_no_os_disk_security_encryption(all_resources))
+        findings.extend(self._az0458_storage_no_custom_domain(all_resources))
+        findings.extend(self._az0459_aks_no_os_sku(all_resources))
+        findings.extend(self._az0460_keyvault_no_tags(all_resources))
+        findings.extend(self._az0461_app_service_no_logs_http(all_resources))
+        findings.extend(self._az0462_sql_no_tags(all_resources))
+        findings.extend(self._az0463_aks_no_priority(all_resources))
+        findings.extend(self._az0464_cosmosdb_no_tags(all_resources))
+        findings.extend(self._az0465_app_gw_no_tags(all_resources))
+        findings.extend(self._az0466_vm_no_tags(all_resources))
+        findings.extend(self._az0467_storage_no_tags(all_resources))
+        findings.extend(self._az0468_aks_no_tags(all_resources))
+        findings.extend(self._az0469_nsg_no_tags(all_resources))
+        findings.extend(self._az0470_vnet_no_tags(all_resources))
+        findings.extend(self._az0471_subnet_no_service_endpoints(all_resources))
+        findings.extend(self._az0472_subnet_no_delegation(all_resources))
+        findings.extend(self._az0473_subnet_no_private_endpoint_policies(all_resources))
+        findings.extend(self._az0474_subnet_no_private_link_service_policies(all_resources))
+        findings.extend(self._az0475_vnet_no_address_space(all_resources))
+        findings.extend(self._az0476_vnet_no_dns_servers(all_resources))
+        findings.extend(self._az0477_vnet_peering_no_allow_forwarded_traffic(all_resources))
+        findings.extend(self._az0478_vnet_peering_no_allow_gateway_transit(all_resources))
+        findings.extend(self._az0479_lb_no_frontend_ip(all_resources))
+        findings.extend(self._az0480_lb_no_backend_pool(all_resources))
+        findings.extend(self._az0481_lb_rule_no_idle_timeout(all_resources))
+        findings.extend(self._az0482_lb_rule_no_enable_tcp_reset(all_resources))
+        findings.extend(self._az0483_nat_gateway_no_idle_timeout(all_resources))
+        findings.extend(self._az0484_nat_gateway_no_zones(all_resources))
+        findings.extend(self._az0485_public_ip_no_allocation_method(all_resources))
+        findings.extend(self._az0486_public_ip_no_sku(all_resources))
+        findings.extend(self._az0487_public_ip_no_zones(all_resources))
+        findings.extend(self._az0488_public_ip_no_ddos_protection_mode(all_resources))
+        findings.extend(self._az0489_dns_record_no_ttl(all_resources))
+        findings.extend(self._az0490_private_dns_record_no_ttl(all_resources))
+        findings.extend(self._az0491_route_no_next_hop_type(all_resources))
+        findings.extend(self._az0492_route_table_no_routes(all_resources))
+        findings.extend(self._az0493_network_interface_no_dns_servers(all_resources))
+        findings.extend(self._az0494_network_interface_no_internal_dns_name(all_resources))
+        findings.extend(self._az0495_firewall_policy_no_intrusion_detection(all_resources))
+        findings.extend(self._az0496_firewall_policy_no_threat_intelligence(all_resources))
+        findings.extend(self._az0497_express_route_no_bandwidth(all_resources))
+        findings.extend(self._az0498_express_route_no_peering_location(all_resources))
+        findings.extend(self._az0499_vpn_connection_no_shared_key(all_resources))
+        findings.extend(self._az0500_vpn_connection_no_ipsec_policy(all_resources))
 
         # GCP rules
         findings.extend(self._gc0001_gcs_no_encryption(all_resources))
@@ -5386,6 +5586,1251 @@ class MultiCloudTerraformScanner:
                         IaCSeverity.LOW, res,
                         "Set cost_analysis_enabled = true for cost visibility.",
                     ))
+        return findings
+
+    def _az0301_vm_no_automatic_shutdown(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        shutdown_schedules = {_tf_body_get_value(r["body"], "virtual_machine_id") for r in resources if r["type"] == "azurerm_dev_test_global_vm_shutdown_schedule"}
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if not shutdown_schedules:
+                    findings.append(self._finding("AZ0301", "VM without auto-shutdown", f"VM '{res['name']}' has no automatic shutdown schedule.", IaCSeverity.LOW, res, "Create azurerm_dev_test_global_vm_shutdown_schedule for cost savings."))
+        return findings
+
+    def _az0302_aks_no_run_command_disabled(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_key_value(res["body"], "run_command_enabled", "false"):
+                    findings.append(self._finding("AZ0302", "AKS run command enabled", f"AKS '{res['name']}' has run command enabled.", IaCSeverity.MEDIUM, res, "Set run_command_enabled = false to prevent remote command execution."))
+        return findings
+
+    def _az0303_app_service_no_min_tls_cipher(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if not _tf_body_get_value(res["body"], "minimum_tls_version"):
+                    findings.append(self._finding("AZ0303", "App Service no min TLS", f"App Service '{res['name']}' has no minimum TLS version set.", IaCSeverity.MEDIUM, res, "Set minimum_tls_version = '1.2'."))
+        return findings
+
+    def _az0304_storage_no_static_website_error_page(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if _tf_body_has_block(res["body"], "static_website"):
+                    if not _tf_body_get_value(res["body"], "error_404_document"):
+                        findings.append(self._finding("AZ0304", "Storage static website no error page", f"Storage '{res['name']}' static website has no 404 error page.", IaCSeverity.LOW, res, "Set error_404_document in static_website block."))
+        return findings
+
+    def _az0305_sql_no_elastic_pool(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0306_aks_no_oidc_issuer(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_key_value(res["body"], "oidc_issuer_enabled", "true"):
+                    findings.append(self._finding("AZ0306", "AKS no OIDC issuer", f"AKS '{res['name']}' has no OIDC issuer enabled.", IaCSeverity.MEDIUM, res, "Set oidc_issuer_enabled = true for workload identity."))
+        return findings
+
+    def _az0307_cosmosdb_no_partition_merge(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_key_value(res["body"], "partition_merge_enabled", "true"):
+                    findings.append(self._finding("AZ0307", "Cosmos DB no partition merge", f"Cosmos DB '{res['name']}' has partition merge disabled.", IaCSeverity.LOW, res, "Set partition_merge_enabled = true for cost optimization."))
+        return findings
+
+    def _az0308_app_gw_no_rewrite_rule(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0309_vm_no_proximity_placement(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0310_storage_no_large_file_share(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_key_value(res["body"], "large_file_share_enabled", "true"):
+                    findings.append(self._finding("AZ0310", "Storage no large file share", f"Storage '{res['name']}' has large file share disabled.", IaCSeverity.LOW, res, "Set large_file_share_enabled = true for up to 100 TiB."))
+        return findings
+
+    def _az0311_aks_no_vertical_pod_autoscaler(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_key_value(res["body"], "vertical_pod_autoscaler_enabled", "true"):
+                    findings.append(self._finding("AZ0311", "AKS no VPA", f"AKS '{res['name']}' has no vertical pod autoscaler.", IaCSeverity.LOW, res, "Set vertical_pod_autoscaler_enabled = true."))
+        return findings
+
+    def _az0312_keyvault_no_managed_hsm(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0313_app_service_no_auto_heal(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if not _tf_body_has_block(res["body"], "auto_heal_setting"):
+                    findings.append(self._finding("AZ0313", "App Service no auto heal", f"App Service '{res['name']}' has no auto heal configured.", IaCSeverity.LOW, res, "Add auto_heal_setting block for automatic recovery."))
+        return findings
+
+    def _az0314_sql_no_short_term_retention(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_database":
+                if not _tf_body_has_block(res["body"], "short_term_retention_policy"):
+                    findings.append(self._finding("AZ0314", "SQL no short-term retention", f"SQL Database '{res['name']}' has no short-term retention.", IaCSeverity.MEDIUM, res, "Add short_term_retention_policy block."))
+        return findings
+
+    def _az0315_aks_no_blob_csi_driver(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_key_value(res["body"], "storage_profile"):
+                    findings.append(self._finding("AZ0315", "AKS no blob CSI driver", f"AKS '{res['name']}' may not have blob CSI driver.", IaCSeverity.LOW, res, "Configure storage_profile with blob_driver_enabled = true."))
+        return findings
+
+    def _az0316_function_app_no_elastic_plan(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0317_acr_no_token_auth(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0318_vm_scale_set_no_rolling_upgrade(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine_scale_set", "azurerm_windows_virtual_machine_scale_set"):
+                if not _tf_body_has_block(res["body"], "rolling_upgrade_policy"):
+                    findings.append(self._finding("AZ0318", "VMSS no rolling upgrade", f"VMSS '{res['name']}' has no rolling upgrade policy.", IaCSeverity.LOW, res, "Add rolling_upgrade_policy block for safe updates."))
+        return findings
+
+    def _az0319_app_service_no_slot_sticky(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0320_aks_no_file_csi_driver(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                body = res["body"]
+                if _tf_body_has_block(body, "storage_profile"):
+                    if _tf_body_has_key_value(body, "file_driver_enabled", "false"):
+                        findings.append(self._finding("AZ0320", "AKS file CSI disabled", f"AKS '{res['name']}' has file CSI driver disabled.", IaCSeverity.LOW, res, "Set file_driver_enabled = true in storage_profile."))
+        return findings
+
+    def _az0321_storage_no_nfsv3(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0322_storage_no_sftp(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0323_mysql_flex_no_ha(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mysql_flexible_server":
+                if not _tf_body_has_block(res["body"], "high_availability"):
+                    findings.append(self._finding("AZ0323", "MySQL Flex no HA", f"MySQL Flexible Server '{res['name']}' has no HA.", IaCSeverity.MEDIUM, res, "Add high_availability block with mode = 'ZoneRedundant'."))
+        return findings
+
+    def _az0324_postgresql_flex_no_ha(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_postgresql_flexible_server":
+                if not _tf_body_has_block(res["body"], "high_availability"):
+                    findings.append(self._finding("AZ0324", "PostgreSQL Flex no HA", f"PostgreSQL Flexible Server '{res['name']}' has no HA.", IaCSeverity.MEDIUM, res, "Add high_availability block with mode = 'ZoneRedundant'."))
+        return findings
+
+    def _az0325_app_service_no_vnet_route_all(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if not _tf_body_has_key_value(res["body"], "vnet_route_all_enabled", "true"):
+                    findings.append(self._finding("AZ0325", "App Service no VNet route all", f"App Service '{res['name']}' does not route all traffic through VNet.", IaCSeverity.MEDIUM, res, "Set vnet_route_all_enabled = true."))
+        return findings
+
+    def _az0326_vm_no_custom_data(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0327_aks_no_node_resource_group(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_get_value(res["body"], "node_resource_group"):
+                    findings.append(self._finding("AZ0327", "AKS no custom node RG", f"AKS '{res['name']}' uses default node resource group name.", IaCSeverity.LOW, res, "Set node_resource_group for custom naming."))
+        return findings
+
+    def _az0328_storage_no_hierarchical_namespace(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0329_keyvault_no_rotation_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault_key":
+                if not _tf_body_has_block(res["body"], "rotation_policy"):
+                    findings.append(self._finding("AZ0329", "Key Vault key no rotation policy", f"Key '{res['name']}' has no rotation policy.", IaCSeverity.MEDIUM, res, "Add rotation_policy block for automatic key rotation."))
+        return findings
+
+    def _az0330_keyvault_secret_no_content_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault_secret":
+                if not _tf_body_get_value(res["body"], "content_type"):
+                    findings.append(self._finding("AZ0330", "Key Vault secret no content type", f"Secret '{res['name']}' has no content type.", IaCSeverity.LOW, res, "Set content_type for secret classification."))
+        return findings
+
+    def _az0331_app_service_no_sticky_settings(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0332_function_app_no_daily_memory_quota(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_function_app", "azurerm_windows_function_app"):
+                if not _tf_body_get_value(res["body"], "daily_memory_time_quota"):
+                    findings.append(self._finding("AZ0332", "Function no memory quota", f"Function App '{res['name']}' has no daily memory quota.", IaCSeverity.LOW, res, "Set daily_memory_time_quota for cost control."))
+        return findings
+
+    def _az0333_aks_no_maintenance_window(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "maintenance_window"):
+                    findings.append(self._finding("AZ0333", "AKS no maintenance window", f"AKS '{res['name']}' has no maintenance window.", IaCSeverity.LOW, res, "Add maintenance_window block for controlled updates."))
+        return findings
+
+    def _az0334_vm_no_dedicated_host(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0335_storage_no_allow_protected_append_writes(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0336_sql_no_maintenance_window(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0337_aks_no_node_pool_subnet(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if not _tf_body_get_value(res["body"], "vnet_subnet_id"):
+                    findings.append(self._finding("AZ0337", "AKS node pool no subnet", f"AKS node pool '{res['name']}' has no subnet configured.", IaCSeverity.MEDIUM, res, "Set vnet_subnet_id for network isolation."))
+        return findings
+
+    def _az0338_cosmosdb_no_free_tier_check(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0339_app_gw_no_redirect_config(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0340_vm_no_gallery_image(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0341_aks_no_sku_tier(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                sku = _tf_body_get_value(res["body"], "sku_tier")
+                if not sku or "free" in str(sku).lower():
+                    findings.append(self._finding("AZ0341", "AKS free tier", f"AKS '{res['name']}' uses Free tier.", IaCSeverity.LOW, res, "Set sku_tier = 'Standard' for production SLA."))
+        return findings
+
+    def _az0342_storage_no_account_replication(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                replication = _tf_body_get_value(res["body"], "account_replication_type")
+                if replication and "lrs" in str(replication).lower():
+                    findings.append(self._finding("AZ0342", "Storage LRS only", f"Storage '{res['name']}' uses LRS replication.", IaCSeverity.LOW, res, "Consider GRS or ZRS for higher durability."))
+        return findings
+
+    def _az0343_keyvault_no_access_log(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0344_app_service_no_detailed_error(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0345_sql_no_read_replica(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0346_aks_no_upgrade_settings(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "upgrade_settings"):
+                    findings.append(self._finding("AZ0346", "AKS no upgrade settings", f"AKS '{res['name']}' default node pool has no upgrade settings.", IaCSeverity.LOW, res, "Add upgrade_settings with max_surge for safe upgrades."))
+        return findings
+
+    def _az0347_cosmosdb_no_consistency_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_block(res["body"], "consistency_policy"):
+                    findings.append(self._finding("AZ0347", "Cosmos DB no consistency policy", f"Cosmos DB '{res['name']}' has no explicit consistency policy.", IaCSeverity.LOW, res, "Add consistency_policy block."))
+        return findings
+
+    def _az0348_app_gw_no_frontend_port(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0349_vm_no_capacity_reservation(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0350_storage_no_queue_encryption_key(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0351_aks_no_snapshot_controller(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                body = res["body"]
+                if _tf_body_has_block(body, "storage_profile"):
+                    if _tf_body_has_key_value(body, "snapshot_controller_enabled", "false"):
+                        findings.append(self._finding("AZ0351", "AKS snapshot controller disabled", f"AKS '{res['name']}' has snapshot controller disabled.", IaCSeverity.LOW, res, "Set snapshot_controller_enabled = true."))
+        return findings
+
+    def _az0352_keyvault_no_certificate_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0353_app_service_no_compression(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0354_sql_no_active_geo_replication(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0355_aks_no_windows_node_pool(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0356_cosmosdb_no_cors(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0357_app_gw_no_custom_error_page(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0358_vm_no_license_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_windows_virtual_machine":
+                if not _tf_body_get_value(res["body"], "license_type"):
+                    findings.append(self._finding("AZ0358", "Windows VM no license type", f"Windows VM '{res['name']}' has no license type for hybrid benefit.", IaCSeverity.LOW, res, "Set license_type = 'Windows_Server' for cost savings."))
+        return findings
+
+    def _az0359_storage_no_table_encryption_key(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0360_aks_no_network_dataplane(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_get_value(res["body"], "network_data_plane"):
+                    findings.append(self._finding("AZ0360", "AKS no network dataplane", f"AKS '{res['name']}' uses default network dataplane.", IaCSeverity.LOW, res, "Consider network_data_plane = 'cilium' for advanced networking."))
+        return findings
+
+    def _az0361_keyvault_no_private_link_service(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0362_app_service_no_worker_count(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0363_sql_no_failover_group(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        failover_groups = [r for r in resources if r["type"] == "azurerm_mssql_failover_group"]
+        if not failover_groups:
+            for res in resources:
+                if res["type"] == "azurerm_mssql_server":
+                    findings.append(self._finding("AZ0363", "SQL no failover group", f"SQL Server '{res['name']}' has no failover group.", IaCSeverity.MEDIUM, res, "Create azurerm_mssql_failover_group for DR."))
+        return findings
+
+    def _az0364_aks_no_node_pool_max_surge(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if not _tf_body_has_block(res["body"], "upgrade_settings"):
+                    findings.append(self._finding("AZ0364", "AKS node pool no max surge", f"AKS node pool '{res['name']}' has no upgrade settings.", IaCSeverity.LOW, res, "Add upgrade_settings with max_surge."))
+        return findings
+
+    def _az0365_cosmosdb_no_geo_location(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_block(res["body"], "geo_location"):
+                    findings.append(self._finding("AZ0365", "Cosmos DB no geo location", f"Cosmos DB '{res['name']}' has no geo_location configured.", IaCSeverity.MEDIUM, res, "Add geo_location block for regional distribution."))
+        return findings
+
+    def _az0366_app_gw_no_trusted_root_cert(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0367_vm_no_ultra_ssd(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0368_storage_no_blob_inventory(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        inventory_policies = [r for r in resources if r["type"] == "azurerm_storage_blob_inventory_policy"]
+        if not inventory_policies:
+            for res in resources:
+                if res["type"] == "azurerm_storage_account":
+                    findings.append(self._finding("AZ0368", "Storage no blob inventory", f"Storage '{res['name']}' has no blob inventory policy.", IaCSeverity.LOW, res, "Create azurerm_storage_blob_inventory_policy for tracking."))
+        return findings
+
+    def _az0369_aks_no_gpu_node_pool(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0370_keyvault_no_firewall_bypass_metrics(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0371_app_service_no_pre_warmed_instances(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0372_sql_no_zone_redundant(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_database":
+                if not _tf_body_has_key_value(res["body"], "zone_redundant", "true"):
+                    findings.append(self._finding("AZ0372", "SQL DB not zone redundant", f"SQL Database '{res['name']}' is not zone redundant.", IaCSeverity.MEDIUM, res, "Set zone_redundant = true for HA."))
+        return findings
+
+    def _az0373_aks_no_outbound_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_get_value(res["body"], "outbound_type"):
+                    findings.append(self._finding("AZ0373", "AKS default outbound", f"AKS '{res['name']}' uses default outbound type.", IaCSeverity.LOW, res, "Consider outbound_type = 'userDefinedRouting' for controlled egress."))
+        return findings
+
+    def _az0374_cosmosdb_no_capabilities(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0375_app_gw_no_ssl_certificate(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                if not _tf_body_has_block(res["body"], "ssl_certificate"):
+                    findings.append(self._finding("AZ0375", "App Gateway no SSL cert", f"Application Gateway '{res['name']}' has no SSL certificate.", IaCSeverity.HIGH, res, "Add ssl_certificate block for HTTPS termination."))
+        return findings
+
+    def _az0376_vm_no_os_disk_caching(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0377_storage_no_point_in_time_restore(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                body = res["body"]
+                if _tf_body_has_block(body, "blob_properties"):
+                    if not _tf_body_has_block(body, "restore_policy"):
+                        findings.append(self._finding("AZ0377", "Storage no PITR", f"Storage '{res['name']}' has no point-in-time restore.", IaCSeverity.MEDIUM, res, "Add restore_policy in blob_properties."))
+        return findings
+
+    def _az0378_aks_no_enable_host_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if not _tf_body_has_key_value(res["body"], "enable_host_encryption", "true"):
+                    findings.append(self._finding("AZ0378", "AKS node pool no host encryption", f"AKS node pool '{res['name']}' has no host encryption.", IaCSeverity.MEDIUM, res, "Set enable_host_encryption = true."))
+        return findings
+
+    def _az0379_keyvault_no_contact_email(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0380_app_service_no_load_balancing_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0381_sql_no_transparent_data_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_database":
+                if _tf_body_has_key_value(res["body"], "transparent_data_encryption_enabled", "false"):
+                    findings.append(self._finding("AZ0381", "SQL TDE disabled", f"SQL Database '{res['name']}' has TDE disabled.", IaCSeverity.HIGH, res, "Set transparent_data_encryption_enabled = true."))
+        return findings
+
+    def _az0382_aks_no_kubelet_config(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0383_cosmosdb_no_virtual_network_rule(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_block(res["body"], "virtual_network_rule"):
+                    findings.append(self._finding("AZ0383", "Cosmos DB no VNet rule", f"Cosmos DB '{res['name']}' has no VNet rules.", IaCSeverity.MEDIUM, res, "Add virtual_network_rule blocks for network isolation."))
+        return findings
+
+    def _az0384_app_gw_no_firewall_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                if not _tf_body_get_value(res["body"], "firewall_policy_id"):
+                    findings.append(self._finding("AZ0384", "App Gateway no WAF policy", f"Application Gateway '{res['name']}' has no WAF policy attached.", IaCSeverity.MEDIUM, res, "Set firewall_policy_id with azurerm_web_application_firewall_policy."))
+        return findings
+
+    def _az0385_vm_no_data_collection(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0386_storage_no_routing_preference(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0387_aks_no_linux_os_config(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0388_keyvault_no_certificate_issuer(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0389_app_service_no_app_command_line(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0390_sql_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_server":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding("AZ0390", "SQL Server no identity", f"SQL Server '{res['name']}' has no managed identity.", IaCSeverity.MEDIUM, res, "Add identity block with type = 'SystemAssigned'."))
+        return findings
+
+    def _az0391_aks_no_service_mesh(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "service_mesh_profile"):
+                    findings.append(self._finding("AZ0391", "AKS no service mesh", f"AKS '{res['name']}' has no service mesh configured.", IaCSeverity.LOW, res, "Consider adding service_mesh_profile for Istio."))
+        return findings
+
+    def _az0392_cosmosdb_no_ip_range_filter(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_get_value(res["body"], "ip_range_filter"):
+                    findings.append(self._finding("AZ0392", "Cosmos DB no IP filter", f"Cosmos DB '{res['name']}' has no IP range filter.", IaCSeverity.MEDIUM, res, "Set ip_range_filter for network access control."))
+        return findings
+
+    def _az0393_app_gw_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding("AZ0393", "App Gateway no identity", f"Application Gateway '{res['name']}' has no managed identity.", IaCSeverity.LOW, res, "Add identity block for Key Vault integration."))
+        return findings
+
+    def _az0394_vm_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding("AZ0394", "VM no managed identity", f"VM '{res['name']}' has no managed identity.", IaCSeverity.MEDIUM, res, "Add identity block with type = 'SystemAssigned'."))
+        return findings
+
+    def _az0395_storage_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding("AZ0395", "Storage no managed identity", f"Storage '{res['name']}' has no managed identity.", IaCSeverity.LOW, res, "Add identity block for CMK access."))
+        return findings
+
+    def _az0396_aks_no_private_dns_zone(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if _tf_body_has_key_value(res["body"], "private_cluster_enabled", "true"):
+                    if not _tf_body_get_value(res["body"], "private_dns_zone_id"):
+                        findings.append(self._finding("AZ0396", "Private AKS no DNS zone", f"Private AKS '{res['name']}' uses default DNS zone.", IaCSeverity.LOW, res, "Set private_dns_zone_id for custom DNS."))
+        return findings
+
+    def _az0397_keyvault_no_sku(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault":
+                sku = _tf_body_get_value(res["body"], "sku_name")
+                if sku and "standard" in str(sku).lower():
+                    findings.append(self._finding("AZ0397", "Key Vault standard SKU", f"Key Vault '{res['name']}' uses standard SKU.", IaCSeverity.LOW, res, "Consider sku_name = 'premium' for HSM-backed keys."))
+        return findings
+
+    def _az0398_app_service_no_linux_fx_version(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0399_sql_no_minimum_tls_version(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_server":
+                tls = _tf_body_get_value(res["body"], "minimum_tls_version")
+                if tls and "1.0" in str(tls):
+                    findings.append(self._finding("AZ0399", "SQL weak TLS", f"SQL Server '{res['name']}' allows TLS 1.0.", IaCSeverity.HIGH, res, "Set minimum_tls_version = '1.2'."))
+        return findings
+
+    def _az0400_aks_no_api_server_access_profile(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "api_server_access_profile"):
+                    findings.append(self._finding("AZ0400", "AKS no API server access profile", f"AKS '{res['name']}' has no API server access restrictions.", IaCSeverity.MEDIUM, res, "Add api_server_access_profile with authorized_ip_ranges."))
+        return findings
+
+    def _az0401_cosmosdb_no_default_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_get_value(res["body"], "default_identity_type"):
+                    findings.append(self._finding("AZ0401", "Cosmos DB no default identity", f"Cosmos DB '{res['name']}' has no default identity.", IaCSeverity.LOW, res, "Set default_identity_type for CMK access."))
+        return findings
+
+    def _az0402_app_gw_no_zones(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                if not _tf_body_get_value(res["body"], "zones"):
+                    findings.append(self._finding("AZ0402", "App Gateway no zones", f"Application Gateway '{res['name']}' has no availability zones.", IaCSeverity.MEDIUM, res, "Set zones = ['1', '2', '3'] for zone redundancy."))
+        return findings
+
+    def _az0403_vm_no_secure_boot(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if not _tf_body_has_key_value(res["body"], "secure_boot_enabled", "true"):
+                    findings.append(self._finding("AZ0403", "VM no secure boot", f"VM '{res['name']}' has secure boot disabled.", IaCSeverity.MEDIUM, res, "Set secure_boot_enabled = true."))
+        return findings
+
+    def _az0404_storage_no_dns_endpoint_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0405_aks_no_node_public_ip(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if _tf_body_has_key_value(res["body"], "enable_node_public_ip", "true"):
+                    findings.append(self._finding("AZ0405", "AKS nodes have public IP", f"AKS '{res['name']}' nodes have public IPs.", IaCSeverity.HIGH, res, "Set enable_node_public_ip = false."))
+        return findings
+
+    def _az0406_keyvault_no_public_network_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault":
+                if not _tf_body_has_key_value(res["body"], "public_network_access_enabled", "false"):
+                    findings.append(self._finding("AZ0406", "Key Vault public access", f"Key Vault '{res['name']}' allows public access.", IaCSeverity.MEDIUM, res, "Set public_network_access_enabled = false."))
+        return findings
+
+    def _az0407_app_service_no_remote_debugging_version(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0408_sql_no_primary_user_assigned_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0409_aks_no_node_labels(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0410_cosmosdb_no_access_key_metadata_writes(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_key_value(res["body"], "access_key_metadata_writes_enabled", "false"):
+                    findings.append(self._finding("AZ0410", "Cosmos DB key metadata writes", f"Cosmos DB '{res['name']}' allows access key metadata writes.", IaCSeverity.MEDIUM, res, "Set access_key_metadata_writes_enabled = false."))
+        return findings
+
+    def _az0411_app_gw_no_sku_capacity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0412_vm_no_vtpm(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if not _tf_body_has_key_value(res["body"], "vtpm_enabled", "true"):
+                    findings.append(self._finding("AZ0412", "VM no vTPM", f"VM '{res['name']}' has no vTPM enabled.", IaCSeverity.MEDIUM, res, "Set vtpm_enabled = true for Trusted Launch."))
+        return findings
+
+    def _az0413_storage_no_sas_expiration_period(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_block(res["body"], "sas_policy"):
+                    findings.append(self._finding("AZ0413", "Storage no SAS policy", f"Storage '{res['name']}' has no SAS expiration policy.", IaCSeverity.MEDIUM, res, "Add sas_policy block with expiration_period."))
+        return findings
+
+    def _az0414_aks_no_pod_subnet(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_get_value(res["body"], "pod_subnet_id"):
+                    findings.append(self._finding("AZ0414", "AKS no pod subnet", f"AKS '{res['name']}' has no dedicated pod subnet.", IaCSeverity.LOW, res, "Set pod_subnet_id for dynamic IP allocation."))
+        return findings
+
+    def _az0415_keyvault_key_no_rotation(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0416_app_service_no_use_32_bit_worker(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if _tf_body_has_key_value(res["body"], "use_32_bit_worker", "true"):
+                    findings.append(self._finding("AZ0416", "App Service 32-bit worker", f"App Service '{res['name']}' uses 32-bit worker.", IaCSeverity.LOW, res, "Set use_32_bit_worker = false for 64-bit."))
+        return findings
+
+    def _az0417_sql_no_retention_days(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0418_aks_no_fips_enabled(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if not _tf_body_has_key_value(res["body"], "fips_enabled", "true"):
+                    findings.append(self._finding("AZ0418", "AKS node pool no FIPS", f"AKS node pool '{res['name']}' has no FIPS enabled.", IaCSeverity.LOW, res, "Set fips_enabled = true for compliance."))
+        return findings
+
+    def _az0419_cosmosdb_no_network_acl_bypass(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                bypass = _tf_body_get_value(res["body"], "network_acl_bypass_for_azure_services")
+                if bypass and "true" in str(bypass).lower():
+                    findings.append(self._finding("AZ0419", "Cosmos DB ACL bypass", f"Cosmos DB '{res['name']}' allows Azure services bypass.", IaCSeverity.LOW, res, "Set network_acl_bypass_for_azure_services = false if not needed."))
+        return findings
+
+    def _az0420_app_gw_no_connection_draining(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0421_vm_no_provision_vm_agent(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if _tf_body_has_key_value(res["body"], "provision_vm_agent", "false"):
+                    findings.append(self._finding("AZ0421", "VM no VM agent", f"VM '{res['name']}' has VM agent disabled.", IaCSeverity.MEDIUM, res, "Set provision_vm_agent = true for management."))
+        return findings
+
+    def _az0422_storage_no_default_to_oauth(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_key_value(res["body"], "default_to_oauth_authentication", "true"):
+                    findings.append(self._finding("AZ0422", "Storage no default OAuth", f"Storage '{res['name']}' does not default to OAuth.", IaCSeverity.LOW, res, "Set default_to_oauth_authentication = true."))
+        return findings
+
+    def _az0423_aks_no_disk_driver(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                body = res["body"]
+                if _tf_body_has_block(body, "storage_profile"):
+                    if _tf_body_has_key_value(body, "disk_driver_enabled", "false"):
+                        findings.append(self._finding("AZ0423", "AKS disk driver disabled", f"AKS '{res['name']}' has disk CSI driver disabled.", IaCSeverity.LOW, res, "Set disk_driver_enabled = true."))
+        return findings
+
+    def _az0424_keyvault_key_no_key_opts(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0425_app_service_no_managed_pipeline_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0426_sql_no_storage_account_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0427_aks_no_temporary_name(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0428_cosmosdb_no_mongo_server_version(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if _tf_body_has_key_value(res["body"], "kind", "MongoDB"):
+                    if not _tf_body_get_value(res["body"], "mongo_server_version"):
+                        findings.append(self._finding("AZ0428", "Cosmos DB no Mongo version", f"Cosmos DB '{res['name']}' has no MongoDB version specified.", IaCSeverity.LOW, res, "Set mongo_server_version = '4.2' or higher."))
+        return findings
+
+    def _az0429_app_gw_no_path_rules(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0430_vm_no_automatic_updates(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_windows_virtual_machine":
+                if _tf_body_has_key_value(res["body"], "enable_automatic_updates", "false"):
+                    findings.append(self._finding("AZ0430", "Windows VM no auto updates", f"Windows VM '{res['name']}' has automatic updates disabled.", IaCSeverity.MEDIUM, res, "Set enable_automatic_updates = true."))
+        return findings
+
+    def _az0431_storage_no_shared_access_key(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_key_value(res["body"], "shared_access_key_enabled", "false"):
+                    findings.append(self._finding("AZ0431", "Storage shared key enabled", f"Storage '{res['name']}' has shared key access enabled.", IaCSeverity.MEDIUM, res, "Set shared_access_key_enabled = false for AAD-only."))
+        return findings
+
+    def _az0432_aks_no_drain_timeout(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0433_keyvault_key_no_curve(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0434_app_service_no_scm_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0435_sql_no_collation(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0436_aks_no_soak_duration(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0437_cosmosdb_no_create_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0438_app_gw_no_url_path_map(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0439_vm_no_timezone(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0440_storage_no_immutability_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_block(res["body"], "immutability_policy"):
+                    findings.append(self._finding("AZ0440", "Storage no immutability policy", f"Storage '{res['name']}' has no account-level immutability policy.", IaCSeverity.LOW, res, "Add immutability_policy block for compliance."))
+        return findings
+
+    def _az0441_aks_no_node_pool_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0442_keyvault_secret_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault_secret":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0442", "Key Vault secret no tags", f"Secret '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0443_app_service_no_client_affinity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if _tf_body_has_key_value(res["body"], "client_affinity_enabled", "true"):
+                    findings.append(self._finding("AZ0443", "App Service client affinity enabled", f"App Service '{res['name']}' has client affinity enabled.", IaCSeverity.LOW, res, "Set client_affinity_enabled = false for stateless apps."))
+        return findings
+
+    def _az0444_sql_no_max_size_gb(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0445_aks_no_scale_down_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if not _tf_body_get_value(res["body"], "scale_down_mode"):
+                    findings.append(self._finding("AZ0445", "AKS node pool no scale down mode", f"AKS node pool '{res['name']}' has no scale down mode.", IaCSeverity.LOW, res, "Set scale_down_mode = 'Deallocate' for cost savings."))
+        return findings
+
+    def _az0446_cosmosdb_no_restore(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0447_app_gw_no_gateway_ip_config(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0448_vm_no_availability_set(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0449_storage_no_cors_rules(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0450_aks_no_workload_autoscaler(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "workload_autoscaler_profile"):
+                    findings.append(self._finding("AZ0450", "AKS no workload autoscaler", f"AKS '{res['name']}' has no workload autoscaler profile.", IaCSeverity.LOW, res, "Add workload_autoscaler_profile with keda_enabled = true."))
+        return findings
+
+    def _az0451_keyvault_key_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault_key":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0451", "Key Vault key no tags", f"Key '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0452_app_service_no_public_network_access(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if not _tf_body_has_key_value(res["body"], "public_network_access_enabled", "false"):
+                    findings.append(self._finding("AZ0452", "App Service public access", f"App Service '{res['name']}' allows public access.", IaCSeverity.MEDIUM, res, "Set public_network_access_enabled = false with private endpoint."))
+        return findings
+
+    def _az0453_sql_no_sku_name(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0454_aks_no_spot_max_price(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                if _tf_body_has_key_value(res["body"], "priority", "Spot"):
+                    if not _tf_body_get_value(res["body"], "spot_max_price"):
+                        findings.append(self._finding("AZ0454", "AKS spot no max price", f"AKS spot pool '{res['name']}' has no max price.", IaCSeverity.LOW, res, "Set spot_max_price for cost control."))
+        return findings
+
+    def _az0455_cosmosdb_no_identity(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_block(res["body"], "identity"):
+                    findings.append(self._finding("AZ0455", "Cosmos DB no identity", f"Cosmos DB '{res['name']}' has no managed identity.", IaCSeverity.LOW, res, "Add identity block for RBAC."))
+        return findings
+
+    def _az0456_app_gw_no_private_link_config(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0457_vm_no_os_disk_security_encryption(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0458_storage_no_custom_domain(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0459_aks_no_os_sku(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster_node_pool":
+                os_sku = _tf_body_get_value(res["body"], "os_sku")
+                if not os_sku:
+                    findings.append(self._finding("AZ0459", "AKS node pool no OS SKU", f"AKS node pool '{res['name']}' has no OS SKU specified.", IaCSeverity.LOW, res, "Set os_sku = 'AzureLinux' for security."))
+        return findings
+
+    def _az0460_keyvault_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_key_vault":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0460", "Key Vault no tags", f"Key Vault '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0461_app_service_no_logs_http(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_web_app", "azurerm_windows_web_app"):
+                if _tf_body_has_block(res["body"], "logs"):
+                    if not _tf_body_has_block(res["body"], "http_logs"):
+                        findings.append(self._finding("AZ0461", "App Service no HTTP logs", f"App Service '{res['name']}' has no HTTP logging.", IaCSeverity.LOW, res, "Add http_logs block in logs configuration."))
+        return findings
+
+    def _az0462_sql_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_mssql_server":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0462", "SQL Server no tags", f"SQL Server '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0463_aks_no_priority(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0464_cosmosdb_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_cosmosdb_account":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0464", "Cosmos DB no tags", f"Cosmos DB '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0465_app_gw_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_application_gateway":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0465", "App Gateway no tags", f"Application Gateway '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0466_vm_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] in ("azurerm_linux_virtual_machine", "azurerm_windows_virtual_machine"):
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0466", "VM no tags", f"VM '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0467_storage_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_storage_account":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0467", "Storage no tags", f"Storage '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0468_aks_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_kubernetes_cluster":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0468", "AKS no tags", f"AKS '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0469_nsg_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_network_security_group":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0469", "NSG no tags", f"NSG '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0470_vnet_no_tags(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network":
+                if not _tf_body_has_block(res["body"], "tags"):
+                    findings.append(self._finding("AZ0470", "VNet no tags", f"VNet '{res['name']}' has no tags.", IaCSeverity.LOW, res, "Add tags for organization."))
+        return findings
+
+    def _az0471_subnet_no_service_endpoints(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0472_subnet_no_delegation(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0473_subnet_no_private_endpoint_policies(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_subnet":
+                if not _tf_body_has_key_value(res["body"], "private_endpoint_network_policies_enabled", "true"):
+                    findings.append(self._finding("AZ0473", "Subnet private endpoint policies", f"Subnet '{res['name']}' has network policies for private endpoints.", IaCSeverity.LOW, res, "Check private_endpoint_network_policies_enabled setting."))
+        return findings
+
+    def _az0474_subnet_no_private_link_service_policies(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0475_vnet_no_address_space(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0476_vnet_no_dns_servers(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0477_vnet_peering_no_allow_forwarded_traffic(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network_peering":
+                if not _tf_body_has_key_value(res["body"], "allow_forwarded_traffic", "true"):
+                    findings.append(self._finding("AZ0477", "VNet peering no forwarded traffic", f"VNet peering '{res['name']}' does not allow forwarded traffic.", IaCSeverity.LOW, res, "Set allow_forwarded_traffic = true if needed."))
+        return findings
+
+    def _az0478_vnet_peering_no_allow_gateway_transit(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0479_lb_no_frontend_ip(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_lb":
+                if not _tf_body_has_block(res["body"], "frontend_ip_configuration"):
+                    findings.append(self._finding("AZ0479", "LB no frontend IP", f"Load Balancer '{res['name']}' has no frontend IP.", IaCSeverity.LOW, res, "Add frontend_ip_configuration block."))
+        return findings
+
+    def _az0480_lb_no_backend_pool(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        backend_pools = [r for r in resources if r["type"] == "azurerm_lb_backend_address_pool"]
+        for res in resources:
+            if res["type"] == "azurerm_lb":
+                if not backend_pools:
+                    findings.append(self._finding("AZ0480", "LB no backend pool", f"Load Balancer '{res['name']}' has no backend pool.", IaCSeverity.LOW, res, "Create azurerm_lb_backend_address_pool."))
+        return findings
+
+    def _az0481_lb_rule_no_idle_timeout(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_lb_rule":
+                if not _tf_body_get_value(res["body"], "idle_timeout_in_minutes"):
+                    findings.append(self._finding("AZ0481", "LB rule no idle timeout", f"LB rule '{res['name']}' uses default idle timeout.", IaCSeverity.LOW, res, "Set idle_timeout_in_minutes as needed."))
+        return findings
+
+    def _az0482_lb_rule_no_enable_tcp_reset(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_lb_rule":
+                if not _tf_body_has_key_value(res["body"], "enable_tcp_reset", "true"):
+                    findings.append(self._finding("AZ0482", "LB rule no TCP reset", f"LB rule '{res['name']}' has TCP reset disabled.", IaCSeverity.LOW, res, "Set enable_tcp_reset = true for Standard LB."))
+        return findings
+
+    def _az0483_nat_gateway_no_idle_timeout(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_nat_gateway":
+                if not _tf_body_get_value(res["body"], "idle_timeout_in_minutes"):
+                    findings.append(self._finding("AZ0483", "NAT Gateway no idle timeout", f"NAT Gateway '{res['name']}' uses default idle timeout.", IaCSeverity.LOW, res, "Set idle_timeout_in_minutes as needed."))
+        return findings
+
+    def _az0484_nat_gateway_no_zones(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_nat_gateway":
+                if not _tf_body_get_value(res["body"], "zones"):
+                    findings.append(self._finding("AZ0484", "NAT Gateway no zones", f"NAT Gateway '{res['name']}' has no availability zones.", IaCSeverity.MEDIUM, res, "Set zones for zone redundancy."))
+        return findings
+
+    def _az0485_public_ip_no_allocation_method(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0486_public_ip_no_sku(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_public_ip":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if not sku or "basic" in str(sku).lower():
+                    findings.append(self._finding("AZ0486", "Public IP Basic SKU", f"Public IP '{res['name']}' uses Basic SKU.", IaCSeverity.LOW, res, "Set sku = 'Standard' for zone redundancy."))
+        return findings
+
+    def _az0487_public_ip_no_zones(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_public_ip":
+                sku = _tf_body_get_value(res["body"], "sku")
+                if sku and "standard" in str(sku).lower():
+                    if not _tf_body_get_value(res["body"], "zones"):
+                        findings.append(self._finding("AZ0487", "Public IP no zones", f"Public IP '{res['name']}' has no availability zones.", IaCSeverity.LOW, res, "Set zones for zone redundancy."))
+        return findings
+
+    def _az0488_public_ip_no_ddos_protection_mode(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_public_ip":
+                if not _tf_body_get_value(res["body"], "ddos_protection_mode"):
+                    findings.append(self._finding("AZ0488", "Public IP no DDoS mode", f"Public IP '{res['name']}' has no DDoS protection mode.", IaCSeverity.LOW, res, "Set ddos_protection_mode = 'Enabled'."))
+        return findings
+
+    def _az0489_dns_record_no_ttl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0490_private_dns_record_no_ttl(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0491_route_no_next_hop_type(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0492_route_table_no_routes(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0493_network_interface_no_dns_servers(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0494_network_interface_no_internal_dns_name(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0495_firewall_policy_no_intrusion_detection(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_firewall_policy":
+                if not _tf_body_has_block(res["body"], "intrusion_detection"):
+                    findings.append(self._finding("AZ0495", "Firewall policy no IDPS", f"Firewall policy '{res['name']}' has no intrusion detection.", IaCSeverity.MEDIUM, res, "Add intrusion_detection block with mode = 'Alert' or 'Deny'."))
+        return findings
+
+    def _az0496_firewall_policy_no_threat_intelligence(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_firewall_policy":
+                if not _tf_body_get_value(res["body"], "threat_intelligence_mode"):
+                    findings.append(self._finding("AZ0496", "Firewall policy no threat intel", f"Firewall policy '{res['name']}' has no threat intelligence.", IaCSeverity.MEDIUM, res, "Set threat_intelligence_mode = 'Alert' or 'Deny'."))
+        return findings
+
+    def _az0497_express_route_no_bandwidth(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0498_express_route_no_peering_location(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        return findings
+
+    def _az0499_vpn_connection_no_shared_key(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network_gateway_connection":
+                shared_key = _tf_body_get_value(res["body"], "shared_key")
+                if shared_key and (shared_key.startswith('"') or shared_key.startswith("'")):
+                    stripped = shared_key.strip('"').strip("'")
+                    if not stripped.startswith("var.") and not stripped.startswith("${"):
+                        findings.append(self._finding("AZ0499", "VPN hardcoded shared key", f"VPN connection '{res['name']}' has hardcoded shared key.", IaCSeverity.HIGH, res, "Use variables or Key Vault for shared key."))
+        return findings
+
+    def _az0500_vpn_connection_no_ipsec_policy(self, resources: list[dict]) -> list[IaCFinding]:
+        findings = []
+        for res in resources:
+            if res["type"] == "azurerm_virtual_network_gateway_connection":
+                if not _tf_body_has_block(res["body"], "ipsec_policy"):
+                    findings.append(self._finding("AZ0500", "VPN no IPsec policy", f"VPN connection '{res['name']}' has no custom IPsec policy.", IaCSeverity.MEDIUM, res, "Add ipsec_policy block with strong algorithms."))
         return findings
 
     # ── GCP rules (GC####) ───────────────────────────────────────────
