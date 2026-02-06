@@ -1291,7 +1291,7 @@ def fix(
     autofix_engine = AutoFixEngine()
 
     # Generate fix suggestions
-    fix_result = autofix_engine.suggest_fixes(all_issues, path)
+    fix_result = autofix_engine.suggest_fixes(all_issues)
 
     # Match issues with remediations
     issues_with_fixes = []
