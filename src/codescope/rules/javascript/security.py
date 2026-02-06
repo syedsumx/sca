@@ -268,3 +268,406 @@ class JSSQLInjectionRule(Rule):
                     break
 
         return result
+
+
+@RuleRegistry.register
+class JSNoSQLInjectionRule(Rule):
+    """Detect NoSQL injection vulnerabilities."""
+
+    id = "javascript:S5334"
+    name = "NoSQL Injection"
+    description = "NoSQL queries should use safe query construction to prevent injection"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [943]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "nosql", "injection", "mongodb", "owasp-top10"]
+    languages = ["javascript", "typescript"]
+
+    NOSQL_PATTERNS = [
+        r'\.find\s*\(\s*\{[^}]*\$where',  # MongoDB $where operator
+        r'\.findOne\s*\(\s*\{[^}]*\$where',
+        r'\$where\s*:\s*[\'"`]',  # $where with string expression
+        r'\.find\s*\(\s*JSON\.parse\s*\(',  # Parsing user input directly
+        r'\.aggregate\s*\(\s*JSON\.parse\s*\(',
+        r'\{\s*\$regex\s*:\s*[a-zA-Z_]+\s*\}',  # User-controlled regex
+        r'new\s+RegExp\s*\([^)]*req\.',  # User-controlled RegExp
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for NoSQL injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.NOSQL_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential NoSQL injection - validate and sanitize user input before query construction",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSPathTraversalRule(Rule):
+    """Detect path traversal vulnerabilities."""
+
+    id = "javascript:S2083"
+    name = "Path Traversal"
+    description = "File paths should be validated to prevent directory traversal attacks"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [22, 73]
+    owasp_categories = ["A01:2021"]
+    effort_minutes = 30
+    tags = ["security", "path-traversal", "lfi", "owasp-top10"]
+    languages = ["javascript", "typescript"]
+
+    PATH_PATTERNS = [
+        r'fs\.(readFile|writeFile|readdir|unlink|stat|access|mkdir|rmdir)\s*\([^)]*req\.',
+        r'fs\.(readFile|writeFile|readdir|unlink|stat|access|mkdir|rmdir)Sync\s*\([^)]*req\.',
+        r'path\.join\s*\([^)]*req\.',
+        r'path\.resolve\s*\([^)]*req\.',
+        r'require\s*\(\s*[`\'"][^`\'"]*\+',  # Dynamic require with concatenation
+        r'import\s*\([^)]*\+',  # Dynamic import with concatenation
+        r'sendFile\s*\([^)]*req\.',  # Express sendFile with user input
+        r'res\.download\s*\([^)]*req\.',  # Express download with user input
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for path traversal patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.PATH_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential path traversal - validate and sanitize file paths from user input",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSReDoSRule(Rule):
+    """Detect Regular Expression Denial of Service vulnerabilities."""
+
+    id = "javascript:S5852"
+    name = "ReDoS (Regex DoS)"
+    description = "Regular expressions should not be vulnerable to catastrophic backtracking"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [1333, 400]
+    owasp_categories = ["A06:2021"]
+    effort_minutes = 45
+    tags = ["security", "regex", "dos", "performance"]
+    languages = ["javascript", "typescript"]
+
+    # Patterns that indicate potentially dangerous regex
+    REDOS_PATTERNS = [
+        r'new\s+RegExp\s*\([^)]*req\.',  # User-controlled regex
+        r'/\([^)]*\+\)[^/]*\+/',  # Nested quantifiers like (a+)+
+        r'/\([^)]*\*\)[^/]*\*/',  # Nested quantifiers like (a*)*
+        r'/\([^)]*\?\)[^/]*\+/',  # Mixed nested quantifiers
+        r'/\[[^\]]+\]\+\[[^\]]+\]\+/',  # Overlapping character classes with quantifiers
+        r'/\([^|)]+\|[^|)]+\)\+/',  # Alternation with quantifier
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for ReDoS patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            # Skip comments
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue
+
+            for pattern in self.REDOS_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential ReDoS vulnerability - regex may cause catastrophic backtracking",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSOpenRedirectRule(Rule):
+    """Detect open redirect vulnerabilities."""
+
+    id = "javascript:S5146"
+    name = "Open Redirect"
+    description = "URLs used for redirects should be validated to prevent phishing attacks"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [601]
+    owasp_categories = ["A01:2021"]
+    effort_minutes = 20
+    tags = ["security", "redirect", "phishing"]
+    languages = ["javascript", "typescript"]
+
+    REDIRECT_PATTERNS = [
+        r'res\.redirect\s*\([^)]*req\.(query|params|body)',
+        r'location\.href\s*=\s*[^;]*(req\.|params|query)',
+        r'window\.location\s*=\s*[^;]*(req\.|params|query)',
+        r'location\.replace\s*\([^)]*req\.',
+        r'location\.assign\s*\([^)]*req\.',
+        r'\.redirect\s*\(\s*302\s*,\s*[^)]*req\.',
+        r'header\s*\(\s*[\'"]Location[\'"][^)]*req\.',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for open redirect patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.REDIRECT_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential open redirect - validate redirect URLs against an allowlist",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSInsecureCookieRule(Rule):
+    """Detect insecure cookie settings."""
+
+    id = "javascript:S2092"
+    name = "Insecure Cookie"
+    description = "Cookies should be created with security attributes (Secure, HttpOnly, SameSite)"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [614, 1004, 1275]
+    owasp_categories = ["A05:2021"]
+    effort_minutes = 10
+    tags = ["security", "cookie", "session"]
+    languages = ["javascript", "typescript"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure cookie settings."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+        source = file.source
+
+        # Check for cookie setting patterns
+        cookie_patterns = [
+            (r'res\.cookie\s*\([^)]+\)', 'express'),
+            (r'document\.cookie\s*=', 'browser'),
+            (r'cookies\.set\s*\([^)]+\)', 'koa'),
+            (r'\.setCookie\s*\([^)]+\)', 'generic'),
+        ]
+
+        for i, line in enumerate(lines, 1):
+            for pattern, cookie_type in cookie_patterns:
+                match = re.search(pattern, line)
+                if match:
+                    # Check if security options are missing
+                    issues_found = []
+
+                    # For express-style cookies, check options object
+                    if 'secure' not in line.lower() and 'httponly' not in line.lower():
+                        if 'httpOnly' not in line and 'secure' not in line:
+                            issues_found.append("missing Secure and HttpOnly flags")
+
+                    # For document.cookie, these flags can't be set without path
+                    if cookie_type == 'browser' and 'Secure' not in line:
+                        issues_found.append("browser cookie may be missing Secure flag")
+
+                    if issues_found:
+                        result.issues.append(
+                            self.create_issue(
+                                message=f"Cookie may be insecure - {'; '.join(issues_found)}",
+                                file_path=file.path,
+                                start_line=i,
+                                snippet=self.get_snippet(file, i),
+                            )
+                        )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSInsecureRandomnessRule(Rule):
+    """Detect use of insecure random number generation."""
+
+    id = "javascript:S2245"
+    name = "Insecure Randomness"
+    description = "Math.random() should not be used for security-sensitive operations"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [338, 330]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 15
+    tags = ["security", "cryptography", "random"]
+    languages = ["javascript", "typescript"]
+
+    # Contexts where Math.random is dangerous
+    SECURITY_CONTEXT_PATTERNS = [
+        r'(token|secret|key|password|salt|nonce|iv|csrf|session)',
+        r'(auth|crypto|secure|encrypt|hash)',
+        r'(uuid|guid|id).*random',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure randomness usage."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            if 'Math.random' in line:
+                # Check if used in security-sensitive context
+                line_lower = line.lower()
+                is_security_context = any(
+                    re.search(pattern, line_lower)
+                    for pattern in self.SECURITY_CONTEXT_PATTERNS
+                )
+
+                # Also check surrounding lines for context
+                context_start = max(0, i - 3)
+                context_end = min(len(lines), i + 2)
+                context = ' '.join(lines[context_start:context_end]).lower()
+
+                if is_security_context or any(
+                    re.search(pattern, context)
+                    for pattern in self.SECURITY_CONTEXT_PATTERNS
+                ):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Math.random() used in security-sensitive context - use crypto.randomBytes() instead",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+
+        return result
+
+
+@RuleRegistry.register
+class JSSSRFRule(Rule):
+    """Detect Server-Side Request Forgery vulnerabilities."""
+
+    id = "javascript:S5144"
+    name = "SSRF (Server-Side Request Forgery)"
+    description = "URLs for outbound requests should be validated to prevent SSRF attacks"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [918]
+    owasp_categories = ["A10:2021"]
+    effort_minutes = 30
+    tags = ["security", "ssrf", "owasp-top10"]
+    languages = ["javascript", "typescript"]
+
+    SSRF_PATTERNS = [
+        r'fetch\s*\([^)]*req\.(query|params|body)',
+        r'axios\.(get|post|put|delete|patch)\s*\([^)]*req\.',
+        r'axios\s*\(\s*\{[^}]*url[^}]*req\.',
+        r'http\.get\s*\([^)]*req\.',
+        r'https\.get\s*\([^)]*req\.',
+        r'request\s*\([^)]*req\.',
+        r'got\s*\([^)]*req\.',
+        r'superagent\.(get|post)\s*\([^)]*req\.',
+        r'needle\.(get|post)\s*\([^)]*req\.',
+        r'urllib\.request\s*\([^)]*req\.',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for SSRF patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.SSRF_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential SSRF - validate and allowlist URLs from user input before making requests",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSWeakCryptoRule(Rule):
+    """Detect use of weak cryptographic algorithms."""
+
+    id = "javascript:S5547"
+    name = "Weak Cryptography"
+    description = "Weak cryptographic algorithms should not be used"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [327, 328]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 30
+    tags = ["security", "cryptography"]
+    languages = ["javascript", "typescript"]
+
+    WEAK_CRYPTO_PATTERNS = [
+        (r'createHash\s*\(\s*[\'"]md5[\'"]\s*\)', "MD5 is cryptographically broken"),
+        (r'createHash\s*\(\s*[\'"]sha1[\'"]\s*\)', "SHA1 is deprecated for security use"),
+        (r'createCipher\s*\(\s*[\'"]des[\'"', "DES is insecure, use AES instead"),
+        (r'createCipher\s*\(\s*[\'"]rc4[\'"', "RC4 is insecure"),
+        (r'createCipher\s*\(\s*[\'"]blowfish[\'"', "Blowfish has known weaknesses"),
+        (r'CryptoJS\.MD5\s*\(', "MD5 is cryptographically broken"),
+        (r'CryptoJS\.SHA1\s*\(', "SHA1 is deprecated for security use"),
+        (r'CryptoJS\.DES\s*\.', "DES is insecure, use AES instead"),
+        (r'CryptoJS\.RC4\s*\.', "RC4 is insecure"),
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for weak cryptographic algorithms."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern, message in self.WEAK_CRYPTO_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message=f"Weak cryptography detected - {message}",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result

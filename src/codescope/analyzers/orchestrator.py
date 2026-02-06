@@ -1,7 +1,10 @@
 """Analysis orchestrator - coordinates the analysis process."""
 
+import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 
 from codescope.core.config import Config, load_config
@@ -21,16 +24,24 @@ class AnalysisOrchestrator:
         self,
         config: Config | None = None,
         progress_callback: Callable[[str, int, int], None] | None = None,
+        parallel: bool = True,
+        max_workers: int | None = None,
     ):
         """Initialize the orchestrator.
 
         Args:
             config: Analysis configuration. Loads from file if not provided.
             progress_callback: Optional callback(file_path, current, total) for progress.
+            parallel: Enable parallel file analysis (default: True).
+            max_workers: Maximum number of worker threads. Defaults to CPU count.
         """
         self.config = config or load_config()
         self.progress_callback = progress_callback
         self.metrics_calculator = MetricsCalculator()
+        self.parallel = parallel
+        self.max_workers = max_workers or min(32, (os.cpu_count() or 1) + 4)
+        self._progress_lock = Lock()
+        self._files_processed = 0
 
     def analyze(self, path: Path) -> AnalysisResults:
         """Run analysis on a path (file or directory).
@@ -60,14 +71,22 @@ class AnalysisOrchestrator:
                 files_to_analyze = context.get_files_to_analyze()
 
             total_files = len(files_to_analyze)
+            self._files_processed = 0
 
-            for i, file_path in enumerate(files_to_analyze):
-                if self.progress_callback:
-                    self.progress_callback(str(file_path), i + 1, total_files)
+            if self.parallel and total_files > 1:
+                # Parallel analysis for multiple files
+                results.files = self._analyze_files_parallel(
+                    files_to_analyze, context, total_files
+                )
+            else:
+                # Sequential analysis for single file or when parallel is disabled
+                for i, file_path in enumerate(files_to_analyze):
+                    if self.progress_callback:
+                        self.progress_callback(str(file_path), i + 1, total_files)
 
-                file_analysis = self._analyze_file(file_path, context)
-                if file_analysis:
-                    results.files.append(file_analysis)
+                    file_analysis = self._analyze_file(file_path, context)
+                    if file_analysis:
+                        results.files.append(file_analysis)
 
             # Calculate aggregate metrics
             results.calculate_metrics()
@@ -79,6 +98,55 @@ class AnalysisOrchestrator:
 
         results.completed_at = datetime.now()
         return results
+
+    def _analyze_files_parallel(
+        self,
+        files: list[Path],
+        context: AnalysisContext,
+        total_files: int,
+    ) -> list[FileAnalysis]:
+        """Analyze multiple files in parallel.
+
+        Args:
+            files: List of file paths to analyze.
+            context: Analysis context.
+            total_files: Total number of files for progress tracking.
+
+        Returns:
+            List of FileAnalysis results.
+        """
+        file_analyses: list[FileAnalysis] = []
+
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all files for analysis
+            future_to_file = {
+                executor.submit(self._analyze_file, file_path, context): file_path
+                for file_path in files
+            }
+
+            # Collect results as they complete
+            for future in as_completed(future_to_file):
+                file_path = future_to_file[future]
+
+                # Update progress
+                with self._progress_lock:
+                    self._files_processed += 1
+                    if self.progress_callback:
+                        self.progress_callback(
+                            str(file_path),
+                            self._files_processed,
+                            total_files,
+                        )
+
+                try:
+                    file_analysis = future.result()
+                    if file_analysis:
+                        file_analyses.append(file_analysis)
+                except Exception:
+                    # Individual file analysis failed, continue with others
+                    pass
+
+        return file_analyses
 
     def _analyze_file(self, file_path: Path, context: AnalysisContext) -> FileAnalysis | None:
         """Analyze a single file.
@@ -139,6 +207,8 @@ def analyze_path(
     path: str | Path,
     config: Config | None = None,
     progress_callback: Callable[[str, int, int], None] | None = None,
+    parallel: bool = True,
+    max_workers: int | None = None,
 ) -> AnalysisResults:
     """Convenience function to analyze a path.
 
@@ -146,9 +216,13 @@ def analyze_path(
         path: Path to analyze (file or directory).
         config: Optional configuration.
         progress_callback: Optional progress callback.
+        parallel: Enable parallel file analysis (default: True).
+        max_workers: Maximum number of worker threads.
 
     Returns:
         AnalysisResults with findings.
     """
-    orchestrator = AnalysisOrchestrator(config, progress_callback)
+    orchestrator = AnalysisOrchestrator(
+        config, progress_callback, parallel=parallel, max_workers=max_workers
+    )
     return orchestrator.analyze(Path(path))

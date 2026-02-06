@@ -860,6 +860,364 @@ def ai_vet(
 
 
 @app.command()
+def secrets(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for secrets.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    scan_git_history: bool = typer.Option(
+        False,
+        "--git-history",
+        "-g",
+        help="Also scan git commit history.",
+    ),
+    max_commits: int = typer.Option(
+        50,
+        "--max-commits",
+        help="Maximum commits to scan in git history.",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Fail if secrets of this severity or higher exist (critical, major, minor).",
+    ),
+) -> None:
+    """Scan for hardcoded secrets, API keys, tokens, and credentials."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.analyzers.secrets.scanner import SecretScanner
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Secret Scanner")
+    console.print()
+
+    scanner = SecretScanner()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scanning for secrets...", total=None)
+        findings = scanner.scan_directory(path)
+
+        if scan_git_history:
+            progress.update(task, description="Scanning git history...")
+            git_findings = scanner.scan_git_history(path, max_commits=max_commits)
+            findings.extend(git_findings)
+
+        progress.update(task, description="Scan complete")
+
+    # Aggregate by severity
+    by_severity: dict[str, int] = {}
+    by_rule: dict[str, int] = {}
+    for f in findings:
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+        by_rule[f.rule_name] = by_rule.get(f.rule_name, 0) + 1
+
+    if format == "json":
+        data = {
+            "total": len(findings),
+            "by_severity": by_severity,
+            "by_rule": by_rule,
+            "findings": [f.to_dict() for f in findings],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        severity_color = {
+            "CRITICAL": "red bold",
+            "MAJOR": "yellow",
+            "MINOR": "blue",
+            "INFO": "dim",
+        }
+
+        # Summary banner
+        total = len(findings)
+        critical = by_severity.get("CRITICAL", 0)
+        major = by_severity.get("MAJOR", 0)
+
+        status_color = "red" if critical > 0 else "yellow" if major > 0 else "green"
+        console.print(Panel(
+            f"[bold {status_color}]Secrets Found: {total}[/bold {status_color}]  |  "
+            f"[red]Critical: {critical}[/red]  |  "
+            f"[yellow]Major: {major}[/yellow]",
+            title="Secret Scan Results",
+        ))
+        console.print()
+
+        if findings:
+            # Summary by type
+            summary_table = Table(title="Findings by Type")
+            summary_table.add_column("Secret Type", style="cyan")
+            summary_table.add_column("Count", style="white", justify="right")
+
+            for rule_name, count in sorted(by_rule.items(), key=lambda x: -x[1]):
+                summary_table.add_row(rule_name, str(count))
+
+            console.print(summary_table)
+            console.print()
+
+            # Detailed findings
+            findings_table = Table(title="Secret Findings")
+            findings_table.add_column("#", style="dim", width=4)
+            findings_table.add_column("Severity", width=10)
+            findings_table.add_column("Type", style="cyan", width=25)
+            findings_table.add_column("File", style="white", width=40)
+            findings_table.add_column("Line", style="dim", width=6)
+
+            for idx, f in enumerate(findings[:50], 1):
+                sev_color = severity_color.get(f.severity, "white")
+                fpath = f.file
+                if len(fpath) > 40:
+                    fpath = "..." + fpath[-37:]
+                findings_table.add_row(
+                    str(idx),
+                    f"[{sev_color}]{f.severity}[/{sev_color}]",
+                    f.rule_name,
+                    fpath,
+                    str(f.line),
+                )
+
+            console.print(findings_table)
+
+            if len(findings) > 50:
+                console.print(f"\n[dim]... and {len(findings) - 50} more findings[/dim]")
+        else:
+            console.print("[green]No secrets found![/green]")
+
+        if output:
+            data = {
+                "total": len(findings),
+                "by_severity": by_severity,
+                "by_rule": by_rule,
+                "findings": [f.to_dict() for f in findings],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"\nDetailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on:
+        severity_levels = ["minor", "major", "critical"]
+        fail_level = fail_on.lower()
+        if fail_level in severity_levels:
+            fail_index = severity_levels.index(fail_level)
+            counts = [
+                by_severity.get("MINOR", 0),
+                by_severity.get("MAJOR", 0),
+                by_severity.get("CRITICAL", 0),
+            ]
+            if any(counts[fail_index:]):
+                console.print(f"[red]FAILED: Found secrets of severity {fail_on} or higher[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: No secrets of severity {fail_on} or higher[/green]")
+
+
+@app.command()
+def iac(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for IaC files.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    platform: Optional[str] = typer.Option(
+        None,
+        "--platform",
+        "-p",
+        help="Filter by platform: terraform, cloudformation, kubernetes, helm, arm, bicep",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Fail if findings of this severity or higher exist (critical, high, medium, low).",
+    ),
+) -> None:
+    """Scan Infrastructure-as-Code for security misconfigurations."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.iac import IaCScanner
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Infrastructure-as-Code Scanner")
+    console.print()
+
+    scanner = IaCScanner()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scanning IaC files...", total=None)
+        result = scanner.scan(path)
+        progress.update(task, description="Scan complete")
+
+    findings = result.findings
+
+    # Filter by platform if specified
+    if platform:
+        platform_upper = platform.upper()
+        findings = [f for f in findings if platform_upper in f.platform.value]
+
+    # Aggregate by severity and platform
+    by_severity: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
+    for f in findings:
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+        by_platform[f.platform.value] = by_platform.get(f.platform.value, 0) + 1
+
+    if format == "json":
+        data = {
+            "total": len(findings),
+            "by_severity": by_severity,
+            "by_platform": by_platform,
+            "findings": [f.to_dict() for f in findings],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        severity_color = {
+            "CRITICAL": "red bold",
+            "HIGH": "red",
+            "MEDIUM": "yellow",
+            "LOW": "blue",
+            "INFO": "dim",
+        }
+
+        # Summary banner
+        total = len(findings)
+        critical = by_severity.get("CRITICAL", 0)
+        high = by_severity.get("HIGH", 0)
+
+        status_color = "red" if critical > 0 else "yellow" if high > 0 else "green"
+        console.print(Panel(
+            f"[bold {status_color}]IaC Findings: {total}[/bold {status_color}]  |  "
+            f"[red]Critical: {critical}[/red]  |  "
+            f"[red]High: {high}[/red]  |  "
+            f"[yellow]Medium: {by_severity.get('MEDIUM', 0)}[/yellow]",
+            title="IaC Scan Results",
+        ))
+        console.print()
+
+        if findings:
+            # Summary by platform
+            if by_platform:
+                platform_table = Table(title="Findings by Platform")
+                platform_table.add_column("Platform", style="cyan")
+                platform_table.add_column("Count", style="white", justify="right")
+
+                for plat, count in sorted(by_platform.items(), key=lambda x: -x[1]):
+                    platform_table.add_row(plat, str(count))
+
+                console.print(platform_table)
+                console.print()
+
+            # Detailed findings by severity
+            for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+                sev_findings = [f for f in findings if f.severity == severity]
+                if not sev_findings:
+                    continue
+
+                sev_color = severity_color.get(severity, "white")
+                findings_table = Table(title=f"{severity} ({len(sev_findings)})")
+                findings_table.add_column("#", style="dim", width=4)
+                findings_table.add_column("Rule ID", style="cyan", width=12)
+                findings_table.add_column("Title", width=35)
+                findings_table.add_column("File", style="white", width=35)
+                findings_table.add_column("Line", style="dim", width=6)
+
+                for idx, f in enumerate(sev_findings[:20], 1):
+                    fpath = f.file_path
+                    if len(fpath) > 35:
+                        fpath = "..." + fpath[-32:]
+                    findings_table.add_row(
+                        str(idx),
+                        f.rule_id,
+                        f.title[:35],
+                        fpath,
+                        str(f.line),
+                    )
+
+                console.print(findings_table)
+
+                if len(sev_findings) > 20:
+                    console.print(f"  [dim]... and {len(sev_findings) - 20} more {severity} findings[/dim]")
+                console.print()
+        else:
+            console.print("[green]No IaC security issues found![/green]")
+
+        if output:
+            data = {
+                "total": len(findings),
+                "by_severity": by_severity,
+                "by_platform": by_platform,
+                "findings": [f.to_dict() for f in findings],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"Detailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on:
+        severity_levels = ["low", "medium", "high", "critical"]
+        fail_level = fail_on.lower()
+        if fail_level in severity_levels:
+            fail_index = severity_levels.index(fail_level)
+            counts = [
+                by_severity.get("LOW", 0),
+                by_severity.get("MEDIUM", 0),
+                by_severity.get("HIGH", 0),
+                by_severity.get("CRITICAL", 0),
+            ]
+            if any(counts[fail_index:]):
+                console.print(f"[red]FAILED: Found IaC issues of severity {fail_on} or higher[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: No IaC issues of severity {fail_on} or higher[/green]")
+
+
+@app.command()
 def server(
     host: str = typer.Option(
         "0.0.0.0",
