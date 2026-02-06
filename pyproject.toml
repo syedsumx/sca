@@ -109,6 +109,15 @@ paths_to_mutate = "src/codescope/"
 tests_dir = "tests/"
 runner = "python -m pytest -x --tb=no -q"
 dict_synonyms = "Struct, NamedStruct"
+# Exclude test files and generated code from mutation
+paths_to_exclude = [
+    "src/codescope/cli/",
+    "src/codescope/api/app.py",
+]
+# Mutation testing configuration for CI
+# Run with: mutmut run --paths-to-mutate=src/codescope/rules
+# View results: mutmut results
+# Generate HTML report: mutmut html
 
 [tool.coverage.run]
 source = ["src/codescope"]
