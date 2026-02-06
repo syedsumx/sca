@@ -1218,6 +1218,190 @@ def iac(
 
 
 @app.command()
+def fix(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to analyze for fix suggestions.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        "-a",
+        help="Apply safe fixes automatically.",
+    ),
+    rule_id: Optional[str] = typer.Option(
+        None,
+        "--rule",
+        "-r",
+        help="Filter by specific rule ID.",
+    ),
+) -> None:
+    """Get fix recommendations and optionally auto-fix issues."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from codescope.analyzers import analyze_path as run_analysis
+    from codescope.remediation import RemediationEngine
+    from codescope.autofix import AutoFixEngine
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Fix Recommendations")
+    console.print()
+
+    # First, run analysis
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Analyzing code...", total=None)
+        results = run_analysis(path)
+        progress.update(task, description="Generating fix suggestions...")
+
+    # Collect all issues
+    all_issues = []
+    for file_analysis in results.files:
+        all_issues.extend(file_analysis.issues)
+
+    if rule_id:
+        all_issues = [i for i in all_issues if rule_id.lower() in i.rule_id.lower()]
+
+    if not all_issues:
+        console.print("[green]No issues found that need fixing![/green]")
+        return
+
+    # Get remediations
+    remediation_engine = RemediationEngine()
+    autofix_engine = AutoFixEngine()
+
+    # Generate fix suggestions
+    fix_result = autofix_engine.suggest_fixes(all_issues, path)
+
+    # Match issues with remediations
+    issues_with_fixes = []
+    for issue in all_issues:
+        remediation = remediation_engine.get(issue.rule_id)
+        suggestion = next(
+            (s for s in fix_result.suggestions if s.rule_id == issue.rule_id and s.start_line == issue.location.start_line),
+            None
+        )
+        issues_with_fixes.append({
+            "issue": issue,
+            "remediation": remediation,
+            "suggestion": suggestion,
+        })
+
+    if format == "json":
+        data = {
+            "total_issues": len(all_issues),
+            "fixable_issues": len([i for i in issues_with_fixes if i["suggestion"]]),
+            "recommendations": [
+                {
+                    "rule_id": item["issue"].rule_id,
+                    "message": item["issue"].message,
+                    "file": str(item["issue"].location.file_path),
+                    "line": item["issue"].location.start_line,
+                    "remediation": item["remediation"].to_dict() if item["remediation"] else None,
+                    "auto_fix": item["suggestion"].to_dict() if item["suggestion"] else None,
+                }
+                for item in issues_with_fixes
+            ],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        fixable_count = len([i for i in issues_with_fixes if i["suggestion"] and i["suggestion"].is_safe_to_apply])
+        has_remediation = len([i for i in issues_with_fixes if i["remediation"]])
+
+        console.print(Panel(
+            f"[bold]Issues Found: {len(all_issues)}[/bold]  |  "
+            f"[green]Auto-Fixable: {fixable_count}[/green]  |  "
+            f"[cyan]With Guidance: {has_remediation}[/cyan]",
+            title="Fix Recommendations",
+        ))
+        console.print()
+
+        # Group by severity/type for display
+        displayed = 0
+        for item in issues_with_fixes[:20]:
+            issue = item["issue"]
+            remediation = item["remediation"]
+            suggestion = item["suggestion"]
+
+            displayed += 1
+            console.print(f"[bold cyan]#{displayed}[/bold cyan] [yellow]{issue.rule_id}[/yellow] - {issue.message[:60]}")
+            console.print(f"   [dim]File:[/dim] {issue.location.file_path}:{issue.location.start_line}")
+
+            if remediation:
+                console.print(f"   [bold]Recommendation:[/bold] {remediation.title}")
+                console.print(f"   [dim]{remediation.description[:100]}...[/dim]")
+
+                if remediation.fix_example:
+                    console.print("   [bold green]Fix Example:[/bold green]")
+                    console.print(Syntax(remediation.fix_example, "python", line_numbers=False, theme="monokai"))
+
+                if remediation.references:
+                    console.print(f"   [dim]References: {', '.join(remediation.references[:2])}[/dim]")
+
+            if suggestion and suggestion.is_safe_to_apply:
+                console.print(f"   [bold green]✓ Auto-fixable[/bold green] (Confidence: {suggestion.confidence:.0%})")
+
+            console.print()
+
+        if len(issues_with_fixes) > 20:
+            console.print(f"[dim]... and {len(issues_with_fixes) - 20} more issues[/dim]")
+
+        # Apply fixes if requested
+        if apply and fixable_count > 0:
+            console.print()
+            console.print("[bold]Applying safe fixes...[/bold]")
+            apply_result = autofix_engine.apply_fixes(fix_result.suggestions, safe_only=True)
+            console.print(f"[green]Applied {apply_result.applied_count} fixes[/green]")
+            if apply_result.skipped_count > 0:
+                console.print(f"[yellow]Skipped {apply_result.skipped_count} fixes (not safe to auto-apply)[/yellow]")
+
+        if output:
+            data = {
+                "total_issues": len(all_issues),
+                "fixable_issues": fixable_count,
+                "recommendations": [
+                    {
+                        "rule_id": item["issue"].rule_id,
+                        "message": item["issue"].message,
+                        "file": str(item["issue"].location.file_path),
+                        "line": item["issue"].location.start_line,
+                        "remediation": item["remediation"].to_dict() if item["remediation"] else None,
+                        "auto_fix": item["suggestion"].to_dict() if item["suggestion"] else None,
+                    }
+                    for item in issues_with_fixes
+                ],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"\nDetailed report written to: {output}")
+
+
+@app.command()
 def server(
     host: str = typer.Option(
         "0.0.0.0",
