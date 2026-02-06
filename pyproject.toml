@@ -49,10 +49,14 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-asyncio>=0.21.0",
+    "pytest-xdist>=3.0.0",
+    "pytest-benchmark>=4.0.0",
     "black>=23.0.0",
     "ruff>=0.1.0",
     "mypy>=1.0.0",
     "pre-commit>=3.0.0",
+    "mutmut>=2.4.0",
+    "hypothesis>=6.0.0",
 ]
 api = [
     "fastapi>=0.100.0",
@@ -88,6 +92,42 @@ include = [
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "performance: marks tests as performance tests (deselect with '-m \"not performance\"')",
+    "slow: marks tests as slow running",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+]
+addopts = "-v --tb=short"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::PendingDeprecationWarning",
+]
+
+[tool.mutmut]
+paths_to_mutate = "src/codescope/"
+tests_dir = "tests/"
+runner = "python -m pytest -x --tb=no -q"
+dict_synonyms = "Struct, NamedStruct"
+
+[tool.coverage.run]
+source = ["src/codescope"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/__pycache__/*",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+    "if __name__ == .__main__.:",
+]
+show_missing = true
+fail_under = 60
 
 [tool.black]
 line-length = 100
