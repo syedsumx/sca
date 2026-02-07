@@ -12,6 +12,9 @@ from codescope.rules import csharp
 from codescope.rules import php
 from codescope.rules import ruby
 
+# Import API security rules (GraphQL, gRPC)
+from codescope.rules import api
+
 __all__ = [
     "Rule",
     "RuleResult",
