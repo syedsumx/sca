@@ -1452,5 +1452,361 @@ def server(
     )
 
 
+# ── Issue Tracker Commands ──────────────────────────────────────────────
+
+
+tracker_app = typer.Typer(
+    name="tracker",
+    help="Manage issue tracker integrations (Jira, Azure Boards).",
+)
+app.add_typer(tracker_app, name="tracker")
+
+
+@tracker_app.command(name="list")
+def tracker_list() -> None:
+    """List configured issue tracker integrations."""
+    from rich.table import Table
+
+    from codescope.integrations.issue_trackers import get_configured_trackers
+    from codescope.integrations.issue_trackers.registry import get_available_providers
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Issue Tracker Integrations")
+    console.print()
+
+    # Show available providers
+    providers = get_available_providers()
+    console.print("[dim]Available providers:[/dim]")
+    for p in providers:
+        console.print(f"  • {p['name']}")
+    console.print()
+
+    # Show configured trackers
+    trackers = get_configured_trackers()
+
+    if not trackers:
+        console.print("[yellow]No issue trackers configured.[/yellow]")
+        console.print()
+        console.print("Configure trackers using environment variables:")
+        console.print("  [cyan]Jira:[/cyan]")
+        console.print("    CODESCOPE_JIRA_URL=https://your-domain.atlassian.net")
+        console.print("    CODESCOPE_JIRA_PROJECT=PROJ")
+        console.print("    CODESCOPE_JIRA_TOKEN=your-api-token")
+        console.print("    CODESCOPE_JIRA_USERNAME=your-email@example.com")
+        console.print()
+        console.print("  [cyan]Azure Boards:[/cyan]")
+        console.print("    CODESCOPE_AZURE_BOARDS_ORGANIZATION=your-org")
+        console.print("    CODESCOPE_AZURE_BOARDS_PROJECT=your-project")
+        console.print("    CODESCOPE_AZURE_BOARDS_TOKEN=your-pat")
+        return
+
+    table = Table(title="Configured Issue Trackers")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Project", style="white")
+    table.add_column("URL", style="dim")
+    table.add_column("Status", style="green")
+
+    for tracker in trackers:
+        is_connected, message = tracker.test_connection()
+        status = "[green]Connected[/green]" if is_connected else f"[red]Error: {message}[/red]"
+        table.add_row(
+            tracker.display_name,
+            tracker.config.project_key,
+            tracker.config.base_url or tracker.config.organization,
+            status,
+        )
+
+    console.print(table)
+
+
+@tracker_app.command(name="test")
+def tracker_test(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+) -> None:
+    """Test connection to an issue tracker."""
+    from codescope.integrations.issue_trackers import get_issue_tracker
+
+    console.print()
+    console.print(f"[bold]Testing connection to {provider}...[/bold]")
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        console.print()
+        console.print("Set the required environment variables:")
+        if provider == "jira":
+            console.print("  CODESCOPE_JIRA_URL, CODESCOPE_JIRA_PROJECT, CODESCOPE_JIRA_TOKEN")
+        elif provider == "azure_boards":
+            console.print("  CODESCOPE_AZURE_BOARDS_ORGANIZATION, CODESCOPE_AZURE_BOARDS_PROJECT, CODESCOPE_AZURE_BOARDS_TOKEN")
+        raise typer.Exit(1)
+
+    is_connected, message = tracker.test_connection()
+
+    if is_connected:
+        console.print(f"[green]Success: {message}[/green]")
+    else:
+        console.print(f"[red]Failed: {message}[/red]")
+        raise typer.Exit(1)
+
+
+@tracker_app.command(name="create")
+def tracker_create_issue(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    title: str = typer.Option(
+        ...,
+        "--title",
+        "-t",
+        help="Issue title.",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Issue description.",
+    ),
+    issue_type: str = typer.Option(
+        "Bug",
+        "--type",
+        help="Issue type (e.g., Bug, Task, Story).",
+    ),
+    priority: str = typer.Option(
+        "medium",
+        "--priority",
+        "-p",
+        help="Priority: highest, high, medium, low, lowest",
+    ),
+    labels: Optional[str] = typer.Option(
+        None,
+        "--labels",
+        "-l",
+        help="Comma-separated labels.",
+    ),
+) -> None:
+    """Create an issue in the tracker."""
+    from codescope.integrations.issue_trackers import get_issue_tracker, IssuePriority
+    from codescope.integrations.issue_trackers.base import CreateIssueRequest
+
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    # Parse priority
+    try:
+        issue_priority = IssuePriority(priority.lower())
+    except ValueError:
+        issue_priority = IssuePriority.MEDIUM
+
+    # Parse labels
+    label_list = []
+    if labels:
+        label_list = [l.strip() for l in labels.split(",") if l.strip()]
+
+    request = CreateIssueRequest(
+        title=title,
+        description=description,
+        priority=issue_priority,
+        issue_type=issue_type,
+        labels=label_list,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Creating issue...", total=None)
+        issue = tracker.create_issue(request)
+        progress.update(task, description="Done")
+
+    if issue:
+        console.print(f"[green]Issue created successfully![/green]")
+        console.print()
+        console.print(f"  [cyan]Key:[/cyan] {issue.key}")
+        console.print(f"  [cyan]Title:[/cyan] {issue.title}")
+        console.print(f"  [cyan]URL:[/cyan] {issue.url}")
+    else:
+        console.print("[red]Failed to create issue.[/red]")
+        raise typer.Exit(1)
+
+
+@tracker_app.command(name="search")
+def tracker_search(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    query: Optional[str] = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help="Search query.",
+    ),
+    status: Optional[str] = typer.Option(
+        None,
+        "--status",
+        "-s",
+        help="Filter by status: open, in_progress, resolved, closed",
+    ),
+    max_results: int = typer.Option(
+        20,
+        "--max",
+        "-n",
+        help="Maximum results to return.",
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+) -> None:
+    """Search for issues in the tracker."""
+    import json as json_mod
+    from rich.table import Table
+
+    from codescope.integrations.issue_trackers import get_issue_tracker, IssueStatus
+
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    # Parse status
+    issue_status = None
+    if status:
+        try:
+            issue_status = IssueStatus(status.lower())
+        except ValueError:
+            console.print(f"[red]Invalid status: {status}[/red]")
+            raise typer.Exit(1)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Searching issues...", total=None)
+        issues = tracker.search_issues(
+            query=query,
+            status=issue_status,
+            max_results=max_results,
+        )
+        progress.update(task, description="Done")
+
+    if format == "json":
+        data = {"issues": [i.to_dict() for i in issues]}
+        print(json_mod.dumps(data, indent=2, default=str))
+    else:
+        if not issues:
+            console.print("[yellow]No issues found.[/yellow]")
+            return
+
+        table = Table(title=f"CodeScope Issues in {tracker.display_name}")
+        table.add_column("Key", style="cyan", width=12)
+        table.add_column("Title", style="white", width=50)
+        table.add_column("Status", width=12)
+        table.add_column("Priority", width=10)
+        table.add_column("Assignee", style="dim", width=15)
+
+        status_colors = {
+            "open": "yellow",
+            "in_progress": "blue",
+            "resolved": "green",
+            "closed": "dim",
+            "reopened": "red",
+        }
+
+        priority_colors = {
+            "highest": "red bold",
+            "high": "red",
+            "medium": "yellow",
+            "low": "blue",
+            "lowest": "dim",
+        }
+
+        for issue in issues:
+            status_color = status_colors.get(issue.status.value, "white")
+            priority_color = priority_colors.get(issue.priority.value, "white")
+
+            title = issue.title
+            if len(title) > 50:
+                title = title[:47] + "..."
+
+            table.add_row(
+                issue.key,
+                title,
+                f"[{status_color}]{issue.status.value}[/{status_color}]",
+                f"[{priority_color}]{issue.priority.value}[/{priority_color}]",
+                issue.assignee[:15] if issue.assignee else "",
+            )
+
+        console.print(table)
+        console.print(f"\nTotal: {len(issues)} issues")
+
+
+@tracker_app.command(name="link")
+def tracker_link_issues(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    issue_ids: str = typer.Argument(
+        ...,
+        help="Comma-separated CodeScope issue IDs to create tracker issues for.",
+    ),
+    issue_type: str = typer.Option(
+        "Bug",
+        "--type",
+        help="Issue type for created issues.",
+    ),
+    dashboard_url: str = typer.Option(
+        "",
+        "--dashboard-url",
+        help="Base URL for CodeScope dashboard links.",
+    ),
+) -> None:
+    """Create tracker issues for CodeScope analysis issues."""
+    from codescope.integrations.issue_trackers import get_issue_tracker
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Link Issues to Tracker")
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    ids = [id.strip() for id in issue_ids.split(",") if id.strip()]
+
+    if not ids:
+        console.print("[yellow]No issue IDs provided.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"Creating {len(ids)} issues in {tracker.display_name}...")
+    console.print()
+
+    # In a full implementation, we would fetch the CodeScope issues from storage
+    # and create corresponding tracker issues. For now, show a placeholder.
+    console.print("[yellow]Note: Full issue linking requires CodeScope issue storage integration.[/yellow]")
+    console.print()
+    console.print("Issue IDs to link:")
+    for id in ids:
+        console.print(f"  • {id}")
+
+
 if __name__ == "__main__":
     app()

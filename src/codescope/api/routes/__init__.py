@@ -28,6 +28,7 @@ from codescope.api.routes import (
     license_policy,
     container,
     iac,
+    issue_trackers,
 )
 
 __all__ = [
@@ -58,4 +59,5 @@ __all__ = [
     "license_policy",
     "container",
     "iac",
+    "issue_trackers",
 ]

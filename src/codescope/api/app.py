@@ -33,6 +33,7 @@ from codescope.api.routes import (
     license_policy,
     container,
     iac,
+    issue_trackers,
 )
 from codescope.auth.database import AuthDatabase
 from codescope.auth.middleware import get_current_user, init_auth, require_role
@@ -183,6 +184,10 @@ def create_app() -> FastAPI:
     )
     app.include_router(
         teams.router, prefix="/api/v1", tags=["Teams"],
+        dependencies=admin_deps,
+    )
+    app.include_router(
+        issue_trackers.router, prefix="/api/v1", tags=["Issue Trackers"],
         dependencies=admin_deps,
     )
 
