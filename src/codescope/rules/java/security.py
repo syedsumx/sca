@@ -235,6 +235,452 @@ class JavaHardcodedSecretRule(PatternRule):
 
 
 @RuleRegistry.register
+class JavaLDAPInjectionRule(Rule):
+    """Detect LDAP injection vulnerabilities in Java."""
+
+    id = "java:S2078"
+    name = "LDAP Injection"
+    description = "LDAP queries should not be constructed from user-controlled data"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [90]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "ldap", "injection", "owasp-top10"]
+    languages = ["java"]
+
+    LDAP_PATTERNS = [
+        r'\.search\s*\([^)]*\+',
+        r'new\s+SearchFilter\s*\([^)]*\+',
+        r'ldapTemplate\.search\s*\([^)]*\+',
+        r'\.newSearchRequest\s*\([^)]*\+',
+        r'".*\(uid=".*\+',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for LDAP injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.LDAP_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential LDAP injection - use parameterized LDAP queries",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaLogInjectionRule(Rule):
+    """Detect log injection vulnerabilities in Java."""
+
+    id = "java:S5145"
+    name = "Log Injection"
+    description = "User input should be sanitized before being logged"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [117]
+    owasp_categories = ["A09:2021"]
+    effort_minutes = 15
+    tags = ["security", "logging", "injection"]
+    languages = ["java"]
+
+    LOG_PATTERNS = [
+        r'logger\.(info|debug|warn|error|trace)\s*\([^)]*\+.*request\.',
+        r'log\.(info|debug|warn|error|trace)\s*\([^)]*\+.*getParameter',
+        r'LOG\.(info|debug|warn|error|trace)\s*\([^)]*\+.*getHeader',
+        r'System\.out\.println\s*\([^)]*request\.',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for log injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.LOG_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential log injection - sanitize user input before logging",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaSSRFRule(Rule):
+    """Detect Server-Side Request Forgery vulnerabilities in Java."""
+
+    id = "java:S5144"
+    name = "SSRF (Server-Side Request Forgery)"
+    description = "URLs for outbound requests should be validated to prevent SSRF attacks"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [918]
+    owasp_categories = ["A10:2021"]
+    effort_minutes = 30
+    tags = ["security", "ssrf", "owasp-top10"]
+    languages = ["java"]
+
+    SSRF_PATTERNS = [
+        r'new\s+URL\s*\([^)]*\+',
+        r'new\s+URL\s*\([^)]*request\.getParameter',
+        r'HttpClient.*execute\s*\([^)]*\+',
+        r'RestTemplate.*\.(get|post|put|delete)\s*\([^)]*\+',
+        r'WebClient.*uri\s*\([^)]*\+',
+        r'\.openConnection\s*\(\s*\).*request\.',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for SSRF patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.SSRF_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential SSRF - validate and allowlist URLs before making outbound requests",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaXPathInjectionRule(Rule):
+    """Detect XPath injection vulnerabilities in Java."""
+
+    id = "java:S2091"
+    name = "XPath Injection"
+    description = "XPath queries should not be constructed from user-controlled data"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [643]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "xpath", "injection", "owasp-top10"]
+    languages = ["java"]
+
+    XPATH_PATTERNS = [
+        r'xpath\.evaluate\s*\([^)]*\+',
+        r'\.selectNodes\s*\([^)]*\+',
+        r'\.selectSingleNode\s*\([^)]*\+',
+        r'XPathFactory.*compile\s*\([^)]*\+',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for XPath injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.XPATH_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential XPath injection - use parameterized XPath queries",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaUnsafeReflectionRule(Rule):
+    """Detect unsafe reflection usage in Java."""
+
+    id = "java:S3011"
+    name = "Unsafe Reflection"
+    description = "Reflection should not be used to bypass access control"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [470]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 45
+    tags = ["security", "reflection"]
+    languages = ["java"]
+
+    REFLECTION_PATTERNS = [
+        r'Class\.forName\s*\([^)]*request\.',
+        r'Class\.forName\s*\([^)]*\+',
+        r'\.setAccessible\s*\(\s*true\s*\)',
+        r'getMethod\s*\([^)]*\+.*invoke',
+        r'getDeclaredMethod\s*\([^)]*\+',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for unsafe reflection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.REFLECTION_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Unsafe reflection - avoid using reflection with user-controlled input",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaSpringELInjectionRule(Rule):
+    """Detect Spring Expression Language injection vulnerabilities."""
+
+    id = "java:S5146"
+    name = "Spring EL Injection"
+    description = "Spring Expression Language should not evaluate user-controlled input"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [917]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 45
+    tags = ["security", "injection", "spring"]
+    languages = ["java"]
+
+    SPEL_PATTERNS = [
+        r'SpelExpressionParser\s*\(\s*\).*parseExpression\s*\([^)]*\+',
+        r'ExpressionParser.*parseExpression\s*\([^)]*request\.',
+        r'@Value\s*\(\s*"[^"]*\#\{.*\+',
+        r'StandardEvaluationContext.*getValue\s*\([^)]*\+',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for Spring EL injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.SPEL_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential Spring EL injection - never evaluate user input as SpEL",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaOpenRedirectRule(Rule):
+    """Detect open redirect vulnerabilities in Java."""
+
+    id = "java:S5146"
+    name = "Open Redirect"
+    description = "URLs used for redirects should be validated"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [601]
+    owasp_categories = ["A01:2021"]
+    effort_minutes = 20
+    tags = ["security", "redirect", "phishing"]
+    languages = ["java"]
+
+    REDIRECT_PATTERNS = [
+        r'response\.sendRedirect\s*\([^)]*request\.getParameter',
+        r'response\.sendRedirect\s*\([^)]*\+',
+        r'ModelAndView\s*\(\s*"redirect:.*\+',
+        r'return\s+"redirect:.*\+',
+        r'RedirectView\s*\([^)]*\+',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for open redirect patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.REDIRECT_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential open redirect - validate redirect URLs against an allowlist",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaWeakCryptoRule(Rule):
+    """Detect use of weak cryptographic algorithms in Java."""
+
+    id = "java:S5547"
+    name = "Weak Cryptography"
+    description = "Weak cryptographic algorithms should not be used"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [327, 328]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 30
+    tags = ["security", "cryptography"]
+    languages = ["java"]
+
+    WEAK_CRYPTO_PATTERNS = [
+        (r'Cipher\.getInstance\s*\(\s*"DES"', "DES is insecure, use AES"),
+        (r'Cipher\.getInstance\s*\(\s*"DESede"', "3DES is deprecated, use AES"),
+        (r'Cipher\.getInstance\s*\(\s*"RC2"', "RC2 is insecure"),
+        (r'Cipher\.getInstance\s*\(\s*"RC4"', "RC4 is insecure"),
+        (r'Cipher\.getInstance\s*\(\s*"Blowfish"', "Blowfish has known weaknesses"),
+        (r'MessageDigest\.getInstance\s*\(\s*"MD5"', "MD5 is cryptographically broken"),
+        (r'MessageDigest\.getInstance\s*\(\s*"SHA-1"', "SHA-1 is deprecated for security use"),
+        (r'Cipher\.getInstance\s*\(\s*"AES/ECB"', "ECB mode is insecure, use CBC or GCM"),
+        (r'SecureRandom\.getInstance\s*\(\s*"SHA1PRNG"', "SHA1PRNG has known weaknesses"),
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for weak cryptographic algorithms."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern, message in self.WEAK_CRYPTO_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message=f"Weak cryptography detected - {message}",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaInsecureTLSRule(Rule):
+    """Detect insecure TLS configurations in Java."""
+
+    id = "java:S4830"
+    name = "Insecure TLS Configuration"
+    description = "TLS configuration should not disable certificate verification"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [295]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 30
+    tags = ["security", "tls", "ssl"]
+    languages = ["java"]
+
+    INSECURE_TLS_PATTERNS = [
+        r'setHostnameVerifier\s*\(\s*SSLSocketFactory\.ALLOW_ALL',
+        r'TrustAllCerts',
+        r'X509TrustManager.*checkClientTrusted.*\{\s*\}',
+        r'X509TrustManager.*checkServerTrusted.*\{\s*\}',
+        r'setDefaultHostnameVerifier\s*\(',
+        r'SSLContext\.getInstance\s*\(\s*"SSL"\s*\)',
+        r'SSLContext\.getInstance\s*\(\s*"TLSv1"\s*\)',
+        r'SSLContext\.getInstance\s*\(\s*"TLSv1\.1"\s*\)',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure TLS configurations."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.INSECURE_TLS_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Insecure TLS configuration - do not disable certificate verification",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JavaSensitiveDataExposureRule(Rule):
+    """Detect exposure of sensitive data in Java."""
+
+    id = "java:S5757"
+    name = "Sensitive Data Exposure"
+    description = "Sensitive data should not be exposed in logs or error messages"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [200, 532]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 15
+    tags = ["security", "sensitive-data", "logging"]
+    languages = ["java"]
+
+    SENSITIVE_PATTERNS = [
+        r'System\.out\.println\s*\([^)]*password',
+        r'System\.out\.println\s*\([^)]*creditCard',
+        r'System\.out\.println\s*\([^)]*ssn',
+        r'logger\.(info|debug|error)\s*\([^)]*password',
+        r'printStackTrace\s*\(\s*\)',
+        r'e\.getMessage\s*\(\s*\).*response',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for sensitive data exposure."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.SENSITIVE_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential sensitive data exposure - avoid logging passwords or exposing stack traces",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
 class JavaPathTraversalRule(Rule):
     """Detect path traversal vulnerabilities in Java."""
 

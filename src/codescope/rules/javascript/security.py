@@ -671,3 +671,427 @@ class JSWeakCryptoRule(Rule):
                     break
 
         return result
+
+
+@RuleRegistry.register
+class JSInsecureJWTRule(Rule):
+    """Detect insecure JWT configurations."""
+
+    id = "javascript:S5659"
+    name = "Insecure JWT Configuration"
+    description = "JWT tokens should be properly validated with secure algorithms"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [347, 327]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 30
+    tags = ["security", "jwt", "authentication"]
+    languages = ["javascript", "typescript"]
+
+    INSECURE_PATTERNS = [
+        (r'algorithm\s*:\s*[\'"]none[\'"]', "JWT 'none' algorithm allows token forgery"),
+        (r'algorithms\s*:\s*\[[^\]]*[\'"]none[\'"]', "JWT 'none' algorithm allows token forgery"),
+        (r'verify\s*:\s*false', "JWT verification is disabled"),
+        (r'ignoreExpiration\s*:\s*true', "JWT expiration check is disabled"),
+        (r'algorithm\s*:\s*[\'"]HS256[\'"].*secret.*[\'"][^\'"{20}', "Weak JWT secret - use at least 256 bits"),
+        (r'jwt\.decode\s*\([^)]*\{[^}]*complete\s*:\s*false', "JWT decoded without verification"),
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure JWT patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern, message in self.INSECURE_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message=f"Insecure JWT configuration - {message}",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSCORSMisconfigurationRule(Rule):
+    """Detect CORS misconfigurations."""
+
+    id = "javascript:S5122"
+    name = "CORS Misconfiguration"
+    description = "CORS should be configured with specific origins, not wildcards for sensitive resources"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [942, 346]
+    owasp_categories = ["A05:2021"]
+    effort_minutes = 20
+    tags = ["security", "cors", "access-control"]
+    languages = ["javascript", "typescript"]
+
+    CORS_PATTERNS = [
+        (r'Access-Control-Allow-Origin[\'"]?\s*[,:]\s*[\'"]?\*', "Wildcard CORS origin allows any site"),
+        (r'origin\s*:\s*true', "Reflecting request origin in CORS header"),
+        (r'Access-Control-Allow-Credentials.*true.*Access-Control-Allow-Origin.*\*',
+         "CORS credentials with wildcard origin is forbidden"),
+        (r'cors\s*\(\s*\)', "CORS enabled with default (permissive) settings"),
+        (r'cors\s*:\s*true', "CORS enabled with default (permissive) settings"),
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for CORS misconfigurations."""
+        result = RuleResult()
+        source = file.source
+        lines = source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern, message in self.CORS_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message=f"CORS misconfiguration - {message}",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSDOMClobberingRule(Rule):
+    """Detect DOM clobbering vulnerabilities."""
+
+    id = "javascript:S5765"
+    name = "DOM Clobbering"
+    description = "Global variable access patterns vulnerable to DOM clobbering attacks"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [79]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "dom", "xss"]
+    languages = ["javascript", "typescript"]
+
+    DOM_PATTERNS = [
+        r'window\[[\'"]\w+[\'"]\]',  # window['name'] access
+        r'document\.\w+\s*\|\|',  # document.x || fallback pattern
+        r'window\.\w+\s*\|\|',  # window.x || fallback pattern
+        r'self\.\w+\s*\|\|',  # self.x || fallback
+        r'globalThis\.\w+\s*\|\|',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for DOM clobbering patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.DOM_PATTERNS:
+                if re.search(pattern, line):
+                    # Exclude legitimate uses
+                    if 'undefined' not in line and 'typeof' not in line:
+                        result.issues.append(
+                            self.create_issue(
+                                message="Potential DOM clobbering - use explicit property checks instead of truthy checks",
+                                file_path=file.path,
+                                start_line=i,
+                                severity=Severity.MINOR,
+                                snippet=self.get_snippet(file, i),
+                            )
+                        )
+                        break
+
+        return result
+
+
+@RuleRegistry.register
+class JSTimingAttackRule(Rule):
+    """Detect timing attack vulnerabilities in string comparisons."""
+
+    id = "javascript:S5852"
+    name = "Timing Attack"
+    description = "Secret comparisons should use constant-time comparison functions"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [208]
+    owasp_categories = ["A02:2021"]
+    effort_minutes = 15
+    tags = ["security", "cryptography", "timing"]
+    languages = ["javascript", "typescript"]
+
+    TIMING_PATTERNS = [
+        r'(password|secret|token|key|hash|signature)\s*===?\s*',
+        r'===?\s*(password|secret|token|key|hash|signature)',
+        r'\.(password|secret|token|key)\s*===?',
+        r'(apiKey|api_key|apikey)\s*===?',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for timing attack vulnerabilities."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            # Skip if using safe comparison
+            if 'timingSafeEqual' in line or 'constantTimeCompare' in line:
+                continue
+
+            for pattern in self.TIMING_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential timing attack - use crypto.timingSafeEqual() for secret comparisons",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSClickjackingRule(Rule):
+    """Detect missing clickjacking protections."""
+
+    id = "javascript:S5732"
+    name = "Missing Clickjacking Protection"
+    description = "Pages should set X-Frame-Options or CSP frame-ancestors to prevent clickjacking"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [1021]
+    owasp_categories = ["A05:2021"]
+    effort_minutes = 10
+    tags = ["security", "clickjacking", "headers"]
+    languages = ["javascript", "typescript"]
+
+    # Patterns that indicate frame protection is being handled
+    PROTECTION_PATTERNS = [
+        r'X-Frame-Options',
+        r'frame-ancestors',
+        r'helmet\s*\(',
+        r'frameguard',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for missing clickjacking protection."""
+        result = RuleResult()
+        source = file.source
+
+        # Check if this appears to be an Express/server file
+        is_server_file = any(x in source for x in ['express()', 'createServer', 'app.listen', 'app.use'])
+
+        if is_server_file:
+            has_protection = any(re.search(pattern, source, re.IGNORECASE) for pattern in self.PROTECTION_PATTERNS)
+
+            if not has_protection:
+                # Find first app.use or similar for line number
+                lines = source.split("\n")
+                for i, line in enumerate(lines, 1):
+                    if 'app.use' in line or 'app.listen' in line:
+                        result.issues.append(
+                            self.create_issue(
+                                message="Missing clickjacking protection - set X-Frame-Options header or use helmet middleware",
+                                file_path=file.path,
+                                start_line=i,
+                                snippet=self.get_snippet(file, i),
+                            )
+                        )
+                        break
+
+        return result
+
+
+@RuleRegistry.register
+class JSPostMessageRule(Rule):
+    """Detect insecure postMessage usage."""
+
+    id = "javascript:S5821"
+    name = "Insecure postMessage"
+    description = "postMessage should validate origin and not use wildcard targetOrigin"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [346]
+    owasp_categories = ["A07:2021"]
+    effort_minutes = 20
+    tags = ["security", "postmessage", "cross-origin"]
+    languages = ["javascript", "typescript"]
+
+    INSECURE_PATTERNS = [
+        (r'\.postMessage\s*\([^)]+,\s*[\'\"]\*[\'\"]', "postMessage uses wildcard origin '*'"),
+        (r'addEventListener\s*\(\s*[\'"]message[\'"][^}]*\)\s*=>\s*\{(?![^}]*origin)',
+         "postMessage handler does not validate origin"),
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure postMessage usage."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern, message in self.INSECURE_PATTERNS:
+                if re.search(pattern, line):
+                    result.issues.append(
+                        self.create_issue(
+                            message=f"Insecure postMessage - {message}",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSSecurityHeadersRule(Rule):
+    """Detect missing security headers."""
+
+    id = "javascript:S5728"
+    name = "Missing Security Headers"
+    description = "Server responses should include security headers"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [693]
+    owasp_categories = ["A05:2021"]
+    effort_minutes = 15
+    tags = ["security", "headers"]
+    languages = ["javascript", "typescript"]
+
+    REQUIRED_HEADERS = [
+        'Content-Security-Policy',
+        'Strict-Transport-Security',
+        'X-Content-Type-Options',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for missing security headers."""
+        result = RuleResult()
+        source = file.source
+
+        # Check if this appears to be an Express/server file
+        is_server_file = any(x in source for x in ['express()', 'createServer', 'app.listen'])
+
+        if is_server_file:
+            # Check if helmet is used (provides all security headers)
+            if 'helmet' in source:
+                return result
+
+            lines = source.split("\n")
+            missing_headers = []
+            for header in self.REQUIRED_HEADERS:
+                if header not in source:
+                    missing_headers.append(header)
+
+            if missing_headers:
+                for i, line in enumerate(lines, 1):
+                    if 'app.listen' in line or 'createServer' in line:
+                        result.issues.append(
+                            self.create_issue(
+                                message=f"Missing security headers: {', '.join(missing_headers)}. Consider using helmet middleware",
+                                file_path=file.path,
+                                start_line=i,
+                                snippet=self.get_snippet(file, i),
+                            )
+                        )
+                        break
+
+        return result
+
+
+@RuleRegistry.register
+class JSInsecureURLSchemeRule(Rule):
+    """Detect javascript: URLs and other insecure schemes."""
+
+    id = "javascript:S5334"
+    name = "Insecure URL Scheme"
+    description = "javascript: and data: URLs can lead to XSS vulnerabilities"
+    severity = Severity.CRITICAL
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [79]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 20
+    tags = ["security", "xss", "url"]
+    languages = ["javascript", "typescript"]
+
+    INSECURE_PATTERNS = [
+        r'href\s*=\s*[\'"]javascript:',
+        r'src\s*=\s*[\'"]javascript:',
+        r'location\s*=\s*[\'"]javascript:',
+        r'window\.open\s*\(\s*[\'"]javascript:',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure URL schemes."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.INSECURE_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Insecure URL scheme - javascript: URLs can lead to XSS",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class JSLogSensitiveDataRule(Rule):
+    """Detect logging of sensitive data."""
+
+    id = "javascript:S5757"
+    name = "Sensitive Data Logging"
+    description = "Sensitive information should not be logged"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [532]
+    owasp_categories = ["A09:2021"]
+    effort_minutes = 15
+    tags = ["security", "logging", "sensitive-data"]
+    languages = ["javascript", "typescript"]
+
+    SENSITIVE_PATTERNS = [
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*password',
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*secret',
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*token',
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*apiKey',
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*creditCard',
+        r'console\.(log|info|debug|warn|error)\s*\([^)]*ssn',
+        r'logger\.(log|info|debug|warn|error)\s*\([^)]*password',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for sensitive data logging."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            for pattern in self.SENSITIVE_PATTERNS:
+                if re.search(pattern, line, re.IGNORECASE):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential sensitive data in logs - avoid logging passwords, tokens, or PII",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
