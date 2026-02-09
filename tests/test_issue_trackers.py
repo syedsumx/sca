@@ -1,9 +1,10 @@
-"""Tests for issue tracker integrations (Jira, Azure Boards).
+"""Tests for issue tracker integrations (Jira, Azure Boards, GitHub Issues).
 
 This module tests the issue tracker integration functionality including:
 - Base classes and models
 - Jira client
 - Azure Boards client
+- GitHub Issues client
 - Registry and configuration
 - API routes
 """
@@ -304,6 +305,226 @@ class TestAzureBoardsClient:
         assert request.priority == IssuePriority.MEDIUM
 
 
+# ── GitHub Issues Client Tests ────────────────────────────────────────────
+
+
+class TestGitHubIssuesClient:
+    """Test GitHubIssuesClient integration."""
+
+    @pytest.fixture
+    def github_config(self):
+        """Create a test GitHub configuration."""
+        return TrackerConfig(
+            provider="github",
+            base_url="",
+            project_key="owner/repo",
+            api_token="ghp_test-token",
+        )
+
+    @pytest.fixture
+    def github_client(self, github_config):
+        """Create a GitHubIssuesClient instance."""
+        from codescope.integrations.issue_trackers.github import GitHubIssuesClient
+        return GitHubIssuesClient(github_config)
+
+    def test_name_property(self, github_client):
+        """Should return correct provider name."""
+        assert github_client.name == "github"
+
+    def test_display_name_property(self, github_client):
+        """Should return correct display name."""
+        assert github_client.display_name == "GitHub Issues"
+
+    def test_api_base_github_com(self, github_client):
+        """Should use correct API base for GitHub.com."""
+        assert github_client._api_base == "https://api.github.com"
+
+    def test_api_base_enterprise(self, github_config):
+        """Should use correct API base for GitHub Enterprise."""
+        from codescope.integrations.issue_trackers.github import GitHubIssuesClient
+
+        github_config.base_url = "https://github.company.com"
+        client = GitHubIssuesClient(github_config)
+        assert client._api_base == "https://github.company.com/api/v3"
+
+    def test_repo_property(self, github_client):
+        """Should return correct repository path."""
+        assert github_client._repo == "owner/repo"
+
+    def test_web_base(self, github_client):
+        """Should return correct web base URL."""
+        assert github_client._web_base == "https://github.com"
+
+    def test_priority_labels(self, github_client):
+        """Should have correct priority label mapping."""
+        assert github_client._PRIORITY_LABELS[IssuePriority.HIGHEST] == "priority:critical"
+        assert github_client._PRIORITY_LABELS[IssuePriority.HIGH] == "priority:high"
+        assert github_client._PRIORITY_LABELS[IssuePriority.MEDIUM] == "priority:medium"
+        assert github_client._PRIORITY_LABELS[IssuePriority.LOW] == "priority:low"
+
+    def test_status_mapping(self, github_client):
+        """Should map statuses correctly."""
+        assert github_client._STATUS_MAP["open"] == IssueStatus.OPEN
+        assert github_client._STATUS_MAP["closed"] == IssueStatus.CLOSED
+
+    def test_extract_issue_number_simple(self, github_client):
+        """Should extract issue number from simple format."""
+        assert github_client._extract_issue_number("123") == 123
+
+    def test_extract_issue_number_hash(self, github_client):
+        """Should extract issue number from hash format."""
+        assert github_client._extract_issue_number("#456") == 456
+
+    def test_extract_issue_number_full(self, github_client):
+        """Should extract issue number from full format."""
+        assert github_client._extract_issue_number("owner/repo#789") == 789
+
+    def test_extract_issue_number_invalid(self, github_client):
+        """Should return None for invalid format."""
+        assert github_client._extract_issue_number("invalid") is None
+
+    @patch.object(
+        __import__("codescope.integrations.issue_trackers.github", fromlist=["GitHubIssuesClient"]).GitHubIssuesClient,
+        "_request"
+    )
+    def test_test_connection_success(self, mock_request, github_client):
+        """Should return success on valid connection."""
+        mock_request.return_value = {"full_name": "owner/repo", "private": False}
+        success, message = github_client.test_connection()
+        assert success is True
+        assert "owner/repo" in message
+
+    @patch.object(
+        __import__("codescope.integrations.issue_trackers.github", fromlist=["GitHubIssuesClient"]).GitHubIssuesClient,
+        "_request"
+    )
+    def test_test_connection_failure(self, mock_request, github_client):
+        """Should return failure on invalid connection."""
+        mock_request.return_value = None
+        success, message = github_client.test_connection()
+        assert success is False
+
+    def test_format_codescope_issue(self, github_client):
+        """Should format CodeScope issue correctly."""
+        request = github_client.format_codescope_issue(
+            issue_id="abc-123",
+            rule_id="python:S3776",
+            message="Function has too high cognitive complexity",
+            file_path="src/utils.py",
+            line=42,
+            severity="CRITICAL",
+            dashboard_url="https://dashboard.example.com/issues/abc-123",
+        )
+        assert "[CodeScope]" in request.title
+        assert "python:S3776" in request.title
+        assert request.priority == IssuePriority.HIGHEST
+        assert "codescope" in request.labels
+        assert "severity:critical" in request.labels
+
+    def test_format_description_markdown(self, github_client):
+        """Should format description in markdown."""
+        description = github_client._format_description(
+            issue_id="test-123",
+            rule_id="js:S1234",
+            message="Test message",
+            file_path="src/index.js",
+            line=10,
+            severity="HIGH",
+            dashboard_url="https://example.com",
+        )
+        assert "## CodeScope Issue" in description
+        assert "| **Rule** | `js:S1234` |" in description
+        assert "| **Line** | 10 |" in description
+        assert "[View in CodeScope Dashboard](https://example.com)" in description
+
+    def test_get_available_issue_types(self, github_client):
+        """Should return label-based issue types."""
+        types = github_client.get_available_issue_types()
+        assert "Bug" in types
+        assert "Feature" in types
+        assert "Task" in types
+
+    def test_get_available_priorities(self, github_client):
+        """Should return priority levels."""
+        priorities = github_client.get_available_priorities()
+        assert "Critical" in priorities
+        assert "High" in priorities
+        assert "Medium" in priorities
+        assert "Low" in priorities
+
+
+class TestGitHubPullRequestClient:
+    """Test GitHubPullRequestClient for PR integration."""
+
+    @pytest.fixture
+    def pr_config(self):
+        """Create a test configuration."""
+        return TrackerConfig(
+            provider="github",
+            base_url="",
+            project_key="owner/repo",
+            api_token="ghp_test-token",
+        )
+
+    @pytest.fixture
+    def pr_client(self, pr_config):
+        """Create a GitHubPullRequestClient instance."""
+        from codescope.integrations.issue_trackers.github import GitHubPullRequestClient
+        return GitHubPullRequestClient(pr_config)
+
+    def test_api_base(self, pr_client):
+        """Should use correct API base."""
+        assert pr_client._api_base == "https://api.github.com"
+
+    def test_repo_property(self, pr_client):
+        """Should return correct repository path."""
+        assert pr_client._repo == "owner/repo"
+
+    @patch.object(
+        __import__("codescope.integrations.issue_trackers.github", fromlist=["GitHubPullRequestClient"]).GitHubPullRequestClient,
+        "_request"
+    )
+    def test_get_pull_request(self, mock_request, pr_client):
+        """Should get pull request details."""
+        mock_request.return_value = {
+            "number": 123,
+            "title": "Test PR",
+            "state": "open",
+        }
+        result = pr_client.get_pull_request(123)
+        assert result is not None
+        assert result["number"] == 123
+
+    @patch.object(
+        __import__("codescope.integrations.issue_trackers.github", fromlist=["GitHubPullRequestClient"]).GitHubPullRequestClient,
+        "_request"
+    )
+    def test_create_issue_comment(self, mock_request, pr_client):
+        """Should create issue comment."""
+        mock_request.return_value = {"id": 456}
+        result = pr_client.create_issue_comment(123, "Test comment")
+        assert result is True
+
+    @patch.object(
+        __import__("codescope.integrations.issue_trackers.github", fromlist=["GitHubPullRequestClient"]).GitHubPullRequestClient,
+        "_request"
+    )
+    def test_post_analysis_summary(self, mock_request, pr_client):
+        """Should post analysis summary to PR."""
+        mock_request.return_value = {"id": 789}
+        result = pr_client.post_analysis_summary(
+            pr_number=123,
+            total_issues=10,
+            critical_count=2,
+            high_count=3,
+            medium_count=4,
+            low_count=1,
+            quality_gate_passed=False,
+            dashboard_url="https://example.com",
+        )
+        assert result is True
+
+
 # ── Registry Tests ─────────────────────────────────────────────────────────
 
 
@@ -318,6 +539,7 @@ class TestRegistry:
         provider_names = [p["name"] for p in providers]
         assert "jira" in provider_names
         assert "azure_boards" in provider_names
+        assert "github" in provider_names
 
     def test_create_tracker_from_config_jira(self):
         """Should create Jira tracker from config."""
@@ -347,6 +569,20 @@ class TestRegistry:
         )
         tracker = create_tracker_from_config(config)
         assert isinstance(tracker, AzureBoardsClient)
+
+    def test_create_tracker_from_config_github(self):
+        """Should create GitHub Issues tracker from config."""
+        from codescope.integrations.issue_trackers.registry import create_tracker_from_config
+        from codescope.integrations.issue_trackers.github import GitHubIssuesClient
+
+        config = TrackerConfig(
+            provider="github",
+            base_url="",
+            project_key="owner/repo",
+            api_token="ghp_token",
+        )
+        tracker = create_tracker_from_config(config)
+        assert isinstance(tracker, GitHubIssuesClient)
 
     def test_create_tracker_unknown_provider(self):
         """Should return None for unknown provider."""
@@ -590,3 +826,49 @@ class TestIntegration:
         assert client._map_severity_to_priority("MINOR") == IssuePriority.MEDIUM
         assert client._map_severity_to_priority("INFO") == IssuePriority.LOW
         assert client._map_severity_to_priority("unknown") == IssuePriority.MEDIUM
+
+    def test_full_github_issue_workflow(self):
+        """Test creating and formatting issues for GitHub."""
+        from codescope.integrations.issue_trackers.github import GitHubIssuesClient
+
+        config = TrackerConfig(
+            provider="github",
+            base_url="",
+            project_key="owner/repo",
+            api_token="ghp_test-token",
+            default_issue_type="Bug",
+            default_labels=["automated"],
+        )
+        client = GitHubIssuesClient(config)
+
+        # Format a CodeScope issue
+        request = client.format_codescope_issue(
+            issue_id="issue-003",
+            rule_id="typescript:S1854",
+            message="Unused variable 'result'",
+            file_path="src/index.ts",
+            line=55,
+            severity="MINOR",
+        )
+
+        assert request.title.startswith("[CodeScope]")
+        assert "typescript:S1854" in request.title
+        assert request.issue_type == "Bug"
+        assert "automated" in request.labels
+        assert "codescope" in request.labels
+        assert "issue-003" in request.codescope_issue_ids
+
+    def test_github_enterprise_configuration(self):
+        """Test GitHub Enterprise Server configuration."""
+        from codescope.integrations.issue_trackers.github import GitHubIssuesClient
+
+        config = TrackerConfig(
+            provider="github",
+            base_url="https://github.enterprise.com",
+            project_key="org/project",
+            api_token="ghe_token",
+        )
+        client = GitHubIssuesClient(config)
+
+        assert client._api_base == "https://github.enterprise.com/api/v3"
+        assert "github.enterprise.com" in client._web_base

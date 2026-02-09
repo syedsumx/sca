@@ -82,6 +82,11 @@ def get_issue_tracker(name: str) -> Optional[IssueTrackerProvider]:
         logger.debug("Azure Boards not configured: missing organization")
         return None
 
+    if name == "github" and not config.project_key:
+        # GitHub uses project_key as "owner/repo"
+        logger.debug("GitHub not configured: missing repository (owner/repo)")
+        return None
+
     if not config.project_key:
         logger.debug("Issue tracker %s not configured: missing project key", name)
         return None
@@ -147,9 +152,11 @@ def _register_builtin_providers() -> None:
     """Register built-in issue tracker providers."""
     from codescope.integrations.issue_trackers.jira import JiraClient
     from codescope.integrations.issue_trackers.azure_boards import AzureBoardsClient
+    from codescope.integrations.issue_trackers.github import GitHubIssuesClient
 
     register_tracker("jira", JiraClient)
     register_tracker("azure_boards", AzureBoardsClient)
+    register_tracker("github", GitHubIssuesClient)
 
 
 _register_builtin_providers()
