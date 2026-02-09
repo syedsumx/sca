@@ -549,3 +549,456 @@ class PathTraversalRule(Rule):
             if any(x in name for x in ["user", "input", "request", "param", "query", "path", "file"]):
                 return True
         return False
+
+
+@RuleRegistry.register
+class SSRFRule(Rule):
+    """Detect Server-Side Request Forgery vulnerabilities."""
+
+    id = "python:S5144"
+    name = "SSRF (Server-Side Request Forgery)"
+    description = "URLs for outbound requests should be validated to prevent SSRF attacks"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [918]
+    owasp_categories = ["A10:2021"]
+    effort_minutes = 30
+    tags = ["security", "ssrf", "owasp-top10"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for SSRF patterns."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        # Track imports
+        http_imports = set()
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name in ("requests", "urllib", "httpx", "aiohttp"):
+                        http_imports.add(alias.asname or alias.name)
+
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and any(m in node.module for m in ("requests", "urllib", "httpx", "aiohttp")):
+                    for alias in node.names:
+                        http_imports.add(alias.asname or alias.name)
+
+            elif isinstance(node, ast.Call):
+                if self._is_http_call_with_user_input(node, http_imports):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential SSRF - validate and allowlist URLs before making outbound requests",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_http_call_with_user_input(self, node: ast.Call, imports: set) -> bool:
+        """Check if call is an HTTP request with potential user input."""
+        func_name = ""
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+            if isinstance(node.func.value, ast.Name):
+                if node.func.value.id in imports:
+                    if func_name in ("get", "post", "put", "delete", "patch", "request", "urlopen"):
+                        return self._has_dynamic_url(node)
+        elif isinstance(node.func, ast.Name):
+            if node.func.id in imports:
+                return self._has_dynamic_url(node)
+        return False
+
+    def _has_dynamic_url(self, node: ast.Call) -> bool:
+        """Check if URL argument is dynamically constructed."""
+        if node.args:
+            arg = node.args[0]
+            if isinstance(arg, (ast.BinOp, ast.JoinedStr, ast.Name)):
+                return True
+            if isinstance(arg, ast.Call):
+                if isinstance(arg.func, ast.Attribute) and arg.func.attr == "format":
+                    return True
+        return False
+
+
+@RuleRegistry.register
+class XXERule(Rule):
+    """Detect XML External Entity vulnerabilities."""
+
+    id = "python:S2755"
+    name = "XML External Entity (XXE)"
+    description = "XML parsers should be configured to prevent XXE attacks"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [611]
+    owasp_categories = ["A05:2021"]
+    effort_minutes = 30
+    tags = ["security", "xxe", "xml", "owasp-top10"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for XXE vulnerabilities."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                # Check for unsafe XML parsing
+                if self._is_unsafe_xml_parse(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="XML parser may be vulnerable to XXE - use defusedxml or disable external entities",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_unsafe_xml_parse(self, node: ast.Call) -> bool:
+        """Check if call is to an unsafe XML parser."""
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+            if func_name in ("parse", "parseString", "fromstring", "XML"):
+                if isinstance(node.func.value, ast.Name):
+                    module = node.func.value.id
+                    if module in ("etree", "ElementTree", "ET", "minidom", "sax"):
+                        return True
+                elif isinstance(node.func.value, ast.Attribute):
+                    if node.func.value.attr in ("etree", "ElementTree"):
+                        return True
+        return False
+
+
+@RuleRegistry.register
+class InsecureDeserializationRule(Rule):
+    """Detect insecure deserialization vulnerabilities."""
+
+    id = "python:S5135"
+    name = "Insecure Deserialization"
+    description = "Deserialization of untrusted data can lead to remote code execution"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [502]
+    owasp_categories = ["A08:2021"]
+    effort_minutes = 60
+    tags = ["security", "deserialization", "owasp-top10"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure deserialization."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if self._is_unsafe_deserialize(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Insecure deserialization - pickle/marshal can execute arbitrary code",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_unsafe_deserialize(self, node: ast.Call) -> bool:
+        """Check if call is to an unsafe deserialization function."""
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+            if func_name in ("load", "loads"):
+                if isinstance(node.func.value, ast.Name):
+                    module = node.func.value.id
+                    if module in ("pickle", "cPickle", "marshal", "shelve"):
+                        return True
+        elif isinstance(node.func, ast.Name):
+            if node.func.id in ("eval", "exec"):
+                return True
+        return False
+
+
+@RuleRegistry.register
+class LDAPInjectionRule(Rule):
+    """Detect LDAP injection vulnerabilities."""
+
+    id = "python:S2078"
+    name = "LDAP Injection"
+    description = "LDAP queries should not be constructed from user-controlled data"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [90]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "ldap", "injection", "owasp-top10"]
+
+    LDAP_PATTERNS = [
+        r'ldap.*search.*%',
+        r'ldap.*filter.*%',
+        r'\.search\s*\([^)]*%',
+        r'ldap.*search.*\.format\(',
+        r'ldap.*search.*f["\']',
+    ]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for LDAP injection patterns."""
+        result = RuleResult()
+        lines = file.source.split("\n")
+
+        for i, line in enumerate(lines, 1):
+            line_lower = line.lower()
+            for pattern in self.LDAP_PATTERNS:
+                if re.search(pattern, line_lower):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential LDAP injection - use ldap.filter.escape_filter_chars() for user input",
+                            file_path=file.path,
+                            start_line=i,
+                            snippet=self.get_snippet(file, i),
+                        )
+                    )
+                    break
+
+        return result
+
+
+@RuleRegistry.register
+class XPathInjectionRule(Rule):
+    """Detect XPath injection vulnerabilities."""
+
+    id = "python:S2091"
+    name = "XPath Injection"
+    description = "XPath queries should not be constructed from user-controlled data"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [643]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 30
+    tags = ["security", "xpath", "injection", "owasp-top10"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for XPath injection patterns."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if self._is_xpath_with_user_input(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential XPath injection - use parameterized XPath queries",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_xpath_with_user_input(self, node: ast.Call) -> bool:
+        """Check if XPath call uses user input."""
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("xpath", "find", "findall", "iterfind"):
+                if node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, (ast.BinOp, ast.JoinedStr)):
+                        return True
+                    if isinstance(arg, ast.Call):
+                        if isinstance(arg.func, ast.Attribute) and arg.func.attr == "format":
+                            return True
+        return False
+
+
+@RuleRegistry.register
+class SSTIRule(Rule):
+    """Detect Server-Side Template Injection vulnerabilities."""
+
+    id = "python:S5334"
+    name = "Server-Side Template Injection (SSTI)"
+    description = "Template engines should not render user-controlled template strings"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [1336, 94]
+    owasp_categories = ["A03:2021"]
+    effort_minutes = 45
+    tags = ["security", "ssti", "injection", "owasp-top10"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for SSTI patterns."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if self._is_unsafe_template_render(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Potential SSTI - never render user-controlled strings as templates",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_unsafe_template_render(self, node: ast.Call) -> bool:
+        """Check if template is rendered with user input."""
+        if isinstance(node.func, ast.Attribute):
+            func_name = node.func.attr
+            if func_name in ("from_string", "Template"):
+                if node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Name):
+                        return True
+                    if isinstance(arg, (ast.BinOp, ast.JoinedStr)):
+                        return True
+        elif isinstance(node.func, ast.Name):
+            if node.func.id == "Template":
+                if node.args:
+                    arg = node.args[0]
+                    if isinstance(arg, ast.Name):
+                        return True
+        return False
+
+
+@RuleRegistry.register
+class LogInjectionRule(Rule):
+    """Detect log injection vulnerabilities."""
+
+    id = "python:S5145"
+    name = "Log Injection"
+    description = "User input should be sanitized before being logged"
+    severity = Severity.MAJOR
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [117]
+    owasp_categories = ["A09:2021"]
+    effort_minutes = 15
+    tags = ["security", "logging", "injection"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for log injection patterns."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if self._is_unsafe_log(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Log injection risk - sanitize user input before logging to prevent log forging",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_unsafe_log(self, node: ast.Call) -> bool:
+        """Check if logging call contains user input patterns."""
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr in ("debug", "info", "warning", "error", "critical", "exception"):
+                if isinstance(node.func.value, ast.Name):
+                    if node.func.value.id in ("logger", "logging", "log"):
+                        if node.args:
+                            arg = node.args[0]
+                            if isinstance(arg, ast.JoinedStr):
+                                # Check for request/user variables in f-string
+                                for value in arg.values:
+                                    if isinstance(value, ast.FormattedValue):
+                                        if isinstance(value.value, ast.Attribute):
+                                            attr_name = self._get_full_attr(value.value)
+                                            if any(x in attr_name.lower() for x in ["request", "user", "input"]):
+                                                return True
+        return False
+
+    def _get_full_attr(self, node: ast.Attribute) -> str:
+        """Get full attribute path."""
+        parts = []
+        current = node
+        while isinstance(current, ast.Attribute):
+            parts.append(current.attr)
+            current = current.value
+        if isinstance(current, ast.Name):
+            parts.append(current.id)
+        return ".".join(reversed(parts))
+
+
+@RuleRegistry.register
+class InsecureYAMLLoadRule(Rule):
+    """Detect insecure YAML loading."""
+
+    id = "python:S5659"
+    name = "Insecure YAML Load"
+    description = "yaml.load() without Loader parameter can execute arbitrary code"
+    severity = Severity.BLOCKER
+    issue_type = IssueType.VULNERABILITY
+    cwe_ids = [502]
+    owasp_categories = ["A08:2021"]
+    effort_minutes = 10
+    tags = ["security", "yaml", "deserialization"]
+
+    def check(self, file: ParsedFile) -> RuleResult:
+        """Check for insecure YAML loading."""
+        result = RuleResult()
+
+        try:
+            tree = ast.parse(file.source)
+        except SyntaxError:
+            return result
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                if self._is_unsafe_yaml_load(node):
+                    result.issues.append(
+                        self.create_issue(
+                            message="Insecure yaml.load() - use yaml.safe_load() or specify Loader=yaml.SafeLoader",
+                            file_path=file.path,
+                            start_line=node.lineno,
+                            snippet=self.get_snippet(file, node.lineno),
+                        )
+                    )
+
+        return result
+
+    def _is_unsafe_yaml_load(self, node: ast.Call) -> bool:
+        """Check if yaml.load is called unsafely."""
+        if isinstance(node.func, ast.Attribute):
+            if node.func.attr == "load":
+                if isinstance(node.func.value, ast.Name):
+                    if node.func.value.id == "yaml":
+                        # Check if Loader parameter is specified
+                        has_loader = False
+                        for kw in node.keywords:
+                            if kw.arg == "Loader":
+                                has_loader = True
+                                break
+                        return not has_loader
+        return False

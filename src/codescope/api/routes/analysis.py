@@ -57,12 +57,12 @@ async def run_analysis(analysis_id: str, path: Path, request: AnalysisRequest):
     try:
         _analyses[analysis_id]["status"] = "RUNNING"
 
-        config = AnalysisConfig(
+        analysis_config = AnalysisConfig(
             project_path=path,
             exclude_patterns=request.exclude_patterns or [],
         )
 
-        orchestrator = AnalysisOrchestrator(config)
+        orchestrator = AnalysisOrchestrator(analysis_config.to_config())
         result = orchestrator.analyze()
 
         _analyses[analysis_id].update({

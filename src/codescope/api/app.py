@@ -17,6 +17,23 @@ from codescope.api.routes import (
     export,
     aivetting,
     auth,
+    cicd,
+    webhooks,
+    trends,
+    sarif_import,
+    custom_rules,
+    compare,
+    secrets,
+    sbom,
+    teams,
+    remediation,
+    suppressions,
+    autofix,
+    monorepo,
+    license_policy,
+    container,
+    iac,
+    issue_trackers,
 )
 from codescope.auth.database import AuthDatabase
 from codescope.auth.middleware import get_current_user, init_auth, require_role
@@ -91,8 +108,20 @@ def create_app() -> FastAPI:
         export.router, prefix="/api/v1", tags=["Export"],
         dependencies=viewer_deps,
     )
+    app.include_router(
+        trends.router, prefix="/api/v1", tags=["Trends"],
+        dependencies=viewer_deps,
+    )
+    app.include_router(
+        remediation.router, prefix="/api/v1", tags=["Remediation"],
+        dependencies=viewer_deps,
+    )
+    app.include_router(
+        compare.router, prefix="/api/v1", tags=["Compare"],
+        dependencies=viewer_deps,
+    )
 
-    # Analyst+ access (can trigger scans)
+    # Analyst+ access (can trigger scans and modify)
     analyst_deps = [Depends(require_role(Role.ANALYST))]
     app.include_router(
         analysis.router, prefix="/api/v1", tags=["Analysis"],
@@ -101,6 +130,65 @@ def create_app() -> FastAPI:
     app.include_router(
         aivetting.router, prefix="/api/v1", tags=["AI Vetting"],
         dependencies=analyst_deps,
+    )
+    app.include_router(
+        secrets.router, prefix="/api/v1", tags=["Secrets"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        sbom.router, prefix="/api/v1", tags=["SBOM"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        sarif_import.router, prefix="/api/v1", tags=["SARIF Import"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        custom_rules.router, prefix="/api/v1", tags=["Custom Rules"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        cicd.router, prefix="/api/v1", tags=["CI/CD"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        suppressions.router, prefix="/api/v1", tags=["Suppressions"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        autofix.router, prefix="/api/v1", tags=["Auto-Fix"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        monorepo.router, prefix="/api/v1", tags=["Monorepo"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        license_policy.router, prefix="/api/v1", tags=["License Policy"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        container.router, prefix="/api/v1", tags=["Container"],
+        dependencies=analyst_deps,
+    )
+    app.include_router(
+        iac.router, prefix="/api/v1", tags=["IaC"],
+        dependencies=analyst_deps,
+    )
+
+    # Admin access
+    admin_deps = [Depends(require_role(Role.ADMIN))]
+    app.include_router(
+        webhooks.router, prefix="/api/v1", tags=["Webhooks"],
+        dependencies=admin_deps,
+    )
+    app.include_router(
+        teams.router, prefix="/api/v1", tags=["Teams"],
+        dependencies=admin_deps,
+    )
+    app.include_router(
+        issue_trackers.router, prefix="/api/v1", tags=["Issue Trackers"],
+        dependencies=admin_deps,
     )
 
     # ── Public endpoints ────────────────────────────────────────

@@ -860,6 +860,548 @@ def ai_vet(
 
 
 @app.command()
+def secrets(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for secrets.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    scan_git_history: bool = typer.Option(
+        False,
+        "--git-history",
+        "-g",
+        help="Also scan git commit history.",
+    ),
+    max_commits: int = typer.Option(
+        50,
+        "--max-commits",
+        help="Maximum commits to scan in git history.",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Fail if secrets of this severity or higher exist (critical, major, minor).",
+    ),
+) -> None:
+    """Scan for hardcoded secrets, API keys, tokens, and credentials."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.analyzers.secrets.scanner import SecretScanner
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Secret Scanner")
+    console.print()
+
+    scanner = SecretScanner()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scanning for secrets...", total=None)
+        findings = scanner.scan_directory(path)
+
+        if scan_git_history:
+            progress.update(task, description="Scanning git history...")
+            git_findings = scanner.scan_git_history(path, max_commits=max_commits)
+            findings.extend(git_findings)
+
+        progress.update(task, description="Scan complete")
+
+    # Aggregate by severity
+    by_severity: dict[str, int] = {}
+    by_rule: dict[str, int] = {}
+    for f in findings:
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+        by_rule[f.rule_name] = by_rule.get(f.rule_name, 0) + 1
+
+    if format == "json":
+        data = {
+            "total": len(findings),
+            "by_severity": by_severity,
+            "by_rule": by_rule,
+            "findings": [f.to_dict() for f in findings],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        severity_color = {
+            "CRITICAL": "red bold",
+            "MAJOR": "yellow",
+            "MINOR": "blue",
+            "INFO": "dim",
+        }
+
+        # Summary banner
+        total = len(findings)
+        critical = by_severity.get("CRITICAL", 0)
+        major = by_severity.get("MAJOR", 0)
+
+        status_color = "red" if critical > 0 else "yellow" if major > 0 else "green"
+        console.print(Panel(
+            f"[bold {status_color}]Secrets Found: {total}[/bold {status_color}]  |  "
+            f"[red]Critical: {critical}[/red]  |  "
+            f"[yellow]Major: {major}[/yellow]",
+            title="Secret Scan Results",
+        ))
+        console.print()
+
+        if findings:
+            # Summary by type
+            summary_table = Table(title="Findings by Type")
+            summary_table.add_column("Secret Type", style="cyan")
+            summary_table.add_column("Count", style="white", justify="right")
+
+            for rule_name, count in sorted(by_rule.items(), key=lambda x: -x[1]):
+                summary_table.add_row(rule_name, str(count))
+
+            console.print(summary_table)
+            console.print()
+
+            # Detailed findings
+            findings_table = Table(title="Secret Findings")
+            findings_table.add_column("#", style="dim", width=4)
+            findings_table.add_column("Severity", width=10)
+            findings_table.add_column("Type", style="cyan", width=25)
+            findings_table.add_column("File", style="white", width=40)
+            findings_table.add_column("Line", style="dim", width=6)
+
+            for idx, f in enumerate(findings[:50], 1):
+                sev_color = severity_color.get(f.severity, "white")
+                fpath = f.file
+                if len(fpath) > 40:
+                    fpath = "..." + fpath[-37:]
+                findings_table.add_row(
+                    str(idx),
+                    f"[{sev_color}]{f.severity}[/{sev_color}]",
+                    f.rule_name,
+                    fpath,
+                    str(f.line),
+                )
+
+            console.print(findings_table)
+
+            if len(findings) > 50:
+                console.print(f"\n[dim]... and {len(findings) - 50} more findings[/dim]")
+        else:
+            console.print("[green]No secrets found![/green]")
+
+        if output:
+            data = {
+                "total": len(findings),
+                "by_severity": by_severity,
+                "by_rule": by_rule,
+                "findings": [f.to_dict() for f in findings],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"\nDetailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on:
+        severity_levels = ["minor", "major", "critical"]
+        fail_level = fail_on.lower()
+        if fail_level in severity_levels:
+            fail_index = severity_levels.index(fail_level)
+            counts = [
+                by_severity.get("MINOR", 0),
+                by_severity.get("MAJOR", 0),
+                by_severity.get("CRITICAL", 0),
+            ]
+            if any(counts[fail_index:]):
+                console.print(f"[red]FAILED: Found secrets of severity {fail_on} or higher[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: No secrets of severity {fail_on} or higher[/green]")
+
+
+@app.command()
+def iac(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to scan for IaC files.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    platform: Optional[str] = typer.Option(
+        None,
+        "--platform",
+        "-p",
+        help="Filter by platform: terraform, cloudformation, kubernetes, helm, arm, bicep",
+    ),
+    fail_on: Optional[str] = typer.Option(
+        None,
+        "--fail-on",
+        help="Fail if findings of this severity or higher exist (critical, high, medium, low).",
+    ),
+) -> None:
+    """Scan Infrastructure-as-Code for security misconfigurations."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+
+    from codescope.iac import IaCScanner
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Infrastructure-as-Code Scanner")
+    console.print()
+
+    scanner = IaCScanner()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Scanning IaC files...", total=None)
+        result = scanner.scan(path)
+        progress.update(task, description="Scan complete")
+
+    findings = result.findings
+
+    # Filter by platform if specified
+    if platform:
+        platform_upper = platform.upper()
+        findings = [f for f in findings if platform_upper in f.platform.value]
+
+    # Aggregate by severity and platform
+    by_severity: dict[str, int] = {}
+    by_platform: dict[str, int] = {}
+    for f in findings:
+        by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
+        by_platform[f.platform.value] = by_platform.get(f.platform.value, 0) + 1
+
+    if format == "json":
+        data = {
+            "total": len(findings),
+            "by_severity": by_severity,
+            "by_platform": by_platform,
+            "findings": [f.to_dict() for f in findings],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        severity_color = {
+            "CRITICAL": "red bold",
+            "HIGH": "red",
+            "MEDIUM": "yellow",
+            "LOW": "blue",
+            "INFO": "dim",
+        }
+
+        # Summary banner
+        total = len(findings)
+        critical = by_severity.get("CRITICAL", 0)
+        high = by_severity.get("HIGH", 0)
+
+        status_color = "red" if critical > 0 else "yellow" if high > 0 else "green"
+        console.print(Panel(
+            f"[bold {status_color}]IaC Findings: {total}[/bold {status_color}]  |  "
+            f"[red]Critical: {critical}[/red]  |  "
+            f"[red]High: {high}[/red]  |  "
+            f"[yellow]Medium: {by_severity.get('MEDIUM', 0)}[/yellow]",
+            title="IaC Scan Results",
+        ))
+        console.print()
+
+        if findings:
+            # Summary by platform
+            if by_platform:
+                platform_table = Table(title="Findings by Platform")
+                platform_table.add_column("Platform", style="cyan")
+                platform_table.add_column("Count", style="white", justify="right")
+
+                for plat, count in sorted(by_platform.items(), key=lambda x: -x[1]):
+                    platform_table.add_row(plat, str(count))
+
+                console.print(platform_table)
+                console.print()
+
+            # Detailed findings by severity
+            for severity in ["CRITICAL", "HIGH", "MEDIUM", "LOW"]:
+                sev_findings = [f for f in findings if f.severity == severity]
+                if not sev_findings:
+                    continue
+
+                sev_color = severity_color.get(severity, "white")
+                findings_table = Table(title=f"{severity} ({len(sev_findings)})")
+                findings_table.add_column("#", style="dim", width=4)
+                findings_table.add_column("Rule ID", style="cyan", width=12)
+                findings_table.add_column("Title", width=35)
+                findings_table.add_column("File", style="white", width=35)
+                findings_table.add_column("Line", style="dim", width=6)
+
+                for idx, f in enumerate(sev_findings[:20], 1):
+                    fpath = f.file_path
+                    if len(fpath) > 35:
+                        fpath = "..." + fpath[-32:]
+                    findings_table.add_row(
+                        str(idx),
+                        f.rule_id,
+                        f.title[:35],
+                        fpath,
+                        str(f.line),
+                    )
+
+                console.print(findings_table)
+
+                if len(sev_findings) > 20:
+                    console.print(f"  [dim]... and {len(sev_findings) - 20} more {severity} findings[/dim]")
+                console.print()
+        else:
+            console.print("[green]No IaC security issues found![/green]")
+
+        if output:
+            data = {
+                "total": len(findings),
+                "by_severity": by_severity,
+                "by_platform": by_platform,
+                "findings": [f.to_dict() for f in findings],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"Detailed report written to: {output}")
+
+    # Check fail condition
+    if fail_on:
+        severity_levels = ["low", "medium", "high", "critical"]
+        fail_level = fail_on.lower()
+        if fail_level in severity_levels:
+            fail_index = severity_levels.index(fail_level)
+            counts = [
+                by_severity.get("LOW", 0),
+                by_severity.get("MEDIUM", 0),
+                by_severity.get("HIGH", 0),
+                by_severity.get("CRITICAL", 0),
+            ]
+            if any(counts[fail_index:]):
+                console.print(f"[red]FAILED: Found IaC issues of severity {fail_on} or higher[/red]")
+                raise typer.Exit(1)
+            else:
+                console.print(f"[green]PASSED: No IaC issues of severity {fail_on} or higher[/green]")
+
+
+@app.command()
+def fix(
+    path: Path = typer.Argument(
+        Path("."),
+        help="Path to analyze for fix suggestions.",
+        exists=True,
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+    output: Optional[Path] = typer.Option(
+        None,
+        "--output",
+        "-o",
+        help="Output file path.",
+    ),
+    apply: bool = typer.Option(
+        False,
+        "--apply",
+        "-a",
+        help="Apply safe fixes automatically.",
+    ),
+    rule_id: Optional[str] = typer.Option(
+        None,
+        "--rule",
+        "-r",
+        help="Filter by specific rule ID.",
+    ),
+) -> None:
+    """Get fix recommendations and optionally auto-fix issues."""
+    import json as json_mod
+    from rich.table import Table
+    from rich.panel import Panel
+    from rich.syntax import Syntax
+
+    from codescope.analyzers import analyze_path as run_analysis
+    from codescope.remediation import RemediationEngine
+    from codescope.autofix import AutoFixEngine
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Fix Recommendations")
+    console.print()
+
+    # First, run analysis
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Analyzing code...", total=None)
+        results = run_analysis(path)
+        progress.update(task, description="Generating fix suggestions...")
+
+    # Collect all issues
+    all_issues = []
+    for file_analysis in results.files:
+        all_issues.extend(file_analysis.issues)
+
+    if rule_id:
+        all_issues = [i for i in all_issues if rule_id.lower() in i.rule_id.lower()]
+
+    if not all_issues:
+        console.print("[green]No issues found that need fixing![/green]")
+        return
+
+    # Get remediations
+    remediation_engine = RemediationEngine()
+    autofix_engine = AutoFixEngine()
+
+    # Generate fix suggestions
+    fix_result = autofix_engine.suggest_fixes(all_issues)
+
+    # Match issues with remediations
+    issues_with_fixes = []
+    for issue in all_issues:
+        remediation = remediation_engine.get(issue.rule_id)
+        suggestion = next(
+            (s for s in fix_result.suggestions if s.rule_id == issue.rule_id and s.start_line == issue.location.start_line),
+            None
+        )
+        issues_with_fixes.append({
+            "issue": issue,
+            "remediation": remediation,
+            "suggestion": suggestion,
+        })
+
+    if format == "json":
+        data = {
+            "total_issues": len(all_issues),
+            "fixable_issues": len([i for i in issues_with_fixes if i["suggestion"]]),
+            "recommendations": [
+                {
+                    "rule_id": item["issue"].rule_id,
+                    "message": item["issue"].message,
+                    "file": str(item["issue"].location.file_path),
+                    "line": item["issue"].location.start_line,
+                    "remediation": item["remediation"].to_dict() if item["remediation"] else None,
+                    "auto_fix": item["suggestion"].to_dict() if item["suggestion"] else None,
+                }
+                for item in issues_with_fixes
+            ],
+        }
+        output_content = json_mod.dumps(data, indent=2)
+        if output:
+            output.write_text(output_content)
+            console.print(f"Report written to: {output}")
+        else:
+            print(output_content)
+    else:
+        # Console output
+        fixable_count = len([i for i in issues_with_fixes if i["suggestion"] and i["suggestion"].is_safe_to_apply])
+        has_remediation = len([i for i in issues_with_fixes if i["remediation"]])
+
+        console.print(Panel(
+            f"[bold]Issues Found: {len(all_issues)}[/bold]  |  "
+            f"[green]Auto-Fixable: {fixable_count}[/green]  |  "
+            f"[cyan]With Guidance: {has_remediation}[/cyan]",
+            title="Fix Recommendations",
+        ))
+        console.print()
+
+        # Group by severity/type for display
+        displayed = 0
+        for item in issues_with_fixes[:20]:
+            issue = item["issue"]
+            remediation = item["remediation"]
+            suggestion = item["suggestion"]
+
+            displayed += 1
+            console.print(f"[bold cyan]#{displayed}[/bold cyan] [yellow]{issue.rule_id}[/yellow] - {issue.message[:60]}")
+            console.print(f"   [dim]File:[/dim] {issue.location.file_path}:{issue.location.start_line}")
+
+            if remediation:
+                console.print(f"   [bold]Recommendation:[/bold] {remediation.title}")
+                console.print(f"   [dim]{remediation.description[:100]}...[/dim]")
+
+                if remediation.fix_example:
+                    console.print("   [bold green]Fix Example:[/bold green]")
+                    console.print(Syntax(remediation.fix_example, "python", line_numbers=False, theme="monokai"))
+
+                if remediation.references:
+                    console.print(f"   [dim]References: {', '.join(remediation.references[:2])}[/dim]")
+
+            if suggestion and suggestion.is_safe_to_apply:
+                console.print(f"   [bold green]✓ Auto-fixable[/bold green] (Confidence: {suggestion.confidence:.0%})")
+
+            console.print()
+
+        if len(issues_with_fixes) > 20:
+            console.print(f"[dim]... and {len(issues_with_fixes) - 20} more issues[/dim]")
+
+        # Apply fixes if requested
+        if apply and fixable_count > 0:
+            console.print()
+            console.print("[bold]Applying safe fixes...[/bold]")
+            apply_result = autofix_engine.apply_fixes(fix_result.suggestions, safe_only=True)
+            console.print(f"[green]Applied {apply_result.applied_count} fixes[/green]")
+            if apply_result.skipped_count > 0:
+                console.print(f"[yellow]Skipped {apply_result.skipped_count} fixes (not safe to auto-apply)[/yellow]")
+
+        if output:
+            data = {
+                "total_issues": len(all_issues),
+                "fixable_issues": fixable_count,
+                "recommendations": [
+                    {
+                        "rule_id": item["issue"].rule_id,
+                        "message": item["issue"].message,
+                        "file": str(item["issue"].location.file_path),
+                        "line": item["issue"].location.start_line,
+                        "remediation": item["remediation"].to_dict() if item["remediation"] else None,
+                        "auto_fix": item["suggestion"].to_dict() if item["suggestion"] else None,
+                    }
+                    for item in issues_with_fixes
+                ],
+            }
+            output.write_text(json_mod.dumps(data, indent=2))
+            console.print(f"\nDetailed report written to: {output}")
+
+
+@app.command()
 def server(
     host: str = typer.Option(
         "0.0.0.0",
@@ -908,6 +1450,362 @@ def server(
         reload=reload,
         workers=workers if not reload else 1,
     )
+
+
+# ── Issue Tracker Commands ──────────────────────────────────────────────
+
+
+tracker_app = typer.Typer(
+    name="tracker",
+    help="Manage issue tracker integrations (Jira, Azure Boards).",
+)
+app.add_typer(tracker_app, name="tracker")
+
+
+@tracker_app.command(name="list")
+def tracker_list() -> None:
+    """List configured issue tracker integrations."""
+    from rich.table import Table
+
+    from codescope.integrations.issue_trackers import get_configured_trackers
+    from codescope.integrations.issue_trackers.registry import get_available_providers
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Issue Tracker Integrations")
+    console.print()
+
+    # Show available providers
+    providers = get_available_providers()
+    console.print("[dim]Available providers:[/dim]")
+    for p in providers:
+        console.print(f"  • {p['name']}")
+    console.print()
+
+    # Show configured trackers
+    trackers = get_configured_trackers()
+
+    if not trackers:
+        console.print("[yellow]No issue trackers configured.[/yellow]")
+        console.print()
+        console.print("Configure trackers using environment variables:")
+        console.print("  [cyan]Jira:[/cyan]")
+        console.print("    CODESCOPE_JIRA_URL=https://your-domain.atlassian.net")
+        console.print("    CODESCOPE_JIRA_PROJECT=PROJ")
+        console.print("    CODESCOPE_JIRA_TOKEN=your-api-token")
+        console.print("    CODESCOPE_JIRA_USERNAME=your-email@example.com")
+        console.print()
+        console.print("  [cyan]Azure Boards:[/cyan]")
+        console.print("    CODESCOPE_AZURE_BOARDS_ORGANIZATION=your-org")
+        console.print("    CODESCOPE_AZURE_BOARDS_PROJECT=your-project")
+        console.print("    CODESCOPE_AZURE_BOARDS_TOKEN=your-pat")
+        return
+
+    table = Table(title="Configured Issue Trackers")
+    table.add_column("Provider", style="cyan")
+    table.add_column("Project", style="white")
+    table.add_column("URL", style="dim")
+    table.add_column("Status", style="green")
+
+    for tracker in trackers:
+        is_connected, message = tracker.test_connection()
+        status = "[green]Connected[/green]" if is_connected else f"[red]Error: {message}[/red]"
+        table.add_row(
+            tracker.display_name,
+            tracker.config.project_key,
+            tracker.config.base_url or tracker.config.organization,
+            status,
+        )
+
+    console.print(table)
+
+
+@tracker_app.command(name="test")
+def tracker_test(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+) -> None:
+    """Test connection to an issue tracker."""
+    from codescope.integrations.issue_trackers import get_issue_tracker
+
+    console.print()
+    console.print(f"[bold]Testing connection to {provider}...[/bold]")
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        console.print()
+        console.print("Set the required environment variables:")
+        if provider == "jira":
+            console.print("  CODESCOPE_JIRA_URL, CODESCOPE_JIRA_PROJECT, CODESCOPE_JIRA_TOKEN")
+        elif provider == "azure_boards":
+            console.print("  CODESCOPE_AZURE_BOARDS_ORGANIZATION, CODESCOPE_AZURE_BOARDS_PROJECT, CODESCOPE_AZURE_BOARDS_TOKEN")
+        raise typer.Exit(1)
+
+    is_connected, message = tracker.test_connection()
+
+    if is_connected:
+        console.print(f"[green]Success: {message}[/green]")
+    else:
+        console.print(f"[red]Failed: {message}[/red]")
+        raise typer.Exit(1)
+
+
+@tracker_app.command(name="create")
+def tracker_create_issue(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    title: str = typer.Option(
+        ...,
+        "--title",
+        "-t",
+        help="Issue title.",
+    ),
+    description: str = typer.Option(
+        "",
+        "--description",
+        "-d",
+        help="Issue description.",
+    ),
+    issue_type: str = typer.Option(
+        "Bug",
+        "--type",
+        help="Issue type (e.g., Bug, Task, Story).",
+    ),
+    priority: str = typer.Option(
+        "medium",
+        "--priority",
+        "-p",
+        help="Priority: highest, high, medium, low, lowest",
+    ),
+    labels: Optional[str] = typer.Option(
+        None,
+        "--labels",
+        "-l",
+        help="Comma-separated labels.",
+    ),
+) -> None:
+    """Create an issue in the tracker."""
+    from codescope.integrations.issue_trackers import get_issue_tracker, IssuePriority
+    from codescope.integrations.issue_trackers.base import CreateIssueRequest
+
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    # Parse priority
+    try:
+        issue_priority = IssuePriority(priority.lower())
+    except ValueError:
+        issue_priority = IssuePriority.MEDIUM
+
+    # Parse labels
+    label_list = []
+    if labels:
+        label_list = [l.strip() for l in labels.split(",") if l.strip()]
+
+    request = CreateIssueRequest(
+        title=title,
+        description=description,
+        priority=issue_priority,
+        issue_type=issue_type,
+        labels=label_list,
+    )
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Creating issue...", total=None)
+        issue = tracker.create_issue(request)
+        progress.update(task, description="Done")
+
+    if issue:
+        console.print(f"[green]Issue created successfully![/green]")
+        console.print()
+        console.print(f"  [cyan]Key:[/cyan] {issue.key}")
+        console.print(f"  [cyan]Title:[/cyan] {issue.title}")
+        console.print(f"  [cyan]URL:[/cyan] {issue.url}")
+    else:
+        console.print("[red]Failed to create issue.[/red]")
+        raise typer.Exit(1)
+
+
+@tracker_app.command(name="search")
+def tracker_search(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    query: Optional[str] = typer.Option(
+        None,
+        "--query",
+        "-q",
+        help="Search query.",
+    ),
+    status: Optional[str] = typer.Option(
+        None,
+        "--status",
+        "-s",
+        help="Filter by status: open, in_progress, resolved, closed",
+    ),
+    max_results: int = typer.Option(
+        20,
+        "--max",
+        "-n",
+        help="Maximum results to return.",
+    ),
+    format: str = typer.Option(
+        "console",
+        "--format",
+        "-f",
+        help="Output format: console, json",
+    ),
+) -> None:
+    """Search for issues in the tracker."""
+    import json as json_mod
+    from rich.table import Table
+
+    from codescope.integrations.issue_trackers import get_issue_tracker, IssueStatus
+
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    # Parse status
+    issue_status = None
+    if status:
+        try:
+            issue_status = IssueStatus(status.lower())
+        except ValueError:
+            console.print(f"[red]Invalid status: {status}[/red]")
+            raise typer.Exit(1)
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Searching issues...", total=None)
+        issues = tracker.search_issues(
+            query=query,
+            status=issue_status,
+            max_results=max_results,
+        )
+        progress.update(task, description="Done")
+
+    if format == "json":
+        data = {"issues": [i.to_dict() for i in issues]}
+        print(json_mod.dumps(data, indent=2, default=str))
+    else:
+        if not issues:
+            console.print("[yellow]No issues found.[/yellow]")
+            return
+
+        table = Table(title=f"CodeScope Issues in {tracker.display_name}")
+        table.add_column("Key", style="cyan", width=12)
+        table.add_column("Title", style="white", width=50)
+        table.add_column("Status", width=12)
+        table.add_column("Priority", width=10)
+        table.add_column("Assignee", style="dim", width=15)
+
+        status_colors = {
+            "open": "yellow",
+            "in_progress": "blue",
+            "resolved": "green",
+            "closed": "dim",
+            "reopened": "red",
+        }
+
+        priority_colors = {
+            "highest": "red bold",
+            "high": "red",
+            "medium": "yellow",
+            "low": "blue",
+            "lowest": "dim",
+        }
+
+        for issue in issues:
+            status_color = status_colors.get(issue.status.value, "white")
+            priority_color = priority_colors.get(issue.priority.value, "white")
+
+            title = issue.title
+            if len(title) > 50:
+                title = title[:47] + "..."
+
+            table.add_row(
+                issue.key,
+                title,
+                f"[{status_color}]{issue.status.value}[/{status_color}]",
+                f"[{priority_color}]{issue.priority.value}[/{priority_color}]",
+                issue.assignee[:15] if issue.assignee else "",
+            )
+
+        console.print(table)
+        console.print(f"\nTotal: {len(issues)} issues")
+
+
+@tracker_app.command(name="link")
+def tracker_link_issues(
+    provider: str = typer.Argument(
+        ...,
+        help="Provider name: jira, azure_boards",
+    ),
+    issue_ids: str = typer.Argument(
+        ...,
+        help="Comma-separated CodeScope issue IDs to create tracker issues for.",
+    ),
+    issue_type: str = typer.Option(
+        "Bug",
+        "--type",
+        help="Issue type for created issues.",
+    ),
+    dashboard_url: str = typer.Option(
+        "",
+        "--dashboard-url",
+        help="Base URL for CodeScope dashboard links.",
+    ),
+) -> None:
+    """Create tracker issues for CodeScope analysis issues."""
+    from codescope.integrations.issue_trackers import get_issue_tracker
+
+    console.print()
+    console.print("[bold]CodeScope[/bold] - Link Issues to Tracker")
+    console.print()
+
+    tracker = get_issue_tracker(provider)
+    if not tracker:
+        console.print(f"[red]Issue tracker '{provider}' is not configured.[/red]")
+        raise typer.Exit(1)
+
+    ids = [id.strip() for id in issue_ids.split(",") if id.strip()]
+
+    if not ids:
+        console.print("[yellow]No issue IDs provided.[/yellow]")
+        raise typer.Exit(1)
+
+    console.print(f"Creating {len(ids)} issues in {tracker.display_name}...")
+    console.print()
+
+    # In a full implementation, we would fetch the CodeScope issues from storage
+    # and create corresponding tracker issues. For now, show a placeholder.
+    console.print("[yellow]Note: Full issue linking requires CodeScope issue storage integration.[/yellow]")
+    console.print()
+    console.print("Issue IDs to link:")
+    for id in ids:
+        console.print(f"  • {id}")
 
 
 if __name__ == "__main__":

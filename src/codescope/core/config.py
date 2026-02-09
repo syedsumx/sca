@@ -175,6 +175,21 @@ class Config:
         return result
 
 
+@dataclass
+class AnalysisConfig:
+    """Lightweight config for running an analysis from the API."""
+
+    project_path: Path = field(default_factory=lambda: Path("."))
+    exclude_patterns: list[str] = field(default_factory=list)
+
+    def to_config(self) -> "Config":
+        """Convert to full Config."""
+        config = Config()
+        if self.exclude_patterns:
+            config.sources.exclude.extend(self.exclude_patterns)
+        return config
+
+
 def load_config(path: Path | None = None) -> Config:
     """Load configuration from file.
 
@@ -197,7 +212,8 @@ def load_config(path: Path | None = None) -> Config:
         # Return default config
         return Config()
 
-    with open(path) as f:
+    resolved = path.resolve()
+    with open(resolved) as f:
         data = yaml.safe_load(f) or {}
 
     return Config.from_dict(data)

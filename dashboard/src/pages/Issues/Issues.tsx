@@ -98,7 +98,7 @@ const mockIssues: Issue[] = [
     location: { file_path: 'src/config/settings.py', start_line: 34, end_line: 34 },
     effort_minutes: 15,
     tags: ['security', 'owasp-a07', 'cwe-798'],
-    snippet: 'DB_PASSWORD = "secret123"',
+    snippet: 'DB_PASSWORD = "<CHANGE_ME>"',
   },
   {
     id: '8',

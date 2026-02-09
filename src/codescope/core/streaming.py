@@ -179,10 +179,11 @@ class StreamingAnalyzer:
         """
         import json
 
-        with open(output_file, 'w', encoding='utf-8') as f:
+        resolved_output = Path(output_file).resolve()
+        with open(resolved_output, 'w', encoding='utf-8') as out:
             for file_path, issues, metrics in streaming_result:
                 for issue in issues:
-                    line = json.dumps({
+                    record = json.dumps({
                         'type': 'issue',
                         'file': str(file_path),
                         'issue': {
@@ -193,10 +194,10 @@ class StreamingAnalyzer:
                             'line': issue.location.start_line,
                         }
                     })
-                    f.write(line + '\n')
+                    print(record, file=out)
 
                 # Write metrics
-                line = json.dumps({
+                record = json.dumps({
                     'type': 'metrics',
                     'file': str(file_path),
                     'metrics': {
@@ -205,7 +206,7 @@ class StreamingAnalyzer:
                         'issues': metrics.issues_count,
                     }
                 })
-                f.write(line + '\n')
+                print(record, file=out)
 
 
 def chunked_file_iterator(

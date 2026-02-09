@@ -87,15 +87,12 @@ class GitBlame:
         result = BlameResult(file_path=str(file_path))
 
         try:
-            # Build command
-            cmd = ["git", "blame", "--line-porcelain"]
-            if end_line:
-                cmd.extend(["-L", f"{start_line},{end_line}"])
-            cmd.append(str(file_path))
+            # Build line-range flag if needed
+            line_range = ["-L", str(start_line) + "," + str(end_line)] if end_line else []
 
             proc = subprocess.run(
-                cmd,
-                cwd=self.repo_path,
+                ["git", "blame", "--line-porcelain", *line_range, str(file_path)],
+                cwd=str(self.repo_path),
                 capture_output=True,
                 text=True,
                 timeout=30,

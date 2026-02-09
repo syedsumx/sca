@@ -211,3 +211,89 @@ export interface AnalysisSummary {
   issues_count: number;
   quality_gate_status: QualityGateStatus;
 }
+
+// Trend Data
+export interface TrendSnapshot {
+  timestamp: string;
+  total_issues: number;
+  vulnerabilities: number;
+  bugs: number;
+  code_smells: number;
+  coverage?: number;
+  duplication_pct?: number;
+  quality_gate_status?: QualityGateStatus;
+}
+
+export interface TrendData {
+  project_name: string;
+  snapshots: TrendSnapshot[];
+  delta?: TrendDelta;
+}
+
+export interface TrendDelta {
+  total_issues: { current: number; previous: number; delta: number };
+  vulnerabilities: { current: number; previous: number; delta: number };
+  bugs: { current: number; previous: number; delta: number };
+  code_smells: { current: number; previous: number; delta: number };
+}
+
+// Hotspot Data
+export interface FileHotspot {
+  file_path: string;
+  issues_count: number;
+  complexity: number;
+  churn: number;
+  last_modified: string;
+  risk_score: number;
+  authors: string[];
+}
+
+export interface HotspotData {
+  files: FileHotspot[];
+  directories: DirectoryHotspot[];
+}
+
+export interface DirectoryHotspot {
+  path: string;
+  total_issues: number;
+  total_files: number;
+  average_complexity: number;
+  risk_score: number;
+}
+
+// Timeline Event
+export interface TimelineEvent {
+  id: string;
+  timestamp: string;
+  event_type: 'issue_created' | 'issue_fixed' | 'scan_complete' | 'quality_gate_change' | 'vulnerability_found';
+  severity?: Severity;
+  title: string;
+  description: string;
+  file_path?: string;
+  rule_id?: string;
+  project_name: string;
+}
+
+// Team/Project Comparison
+export interface TeamSummary {
+  team_id: string;
+  team_name: string;
+  projects: ProjectSummary[];
+  aggregate_metrics: {
+    total_issues: number;
+    total_vulnerabilities: number;
+    average_coverage: number;
+    average_duplication: number;
+    average_quality_rating: QualityGrade;
+  };
+}
+
+export interface ProjectComparison {
+  projects: ProjectSummary[];
+  metrics_comparison: {
+    metric_name: string;
+    values: { project_name: string; value: number }[];
+    best_project: string;
+    worst_project: string;
+  }[];
+}

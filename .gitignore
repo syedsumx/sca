@@ -93,3 +93,4 @@ logs/
 # OS files
 .DS_Store
 Thumbs.db
+dashboard/node_modules/
