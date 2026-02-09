@@ -326,15 +326,1213 @@ def _soc2() -> ComplianceFramework:
     )
 
 
+def _gdpr() -> ComplianceFramework:
+    """GDPR - General Data Protection Regulation (EU)."""
+    return ComplianceFramework(
+        framework_id="gdpr",
+        name="GDPR",
+        version="2018",
+        description="General Data Protection Regulation — EU Data Privacy Requirements",
+        requirements=[
+            ComplianceRequirement(
+                req_id="GDPR-Art.5(1)(f)",
+                title="Integrity and Confidentiality",
+                description="Personal data must be processed securely with appropriate protection against unauthorized access, loss, or damage.",
+                cwe_ids=[284, 285, 311, 312, 319, 326, 327, 522, 523],
+                rule_tags=["access-control", "crypto", "insecure-tls", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.25",
+                title="Data Protection by Design and Default",
+                description="Implement appropriate technical measures to ensure data protection principles are embedded.",
+                cwe_ids=[200, 209, 359, 497, 532, 538],
+                rule_tags=["data-exposure", "logging", "debug"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.32(1)(a)",
+                title="Encryption of Personal Data",
+                description="Pseudonymization and encryption of personal data.",
+                cwe_ids=[311, 312, 319, 326, 327, 328, 330],
+                rule_tags=["crypto", "weak-hash", "insecure-tls"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.32(1)(b)",
+                title="Confidentiality and Integrity",
+                description="Ensure ongoing confidentiality, integrity, availability and resilience of processing systems.",
+                cwe_ids=[287, 306, 798, 862, 863],
+                rule_tags=["authentication", "authorization", "hardcoded-credential"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.32(2)",
+                title="Security Risk Assessment",
+                description="Assess appropriate security level based on risks of accidental or unlawful destruction, loss, alteration, or unauthorized disclosure.",
+                cwe_ids=[89, 78, 79, 94, 502],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection", "deserialization"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.33",
+                title="Breach Notification",
+                description="Ability to detect, report, and investigate personal data breaches.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="GDPR-Art.17",
+                title="Right to Erasure",
+                description="Ensure mechanisms exist for complete data deletion on request.",
+                cwe_ids=[212, 226, 459],
+                rule_tags=["data-exposure"],
+            ),
+        ],
+    )
+
+
+def _nist_800_53() -> ComplianceFramework:
+    """NIST 800-53 - Security and Privacy Controls."""
+    return ComplianceFramework(
+        framework_id="nist-800-53",
+        name="NIST 800-53",
+        version="Rev. 5",
+        description="NIST Special Publication 800-53 — Security and Privacy Controls for Information Systems",
+        requirements=[
+            # Access Control Family (AC)
+            ComplianceRequirement(
+                req_id="AC-3",
+                title="Access Enforcement",
+                description="Enforce approved authorizations for logical access to information and system resources.",
+                cwe_ids=[284, 285, 732, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="AC-6",
+                title="Least Privilege",
+                description="Employ the principle of least privilege, allowing only authorized accesses.",
+                cwe_ids=[250, 266, 269, 272, 274],
+                rule_tags=["privilege", "access-control"],
+            ),
+            ComplianceRequirement(
+                req_id="AC-17",
+                title="Remote Access",
+                description="Authorize, monitor, and control remote access methods.",
+                cwe_ids=[319, 295, 300],
+                rule_tags=["insecure-tls", "authentication"],
+            ),
+            # Audit and Accountability (AU)
+            ComplianceRequirement(
+                req_id="AU-2",
+                title="Event Logging",
+                description="Identify events to be logged and logging requirements.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="AU-9",
+                title="Protection of Audit Information",
+                description="Protect audit information and tools from unauthorized access and modification.",
+                cwe_ids=[532, 117],
+                rule_tags=["logging", "data-exposure"],
+            ),
+            # Identification and Authentication (IA)
+            ComplianceRequirement(
+                req_id="IA-2",
+                title="Identification and Authentication",
+                description="Uniquely identify and authenticate organizational users.",
+                cwe_ids=[287, 288, 290, 306, 307],
+                rule_tags=["authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="IA-5",
+                title="Authenticator Management",
+                description="Manage system authenticators with appropriate protections.",
+                cwe_ids=[259, 260, 261, 521, 522, 798],
+                rule_tags=["hardcoded-credential", "hardcoded-secret", "authentication"],
+            ),
+            # System and Communications Protection (SC)
+            ComplianceRequirement(
+                req_id="SC-8",
+                title="Transmission Confidentiality and Integrity",
+                description="Protect the confidentiality and integrity of transmitted information.",
+                cwe_ids=[311, 319, 523],
+                rule_tags=["insecure-tls", "crypto"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-12",
+                title="Cryptographic Key Management",
+                description="Establish and manage cryptographic keys.",
+                cwe_ids=[320, 321, 322, 323, 324, 325],
+                rule_tags=["crypto", "hardcoded-secret"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-13",
+                title="Cryptographic Protection",
+                description="Implement cryptographic mechanisms in accordance with applicable laws.",
+                cwe_ids=[326, 327, 328, 329, 330, 338, 916],
+                rule_tags=["crypto", "weak-hash", "insecure-random"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-28",
+                title="Protection of Information at Rest",
+                description="Protect the confidentiality and integrity of information at rest.",
+                cwe_ids=[311, 312, 313, 314, 315, 316],
+                rule_tags=["crypto", "data-exposure"],
+            ),
+            # System and Information Integrity (SI)
+            ComplianceRequirement(
+                req_id="SI-2",
+                title="Flaw Remediation",
+                description="Identify, report, and correct system flaws.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="SI-3",
+                title="Malicious Code Protection",
+                description="Detect and eradicate malicious code.",
+                cwe_ids=[94, 95, 96, 502],
+                rule_tags=["injection", "deserialization"],
+            ),
+            ComplianceRequirement(
+                req_id="SI-10",
+                title="Information Input Validation",
+                description="Check validity of information inputs.",
+                cwe_ids=[20, 74, 79, 89, 94],
+                rule_tags=["input-validation", "injection", "sql-injection", "xss"],
+            ),
+            ComplianceRequirement(
+                req_id="SI-11",
+                title="Error Handling",
+                description="Generate error messages with security context.",
+                cwe_ids=[209, 210, 211],
+                rule_tags=["error-handling", "data-exposure"],
+            ),
+        ],
+    )
+
+
+def _iso_27001() -> ComplianceFramework:
+    """ISO 27001 - Information Security Management System."""
+    return ComplianceFramework(
+        framework_id="iso-27001",
+        name="ISO 27001",
+        version="2022",
+        description="ISO/IEC 27001 — Information Security Management System Requirements",
+        requirements=[
+            # A.5 - Organizational Controls
+            ComplianceRequirement(
+                req_id="A.5.15",
+                title="Access Control",
+                description="Rules to control physical and logical access to information.",
+                cwe_ids=[284, 285, 732, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="A.5.17",
+                title="Authentication Information",
+                description="Allocation and management of authentication information.",
+                cwe_ids=[259, 260, 521, 522, 798],
+                rule_tags=["authentication", "hardcoded-credential", "hardcoded-secret"],
+            ),
+            ComplianceRequirement(
+                req_id="A.5.33",
+                title="Protection of Records",
+                description="Records shall be protected from loss, destruction, and falsification.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "integrity"],
+            ),
+            # A.8 - Technological Controls
+            ComplianceRequirement(
+                req_id="A.8.2",
+                title="Privileged Access Rights",
+                description="Restrict and manage allocation of privileged access rights.",
+                cwe_ids=[250, 266, 269, 272],
+                rule_tags=["privilege", "access-control"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.3",
+                title="Information Access Restriction",
+                description="Access to information and application system functions shall be restricted.",
+                cwe_ids=[284, 285, 639, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.5",
+                title="Secure Authentication",
+                description="Secure authentication technologies and procedures shall be implemented.",
+                cwe_ids=[287, 288, 290, 294, 306, 307],
+                rule_tags=["authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.7",
+                title="Protection Against Malware",
+                description="Implement controls against malware.",
+                cwe_ids=[94, 95, 96, 434, 502],
+                rule_tags=["injection", "deserialization", "file-upload"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.9",
+                title="Configuration Management",
+                description="Configurations of hardware, software, and networks shall be established and managed.",
+                cwe_ids=[16, 1004, 1032, 756],
+                rule_tags=["misconfiguration"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.12",
+                title="Data Leakage Prevention",
+                description="Detect and prevent unauthorized disclosure of information.",
+                cwe_ids=[200, 209, 359, 497, 532, 538],
+                rule_tags=["data-exposure", "logging"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.15",
+                title="Logging",
+                description="Produce, store, protect, and analyze logs for security events.",
+                cwe_ids=[117, 223, 532, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.20",
+                title="Networks Security",
+                description="Secure network infrastructure and services.",
+                cwe_ids=[295, 300, 319, 918],
+                rule_tags=["insecure-tls", "ssrf"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.24",
+                title="Use of Cryptography",
+                description="Define and implement rules for effective use of cryptography.",
+                cwe_ids=[326, 327, 328, 329, 330, 338],
+                rule_tags=["crypto", "weak-hash", "insecure-random"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.25",
+                title="Secure Development Life Cycle",
+                description="Rules for secure development of software and systems.",
+                cwe_ids=[89, 78, 79, 94, 502],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.26",
+                title="Application Security Requirements",
+                description="Information security requirements shall be identified and specified.",
+                cwe_ids=[20, 22, 352, 434],
+                rule_tags=["input-validation", "path-traversal", "csrf", "file-upload"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.28",
+                title="Secure Coding",
+                description="Secure coding principles shall be applied to software development.",
+                cwe_ids=[89, 78, 79, 94, 119, 125, 787],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection"],
+            ),
+            ComplianceRequirement(
+                req_id="A.8.31",
+                title="Separation of Development, Test and Production",
+                description="Development, testing, and production environments shall be separated.",
+                cwe_ids=[489, 540],
+                rule_tags=["debug", "misconfiguration"],
+            ),
+        ],
+    )
+
+
+def _ccpa() -> ComplianceFramework:
+    """CCPA - California Consumer Privacy Act."""
+    return ComplianceFramework(
+        framework_id="ccpa",
+        name="CCPA",
+        version="2020",
+        description="California Consumer Privacy Act — Consumer Data Privacy Requirements",
+        requirements=[
+            ComplianceRequirement(
+                req_id="CCPA-1798.100",
+                title="Right to Know",
+                description="Consumers have the right to know what personal information is collected.",
+                cwe_ids=[200, 359, 497],
+                rule_tags=["data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="CCPA-1798.105",
+                title="Right to Delete",
+                description="Consumers can request deletion of personal information.",
+                cwe_ids=[212, 226, 459],
+                rule_tags=["data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="CCPA-1798.110",
+                title="Right to Access",
+                description="Consumers have the right to access their personal information.",
+                cwe_ids=[284, 285, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="CCPA-1798.150",
+                title="Security Breach Liability",
+                description="Implement reasonable security measures to protect personal information.",
+                cwe_ids=[89, 78, 79, 287, 306, 311, 319, 326, 327, 798],
+                rule_tags=["injection", "sql-injection", "xss", "authentication", "crypto", "insecure-tls", "hardcoded-credential"],
+            ),
+            ComplianceRequirement(
+                req_id="CCPA-1798.81.5",
+                title="Reasonable Security",
+                description="Implement and maintain reasonable security procedures.",
+                cwe_ids=[284, 285, 287, 306, 311, 319, 326, 327, 522],
+                rule_tags=["access-control", "authentication", "crypto", "insecure-tls"],
+            ),
+        ],
+    )
+
+
+def _nist_csf() -> ComplianceFramework:
+    """NIST Cybersecurity Framework."""
+    return ComplianceFramework(
+        framework_id="nist-csf",
+        name="NIST CSF",
+        version="2.0",
+        description="NIST Cybersecurity Framework — Core Functions for Managing Cybersecurity Risk",
+        requirements=[
+            # Identify (ID)
+            ComplianceRequirement(
+                req_id="ID.AM-1",
+                title="Asset Management",
+                description="Physical devices and systems within the organization are inventoried.",
+                rule_tags=["sbom", "dependency"],
+            ),
+            ComplianceRequirement(
+                req_id="ID.RA-1",
+                title="Risk Assessment",
+                description="Asset vulnerabilities are identified and documented.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            # Protect (PR)
+            ComplianceRequirement(
+                req_id="PR.AA-1",
+                title="Identity Management and Access Control",
+                description="Identities and credentials are issued, managed, and verified.",
+                cwe_ids=[259, 287, 306, 521, 522, 798],
+                rule_tags=["authentication", "hardcoded-credential"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.AA-3",
+                title="Access Control",
+                description="Access permissions and authorizations are managed.",
+                cwe_ids=[284, 285, 732, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.AA-5",
+                title="Least Privilege",
+                description="Access permissions use the principle of least privilege.",
+                cwe_ids=[250, 266, 269, 272, 274],
+                rule_tags=["privilege", "access-control"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.DS-1",
+                title="Data-at-Rest Protection",
+                description="Data-at-rest is protected.",
+                cwe_ids=[311, 312, 313, 316],
+                rule_tags=["crypto", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.DS-2",
+                title="Data-in-Transit Protection",
+                description="Data-in-transit is protected.",
+                cwe_ids=[295, 300, 319, 523],
+                rule_tags=["insecure-tls", "crypto"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.DS-10",
+                title="Data Integrity",
+                description="Integrity checking mechanisms are used for software, firmware, and data.",
+                cwe_ids=[345, 353, 354],
+                rule_tags=["integrity"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.PS-1",
+                title="Configuration Management",
+                description="Security configuration standards are established and maintained.",
+                cwe_ids=[16, 756, 1004, 1032],
+                rule_tags=["misconfiguration"],
+            ),
+            ComplianceRequirement(
+                req_id="PR.PS-6",
+                title="Secure Software Development",
+                description="Software is developed using secure coding practices.",
+                cwe_ids=[20, 78, 79, 89, 94, 119, 502],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection", "input-validation"],
+            ),
+            # Detect (DE)
+            ComplianceRequirement(
+                req_id="DE.CM-1",
+                title="Security Continuous Monitoring",
+                description="Networks are monitored to detect potential cybersecurity events.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="DE.CM-6",
+                title="Personnel Activity Monitoring",
+                description="Personnel activity is monitored for anomalies.",
+                cwe_ids=[532, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            # Respond (RS)
+            ComplianceRequirement(
+                req_id="RS.AN-3",
+                title="Incident Analysis",
+                description="Forensics are performed to support incident analysis.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+        ],
+    )
+
+
+def _fedramp() -> ComplianceFramework:
+    """FedRAMP - Federal Risk and Authorization Management Program."""
+    return ComplianceFramework(
+        framework_id="fedramp",
+        name="FedRAMP",
+        version="Rev. 5",
+        description="Federal Risk and Authorization Management Program — Cloud Security Requirements",
+        requirements=[
+            ComplianceRequirement(
+                req_id="AC-2",
+                title="Account Management",
+                description="Manage system accounts including establishing, activating, modifying, and disabling.",
+                cwe_ids=[284, 285, 732, 798],
+                rule_tags=["access-control", "hardcoded-credential"],
+            ),
+            ComplianceRequirement(
+                req_id="AC-3",
+                title="Access Enforcement",
+                description="Enforce approved authorizations for logical access.",
+                cwe_ids=[284, 285, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="AC-6",
+                title="Least Privilege",
+                description="Employ least privilege principle.",
+                cwe_ids=[250, 266, 269, 272],
+                rule_tags=["privilege"],
+            ),
+            ComplianceRequirement(
+                req_id="AU-2",
+                title="Audit Events",
+                description="Define auditable events and generate audit records.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="IA-2",
+                title="Identification and Authentication",
+                description="Uniquely identify and authenticate users.",
+                cwe_ids=[287, 288, 306, 307],
+                rule_tags=["authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="IA-5",
+                title="Authenticator Management",
+                description="Manage authenticators including passwords, tokens, and certificates.",
+                cwe_ids=[259, 521, 522, 798],
+                rule_tags=["hardcoded-credential", "hardcoded-secret", "authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-8",
+                title="Transmission Confidentiality",
+                description="Protect transmitted information using encryption.",
+                cwe_ids=[295, 300, 319, 523],
+                rule_tags=["insecure-tls", "crypto"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-13",
+                title="Cryptographic Protection",
+                description="Implement FIPS-validated cryptography.",
+                cwe_ids=[326, 327, 328, 329, 330, 338],
+                rule_tags=["crypto", "weak-hash", "insecure-random"],
+            ),
+            ComplianceRequirement(
+                req_id="SC-28",
+                title="Protection of Information at Rest",
+                description="Protect information at rest using encryption.",
+                cwe_ids=[311, 312, 313, 316],
+                rule_tags=["crypto", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="SI-2",
+                title="Flaw Remediation",
+                description="Identify, report, and correct system flaws.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="SI-10",
+                title="Information Input Validation",
+                description="Check the validity of all inputs.",
+                cwe_ids=[20, 74, 78, 79, 89, 94],
+                rule_tags=["input-validation", "injection", "sql-injection", "xss", "command-injection"],
+            ),
+        ],
+    )
+
+
+def _cis_controls() -> ComplianceFramework:
+    """CIS Controls - Center for Internet Security Controls."""
+    return ComplianceFramework(
+        framework_id="cis-controls",
+        name="CIS Controls",
+        version="8.0",
+        description="CIS Critical Security Controls — Best Practice Guidelines for Cyber Defense",
+        requirements=[
+            ComplianceRequirement(
+                req_id="CIS-1",
+                title="Inventory and Control of Enterprise Assets",
+                description="Actively manage all enterprise assets connected to the infrastructure.",
+                rule_tags=["sbom", "dependency"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-2",
+                title="Inventory and Control of Software Assets",
+                description="Actively manage all software on the network.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["sbom", "dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-3",
+                title="Data Protection",
+                description="Develop processes and technical controls to identify, classify, and protect data.",
+                cwe_ids=[200, 311, 312, 319, 359, 532],
+                rule_tags=["crypto", "insecure-tls", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-4",
+                title="Secure Configuration of Enterprise Assets",
+                description="Establish and maintain secure configurations.",
+                cwe_ids=[16, 756, 1004, 1032],
+                rule_tags=["misconfiguration"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-5",
+                title="Account Management",
+                description="Use processes and tools to assign and manage credentials.",
+                cwe_ids=[259, 260, 521, 522, 798],
+                rule_tags=["authentication", "hardcoded-credential", "hardcoded-secret"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-6",
+                title="Access Control Management",
+                description="Use processes and tools for access control management.",
+                cwe_ids=[284, 285, 732, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-7",
+                title="Continuous Vulnerability Management",
+                description="Continuously assess and track vulnerabilities.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-8",
+                title="Audit Log Management",
+                description="Collect, alert, review, and retain audit logs.",
+                cwe_ids=[117, 223, 778],
+                rule_tags=["logging", "monitoring"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-10",
+                title="Malware Defenses",
+                description="Prevent or control installation and execution of malicious software.",
+                cwe_ids=[94, 95, 96, 434, 502],
+                rule_tags=["injection", "deserialization", "file-upload"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-16",
+                title="Application Software Security",
+                description="Manage security life cycle of in-house developed and acquired software.",
+                cwe_ids=[20, 78, 79, 89, 94, 119, 125, 787],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection", "input-validation"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-16.1",
+                title="Secure Software Development Process",
+                description="Establish and maintain a secure application development process.",
+                cwe_ids=[89, 78, 79, 94, 502],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-16.2",
+                title="Software Component Analysis",
+                description="Establish and maintain a process for third-party software components.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve", "sbom"],
+            ),
+            ComplianceRequirement(
+                req_id="CIS-16.4",
+                title="Static Application Security Testing",
+                description="Perform static analysis as part of the development process.",
+                cwe_ids=[89, 78, 79, 94],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection"],
+            ),
+        ],
+    )
+
+
+def _owasp_asvs() -> ComplianceFramework:
+    """OWASP ASVS - Application Security Verification Standard."""
+    return ComplianceFramework(
+        framework_id="owasp-asvs",
+        name="OWASP ASVS",
+        version="4.0",
+        description="OWASP Application Security Verification Standard — Comprehensive Security Requirements",
+        requirements=[
+            # V1 - Architecture, Design and Threat Modeling
+            ComplianceRequirement(
+                req_id="V1.2",
+                title="Authentication Architecture",
+                description="Verify authentication is implemented consistently across the application.",
+                cwe_ids=[287, 306, 307],
+                rule_tags=["authentication"],
+            ),
+            # V2 - Authentication
+            ComplianceRequirement(
+                req_id="V2.1",
+                title="Password Security",
+                description="Verify passwords are stored using approved hashing algorithms.",
+                cwe_ids=[259, 260, 261, 521, 916],
+                rule_tags=["authentication", "weak-hash", "hardcoded-credential"],
+            ),
+            ComplianceRequirement(
+                req_id="V2.5",
+                title="Credential Recovery",
+                description="Verify credential recovery mechanisms are secure.",
+                cwe_ids=[287, 620, 640],
+                rule_tags=["authentication"],
+            ),
+            # V3 - Session Management
+            ComplianceRequirement(
+                req_id="V3.2",
+                title="Session Binding",
+                description="Verify sessions are properly bound to the user and context.",
+                cwe_ids=[384, 613],
+                rule_tags=["session"],
+            ),
+            ComplianceRequirement(
+                req_id="V3.5",
+                title="Token-based Session Management",
+                description="Verify token-based session management is secure.",
+                cwe_ids=[287, 346, 352],
+                rule_tags=["session", "csrf"],
+            ),
+            # V4 - Access Control
+            ComplianceRequirement(
+                req_id="V4.1",
+                title="General Access Control",
+                description="Verify access control is enforced on the server side.",
+                cwe_ids=[284, 285, 639, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            ComplianceRequirement(
+                req_id="V4.2",
+                title="Operation Level Access Control",
+                description="Verify users can only access functions they have permissions for.",
+                cwe_ids=[284, 285, 862, 863],
+                rule_tags=["access-control", "authorization"],
+            ),
+            # V5 - Validation, Sanitization and Encoding
+            ComplianceRequirement(
+                req_id="V5.1",
+                title="Input Validation",
+                description="Verify input validation is performed on the server side.",
+                cwe_ids=[20, 74, 89, 116],
+                rule_tags=["input-validation", "injection"],
+            ),
+            ComplianceRequirement(
+                req_id="V5.2",
+                title="Sanitization and Sandboxing",
+                description="Verify untrusted HTML is properly sanitized.",
+                cwe_ids=[79, 80, 83],
+                rule_tags=["xss"],
+            ),
+            ComplianceRequirement(
+                req_id="V5.3",
+                title="Output Encoding",
+                description="Verify output encoding prevents injection attacks.",
+                cwe_ids=[79, 80, 89, 94],
+                rule_tags=["xss", "sql-injection", "injection"],
+            ),
+            ComplianceRequirement(
+                req_id="V5.5",
+                title="Deserialization Prevention",
+                description="Verify deserialization of untrusted data is avoided.",
+                cwe_ids=[502],
+                rule_tags=["deserialization"],
+            ),
+            # V6 - Stored Cryptography
+            ComplianceRequirement(
+                req_id="V6.1",
+                title="Data Classification",
+                description="Verify regulated data is stored encrypted.",
+                cwe_ids=[311, 312, 313],
+                rule_tags=["crypto", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="V6.2",
+                title="Algorithms",
+                description="Verify strong cryptographic algorithms are used.",
+                cwe_ids=[326, 327, 328, 916],
+                rule_tags=["crypto", "weak-hash"],
+            ),
+            ComplianceRequirement(
+                req_id="V6.3",
+                title="Random Values",
+                description="Verify cryptographically secure random values are used.",
+                cwe_ids=[330, 338],
+                rule_tags=["insecure-random"],
+            ),
+            ComplianceRequirement(
+                req_id="V6.4",
+                title="Secret Management",
+                description="Verify secrets are stored and managed securely.",
+                cwe_ids=[259, 260, 321, 798],
+                rule_tags=["hardcoded-secret", "hardcoded-credential"],
+            ),
+            # V7 - Error Handling and Logging
+            ComplianceRequirement(
+                req_id="V7.1",
+                title="Log Content",
+                description="Verify sensitive data is not logged.",
+                cwe_ids=[117, 532],
+                rule_tags=["logging", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="V7.4",
+                title="Error Handling",
+                description="Verify error handling does not expose sensitive information.",
+                cwe_ids=[209, 210, 211],
+                rule_tags=["error-handling", "data-exposure"],
+            ),
+            # V8 - Data Protection
+            ComplianceRequirement(
+                req_id="V8.1",
+                title="General Data Protection",
+                description="Verify sensitive data is protected from unauthorized access.",
+                cwe_ids=[200, 359, 497, 538],
+                rule_tags=["data-exposure"],
+            ),
+            # V9 - Communications
+            ComplianceRequirement(
+                req_id="V9.1",
+                title="Client Communications Security",
+                description="Verify TLS is used for all client connections.",
+                cwe_ids=[295, 300, 319, 523],
+                rule_tags=["insecure-tls"],
+            ),
+            ComplianceRequirement(
+                req_id="V9.2",
+                title="Server Communications Security",
+                description="Verify server-to-server communications use TLS.",
+                cwe_ids=[295, 300, 319],
+                rule_tags=["insecure-tls"],
+            ),
+            # V10 - Malicious Code
+            ComplianceRequirement(
+                req_id="V10.2",
+                title="Malicious Code Search",
+                description="Verify application source code does not contain malicious code.",
+                cwe_ids=[506, 507, 511],
+                rule_tags=["backdoor"],
+            ),
+            # V11 - Business Logic
+            ComplianceRequirement(
+                req_id="V11.1",
+                title="Business Logic Security",
+                description="Verify business logic flows are processed in sequential step order.",
+                cwe_ids=[362, 367],
+                rule_tags=["race-condition"],
+            ),
+            # V12 - Files and Resources
+            ComplianceRequirement(
+                req_id="V12.1",
+                title="File Upload",
+                description="Verify file upload functionality does not introduce vulnerabilities.",
+                cwe_ids=[22, 400, 434],
+                rule_tags=["file-upload", "path-traversal"],
+            ),
+            ComplianceRequirement(
+                req_id="V12.3",
+                title="File Execution",
+                description="Verify user-submitted files are not executed.",
+                cwe_ids=[78, 94, 434],
+                rule_tags=["command-injection", "injection", "file-upload"],
+            ),
+            ComplianceRequirement(
+                req_id="V12.4",
+                title="File Storage",
+                description="Verify files are stored securely.",
+                cwe_ids=[22, 73],
+                rule_tags=["path-traversal"],
+            ),
+            ComplianceRequirement(
+                req_id="V12.5",
+                title="File Download",
+                description="Verify file download does not introduce vulnerabilities.",
+                cwe_ids=[22, 918],
+                rule_tags=["path-traversal", "ssrf"],
+            ),
+            ComplianceRequirement(
+                req_id="V12.6",
+                title="SSRF Protection",
+                description="Verify the application is protected against SSRF attacks.",
+                cwe_ids=[918],
+                rule_tags=["ssrf"],
+            ),
+            # V13 - API and Web Service
+            ComplianceRequirement(
+                req_id="V13.1",
+                title="Generic Web Service Security",
+                description="Verify API endpoints are secured.",
+                cwe_ids=[284, 285, 287, 306],
+                rule_tags=["access-control", "authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="V13.2",
+                title="RESTful Web Service",
+                description="Verify RESTful services use anti-CSRF mechanisms.",
+                cwe_ids=[352],
+                rule_tags=["csrf"],
+            ),
+            # V14 - Configuration
+            ComplianceRequirement(
+                req_id="V14.2",
+                title="Dependency",
+                description="Verify third-party components are from trusted sources and up-to-date.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="V14.3",
+                title="Unintended Security Disclosure",
+                description="Verify error messages and debug information are not exposed.",
+                cwe_ids=[209, 489, 540],
+                rule_tags=["debug", "error-handling", "data-exposure"],
+            ),
+        ],
+    )
+
+
+def _owasp_masvs() -> ComplianceFramework:
+    """OWASP MASVS - Mobile Application Security Verification Standard."""
+    return ComplianceFramework(
+        framework_id="owasp-masvs",
+        name="OWASP MASVS",
+        version="2.0",
+        description="OWASP Mobile Application Security Verification Standard — Mobile App Security Requirements",
+        requirements=[
+            # MASVS-STORAGE
+            ComplianceRequirement(
+                req_id="MASVS-STORAGE-1",
+                title="Secure Data Storage",
+                description="The app securely stores sensitive data.",
+                cwe_ids=[200, 311, 312, 313, 316, 359, 532],
+                rule_tags=["crypto", "data-exposure", "logging"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-STORAGE-2",
+                title="Data Leakage Prevention",
+                description="The app prevents leakage of sensitive data.",
+                cwe_ids=[200, 359, 497, 532, 538],
+                rule_tags=["data-exposure", "logging"],
+            ),
+            # MASVS-CRYPTO
+            ComplianceRequirement(
+                req_id="MASVS-CRYPTO-1",
+                title="Strong Cryptography",
+                description="The app employs current strong cryptography.",
+                cwe_ids=[326, 327, 328, 329, 330, 338, 916],
+                rule_tags=["crypto", "weak-hash", "insecure-random"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-CRYPTO-2",
+                title="Cryptography Configuration",
+                description="The app performs key management according to industry best practices.",
+                cwe_ids=[320, 321, 322, 324, 325],
+                rule_tags=["crypto", "hardcoded-secret"],
+            ),
+            # MASVS-AUTH
+            ComplianceRequirement(
+                req_id="MASVS-AUTH-1",
+                title="Authentication",
+                description="The app uses secure authentication mechanisms.",
+                cwe_ids=[287, 288, 306, 307, 521],
+                rule_tags=["authentication"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-AUTH-2",
+                title="Session Management",
+                description="The app performs secure session management.",
+                cwe_ids=[384, 613],
+                rule_tags=["session"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-AUTH-3",
+                title="Password Policy",
+                description="The app implements a secure password policy.",
+                cwe_ids=[521, 522],
+                rule_tags=["authentication"],
+            ),
+            # MASVS-NETWORK
+            ComplianceRequirement(
+                req_id="MASVS-NETWORK-1",
+                title="Secure Connections",
+                description="The app secures all network traffic.",
+                cwe_ids=[295, 300, 319, 523],
+                rule_tags=["insecure-tls"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-NETWORK-2",
+                title="TLS Configuration",
+                description="The app performs proper TLS configuration and verification.",
+                cwe_ids=[295, 297],
+                rule_tags=["insecure-tls"],
+            ),
+            # MASVS-PLATFORM
+            ComplianceRequirement(
+                req_id="MASVS-PLATFORM-1",
+                title="Platform Interaction",
+                description="The app uses platform APIs securely.",
+                cwe_ids=[78, 89, 94, 502, 927],
+                rule_tags=["injection", "sql-injection", "command-injection", "deserialization"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-PLATFORM-2",
+                title="WebView Security",
+                description="The app secures WebView interactions.",
+                cwe_ids=[79, 749, 919],
+                rule_tags=["xss"],
+            ),
+            # MASVS-CODE
+            ComplianceRequirement(
+                req_id="MASVS-CODE-1",
+                title="Security Best Practices",
+                description="The app follows secure coding best practices.",
+                cwe_ids=[20, 78, 79, 89, 94, 119],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection", "input-validation"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-CODE-2",
+                title="Input Validation",
+                description="The app validates and sanitizes all user input.",
+                cwe_ids=[20, 22, 74, 79, 89, 94],
+                rule_tags=["input-validation", "injection", "path-traversal"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-CODE-3",
+                title="Third-Party Libraries",
+                description="The app uses up-to-date third-party libraries.",
+                cwe_ids=[1035, 1104],
+                rule_tags=["dependency", "cve"],
+            ),
+            ComplianceRequirement(
+                req_id="MASVS-CODE-4",
+                title="Hardcoded Secrets",
+                description="The app does not contain hardcoded sensitive values.",
+                cwe_ids=[259, 321, 798],
+                rule_tags=["hardcoded-credential", "hardcoded-secret"],
+            ),
+        ],
+    )
+
+
+def _mitre_attack() -> ComplianceFramework:
+    """MITRE ATT&CK - Adversary Tactics, Techniques, and Common Knowledge."""
+    return ComplianceFramework(
+        framework_id="mitre-attack",
+        name="MITRE ATT&CK",
+        version="14.0",
+        description="MITRE ATT&CK Framework — Adversarial Tactics, Techniques, and Procedures Mapping",
+        requirements=[
+            # Initial Access
+            ComplianceRequirement(
+                req_id="T1190",
+                title="Exploit Public-Facing Application",
+                description="Adversaries may exploit vulnerabilities in internet-facing systems.",
+                cwe_ids=[20, 78, 79, 89, 94, 502, 918],
+                owasp_ids=["A03"],
+                rule_tags=["injection", "sql-injection", "xss", "command-injection", "deserialization", "ssrf"],
+            ),
+            ComplianceRequirement(
+                req_id="T1078",
+                title="Valid Accounts",
+                description="Adversaries may obtain and abuse valid account credentials.",
+                cwe_ids=[259, 287, 306, 521, 522, 798],
+                owasp_ids=["A07"],
+                rule_tags=["hardcoded-credential", "authentication"],
+            ),
+            # Execution
+            ComplianceRequirement(
+                req_id="T1059",
+                title="Command and Scripting Interpreter",
+                description="Adversaries may abuse command and script interpreters to execute commands.",
+                cwe_ids=[77, 78, 94, 95, 96],
+                owasp_ids=["A03"],
+                rule_tags=["command-injection", "injection"],
+            ),
+            ComplianceRequirement(
+                req_id="T1203",
+                title="Exploitation for Client Execution",
+                description="Adversaries may exploit software vulnerabilities in client applications.",
+                cwe_ids=[79, 94, 502],
+                owasp_ids=["A03", "A08"],
+                rule_tags=["xss", "injection", "deserialization"],
+            ),
+            # Persistence
+            ComplianceRequirement(
+                req_id="T1136",
+                title="Create Account",
+                description="Adversaries may create accounts to maintain access.",
+                cwe_ids=[284, 285, 862],
+                owasp_ids=["A01"],
+                rule_tags=["access-control"],
+            ),
+            ComplianceRequirement(
+                req_id="T1505.003",
+                title="Web Shell",
+                description="Adversaries may install web shells on web servers.",
+                cwe_ids=[434, 94],
+                rule_tags=["file-upload", "injection"],
+            ),
+            # Privilege Escalation
+            ComplianceRequirement(
+                req_id="T1068",
+                title="Exploitation for Privilege Escalation",
+                description="Adversaries may exploit software vulnerabilities to escalate privileges.",
+                cwe_ids=[250, 266, 269, 272, 274],
+                rule_tags=["privilege"],
+            ),
+            ComplianceRequirement(
+                req_id="T1548",
+                title="Abuse Elevation Control Mechanism",
+                description="Adversaries may circumvent mechanisms designed to control elevate privileges.",
+                cwe_ids=[269, 284, 285, 862, 863],
+                owasp_ids=["A01"],
+                rule_tags=["privilege", "authorization"],
+            ),
+            # Defense Evasion
+            ComplianceRequirement(
+                req_id="T1562.006",
+                title="Indicator Blocking",
+                description="Adversaries may block logging or security tool output.",
+                cwe_ids=[117, 223, 778],
+                owasp_ids=["A09"],
+                rule_tags=["logging"],
+            ),
+            ComplianceRequirement(
+                req_id="T1140",
+                title="Deobfuscate/Decode Files or Information",
+                description="Adversaries may use obfuscated files to hide malicious content.",
+                cwe_ids=[502, 506],
+                rule_tags=["deserialization"],
+            ),
+            # Credential Access
+            ComplianceRequirement(
+                req_id="T1552",
+                title="Unsecured Credentials",
+                description="Adversaries may search for insecurely stored credentials.",
+                cwe_ids=[256, 257, 259, 260, 312, 522, 798],
+                owasp_ids=["A02", "A07"],
+                rule_tags=["hardcoded-credential", "hardcoded-secret", "data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="T1110",
+                title="Brute Force",
+                description="Adversaries may use brute force techniques to gain access.",
+                cwe_ids=[307, 521],
+                owasp_ids=["A07"],
+                rule_tags=["authentication"],
+            ),
+            # Discovery
+            ComplianceRequirement(
+                req_id="T1083",
+                title="File and Directory Discovery",
+                description="Adversaries may enumerate files and directories.",
+                cwe_ids=[22, 200, 538, 548],
+                owasp_ids=["A01"],
+                rule_tags=["path-traversal", "data-exposure"],
+            ),
+            # Lateral Movement
+            ComplianceRequirement(
+                req_id="T1210",
+                title="Exploitation of Remote Services",
+                description="Adversaries may exploit remote services to gain access.",
+                cwe_ids=[78, 89, 94, 918],
+                owasp_ids=["A03"],
+                rule_tags=["injection", "sql-injection", "command-injection", "ssrf"],
+            ),
+            # Collection
+            ComplianceRequirement(
+                req_id="T1005",
+                title="Data from Local System",
+                description="Adversaries may search for and collect data from local systems.",
+                cwe_ids=[200, 312, 359, 532],
+                rule_tags=["data-exposure"],
+            ),
+            ComplianceRequirement(
+                req_id="T1530",
+                title="Data from Cloud Storage",
+                description="Adversaries may access data from cloud storage.",
+                cwe_ids=[284, 285, 311, 862],
+                rule_tags=["access-control", "crypto"],
+            ),
+            # Exfiltration
+            ComplianceRequirement(
+                req_id="T1048",
+                title="Exfiltration Over Alternative Protocol",
+                description="Adversaries may steal data by exfiltrating over different protocols.",
+                cwe_ids=[200, 319, 359],
+                rule_tags=["data-exposure", "insecure-tls"],
+            ),
+            # Impact
+            ComplianceRequirement(
+                req_id="T1565",
+                title="Data Manipulation",
+                description="Adversaries may manipulate data to impact availability or integrity.",
+                cwe_ids=[89, 345, 353],
+                owasp_ids=["A03"],
+                rule_tags=["sql-injection", "integrity"],
+            ),
+        ],
+    )
+
+
 # ── Registry ─────────────────────────────────────────────────────────
 
 FRAMEWORK_BUILDERS: dict[str, Any] = {
+    # Security Standards
     "owasp-top10-2021": _owasp_top10_2021,
     "cwe-top25-2023": _cwe_top25_2023,
     "sans-top25": _sans_top25,
+    # OWASP Verification Standards
+    "owasp-asvs": _owasp_asvs,
+    "owasp-masvs": _owasp_masvs,
+    # Industry Regulations
     "pci-dss-v4": _pci_dss_v4,
     "hipaa": _hipaa,
     "soc2": _soc2,
+    # Data Privacy
+    "gdpr": _gdpr,
+    "ccpa": _ccpa,
+    # Government & Federal
+    "nist-800-53": _nist_800_53,
+    "nist-csf": _nist_csf,
+    "fedramp": _fedramp,
+    # International Standards
+    "iso-27001": _iso_27001,
+    # Best Practices
+    "cis-controls": _cis_controls,
+    # Threat Intelligence
+    "mitre-attack": _mitre_attack,
 }
 
 
