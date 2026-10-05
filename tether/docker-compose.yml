@@ -28,6 +28,8 @@ services:
       TETHER_API_URL: http://api:8000
     ports:
       - "8000:8000"
+    volumes:
+      - ./certificates:/app/certificates
     depends_on:
       db:
         condition: service_healthy
