@@ -38,11 +38,26 @@ def cmd_seed(_: argparse.Namespace) -> None:
     print(f"seeded {result.customers} customers and {result.tickets} tickets")
 
 
+def cmd_pipelines(_: argparse.Namespace) -> None:
+    from tether.embeddings import get_embedder
+    from tether.pipelines.run import run_pipelines
+
+    with session_scope() as s:
+        result = run_pipelines(s, get_embedder())
+    print(
+        f"customers={result.customers} rag={result.rag} "
+        f"models={result.training.models} memory={result.memory}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="tether", description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("migrate", help="apply database migrations").set_defaults(func=cmd_migrate)
     sub.add_parser("seed", help="reset and seed demo source data").set_defaults(func=cmd_seed)
+    sub.add_parser("pipelines", help="run the RAG, training and memory pipelines").set_defaults(
+        func=cmd_pipelines
+    )
     return parser
 
 

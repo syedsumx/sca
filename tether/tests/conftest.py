@@ -27,6 +27,9 @@ import tether  # noqa: E402
 from tether.cli import alembic_config  # noqa: E402
 from tether.db.models import Base  # noqa: E402
 from tether.db.session import get_engine, get_session_factory  # noqa: E402
+from tether.embeddings.fake import FakeEmbedder  # noqa: E402
+from tether.pipelines.run import PipelineResult, run_pipelines  # noqa: E402
+from tether.pipelines.seed import seed  # noqa: E402
 
 
 @pytest.fixture(scope="session")
@@ -63,3 +66,17 @@ def session(session_factory: sessionmaker[Session]) -> Iterator[Session]:
         s.commit()
     finally:
         s.close()
+
+
+@pytest.fixture
+def embedder() -> FakeEmbedder:
+    return FakeEmbedder(int(os.environ.get("TETHER_EMBEDDING_DIM", "384")))
+
+
+@pytest.fixture
+def demo_world(session: Session, embedder: FakeEmbedder) -> PipelineResult:
+    """Seeded source data (30 customers, 120 tickets) plus every pipeline run once."""
+    seed(session, n_customers=30, n_tickets=120)
+    result = run_pipelines(session, embedder)
+    session.commit()
+    return result
