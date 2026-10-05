@@ -15,11 +15,16 @@ class SourceTable:
     pk: InstrumentedAttribute[Any]
     # Lower runs first during purges (children before parents, respecting FKs).
     purge_order: int
+    # Column holding the subject id. A purge also sweeps rows matching the subject that
+    # were never recorded in lineage, as a safety net for untracked writes.
+    subject_column: InstrumentedAttribute[Any] | None = None
 
 
 SOURCE_TABLES: dict[str, SourceTable] = {
-    "support_tickets": SourceTable(SupportTicket, SupportTicket.id, purge_order=10),
-    "customers": SourceTable(Customer, Customer.id, purge_order=90),
+    "support_tickets": SourceTable(
+        SupportTicket, SupportTicket.id, purge_order=10, subject_column=SupportTicket.customer_id
+    ),
+    "customers": SourceTable(Customer, Customer.id, purge_order=90, subject_column=Customer.id),
 }
 
 
@@ -47,3 +52,16 @@ def delete_source_record(session: Session, ref: str) -> int:
         raise KeyError(f"source table {table!r} is not registered in SOURCE_TABLES")
     result = session.execute(delete(entry.model).where(entry.pk == pk))
     return int(getattr(result, "rowcount", 0) or 0)
+
+
+def sweep_subject_rows(session: Session, subject_id: str) -> dict[str, int]:
+    """Delete rows tied to ``subject_id`` in every registered table (children first)."""
+    swept: dict[str, int] = {}
+    for name, entry in sorted(SOURCE_TABLES.items(), key=lambda kv: kv[1].purge_order):
+        if entry.subject_column is None:
+            continue
+        result = session.execute(delete(entry.model).where(entry.subject_column == subject_id))
+        n = int(getattr(result, "rowcount", 0) or 0)
+        if n:
+            swept[name] = n
+    return swept

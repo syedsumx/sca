@@ -97,7 +97,14 @@ class LineageStore:
             },
         )
         self.session.execute(stmt)
+        self._expire({s.id for s in specs})
         self._reindex(specs)
+
+    def _expire(self, ids: set[str]) -> None:
+        """Core upserts bypass the ORM, so refresh any already-loaded copies of these nodes."""
+        for obj in list(self.session.identity_map.values()):
+            if isinstance(obj, LineageNode) and obj.id in ids:
+                self.session.expire(obj)
 
     def _reindex(self, specs: Sequence[NodeSpec]) -> None:
         ids = [s.id for s in specs]
