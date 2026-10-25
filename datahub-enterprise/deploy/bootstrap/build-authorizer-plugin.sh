@@ -9,7 +9,7 @@ cp -r "$SRC" /tmp/build && cd /tmp/build
 gradle --no-daemon -q jar
 mkdir -p "$OUT/dhe-enterprise-authorizer"
 rm -f "$OUT"/dhe-enterprise-authorizer/*.jar
-cp build/libs/dhe-enterprise-authorizer-*.jar "$OUT/dhe-enterprise-authorizer/"
+cp build/libs/dhe-enterprise-authorizer.jar "$OUT/dhe-enterprise-authorizer/"
 cp config.yml "$OUT/config.yml"
 echo "authorizer plugin installed into $OUT"
 ls -R "$OUT"

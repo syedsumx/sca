@@ -65,7 +65,7 @@ x-dhe-service: &dhe-service
     context: .
     dockerfile: docker/Dockerfile
   restart: unless-stopped
-  entrypoint: ["/usr/bin/tini", "--", "/opt/dhe-bootstrap/with-token.sh"]
+  entrypoint: ["/opt/dhe/bin/dumb-init", "--", "/opt/dhe-bootstrap/with-token.sh"]
   environment:
     <<: *dhe-env
   volumes:
@@ -81,7 +81,7 @@ x-dhe-service: &dhe-service
   networks: [datahub]
   read_only: true
   tmpfs:
-    - /tmp
+    - /tmp:mode=1777
   security_opt:
     - no-new-privileges:true
   cap_drop: [ALL]
@@ -125,6 +125,9 @@ services:
       discovery.type: single-node
       DISABLE_SECURITY_PLUGIN: "true"
       OPENSEARCH_JAVA_OPTS: -Xms768m -Xmx1024m -Dlog4j2.formatMsgNoLookups=true
+      # Local dev: OpenSearch blocks index creation at the 95% disk flood stage, which laptops and
+      # quota-limited sandboxes hit easily. Set to "true" for production-like behaviour.
+      cluster.routing.allocation.disk.threshold_enabled: ${DHE_SEARCH_DISK_THRESHOLD_ENABLED:-false}
     healthcheck:
       test: ["CMD-SHELL", "curl -sS --fail 'http://search:9200/_cluster/health?wait_for_status=yellow&timeout=0s'"]
       interval: 5s
@@ -177,19 +180,19 @@ services:
     networks: [datahub]
 
   # ============================================================ DataHub core services
-  # Builds the DHE authorizer plugin into the shared plugin volume mounted by GMS.
+  # Copies the DHE authorizer plugin (jar + config.yml) into the plugin volume mounted by GMS.
+  # Image: docker/authorizer-plugin.Dockerfile (built by deploy/build-images.sh).
   authorizer-plugin:
-    image: gradle:8.14.3-jdk21
-    command: ["/bin/sh", "/opt/dhe-bootstrap/build-authorizer-plugin.sh"]
+    image: ${DHE_PLUGIN_IMAGE:-dhe/enterprise-authorizer}:${DHE_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/authorizer-plugin.Dockerfile
+    user: "0:0"  # one-shot init writing into a root-owned named volume
     environment:
-      SRC: /src
-      OUT: /plugins/auth
+      PLUGIN_DIR: /plugins/auth
     volumes:
-      - ./plugins/java/enterprise-authorizer:/src:ro
-      - ./deploy/bootstrap:/opt/dhe-bootstrap:ro
       - gms-plugins:/plugins
-      - gradle-cache:/home/gradle/.gradle
-    networks: [datahub]
+    network_mode: none
 
   system-update:
     image: acryldata/datahub-upgrade:${DATAHUB_VERSION:-v1.8.0}
@@ -369,7 +372,7 @@ services:
     command: ["pdp", "--host", "0.0.0.0", "--port", "8810"]
     healthcheck:
       <<: *dhe-http-healthcheck
-      test: ["CMD", "curl", "-sSf", "http://localhost:8810/health"]
+      test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8810/health"]
     # The PDP must start before GMS can authorize non-root users, but needs a GMS token to import
     # native policies; it tolerates GMS being unavailable at boot and retries the import.
     depends_on:
@@ -384,7 +387,7 @@ services:
       - "${DHE_MAPPED_API_PORT:-8800}:8800"
     healthcheck:
       <<: *dhe-http-healthcheck
-      test: ["CMD", "curl", "-sSf", "http://localhost:8800/health"]
+      test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8800/health"]
     depends_on:
       <<: *dhe-depends
       dhe-pdp:
@@ -401,7 +404,7 @@ services:
       - dhe-gateway-keys:/var/lib/dhe/keys
     healthcheck:
       <<: *dhe-http-healthcheck
-      test: ["CMD", "curl", "-sSf", "http://localhost:8820/health"]
+      test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8820/health"]
     # The gateway is the only control-plane service reachable from the VPC side.
     networks: [datahub, vpc-egress]
 
@@ -440,7 +443,7 @@ services:
       - "${DHE_MAPPED_MCP_PORT:-8830}:8830"
     healthcheck:
       <<: *dhe-http-healthcheck
-      test: ["CMD", "curl", "-sSf", "http://localhost:8830/health"]
+      test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8830/health"]
 
   # Single origin for the UI + DHE API (+ remote MCP) on http://localhost:9000
   edge:
@@ -503,7 +506,7 @@ services:
       - ./docker/agent/agent.yml:/etc/dhe-agent/agent.yml:ro
       - dhe-agent-state:/var/lib/dhe-agent
     tmpfs:
-      - /tmp/dhe
+      - /tmp/dhe:mode=1777  # default tmpfs is root:root 0755, unwritable for uid 10001
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -545,7 +548,6 @@ volumes:
   osdata:
   broker:
   gms-plugins:
-  gradle-cache:
   dhe-pgdata:
   dhe-bootstrap:
   dhe-gateway-keys:

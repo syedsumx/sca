@@ -12,7 +12,7 @@ checked against a running stack. **Status** reflects this repository as of v0.1:
 | 0.2 | Python package skeleton: settings, GMS client (Rest.li ingestProposal, OpenAPI v3, GraphQL), MCP builders | ✅ |
 | 0.3 | DHE database layer (SQLAlchemy Core; Postgres prod / SQLite tests), hash-chained audit log + verifier | ✅ |
 | 0.4 | Caller identity: DataHub PAT validation via GMS `me`, UI session cookies via frontend, service token | ✅ |
-| 0.5 | Compose stack (DataHub v1.8.0 core + DHE + pgvector + nginx edge) and Helm umbrella chart | 🟡 config/lint/kubeconform validated; images not built here |
+| 0.5 | Compose stack (DataHub v1.8.0 core + DHE + pgvector + nginx edge) and Helm umbrella chart | ✅ compose stack runs healthy; 🟡 Helm only lint/kubeconform |
 
 **DoD:** `docker compose -f docker-compose.enterprise.yml up` reaches healthy. `dhe bootstrap` creates the
 certification structured properties, the `Certified` tag and the `Classification.PII.*` terms.
@@ -24,8 +24,8 @@ certification structured properties, the `Certified` tag and the `Classification
 | 1.1 | Detectors: seasonal robust-z (MAD), EWMA, learned freshness cadence, PSI + KS drift, schema diff, static bounds | ✅ |
 | 1.2 | Collectors: DataHub signals (`operation`, `datasetProfile`, `schemaMetadata`) and SQL (dialect-quoted, read-only guard) | ✅ |
 | 1.3 | Engine: idempotent run ids, outage buffering + flush, feedback loop, incident raise/auto-resolve that never reopens human-closed incidents | ✅ |
-| 1.4 | Projection to native `assertionInfo` / `assertionRunEvent` / `incidentInfo` | 🟡 shapes follow the PDL; confirm in the UI Quality tab |
-| 1.5 | Leader-elected scheduler (pg advisory lock) with hash partitioning | ✅ (lock path needs Postgres) |
+| 1.4 | Projection to native `assertionInfo` / `assertionRunEvent` / `incidentInfo` | ✅ verified live via GMS GraphQL (e2e) |
+| 1.5 | Leader-elected scheduler (pg advisory lock) with hash partitioning | ✅ leadership acquired on Postgres in the live stack |
 | 1.6 | REST API + React dashboard, monitor editor, evaluation chart, dataset health badge | ✅ |
 | 1.7 | Next: smart-monitor auto-provisioning (create volume/freshness monitors for every certified or top-usage dataset) | ⬜ |
 | 1.8 | Next: per-column profiling collector (null/distinct for all columns in one scan) and partition-aware volume | ⬜ |
@@ -41,9 +41,9 @@ on recovery, and both events are visible on the dataset's Quality and Incidents 
 | 2.1 | ABAC engine: condition DSL (17 operators, `ref` to subject attrs, dotted structured-property keys), safe regex, targets | ✅ |
 | 2.2 | PDP: deny-overrides, RBAC roles + inheritance + bindings, obligations, sub-resource checks, explain traces, decision cache with MCL-driven invalidation | ✅ |
 | 2.3 | Native `dataHubPolicy` import (actors, owners/owner-types, resource filters) with retry until GMS is up | ✅ |
-| 2.4 | Java `EnterpriseAuthorizer` GMS plugin: fail-closed, circuit breaker, TTL cache, root/system bypass | ✅ 16 JUnit tests against auth-api 1.5.0; 🟡 1.7.x path untested (needs JDK 25) |
+| 2.4 | Java `EnterpriseAuthorizer` GMS plugin: fail-closed, circuit breaker, TTL cache, root/system bypass | ✅ 16 JUnit tests; loads and initialises in GMS v1.8.0 (Java 25) |
 | 2.5 | Additive vs authoritative mode (`AUTH_POLICIES_ENABLED=false` + PDP as sole authority) | 🟡 needs live GMS validation |
-| 2.6 | PII classifier (names + validated value patterns) and lineage propagation action with attribution, loop safety, revert | ✅ |
+| 2.6 | PII classifier (names + validated value patterns) and lineage propagation action with attribution, loop safety, revert | ✅ propagation verified live (Kafka → actions → GMS) |
 | 2.7 | Certification/approval workflows: quorum, SoD, veto, entry checks, expiry, DQ auto-revoke, projection (structured property + tag) | ✅ |
 | 2.8 | UI: access simulator, policy editor, certification inbox | ✅ |
 | 2.9 | Next: MCL consumer that calls `AttributeResolver.invalidate` (today: TTL 60 s) | ⬜ |
@@ -60,8 +60,8 @@ on downstream columns within one MCL round-trip.
 |---|---|---|
 | 3.1 | Crypto: Ed25519 request signing, X25519/HKDF/AES-256-GCM sealed envelopes with AAD binding, bounded decompression | ✅ |
 | 3.2 | Gateway: one-time enrolment tokens, nonce/skew replay protection, leasing with expiry + retries, sequence enforcement, pool policy MCP filtering, protected entity types | ✅ |
-| 3.3 | Dispatcher: claims native `dataHubExecutionRequest`s by `executorId == pool`, updates `dataHubExecutionRequestResult` | ✅ (poll mode); ⬜ MCL mode wiring |
-| 3.4 | Agent: enrolment, heartbeat, poll loop with backoff, local secret resolution (env/dir/Vault/AWS SM), encrypted `dhe-encrypted` sink | ✅ protocol tested with fake pipeline; 🟡 real `datahub ingest` run |
+| 3.3 | Dispatcher: claims native `dataHubExecutionRequest`s by `executorId == pool`, updates `dataHubExecutionRequestResult` | ✅ verified live (poll mode); ⬜ MCL mode wiring |
+| 3.4 | Agent: enrolment, heartbeat, poll loop with backoff, local secret resolution (env/dir/Vault/AWS SM), encrypted `dhe-encrypted` sink | ✅ real Postgres ingestion through an isolated network verified live |
 | 3.5 | Helm chart `dhe-remote-agent` (restricted PSS, read-only rootfs, egress-only NetworkPolicy) | ✅ lint/kubeconform |
 | 3.6 | UI: fleet, pools, enrolment-token flow, runs | ✅ |
 | 3.7 | Next: cancellation (`dataHubExecutionRequestSignal` → heartbeat `cancel_task_ids` → pipeline interrupt) | ⬜ gateway side done |
@@ -81,7 +81,7 @@ platform URN.
 | 4.3 | Semantic index: entity documents, content-hash dedupe, pgvector HNSW / in-memory, MCL indexer action | ✅; ⬜ `embedding_provider=datahub` (delegate to GMS `SemanticSearchService`) |
 | 4.4 | Documentation generation → `DOCUMENTATION` workflow → attributed write on approval | ✅ |
 | 4.5 | Guardrails: PDP-filtered retrieval, PII redaction, untrusted-data wrapping, LLM call audit | ✅ |
-| 4.6 | MCP server (stdio + streamable HTTP with PAT auth, 11 tools) | ✅ incl. HTTP round-trip test |
+| 4.6 | MCP server (stdio + streamable HTTP with PAT auth, 11 tools) | ✅ verified live against GMS |
 | 4.7 | UI: Ask DataHub panel, doc draft review | ✅ |
 | 4.8 | Next: eval set for NLQ plans and doc drafts (golden questions per domain), cost tracking per user | ⬜ |
 | 4.9 | Next: query-log grounding (popular SQL from `queryProperties`) and column-level lineage in doc prompts | ⬜ |
@@ -94,12 +94,26 @@ writes nothing until it is approved.
 
 | # | Deliverable | Status |
 |---|---|---|
-| 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ⬜ |
-| 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (GMS/PDP/gateway outages) | ⬜ |
+| 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ✅ build (`deploy/build-images.sh`, apt-free images); ⬜ scan, SBOM, signing, registry push in CI |
+| 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (GMS/PDP/gateway outages) | ✅ API smoke suite `tests/e2e` (8 scenarios); ⬜ Playwright UI, chaos tests, CI job |
 | 5.3 | Load test PDP (target p99 < 5 ms cached, < 25 ms uncached at 2k rps) and gateway (100 agents, 1 GB metadata/run) | ⬜ |
 | 5.4 | Alembic migrations for the `dhe` schema (v0.1 uses `create_all`) | ⬜ |
 | 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ⬜ |
 | 5.6 | Upgrade playbook: pin-and-test matrix against DataHub minor releases (aspect shapes, GraphQL fields) | ⬜ |
+
+## Issues found by the first live run (fixed)
+
+Running against real DataHub v1.8.0 surfaced five defects that unit tests with fakes could not catch:
+
+1. GMS loads `<plugin>/<plugin-name>.jar`, but the build produced a versioned jar name, so GMS failed to start.
+2. DataHub v1.8 rejects `NO_EXPIRY` access tokens. Bootstrap now mints a token with a finite lifetime
+   (`DHE_GMS_TOKEN_DURATION`, default `THREE_MONTHS`) and re-mints it when it stops validating.
+3. The admin API eagerly created gateway keys, which crashed on a read-only root filesystem. Key loading is
+   now lazy and happens only in `dhe gateway`.
+4. Compose `tmpfs` mounts default to `root 0755`, which the non-root agent cannot write. They are now
+   mounted with `mode=1777`.
+5. OpenSearch blocks index creation at its 95% disk flood stage. The threshold is configurable in compose
+   via `DHE_SEARCH_DISK_THRESHOLD_ENABLED`.
 
 ## Code-generation plan (how each milestone was / will be produced)
 

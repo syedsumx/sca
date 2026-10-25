@@ -52,6 +52,7 @@ def cmd_gateway(a) -> None:
     import threading
 
     s = _services(with_ai=False)
+    _ = s.gateway.keys.identity  # type: ignore[union-attr]  # fail fast if the key dir is unusable
     if s.graph is not None and not a.no_dispatcher:
         dispatcher = ExecutionRequestDispatcher(s.gateway, s.graph)  # type: ignore[arg-type]
 

@@ -1,0 +1,14 @@
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+**/.pytest_cache
+.env
+.git
+ui/node_modules
+ui/coverage
+ui/dist
+helm/**/charts/*.tgz
+plugins/java/enterprise-authorizer/.gradle
+# keep plugins/java/enterprise-authorizer/build/libs (used by JAR_STAGE=prebuilt)
+plugins/java/enterprise-authorizer/build/*
+!plugins/java/enterprise-authorizer/build/libs

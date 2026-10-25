@@ -71,7 +71,7 @@ def mint(frontend_url: str, username: str, password: str, actor: str, name: str)
                 "input": {
                     "type": "PERSONAL",
                     "actorUrn": actor,
-                    "duration": "NO_EXPIRY",
+                    "duration": os.environ.get("DHE_GMS_TOKEN_DURATION", "THREE_MONTHS"),
                     "name": name,
                     "description": "Service token for the DHE control plane (bootstrap)",
                 }

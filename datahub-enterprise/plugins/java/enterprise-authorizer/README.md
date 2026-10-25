@@ -59,7 +59,7 @@ field does not hide the others.
 
 ```bash
 ./gradlew test pluginBundle
-# → build/libs/dhe-enterprise-authorizer-0.1.0.jar
+# → build/libs/dhe-enterprise-authorizer.jar
 # → build/distributions/dhe-enterprise-authorizer-0.1.0.zip  (jar + config.yml in GMS layout)
 ```
 
@@ -77,7 +77,7 @@ To compile against a newer API with a JDK 25 toolchain:
 /etc/datahub/plugins/auth/
 ├── config.yml                                   # see ./config.yml
 └── dhe-enterprise-authorizer/
-    └── dhe-enterprise-authorizer-0.1.0.jar
+    └── dhe-enterprise-authorizer.jar   # GMS loads <plugin-name>.jar
 ```
 
 Set `DHE_SERVICE_TOKEN` (and optionally `DHE_PDP_URL` and `DHE_AUTHZ_MODE`) in the GMS environment,

@@ -115,15 +115,26 @@ def find_inline_secrets(recipe: Any, path: str = "") -> list[str]:
 
 
 class GatewayKeys:
-    """The gateway's own identity; agents encrypt batches to its X25519 key."""
+    """The gateway's own identity; agents encrypt batches to its X25519 key.
+
+    Loaded (or created) on first use, so processes that only use the admin side of
+    :class:`GatewayService`, such as ``dhe api``, never touch the key material.
+    """
 
     def __init__(self, key_dir: str):
         self.path = os.path.join(key_dir, "gateway-identity.json")
-        if os.path.exists(self.path):
-            self.identity, _ = crypto.Identity.load(self.path)
-        else:
-            self.identity = crypto.Identity.generate()
-            self.identity.save(self.path)
+        self._identity: Optional[crypto.Identity] = None
+
+    @property
+    def identity(self) -> crypto.Identity:
+        if self._identity is None:
+            if os.path.exists(self.path):
+                self._identity, _ = crypto.Identity.load(self.path)
+            else:
+                identity = crypto.Identity.generate()
+                identity.save(self.path)
+                self._identity = identity
+        return self._identity
 
 
 class GatewayService:

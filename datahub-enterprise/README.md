@@ -32,7 +32,11 @@ tests/                       pytest suite (runs without a live DataHub)
 
 ```bash
 cp .env.example .env                  # replace every CHANGE_ME (openssl rand -hex 32)
-docker compose -f docker-compose.enterprise.yml up -d
+deploy/build-images.sh                # dhe/datahub-enterprise, dhe/remote-agent, dhe/enterprise-authorizer
+#   Docker Hub rate limits: BASE_IMAGE=mirror.gcr.io/library/python:3.12-slim \
+#                           BUSYBOX_IMAGE=mirror.gcr.io/library/busybox:1.37 deploy/build-images.sh
+#   TLS-intercepting proxy: EXTRA_CA_FILE=/path/ca.crt HTTPS_PROXY=... deploy/build-images.sh
+docker compose -f docker-compose.enterprise.yml up -d --no-build
 # UI (DataHub + DHE behind one origin): http://localhost:9000   ·  DHE API: http://localhost:8800/docs
 
 # Create the DHE structured properties / Certified tag / PII glossary terms
@@ -59,6 +63,9 @@ claude mcp add --transport http datahub-enterprise http://localhost:8830/mcp --h
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[server,ai,test]"
 pytest                                   # 74 tests: detectors, engine, PDP, PII, workflows, agent protocol, AI, APIs
+# live smoke suite against the running compose stack (8 scenarios)
+DHE_E2E=1 DHE_E2E_TOKEN=$(docker compose -f docker-compose.enterprise.yml exec -T dhe-api cat /run/dhe/gms_token) \
+  pytest tests/e2e -v
 dhe policies validate config/policies
 
 cd plugins/java/enterprise-authorizer && ./gradlew test pluginBundle
@@ -70,11 +77,15 @@ cd ui && npm install && npx tsc --noEmit && npx vitest run
 | Check | Result |
 |---|---|
 | Python unit/integration tests (`pytest`) | 74 passed |
-| MCP streamable-HTTP round trip (auth middleware → tool runs as caller) | passed |
 | Java plugin (`./gradlew test`) against `datahub-auth-api:1.5.0` | 16 passed |
 | UI (`tsc --noEmit`, `vitest`) | clean, 35 passed |
 | `docker compose config`, `helm lint`, kubeconform (k8s 1.30) | passed |
-| Images built / stack started / live GMS round trip | **not yet:** see ROADMAP M5.1–5.2 |
+| Images built (`deploy/build-images.sh`): control plane / agent / plugin | 145 MB / 144 MB / 2.3 MB compressed, non-root, no OS packages |
+| Full compose stack (DataHub **v1.8.0** core + DHE), 15 services | all healthy |
+| GMS loads `EnterpriseAuthorizer` (GMS runs Java 25; plugin built for 17) | passed |
+| **Live e2e** (`tests/e2e`, 8 scenarios): PAT identity · monitor → native `VOLUME` assertion + run events → incident raised and auto-resolved · native policy import · PII propagated over column lineage via Kafka → datahub-actions → GMS · SoD on certification · MCP streamable HTTP · **in-VPC agent ingesting a DB unreachable from the control plane, triggered by a native DataHub execution request** | 8 passed |
+| Secret confinement: agent DB password absent from gateway/API logs, DHE DB and GMS (only `${FINANCE_PG_PASSWORD}`) | verified |
+| Not yet run live | Helm on a real cluster, authoritative mode, Claude/Ollama calls, UI modules inside datahub-web-react |
 
 ## Security notes
 

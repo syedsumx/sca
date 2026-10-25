@@ -54,6 +54,9 @@ test {
 }
 
 jar {
+  // GMS loads <plugin-dir>/<plugin-name>.jar unless params.jarFileName is set, so the file name
+  // carries no version (the version is in the manifest).
+  archiveFileName = 'dhe-enterprise-authorizer.jar'
   manifest {
     attributes(
       'Implementation-Title': 'DHE Enterprise Authorizer',
