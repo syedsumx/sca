@@ -8,4 +8,4 @@ import { demoFetch } from './demoApi';
 const client = new ConsumerClient({ baseUrl: '/dhe/api', graphqlUrl: '/api/v2/graphql', fetchImpl: demoFetch as typeof fetch });
 
 if (!window.location.hash) window.location.hash = '#/discover';
-ReactDOM.render(<ConsumerApp routerMode="hash" client={client} />, document.getElementById('dhe-root'));
+ReactDOM.render(<ConsumerApp routerMode="hash" client={client} datahubUrl={null} />, document.getElementById('dhe-root'));

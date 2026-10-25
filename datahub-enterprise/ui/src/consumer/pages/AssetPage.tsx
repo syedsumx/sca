@@ -11,6 +11,7 @@ import { BookmarkToggle, FollowButton } from '../components/Engagement';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/DheProvider';
+import { useDataHubHref } from '../context/NativeLinks';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 
@@ -122,6 +123,7 @@ export function AssetPage() {
         client.recordView(urn).catch(() => undefined);
     }, [client, urn]);
 
+    const datahubHref = useDataHubHref(urn);
     const d = details.data;
     const e = enrichment.data?.[urn];
     const name = d?.properties?.name || d?.name || shortUrn(urn);
@@ -186,9 +188,11 @@ export function AssetPage() {
                         <Button>Request access</Button>
                     </Link>
                     <Button onClick={() => session.setAssistantOpen(true)}>✨ Ask about this asset</Button>
-                    <a href={`/dataset/${encodeURIComponent(urn)}`}>
-                        <Button type="link">Open in DataHub ↗</Button>
-                    </a>
+                    {datahubHref && (
+                        <a href={datahubHref}>
+                            <Button type="link">Open in DataHub ↗</Button>
+                        </a>
+                    )}
                 </div>
             </Header>
             <Tabs
@@ -301,7 +305,7 @@ export function AssetPage() {
                                 <Button type="primary" loading={explaining} onClick={() => void runExplain()}>
                                     Explain lineage anomalies
                                 </Button>{' '}
-                                <a href={`/dataset/${encodeURIComponent(urn)}/Lineage`}>Open full lineage ↗</a>
+                                {datahubHref && <a href={`${datahubHref}/Lineage`}>Open full lineage ↗</a>}
                                 {explain && (
                                     <div style={{ marginTop: 16 }}>
                                         <MarkdownView source={explain.summary_md} />

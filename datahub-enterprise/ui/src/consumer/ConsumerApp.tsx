@@ -5,6 +5,7 @@ import { BrowserRouter, HashRouter, Redirect, Route, Switch } from 'react-router
 import { ConsumerClient } from './api/client';
 import { QueryCache } from './api/cache';
 import { ConsumerLayout } from './components/Layout';
+import { DataHubUrlContext } from './context/NativeLinks';
 import { tokens } from './components/tokens';
 import { DheProvider } from './context/DheProvider';
 
@@ -96,9 +97,19 @@ export interface ConsumerAppProps {
     graphqlUrl?: string;
     client?: ConsumerClient;
     cache?: QueryCache;
+    /** Base URL of the DataHub UI for "Open in DataHub" links ('' = same origin); `null` hides them. */
+    datahubUrl?: string | null;
 }
 
-export function ConsumerApp({ routerMode = 'hash', basename = '/dhe', apiBaseUrl, graphqlUrl, client, cache }: ConsumerAppProps) {
+export function ConsumerApp({
+    routerMode = 'hash',
+    basename = '/dhe',
+    apiBaseUrl,
+    graphqlUrl,
+    client,
+    cache,
+    datahubUrl = '',
+}: ConsumerAppProps) {
     const content = (
         <div className="dhe-consumer" style={{ fontFamily: 'inherit', color: tokens.color.text }}>
             <ConsumerRoutes />
@@ -106,13 +117,15 @@ export function ConsumerApp({ routerMode = 'hash', basename = '/dhe', apiBaseUrl
     );
     return (
         <ConfigProvider componentSize="middle">
-            <DheProvider client={client} cache={cache} baseUrl={apiBaseUrl} graphqlUrl={graphqlUrl}>
-                {routerMode === 'browser' ? (
-                    <BrowserRouter basename={basename}>{content}</BrowserRouter>
-                ) : (
-                    <HashRouter>{content}</HashRouter>
-                )}
-            </DheProvider>
+            <DataHubUrlContext.Provider value={datahubUrl}>
+                <DheProvider client={client} cache={cache} baseUrl={apiBaseUrl} graphqlUrl={graphqlUrl}>
+                    {routerMode === 'browser' ? (
+                        <BrowserRouter basename={basename}>{content}</BrowserRouter>
+                    ) : (
+                        <HashRouter>{content}</HashRouter>
+                    )}
+                </DheProvider>
+            </DataHubUrlContext.Provider>
         </ConfigProvider>
     );
 }

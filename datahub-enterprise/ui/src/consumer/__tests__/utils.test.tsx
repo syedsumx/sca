@@ -3,6 +3,7 @@ import React from 'react';
 
 import { forceLayout } from '../utils/forceLayout';
 import { qualityLabel, relativeTime, shortUrn } from '../utils/format';
+import { datahubEntityHref } from '../context/NativeLinks';
 import { MarkdownView, extractMentions, isSafeUrl, tokenizeInline } from '../utils/markdown';
 import { DS } from './mockApi';
 
@@ -68,5 +69,13 @@ describe('forceLayout', () => {
         });
         const d = (u: string, v: string) => Math.hypot(p1[u].x - p1[v].x, p1[u].y - p1[v].y);
         expect(d('a', 'b')).toBeLessThan(d('a', 'd') + 1); // connected nodes pulled together
+    });
+});
+
+describe('datahubEntityHref', () => {
+    it('uses the entity-specific DataHub route', () => {
+        expect(datahubEntityHref('', 'urn:li:dashboard:(looker,rev)')).toBe('/dashboard/urn%3Ali%3Adashboard%3A(looker%2Crev)');
+        expect(datahubEntityHref('https://dh.example.com/', 'urn:li:dataset:(a,b,PROD)')).toMatch(/^https:\/\/dh\.example\.com\/dataset\//);
+        expect(datahubEntityHref('', 'urn:li:query:abc')).toBeNull();
     });
 });
