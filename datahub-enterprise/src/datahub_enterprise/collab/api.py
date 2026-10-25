@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from datahub_enterprise.collab.service import CollabService, CommentIn, ThreadIn
@@ -144,14 +144,14 @@ def build_router(collab: CollabService, current_principal, authorize, can_view,
         _view(p, t["entity_urn"])
         return collab.set_status(p.urn, thread_id, "RESOLVED" if action == "resolve" else "OPEN")
 
-    @router.post("/comments/{comment_id}/reactions")
-    def react(comment_id: str, body: ReactionIn, p: Principal = Depends(current_principal)):
+    @router.api_route("/comments/{comment_id}/reactions", methods=["POST", "DELETE"])
+    def react(comment_id: str, body: ReactionIn, request: Request, p: Principal = Depends(current_principal)):
         entity = collab.thread_author_of_comment(comment_id)
         if entity is None:
             raise HTTPException(404, "comment not found")
         _view(p, entity)
         try:
-            return collab.toggle_reaction(p.urn, comment_id, body.emoji)
+            return collab.toggle_reaction(p.urn, comment_id, body.emoji, active=request.method == "POST")
         except ValueError as e:
             raise HTTPException(422, str(e))
 

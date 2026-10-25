@@ -379,6 +379,7 @@ class ContextStore:
     def upsert(self, findings: list[Finding]) -> dict[str, int]:
         stats = {"new": 0, "updated": 0, "unchanged_dismissed": 0}
         now = _now()
+        drifted: list[Finding] = []
         with self.engine.begin() as conn:
             for f in findings:
                 doc = {"title": f.title, "summary_md": f.summary_md, "evidence": f.evidence,
@@ -389,18 +390,22 @@ class ContextStore:
                         id=f"fnd_{uuid.uuid4().hex[:16]}", fingerprint=f.fingerprint, type=f.type, status="OPEN",
                         confidence=f.confidence, doc=doc, entities=f.entities, created_at_ms=now, updated_at_ms=now))
                     stats["new"] += 1
-                    if f.type == "DEFINITION_DRIFT" and self.notify is not None:
-                        from datahub_enterprise.notify.hub import Event
-
-                        self.notify.publish(Event(type="context.drift", title=f.title, body=f.summary_md[:600],
-                                                  actor=CONTEXT_ACTOR, entity_urn=(f.entities or [None])[0],
-                                                  include_followers=True, include_owners=True))
+                    if f.type == "DEFINITION_DRIFT":
+                        drifted.append(f)
                 elif row.status == "DISMISSED":
                     stats["unchanged_dismissed"] += 1
                 else:
                     conn.execute(update(findings_table).where(findings_table.c.id == row.id).values(
                         confidence=f.confidence, doc=doc, entities=f.entities, updated_at_ms=now))
                     stats["updated"] += 1
+        # Publish after commit: never hold the findings transaction open across notification writes.
+        if self.notify is not None:
+            from datahub_enterprise.notify.hub import Event
+
+            for f in drifted:
+                self.notify.publish(Event(type="context.drift", title=f.title, body=f.summary_md[:600],
+                                          actor=CONTEXT_ACTOR, entity_urn=(f.entities or [None])[0],
+                                          include_followers=True, include_owners=True))
         return stats
 
     def _dict(self, r) -> dict:

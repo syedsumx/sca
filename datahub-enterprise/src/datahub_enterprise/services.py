@@ -140,13 +140,16 @@ class Services:
         return out
 
     def summaries(self, urns: list[str]) -> dict[str, dict]:
-        if self.catalog is None or not urns:
+        """Display data per urn. Without catalog access, names are derived from the urn so callers can
+        still tell "unresolvable right now" apart from "deleted" (absent from a successful lookup)."""
+        if not urns:
             return {}
-        try:
-            return self.catalog.summaries(urns)
-        except Exception:
-            logger.exception("entity summary lookup failed")
-            return {}
+        if self.catalog is not None:
+            try:
+                return self.catalog.summaries(urns)
+            except Exception:
+                logger.exception("entity summary lookup failed; falling back to urn-derived names")
+        return {u: _urn_summary(u) for u in urns}
 
     def explainer_for(self, principal: Principal):
         from datahub_enterprise.ai.lineage_explainer import LineageExplainer
@@ -206,6 +209,16 @@ class Services:
         for t in self._threads:
             if isinstance(t, threading.Event):
                 t.set()
+
+
+def _urn_summary(urn: str) -> dict:
+    etype = urn.split(":", 3)[2] if urn.startswith("urn:li:") else "unknown"
+    name, platform = urn.rsplit(":", 1)[-1], None
+    if etype == "dataset" and "," in urn:
+        platform = urn.split("urn:li:dataPlatform:", 1)[-1].split(",", 1)[0]
+        name = urn.split(",")[1]
+    return {"urn": urn, "type": etype.upper(), "name": name, "platform": platform, "description": None,
+            "domain": None}
 
 
 def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, llm: Optional[LLMProvider] = None,

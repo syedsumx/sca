@@ -294,19 +294,21 @@ class CollabService:
             raise KeyError("thread not found")
         return self.get_thread(thread_id)  # type: ignore[return-value]
 
-    def toggle_reaction(self, actor: str, comment_id: str, emoji: str) -> dict:
+    def toggle_reaction(self, actor: str, comment_id: str, emoji: str, active: Optional[bool] = None) -> dict:
+        """Toggle a reaction, or set it explicitly with ``active`` (idempotent add/remove)."""
         if emoji not in ALLOWED_EMOJI:
             raise ValueError(f"emoji must be one of {sorted(ALLOWED_EMOJI)}")
         with self.engine.begin() as conn:
             if not conn.execute(select(comments.c.id).where(comments.c.id == comment_id)).first():
                 raise KeyError("comment not found")
             key = and_(reactions.c.comment_id == comment_id, reactions.c.actor == actor, reactions.c.emoji == emoji)
-            if conn.execute(select(reactions).where(key)).first():
+            exists = conn.execute(select(reactions).where(key)).first() is not None
+            if active is None:
+                active = not exists
+            if exists and not active:
                 conn.execute(delete(reactions).where(key))
-                active = False
-            else:
+            elif active and not exists:
                 conn.execute(reactions.insert().values(comment_id=comment_id, actor=actor, emoji=emoji))
-                active = True
             actors = [r.actor for r in conn.execute(select(reactions.c.actor).where(and_(
                 reactions.c.comment_id == comment_id, reactions.c.emoji == emoji)))]
         return {"comment_id": comment_id, "emoji": emoji, "active": active, "actors": actors}

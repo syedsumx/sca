@@ -141,9 +141,19 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 personas = [{"id": i, "name": getattr(services.personas.get_persona(i), "name", i)} for i in ids]
             except Exception:
                 logger.exception("persona lookup failed for %s", p.urn)
+        display_name = p.urn.split(":", 3)[-1]
+        try:
+            info = services.attributes.subject(p.urn).get("attributes", {})
+            display_name = info.get("display_name") or display_name
+        except Exception:
+            pass
         return {
             "actor": p.urn,
+            "user": {"urn": p.urn, "display_name": display_name},
             "personas": personas,
+            "slack_enabled": services.slack is not None,
+            "teams_enabled": bool(cfg.teams_webhook_url),
+            "embed_allowed_origins": cfg.embed_allowed_origins,
             "is_admin": services.is_admin(p.urn),
             "public_url": cfg.public_url,
             "features": {

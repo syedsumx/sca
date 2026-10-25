@@ -37,6 +37,7 @@ dhe-encrypted = "datahub_enterprise.agent.sink:EncryptedGatewaySink"
 
 [project.entry-points."datahub_actions.action.plugins"]
 dhe_pii_propagation = "datahub_enterprise.governance.propagation_action:PiiPropagationAction"
+dhe_label_propagation = "datahub_enterprise.governance.propagation_rules:LabelPropagationAction"
 dhe_vector_indexer = "datahub_enterprise.ai.indexer_action:VectorIndexerAction"
 
 [tool.setuptools.packages.find]

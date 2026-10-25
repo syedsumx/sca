@@ -9,17 +9,22 @@ capabilities otherwise found in commercial DataHub Cloud, and it **requires no f
 | **B. Enterprise Governance** | An ABAC + RBAC Policy Decision Point with deny-overrides, a GMS authorizer plugin, PII classification with column-lineage propagation, and certification and approval workflows. |
 | **C. In-VPC Remote Agents** | Outbound-only ingestion agents. They resolve secrets locally and stream metadata signed and end-to-end encrypted. |
 | **D. AI Context & Discovery** | An MCP server, natural-language catalog Q&A, semantic vector search, and AI documentation that goes through human review. |
+| **E. Active Metadata & AI Context Layer** | A consumer workspace micro-frontend: Discover, faceted search, trending assets, discussions, bookmarks, and a data marketplace where access is requested without tickets. It adds Personas & Purposes, with purpose denies overriding persona grants, and PII masking in the `dhe-gms-proxy`. Rule-based tag and term propagation runs over column lineage. Context agents mine queries, dbt, BI and job runs for definitions, drift and ontologies. The layer also includes an assistant, plain-English lineage-anomaly explanations, and Slack/Teams actions. Trust components can be embedded in Tableau, Looker, Power BI and portals. |
 
 Read **[ARCHITECTURE_ENTERPRISE.md](ARCHITECTURE_ENTERPRISE.md)** for the analysis of DataHub internals and
-the design, and **[ROADMAP.md](ROADMAP.md)** for milestones and status.
+the design, **[UX_ACTIVE_METADATA_SPEC.md](UX_ACTIVE_METADATA_SPEC.md)** for the consumer UX and
+active-metadata blueprint (module E), and **[ROADMAP.md](ROADMAP.md)** for milestones and status.
+Deployment of module E is covered in [deploy/README-active-metadata.md](deploy/README-active-metadata.md).
 
 ## Layout
 
 ```
 src/datahub_enterprise/      Python services (one package, many entry points: `dhe …`)
   common/  quality/  governance/  agent/  ai/  services.py  app.py  cli.py
+  collab/  marketplace/  context/  notify/  embed/  gmsproxy/      (module E)
 plugins/java/enterprise-authorizer/   GMS Authorizer plugin → PDP
-ui/                          @dhe/web-react-modules (drop-in for datahub-web-react)
+ui/                          @dhe/web-react-modules + consumer workspace MFE (src/consumer) + embed SDK (src/embed)
+embeds/                      Tableau / Looker / Power BI / portal packaging for the embed components
 config/                      policy bundle, workflow templates, monitor + connection examples
 deploy/  docker/             bootstrap scripts, actions pipelines, Dockerfiles, nginx edge
 docker-compose.enterprise.yml   full local stack (DataHub core + DHE + demo private VPC)
@@ -76,16 +81,18 @@ cd ui && npm install && npx tsc --noEmit && npx vitest run
 
 | Check | Result |
 |---|---|
-| Python unit/integration tests (`pytest`) | 74 passed |
+| Python unit/integration tests (`pytest`) | 96 passed (v0.2, incl. module E) |
 | Java plugin (`./gradlew test`) against `datahub-auth-api:1.5.0` | 16 passed |
-| UI (`tsc --noEmit`, `vitest`) | clean, 35 passed |
+| UI (`tsc --noEmit`, `vitest`) | clean, 64 passed; MFE `remoteEntry.js` + ~162 kB gz first load; embed SDK 4 kB gz |
+| Module E API contract: UI client calls vs. backend routes and response shapes | all routes and shapes match |
+| `dhe/consumer-ui` image; MFE mounted in headless Chromium via `remoteEntry.js` → `mount()` | passed |
 | `docker compose config`, `helm lint`, kubeconform (k8s 1.30) | passed |
 | Images built (`deploy/build-images.sh`): control plane / agent / plugin | 145 MB / 144 MB / 2.3 MB compressed, non-root, no OS packages |
 | Full compose stack (DataHub **v1.8.0** core + DHE), 15 services | all healthy |
 | GMS loads `EnterpriseAuthorizer` (GMS runs Java 25; plugin built for 17) | passed |
 | **Live e2e** (`tests/e2e`, 8 scenarios): PAT identity · monitor → native `VOLUME` assertion + run events → incident raised and auto-resolved · native policy import · PII propagated over column lineage via Kafka → datahub-actions → GMS · SoD on certification · MCP streamable HTTP · **in-VPC agent ingesting a DB unreachable from the control plane, triggered by a native DataHub execution request** | 8 passed |
 | Secret confinement: agent DB password absent from gateway/API logs, DHE DB and GMS (only `${FINANCE_PG_PASSWORD}`) | verified |
-| Not yet run live | Helm on a real cluster, authoritative mode, Claude/Ollama calls, UI modules inside datahub-web-react |
+| Not yet run live | Helm on a real cluster, authoritative mode, Claude/Ollama calls, UI modules inside datahub-web-react; module E against the live stack (gms-proxy in the frontend path, Slack/Teams round-trips, BI tools) |
 
 ## Security notes
 

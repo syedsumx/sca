@@ -102,6 +102,7 @@ class AttributeResolver:
             "title": info.get("title"),
             "country": info.get("countryCode"),
             "email": info.get("email"),
+            "display_name": info.get("displayName") or info.get("fullName"),
         }
         # Structured properties on users (e.g. io.dhe.clearance, io.dhe.employment_type)
         # are exposed by their last path segment: subject.attributes.clearance.

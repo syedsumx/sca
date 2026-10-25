@@ -1,6 +1,6 @@
 {{- $cm := printf "%s-actions" (include "dhe.fullname" $) }}
-{{- $pipelines := dict "pii-propagation" (dict "cfg" .Values.dhe.actions.piiPropagation "file" "pii_propagation.yml") "vector-indexer" (dict "cfg" .Values.dhe.actions.vectorIndexer "file" "vector_indexer.yml") }}
-{{- $any := or .Values.dhe.actions.piiPropagation.enabled .Values.dhe.actions.vectorIndexer.enabled }}
+{{- $pipelines := dict "pii-propagation" (dict "cfg" .Values.dhe.actions.piiPropagation "file" "pii_propagation.yml") "vector-indexer" (dict "cfg" .Values.dhe.actions.vectorIndexer "file" "vector_indexer.yml") "label-propagation" (dict "cfg" .Values.dhe.actions.labelPropagation "file" "label_propagation.yml") }}
+{{- $any := or .Values.dhe.actions.piiPropagation.enabled .Values.dhe.actions.vectorIndexer.enabled .Values.dhe.actions.labelPropagation.enabled }}
 {{- if $any }}
 apiVersion: v1
 kind: ConfigMap

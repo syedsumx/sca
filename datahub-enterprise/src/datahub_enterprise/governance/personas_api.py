@@ -33,8 +33,9 @@ def build_router(personas: PersonaEngine, current_principal, authorize, graph=No
         return p
 
     @router.get("/permission-bundles")
+    @router.get("/personas/permission-bundles")
     def bundles(_p: Principal = Depends(current_principal)):
-        return {"bundles": [{"id": k, "privileges": v} for k, v in PERMISSION_BUNDLES.items()]}
+        return PERMISSION_BUNDLES
 
     # ---- personas -------------------------------------------------------------------
     @router.get("/personas")
@@ -63,7 +64,7 @@ def build_router(personas: PersonaEngine, current_principal, authorize, graph=No
         if not personas.delete_persona(pid, p.urn):
             raise HTTPException(404, "persona not found")
 
-    @router.get("/personas/{pid}/preview")
+    @router.api_route("/personas/{pid}/preview", methods=["GET", "POST"])
     def preview(pid: str, _p: Principal = Depends(admin)):
         try:
             return personas.preview(pid, graph)

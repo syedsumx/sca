@@ -325,6 +325,13 @@ dhe:
       resources:
         requests: { cpu: 100m, memory: 256Mi }
         limits: { memory: 768Mi }
+    # Rule-based tag/term propagation (edit files/actions/label_propagation.yml for the rules).
+    labelPropagation:
+      enabled: false
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 768Mi }
     vectorIndexer:
       enabled: true
       replicas: 1

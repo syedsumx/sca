@@ -382,3 +382,39 @@ def test_bootstrap_mcps_shapes():
     assert names == {"propertyDefinition", "tagProperties", "glossaryTermInfo"}
     status = next(aspect_value(m) for m in mcps if m["entityUrn"] == CERT_STATUS_PROP)
     assert status["valueType"] == "urn:li:dataType:datahub.string"
+
+
+def test_rule_propagation_tags_and_terms_with_platform_filter_and_revert(graph):
+    import json
+
+    from datahub_enterprise.governance.propagation_rules import PropagationRule, RulePropagator, RulesConfig
+
+    src, down, down2 = _lineage_graph(graph)
+    esm = graph.aspects[(DS, "editableSchemaMetadata")]
+    esm["editableSchemaFieldInfo"][0]["globalTags"] = {"tags": [{"tag": "urn:li:tag:gdpr-subject"}]}
+    prop = RulePropagator(graph, RulesConfig(rules=[
+        PropagationRule(id="gdpr", labels=["urn:li:tag:gdpr*"]),
+        PropagationRule(id="pii-snowflake", labels=["urn:li:glossaryTerm:Classification.PII.*"],
+                        target_platforms=["snowflake"]),
+    ]))
+    mcl = {"entityUrn": DS, "aspectName": "editableSchemaMetadata", "systemMetadata": {"properties": {}}}
+    prop.handle(mcl)
+    down_info = graph.get_aspect(DS_DOWN, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]
+    down2_info = graph.get_aspect(DS_DOWN2, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]
+    assert down_info["globalTags"]["tags"][0]["tag"] == "urn:li:tag:gdpr-subject"
+    assert down_info["globalTags"]["tags"][0]["attribution"]["sourceDetail"]["rule"] == "gdpr"
+    assert down_info["glossaryTerms"]["terms"][0]["urn"] == pii_term("Email")       # snowflake target
+    assert "glossaryTerms" not in down2_info                                        # looker filtered out
+    assert down2_info["globalTags"]["tags"][0]["attribution"]["sourceDetail"]["hops"] == "2"
+    assert prop.handle(mcl) == []  # idempotent
+
+    with pytest.raises(ValueError):
+        PropagationRule(id="bad", labels=["PII"])
+
+    prev = json.loads(json.dumps(graph.get_aspect(DS, "editableSchemaMetadata")))
+    graph.aspects[(DS, "editableSchemaMetadata")]["editableSchemaFieldInfo"][0]["globalTags"]["tags"] = []
+    cur = graph.get_aspect(DS, "editableSchemaMetadata")
+    prop.handle({**mcl, "previousAspectValue": {"value": json.dumps(prev)}, "aspect": {"value": json.dumps(cur)}})
+    for ds in (DS_DOWN, DS_DOWN2):
+        assert graph.get_aspect(ds, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]["globalTags"]["tags"] == []
+    assert graph.get_aspect(DS_DOWN, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]["glossaryTerms"]["terms"]

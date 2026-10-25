@@ -344,9 +344,10 @@ def test_miner_detects_definition_drift_and_store_lifecycle(engine):
     drift = [f for f in findings if f.type == "DEFINITION_DRIFT"]
     assert drift and drift[0].data["name"] == "revenue" and len(drift[0].data["variants"]) == 2
 
-    hub = NotificationHub(engine, "https://dh", "s")
+    hub = NotificationHub(engine, "https://dh", "s", owners=lambda urn: [CAROL])
     store = ContextStore(engine, None, CollabService(engine, hub), None, hub)
     assert store.upsert(findings)["new"] == len(findings)
+    assert [n["type"] for n in hub.inbox(CAROL)] == ["context.drift"]
     assert store.upsert(findings)["new"] == 0  # fingerprints dedupe
     fid = store.list("DEFINITION_DRIFT")[0]["id"]
     store.set_status(fid, "DISMISSED", ALICE)

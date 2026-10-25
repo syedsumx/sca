@@ -22,7 +22,8 @@ routes only control which nav entries are shown.
 ```bash
 npm install
 npm run typecheck   # tsc --noEmit
-npm test            # vitest (jsdom): client, chart scaling, helpers, page smoke tests
+npm test            # vitest (jsdom): client, chart scaling, helpers, page smoke tests, consumer
+                    # workspace (API/cache/URL state/components/mount) and embed elements
 ```
 
 ## Integrate into datahub-web-react
@@ -110,6 +111,66 @@ npm test            # vitest (jsdom): client, chart scaling, helpers, page smoke
 
 7. Run `./gradlew :datahub-web-react:lint` and `yarn type-check` in datahub-web-react. The repo's
    eslint import-order rules may ask you to reorder imports. The code itself needs no changes.
+
+## Consumer workspace (micro-frontend)
+
+`src/consumer/` is the end-user workspace: Discover, Search, Asset, Data Marketplace and Requests,
+Assistant, Context Inbox (with the ontology view), Governance Studio (personas and purposes), and
+Settings (notifications, inbox, embed builder). It ships as a **Webpack 5 Module Federation remote**
+that DataHub's built-in MFE host (`app/mfeframework`) mounts, so datahub-web-react needs no fork.
+
+```bash
+npm run build:mfe     # → dist/mfe/remoteEntry.js + hashed chunks (var library "dheConsumer", exposes ./mount)
+npm run build:embed   # → dist/embed/sdk.js, frame.js, frame.html
+npm run build         # both
+```
+
+- **Host config.** Point `MFE_CONFIG_FILE_PATH` on datahub-frontend at a file like
+  [`mfe.config.yaml`](mfe.config.yaml) (`module: dheConsumer/mount`, `remoteEntry: /dhe-ui/remoteEntry.js`).
+  The host calls `mount(el, {})` and keeps the returned cleanup function.
+- **Routing.** The host registers `/mfe/dhe` as an exact route, so the workspace routes inside the URL
+  hash: `/mfe/dhe#/search?q=orders&f.platform=…`, `/mfe/dhe#/asset/<urn>`. Search state (query,
+  facets, page) lives in the hash and is shareable. Set `data-dhe-router="browser"` on the mount
+  element, or pass `routerMode: 'browser'`, when hosting it at a non-exact route.
+- **No shared deps.** The host shares nothing, so the remote bundles its own React 17, antd,
+  styled-components and react-router. It renders into the host DOM and uses the host's antd 4 CSS;
+  the bundle has no CSS of its own.
+- **Data.** The remote calls DataHub GraphQL (`/api/v2/graphql`) for search and asset details, and
+  the DHE API (`/dhe/api`) for everything else, with the user's session cookie. Serve `/dhe-ui/` from
+  the same origin (the `dhe-consumer-ui` image behind the edge proxy).
+- **Serving.** `docker/consumer-ui.Dockerfile` builds both bundles and serves them from unprivileged
+  nginx on `:8080`, at `/dhe-ui/` and `/dhe-ui/embed/`. `remoteEntry.js`, `sdk.js` and `frame.*` are
+  served with `no-cache`; hashed chunks are `immutable`; responses carry CORS and CORP headers so
+  third-party pages can load the SDK.
+- **Embedding in your own React app.** `import { consumer } from '@dhe/web-react-modules'`, then render
+  `<consumer.ConsumerApp routerMode="browser" basename="/workspace" />`.
+
+Building blocks, for reuse: `useDheQuery(key, loader)` (SWR cache with dedupe, `invalidate(prefix)`,
+and optimistic updates with rollback), `TrustBadges`, `AssetCard` and `AssetRow`, `BookmarkToggle`,
+`OmniSearchBar` (`/` or ⌘K to focus), `FacetPanel`, `MarkdownView` (safe: no raw HTML, http(s),
+mailto and relative links only), the discussion thread with @mentions, `ProductCard`,
+`RequestAccessDrawer`, and `ConfidenceMeter`.
+
+Bundle sizes (production, gzip -9):
+
+| File | gz |
+|---|---|
+| `remoteEntry.js` | 2.4 kB |
+| initial `./mount` (vendor 541 + app shell 531) | 146.5 kB + 12.8 kB |
+| all lazy route chunks combined | ≈ 180 kB |
+| `embed/sdk.js` (no dependencies) | 4.0 kB |
+
+## Embeds (web components)
+
+`src/embed/` is a dependency-free SDK of custom elements that render in shadow DOM:
+`<dhe-asset-card>`, `<dhe-quality-badge>` and `<dhe-lineage>`. They are authenticated with a scoped,
+read-only embed token (no cookies), and `frame.ts` renders the same elements as an iframe page.
+Usage for Tableau, Looker, Power BI and portals is in [`../embeds/`](../embeds/README.md).
+
+```html
+<script src="https://DATAHUB_HOST/dhe-ui/embed/sdk.js" defer></script>
+<dhe-asset-card urn="urn:li:dataset:(…)" token="…"></dhe-asset-card>
+```
 
 ## API contract
 

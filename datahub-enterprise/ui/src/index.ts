@@ -22,3 +22,4 @@ export { DocDraftReview, DraftView } from './ai/DocDraftReview';
 
 export { ENTERPRISE_ROUTES, ENTERPRISE_BASE_PATH, visibleRoutes } from './routes';
 export type { EnterpriseRoute } from './routes';
+export * as consumer from './consumer';

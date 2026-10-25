@@ -101,6 +101,18 @@ writes nothing until it is approved.
 | 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ⬜ |
 | 5.6 | Upgrade playbook: pin-and-test matrix against DataHub minor releases (aspect shapes, GraphQL fields) | ⬜ |
 
+## M6 — Active Metadata & AI Context Layer (UX_ACTIVE_METADATA_SPEC.md)
+
+| # | Deliverable | Status |
+|---|---|---|
+| U1 | Consumer MFE shell (`/mfe/dhe`), `/ui/config`, collaboration (bookmarks, follows, views, trending, threads with @mentions), Discover + faceted search | ✅ code + tests; ⬜ mounted in a live datahub-frontend, search p95 measured |
+| U2 | Marketplace: product cards/detail, request policies, access requests with auto-approval, SoD, time-boxed persona grants with expiry and warnings, Slack/Teams/email approvals | ✅ code + tests; ⬜ live Slack round-trip |
+| U3 | Personas & Purposes (studio, compiler into PDP layers, purpose denies at priority 1000, masking obligations), `dhe-gms-proxy` masking with fail-closed behaviour, rule-based tag/term propagation (`dhe_label_propagation`) | ✅ code + tests; ⬜ compliance sign-off on the live stack |
+| U4 | Context agents: query/dbt/BI/run miners, METRIC_DEFINITION / DEFINITION_DRIFT / TERM_* / JOIN_RELATIONSHIP / RUN_ANOMALY findings, accept → native glossary terms / ER relationships / discussions, ontology | ✅ code + tests; ⬜ pilot-domain acceptance rate |
+| U5 | Assistant (Claude tool loop over caller-scoped tools, offline fallback), lineage-anomaly explainer, markdown docs | ✅ code + tests; ⬜ golden-set evaluation with a live model |
+| U6 | Embeds: signed origin-bound tokens, web components + iframe pages, Tableau `.trex`, Looker/Power BI/portal guides; Teams adaptive cards | ✅ code + tests; ⬜ validated inside each BI tool |
+| U7 | Deployment: compose services (`dhe-gms-proxy`, `dhe-context-miner`, `dhe-notifier`, `dhe-consumer-ui`), Helm templates + `values-active-metadata.yaml`, Slack app manifest | ✅ rendered and linted; ⬜ live cluster |
+
 ## Issues found by the first live run (fixed)
 
 Running against real DataHub v1.8.0 surfaced five defects that unit tests with fakes could not catch:
