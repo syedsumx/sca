@@ -1,0 +1,34 @@
+DataHub Enterprise (DHE) {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
+
+Control plane services:
+{{- if .Values.dhe.api.enabled }}
+  API      http://{{ include "dhe.fullname" . }}-api:{{ .Values.dhe.api.port }}
+{{- end }}
+{{- if .Values.dhe.pdp.enabled }}
+  PDP      http://{{ include "dhe.fullname" . }}-pdp:{{ .Values.dhe.pdp.port }}   (GMS authorizer plugin target)
+{{- end }}
+{{- if .Values.dhe.gateway.enabled }}
+  Gateway  http://{{ include "dhe.fullname" . }}-gateway:{{ .Values.dhe.gateway.port }}   public URL: {{ .Values.dhe.gateway.publicUrl }}
+{{- end }}
+{{- if .Values.dhe.mcp.enabled }}
+  MCP      http://{{ include "dhe.fullname" . }}-mcp:{{ .Values.dhe.mcp.port }}/mcp
+{{- end }}
+
+Authorization mode: {{ .Values.dhe.auth.mode }}
+{{- if eq .Values.dhe.auth.mode "authoritative" }}
+  ⚠ Make sure datahub.datahub-gms.extraEnvs sets AUTH_POLICIES_ENABLED="false"; otherwise the native
+    authorizer can still ALLOW what DHE denies (AuthorizerChain is first-ALLOW-wins).
+{{- end }}
+  GMS must reach the PDP at the URL in datahub.datahub-gms.extraEnvs[DHE_PDP_URL]; for this release use
+  http://{{ include "dhe.fullname" . }}-pdp:{{ .Values.dhe.pdp.port }}
+
+{{- if and .Values.dhe.gateway.enabled (eq .Values.dhe.gateway.keys.existingSecret "") }}
+
+  ⚠ Gateway keys are on a PVC, so the gateway runs as a single replica. For HA, provide
+    dhe.gateway.keys.existingSecret (same identity on every replica).
+{{- end }}
+
+Required Secret "{{ .Values.dhe.secrets.name }}" keys: {{ .Values.dhe.secrets.serviceTokenKey }}, {{ .Values.dhe.secrets.gmsTokenKey }}, {{ .Values.dhe.secrets.databaseUrlKey }}{{ if eq .Values.dhe.ai.llmProvider "anthropic" }}, {{ .Values.dhe.secrets.anthropicApiKeyKey }}{{ end }}
+
+Remote agents: install the "dhe-remote-agent" chart inside each private VPC cluster with
+  gateway.url={{ .Values.dhe.gateway.publicUrl }}

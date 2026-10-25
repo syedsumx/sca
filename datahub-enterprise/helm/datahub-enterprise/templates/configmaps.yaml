@@ -1,0 +1,44 @@
+{{- if and .Values.dhe.policies.files (not .Values.dhe.policies.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dhe.fullname" . }}-policies
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+data:
+  {{- range $file, $body := .Values.dhe.policies.files }}
+  {{ $file }}: |
+    {{- $body | nindent 4 }}
+  {{- end }}
+---
+{{- end }}
+# Authorizer plugin config for GMS. The init-container image ships an identical default; mount this
+# ConfigMap over /etc/datahub/plugins/auth/config.yml to customise it without rebuilding the image.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dhe.fullname" . }}-authorizer-config
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+data:
+  config.yml: |
+    plugins:
+      - name: "dhe-enterprise-authorizer"
+        type: "authorizer"
+        enabled: "true"
+        params:
+          className: "io.dhe.authorization.EnterpriseAuthorizer"
+          configs:
+            pdpUrl: {{ printf "http://%s-pdp.%s.svc.cluster.local:%v" (include "dhe.fullname" .) .Release.Namespace .Values.dhe.pdp.port | quote }}
+            serviceTokenEnv: "DHE_SERVICE_TOKEN"
+            mode: {{ .Values.dhe.auth.mode | quote }}
+            connectTimeoutMs: 500
+            requestTimeoutMs: 1500
+            cacheTtlSeconds: 5
+            cacheMaxEntries: 50000
+            rootUsers:
+              {{- toYaml .Values.dhe.auth.rootUsers | nindent 14 }}
+            failOpenPrivileges: []
+            circuitBreaker:
+              failureThreshold: 5
+              openSeconds: 10

@@ -1,0 +1,80 @@
+{{- if .Values.dhe.gateway.enabled }}
+{{- $gw := .Values.dhe.gateway }}
+{{- $sharedKeys := ne $gw.keys.existingSecret "" }}
+{{- /* Without a shared key Secret the identity lives on a RWO PVC → single replica, no HPA. */}}
+{{- $cfg := $gw }}
+{{- if not $sharedKeys }}
+{{- $cfg = merge (dict "autoscaling" (dict "enabled" false) "pdb" (dict "enabled" false)) (omit $gw "autoscaling" "pdb") }}
+{{- end }}
+{{- $volumes := list }}
+{{- if $sharedKeys }}
+{{- $volumes = list (dict "name" "gateway-keys" "secret" (dict "secretName" $gw.keys.existingSecret "defaultMode" 0400)) }}
+{{- else }}
+{{- $volumes = list (dict "name" "gateway-keys" "persistentVolumeClaim" (dict "claimName" (printf "%s-gateway-keys" (include "dhe.fullname" $)))) }}
+{{- end }}
+{{- $mounts := list (dict "name" "gateway-keys" "mountPath" "/var/lib/dhe/keys" "readOnly" $sharedKeys) }}
+{{- $ctx := dict "root" $ "component" "gateway" "cfg" $cfg "replicas" (ternary $gw.replicas 1 $sharedKeys) "recreate" (not $sharedKeys) "port" (int $gw.port) "args" (list "gateway" "--host" "0.0.0.0" "--port" (toString $gw.port)) "extraVolumes" $volumes "extraVolumeMounts" $mounts }}
+{{ include "dhe.deployment" $ctx }}
+---
+{{ include "dhe.service" (merge (dict "port" $gw.port "type" $gw.service.type "annotations" $gw.service.annotations) $ctx) }}
+{{- with (include "dhe.hpa" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "dhe.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- if not $sharedKeys }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-gateway-keys" (include "dhe.fullname" $) }}
+  labels:
+    {{- include "dhe.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $gw.keys.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $gw.keys.persistence.size }}
+{{- end }}
+{{- if $gw.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dhe.componentName" $ctx }}
+  labels:
+    {{- include "dhe.componentLabels" $ctx | nindent 4 }}
+  {{- with $gw.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $gw.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $gw.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $gw.ingress.host | quote }}
+      http:
+        paths:
+          # Only the agent protocol is exposed; admin endpoints stay on dhe-api.
+          - path: /agents
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dhe.componentName" $ctx }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

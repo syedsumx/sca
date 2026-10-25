@@ -1,0 +1,26 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "agent.fullname" . }}
+  labels:
+    {{- include "agent.labels" . | nindent 4 }}
+data:
+  # Schema: datahub_enterprise.agent.worker.AgentConfig. The enrolment token is injected via the
+  # DHE_AGENT_ENROLLMENT_TOKEN env var (from a Secret), never written into this ConfigMap.
+  agent.yml: |
+    gateway_url: {{ .Values.gateway.url | quote }}
+    state_dir: /var/lib/dhe-agent
+    max_parallel_tasks: {{ .Values.agent.maxParallelTasks }}
+    poll_interval_seconds: {{ .Values.agent.pollIntervalSeconds }}
+    heartbeat_interval_seconds: {{ .Values.agent.heartbeatIntervalSeconds }}
+    batch_max_items: {{ int .Values.agent.batch.maxItems }}
+    batch_max_bytes: {{ int .Values.agent.batch.maxBytes }}
+    {{- if .Values.gateway.caBundle }}
+    tls_ca_bundle: /etc/dhe-agent/ca.pem
+    {{- end }}
+    secrets:
+      {{- toYaml .Values.secretStores | nindent 6 }}
+  {{- if .Values.gateway.caBundle }}
+  ca.pem: |
+    {{- .Values.gateway.caBundle | nindent 4 }}
+  {{- end }}

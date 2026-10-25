@@ -1,0 +1,10 @@
+{{- if .Values.dhe.pdp.enabled }}
+{{- $ctx := dict "root" $ "component" "pdp" "cfg" .Values.dhe.pdp "replicas" .Values.dhe.pdp.replicas "port" (int .Values.dhe.pdp.port) "args" (list "pdp" "--host" "0.0.0.0" "--port" (toString .Values.dhe.pdp.port)) }}
+{{ include "dhe.deployment" $ctx }}
+---
+{{ include "dhe.service" (merge (dict "port" .Values.dhe.pdp.port) $ctx) }}
+{{- with (include "dhe.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}

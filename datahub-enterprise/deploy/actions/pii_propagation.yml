@@ -1,0 +1,32 @@
+# datahub-actions pipeline: column-level PII term propagation along fine-grained lineage.
+# Run with: dhe actions -c deploy/actions/pii_propagation.yml
+name: dhe_pii_propagation
+source:
+  type: kafka
+  config:
+    connection:
+      bootstrap: ${DHE_KAFKA_BOOTSTRAP:-broker:29092}
+      schema_registry_url: ${DHE_SCHEMA_REGISTRY_URL:-http://datahub-gms:8080/schema-registry/api/}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+filter:
+  event_type: MetadataChangeLogEvent_v1
+  event:
+    entityType: [dataset, schemaField]
+    aspectName: [schemaMetadata, editableSchemaMetadata, glossaryTerms, upstreamLineage]
+action:
+  type: dhe_pii_propagation
+  config:
+    # Schema: datahub_enterprise.governance.propagation_action.PropagationConfig
+    max_hops: 5
+    blocking_transforms: [HASH, AGGREGATE, COUNT, ENCRYPT, TOKENIZE, MASK]
+    dry_run: false
+    gms_url: ${DHE_GMS_URL:-http://datahub-gms:8080}
+    gms_token: ${DHE_GMS_TOKEN}
+datahub:
+  server: ${DHE_GMS_URL:-http://datahub-gms:8080}
+  token: ${DHE_GMS_TOKEN}
+options:
+  retry_count: 5
+  failure_mode: CONTINUE
+  failed_events_dir: /tmp/dhe/failed_events

@@ -221,8 +221,20 @@ flowchart TB
 ```
 
 All DHE services ship as **one Python package** (`datahub_enterprise`) and one image with several
-entry points (`dhe api`, `dhe scheduler`, `dhe mcp`, `dhe agent`, `dhe actions`). The authorizer
-plugin is the only JVM artifact.
+entry points (`dhe api`, `dhe pdp`, `dhe gateway`, `dhe scheduler`, `dhe mcp`, `dhe actions`,
+`dhe agent run`). The authorizer plugin is the only JVM artifact.
+
+**Source map (this directory):**
+
+| Module | Code |
+|---|---|
+| Common | `src/datahub_enterprise/common/` (config, GMS client, MCP builders, DB, hash-chained audit, identity) |
+| A: Quality | `src/datahub_enterprise/quality/` (`detectors.py`, `collectors.py`, `engine.py`, `scheduler.py`, `emitter.py`, `api.py`) |
+| B: Governance | `src/datahub_enterprise/governance/` (`abac.py`, `rbac.py`, `pdp.py`, `attributes.py`, `pii.py`, `propagation_action.py`, `certification.py`, `api.py`) + `plugins/java/enterprise-authorizer/` |
+| C: Remote agents | `src/datahub_enterprise/agent/` (`crypto.py`, `gateway.py`, `dispatcher.py`, `api.py`, `client.py`, `worker.py`, `sink.py`, `secrets.py`) |
+| D: AI | `src/datahub_enterprise/ai/` (`llm.py`, `embeddings.py`, `catalog.py`, `semantic.py`, `nlq.py`, `docgen.py`, `guardrails.py`, `mcp_server.py`, `indexer_action.py`, `api.py`) |
+| UI | `ui/` (`@dhe/web-react-modules`: quality dashboard, monitor editor, access simulator, policy editor, certification inbox, agent fleet, Ask DataHub) |
+| Deploy | `docker-compose.enterprise.yml`, `docker/`, `deploy/`, `helm/datahub-enterprise/`, `helm/dhe-remote-agent/` |
 
 ### 2.1 Cross-cutting design
 
@@ -278,8 +290,8 @@ flowchart LR
   baselines. Behind a feature flag, the sensitivity can also be auto-tuned.
 * **Idempotent emission.** The assertion URN is `urn:li:assertion:dhe-<sha1(monitor_id)>`. Run events
   carry `runId = <monitor_id>:<scheduled_ts>`, so retries do not duplicate results.
-* **Incident lifecycle.** After N consecutive failures (default 1), DHE raises an incident with
-  `IncidentType.DATA_QUALITY` linked to the assertion. When the monitor recovers it resolves the
+* **Incident lifecycle.** After N consecutive failures (default 1), DHE raises an incident linked to the
+  assertion, typed from the monitor (`FRESHNESS`, `VOLUME`, `FIELD`, `SQL`, `DATA_SCHEMA`). When the monitor recovers it resolves the
   incident automatically, and it never reopens an incident a human has closed.
 * **Scale-out.** The scheduler takes a Postgres advisory lock (`pg_try_advisory_lock`) for leader
   election and hands evaluations to a worker pool. Monitor IDs are hash-partitioned so several
@@ -321,7 +333,7 @@ flowchart LR
   trace. The UI "Access Simulator" uses it.
 * **Performance.** Decisions are cached by `(actor, privilege, resource, attr_version)` for 30 s.
   An MCL for an entity bumps its `attr_version`, which invalidates the cache entry. The Java
-  plugin keeps its own Caffeine cache (5 s) and a circuit breaker.
+  plugin keeps its own TTL cache (5 s, dependency-free) and a circuit breaker.
 
 #### 2.3.2 PII classification and propagation
 
@@ -495,7 +507,7 @@ DataHub aspects, so nothing breaks if DHE is removed:
 | DHE concept | Native DataHub representation |
 |---|---|
 | Monitor | `assertion` entity: `assertionInfo` (type FRESHNESS/VOLUME/FIELD/SQL/DATA_SCHEMA, `source.type=NATIVE`), `assertionRunEvent` timeseries |
-| Anomaly incident | `incident` entity with `incidentInfo` (type `DATA_QUALITY`, `source.type=ASSERTION_FAILURE`) |
+| Anomaly incident | `incident` entity with `incidentInfo` (type from monitor, `source.type=ASSERTION_FAILURE`) |
 | Certification | Structured property `io.dhe.certification.status` + tag `Certified` |
 | PII classification | Glossary terms under `Classification.PII.*` with `attribution` metadata |
 | Remote agent run | `dataHubExecutionRequest` (native) with `executorId=<pool>` |
@@ -538,7 +550,7 @@ DataHub aspects, so nothing breaks if DHE is removed:
 
 | Failure | Behaviour |
 |---|---|
-| PDP down | Java plugin: circuit opens and the plugin fails closed, except for `failOpenPrivileges` (default: `VIEW_ENTITY_PAGE`, `SEARCH_PRIVILEGE` when explicitly enabled) |
+| PDP down | Java plugin: circuit opens and the plugin fails closed, except for privileges explicitly listed in `failOpenPrivileges` (empty by default) |
 | GMS down | Quality results are buffered in `metric_points`/`evaluations` with `emitted=false` and re-emitted on recovery |
 | Gateway down | Agents back off exponentially (capped at 60 s). In-flight batches are spooled to a bounded local disk queue. |
 | LLM down / refusal | NLQ falls back to the heuristic parser. Doc generation marks the job `FAILED` with a reason, and nothing is written. |

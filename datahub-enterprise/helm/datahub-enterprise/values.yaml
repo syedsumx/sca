@@ -1,0 +1,278 @@
+# Default values for datahub-enterprise.
+#
+# Two layers:
+#   datahub:  pass-through values for the official DataHub chart (dependency). Only the keys DHE needs
+#             are shown; see https://github.com/acryldata/datahub-helm for the full reference.
+#   dhe:      the DHE enterprise control plane.
+
+# ============================================================================================
+# DataHub Core (official chart, https://helm.datahubproject.io)
+# ============================================================================================
+datahub:
+  # Set to false to attach DHE to an existing DataHub release; then set dhe.gms.url accordingly.
+  enabled: true
+
+  global:
+    datahub:
+      version: v1.8.0
+      # Token auth is required: DHE services and the authorizer plugin act as real principals.
+      metadata_service_authentication:
+        enabled: true
+
+  datahub-gms:
+    # --- DHE authorizer plugin wiring -------------------------------------------------------
+    # 1. An initContainer copies the plugin jar + config.yml into an emptyDir.
+    # 2. The emptyDir is mounted at /etc/datahub/plugins/auth in GMS.
+    # 3. Env vars point the plugin at the PDP and select the mode.
+    # In authoritative mode set AUTH_POLICIES_ENABLED to "false" (and dhe.auth.mode=authoritative).
+    extraInitContainers:
+      - name: dhe-authorizer-plugin
+        image: dhe/enterprise-authorizer:0.1.0
+        imagePullPolicy: IfNotPresent
+        env:
+          - name: PLUGIN_DIR
+            value: /etc/datahub/plugins/auth
+        volumeMounts:
+          - name: dhe-auth-plugins
+            mountPath: /etc/datahub/plugins/auth
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop: ["ALL"]
+    extraVolumes:
+      - name: dhe-auth-plugins
+        emptyDir: {}
+    extraVolumeMounts:
+      - name: dhe-auth-plugins
+        mountPath: /etc/datahub/plugins/auth
+    extraEnvs:
+      - name: AUTH_POLICIES_ENABLED
+        value: "true"
+      - name: DHE_AUTHZ_MODE
+        value: additive
+      - name: VIEW_AUTHORIZATION_ENABLED
+        value: "true"
+      # Must resolve to the PDP Service of this release: <release>-datahub-enterprise-pdp
+      - name: DHE_PDP_URL
+        value: http://datahub-datahub-enterprise-pdp:8810
+      - name: DHE_SERVICE_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: dhe-secrets
+            key: service-token
+
+# ============================================================================================
+# DHE control plane
+# ============================================================================================
+global:
+  dhe:
+    image:
+      repository: dhe/datahub-enterprise
+      tag: ""            # defaults to .Chart.AppVersion
+      pullPolicy: IfNotPresent
+    imagePullSecrets: []
+
+dhe:
+  # DataHub endpoints as seen from inside the cluster. Defaults match the official chart's service names
+  # for a release named "datahub"; override when using another release name or an external DataHub.
+  gms:
+    url: http://datahub-datahub-gms:8080
+    frontendUrl: http://datahub-datahub-frontend:9002
+
+  # Kubernetes Secret holding DHE credentials. Create it yourself (or with ExternalSecrets / Vault):
+  #   kubectl create secret generic dhe-secrets \
+  #     --from-literal=service-token=$(openssl rand -hex 32) \
+  #     --from-literal=gms-token=<DataHub PAT for the dhe service user> \
+  #     --from-literal=database-url='postgresql+psycopg://dhe:***@dhe-postgres:5432/dhe' \
+  #     --from-literal=anthropic-api-key=<optional>
+  secrets:
+    name: dhe-secrets
+    serviceTokenKey: service-token
+    gmsTokenKey: gms-token
+    databaseUrlKey: database-url
+    anthropicApiKeyKey: anthropic-api-key
+
+  auth:
+    # additive | authoritative  (authoritative requires datahub-gms AUTH_POLICIES_ENABLED=false)
+    mode: additive
+    importNativePolicies: true
+    decisionCacheTtlSeconds: 30
+    rootUsers:
+      - urn:li:corpuser:datahub
+
+  kafka:
+    bootstrap: datahub-prerequisites-kafka:9092
+    schemaRegistryUrl: http://datahub-datahub-gms:8080/schema-registry/api/
+
+  ai:
+    # anthropic | ollama | none
+    llmProvider: none
+    model: claude-opus-5-5
+    effort: high
+    ollamaUrl: http://ollama:11434
+    # hashing | ollama | datahub
+    embeddingProvider: hashing
+    auditPrompts: false
+
+  # ABAC policy bundle (YAML documents) mounted at DHE_POLICY_DIR. Empty → the policies baked into the
+  # image (/etc/dhe/config/policies) are used. Alternatively reference an existing ConfigMap.
+  policies:
+    existingConfigMap: ""
+    files: {}
+    #  10-pii.yaml: |
+    #    policies: [...]
+
+  extraEnv: []
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # -------------------------------------------------------------------------- components
+  api:
+    enabled: true
+    replicas: 2
+    port: 8800
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    ingress:
+      enabled: false
+      className: ""
+      host: datahub.example.com
+      path: /dhe/api
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  pdp:
+    enabled: true
+    # The PDP is on the GMS authorization hot path: keep >= 2 replicas.
+    replicas: 2
+    port: 8810
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    pdb:
+      enabled: true
+      minAvailable: 1
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  gateway:
+    enabled: true
+    replicas: 2
+    port: 8820
+    publicUrl: https://dhe-gateway.example.com
+    # The gateway's X25519/Ed25519 identity must be identical on every replica. Provide it as a Secret
+    # (files: gateway_x25519.key, gateway_ed25519.key). If empty, a PVC is used and replicas is forced to 1.
+    keys:
+      existingSecret: ""
+      persistence:
+        size: 64Mi
+        storageClass: ""
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # Public (or PrivateLink / VPC endpoint) exposure for remote agents.
+    service:
+      type: ClusterIP
+      annotations: {}
+    ingress:
+      enabled: false
+      className: ""
+      host: dhe-gateway.example.com
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  mcp:
+    enabled: true
+    replicas: 1
+    port: 8830
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  scheduler:
+    enabled: true
+    # Leader election uses a Postgres advisory lock; standby replicas take over within one tick.
+    replicas: 2
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  actions:
+    piiPropagation:
+      enabled: true
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 768Mi }
+    vectorIndexer:
+      enabled: true
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 1Gi }
+
+  networkPolicy:
+    enabled: true
+    # Label selector for the GMS pods allowed to call the PDP.
+    gmsPodSelector:
+      app.kubernetes.io/name: datahub-gms
+    # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
+    apiIngressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}

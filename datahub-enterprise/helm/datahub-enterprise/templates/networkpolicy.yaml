@@ -1,0 +1,92 @@
+{{- if .Values.dhe.networkPolicy.enabled }}
+{{- $sel := dict "app.kubernetes.io/name" (include "dhe.name" .) "app.kubernetes.io/instance" .Release.Name }}
+# PDP: only GMS (authorizer plugin) and DHE components may ask for decisions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-pdp
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: pdp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.dhe.networkPolicy.gmsPodSelector | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+      ports:
+        - port: http
+---
+# API: DHE components, the DataHub frontend/ingress and explicitly configured sources.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-api
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: datahub-frontend
+        {{- with .Values.dhe.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+---
+# Gateway: reachable by remote agents (any source); it is the only internet/PrivateLink-facing service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-gateway
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: http
+---
+# Workers (scheduler, actions) and MCP accept no unsolicited ingress except metrics scraping from
+# within the namespace; MCP additionally accepts in-namespace clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-workers
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["scheduler", "actions-pii-propagation", "actions-vector-indexer", "mcp"]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+{{- end }}

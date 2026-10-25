@@ -1,0 +1,5 @@
+{{- if .Values.dhe.scheduler.enabled }}
+{{- /* No port: leader election through a Postgres advisory lock, liveness via process supervision. */}}
+{{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.dhe.scheduler "replicas" .Values.dhe.scheduler.replicas "args" (list "scheduler") }}
+{{ include "dhe.deployment" $ctx }}
+{{- end }}
