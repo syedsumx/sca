@@ -12,7 +12,8 @@
     "test": "vitest run",
     "build:mfe": "webpack --config webpack.mfe.config.js --mode production",
     "build:embed": "node scripts/build-embed.mjs",
-    "build": "npm run build:mfe && npm run build:embed"
+    "build": "npm run build:mfe && npm run build:embed",
+    "build:demo": "node scripts/build-demo.mjs"
   },
   "peerDependencies": {
     "antd": "4.24.7",

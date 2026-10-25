@@ -18,8 +18,8 @@ export type Tone = 'good' | 'warn' | 'bad' | 'neutral';
 export function tone(status: string | null | undefined): Tone {
     const s = (status || '').toUpperCase();
     if (s === 'PASS' || s === 'HEALTHY') return 'good';
-    if (s === 'WARN' || s === 'TRAINING') return 'warn';
-    if (s === 'FAIL' || s === 'ERROR' || s === 'UNHEALTHY') return 'bad';
+    if (s === 'WARN' || s === 'WARNING' || s === 'TRAINING' || s === 'LEARNING') return 'warn';
+    if (s === 'FAIL' || s === 'FAILING' || s === 'ERROR' || s === 'UNHEALTHY') return 'bad';
     return 'neutral';
 }
 

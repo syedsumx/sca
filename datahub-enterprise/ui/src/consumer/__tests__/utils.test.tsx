@@ -42,6 +42,10 @@ describe('format helpers', () => {
         expect(relativeTime('2026-10-25T11:58:00Z', now)).toBe('2 min ago');
         expect(relativeTime('2026-10-24T12:00:00Z', now)).toBe('1 d ago');
         expect(qualityLabel('FAIL')).toBe('Failing');
+        // dhe-api trust badges use these spellings (services.trust / embed _status)
+        expect(qualityLabel('FAILING')).toBe('Failing');
+        expect(qualityLabel('WARNING')).toBe('Warning');
+        expect(qualityLabel('LEARNING')).toBe('Learning');
         expect(qualityLabel(null)).toBe('Untested');
     });
 });

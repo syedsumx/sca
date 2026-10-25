@@ -63,9 +63,12 @@ export function qualityTone(status: string | null | undefined): TrustTone {
         case 'HEALTHY':
             return 'good';
         case 'WARN':
+        case 'WARNING':
         case 'TRAINING':
+        case 'LEARNING':
             return 'warn';
         case 'FAIL':
+        case 'FAILING':
         case 'ERROR':
         case 'UNHEALTHY':
             return 'bad';
@@ -79,7 +82,7 @@ export function qualityLabel(status: string | null | undefined): string {
         case 'good':
             return 'Healthy';
         case 'warn':
-            return (status || '').toUpperCase() === 'TRAINING' ? 'Learning' : 'Warning';
+            return ['TRAINING', 'LEARNING'].includes((status || '').toUpperCase()) ? 'Learning' : 'Warning';
         case 'bad':
             return 'Failing';
         default:
