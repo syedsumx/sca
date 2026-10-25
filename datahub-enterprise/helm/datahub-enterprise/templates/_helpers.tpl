@@ -116,6 +116,35 @@ app.kubernetes.io/component: {{ .component }}
   valueFrom:
     secretKeyRef: { name: {{ $s.name }}, key: {{ $s.anthropicApiKeyKey }} }
 {{- end }}
+- name: DHE_PUBLIC_URL
+  value: {{ .Values.dhe.publicUrl | quote }}
+- name: DHE_EMBED_ALLOWED_ORIGINS
+  value: {{ join "," .Values.dhe.embeds.allowedOrigins | quote }}
+- name: DHE_ACTION_LINK_SECRET
+  valueFrom:
+    secretKeyRef: { name: {{ $s.name }}, key: {{ $s.actionLinkSecretKey }} }
+- name: DHE_EMBED_SIGNING_SECRET
+  valueFrom:
+    secretKeyRef: { name: {{ $s.name }}, key: {{ $s.embedSigningSecretKey }} }
+{{- $i := .Values.dhe.integrations }}
+{{- if $i.slack.enabled }}
+- name: DHE_SLACK_BOT_TOKEN
+  valueFrom:
+    secretKeyRef: { name: {{ $i.slack.existingSecret }}, key: {{ $i.slack.botTokenKey }} }
+- name: DHE_SLACK_SIGNING_SECRET
+  valueFrom:
+    secretKeyRef: { name: {{ $i.slack.existingSecret }}, key: {{ $i.slack.signingSecretKey }} }
+{{- end }}
+{{- if $i.teams.enabled }}
+- name: DHE_TEAMS_WEBHOOK_URL
+  valueFrom:
+    secretKeyRef: { name: {{ $i.teams.existingSecret }}, key: {{ $i.teams.webhookUrlKey }} }
+{{- end }}
+{{- if $i.email.enabled }}
+- name: DHE_SMTP_URL
+  valueFrom:
+    secretKeyRef: { name: {{ $i.email.existingSecret }}, key: {{ $i.email.smtpUrlKey }} }
+{{- end }}
 {{- with .Values.dhe.extraEnv }}
 {{ toYaml . }}
 {{- end }}
@@ -127,13 +156,17 @@ Renders a DHE Deployment. Arguments (dict):
   component  – component name (api, pdp, gateway, …)
   cfg        – component values
   args       – container args (list) passed to the `dhe` entrypoint
-  port       – optional container port (int); enables probes against GET /health
+  port       – optional container port (int); enables probes against GET <healthPath>
+  healthPath – optional probe path (default /health)
+  metricsPath – optional Prometheus scrape path (default /metrics)
+  extraEnv   – optional list of extra env entries for this component
   extraVolumes / extraVolumeMounts – optional lists
 */}}
 {{- define "dhe.deployment" -}}
 {{- $root := .root -}}
 {{- $cfg := .cfg -}}
 {{- $replicas := default 1 .replicas -}}
+{{- $health := default "/health" .healthPath -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -161,7 +194,7 @@ spec:
         {{- if .port }}
         prometheus.io/scrape: "true"
         prometheus.io/port: {{ .port | quote }}
-        prometheus.io/path: /metrics
+        prometheus.io/path: {{ default "/metrics" .metricsPath }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "dhe.serviceAccountName" $root }}
@@ -180,24 +213,27 @@ spec:
             {{- toYaml .args | nindent 12 }}
           env:
             {{- include "dhe.env" $root | nindent 12 }}
+            {{- with .extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- if .port }}
           ports:
             - name: http
               containerPort: {{ .port }}
               protocol: TCP
           readinessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: {{ $health }}, port: http }
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: {{ $health }}, port: http }
             initialDelaySeconds: 20
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 4
           startupProbe:
-            httpGet: { path: /health, port: http }
+            httpGet: { path: {{ $health }}, port: http }
             periodSeconds: 3
             failureThreshold: 40
           {{- end }}

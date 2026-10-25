@@ -10,7 +10,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Literal, Optional
+from typing import Any, Callable, Literal, Optional
 
 import yaml
 from pydantic import BaseModel, Field
@@ -86,6 +86,10 @@ class PolicyDecisionPoint:
         self._bundle = PolicyBundle()
         self._rbac = RbacModel()
         self._native: list[Policy] = []
+        # Additional compiled layers (e.g. "personas", "purposes") managed by other modules.
+        self._layers: dict[str, list[Policy]] = {}
+        # Callables that add derived subject attributes (e.g. persona memberships).
+        self.subject_enrichers: list[Callable[[dict, int], dict]] = []
         self._compiled: list[Policy] = []
         self._cache: dict[str, tuple[float, Decision]] = {}
         self._lock = threading.RLock()
@@ -119,12 +123,22 @@ class PolicyDecisionPoint:
             self._recompile()
         return len(translated)
 
+    def set_layer(self, name: str, policies: list[Policy]) -> None:
+        with self._lock:
+            self._layers[name] = list(policies)
+            self._recompile()
+
+    def invalidate_decisions(self) -> None:
+        with self._lock:
+            self._cache.clear()
+
     def policies(self) -> list[Policy]:
         return list(self._compiled)
 
     def _recompile(self) -> None:
         self._compiled = sorted(
-            [*self._bundle.policies, *self._rbac.to_policies(), *self._native],
+            [*self._bundle.policies, *self._rbac.to_policies(), *self._native,
+             *(p for layer in self._layers.values() for p in layer)],
             key=lambda p: (-p.priority, p.id),
         )
         self._cache.clear()
@@ -135,6 +149,9 @@ class PolicyDecisionPoint:
         subject = dict(self.resolver.subject(req.actor))
         subject["groups"] = sorted(set(subject.get("groups", [])) | set(req.actor_groups))
         subject["attributes"] = {**subject.get("attributes", {}), **req.subject_attributes}
+        now_ms = int(time.time() * 1000)
+        for enrich in self.subject_enrichers:
+            subject.update(enrich(subject, now_ms))
         resource: dict[str, Any] = {}
         if req.resource:
             resource = dict(self.resolver.resource(req.resource.urn))
@@ -156,7 +173,7 @@ class PolicyDecisionPoint:
                     resource[key] = value
         now = datetime.now(timezone.utc)
         environment = {"time": now.isoformat(), "hour": now.hour, "weekday": now.strftime("%a").lower(),
-                       "channel": "api", **req.environment}
+                       "now_ms": now_ms, "channel": "api", **req.environment}
         return {"subject": subject, "resource": resource, "action": req.privilege, "environment": environment}
 
     def _cache_key(self, req: AuthorizeRequest) -> str:
@@ -214,23 +231,28 @@ class PolicyDecisionPoint:
             top = denies[0]
             return Decision(decision="DENY", reason=f"denied by policy {top.policy_id}",
                             policy_ids=[r.policy_id for r in denies], ttl_seconds=self.cache_ttl, trace=trace)
-        allows = [r for r in matched if r.effect == "allow"]
-        if allows:
-            by_id = {p.id: p for p in self._compiled}
-            obligations: list[Obligation] = []
-            seen: set[str] = set()
-            for r in allows:
+        by_id = {p.id: p for p in self._compiled}
+        # Obligations come from matched allow policies and from obligation-only policies; they
+        # apply to every non-denied outcome (in additive mode the native authorizer may allow).
+        obligations: list[Obligation] = []
+        seen: set[str] = set()
+        for r in matched:
+            if r.effect in ("allow", "obligation"):
                 for o in by_id[r.policy_id].obligations:
                     k = o.model_dump_json()
                     if k not in seen:
                         seen.add(k)
                         obligations.append(o)
+        obligation_ids = [r.policy_id for r in matched if r.effect == "obligation"]
+        allows = [r for r in matched if r.effect == "allow"]
+        if allows:
             return Decision(decision="ALLOW", reason=f"allowed by policy {allows[0].policy_id}",
-                            policy_ids=[r.policy_id for r in allows], obligations=obligations,
+                            policy_ids=[r.policy_id for r in allows] + obligation_ids, obligations=obligations,
                             ttl_seconds=self.cache_ttl, trace=trace)
         if self.mode == "additive":
             return Decision(decision="NOT_APPLICABLE", reason="no DHE policy applies; defer to DataHub policies",
-                            ttl_seconds=self.cache_ttl, trace=trace)
+                            policy_ids=obligation_ids, obligations=obligations, ttl_seconds=self.cache_ttl,
+                            trace=trace)
         return Decision(decision="DENY", reason="no policy grants this privilege (default deny)",
                         ttl_seconds=self.cache_ttl, trace=trace)
 

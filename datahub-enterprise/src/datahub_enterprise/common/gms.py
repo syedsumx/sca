@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import Any, Optional, Protocol, Sequence
 
 import httpx
@@ -46,17 +47,36 @@ class GmsClient:
         token: Optional[str] = None,
         timeout_seconds: float = 30.0,
         client: Optional[httpx.Client] = None,
+        token_file: Optional[str] = None,
     ):
+        """``token_file`` (e.g. ``DHE_GMS_TOKEN_FILE``) is re-read whenever it changes, so a token
+        minted after startup, or rotated later, is picked up without a restart."""
         self.url = url.rstrip("/")
-        headers = {
+        self._base_headers = {
             "X-RestLi-Protocol-Version": "2.0.0",
             "Content-Type": "application/json",
             "User-Agent": "datahub-enterprise/0.1",
         }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        self._token = token
+        self._token_file = token_file if not token else None
+        self._token_mtime: Optional[float] = None
         self._http = client or httpx.Client(timeout=timeout_seconds)
-        self._headers = headers
+
+    @property
+    def _headers(self) -> dict:
+        if self._token_file:
+            try:
+                mtime = os.stat(self._token_file).st_mtime
+                if mtime != self._token_mtime:
+                    with open(self._token_file) as fh:
+                        self._token = fh.read().strip() or None
+                    self._token_mtime = mtime
+            except OSError:
+                pass
+        headers = dict(self._base_headers)
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        return headers
 
     def close(self) -> None:
         self._http.close()

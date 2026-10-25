@@ -42,3 +42,17 @@ data:
             circuitBreaker:
               failureThreshold: 5
               openSeconds: 10
+{{- if .Values.dhe.consumerUi.enabled }}
+---
+# DataHub micro-frontend config: mounted into datahub-frontend at /etc/datahub/mfe (MFE_CONFIG_FILE_PATH).
+# datahub-frontend reads it once at startup; roll the frontend after changing it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dhe.fullname" . }}-mfe-config
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+data:
+  mfe.config.yaml: |
+    {{- .Values.dhe.mfe.config | nindent 4 }}
+{{- end }}

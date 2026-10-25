@@ -65,6 +65,13 @@ def init_db(engine: Engine) -> None:
     from datahub_enterprise.common import audit as _audit  # noqa: F401
     from datahub_enterprise.governance import certification as _cert  # noqa: F401
     from datahub_enterprise.quality import store as _quality_store  # noqa: F401
+    from datahub_enterprise.ai import assistant as _assistant  # noqa: F401
+    from datahub_enterprise.collab import service as _collab  # noqa: F401
+    from datahub_enterprise.context import miner as _context  # noqa: F401
+    from datahub_enterprise.embed import service as _embed  # noqa: F401
+    from datahub_enterprise.governance import personas as _personas  # noqa: F401
+    from datahub_enterprise.marketplace import service as _marketplace  # noqa: F401
+    from datahub_enterprise.notify import hub as _notify  # noqa: F401
 
     metadata.create_all(engine)
 

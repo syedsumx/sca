@@ -84,9 +84,92 @@ spec:
         values: [{{ .Release.Name | quote }}]
       - key: app.kubernetes.io/component
         operator: In
-        values: ["scheduler", "actions-pii-propagation", "actions-vector-indexer", "mcp"]
+        values: ["scheduler", "actions-pii-propagation", "actions-vector-indexer", "mcp", "context-miner", "notifier"]
   policyTypes: [Ingress]
   ingress:
     - from:
         - podSelector: {}
+{{- if .Values.dhe.gmsProxy.enabled }}
+---
+# GMS proxy: on the frontend → GMS hot path. Only the DataHub frontend and DHE components may call it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-gms-proxy
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: gms-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.dhe.networkPolicy.frontendPodSelector | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.dhe.consumerUi.enabled }}
+---
+# Consumer UI static assets: fetched by browsers through the ingress (and by the frontend pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-consumer-ui
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: consumer-ui
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml .Values.dhe.networkPolicy.frontendPodSelector | nindent 14 }}
+        {{- with .Values.dhe.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.dhe.notifier.enabled }}
+---
+# Notifier egress: in-cluster dependencies (DB, GMS, DNS) plus HTTPS/SMTP to Slack, Teams and the
+# mail relay. Restrict external destinations with dhe.networkPolicy.notifierEgressTo.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dhe.fullname" . }}-notifier-egress
+  labels:
+    {{- include "dhe.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: notifier
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - ports:
+        - { port: 443, protocol: TCP }
+        - { port: 587, protocol: TCP }
+        - { port: 465, protocol: TCP }
+      {{- with .Values.dhe.networkPolicy.notifierEgressTo }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
 {{- end }}

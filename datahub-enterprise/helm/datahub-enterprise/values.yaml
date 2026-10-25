@@ -64,6 +64,32 @@ datahub:
             name: dhe-secrets
             key: service-token
 
+  datahub-frontend:
+    # --- Active Metadata layer wiring. If you disable dhe.gmsProxy, delete datahub.gms below (the
+    # frontend would otherwise point at a missing Service); if you disable dhe.consumerUi, delete the
+    # MFE env/volume entries. ---
+    # 1. All UI → GMS traffic goes through the DHE masking middleware. The frontend subchart reads
+    #    datahub.gms.host/port before the global values, so only the frontend is re-pointed; every
+    #    other component (and the proxy itself) still talks to GMS directly.
+    #    Must resolve to the gms-proxy Service of this release: <release>-datahub-enterprise-gms-proxy
+    datahub:
+      gms:
+        host: datahub-datahub-enterprise-gms-proxy
+        port: "8890"
+    # 2. Mount the DHE workspace micro-frontend config (ConfigMap rendered by this chart).
+    extraEnvs:
+      - name: MFE_CONFIG_FILE_PATH
+        value: /etc/datahub/mfe/mfe.config.yaml
+    extraVolumes:
+      - name: dhe-mfe-config
+        configMap:
+          # <release>-datahub-enterprise-mfe-config
+          name: datahub-datahub-enterprise-mfe-config
+    extraVolumeMounts:
+      - name: dhe-mfe-config
+        mountPath: /etc/datahub/mfe
+        readOnly: true
+
 # ============================================================================================
 # DHE control plane
 # ============================================================================================
@@ -94,6 +120,11 @@ dhe:
     gmsTokenKey: gms-token
     databaseUrlKey: database-url
     anthropicApiKeyKey: anthropic-api-key
+    # Active Metadata layer: HMAC secrets for one-click action links (Teams/email) and embed tokens.
+    #   --from-literal=action-link-secret=$(openssl rand -hex 32)
+    #   --from-literal=embed-signing-secret=$(openssl rand -hex 32)
+    actionLinkSecretKey: action-link-secret
+    embedSigningSecretKey: embed-signing-secret
 
   auth:
     # additive | authoritative  (authoritative requires datahub-gms AUTH_POLICIES_ENABLED=false)
@@ -126,6 +157,51 @@ dhe:
     #    policies: [...]
 
   extraEnv: []
+
+  # ============================================================ Active Metadata layer
+  # Public base URL users reach DataHub on (Slack/Teams links, embed snippets, OAuth-style redirects).
+  publicUrl: https://datahub.example.com
+
+  embeds:
+    # Origins allowed to frame DHE embeds (CSP frame-ancestors) and call the embed API.
+    allowedOrigins: []
+    #  - https://acme.looker.com
+    #  - https://*.online.tableau.com
+    #  - https://app.powerbi.com
+
+  integrations:
+    slack:
+      enabled: false
+      # Secret with the Slack app credentials (see deploy/slack/app-manifest.yaml).
+      existingSecret: dhe-slack
+      botTokenKey: bot-token
+      signingSecretKey: signing-secret
+    teams:
+      enabled: false
+      # Secret with the default Teams Workflows webhook URL (per-domain routes live in DHE).
+      existingSecret: dhe-teams
+      webhookUrlKey: webhook-url
+    email:
+      enabled: false
+      existingSecret: dhe-smtp
+      smtpUrlKey: smtp-url
+
+  # Micro-frontend config mounted into datahub-frontend (see datahub.datahub-frontend above).
+  mfe:
+    config: |
+      topLevelMenuTitle: Workspace
+      subNavigationMode: false
+      loadTimeoutMs: 30000
+      microFrontends:
+        - id: DheWorkspace
+          label: Workspace
+          path: /dhe
+          remoteEntry: /dhe-ui/remoteEntry.js
+          module: dheConsumer/mount
+          flags:
+            enabled: true
+            showInNav: true
+          navIcon: Compass
 
   podSecurityContext:
     runAsNonRoot: true
@@ -256,11 +332,97 @@ dhe:
         requests: { cpu: 100m, memory: 256Mi }
         limits: { memory: 1Gi }
 
+  # ---------------------------------------------------------------- Active Metadata components
+  # Masking middleware between datahub-frontend and GMS. It sits on the UI hot path: keep >= 2
+  # replicas with a PDB. Stateless; scales horizontally.
+  gmsProxy:
+    enabled: true
+    replicas: 2
+    port: 8890
+    # Upstream GMS; defaults to dhe.gms.url.
+    upstream: ""
+    # DataHub's session-token signing key, used read-only to verify session JWTs (actorId claim).
+    # Defaults match the official chart's provisioned auth secret.
+    sessionSigningKey:
+      secretRef: datahub-auth-secrets
+      secretKey: token_service_signing_key
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Context Agents: mine queries, dbt, BI semantics and run histories (findings, drift, ontology).
+  contextMiner:
+    enabled: true
+    replicas: 1
+    intervalSeconds: 300
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1536Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Notification hub fan-out to Slack / Teams / email / in-app.
+  notifier:
+    enabled: true
+    replicas: 1
+    intervalSeconds: 10
+    resources:
+      requests: { cpu: 50m, memory: 192Mi }
+      limits: { memory: 512Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
+  consumerUi:
+    enabled: true
+    replicas: 2
+    port: 8080
+    image:
+      repository: dhe/consumer-ui
+      tag: ""            # defaults to .Chart.AppVersion
+      pullPolicy: IfNotPresent
+    resources:
+      requests: { cpu: 20m, memory: 32Mi }
+      limits: { memory: 128Mi }
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # Must share the DataHub UI's origin so the MFE can use the session cookie.
+    ingress:
+      enabled: false
+      className: ""
+      host: datahub.example.com
+      path: /dhe-ui
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
   networkPolicy:
     enabled: true
     # Label selector for the GMS pods allowed to call the PDP.
     gmsPodSelector:
       app.kubernetes.io/name: datahub-gms
+    # Label selector for the datahub-frontend pods (the only callers of the gms-proxy besides DHE).
+    frontendPodSelector:
+      app.kubernetes.io/name: datahub-frontend
+    # Egress for the notifier (Slack / Teams / SMTP over 443/587). Empty = allow any destination on
+    # those ports; restrict with ipBlock / namespaceSelector entries for an egress proxy.
+    notifierEgressTo: []
     # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
     apiIngressFrom:
       - namespaceSelector:

@@ -65,6 +65,15 @@ query dheEntity($urn: String!) {
 }
 """
 
+ENTITIES_QUERY = f"""
+query dheEntities($urns: [String!]!) {{
+  entities(urns: $urns) {{ {_SUMMARY_FRAGMENT}
+    ... on Dataset {{ domain {{ domain {{ urn properties {{ name }} }} }} }}
+    ... on DataProduct {{ domain {{ domain {{ urn properties {{ name }} }} }} }}
+  }}
+}}
+"""
+
 FACETS_QUERY = """
 query dheFacets($input: SearchAcrossEntitiesInput!) {
   searchAcrossEntities(input: $input) {
@@ -103,6 +112,20 @@ class Catalog:
         data = self.graph.graphql(SEARCH_QUERY, {"input": inp})
         results = ((data.get("searchAcrossEntities") or {}).get("searchResults")) or []
         return [summarize(r["entity"]) for r in results if r.get("entity")]
+
+    def summaries(self, urns: list[str]) -> dict[str, dict]:
+        """Batched name/type/platform/description lookup (one GraphQL round-trip per 100 urns)."""
+        out: dict[str, dict] = {}
+        for i in range(0, len(urns), 100):
+            chunk = urns[i:i + 100]
+            data = self.graph.graphql(ENTITIES_QUERY, {"urns": chunk})
+            for e in data.get("entities") or []:
+                if e and e.get("urn"):
+                    s = summarize(e)
+                    dom = ((e.get("domain") or {}).get("domain") or {})
+                    s["domain"] = {"urn": dom["urn"], "name": (dom.get("properties") or {}).get("name")} if dom else None
+                    out[e["urn"]] = s
+        return out
 
     def lineage(self, urn: str, direction: str = "DOWNSTREAM", max_hops: int = 3, count: int = 50) -> list[dict]:
         degrees = ["1", "2", "3+"][: max(1, min(max_hops, 3))]

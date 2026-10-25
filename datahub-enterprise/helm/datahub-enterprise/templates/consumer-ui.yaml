@@ -1,0 +1,105 @@
+{{- if .Values.dhe.consumerUi.enabled }}
+{{- $u := .Values.dhe.consumerUi }}
+{{- $ctx := dict "root" $ "component" "consumer-ui" "cfg" $u }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dhe.componentName" $ctx }}
+  labels:
+    {{- include "dhe.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $u.replicas }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "dhe.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dhe.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.dhe.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.dhe.podSecurityContext | nindent 8 }}
+      containers:
+        - name: consumer-ui
+          image: {{ printf "%s:%s" $u.image.repository (default .Chart.AppVersion $u.image.tag) }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /dhe-ui/remoteEntry.js, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /dhe-ui/remoteEntry.js, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.dhe.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{ include "dhe.service" (merge (dict "port" $u.port) $ctx) }}
+{{- with (include "dhe.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- if $u.ingress.enabled }}
+---
+# Serves /dhe-ui/* on the DataHub UI host (same origin as the frontend, required for the MFE).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dhe.componentName" $ctx }}
+  labels:
+    {{- include "dhe.componentLabels" $ctx | nindent 4 }}
+  {{- with $u.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $u.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $u.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $u.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ $u.ingress.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dhe.componentName" $ctx }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

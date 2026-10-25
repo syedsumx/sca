@@ -76,6 +76,82 @@ def cmd_scheduler(a) -> None:
     Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions).run_forever()
 
 
+def _every(seconds: float, fn, name: str) -> None:
+    import threading
+
+    log = logging.getLogger(f"dhe.{name}")
+
+    def loop() -> None:
+        while True:
+            time.sleep(seconds)
+            try:
+                fn()
+            except Exception:
+                log.exception("%s failed", name)
+
+    threading.Thread(target=loop, daemon=True, name=name).start()
+
+
+def cmd_gms_proxy(a) -> None:
+    """Masking reverse proxy in the datahub-frontend → GMS path."""
+    from datahub_enterprise.gmsproxy.proxy import MaskingService, ProxyIdentity, create_proxy_app
+
+    s = _services(with_gateway=False, with_ai=False)
+    s.start_background()
+    # Personas/purposes are edited through `dhe api`; pick up changes from the shared database.
+    _every(a.reload_interval, s.personas.reload, "persona-reload")
+    _every(a.reload_interval, lambda: s.pdp.set_bundle(s.policy_repo.latest() or s.pdp.bundle), "bundle-reload")
+    identity = ProxyIdentity(s.settings.active.session_signing_key, a.upstream)
+    app = create_proxy_app(a.upstream, MaskingService(s.pdp, s.attributes), identity, a.timeout)
+    _serve(app, a.host, a.port)
+
+
+def cmd_context_miner(a) -> None:
+    from datahub_enterprise.context.miner import ContextMiner
+
+    s = _services(with_gateway=False, with_ai=False)
+    if s.graph is None:
+        sys.exit("DHE_GMS_URL is required for context mining")
+    miner = ContextMiner(s.graph, s.context, a.interval)
+    if a.once:
+        print(json.dumps(miner.run_once(), indent=2))
+        return
+    miner.run_forever()
+
+
+def notifier_tick(s) -> dict:
+    """One maintenance pass: deliver notifications, expire access, revoke expired grants, purge chats."""
+    now_ms = int(time.time() * 1000)
+    out: dict = {"delivery": s.notify.dispatch_pending()}
+    if s.marketplace is not None:
+        out["access"] = s.marketplace.sweep(now_ms)
+    expired = s.personas.expired_grants(now_ms)
+    for g in expired:
+        s.personas.revoke_grant(g["id"], "urn:li:corpuser:dhe-notifier")
+    out["grants_expired"] = len(expired)
+    return out
+
+
+def cmd_notifier(a) -> None:
+    s = _services(with_gateway=False, with_ai=False)
+    log = logging.getLogger("dhe.notifier")
+    last_purge = 0.0
+    while True:
+        try:
+            stats = notifier_tick(s)
+            if time.time() - last_purge > 3600:
+                stats["conversations_purged"] = s.assistant.purge_older_than(
+                    s.settings.active.conversation_retention_days)
+                last_purge = time.time()
+            if any(v for v in stats["delivery"].values()) or stats.get("grants_expired"):
+                log.info("notifier tick: %s", stats)
+        except Exception:
+            log.exception("notifier tick failed")
+        if a.once:
+            return
+        time.sleep(a.interval)
+
+
 def cmd_mcp(a) -> None:
     from datahub_enterprise.ai.mcp_server import run
 
@@ -132,7 +208,7 @@ def build_parser() -> argparse.ArgumentParser:
         return sp
 
     api = http("api", 8800, cmd_api, "control-plane API (quality, governance, ai, agent admin)")
-    api.add_argument("--modules", default="quality,governance,ai,agents")
+    api.add_argument("--modules", default="quality,governance,ai,agents,collab,marketplace,context,notify,embed")
     http("pdp", 8810, cmd_pdp, "policy decision point")
     gw = http("gateway", 8820, cmd_gateway, "remote agent gateway")
     gw.add_argument("--no-dispatcher", action="store_true")
@@ -144,6 +220,21 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--partition", type=int, default=int(os.environ.get("DHE_SCHEDULER_PARTITION", 0)))
     sch.add_argument("--partitions", type=int, default=int(os.environ.get("DHE_SCHEDULER_PARTITIONS", 1)))
     sch.set_defaults(fn=cmd_scheduler)
+
+    gp = http("gms-proxy", 8890, cmd_gms_proxy, "PII-masking reverse proxy between datahub-frontend and GMS")
+    gp.add_argument("--upstream", default=os.environ.get("DHE_GMS_URL", "http://localhost:8080"))
+    gp.add_argument("--timeout", type=float, default=120.0)
+    gp.add_argument("--reload-interval", type=float, default=30.0)
+
+    cm = sub.add_parser("context-miner", help="context-mining worker (queries, dbt, BI, runs → findings)")
+    cm.add_argument("--interval", type=int, default=300)
+    cm.add_argument("--once", action="store_true")
+    cm.set_defaults(fn=cmd_context_miner)
+
+    nt = sub.add_parser("notifier", help="notification delivery + access/grant expiry sweeps")
+    nt.add_argument("--interval", type=float, default=10.0)
+    nt.add_argument("--once", action="store_true")
+    nt.set_defaults(fn=cmd_notifier)
 
     mcp = sub.add_parser("mcp", help="Model Context Protocol server")
     mcp.add_argument("--transport", choices=["stdio", "streamable-http"], default="stdio")

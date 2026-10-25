@@ -64,6 +64,15 @@ class Services:
     nlq: Optional[NaturalLanguageQuery]
     semantic: Optional[SemanticIndex]
     docgen: Optional[DocGenerator]
+    # ---- active metadata layer ------------------------------------------------------
+    personas: Optional[Any] = None
+    notify: Optional[Any] = None
+    slack: Optional[Any] = None
+    collab: Optional[Any] = None
+    marketplace: Optional[Any] = None
+    context: Optional[Any] = None
+    embed: Optional[Any] = None
+    assistant: Optional[Any] = None
     _threads: list = field(default_factory=list)
 
     # ---- authorization helper shared by every DHE API ------------------------------
@@ -84,6 +93,77 @@ class Services:
 
     def can_view(self, principal: Principal):
         return lambda urn: self.authorize(principal, "VIEW_ENTITY_PAGE", urn, raise_on_deny=False)
+
+    def can_view_as(self, actor: str):
+        return self.can_view(Principal(urn=actor, via="delegated"))
+
+    def explicitly_denied(self, principal: Principal, privilege: str, resource_urn: Optional[str]) -> bool:
+        """True only for an explicit DENY (strict denies such as purposes); NOT_APPLICABLE is not a deny."""
+        if principal.is_service:
+            return False
+        resource = ResourceRef(type=resource_urn.split(":", 3)[2], urn=resource_urn) \
+            if resource_urn and resource_urn.startswith("urn:li:") else None
+        return self.pdp.decide(AuthorizeRequest(actor=principal.urn, privilege=privilege, resource=resource,
+                                                environment={"channel": "dhe-api"})).decision == "DENY"
+
+    def subject_of(self, actor: str) -> dict:
+        """Resolved subject (groups, attributes) plus current persona memberships."""
+        import time
+
+        subject = dict(self.attributes.subject(actor))
+        if self.personas is not None:
+            subject["personas"] = self.personas.memberships(subject, int(time.time() * 1000))
+        return subject
+
+    def is_admin(self, actor: str) -> bool:
+        return self.authorize(Principal(urn=actor, via="delegated"), "MANAGE_POLICIES", None, raise_on_deny=False)
+
+    def trust(self, urns: list[str]) -> dict[str, dict]:
+        """Trust badges per asset: certification status + worst current quality status."""
+        out: dict[str, dict] = {}
+        rank = {"FAILING": 3, "ERROR": 2, "WARNING": 1, "HEALTHY": 0}
+        for urn in urns:
+            cert = None
+            try:
+                cert = self.attributes.resource(urn).get("certification")
+            except Exception:
+                pass
+            status = None
+            store = self.quality.store
+            for m in store.list_monitors(urn):
+                ev = m.last_evaluation
+                st = {"FAIL": "FAILING", "WARN": "WARNING", "PASS": "HEALTHY", "ERROR": "ERROR"}.get(
+                    ev.status if ev else "")
+                if st in rank and (status is None or rank[st] > rank[status]):
+                    status = st
+            out[urn] = {"certification": cert, "quality_status": status}
+        return out
+
+    def summaries(self, urns: list[str]) -> dict[str, dict]:
+        if self.catalog is None or not urns:
+            return {}
+        try:
+            return self.catalog.summaries(urns)
+        except Exception:
+            logger.exception("entity summary lookup failed")
+            return {}
+
+    def explainer_for(self, principal: Principal):
+        from datahub_enterprise.ai.lineage_explainer import LineageExplainer
+
+        return LineageExplainer(self.catalog, self.quality.store, self.context, self.llm,
+                                self.settings.ai.model, self.can_view(principal))
+
+    def tools_for(self, principal: Principal):
+        """MCP tool implementations bound to an explicit principal (used by the assistant)."""
+        from datahub_enterprise.ai.mcp_server import DheTools
+
+        class _Scoped(DheTools):
+            @staticmethod
+            def principal() -> Principal:
+                return principal
+
+        return _Scoped(self)
 
     def record_llm_call(self, principal: Optional[Principal]):
         def _record(task: str, usage: Any) -> None:
@@ -199,5 +279,197 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
         semantic = SemanticIndex(catalog, embedder, build_vector_store(engine, embedder.dim))
         docgen = DocGenerator(catalog, llm, settings.ai.model_docgen)
 
-    return Services(settings, engine, graph, audit, identity, attributes, pdp, policy_repo, quality, workflows,
-                    gateway, catalog, llm, nlq, semantic, docgen)
+    services = Services(settings, engine, graph, audit, identity, attributes, pdp, policy_repo, quality, workflows,
+                        gateway, catalog, llm, nlq, semantic, docgen)
+    _build_active_metadata(services)
+    return services
+
+
+def _build_active_metadata(s: Services) -> None:
+    """Personas & Purposes, notifications, collaboration, marketplace, context mining, embeds, assistant."""
+    from datahub_enterprise.ai.assistant import Assistant
+    from datahub_enterprise.collab.service import CollabService
+    from datahub_enterprise.context.miner import ContextStore
+    from datahub_enterprise.embed.service import EmbedService
+    from datahub_enterprise.governance.personas import PersonaEngine
+    from datahub_enterprise.marketplace.service import MarketplaceService
+    from datahub_enterprise.notify.channels import EmailSender, SlackSender, TeamsSender, WebhookSender
+    from datahub_enterprise.notify.hub import Event, NotificationHub, Route
+    from datahub_enterprise.notify.slack import SlackInteractions
+
+    cfg = s.settings.active
+    s.personas = PersonaEngine(s.engine, s.pdp, s.audit, s.attributes)
+
+    def email_of(actor: str) -> Optional[str]:
+        if not actor.startswith("urn:li:corpuser:"):
+            return None
+        try:
+            email = s.attributes.subject(actor).get("attributes", {}).get("email")
+        except Exception:
+            email = None
+        username = actor.split(":", 3)[3]
+        return email or (username if "@" in username else None)
+
+    def owners(urn: str) -> list[str]:
+        try:
+            return list(s.attributes.resource(urn).get("owners", []))
+        except Exception:
+            return []
+
+    def domains_of(urn: str) -> list[str]:
+        try:
+            return list(s.attributes.resource(urn).get("domains", []))
+        except Exception:
+            return []
+
+    def followers(urn: str) -> list[str]:
+        out = s.collab.followers(urn) if s.collab else []
+        if s.marketplace is not None and urn.startswith("urn:li:dataProduct:"):
+            out += [a for a in s.marketplace.subscribers(urn) if a not in out]
+        return out
+
+    hub = NotificationHub(s.engine, cfg.public_url, cfg.action_link_secret, s.audit, followers, owners, domains_of)
+    hub.channels["webhook"] = WebhookSender()
+    hub.channels["teams"] = TeamsSender()
+    slack_sender = None
+    if cfg.slack_bot_token:
+        slack_sender = SlackSender(cfg.slack_bot_token, email_of)
+        hub.channels["slack"] = slack_sender
+    if cfg.smtp_url:
+        hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of)
+    if cfg.teams_webhook_url and not hub.list_routes():
+        hub.put_routes([Route(id="teams-default", channel="teams", target=cfg.teams_webhook_url,
+                              event_types=["quality.incident.raised", "certification.requested", "asset.deprecated",
+                                           "context.drift"])])
+    s.notify = hub
+
+    def entity_name(urn: str) -> str:
+        return (s.summaries([urn]).get(urn) or {}).get("name") or urn
+
+    s.collab = CollabService(s.engine, hub, entity_name)
+    s.context = ContextStore(s.engine, s.graph, s.collab, s.audit, hub)
+    if s.graph is not None:
+        s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
+                                           s.is_admin)
+    s.embed = EmbedService(s.engine, cfg.embed_signing_secret, cfg.embed_allowed_origins, cfg.public_url,
+                           s.catalog, s.attributes, s.quality.store, s.can_view_as)
+
+    def products_for(principal: Principal, query: str) -> list[dict]:
+        if s.marketplace is None:
+            return []
+        return s.marketplace.list_products(principal.urn, query, limit=20, can_view=s.can_view(principal))
+
+    s.assistant = Assistant(s.engine, s.tools_for, s.llm, s.explainer_for, s.nlq, products_for,
+                            s.settings.ai.model, cfg.assistant_effort)
+
+    # ---- inline actions (Slack buttons, Teams/email signed links, in-app) -----------
+    if s.marketplace is not None:
+        hub.register_action("access_request", s.marketplace.action_handler)
+
+    def workflow_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
+        from datahub_enterprise.governance.certification import WorkflowError
+
+        if action not in ("approve", "reject", "request-changes"):
+            raise ValueError(f"unsupported workflow action {action}")
+        try:
+            wf = s.workflows.act(object_id, action, actor, comment)
+        except WorkflowError as e:
+            raise (PermissionError(str(e)) if e.status == 403 else ValueError(str(e)))
+        return f"{wf.kind.title()} request {wf.id} is now {wf.state.lower().replace('_', ' ')}"
+
+    def finding_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
+        f = s.context.get(object_id)
+        p = Principal(urn=actor, via="delegated")
+        if action == "dismiss":
+            s.context.set_status(object_id, "DISMISSED", actor)
+            return f"Dismissed: {f['title']}"
+        if action != "accept":
+            raise ValueError(f"unsupported finding action {action}")
+        for e in f.get("entities", []):
+            if e.startswith("urn:li:dataset:") and not s.authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e, False):
+                raise PermissionError(f"you cannot edit glossary terms on {e}")
+        s.context.accept(object_id, actor)
+        return f"Accepted: {f['title']}"
+
+    def deprecation_action(action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
+        if action != "acknowledge":
+            raise ValueError(f"unsupported deprecation action {action}")
+        s.audit.record("notify", "deprecation.acknowledged", actor, object_id, {"comment": comment})
+        return "Thanks — the owners can see you acknowledged the deprecation."
+
+    hub.register_action("workflow", workflow_action)
+    hub.register_action("finding", finding_action)
+    hub.register_action("deprecation", deprecation_action)
+
+    # ---- event sources ----------------------------------------------------------------
+    _hook_workflow_events(s, Event)
+    _hook_quality_events(s, Event)
+
+    if cfg.slack_signing_secret:
+        def resolve_slack_actor(slack_user_id: str) -> Optional[str]:
+            if slack_sender is None:
+                return None
+            try:
+                email = slack_sender.user_email(slack_user_id)
+            except Exception:
+                return None
+            return f"urn:li:corpuser:{email}" if email else None
+
+        def slack_search(actor: str, query: str) -> list[dict]:
+            if s.catalog is None:
+                return []
+            check = s.can_view_as(actor)
+            return [r for r in s.catalog.search(query, None, None, 20) if check(r["urn"])]
+
+        def slack_ask(actor: str, question: str) -> str:
+            out = s.assistant.chat(Principal(urn=actor, via="delegated"), question)
+            return out["reply_md"]
+
+        s.slack = SlackInteractions(hub, cfg.slack_signing_secret, resolve_slack_actor, slack_search, slack_ask)
+
+
+def _hook_workflow_events(s: Services, Event) -> None:
+    """Certification requests / decisions → notifications with inline Approve / Reject."""
+    from datahub_enterprise.notify.hub import Action
+
+    def on_transition(wf, entry) -> None:
+        to, actor = entry.to_state, entry.actor
+        if to == "SUBMITTED":
+            template = s.workflows.templates.get(wf.template)
+            reviewers = [g for g in (template.reviewer_groups if template else []) if g.startswith("urn:li:")]
+            s.notify.publish(Event(
+                type="certification.requested", title=f"{wf.kind.title()} review requested",
+                body=f"{actor} asked for a {wf.kind.lower()} review of {wf.entity_urn}.", actor=actor,
+                entity_urn=wf.entity_urn, recipients=reviewers, include_owners=True,
+                actions=[Action("approve", "workflow", wf.id, "Approve", "primary"),
+                         Action("reject", "workflow", wf.id, "Reject", "danger")],
+                payload={"workflow_id": wf.id}))
+        elif to in ("APPROVED", "REJECTED", "CHANGES_REQUESTED"):
+            s.notify.publish(Event(
+                type="certification.decided", title=f"{wf.kind.title()} {to.lower().replace('_', ' ')}",
+                body=entry.comment or f"{actor} decided on {wf.entity_urn}.", actor=actor, entity_urn=wf.entity_urn,
+                recipients=[wf.requester], include_followers=to == "APPROVED", payload={"workflow_id": wf.id}))
+
+    s.workflows.listeners.append(on_transition)
+
+
+def _hook_quality_events(s: Services, Event) -> None:
+    """Quality incidents → owners and followers of the dataset."""
+    original = s.quality.notifier
+
+    def notifier(monitor, ev, kind):
+        original(monitor, ev, kind)
+        if kind not in ("failing", "recovered"):
+            return
+        try:
+            raised = kind == "failing"
+            s.notify.publish(Event(
+                type="quality.incident.raised" if raised else "quality.incident.resolved",
+                title=f"{'Quality incident' if raised else 'Recovered'}: {monitor.name}",
+                body=ev.message or "", actor="urn:li:corpuser:dhe-quality", entity_urn=monitor.dataset_urn,
+                include_followers=True, include_owners=True,
+                payload={"monitor_id": monitor.id, "severity": monitor.severity}))
+        except Exception:
+            logger.exception("quality notification failed")
+
+    s.quality.notifier = notifier

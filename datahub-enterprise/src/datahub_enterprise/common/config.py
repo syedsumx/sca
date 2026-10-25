@@ -34,6 +34,7 @@ def _env_int(name: str, default: int) -> int:
 class GmsSettings(BaseModel):
     url: str = "http://localhost:8080"
     token: Optional[str] = None
+    token_file: Optional[str] = None
     frontend_url: Optional[str] = None
     timeout_seconds: float = 30.0
 
@@ -69,6 +70,23 @@ class GatewaySettings(BaseModel):
     max_batch_bytes: int = 4 * 1024 * 1024
 
 
+class ActiveMetadataSettings(BaseModel):
+    """Consumer UI, notifications, embeds, context mining and the masking proxy."""
+
+    public_url: str = "http://localhost:9002"
+    session_signing_key: Optional[str] = None      # = datahub-frontend DATAHUB_TOKEN_SERVICE_SIGNING_KEY
+    action_link_secret: Optional[str] = None
+    slack_bot_token: Optional[str] = None
+    slack_signing_secret: Optional[str] = None
+    teams_webhook_url: Optional[str] = None
+    smtp_url: Optional[str] = None
+    email_from: str = "datahub@localhost"
+    embed_signing_secret: Optional[str] = None
+    embed_allowed_origins: list[str] = Field(default_factory=list)
+    conversation_retention_days: int = 30
+    assistant_effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+
+
 class Settings(BaseModel):
     database_url: str = "sqlite:///./dhe.db"
     service_token: Optional[str] = None
@@ -78,6 +96,7 @@ class Settings(BaseModel):
     authz: AuthzSettings = Field(default_factory=AuthzSettings)
     ai: AiSettings = Field(default_factory=AiSettings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+    active: ActiveMetadataSettings = Field(default_factory=ActiveMetadataSettings)
     # Development-only escape hatch: trust an X-DHE-Actor header without validating
     # a DataHub token. Never enable in production.
     dev_trust_actor_header: bool = False
@@ -93,6 +112,7 @@ def load_settings() -> Settings:
         gms=GmsSettings(
             url=_env("DHE_GMS_URL", "http://localhost:8080"),
             token=_env("DHE_GMS_TOKEN"),
+            token_file=_env("DHE_GMS_TOKEN_FILE"),
             frontend_url=_env("DHE_FRONTEND_URL"),
         ),
         authz=AuthzSettings(
@@ -119,6 +139,21 @@ def load_settings() -> Settings:
         gateway=GatewaySettings(
             key_dir=_env("DHE_GATEWAY_KEY_DIR", "./.dhe/gateway-keys"),
             public_url=_env("DHE_GATEWAY_PUBLIC_URL", "http://localhost:8820"),
+        ),
+        active=ActiveMetadataSettings(
+            public_url=_env("DHE_PUBLIC_URL", "http://localhost:9002"),
+            session_signing_key=_env("DHE_SESSION_SIGNING_KEY"),
+            action_link_secret=_env("DHE_ACTION_LINK_SECRET"),
+            slack_bot_token=_env("DHE_SLACK_BOT_TOKEN"),
+            slack_signing_secret=_env("DHE_SLACK_SIGNING_SECRET"),
+            teams_webhook_url=_env("DHE_TEAMS_WEBHOOK_URL"),
+            smtp_url=_env("DHE_SMTP_URL"),
+            email_from=_env("DHE_EMAIL_FROM", "datahub@localhost"),
+            embed_signing_secret=_env("DHE_EMBED_SIGNING_SECRET"),
+            embed_allowed_origins=[o.strip() for o in (_env("DHE_EMBED_ALLOWED_ORIGINS") or "").split(",")
+                                   if o.strip()],
+            conversation_retention_days=_env_int("DHE_CONVERSATION_RETENTION_DAYS", 30),
+            assistant_effort=_env("DHE_ASSISTANT_EFFORT", "medium"),
         ),
         dev_trust_actor_header=_env_bool("DHE_DEV_TRUST_ACTOR_HEADER", False),
     )

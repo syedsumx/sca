@@ -48,14 +48,16 @@ class Target(BaseModel):
 class Policy(BaseModel):
     id: str = Field(pattern=r"^[A-Za-z0-9_.:\-]{1,128}$")
     description: str = ""
-    effect: Literal["allow", "deny"]
+    # "obligation" policies never grant or deny; they attach obligations (e.g. masking) to any
+    # request that is not denied.
+    effect: Literal["allow", "deny", "obligation"]
     priority: int = 0
     actions: list[str] = Field(min_length=1)
     target: Target = Field(default_factory=Target)
     condition: Optional[dict[str, Any]] = None
     obligations: list[Obligation] = Field(default_factory=list)
     enabled: bool = True
-    source: Literal["dhe", "datahub-native", "rbac"] = "dhe"
+    source: Literal["dhe", "datahub-native", "rbac", "persona", "purpose"] = "dhe"
 
     @field_validator("condition")
     @classmethod

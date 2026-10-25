@@ -58,6 +58,15 @@ x-dhe-env: &dhe-env
   DHE_OLLAMA_URL: ${DHE_OLLAMA_URL:-http://ollama:11434}
   DHE_EMBEDDING_PROVIDER: ${DHE_EMBEDDING_PROVIDER:-hashing}
   DHE_ROOT_USERS: urn:li:corpuser:datahub
+  # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
+  DHE_PUBLIC_URL: ${DHE_PUBLIC_URL:-http://localhost:9000}
+  DHE_ACTION_LINK_SECRET: ${DHE_ACTION_LINK_SECRET:?set DHE_ACTION_LINK_SECRET in .env}
+  DHE_EMBED_SIGNING_SECRET: ${DHE_EMBED_SIGNING_SECRET:?set DHE_EMBED_SIGNING_SECRET in .env}
+  DHE_EMBED_ALLOWED_ORIGINS: ${DHE_EMBED_ALLOWED_ORIGINS:-}
+  DHE_SLACK_BOT_TOKEN: ${DHE_SLACK_BOT_TOKEN:-}
+  DHE_SLACK_SIGNING_SECRET: ${DHE_SLACK_SIGNING_SECRET:-}
+  DHE_TEAMS_WEBHOOK_URL: ${DHE_TEAMS_WEBHOOK_URL:-}
+  DHE_SMTP_URL: ${DHE_SMTP_URL:-}
 
 x-dhe-service: &dhe-service
   image: ${DHE_IMAGE:-dhe/datahub-enterprise}:${DHE_VERSION:-0.1.0}
@@ -285,8 +294,11 @@ services:
     image: acryldata/datahub-frontend-react:${DATAHUB_VERSION:-v1.8.0}
     hostname: datahub-frontend-react
     environment:
-      DATAHUB_GMS_HOST: datahub-gms
-      DATAHUB_GMS_PORT: "8080"
+      # All UI traffic to GMS goes through the DHE masking middleware (dhe-gms-proxy).
+      DATAHUB_GMS_HOST: dhe-gms-proxy
+      DATAHUB_GMS_PORT: "8890"
+      # Mounts the DHE consumer workspace (Module Federation remote) into the DataHub shell.
+      MFE_CONFIG_FILE_PATH: /etc/datahub/mfe/mfe.config.yaml
       DATAHUB_SECRET: ${DATAHUB_FRONTEND_SECRET:?set DATAHUB_FRONTEND_SECRET in .env}
       DATAHUB_APP_VERSION: ${DATAHUB_VERSION:-v1.8.0}
       DATAHUB_PLAY_MEM_BUFFER_SIZE: 10MB
@@ -308,8 +320,12 @@ services:
       start_period: 1m
     ports:
       - "${DATAHUB_MAPPED_FRONTEND_PORT:-9002}:9002"
+    volumes:
+      - ./deploy/mfe/mfe.config.yaml:/etc/datahub/mfe/mfe.config.yaml:ro
     depends_on:
       datahub-gms:
+        condition: service_healthy
+      dhe-gms-proxy:
         condition: service_healthy
     networks: [datahub]
 
@@ -445,6 +461,68 @@ services:
       <<: *dhe-http-healthcheck
       test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8830/health"]
 
+  # ---------------------------------------------------------- Active Metadata layer
+  # Masking middleware between datahub-frontend and GMS. Must NOT depend on dhe-bootstrap
+  # (bootstrap → frontend → proxy would be a cycle); it starts with the PDP and reads the GMS token
+  # file lazily once dhe-bootstrap has minted it.
+  dhe-gms-proxy:
+    <<: *dhe-service
+    hostname: dhe-gms-proxy
+    command: ["gms-proxy", "--host", "0.0.0.0", "--port", "8890", "--upstream", "http://datahub-gms:8080"]
+    environment:
+      <<: *dhe-env
+      # DataHub's session-token signing key, used read-only to verify session JWTs and read actorId.
+      DHE_SESSION_SIGNING_KEY: ${DATAHUB_TOKEN_SERVICE_SIGNING_KEY:?set DATAHUB_TOKEN_SERVICE_SIGNING_KEY in .env}
+    healthcheck:
+      <<: *dhe-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/dhe-healthcheck", "http://localhost:8890/__dhe/health"]
+    depends_on:
+      dhe-postgres:
+        condition: service_healthy
+      dhe-pdp:
+        condition: service_healthy
+      datahub-gms:
+        condition: service_healthy
+
+  # Context Agents: mine queries, dbt, BI semantics and run histories into findings + ontology.
+  dhe-context-miner:
+    <<: *dhe-service
+    hostname: dhe-context-miner
+    command: ["context-miner", "--interval", "300"]
+    depends_on:
+      <<: *dhe-depends
+      datahub-gms:
+        condition: service_healthy
+
+  # Notification hub fan-out: Slack (Block Kit), Teams (Adaptive Cards), email, in-app.
+  dhe-notifier:
+    <<: *dhe-service
+    hostname: dhe-notifier
+    command: ["notifier", "--interval", "10"]
+    depends_on:
+      <<: *dhe-depends
+
+  # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
+  dhe-consumer-ui:
+    image: ${DHE_CONSUMER_UI_IMAGE:-dhe/consumer-ui}:${DHE_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/consumer-ui.Dockerfile
+    hostname: dhe-consumer-ui
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/dhe-ui/remoteEntry.js"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [datahub]
+
   # Single origin for the UI + DHE API (+ remote MCP) on http://localhost:9000
   edge:
     image: nginx:1.27-alpine
@@ -465,6 +543,8 @@ services:
       datahub-frontend-react:
         condition: service_healthy
       dhe-api:
+        condition: service_healthy
+      dhe-consumer-ui:
         condition: service_healthy
     networks: [datahub]
 

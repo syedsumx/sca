@@ -82,7 +82,10 @@ def _base_app(name: str, services: Services) -> FastAPI:
     return app
 
 
-def create_api_app(services: Services, modules: Iterable[str] = ("quality", "governance", "ai", "agents")) -> FastAPI:
+DEFAULT_MODULES = ("quality", "governance", "ai", "agents", "collab", "marketplace", "context", "notify", "embed")
+
+
+def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES) -> FastAPI:
     from datahub_enterprise.agent.api import build_router as agents_router
     from datahub_enterprise.ai.api import build_router as ai_router
     from datahub_enterprise.governance.api import build_router as governance_router
@@ -100,7 +103,62 @@ def create_api_app(services: Services, modules: Iterable[str] = ("quality", "gov
         app.include_router(ai_router(services, cp))
     if "agents" in modules and services.gateway is not None:
         app.include_router(agents_router(services.gateway, cp, authz, admin=True, protocol=False))
+    _include_active_metadata(app, services, modules, cp, authz)
     return app
+
+
+def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp, authz) -> None:
+    from datahub_enterprise.collab.api import build_router as collab_router
+    from datahub_enterprise.context.api import build_router as context_router
+    from datahub_enterprise.embed.api import build_router as embed_router
+    from datahub_enterprise.governance.personas_api import build_router as personas_router
+    from datahub_enterprise.marketplace.api import build_router as marketplace_router
+    from datahub_enterprise.notify.api import build_router as notify_router
+
+    if "governance" in modules and services.personas is not None:
+        app.include_router(personas_router(services.personas, cp, authz, services.graph))
+    if "collab" in modules and services.collab is not None:
+        app.include_router(collab_router(services.collab, cp, authz, services.can_view, services.summaries,
+                                         services.trust, services.explicitly_denied))
+    if "marketplace" in modules and services.marketplace is not None:
+        app.include_router(marketplace_router(services.marketplace, cp, services.can_view,
+                                              lambda p: services.subject_of(p.urn)))
+    if "context" in modules and services.context is not None:
+        app.include_router(context_router(services.context, cp, authz, services.can_view))
+    if "notify" in modules and services.notify is not None:
+        app.include_router(notify_router(services.notify, services.slack, cp, authz))
+    if "embed" in modules and services.embed is not None:
+        app.include_router(embed_router(services.embed, cp, services.can_view))
+
+    @app.get("/ui/config")
+    def ui_config(p: Principal = Depends(cp)):
+        """Feature flags + caller context for the consumer UI (one round-trip on mount)."""
+        cfg = services.settings.active
+        personas = []
+        if services.personas is not None:
+            try:
+                ids = services.subject_of(p.urn).get("personas", [])
+                personas = [{"id": i, "name": getattr(services.personas.get_persona(i), "name", i)} for i in ids]
+            except Exception:
+                logger.exception("persona lookup failed for %s", p.urn)
+        return {
+            "actor": p.urn,
+            "personas": personas,
+            "is_admin": services.is_admin(p.urn),
+            "public_url": cfg.public_url,
+            "features": {
+                "assistant": services.assistant is not None,
+                "assistant_llm": services.llm is not None,
+                "marketplace": services.marketplace is not None,
+                "context": services.context is not None,
+                "semantic_search": services.semantic is not None,
+                "slack": services.slack is not None,
+                "teams": bool(cfg.teams_webhook_url),
+                "email": bool(cfg.smtp_url),
+                "embeds": bool(cfg.embed_signing_secret),
+                "masking_proxy": bool(cfg.session_signing_key),
+            },
+        }
 
 
 def create_pdp_app(services: Services) -> FastAPI:

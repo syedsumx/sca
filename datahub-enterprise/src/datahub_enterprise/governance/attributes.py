@@ -124,14 +124,20 @@ class AttributeResolver:
         terms = [t.get("urn") for t in (self._aspect(urn, "glossaryTerms") or {}).get("terms", [])]
         field_terms: list[str] = []
         sensitive_fields: dict[str, list[str]] = {}
+        # Every label attached to a column: tag urns, term urns and classification labels.
+        field_labels: dict[str, set[str]] = {}
         for aspect_name, list_key in (("editableSchemaMetadata", "editableSchemaFieldInfo"), ("schemaMetadata", "fields")):
             for f in (self._aspect(urn, aspect_name) or {}).get(list_key, []):
-                ft = [t.get("urn") for t in (f.get("glossaryTerms") or {}).get("terms", [])]
+                path = f.get("fieldPath")
+                ft = [t.get("urn") for t in (f.get("glossaryTerms") or {}).get("terms", []) if t.get("urn")]
+                ftags = [t.get("tag") for t in (f.get("globalTags") or {}).get("tags", []) if t.get("tag")]
                 field_terms.extend(ft)
                 cls = _classification_from_terms(ft)
+                if path and (ft or ftags):
+                    field_labels.setdefault(path, set()).update(ft, ftags, cls)
                 if cls:
-                    sensitive_fields.setdefault(f.get("fieldPath"), [])
-                    sensitive_fields[f["fieldPath"]] = sorted(set(sensitive_fields[f["fieldPath"]]) | set(cls))
+                    sensitive_fields.setdefault(path, [])
+                    sensitive_fields[path] = sorted(set(sensitive_fields[path]) | set(cls))
         domains = (self._aspect(urn, "domains") or {}).get("domains", [])
         container = (self._aspect(urn, "container") or {}).get("container")
         dpi = self._aspect(urn, "dataPlatformInstance") or {}
@@ -139,6 +145,8 @@ class AttributeResolver:
         props = _sp_values(sp_aspect)
         parsed = parse_dataset_urn(urn) if entity_type == "dataset" else {}
         certification = (props.get("io.dhe.certification.status") or [None])[0]
+        data_products = [d.get("destinationUrn") for d in
+                         (self._aspect(urn, "dataProducts") or {}).get("dataProducts", []) if d.get("destinationUrn")]
         return {
             "urn": urn,
             "type": entity_type,
@@ -153,6 +161,10 @@ class AttributeResolver:
             "env": parsed.get("env"),
             "classification": _classification_from_terms(terms + field_terms),
             "sensitive_fields": sensitive_fields,
+            "field_labels": {k: sorted(v) for k, v in field_labels.items()},
+            "all_labels": sorted({t for t in tags if t} | {t for t in terms if t}
+                                 | {x for v in field_labels.values() for x in v}),
+            "data_products": data_products,
             "certification": certification,
             "structured_properties": props,
             "structured_property_urns": [p.get("propertyUrn") for p in (sp_aspect or {}).get("properties", [])],

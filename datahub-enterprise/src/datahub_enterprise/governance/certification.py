@@ -14,6 +14,7 @@ CERTIFIED. Every transition is appended to the workflow history and the audit ch
 from __future__ import annotations
 
 import glob
+import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -28,6 +29,8 @@ from datahub_enterprise.common.audit import AuditLog
 from datahub_enterprise.common.db import JSONText, metadata
 from datahub_enterprise.common.gms import MetadataGraph
 from datahub_enterprise.common.proposals import DHE_ACTOR, audit_stamp, make_mcp, now_ms
+
+logger = logging.getLogger(__name__)
 
 State = Literal["DRAFT", "SUBMITTED", "IN_REVIEW", "CHANGES_REQUESTED", "APPROVED", "REJECTED",
                 "CERTIFIED", "EXPIRED", "REVOKED"]
@@ -217,6 +220,16 @@ class WorkflowService:
         self.is_eligible_reviewer = is_eligible_reviewer
         self.audit = audit
         self.on_documentation_approved = on_documentation_approved
+        # Called after a state change is persisted: (workflow, history_entry).
+        self.listeners: list[Callable[[Workflow, HistoryEntry], None]] = []
+
+    def _fire(self, wf: Workflow, entries: list[HistoryEntry]) -> None:
+        for entry in entries:
+            for listener in self.listeners:
+                try:
+                    listener(wf, entry)
+                except Exception:
+                    logger.exception("workflow listener failed")
 
     # ---- persistence -------------------------------------------------------------
     def _row_to_wf(self, row: Any) -> Workflow:
@@ -291,6 +304,7 @@ class WorkflowService:
             wf.checks = self.checks.run(wf.entity_urn, template.checks)
             self._transition(wf, "SUBMITTED", actor, None)
         self._save(wf, None)
+        self._fire(wf, wf.history[1:])
         return wf
 
     def act(self, workflow_id: str, action: str, actor: str, comment: Optional[str] = None) -> Workflow:
@@ -303,8 +317,10 @@ class WorkflowService:
         }.get(action)
         if handler is None:
             raise WorkflowError(f"unknown action {action!r}", 400)
+        seen = len(wf.history)
         handler(wf, template, actor, comment)
         self._save(wf, version)
+        self._fire(wf, wf.history[seen:])
         return wf
 
     def _require_reviewer(self, wf: Workflow, template: Template, actor: str) -> None:

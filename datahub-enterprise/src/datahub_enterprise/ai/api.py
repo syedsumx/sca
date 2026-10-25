@@ -26,6 +26,15 @@ class DocRequest(BaseModel):
     dataset_urn: str
 
 
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    conversation_id: Optional[str] = None
+
+
+class UrnRequest(BaseModel):
+    urn: str = Field(pattern=r"^urn:li:")
+
+
 class RebuildRequest(BaseModel):
     entity_types: Optional[list[str]] = None
     urns: Optional[list[str]] = None
@@ -65,6 +74,41 @@ def build_router(services, current_principal) -> APIRouter:
         except WorkflowError as e:
             raise HTTPException(e.status, str(e))
         return {"workflow_id": wf.id, "draft": draft}
+
+    @router.post("/chat")
+    def chat(req: ChatRequest, p: Principal = Depends(current_principal)):
+        if getattr(services, "assistant", None) is None:
+            raise HTTPException(503, "assistant not configured")
+        try:
+            return services.assistant.chat(p, req.message, req.conversation_id)
+        except LLMError as e:
+            raise HTTPException(502, f"LLM failure: {e}")
+
+    @router.post("/explain/lineage")
+    def explain(req: UrnRequest, p: Principal = Depends(current_principal)):
+        services.authorize(p, "VIEW_ENTITY_PAGE", req.urn)
+        return services.explainer_for(p).explain(req.urn)
+
+    @router.post("/docs/markdown")
+    def markdown(req: UrnRequest, p: Principal = Depends(current_principal)):
+        from datahub_enterprise.ai.readme import assemble_markdown
+
+        services.authorize(p, "VIEW_ENTITY_PAGE", req.urn)
+        if services.catalog is None:
+            raise HTTPException(503, "catalog access not configured")
+        draft, workflow_id = None, None
+        if services.docgen is not None and services.docgen.llm is not None:
+            services.authorize(p, "EDIT_ENTITY_DOCS", req.urn)
+            try:
+                services.docgen.on_llm_call = services.record_llm_call(p)
+                draft = services.docgen.draft(req.urn)
+                wf = services.workflows.create(CreateWorkflowRequest(
+                    kind="DOCUMENTATION", entity_urn=req.urn, payload={"draft": draft}), p.urn)
+                workflow_id = wf.id
+            except (LLMError, WorkflowError, LookupError):
+                draft = None
+        md = assemble_markdown(req.urn, services.catalog, services.quality.store, services.attributes, draft)
+        return {"markdown": md, "workflow_id": workflow_id, "ai_drafted": draft is not None}
 
     @router.post("/index/rebuild")
     def rebuild(req: RebuildRequest, p: Principal = Depends(current_principal)):
