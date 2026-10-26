@@ -173,13 +173,12 @@ class PiiPropagationAction(_ActionBase):  # type: ignore[misc,valid-type]
     def create(cls, config_dict: dict, ctx: Any) -> "PiiPropagationAction":
         config = PropagationConfig.model_validate(config_dict or {})
         graph: MetadataGraph
-        if config.core_url:
-            graph = CoreClient(config.core_url, config.core_token)
-        else:
-            from cairn.common.config import get_settings
+        from cairn.common.config import get_settings
 
-            s = get_settings()
-            graph = CoreClient(s.core.url, s.core.token)
+        s = get_settings()
+        # The token file (rotated by cairn-token-keeper) wins over a token passed in the config.
+        graph = CoreClient(config.core_url or s.core.url, config.core_token or s.core.token,
+                           token_file=s.core.token_file)
         return cls(PiiPropagator(graph, config))
 
     def __init__(self, propagator: PiiPropagator):

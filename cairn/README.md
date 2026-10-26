@@ -45,8 +45,9 @@ deploy/build-images.sh                # cairn/{core,web,setup,executor,platform,
 #   TLS-intercepting proxy: EXTRA_CA_FILE=/path/ca.crt HTTPS_PROXY=... deploy/build-images.sh
 docker compose -f docker-compose.cairn.yml up -d --no-build
 # UI: http://localhost:9000, sign in as admin / CAIRN_ADMIN_PASSWORD  ·  Cairn API: http://localhost:8800/docs
-# Service token for the curl examples below:
-CAIRN_TOKEN=$(docker compose -f docker-compose.cairn.yml exec -T cairn-api cat /run/cairn/core_token)
+# One-hour admin token for the curl examples below:
+CAIRN_TOKEN=$(CAIRN_ADMIN_PASSWORD=... python3 deploy/bootstrap/mint_core_token.py \
+  --frontend-url http://localhost:9002 --core-url http://localhost:8080 --print-admin-token)
 
 # Create the Cairn structured properties / Certified tag / PII glossary terms
 docker compose -f docker-compose.cairn.yml exec cairn-api cairn bootstrap
@@ -76,8 +77,7 @@ python -m venv .venv && . .venv/bin/activate
 pip install -e ".[server,ai,test]"
 pytest                                   # 74 tests: detectors, engine, PDP, PII, workflows, agent protocol, AI, APIs
 # live smoke suite against the running compose stack (8 scenarios)
-CAIRN_E2E=1 CAIRN_E2E_TOKEN=$(docker compose -f docker-compose.cairn.yml exec -T cairn-api cat /run/cairn/core_token) \
-  pytest tests/e2e -v
+tests/e2e/run.sh -v
 cairn policies validate config/policies
 
 cd plugins/java/cairn-authorizer && ./gradlew test pluginBundle
@@ -110,6 +110,12 @@ which must ship with every distribution of Cairn.
 
 ## Security notes
 
+- The control plane never acts as root. It runs as `urn:li:corpuser:cairn-service`, created at
+  bootstrap with two non-editable policies (`deploy/bootstrap/mint_core_token.py` lists the
+  privileges). It cannot manage policies, users, credentials, secrets or other users' tokens, delete
+  entities or run system operations. `cairn-token-keeper` rotates its token every
+  `CAIRN_TOKEN_ROTATE_DAYS` (default 7): the account mints its own successor and the previous
+  token is revoked after `CAIRN_TOKEN_GRACE_MINUTES`. The admin password is used once, at bootstrap.
 - The PDP fails closed. Authoritative mode (`CAIRN_NATIVE_POLICIES_ENABLED=false`) makes Cairn the only
   authorizer, so deny rules are enforced. Additive mode can only *grant*. This follows from Cairn Core's
   first-ALLOW-wins `AuthorizerChain`.

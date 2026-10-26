@@ -50,7 +50,8 @@ class CoreClient:
         token_file: Optional[str] = None,
     ):
         """``token_file`` (e.g. ``CAIRN_CORE_TOKEN_FILE``) is re-read whenever it changes, so a token
-        minted after startup, or rotated later, is picked up without a restart."""
+        minted after startup, or rotated later, is picked up without a restart. When both are given
+        the file wins once it exists; ``token`` is the fallback."""
         self.url = url.rstrip("/")
         self._base_headers = {
             "X-RestLi-Protocol-Version": "2.0.0",
@@ -58,7 +59,7 @@ class CoreClient:
             "User-Agent": "cairn/0.1",
         }
         self._token = token
-        self._token_file = token_file if not token else None
+        self._token_file = token_file
         self._token_mtime: Optional[float] = None
         self._http = client or httpx.Client(timeout=timeout_seconds)
 

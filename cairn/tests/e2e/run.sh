@@ -11,7 +11,10 @@ compose=(docker compose -f docker-compose.cairn.yml)
 PY="${PYTHON:-python3}"
 env_val() { grep -E "^$1=" .env | cut -d= -f2-; }
 
-token="$("${compose[@]}" exec -T cairn-api cat /run/cairn/core_token)"
+# Root actions in the tests use a one-hour admin token; the control plane runs as cairn-service.
+token="$(CAIRN_ADMIN_PASSWORD="$(env_val CAIRN_ADMIN_PASSWORD)" "$PY" deploy/bootstrap/mint_core_token.py \
+  --frontend-url http://localhost:9002 --core-url http://localhost:8080 --print-admin-token)"
+service_token="$("${compose[@]}" exec -T cairn-api cat /run/cairn/core_token)"
 
 # Webhook sink: records POSTs, returns them on GET.
 docker rm -f cairn-e2e-sink >/dev/null 2>&1 || true
@@ -32,7 +35,7 @@ if ! "${compose[@]}" logs cairn-remote-agent 2>/dev/null | grep -q "enrolled as"
   done
 fi
 
-export CAIRN_E2E=1 CAIRN_E2E_TOKEN="${token}"
+export CAIRN_E2E=1 CAIRN_E2E_TOKEN="${token}" CAIRN_E2E_SERVICE_TOKEN="${service_token}"
 export CAIRN_E2E_UI_PASSWORD="$(env_val CAIRN_ADMIN_PASSWORD)"
 export CAIRN_E2E_SLACK_SECRET="$(env_val CAIRN_SLACK_SIGNING_SECRET)"
 export CAIRN_E2E_SINK=http://cairn-e2e-sink:8099/ CAIRN_E2E_SINK_HOST=http://127.0.0.1:8099/

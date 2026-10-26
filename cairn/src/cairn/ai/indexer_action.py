@@ -30,7 +30,8 @@ class VectorIndexerAction(_ActionBase):  # type: ignore[misc,valid-type]
         s = get_settings()
         if cfg.get("embedding_provider"):
             s = s.model_copy(update={"ai": s.ai.model_copy(update={"embedding_provider": cfg["embedding_provider"]})})
-        graph = CoreClient(cfg.get("core_url") or s.core.url, cfg.get("core_token") or s.core.token)
+        graph = CoreClient(cfg.get("core_url") or s.core.url, cfg.get("core_token") or s.core.token,
+                           token_file=s.core.token_file)
         embedder = build_embedder(s)
         store = build_vector_store(get_engine(cfg.get("database_url") or s.database_url), embedder.dim)
         return cls(SemanticIndex(Catalog(graph), embedder, store))

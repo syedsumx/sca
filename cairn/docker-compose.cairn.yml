@@ -275,7 +275,8 @@ services:
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-cairn.sql:ro
     networks: [catalog]
 
-  # Mints a Cairn Core PAT for the Cairn services into the cairn-bootstrap volume (idempotent).
+  # Creates the least-privilege service account (urn:li:corpuser:cairn-service) and its policies,
+  # and writes its token into the cairn-bootstrap volume (idempotent). See deploy/bootstrap/mint_core_token.py.
   cairn-bootstrap:
     image: python:3.12-slim
     command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token"]
@@ -289,6 +290,25 @@ services:
     depends_on:
       cairn-web:
         condition: service_healthy
+    networks: [catalog]
+
+  # Rotates the service token: the account mints its own successor every CAIRN_TOKEN_ROTATE_DAYS and
+  # revokes the previous token after a grace period. Holds no admin credentials.
+  cairn-token-keeper:
+    image: python:3.12-slim
+    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token", "--keep"]
+    restart: unless-stopped
+    environment:
+      CAIRN_CORE_URL: http://cairn-core:8080
+      CAIRN_TOKEN_ROTATE_DAYS: ${CAIRN_TOKEN_ROTATE_DAYS:-7}
+      CAIRN_TOKEN_GRACE_MINUTES: ${CAIRN_TOKEN_GRACE_MINUTES:-15}
+      CAIRN_TOKEN_CHECK_MINUTES: ${CAIRN_TOKEN_CHECK_MINUTES:-30}
+    volumes:
+      - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
+      - cairn-bootstrap:/run/cairn
+    depends_on:
+      cairn-bootstrap:
+        condition: service_completed_successfully
     networks: [catalog]
 
   cairn-pdp:
@@ -346,6 +366,9 @@ services:
     <<: *cairn-service
     hostname: cairn-actions-pii
     command: ["actions", "-c", "/etc/cairn/actions/pii_propagation.yml"]
+    environment:
+      <<: *cairn-env
+      CAIRN_RESTART_ON_TOKEN_CHANGE: "1"   # the pipeline config holds the token: restart on rotation
     depends_on:
       <<: *cairn-depends
       broker:
@@ -356,6 +379,9 @@ services:
     <<: *cairn-service
     hostname: cairn-actions-labels
     command: ["actions", "-c", "/etc/cairn/actions/label_propagation.yml"]
+    environment:
+      <<: *cairn-env
+      CAIRN_RESTART_ON_TOKEN_CHANGE: "1"   # the pipeline config holds the token: restart on rotation
     depends_on:
       <<: *cairn-depends
       broker:
@@ -365,6 +391,9 @@ services:
     <<: *cairn-service
     hostname: cairn-actions-indexer
     command: ["actions", "-c", "/etc/cairn/actions/vector_indexer.yml"]
+    environment:
+      <<: *cairn-env
+      CAIRN_RESTART_ON_TOKEN_CHANGE: "1"   # the pipeline config holds the token: restart on rotation
     depends_on:
       <<: *cairn-depends
       broker:

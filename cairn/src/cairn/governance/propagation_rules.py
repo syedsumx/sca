@@ -252,13 +252,12 @@ class LabelPropagationAction(_ActionBase):  # type: ignore[misc,valid-type]
     @classmethod
     def create(cls, config_dict: dict, ctx: Any) -> "LabelPropagationAction":
         config = RulesConfig.model_validate(config_dict or {})
-        if config.core_url:
-            graph: MetadataGraph = CoreClient(config.core_url, config.core_token)
-        else:
-            from cairn.common.config import get_settings
+        from cairn.common.config import get_settings
 
-            s = get_settings()
-            graph = CoreClient(s.core.url, s.core.token, token_file=s.core.token_file)
+        s = get_settings()
+        # The token file (rotated by cairn-token-keeper) wins over a token passed in the config.
+        graph: MetadataGraph = CoreClient(config.core_url or s.core.url, config.core_token or s.core.token,
+                           token_file=s.core.token_file)
         return cls(RulePropagator(graph, config))
 
     def __init__(self, propagator: RulePropagator):
