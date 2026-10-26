@@ -29,4 +29,4 @@ COPY --chown=101:101 ui/brand/ /usr/share/nginx/html/cairn-ui/brand/
 COPY --from=build --chown=101:101 /src/dist/docs/ /usr/share/nginx/html/docs/
 USER 101
 EXPOSE 8080
-HEALTHCHECK --interval=10s --timeout=3s --retries=6 CMD wget -qO- http://localhost:8080/cairn-ui/remoteEntry.js >/dev/null || exit 1
+HEALTHCHECK --interval=10s --timeout=3s --retries=6 CMD wget -qO- http://127.0.0.1:8080/cairn-ui/remoteEntry.js >/dev/null || exit 1

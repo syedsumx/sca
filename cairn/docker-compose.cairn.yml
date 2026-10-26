@@ -228,7 +228,7 @@ services:
       CAIRN_SYSTEM_CLIENT_SECRET: ${CAIRN_SYSTEM_CLIENT_SECRET}
       CAIRN_KAFKA_BOOTSTRAP: broker:29092
     healthcheck:
-      test: ["CMD-SHELL", "curl -sS --fail http://localhost:9002/admin"]
+      test: ["CMD-SHELL", "curl -sS --fail http://127.0.0.1:9002/admin"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -317,7 +317,7 @@ services:
     command: ["pdp", "--host", "0.0.0.0", "--port", "8810"]
     healthcheck:
       <<: *cairn-http-healthcheck
-      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8810/health"]
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8810/health"]
     # The PDP must start before Cairn Core can authorize non-root users, but needs a Cairn Core token to import
     # native policies; it tolerates Cairn Core being unavailable at boot and retries the import.
     depends_on:
@@ -332,7 +332,7 @@ services:
       - "${CAIRN_MAPPED_API_PORT:-8800}:8800"
     healthcheck:
       <<: *cairn-http-healthcheck
-      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8800/health"]
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8800/health"]
     depends_on:
       <<: *cairn-depends
       cairn-pdp:
@@ -349,7 +349,7 @@ services:
       - cairn-gateway-keys:/var/lib/cairn/keys
     healthcheck:
       <<: *cairn-http-healthcheck
-      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8820/health"]
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8820/health"]
     # The gateway is the only control-plane service reachable from the VPC side.
     networks: [catalog, vpc-egress]
 
@@ -407,7 +407,7 @@ services:
       - "${CAIRN_MAPPED_MCP_PORT:-8830}:8830"
     healthcheck:
       <<: *cairn-http-healthcheck
-      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8830/health"]
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8830/health"]
 
   # ---------------------------------------------------------- Active Metadata layer
   # Masking middleware between cairn-web and Cairn Core. Must NOT depend on cairn-bootstrap
@@ -423,7 +423,7 @@ services:
       CAIRN_SESSION_SIGNING_KEY: ${CAIRN_SESSION_SIGNING_KEY:?set CAIRN_SESSION_SIGNING_KEY in .env}
     healthcheck:
       <<: *cairn-http-healthcheck
-      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8890/__cairn/health"]
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://127.0.0.1:8890/__cairn/health"]
     depends_on:
       cairn-postgres:
         condition: service_healthy
@@ -465,7 +465,7 @@ services:
       - no-new-privileges:true
     cap_drop: [ALL]
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/cairn-ui/remoteEntry.js"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/cairn-ui/remoteEntry.js"]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -483,7 +483,7 @@ services:
       - /tmp
     read_only: true
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3

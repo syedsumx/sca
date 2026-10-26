@@ -48,11 +48,27 @@ RUN mkdir /out && python3 /relabel.py /in/web.jar /out/datahub-frontend-${UPSTRE
     && rm -rf /in
 
 # ---------------------------------------------------------------- core
-FROM upstream-core AS core
+# The engine archive is replaced, not overlaid: the upstream filesystem is flattened without it, so the
+# image carries one copy (an overlay would keep the original in a lower layer: +620 MB).
+FROM upstream-core AS core-base
+USER root
+RUN rm /datahub/datahub-gms/bin/war.war
+
+FROM scratch AS core
 ARG CAIRN_VERSION
 LABEL org.opencontainers.image.title="Cairn Core" org.opencontainers.image.vendor="Cairn" \
       org.opencontainers.image.version="${CAIRN_VERSION}"
-COPY --from=relabel-core /out/war.war /datahub/datahub-gms/bin/war.war
+COPY --from=core-base / /
+# Runtime environment of the upstream image (lost by the flattening).
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    JMX_VERSION=1.0.1 \
+    JMX_OPTS= \
+    OTEL_EXPORTER_OTLP_MAX_PAYLOAD_SIZE=4194304 \
+    OTEL_EXPORTER_OTLP_HTTP_HTTP2_MAX_FRAME_SIZE=8388608 \
+    OTEL_EXPORTER_OTLP_HTTP_COMPRESSION=gzip \
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION=gzip
+COPY --from=relabel-core --chown=datahub:datahub /out/war.war /datahub/datahub-gms/bin/war.war
 COPY --from=plugin /plugin/ /etc/datahub/plugins/auth/
 COPY core/rootfs/usr/local/bin/cairn-env /usr/local/bin/cairn-env
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/cairn/THIRD_PARTY_NOTICES.md
@@ -87,6 +103,8 @@ ENV DATAHUB_TELEMETRY_ENABLED=false \
     REACT_APP_LOGO_URL=/assets/brand/cairn-logo.svg \
     REACT_APP_FAVICON_URL=/assets/icons/favicon.ico \
     JAVA_OPTS="-Xms1g -Xmx1g"
+EXPOSE 8080
+USER datahub
 ENTRYPOINT ["/usr/local/bin/cairn-env"]
 CMD ["/datahub/datahub-gms/scripts/start.sh"]
 
@@ -122,10 +140,23 @@ ENTRYPOINT ["/usr/local/bin/cairn-env"]
 CMD ["/start.sh"]
 
 # ---------------------------------------------------------------- setup
-FROM upstream-setup AS setup
+# Flattened without the upstream jar, like core (saves 660 MB).
+FROM upstream-setup AS setup-base
+USER root
+RUN rm /datahub/datahub-upgrade/bin/datahub-upgrade.jar
+
+FROM scratch AS setup
 ARG CAIRN_VERSION
 LABEL org.opencontainers.image.title="Cairn Setup" org.opencontainers.image.vendor="Cairn" \
       org.opencontainers.image.version="${CAIRN_VERSION}"
+COPY --from=setup-base / /
+ENV PATH=/usr/local/sbin:/usr/local/bin:/usr/bin:/usr/sbin:/sbin:/bin \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt \
+    JMX_VERSION=1.0.1 \
+    OTEL_EXPORTER_OTLP_MAX_PAYLOAD_SIZE=4194304 \
+    OTEL_EXPORTER_OTLP_HTTP_HTTP2_MAX_FRAME_SIZE=16777215 \
+    OTEL_EXPORTER_OTLP_HTTP_COMPRESSION=gzip \
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION=gzip
 COPY --from=relabel-setup /out/datahub-upgrade.jar /datahub/datahub-upgrade/bin/datahub-upgrade.jar
 COPY core/rootfs/usr/local/bin/cairn-env /usr/local/bin/cairn-env
 COPY THIRD_PARTY_NOTICES.md /usr/share/doc/cairn/THIRD_PARTY_NOTICES.md
@@ -152,6 +183,7 @@ ENV ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.y
     REPROCESS_DEFAULT_BROWSE_PATHS_V2=false \
     ZDU_STAGE_10=true \
     ZDU_STAGE_20=true
+USER datahub
 ENTRYPOINT ["/usr/local/bin/cairn-env", "/datahub/datahub-upgrade/scripts/start.sh"]
 CMD ["-u", "SystemUpdate"]
 
