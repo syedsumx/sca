@@ -252,7 +252,7 @@ class MarketplaceService:
         readme = _custom(props).get("readme") or props.get("description") or ""
         links = (((p.get("institutionalMemory") or {}).get("elements")) or [])
         if links:
-            readme += "\n\n**Links**\n" + "\n".join(f"- [{l.get('label') or l['url']}]({l['url']})" for l in links)
+            readme += "\n\n**Links**\n" + "\n".join(f"- [{ln.get('label') or ln['url']}]({ln['url']})" for ln in links)
         with self.engine.connect() as conn:
             subscribed = bool(conn.execute(select(subscriptions).where(and_(
                 subscriptions.c.actor == actor, subscriptions.c.product_urn == urn))).first())

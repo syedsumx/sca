@@ -96,7 +96,8 @@ def analyze_sql(sql: str, platform: Optional[str] = None) -> SqlFacts:
         physical = [t for t in dict.fromkeys(tables) if t.split(".")[-1] not in cte_names]
         facts.tables.extend(t for t in physical if t not in facts.tables)
 
-        def resolve(col) -> ColumnRef:
+        # Called within this iteration only; defaults bind this statement's aliases and tables.
+        def resolve(col, aliases=aliases, physical=physical) -> ColumnRef:
             qual = (col.table or "").lower()
             if qual and qual in aliases:
                 return ColumnRef(aliases[qual], col.name.lower())

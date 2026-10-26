@@ -308,7 +308,8 @@ def _workflows(engine, graph, eligible=None, on_doc=None):
 def _documented(graph):
     graph.aspects[(DS, "ownership")] = {"owners": [{"owner": ALICE}]}
     graph.aspects[(DS, "editableDatasetProperties")] = {"description": "All customer orders, one row per order line."}
-    graph.aspects[(DS, "schemaMetadata")] = {"fields": [{"fieldPath": "id", "description": "pk"}, {"fieldPath": "email", "description": "e"}]}
+    graph.aspects[(DS, "schemaMetadata")] = {
+        "fields": [{"fieldPath": "id", "description": "pk"}, {"fieldPath": "email", "description": "e"}]}
 
 
 def test_certification_happy_path_and_projection(engine, graph):

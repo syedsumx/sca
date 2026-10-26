@@ -215,7 +215,7 @@ def test_notify_publish_inbox_and_single_use_action_links(engine):
     with pytest.raises(PermissionError):
         hub.consume_action_token(token, CAROL)
     assert calls == [("approve", "ar_1", CAROL)]
-    with pytest.raises(Exception):
+    with pytest.raises(PermissionError):
         hub.verify_action(token[:-2] + "xx")
 
 

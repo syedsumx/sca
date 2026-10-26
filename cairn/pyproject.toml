@@ -49,3 +49,13 @@ cairn = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+line-length = 140
+target-version = "py312"
+extend-exclude = ["ui", "plugins", "helm", "core/web/build"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B"]
+# B008: FastAPI's Depends()/Query() defaults. B904/B905: style, not defects here.
+ignore = ["B008", "B904", "B905"]
