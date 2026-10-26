@@ -26,6 +26,7 @@ export function brand(text, { prose = false } = {}) {
         // Upstream documentation and project links → the Cairn docs root (paths would leak the name).
         .replace(/https?:\/\/(www\.)?(docs\.datahub\.com|datahubproject\.io|datahub\.(com|io))[^\s'"`)<>]*/g, DOCS)
         .replace(/https?:\/\/github\.com\/(datahub-project|acryldata)\/[^\s'"`)<>]*/g, DOCS)
+        .replace(/https?:\/\/github\.com\/[^\s'"`)<>]*datahub[^\s'"`)<>]*/gi, DOCS)
         .replace(/\bdatahub\.(local|amazonaws\.company\.com)/g, 'cairn.$1')
         .replace(/assets\/logos\/acryl-[\w-]+\.svg/g, 'assets/brand/cairn-logo.svg')
         .replace(/DataHub Cloud/g, NAME)
@@ -118,6 +119,32 @@ for (const file of walk(path.join(webDir, 'src'))) {
     if (/\.(test|spec)\.tsx?$/.test(file)) continue;
     if (/\.tsx?$/.test(file)) rewriteSource(file);
     else if (file.endsWith('.json')) rewriteJson(file);
+}
+
+// ---- 2b. Help menus: one documentation entry; API links go to Cairn's own API references -----
+const PATCHES = [
+    // [file, pattern, replacement]: every pattern must match, so an upstream change fails loudly.
+    ['src/conf/Global.ts', /GRAPHIQL = '\/api\/graphiql'/, "GRAPHIQL = '/docs/api.html'"],
+    ['src/conf/Global.ts', /OPENAPI = '\/openapi\/swagger-ui\/index\.html'/, "OPENAPI = '/cairn/api/docs'"],
+    ['src/conf/theme/themeV2.ts', /\{\s*label: 'Cairn GitHub',[^}]*\},?\s*/, ''],
+    ['src/app/shared/error/ErrorSection.tsx', /\{\s*\/\* untranslated-text \*\/\s*label: 'Cairn (GitHub|Docs)',[^}]*\},?\s*/g, ''],
+];
+for (const [rel, pattern, replacement] of PATCHES) {
+    const file = path.join(webDir, rel);
+    const before = fs.readFileSync(file, 'utf8');
+    const already = typeof replacement === 'string' && replacement && before.includes(replacement);
+    const after = before.replace(pattern, replacement);
+    if (after === before && !already && !(replacement === '' && !/label: 'Cairn (GitHub|Docs)'/.test(before))) {
+        throw new Error(`${rel}: help-menu patch ${pattern} found nothing`);
+    }
+    fs.writeFileSync(file, after);
+}
+for (const rel of ['src/conf/theme/themeV2.ts', 'src/conf/theme/themeV1.ts', 'src/app/shared/error/ErrorSection.tsx']) {
+    const file = path.join(webDir, rel);
+    if (!fs.existsSync(file)) continue;
+    fs.writeFileSync(file, fs.readFileSync(file, 'utf8')
+        .replace(/label: 'Cairn Project'/g, "label: 'Documentation'")
+        .replace(/description: '(Explore )?Cairn Project website'/g, "description: 'Guides for using and running Cairn'"));
 }
 
 // ---- 3. Panels whose content is the vendor's own media (release blog, product-tour videos,

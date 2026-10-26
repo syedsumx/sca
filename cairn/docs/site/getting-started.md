@@ -1,0 +1,39 @@
+---
+title: Getting started
+order: 1
+---
+# Getting started
+
+## Sign in
+
+Open Cairn in your browser and sign in with your company account (single sign-on) or the
+credentials your administrator gave you. The first administrator account is `admin`.
+
+## Two ways in
+
+* **Workspace** (left navigation → *Workspace*) is the everyday view: Discover, faceted search,
+  bookmarks, trending assets, data products and the assistant.
+* **Catalog** pages (Home, Glossary, Domains, Data Sources, Settings) are where stewards and
+  administrators curate metadata, manage ingestion and configure access.
+
+## Find data
+
+* Type in the search bar (`⌘K` or `/`). Results show trust signals at a glance: certification,
+  quality status, PII and freshness.
+* Narrow results with facets: type, platform, domain, certification, quality, sensitivity, owner.
+  The query and filters live in the URL, so a search can be shared as a link.
+* Discover shows what is trending in your domain, your bookmarks, recently viewed assets and the
+  featured data products.
+
+## Understand an asset
+
+An asset page has tabs for **Summary** (description, owners, business terms, downstream use),
+**Columns** (types, classifications and whether a column is masked for you), **Discussion**,
+**Quality**, **Lineage** and **Access**.
+
+## Collaborate
+
+* **Bookmark** assets you use and **follow** the ones you care about: you are notified about
+  quality incidents, schema changes and new comments.
+* **Discuss** an asset or a single column. Mention colleagues with `@name`; replies and reactions
+  are threaded.

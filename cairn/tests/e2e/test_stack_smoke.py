@@ -11,6 +11,7 @@ admin (root) user in ``CAIRN_E2E_TOKEN`` (the compose bootstrap mints one into t
 from __future__ import annotations
 
 import json
+import re
 import os
 import time
 import uuid
@@ -230,3 +231,19 @@ def test_remote_agent_ingests_private_source(api):
     recipe_in_core = gql("query($u: String!){ ingestionSource(urn:$u){ config { recipe } } }",
                         {"u": src})["ingestionSource"]["config"]["recipe"]
     assert "${FINANCE_PG_PASSWORD}" in recipe_in_core  # only the reference ever leaves the VPC
+
+
+def test_product_docs_served():
+    """In-app help links point at /docs: every page and every link between pages resolves."""
+    r = httpx.get(f"{EDGE}/docs", follow_redirects=False, timeout=10)
+    assert r.status_code == 301 and r.headers["location"].endswith("/docs/") and "8080" not in r.headers["location"]
+    index = httpx.get(f"{EDGE}/docs/", timeout=10)
+    assert index.status_code == 200 and "Cairn documentation" in index.text
+    pages = sorted(set(re.findall(r'href="([a-z0-9-]+\.html)"', index.text)))
+    assert len(pages) >= 10, pages
+    for page in pages:
+        body = httpx.get(f"{EDGE}/docs/{page}", timeout=10)
+        assert body.status_code == 200, page
+        for href in set(re.findall(r'href="([a-z0-9-]+\.html)(?:#[^"]*)?"', body.text)):
+            assert href in pages, f"{page} links to missing {href}"
+    assert httpx.get(f"{EDGE}/cairn/api/docs", timeout=10).status_code == 200   # linked from the API page

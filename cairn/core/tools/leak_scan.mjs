@@ -38,7 +38,10 @@ const browser = await chromium.launch();
 const page = await browser.newPage();
 
 // 1. Unauthenticated shell.
-for (const path of ['/login', '/manifest.json']) {
+const docs = await page.request.get(`${BASE}/docs/`);
+const docPages = docs.ok() ? [...(await docs.text()).matchAll(/href="([a-z0-9-]+\.html)"/g)].map((m) => `/docs/${m[1]}`) : [];
+if (!docs.ok()) findings.push(`GET /docs/: HTTP ${docs.status()}`);
+for (const path of ['/login', '/manifest.json', '/config', ...new Set(docPages)]) {
     const r = await page.request.get(BASE + path);
     note(`GET ${path}`, await r.text());
 }

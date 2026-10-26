@@ -143,6 +143,23 @@ class MaskingService:
         return build_plan([o.model_dump() for o in decision.obligations], resource or {})
 
 
+def product_version_document(raw: bytes) -> Optional[bytes]:
+    """The UI shows ``appConfig.appVersion``: report the Cairn version, not the engine's build."""
+    if b'"appVersion"' not in raw:
+        return None
+    try:
+        doc = json.loads(raw)
+    except json.JSONDecodeError:
+        return None
+    app_config = (doc.get("data") or {}).get("appConfig") if isinstance(doc, dict) else None
+    if not isinstance(app_config, dict) or "appVersion" not in app_config:
+        return None
+    from cairn import __version__
+
+    app_config["appVersion"] = f"v{__version__}"
+    return json.dumps(doc, separators=(",", ":")).encode()
+
+
 def _context_urn(path: str) -> Optional[str]:
     # /openapi/v3/entity/dataset/<urn>[/...]
     marker = "/entity/dataset/"
@@ -196,6 +213,9 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
         raw = await resp.aread()
         await resp.aclose()
         out_headers.pop("content-encoding", None)
+        relabeled = product_version_document(raw) if resp.status_code < 400 else None
+        if relabeled is not None:
+            raw = relabeled
         actor = await identity.resolve(request.headers.get("authorization"), client)
         if resp.status_code >= 400 or not actor or not needs_inspection(raw):
             return Response(raw, status_code=resp.status_code, headers=out_headers)

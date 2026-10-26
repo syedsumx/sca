@@ -24,7 +24,7 @@ trap 'docker rm -f cairn-e2e-sink >/dev/null 2>&1 || true' EXIT
 
 # Remote agent: enrol once per fresh database.
 if ! "${compose[@]}" logs cairn-remote-agent 2>/dev/null | grep -q "enrolled as"; then
-  curl -fsS -o /dev/null -XPOST -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
+  curl -sS -o /dev/null -XPOST -H "Authorization: Bearer ${token}" -H 'Content-Type: application/json' \
     localhost:8800/agents/pools -d '{"name": "finance", "allowed_platforms": ["postgres"]}' || true
   enr="$(curl -fsS -XPOST -H "Authorization: Bearer ${token}" localhost:8800/agents/pools/finance/enrollment-tokens \
     | "$PY" -c 'import json,sys; print(json.load(sys.stdin)["token"])')"

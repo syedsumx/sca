@@ -3,6 +3,7 @@
 #   /cairn-ui/remoteEntry.js      → loaded by cairn-web's MFE host (mfe.config.yaml)
 #   /cairn-ui/<chunk>.<hash>.js   → immutable chunks
 #   /cairn-ui/embed/sdk.js        → <cairn-asset-card>/<cairn-quality-badge>/<cairn-lineage> web components
+#   /docs/                        → product documentation (docs/site, built by ui/scripts/build-docs.mjs)
 # Build context: cairn/ (see docker-compose.cairn.yml, service cairn-consumer-ui).
 #   docker build -f docker/consumer-ui.Dockerfile -t cairn/consumer-ui:0.1.0 .
 # Behind a TLS-intercepting proxy pass its CA as a BuildKit secret (it is never stored in a layer):
@@ -17,13 +18,15 @@ RUN --mount=type=secret,id=extra_ca,required=false \
  && npm ci \
  && test -x node_modules/.bin/webpack
 COPY ui/ ./
-RUN npm run typecheck && npm run build:mfe && npm run build:embed
+COPY docs/site/ /docs-src/
+RUN npm run typecheck && npm run build:mfe && npm run build:embed && node scripts/build-docs.mjs /docs-src dist/docs
 
 FROM nginxinc/nginx-unprivileged:1.27-alpine
 COPY docker/consumer-ui/nginx.conf /etc/nginx/nginx.conf
 COPY --from=build --chown=101:101 /src/dist/mfe/ /usr/share/nginx/html/cairn-ui/
 COPY --from=build --chown=101:101 /src/dist/embed/ /usr/share/nginx/html/cairn-ui/embed/
 COPY --chown=101:101 ui/brand/ /usr/share/nginx/html/cairn-ui/brand/
+COPY --from=build --chown=101:101 /src/dist/docs/ /usr/share/nginx/html/docs/
 USER 101
 EXPOSE 8080
 HEALTHCHECK --interval=10s --timeout=3s --retries=6 CMD wget -qO- http://localhost:8080/cairn-ui/remoteEntry.js >/dev/null || exit 1

@@ -105,6 +105,8 @@ COPY core/rootfs/etc/cairn/env.d/00-common.map core/rootfs/etc/cairn/env.d/10-we
 COPY core/rootfs/etc/cairn/init.d/20-admin-login.sh /etc/cairn/init.d/
 COPY deploy/mfe/mfe.config.yaml /etc/cairn/mfe.config.yaml
 # No sample accounts: the admin login is written from CAIRN_ADMIN_PASSWORD at start.
+RUN sed -i 's#^links.wiki.appHelp = .*#links.wiki.appHelp = "/docs"#' /datahub-frontend/conf/application.conf \
+    && grep -q '^links.wiki.appHelp = "/docs"' /datahub-frontend/conf/application.conf
 RUN : > /datahub-frontend/conf/user.props && chown datahub:datahub /datahub-frontend/conf/user.props \
     && chmod 600 /datahub-frontend/conf/user.props
 USER datahub

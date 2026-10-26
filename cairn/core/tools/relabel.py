@@ -42,6 +42,10 @@ SEED_RULES = [
      rb"\1cairn\2"),
     *RULES,
 ]
+# Identifier-like constants that are user-visible, rewritten only in the named class.
+CLASS_CONSTANTS = {
+    "controllers/Application.class": {b"datahub-frontend": b"cairn-web"},   # GET /config "application"
+}
 SEED_FILES = re.compile(r"^(bootstrap_mcps/.*\.ya?ml|boot/.*\.json|BOOT-INF/classes/boot/.*\.json)$")
 
 # constant-pool tag -> fixed payload size (Utf8 = 1 is variable, handled separately)
@@ -55,7 +59,7 @@ def _prose(s: bytes) -> bool:
     return b" " in s and head not in (b"{", b"[") and b'"type"' not in s
 
 
-def relabel_class(data: bytes) -> tuple[bytes, int]:
+def relabel_class(data: bytes, name: str = "") -> tuple[bytes, int]:
     if data[:4] != b"\xca\xfe\xba\xbe":
         return data, 0
     count = struct.unpack_from(">H", data, 8)[0]
@@ -67,7 +71,11 @@ def relabel_class(data: bytes) -> tuple[bytes, int]:
         if tag == 1:
             n = struct.unpack_from(">H", data, pos + 1)[0]
             s = data[pos + 3:pos + 3 + n]
-            if s == ROOT_URN[0]:
+            exact = CLASS_CONSTANTS.get(name, {})
+            if s in exact:
+                s = exact[s]
+                changed += 1
+            elif s == ROOT_URN[0]:
                 s = ROOT_URN[1]
                 changed += 1
             elif _prose(s):
@@ -98,7 +106,7 @@ def relabel_archive(data: bytes) -> tuple[bytes, int]:
         for info in src.infolist():
             body = src.read(info)
             if info.filename.endswith(".class"):
-                body, n = relabel_class(body)
+                body, n = relabel_class(body, info.filename)
                 total += n
             elif SEED_FILES.match(info.filename):
                 new = body

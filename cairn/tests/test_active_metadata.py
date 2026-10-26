@@ -186,6 +186,20 @@ def test_proxy_masks_for_restricted_caller_and_streams_others(gov):
         assert c.get("/some/file", headers=bob).content == b"binary"
 
 
+def test_proxy_reports_cairn_version(gov):
+    pdp, _, attrs = gov
+    from cairn import __version__
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"appConfig": {"appVersion": "v9.9.9", "authConfig": {}}}})
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    with TestClient(app) as c:
+        r = c.post("/api/v2/graphql", json={"query": "{ appConfig { appVersion } }"})
+        assert r.json()["data"]["appConfig"] == {"appVersion": f"v{__version__}", "authConfig": {}}
+
+
 def test_masking_fails_closed_when_pdp_errors(gov):
     pdp, _, attrs = gov
 

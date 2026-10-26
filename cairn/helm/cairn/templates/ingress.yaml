@@ -39,6 +39,10 @@ spec:
             pathType: Prefix
             backend:
               service: { name: {{ $full }}-consumer-ui, port: { name: http } }
+          - path: /docs
+            pathType: Prefix
+            backend:
+              service: { name: {{ $full }}-consumer-ui, port: { name: http } }
           {{- end }}
           - path: /
             pathType: Prefix
