@@ -182,7 +182,14 @@ ENV ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.y
     BACKFILL_BROWSE_PATHS_V2=true \
     REPROCESS_DEFAULT_BROWSE_PATHS_V2=false \
     ZDU_STAGE_10=true \
-    ZDU_STAGE_20=true
+    ZDU_STAGE_20=true \
+    DATAHUB_GC_BOOTSTRAP_VALUES='{"ingestion":{"version":"bundled"}}' \
+    DATAHUB_GC_BOOTSTRAP_REVISION='{"version":"v8-cairn1"}' \
+    DATAHUB_DOCUMENTS_BOOTSTRAP_VALUES='{"ingestion":{"version":"bundled"}}' \
+    DATAHUB_DOCUMENTS_REVISION='{"version":"v2-cairn1"}'
+# The two built-in maintenance sources (garbage collection, documents) run from the executor's
+# pre-built venvs ("bundled"): no package download at run time, so they work offline. A new
+# revision re-applies the seed on existing installs.
 USER datahub
 ENTRYPOINT ["/usr/local/bin/cairn-env", "/datahub/datahub-upgrade/scripts/start.sh"]
 CMD ["-u", "SystemUpdate"]

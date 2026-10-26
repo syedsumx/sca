@@ -48,8 +48,10 @@ jobs:
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
         run: pytest -q
-      - name: Policy bundle
-        run: cairn policies validate config/policies
+      - name: Policy bundle and its decision tests
+        run: |
+          cairn policies validate config/policies
+          cairn policies test config/policies config/policy-tests
 
   ui:
     runs-on: ubuntu-latest
@@ -190,7 +192,9 @@ jobs:
               echo "${k}=$(openssl rand -hex 32)"
             done
           } > .env
-          grep -vE '^(CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET)=' \
+          # Embed origins the e2e suite exercises (test_11).
+          echo "CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000" >> .env
+          grep -vE '^(CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET)=' \
             .env.example >> .env
           docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900 \
             || docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 600
@@ -203,14 +207,14 @@ jobs:
           pip install -e ".[test]"
           npm install --prefix "$RUNNER_TEMP/pw" "playwright@${PLAYWRIGHT_VERSION}"
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
-          NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
+          KEEP_SINK=1 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
 
       - name: Kubernetes token path (real kube-apiserver, chart RBAC)
         run: tests/k8s/token_secret.sh
 
       - name: Brand-leak scan
         run: |
-          CAIRN_ADMIN_PASSWORD="$(grep ^CAIRN_ADMIN_PASSWORD= .env | cut -d= -f2-)" \
+          CAIRN_ADMIN_PASSWORD="$(grep ^CAIRN_ADMIN_PASSWORD= .env | cut -d= -f2-)" CAIRN_SINK_URL=http://127.0.0.1:8099/ \
             NODE_PATH="$RUNNER_TEMP/pw/node_modules" node core/tools/leak_scan.mjs http://localhost:9000
 
       - name: Stack logs

@@ -5,6 +5,8 @@
 #
 # Starts a webhook sink on the stack network, enrols the demo remote agent in pool "finance"
 # (creating the pool if needed), then runs tests/e2e with credentials read from the stack and .env.
+# The stack must allow the embed origins the suite uses:
+#   CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 compose=(docker compose -f docker-compose.cairn.yml)
@@ -20,7 +22,8 @@ service_token="$("${compose[@]}" exec -T cairn-api cat /run/cairn/core_token)"
 docker rm -f cairn-e2e-sink >/dev/null 2>&1 || true
 docker run -d --name cairn-e2e-sink --network cairn_catalog -p 127.0.0.1:8099:8099 \
   -v "$PWD/tests/e2e/sink.py:/sink.py:ro" "${SINK_IMAGE:-python:3.12-slim}" python /sink.py >/dev/null
-trap 'docker rm -f cairn-e2e-sink >/dev/null 2>&1 || true' EXIT
+# KEEP_SINK=1 leaves it running (CI hands its recorded payloads to the leak scan).
+[ "${KEEP_SINK:-0}" = 1 ] || trap 'docker rm -f cairn-e2e-sink >/dev/null 2>&1 || true' EXIT
 
 # Remote agent: enrol once per fresh database.
 if ! "${compose[@]}" logs cairn-remote-agent 2>/dev/null | grep -q "enrolled as"; then

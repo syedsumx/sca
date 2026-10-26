@@ -1,0 +1,97 @@
+# Decision tests for config/policies (run: cairn policies test config/policies config/policy-tests).
+# Each case is an authorization request with the attributes the PDP would resolve, and the expected
+# decision. A failing case means a policy change altered who may do what.
+defaults:
+  resource: {type: dataset, urn: "urn:li:dataset:(urn:li:dataPlatform:snowflake,sales.customers,PROD)"}
+
+cases:
+  - name: contractors never see profiles of PII datasets
+    request:
+      actor: urn:li:corpuser:ext-contractor
+      privilege: VIEW_DATASET_PROFILE
+      subject_attributes: {employment_type: contractor}
+      resource_attributes: {classification: [PII]}
+    expect: DENY
+    expect_policies: [deny-pii-profile-to-contractors]
+
+  - name: employees see PII datasets with PII columns masked
+    request:
+      actor: urn:li:corpuser:ana
+      privilege: VIEW_ENTITY_PAGE
+      subject_attributes: {employment_type: employee}
+      resource_attributes: {classification: [PII]}
+    expect: ALLOW
+    expect_obligations: [mask_columns]
+
+  - name: stewards see PII datasets unmasked
+    request:
+      actor: urn:li:corpuser:steward
+      actor_groups: [urn:li:corpGroup:data-stewards]
+      privilege: VIEW_ENTITY_PAGE
+      resource_attributes: {classification: [PII]}
+    expect: ALLOW
+    expect_no_obligations: true
+
+  - name: restricted domain needs clearance 3
+    request:
+      actor: urn:li:corpuser:ana
+      privilege: VIEW_ENTITY_PAGE
+      subject_attributes: {clearance: 2}
+      resource_attributes: {domains: ["urn:li:domain:restricted"]}
+    expect: DENY
+    expect_policies: [restricted-domain-requires-clearance]
+
+  - name: cleared users reach the restricted domain
+    request:
+      actor: urn:li:corpuser:ana
+      privilege: VIEW_ENTITY_PAGE
+      subject_attributes: {clearance: 3}
+      resource_attributes: {domains: ["urn:li:domain:restricted"]}
+    expect: NOT_APPLICABLE        # no deny; native policies decide in additive mode
+
+  - name: owners edit tags on their assets
+    request:
+      actor: urn:li:corpuser:emeka
+      privilege: EDIT_ENTITY_TAGS
+      resource_attributes: {owners: ["urn:li:corpuser:emeka"]}
+    expect: ALLOW
+    expect_policies: [owners-edit-their-assets]
+
+  - name: group ownership counts
+    request:
+      actor: urn:li:corpuser:li
+      actor_groups: [urn:li:corpGroup:finance-data]
+      privilege: EDIT_ENTITY_DOCS
+      resource_attributes: {owners: ["urn:li:corpGroup:finance-data"]}
+    expect: ALLOW
+
+  - name: non-owners cannot edit through the owner rule
+    request:
+      actor: urn:li:corpuser:li
+      privilege: EDIT_ENTITY_TAGS
+      resource_attributes: {owners: ["urn:li:corpuser:emeka"]}
+    expect: NOT_APPLICABLE
+
+  - name: break-glass edits are denied off the corporate network
+    request:
+      actor: urn:li:corpuser:oncall
+      actor_groups: [urn:li:corpGroup:break-glass]
+      privilege: EDIT_ENTITY_TAGS
+      environment: {ip: "203.0.113.7"}
+    expect: DENY
+    expect_policies: [break-glass-office-hours-only]
+
+  - name: break-glass edits from the corporate network are not blocked
+    request:
+      actor: urn:li:corpuser:oncall
+      actor_groups: [urn:li:corpGroup:break-glass]
+      privilege: EDIT_ENTITY_TAGS
+      environment: {ip: "10.2.3.4"}
+    expect: NOT_APPLICABLE
+
+  - name: stewards approve certifications through their role
+    request:
+      actor: urn:li:corpuser:steward
+      actor_groups: [urn:li:corpGroup:data-stewards]
+      privilege: CAIRN_APPROVE_CERTIFICATION
+    expect: ALLOW

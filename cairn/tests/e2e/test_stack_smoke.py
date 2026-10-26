@@ -247,3 +247,24 @@ def test_product_docs_served():
         for href in set(re.findall(r'href="([a-z0-9-]+\.html)(?:#[^"]*)?"', body.text)):
             assert href in pages, f"{page} links to missing {href}"
     assert httpx.get(f"{EDGE}/cairn/api/docs", timeout=10).status_code == 200   # linked from the API page
+
+
+def test_builtin_maintenance_sources_run_offline():
+    """Garbage collection and documents indexing run from the executor's pre-built environments."""
+    q = "mutation($u: String!) { createIngestionExecutionRequest(input: { ingestionSourceUrn: $u }) }"
+    runs = {src: gql(q, {"u": f"urn:li:dataHubIngestionSource:{src}"})["createIngestionExecutionRequest"]
+            for src in ("datahub-gc", "datahub-documents")}
+    status_q = "query($u: String!) { executionRequest(urn: $u) { result { status report } } }"
+
+    def done():
+        out = {}
+        for src, urn in runs.items():
+            result = gql(status_q, {"u": urn})["executionRequest"]["result"] or {}
+            if result.get("status") in (None, "RUNNING", "PENDING"):
+                return None
+            out[src] = result
+        return out
+    results = eventually(done, timeout=300, interval=5)
+    for src, result in results.items():
+        assert result["status"] == "SUCCESS", f"{src}: {result['report'][-1500:]}"
+        assert "bundled" in result["report"], f"{src} installed packages at run time"

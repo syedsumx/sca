@@ -193,6 +193,55 @@ def cmd_policies_validate(a) -> None:
     print(json.dumps({"valid": True, "policies": len(bundle.policies), "roles": len(rbac.roles)}))
 
 
+def run_policy_tests(bundle_dir: str, tests_path: str) -> list[dict]:
+    """Evaluate decision test cases (YAML) against a policy bundle; returns one result per case."""
+    import pathlib
+
+    import yaml
+
+    from cairn.governance.attributes import AttributeResolver
+    from cairn.governance.pdp import AuthorizeRequest, PolicyDecisionPoint, load_bundle_from_dir
+
+    bundle, rbac = load_bundle_from_dir(bundle_dir)
+    pdp = PolicyDecisionPoint(AttributeResolver(None), mode="additive", root_users=[], cache_ttl_seconds=0)
+    pdp.set_bundle(bundle)
+    pdp.set_rbac(rbac)
+    path = pathlib.Path(tests_path)
+    files = sorted(path.glob("*.y*ml")) if path.is_dir() else [path]
+    results = []
+    for f in files:
+        doc = yaml.safe_load(f.read_text()) or {}
+        defaults = doc.get("defaults") or {}
+        for case in doc.get("cases") or []:
+            req = AuthorizeRequest(**{**defaults, **case["request"]})
+            got = pdp.decide(req, explain=True)
+            problems = []
+            if got.decision != case["expect"]:
+                problems.append(f"decision {got.decision}, expected {case['expect']} ({got.reason})")
+            for pid in case.get("expect_policies") or []:
+                if pid not in got.policy_ids:
+                    problems.append(f"policy {pid} did not apply (applied: {got.policy_ids})")
+            kinds = [o.type for o in got.obligations]
+            for kind in case.get("expect_obligations") or []:
+                if kind not in kinds:
+                    problems.append(f"obligation {kind} missing (got {kinds})")
+            if case.get("expect_no_obligations") and kinds:
+                problems.append(f"unexpected obligations {kinds}")
+            results.append({"file": f.name, "name": case["name"], "ok": not problems, "problems": problems})
+    return results
+
+
+def cmd_policies_test(a) -> None:
+    results = run_policy_tests(a.dir, a.tests)
+    failed = [r for r in results if not r["ok"]]
+    for r in results:
+        print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['file']}: {r['name']}")
+        for p in r["problems"]:
+            print(f"       {p}")
+    print(f"{len(results) - len(failed)}/{len(results)} decision tests passed")
+    sys.exit(1 if failed or not results else 0)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cairn", description="Cairn extension layer")
     sub = p.add_subparsers(dest="command", required=True)
@@ -269,6 +318,10 @@ def build_parser() -> argparse.ArgumentParser:
     v = pol_sub.add_parser("validate")
     v.add_argument("dir")
     v.set_defaults(fn=cmd_policies_validate)
+    t = pol_sub.add_parser("test", help="run decision test cases against a policy bundle")
+    t.add_argument("dir", help="policy bundle directory")
+    t.add_argument("tests", help="YAML file or directory of decision test cases")
+    t.set_defaults(fn=cmd_policies_test)
     return p
 
 

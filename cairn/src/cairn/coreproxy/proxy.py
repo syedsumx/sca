@@ -20,6 +20,7 @@ import hmac
 import contextlib
 import json
 import logging
+import re
 import threading
 import time
 from typing import Optional
@@ -143,21 +144,60 @@ class MaskingService:
         return build_plan([o.model_dump() for o in decision.obligations], resource or {})
 
 
-def product_version_document(raw: bytes) -> Optional[bytes]:
-    """The UI shows ``appConfig.appVersion``: report the Cairn version, not the engine's build."""
-    if b'"appVersion"' not in raw:
+# Ingestion run logs (Data Sources -> Run History) are free text written by the ingestion framework;
+# they name its packages, paths and CLI. Rewritten for display only: report and structuredReport.
+_REPORT_RULES = [
+    (re.compile(r"acryl-datahub"), "cairn-ingestion"),
+    (re.compile(r"/metadata-ingestion/src/datahub/"), "/opt/cairn/ingestion/"),
+    (re.compile(r"/opt/datahub/"), "/opt/cairn/"),
+    (re.compile(r"DataHub|Datahub"), "Cairn"),
+    (re.compile(r"DATAHUB"), "CAIRN"),
+    (re.compile(r"datahub"), "cairn"),
+    (re.compile(r"Acryl Data|Acryl"), "Cairn"),
+    (re.compile(r"acryl"), "cairn"),
+]
+_REPORT_FIELDS = ("report", "serializedValue")
+
+
+def relabel_report_text(text: str) -> str:
+    for rx, rep in _REPORT_RULES:
+        text = rx.sub(rep, text)
+    return text
+
+
+def _relabel_reports(node) -> int:
+    changed = 0
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in _REPORT_FIELDS and isinstance(value, str):
+                new = relabel_report_text(value)
+                if new != value:
+                    node[key] = new
+                    changed += 1
+            else:
+                changed += _relabel_reports(value)
+    elif isinstance(node, list):
+        for item in node:
+            changed += _relabel_reports(item)
+    return changed
+
+
+def presentation_document(raw: bytes) -> Optional[bytes]:
+    """Display rewrites for the UI: Cairn's version in appConfig, relabeled ingestion run logs."""
+    if b'"appVersion"' not in raw and b'"report"' not in raw and b'"serializedValue"' not in raw:
         return None
     try:
         doc = json.loads(raw)
     except json.JSONDecodeError:
         return None
+    changed = _relabel_reports(doc)
     app_config = (doc.get("data") or {}).get("appConfig") if isinstance(doc, dict) else None
-    if not isinstance(app_config, dict) or "appVersion" not in app_config:
-        return None
-    from cairn import __version__
+    if isinstance(app_config, dict) and "appVersion" in app_config:
+        from cairn import __version__
 
-    app_config["appVersion"] = f"v{__version__}"
-    return json.dumps(doc, separators=(",", ":")).encode()
+        app_config["appVersion"] = f"v{__version__}"
+        changed += 1
+    return json.dumps(doc, separators=(",", ":")).encode() if changed else None
 
 
 def _context_urn(path: str) -> Optional[str]:
@@ -213,7 +253,7 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
         raw = await resp.aread()
         await resp.aclose()
         out_headers.pop("content-encoding", None)
-        relabeled = product_version_document(raw) if resp.status_code < 400 else None
+        relabeled = presentation_document(raw) if resp.status_code < 400 else None
         if relabeled is not None:
             raw = relabeled
         actor = await identity.resolve(request.headers.get("authorization"), client)

@@ -200,6 +200,31 @@ def test_proxy_reports_cairn_version(gov):
         assert r.json()["data"]["appConfig"] == {"appVersion": f"v{__version__}", "authConfig": {}}
 
 
+def test_proxy_relabels_ingestion_run_logs(gov):
+    pdp, _, attrs = gov
+    report = ("Using existing bundled startup venv: /opt/datahub/venvs/datahub-gc-bundled\n"
+              "  File \"/metadata-ingestion/src/datahub/ingestion/run/pipeline.py\"\n"
+              "Successfully executed 'datahub ingest' (acryl-datahub 1.8.0) for DataHub")
+    structured = '{"source": {"type": "datahub-gc"}, "sink": {"type": "datahub-rest"}, "events": 3}'
+    doc = {"data": {"executionRequest": {"urn": "urn:li:dataHubExecutionRequest:x",
+                                         "input": {"source": {"type": "SCHEDULED_INGESTION_SOURCE"}},
+                                         "result": {"status": "SUCCESS", "report": report,
+                                                    "structuredReport": {"serializedValue": structured}}}}}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=doc)
+
+    app = create_proxy_app("http://core", MaskingService(pdp, attrs), ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    with TestClient(app) as c:
+        out = c.post("/api/v2/graphql", json={"query": "{ executionRequest }"}).json()["data"]["executionRequest"]
+    text = out["result"]["report"] + out["result"]["structuredReport"]["serializedValue"]
+    assert "datahub" not in text.lower() and "acryl" not in text.lower()
+    assert "cairn ingest" in text and "/opt/cairn/venvs/cairn-gc-bundled" in text
+    assert json.loads(out["result"]["structuredReport"]["serializedValue"])["events"] == 3   # still valid JSON
+    assert out["urn"] == "urn:li:dataHubExecutionRequest:x"                                  # identifiers untouched
+
+
 def test_masking_fails_closed_when_pdp_errors(gov):
     pdp, _, attrs = gov
 

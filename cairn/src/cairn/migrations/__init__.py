@@ -16,16 +16,23 @@ import warnings
 from contextlib import contextmanager
 from typing import Iterator
 
-from alembic import command
-from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.script import ScriptDirectory
-from sqlalchemy import inspect, text
-from sqlalchemy.engine import Connection, Engine
+# Alembic logs plugin setup at import time; quiet it before importing (see _quiet for later setups).
+logging.getLogger("alembic").setLevel(logging.WARNING)
+
+from alembic import command  # noqa: E402
+from alembic.config import Config  # noqa: E402
+from alembic.migration import MigrationContext  # noqa: E402
+from alembic.script import ScriptDirectory  # noqa: E402
+from sqlalchemy import inspect, text  # noqa: E402
+from sqlalchemy.engine import Connection, Engine  # noqa: E402
 
 HERE = os.path.dirname(__file__)
-# Every service migrates at start: keep Alembic's per-plugin INFO chatter out of the service logs.
-logging.getLogger("alembic").setLevel(logging.WARNING)
+
+
+def _quiet() -> None:
+    """Every service migrates at start: keep Alembic's per-plugin INFO chatter out of the logs.
+    Applied per call, because services configure logging after importing this module."""
+    logging.getLogger("alembic").setLevel(logging.WARNING)
 BASELINE = "0001"
 _LOCK_KEY = 0x0CA1A1DB  # advisory lock id for migrations
 
@@ -64,6 +71,7 @@ def _lock(conn: Connection) -> Iterator[None]:
 
 def upgrade(engine: Engine, target: str = "head") -> str:
     """Bring the schema to ``target``; returns the resulting revision."""
+    _quiet()
     with engine.connect() as conn:
         with _lock(conn):
             tables = set(inspect(conn).get_table_names())
@@ -81,6 +89,7 @@ def check(engine: Engine) -> list:
 
     from cairn.common.db import load_models
 
+    _quiet()
     metadata = load_models()
     with engine.connect() as conn, warnings.catch_warnings():
         # Unmanaged tables (e.g. pgvector columns) are reflected before include_object filters them.
