@@ -209,7 +209,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 | Component | Used as | Licence |
 |---|---|---|
 | OpenSearch | search and graph index (container) | Apache-2.0 |
-| Apache Kafka (Confluent Community images) | event bus (container) | Apache-2.0 (Kafka); Confluent Community License (image packaging) |
+| Apache Kafka (`apache/kafka` image) | event bus (container) | Apache-2.0 |
 | MySQL Community Server | Cairn Core database (container) | GPL-2.0 with the Universal FOSS Exception |
 | PostgreSQL, pgvector | control-plane database (container) | PostgreSQL License |
 | nginx | edge proxy and static hosting (container) | BSD-2-Clause |
