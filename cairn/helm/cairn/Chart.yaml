@@ -1,0 +1,16 @@
+apiVersion: v2
+name: cairn
+description: >-
+  Cairn: self-hosted active metadata and data governance. Installs Cairn Core (metadata service, web
+  application, setup job, ingestion executor) and the Cairn control plane: data quality engine, ABAC/RBAC
+  policy decision point, in-VPC agent gateway, AI/MCP services and the Active Metadata layer.
+type: application
+version: 0.2.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.27.0-0"
+keywords: [cairn, metadata, catalog, governance, data-quality, lineage, mcp]
+home: https://github.com/syedsumx/sca/tree/main/cairn
+sources:
+  - https://github.com/syedsumx/sca
+annotations:
+  artifacthub.io/license: Apache-2.0

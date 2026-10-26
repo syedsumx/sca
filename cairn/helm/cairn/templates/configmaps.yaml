@@ -1,0 +1,13 @@
+{{- if and .Values.cairn.policies.files (not .Values.cairn.policies.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.fullname" . }}-policies
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+data:
+  {{- range $file, $body := .Values.cairn.policies.files }}
+  {{ $file }}: |
+    {{- $body | nindent 4 }}
+  {{- end }}
+{{- end }}

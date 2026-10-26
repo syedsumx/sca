@@ -1,0 +1,18 @@
+#!/bin/sh
+# Cairn Core entrypoint shim: translates the documented CAIRN_* settings into the names the
+# engine reads (tables in /etc/cairn/env.d/*.map), runs the init hooks in /etc/cairn/init.d,
+# then execs the service. An engine-native variable that is already set always wins.
+set -e
+for map in /etc/cairn/env.d/*.map; do
+  [ -f "$map" ] || continue
+  while read -r from to; do
+    case "$from" in ''|\#*) continue ;; esac
+    eval "val=\${$from-}"
+    eval "cur=\${$to-}"
+    if [ -n "$val" ] && [ -z "$cur" ]; then export "$to=$val"; fi
+  done < "$map"
+done
+for hook in /etc/cairn/init.d/*.sh; do
+  [ -f "$hook" ] && . "$hook"
+done
+exec "$@"

@@ -1,0 +1,9 @@
+# Overlay for authoritative ABAC mode: the Cairn authorizer becomes the ONLY authorizer in Cairn Core
+# (the authorizer chain is first-ALLOW-wins, so the native authorizer must be removed from it).
+#   helm upgrade --install cairn . -f values.yaml -f values-authoritative.yaml
+cairn:
+  auth:
+    mode: authoritative
+
+core:
+  nativePoliciesEnabled: false

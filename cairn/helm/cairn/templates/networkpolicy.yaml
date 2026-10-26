@@ -1,0 +1,171 @@
+{{- if .Values.cairn.networkPolicy.enabled }}
+{{- $sel := dict "app.kubernetes.io/name" (include "cairn.name" .) "app.kubernetes.io/instance" .Release.Name }}
+# PDP: only Cairn Core (authorizer plugin) and Cairn components may ask for decisions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-pdp
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: pdp
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.extraPdpClientSelector }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml . | nindent 14 }}
+        {{- end }}
+      ports:
+        - port: http
+---
+# API: Cairn components (incl. the web application), the ingress and explicitly configured sources.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-api
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+---
+# Gateway: reachable by remote agents (any source); it is the only internet/PrivateLink-facing service.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-gateway
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: gateway
+  policyTypes: [Ingress]
+  ingress:
+    - ports:
+        - port: http
+---
+# Workers (scheduler, actions) and MCP accept no unsolicited ingress except metrics scraping from
+# within the namespace; MCP additionally accepts in-namespace clients.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-workers
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/instance
+        operator: In
+        values: [{{ .Release.Name | quote }}]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: ["scheduler", "actions-pii-propagation", "actions-vector-indexer", "mcp", "context-miner", "notifier"]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+{{- if .Values.cairn.coreProxy.enabled }}
+---
+# Core proxy: on the web → Cairn Core hot path. Only Cairn components (incl. the web application) may call it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-core-proxy
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: core-proxy
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.consumerUi.enabled }}
+---
+# Consumer UI static assets: fetched by browsers through the ingress (and by the web pods).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-consumer-ui
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: consumer-ui
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.apiIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.notifier.enabled }}
+---
+# Notifier egress: in-cluster dependencies (DB, Cairn Core, DNS) plus HTTPS/SMTP to Slack, Teams and the
+# mail relay. Restrict external destinations with cairn.networkPolicy.notifierEgressTo.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-notifier-egress
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: notifier
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector: {}
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - ports:
+        - { port: 443, protocol: TCP }
+        - { port: 587, protocol: TCP }
+        - { port: 465, protocol: TCP }
+      {{- with .Values.cairn.networkPolicy.notifierEgressTo }}
+      to:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}

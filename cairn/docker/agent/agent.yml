@@ -1,0 +1,16 @@
+# Demo remote-agent config (mounted at /etc/cairn-agent/agent.yml in docker-compose).
+# Schema: cairn.agent.worker.AgentConfig. gateway_url / state_dir / enrollment_token
+# are taken from CAIRN_AGENT_GATEWAY_URL / CAIRN_AGENT_STATE_DIR / CAIRN_AGENT_ENROLLMENT_TOKEN when set.
+# The pool is bound server-side to the enrolment token.
+# Secrets are resolved INSIDE the VPC; the gateway only ever sees ${NAME} references.
+gateway_url: http://cairn-gateway:8820
+state_dir: /var/lib/cairn-agent
+max_parallel_tasks: 2
+poll_interval_seconds: 5
+heartbeat_interval_seconds: 15
+batch_max_items: 500
+batch_max_bytes: 1048576
+secrets:
+  - type: env          # FINANCE_PG_PASSWORD etc. from the container environment
+  - type: directory
+    path: /run/secrets/cairn

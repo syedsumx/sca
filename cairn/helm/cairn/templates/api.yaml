@@ -1,0 +1,48 @@
+{{- if .Values.cairn.api.enabled }}
+{{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) }}
+{{ include "cairn.deployment" $ctx }}
+---
+{{ include "cairn.service" (merge (dict "port" .Values.cairn.api.port) $ctx) }}
+{{- with (include "cairn.hpa" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- if .Values.cairn.api.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    {{- with .Values.cairn.api.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.cairn.api.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.cairn.api.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.cairn.api.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ printf "%s(/|$)(.*)" (trimSuffix "/" .Values.cairn.api.ingress.path) }}
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "cairn.componentName" $ctx }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

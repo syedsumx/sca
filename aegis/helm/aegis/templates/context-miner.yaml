@@ -1,6 +1,0 @@
-{{- if .Values.aegis.contextMiner.enabled }}
-{{- /* No port: incremental miner loop; cursors and findings live in the Aegis database. */}}
-{{- $c := .Values.aegis.contextMiner }}
-{{- $ctx := dict "root" $ "component" "context-miner" "cfg" $c "replicas" $c.replicas "args" (list "context-miner" "--interval" (toString $c.intervalSeconds)) }}
-{{ include "aegis.deployment" $ctx }}
-{{- end }}

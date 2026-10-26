@@ -1,0 +1,90 @@
+{{- if and .Values.core.enabled .Values.core.ingress.enabled }}
+{{- $i := .Values.core.ingress }}
+{{- $ctx := dict "root" $ "component" "edge" }}
+{{- $full := include "cairn.fullname" . }}
+# One origin for the UI, the Cairn API, the workspace MFE and remote MCP (the MFE and the API rely on
+# the UI session cookie). Mirrors docker/nginx/nginx.conf of the compose stack.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    {{- if $i.blockDeveloperConsoles }}
+    # The engine's developer consoles are not part of the product surface.
+    nginx.ingress.kubernetes.io/server-snippet: |
+      location ~ ^/(openapi/swagger-ui|openapi/v3/api-docs|swagger-ui|api/graphiql)(/|$) { return 404; }
+    {{- end }}
+    {{- with $i.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with $i.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $i.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $i.host | quote }}
+      http:
+        paths:
+          {{- if .Values.cairn.consumerUi.enabled }}
+          - path: /cairn-ui/
+            pathType: Prefix
+            backend:
+              service: { name: {{ $full }}-consumer-ui, port: { name: http } }
+          {{- end }}
+          - path: /
+            pathType: Prefix
+            backend:
+              service: { name: {{ $full }}-web, port: { name: http } }
+{{- if or .Values.cairn.api.enabled .Values.cairn.mcp.enabled }}
+---
+# /cairn/api/* and /cairn/mcp/* with the prefix stripped (cairn-api serves /quality/..., cairn-mcp /mcp).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-api
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/x-forwarded-prefix: /cairn/api
+    {{- with $i.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with $i.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $i.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $i.host | quote }}
+      http:
+        paths:
+          {{- if .Values.cairn.api.enabled }}
+          - path: /cairn/api(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service: { name: {{ $full }}-api, port: { name: http } }
+          {{- end }}
+          {{- if .Values.cairn.mcp.enabled }}
+          - path: /cairn/mcp(/|$)(.*)
+            pathType: ImplementationSpecific
+            backend:
+              service: { name: {{ $full }}-mcp, port: { name: http } }
+          {{- end }}
+{{- end }}
+{{- end }}

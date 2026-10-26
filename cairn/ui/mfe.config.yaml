@@ -1,0 +1,21 @@
+# Cairn Core micro-frontend config for the Cairn consumer workspace.
+# cairn-web reads it once at startup (MFE_CONFIG_FILE_PATH) and serves it with a 5-minute
+# browser cache: restart cairn-web after editing.
+#
+# remoteEntry is same-origin (served by cairn-consumer-ui behind the edge proxy / ingress at /cairn-ui/),
+# so the workspace can call /api/v2/graphql and /cairn/api/* with the user's Cairn Core session cookie.
+# Example copy of deploy/mfe/mfe.config.yaml (the file docker-compose mounts). The host route is
+# /mfe/cairn; the workspace routes inside the URL hash: /mfe/cairn#/search?q=orders.
+topLevelMenuTitle: Workspace
+subNavigationMode: false
+loadTimeoutMs: 30000
+microFrontends:
+  - id: CairnWorkspace
+    label: Workspace
+    path: /cairn
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Compass

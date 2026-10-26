@@ -1,0 +1,10 @@
+{{- if .Values.cairn.pdp.enabled }}
+{{- $ctx := dict "root" $ "component" "pdp" "cfg" .Values.cairn.pdp "replicas" .Values.cairn.pdp.replicas "port" (int .Values.cairn.pdp.port) "args" (list "pdp" "--host" "0.0.0.0" "--port" (toString .Values.cairn.pdp.port)) }}
+{{ include "cairn.deployment" $ctx }}
+---
+{{ include "cairn.service" (merge (dict "port" .Values.cairn.pdp.port) $ctx) }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}

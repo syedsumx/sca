@@ -1,0 +1,63 @@
+{{- if .Values.core.enabled }}
+{{- $c := .Values.core }}
+{{- $s := $c.secrets }}
+{{- /* ------------------------------------------------------------ core (metadata service) */}}
+{{- $coreEnv := include "cairn.coreEnv" . }}
+{{- $coreEnv = printf "%s\n- name: CAIRN_PDP_URL\n  value: %s" $coreEnv (printf "http://%s-pdp:%v" (include "cairn.fullname" .) .Values.cairn.pdp.port | quote) }}
+{{- $coreEnv = printf "%s\n%s" $coreEnv (include "cairn.secretEnv" (dict "name" "CAIRN_SERVICE_TOKEN" "secret" .Values.cairn.secrets.name "key" .Values.cairn.secrets.serviceTokenKey)) }}
+{{- $coreEnv = printf "%s\n- name: CAIRN_AUTHZ_MODE\n  value: %s" $coreEnv (.Values.cairn.auth.mode | quote) }}
+{{- $coreEnv = printf "%s\n- name: CAIRN_NATIVE_POLICIES_ENABLED\n  value: %s" $coreEnv ($c.nativePoliciesEnabled | toString | quote) }}
+{{- $coreEnv = printf "%s\n- name: CAIRN_VIEW_AUTHORIZATION_ENABLED\n  value: %s" $coreEnv ($c.viewAuthorizationEnabled | toString | quote) }}
+{{- $coreEnv = printf "%s\n- name: CAIRN_JAVA_OPTS\n  value: %s" $coreEnv ($c.api.javaOpts | quote) }}
+{{- range $k, $v := dict "CAIRN_APP_TITLE" $c.branding.appTitle "CAIRN_LOGO_URL" $c.branding.logoUrl "CAIRN_FAVICON_URL" $c.branding.faviconUrl }}
+{{- if $v }}
+{{- $coreEnv = printf "%s\n- name: %s\n  value: %s" $coreEnv $k ($v | quote) }}
+{{- end }}
+{{- end }}
+{{- $ctx := dict "root" $ "component" "core" "cfg" $c.api "image" "core" "env" $coreEnv "port" 8080 "healthPath" "/health" "volumes" (list (dict "name" "tmp" "emptyDir" (dict))) "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
+{{ include "cairn.coreDeployment" $ctx }}
+---
+{{ include "cairn.service" (merge (dict "port" 8080) $ctx) }}
+---
+{{- /* ------------------------------------------------------------ web application */}}
+{{- $apiHost := include "cairn.coreHost" . }}
+{{- $apiPort := 8080 }}
+{{- if .Values.cairn.coreProxy.enabled }}
+{{- $apiHost = printf "%s-core-proxy" (include "cairn.fullname" .) }}
+{{- $apiPort = .Values.cairn.coreProxy.port }}
+{{- end }}
+{{- $webEnv := printf "- name: CAIRN_CORE_API_HOST\n  value: %s\n- name: CAIRN_CORE_API_PORT\n  value: %s" ($apiHost | quote) ($apiPort | toString | quote) }}
+{{- range $name, $key := dict "CAIRN_WEB_SECRET" $s.webSecretKey "CAIRN_ADMIN_PASSWORD" $s.adminPasswordKey "CAIRN_SYSTEM_CLIENT_SECRET" $s.systemClientSecretKey }}
+{{- $webEnv = printf "%s\n%s" $webEnv (include "cairn.secretEnv" (dict "name" $name "secret" $s.name "key" $key)) }}
+{{- end }}
+{{- $webEnv = printf "%s\n- name: CAIRN_KAFKA_BOOTSTRAP\n  value: %s\n- name: CAIRN_JAVA_OPTS\n  value: %s" $webEnv ($c.kafka.bootstrap | quote) ($c.web.javaOpts | quote) }}
+{{- $webVolumes := list (dict "name" "tmp" "emptyDir" (dict)) }}
+{{- $webMounts := list (dict "name" "tmp" "mountPath" "/tmp") }}
+{{- if $c.web.mfeConfigOverride }}
+{{- $webVolumes = append $webVolumes (dict "name" "mfe-config" "configMap" (dict "name" (printf "%s-mfe-config" (include "cairn.fullname" .)))) }}
+{{- $webMounts = append $webMounts (dict "name" "mfe-config" "mountPath" "/etc/cairn/mfe.config.yaml" "subPath" "mfe.config.yaml" "readOnly" true) }}
+{{- end }}
+{{- $wctx := dict "root" $ "component" "web" "cfg" $c.web "image" "web" "env" $webEnv "port" 9002 "healthPath" "/admin" "volumes" $webVolumes "volumeMounts" $webMounts }}
+{{ include "cairn.coreDeployment" $wctx }}
+---
+{{ include "cairn.service" (merge (dict "port" 9002) $wctx) }}
+{{- if $c.web.mfeConfigOverride }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.fullname" . }}-mfe-config
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+data:
+  mfe.config.yaml: |
+    {{- $c.web.mfeConfigOverride | nindent 4 }}
+{{- end }}
+{{- /* ------------------------------------------------------------ ingestion executor */}}
+{{- if $c.executor.enabled }}
+---
+{{- $exEnv := printf "- name: CAIRN_CORE_API_HOST\n  value: %s\n- name: CAIRN_CORE_API_PORT\n  value: \"8080\"\n- name: CAIRN_KAFKA_BOOTSTRAP\n  value: %s" (include "cairn.coreHost" . | quote) ($c.kafka.bootstrap | quote) }}
+{{- $exEnv = printf "%s\n%s" $exEnv (include "cairn.secretEnv" (dict "name" "CAIRN_SYSTEM_CLIENT_SECRET" "secret" $s.name "key" $s.systemClientSecretKey)) }}
+{{ include "cairn.coreDeployment" (dict "root" $ "component" "executor" "cfg" $c.executor "image" "executor" "env" $exEnv) }}
+{{- end }}
+{{- end }}

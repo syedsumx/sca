@@ -1,0 +1,562 @@
+# Cairn: full local stack.
+#
+#   cp .env.example .env            # then set every CHANGE_ME
+#   deploy/build-images.sh          # or pull cairn/* from your registry
+#   docker compose -f docker-compose.cairn.yml up -d
+#   docker compose -f docker-compose.cairn.yml --profile ai-local up -d   # + Ollama
+#
+# Open http://localhost:9000 and sign in as "admin" with CAIRN_ADMIN_PASSWORD.
+#
+# Topology (see ARCHITECTURE.md §2.8):
+#   network "catalog"      Cairn Core + Cairn control plane
+#   network "vpc-egress"   the ONLY path between the private VPC and the control plane: gateway <-> agent
+#   network "vpc-finance"  simulated customer VPC: remote agent + private source DB (internal, no egress)
+
+name: cairn
+
+# ---------------------------------------------------------------- Cairn Core
+x-core-env: &core-env
+  CAIRN_DB_HOST: mysql:3306
+  CAIRN_DB_NAME: cairn
+  CAIRN_DB_USER: root   # cairn-setup creates the schema
+  CAIRN_DB_PASSWORD: ${CAIRN_DB_ROOT_PASSWORD:?set CAIRN_DB_ROOT_PASSWORD in .env}
+  CAIRN_SEARCH_HOST: search
+  CAIRN_KAFKA_BOOTSTRAP: broker:29092
+  CAIRN_SYSTEM_CLIENT_SECRET: ${CAIRN_SYSTEM_CLIENT_SECRET:?set CAIRN_SYSTEM_CLIENT_SECRET in .env}
+  CAIRN_SESSION_SIGNING_KEY: ${CAIRN_SESSION_SIGNING_KEY:?set CAIRN_SESSION_SIGNING_KEY in .env}
+  CAIRN_TOKEN_SALT: ${CAIRN_TOKEN_SALT:?set CAIRN_TOKEN_SALT in .env}
+
+# ---------------------------------------------------------------- Cairn common
+x-cairn-env: &cairn-env
+  CAIRN_CORE_URL: http://cairn-core:8080
+  CAIRN_FRONTEND_URL: http://cairn-web:9002
+  CAIRN_CORE_TOKEN_FILE: /run/cairn/core_token
+  CAIRN_DATABASE_URL: postgresql+psycopg://cairn:${CAIRN_POSTGRES_PASSWORD:-cairn}@cairn-postgres:5432/cairn
+  CAIRN_SERVICE_TOKEN: ${CAIRN_SERVICE_TOKEN:?set CAIRN_SERVICE_TOKEN in .env}
+  CAIRN_AUTHZ_MODE: ${CAIRN_AUTHZ_MODE:-additive}
+  CAIRN_POLICY_DIR: /etc/cairn/config/policies
+  CAIRN_KAFKA_BOOTSTRAP: broker:29092
+  CAIRN_SCHEMA_REGISTRY_URL: http://cairn-core:8080/schema-registry/api/
+  CAIRN_GATEWAY_PUBLIC_URL: http://cairn-gateway:8820
+  CAIRN_GATEWAY_KEY_DIR: /var/lib/cairn/keys
+  CAIRN_LLM_PROVIDER: ${CAIRN_LLM_PROVIDER:-none}
+  CAIRN_AI_MODEL: ${CAIRN_AI_MODEL:-claude-opus-5-5}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  CAIRN_OLLAMA_URL: ${CAIRN_OLLAMA_URL:-http://ollama:11434}
+  CAIRN_EMBEDDING_PROVIDER: ${CAIRN_EMBEDDING_PROVIDER:-hashing}
+  CAIRN_ROOT_USERS: urn:li:corpuser:admin
+  # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
+  CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
+  CAIRN_MASKING_PROXY_ENABLED: "true"   # cairn-web talks to Cairn Core through cairn-core-proxy
+  CAIRN_ACTION_LINK_SECRET: ${CAIRN_ACTION_LINK_SECRET:?set CAIRN_ACTION_LINK_SECRET in .env}
+  CAIRN_EMBED_SIGNING_SECRET: ${CAIRN_EMBED_SIGNING_SECRET:?set CAIRN_EMBED_SIGNING_SECRET in .env}
+  CAIRN_EMBED_ALLOWED_ORIGINS: ${CAIRN_EMBED_ALLOWED_ORIGINS:-}
+  CAIRN_SLACK_BOT_TOKEN: ${CAIRN_SLACK_BOT_TOKEN:-}
+  CAIRN_SLACK_SIGNING_SECRET: ${CAIRN_SLACK_SIGNING_SECRET:-}
+  CAIRN_TEAMS_WEBHOOK_URL: ${CAIRN_TEAMS_WEBHOOK_URL:-}
+  CAIRN_SMTP_URL: ${CAIRN_SMTP_URL:-}
+
+x-cairn-service: &cairn-service
+  image: ${CAIRN_REGISTRY:-cairn}/platform:${CAIRN_VERSION:-0.1.0}
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  entrypoint: ["/opt/cairn/bin/dumb-init", "--", "/opt/cairn-bootstrap/with-token.sh"]
+  environment:
+    <<: *cairn-env
+  volumes:
+    - ./config:/etc/cairn/config:ro
+    - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
+    - ./deploy/actions:/etc/cairn/actions:ro
+    - cairn-bootstrap:/run/cairn:ro
+  depends_on: &cairn-depends
+    cairn-postgres:
+      condition: service_healthy
+    cairn-bootstrap:
+      condition: service_completed_successfully
+  networks: [catalog]
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+
+x-cairn-http-healthcheck: &cairn-http-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 6
+  start_period: 20s
+
+services:
+  # ============================================================ Cairn Core storage
+  mysql:
+    image: mysql:8.2
+    hostname: mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --default-authentication-plugin=caching_sha2_password
+    environment:
+      MYSQL_DATABASE: cairn
+      MYSQL_USER: cairn
+      MYSQL_PASSWORD: ${CAIRN_DB_PASSWORD:?set CAIRN_DB_PASSWORD in .env}
+      MYSQL_ROOT_PASSWORD: ${CAIRN_DB_ROOT_PASSWORD:?set CAIRN_DB_ROOT_PASSWORD in .env}
+      MYSQL_ROOT_HOST: "%"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h mysql -u $$MYSQL_USER --password=$$MYSQL_PASSWORD"]
+      interval: 3s
+      timeout: 10s
+      retries: 20
+      start_period: 90s   # first start initialises the data directory
+    volumes:
+      - mysqldata:/var/lib/mysql
+    networks: [catalog]
+    restart: on-failure
+
+  search:
+    image: opensearchproject/opensearch:2.19.3
+    hostname: search
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms768m -Xmx1024m -Dlog4j2.formatMsgNoLookups=true
+      # Local dev: OpenSearch blocks index creation at the 95% disk flood stage, which laptops and
+      # quota-limited sandboxes hit easily. Set to "true" for production-like behaviour.
+      cluster.routing.allocation.disk.threshold_enabled: ${CAIRN_SEARCH_DISK_THRESHOLD_ENABLED:-false}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail 'http://search:9200/_cluster/health?wait_for_status=yellow&timeout=0s'"]
+      interval: 5s
+      timeout: 15s
+      retries: 20
+      start_period: 1m
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    networks: [catalog]
+
+  broker:
+    image: confluentinc/cp-kafka:8.2.2
+    hostname: broker
+    command:
+      - /bin/bash
+      - -c
+      - |
+        file_path="/var/lib/kafka/data/clusterID"
+        if [ ! -f "$$file_path" ]; then
+          /bin/kafka-storage random-uuid > $$file_path
+          kafka-storage format --ignore-formatted -t $$(cat "$$file_path") -c /etc/kafka/kafka.properties
+        fi
+        export CLUSTER_ID=$$(cat "$$file_path")
+        /etc/confluent/docker/run
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_BROKER_ID: "1"
+      KAFKA_PROCESS_ROLES: controller, broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:39092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: BROKER://broker:29092,EXTERNAL://broker:9092,CONTROLLER://broker:39092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://broker:29092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_MESSAGE_MAX_BYTES: "5242880"
+      KAFKA_MAX_MESSAGE_BYTES: "5242880"
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      KAFKA_LOG4J_LOGGERS: org.apache.kafka.image.loader.MetadataLoader=WARN
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server broker:29092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 1m
+    volumes:
+      - broker:/var/lib/kafka/data
+    networks: [catalog]
+
+  # ============================================================ Cairn Core services
+  # Images: core/Dockerfile (deploy/build-images.sh). Only CAIRN_* settings are read here; every
+  # engine default is baked into the images.
+
+  # Creates / migrates the schema, search indices, topics and seed data. Runs before every start.
+  cairn-setup:
+    image: ${CAIRN_REGISTRY:-cairn}/setup:${CAIRN_VERSION:-0.1.0}
+    hostname: cairn-setup
+    environment:
+      <<: *core-env
+      CAIRN_CORE_API_HOST: cairn-core
+      CAIRN_CORE_API_PORT: "8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    networks: [catalog]
+
+  cairn-core:
+    image: ${CAIRN_REGISTRY:-cairn}/core:${CAIRN_VERSION:-0.1.0}
+    hostname: cairn-core
+    restart: unless-stopped
+    environment:
+      <<: *core-env
+      # Cairn authorizer (baked in). Authoritative mode REQUIRES CAIRN_NATIVE_POLICIES_ENABLED=false.
+      CAIRN_PDP_URL: http://cairn-pdp:8810
+      CAIRN_SERVICE_TOKEN: ${CAIRN_SERVICE_TOKEN:?set CAIRN_SERVICE_TOKEN in .env}
+      CAIRN_AUTHZ_MODE: ${CAIRN_AUTHZ_MODE:-additive}
+      CAIRN_NATIVE_POLICIES_ENABLED: ${CAIRN_NATIVE_POLICIES_ENABLED:-true}
+      # View authorization makes ABAC visibility rules apply to entity pages too.
+      CAIRN_VIEW_AUTHORIZATION_ENABLED: ${CAIRN_VIEW_AUTHORIZATION_ENABLED:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail http://cairn-core:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 1m30s
+    # Internal API: published on loopback only, for operators and the e2e suite. Users go through the edge.
+    ports:
+      - "127.0.0.1:${CAIRN_MAPPED_CORE_PORT:-8080}:8080"
+    depends_on:
+      cairn-setup:
+        condition: service_completed_successfully
+    networks: [catalog]
+
+  cairn-web:
+    image: ${CAIRN_REGISTRY:-cairn}/web:${CAIRN_VERSION:-0.1.0}
+    hostname: cairn-web
+    restart: unless-stopped
+    environment:
+      # All UI traffic to Cairn Core goes through the Cairn masking middleware (cairn-core-proxy).
+      CAIRN_CORE_API_HOST: cairn-core-proxy
+      CAIRN_CORE_API_PORT: "8890"
+      CAIRN_WEB_SECRET: ${CAIRN_WEB_SECRET:?set CAIRN_WEB_SECRET in .env}
+      CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:?set CAIRN_ADMIN_PASSWORD in .env}
+      CAIRN_SYSTEM_CLIENT_SECRET: ${CAIRN_SYSTEM_CLIENT_SECRET}
+      CAIRN_KAFKA_BOOTSTRAP: broker:29092
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail http://localhost:9002/admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 1m
+    ports:
+      - "127.0.0.1:${CAIRN_MAPPED_WEB_PORT:-9002}:9002"
+    depends_on:
+      cairn-core:
+        condition: service_healthy
+      cairn-core-proxy:
+        condition: service_healthy
+    networks: [catalog]
+
+  # Runs ingestion recipes scheduled from the UI.
+  cairn-executor:
+    image: ${CAIRN_REGISTRY:-cairn}/executor:${CAIRN_VERSION:-0.1.0}
+    hostname: cairn-executor
+    restart: unless-stopped
+    environment:
+      CAIRN_CORE_API_HOST: cairn-core
+      CAIRN_CORE_API_PORT: "8080"
+      CAIRN_SYSTEM_CLIENT_SECRET: ${CAIRN_SYSTEM_CLIENT_SECRET}
+      CAIRN_KAFKA_BOOTSTRAP: broker:29092
+    depends_on:
+      cairn-core:
+        condition: service_healthy
+    networks: [catalog]
+
+  # ============================================================ Cairn control plane
+  cairn-postgres:
+    image: pgvector/pgvector:pg16
+    hostname: cairn-postgres
+    environment:
+      POSTGRES_USER: cairn
+      POSTGRES_PASSWORD: ${CAIRN_POSTGRES_PASSWORD:-cairn}
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - cairn-pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-cairn.sql:ro
+    networks: [catalog]
+
+  # Mints a Cairn Core PAT for the Cairn services into the cairn-bootstrap volume (idempotent).
+  cairn-bootstrap:
+    image: python:3.12-slim
+    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token"]
+    environment:
+      CAIRN_FRONTEND_URL: http://cairn-web:9002
+      CAIRN_CORE_URL: http://cairn-core:8080
+      CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:?set CAIRN_ADMIN_PASSWORD in .env}
+    volumes:
+      - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
+      - cairn-bootstrap:/run/cairn
+    depends_on:
+      cairn-web:
+        condition: service_healthy
+    networks: [catalog]
+
+  cairn-pdp:
+    <<: *cairn-service
+    hostname: cairn-pdp
+    command: ["pdp", "--host", "0.0.0.0", "--port", "8810"]
+    healthcheck:
+      <<: *cairn-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8810/health"]
+    # The PDP must start before Cairn Core can authorize non-root users, but needs a Cairn Core token to import
+    # native policies; it tolerates Cairn Core being unavailable at boot and retries the import.
+    depends_on:
+      cairn-postgres:
+        condition: service_healthy
+
+  cairn-api:
+    <<: *cairn-service
+    hostname: cairn-api
+    command: ["api", "--host", "0.0.0.0", "--port", "8800"]
+    ports:
+      - "${CAIRN_MAPPED_API_PORT:-8800}:8800"
+    healthcheck:
+      <<: *cairn-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8800/health"]
+    depends_on:
+      <<: *cairn-depends
+      cairn-pdp:
+        condition: service_healthy
+
+  cairn-gateway:
+    <<: *cairn-service
+    hostname: cairn-gateway
+    command: ["gateway", "--host", "0.0.0.0", "--port", "8820"]
+    volumes:
+      - ./config:/etc/cairn/config:ro
+      - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
+      - cairn-bootstrap:/run/cairn:ro
+      - cairn-gateway-keys:/var/lib/cairn/keys
+    healthcheck:
+      <<: *cairn-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8820/health"]
+    # The gateway is the only control-plane service reachable from the VPC side.
+    networks: [catalog, vpc-egress]
+
+  cairn-scheduler:
+    <<: *cairn-service
+    hostname: cairn-scheduler
+    command: ["scheduler"]
+    depends_on:
+      <<: *cairn-depends
+      cairn-core:
+        condition: service_healthy
+
+  cairn-actions-pii:
+    <<: *cairn-service
+    hostname: cairn-actions-pii
+    command: ["actions", "-c", "/etc/cairn/actions/pii_propagation.yml"]
+    depends_on:
+      <<: *cairn-depends
+      broker:
+        condition: service_healthy
+
+  # Rule-based tag + glossary-term propagation over column lineage (rules in deploy/actions/label_propagation.yml).
+  cairn-actions-labels:
+    <<: *cairn-service
+    hostname: cairn-actions-labels
+    command: ["actions", "-c", "/etc/cairn/actions/label_propagation.yml"]
+    depends_on:
+      <<: *cairn-depends
+      broker:
+        condition: service_healthy
+
+  cairn-actions-indexer:
+    <<: *cairn-service
+    hostname: cairn-actions-indexer
+    command: ["actions", "-c", "/etc/cairn/actions/vector_indexer.yml"]
+    depends_on:
+      <<: *cairn-depends
+      broker:
+        condition: service_healthy
+
+  cairn-mcp:
+    <<: *cairn-service
+    hostname: cairn-mcp
+    command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8830"]
+    ports:
+      - "${CAIRN_MAPPED_MCP_PORT:-8830}:8830"
+    healthcheck:
+      <<: *cairn-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8830/health"]
+
+  # ---------------------------------------------------------- Active Metadata layer
+  # Masking middleware between cairn-web and Cairn Core. Must NOT depend on cairn-bootstrap
+  # (bootstrap → frontend → proxy would be a cycle); it starts with the PDP and reads the Cairn Core token
+  # file lazily once cairn-bootstrap has minted it.
+  cairn-core-proxy:
+    <<: *cairn-service
+    hostname: cairn-core-proxy
+    command: ["core-proxy", "--host", "0.0.0.0", "--port", "8890", "--upstream", "http://cairn-core:8080"]
+    environment:
+      <<: *cairn-env
+      # Cairn Core's session-token signing key, used read-only to verify session JWTs and read actorId.
+      CAIRN_SESSION_SIGNING_KEY: ${CAIRN_SESSION_SIGNING_KEY:?set CAIRN_SESSION_SIGNING_KEY in .env}
+    healthcheck:
+      <<: *cairn-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/cairn-healthcheck", "http://localhost:8890/__cairn/health"]
+    depends_on:
+      cairn-postgres:
+        condition: service_healthy
+      cairn-pdp:
+        condition: service_healthy
+      cairn-core:
+        condition: service_healthy
+
+  # Context Agents: mine queries, dbt, BI semantics and run histories into findings + ontology.
+  cairn-context-miner:
+    <<: *cairn-service
+    hostname: cairn-context-miner
+    command: ["context-miner", "--interval", "300"]
+    depends_on:
+      <<: *cairn-depends
+      cairn-core:
+        condition: service_healthy
+
+  # Notification hub fan-out: Slack (Block Kit), Teams (Adaptive Cards), email, in-app.
+  cairn-notifier:
+    <<: *cairn-service
+    hostname: cairn-notifier
+    command: ["notifier", "--interval", "10"]
+    depends_on:
+      <<: *cairn-depends
+
+  # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
+  cairn-consumer-ui:
+    image: ${CAIRN_REGISTRY:-cairn}/consumer-ui:${CAIRN_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/consumer-ui.Dockerfile
+    hostname: cairn-consumer-ui
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/cairn-ui/remoteEntry.js"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [catalog]
+
+  # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
+  edge:
+    image: nginx:1.27-alpine
+    hostname: edge
+    ports:
+      - "${CAIRN_MAPPED_EDGE_PORT:-9000}:8080"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      cairn-web:
+        condition: service_healthy
+      cairn-api:
+        condition: service_healthy
+      cairn-consumer-ui:
+        condition: service_healthy
+    networks: [catalog]
+
+  # ============================================================ simulated private VPC "finance"
+  finance-db:
+    image: postgres:16-alpine
+    hostname: finance-db
+    environment:
+      POSTGRES_USER: finance_admin
+      POSTGRES_PASSWORD: ${FINANCE_DB_ADMIN_PASSWORD:-finance-admin-demo}
+      POSTGRES_DB: finance
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance_admin -d finance"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ./docker/demo-source/init.sql:/docker-entrypoint-initdb.d/00-finance.sql:ro
+    networks: [vpc-finance]
+
+  cairn-remote-agent:
+    image: ${CAIRN_REGISTRY:-cairn}/remote-agent:${CAIRN_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+      args:
+        INGEST_EXTRAS: postgres
+    hostname: cairn-remote-agent
+    restart: unless-stopped
+    environment:
+      CAIRN_AGENT_GATEWAY_URL: http://cairn-gateway:8820
+      CAIRN_AGENT_POOL: ${CAIRN_AGENT_POOL:-finance}
+      # One-time token from: POST /agents/pools/finance/enrollment-tokens (see README quickstart).
+      CAIRN_AGENT_ENROLLMENT_TOKEN: ${CAIRN_AGENT_ENROLLMENT_TOKEN:-}
+      CAIRN_AGENT_STATE_DIR: /var/lib/cairn-agent
+      # Resolved locally for ${FINANCE_PG_PASSWORD} references in recipes; never sent upstream.
+      FINANCE_PG_PASSWORD: reader-demo-only
+    volumes:
+      - ./docker/agent/agent.yml:/etc/cairn-agent/agent.yml:ro
+      - cairn-agent-state:/var/lib/cairn-agent
+    tmpfs:
+      - /tmp/cairn:mode=1777  # default tmpfs is root:root 0755, unwritable for uid 10001
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    depends_on:
+      finance-db:
+        condition: service_healthy
+      cairn-gateway:
+        condition: service_healthy
+    # vpc-finance: reach the private source; vpc-egress: reach ONLY the gateway. No route to Cairn Core.
+    networks: [vpc-finance, vpc-egress]
+
+  # ============================================================ optional in-VPC LLM
+  ollama:
+    image: ollama/ollama:0.6.8
+    hostname: ollama
+    profiles: [ai-local]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [catalog]
+
+networks:
+  catalog:
+    name: cairn_catalog
+  vpc-egress:
+    name: cairn_vpc_egress
+    internal: true
+  vpc-finance:
+    name: cairn_vpc_finance
+    internal: true
+
+volumes:
+  mysqldata:
+  osdata:
+  broker:
+  cairn-pgdata:
+  cairn-bootstrap:
+  cairn-gateway-keys:
+  cairn-agent-state:
+  ollama:

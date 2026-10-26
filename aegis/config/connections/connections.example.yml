@@ -1,7 +1,0 @@
-# Warehouse connections for SQL-sourced monitors (AEGIS_QUALITY_CONNECTIONS).
-# Use a READ-ONLY role; secrets are injected from the environment.
-connections:
-  snowflake_prod:
-    url: snowflake://${SF_USER}:${SF_PASSWORD}@${SF_ACCOUNT}/ANALYTICS?warehouse=AEGIS_WH&role=AEGIS_READONLY
-  demo_postgres:
-    url: postgresql+psycopg://${DEMO_PG_USER}:${DEMO_PG_PASSWORD}@demo-source:5432/finance

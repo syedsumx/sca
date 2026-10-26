@@ -1,0 +1,32 @@
+# cairn-executor pipeline: column-level PII term propagation along fine-grained lineage.
+# Run with: cairn actions -c deploy/actions/pii_propagation.yml
+name: cairn_pii_propagation
+source:
+  type: kafka
+  config:
+    connection:
+      bootstrap: ${CAIRN_KAFKA_BOOTSTRAP:-broker:29092}
+      schema_registry_url: ${CAIRN_SCHEMA_REGISTRY_URL:-http://cairn-core:8080/schema-registry/api/}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+filter:
+  event_type: MetadataChangeLogEvent_v1
+  event:
+    entityType: [dataset, schemaField]
+    aspectName: [schemaMetadata, editableSchemaMetadata, glossaryTerms, upstreamLineage]
+action:
+  type: cairn_pii_propagation
+  config:
+    # Schema: cairn.governance.propagation_action.PropagationConfig
+    max_hops: 5
+    blocking_transforms: [HASH, AGGREGATE, COUNT, ENCRYPT, TOKENIZE, MASK]
+    dry_run: false
+    core_url: ${CAIRN_CORE_URL:-http://cairn-core:8080}
+    core_token: ${CAIRN_CORE_TOKEN}
+datahub:
+  server: ${CAIRN_CORE_URL:-http://cairn-core:8080}
+  token: ${CAIRN_CORE_TOKEN}
+options:
+  retry_count: 5
+  failure_mode: CONTINUE
+  failed_events_dir: /tmp/cairn/failed_events

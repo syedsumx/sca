@@ -1,0 +1,457 @@
+# Default values for cairn.
+#
+# Two layers:
+#   core:   Cairn Core — metadata service, web application, setup job and ingestion executor.
+#   cairn:  the Cairn control plane.
+#
+# Prerequisites (external, managed or self-hosted): MySQL 8, OpenSearch 2.x, Kafka 3.x+, PostgreSQL 16
+# with pgvector (control plane). Secrets:
+#
+#   kubectl create secret generic cairn-core-secrets \
+#     --from-literal=admin-password=$(openssl rand -base64 24) \
+#     --from-literal=system-client-secret=$(openssl rand -hex 32) \
+#     --from-literal=session-signing-key=$(openssl rand -hex 32) \
+#     --from-literal=token-salt=$(openssl rand -hex 32) \
+#     --from-literal=web-secret=$(openssl rand -hex 32) \
+#     --from-literal=db-password='<MySQL password of core.database.user>'
+#   kubectl create secret generic cairn-secrets ...   (see cairn.secrets below)
+
+global:
+  cairn:
+    # Registry/namespace of the Cairn images: <registry>/core, /web, /setup, /executor, /platform.
+    registry: cairn
+    image:
+      # Control-plane image; empty = <registry>/platform.
+      repository: ""
+      tag: ""            # defaults to .Chart.AppVersion (applies to every Cairn image)
+      pullPolicy: IfNotPresent
+    imagePullSecrets: []
+
+# ============================================================================================
+# Cairn Core
+# ============================================================================================
+core:
+  # Set to false to attach the control plane to an existing Cairn Core; then set cairn.core.url,
+  # cairn.core.frontendUrl and cairn.kafka.* explicitly.
+  enabled: true
+
+  # Existing Secret with the Cairn Core credentials (see the kubectl example at the top).
+  secrets:
+    name: cairn-core-secrets
+    adminPasswordKey: admin-password
+    systemClientSecretKey: system-client-secret
+    sessionSigningKeyKey: session-signing-key
+    tokenSaltKey: token-salt
+    webSecretKey: web-secret
+    dbPasswordKey: db-password
+
+  database:          # MySQL 8
+    host: mysql
+    port: 3306
+    name: cairn
+    # The setup job creates the schema: the user needs DDL rights on the database.
+    user: root
+  search:            # OpenSearch 2.x
+    host: opensearch
+    port: 9200
+    useSsl: false
+    username: ""
+    # Key in core.secrets.name holding the search password; empty = no authentication.
+    passwordKey: ""
+  kafka:
+    bootstrap: kafka:9092
+
+  # Authorization: additive keeps the native policies in the chain; authoritative makes the Cairn
+  # authorizer the only one (set cairn.auth.mode=authoritative too).
+  nativePoliciesEnabled: true
+  # ABAC visibility rules also apply to entity pages.
+  viewAuthorizationEnabled: true
+
+  # Optional per-tenant branding (served by the web application).
+  branding:
+    appTitle: ""
+    logoUrl: ""
+    faviconUrl: ""
+
+  api:
+    replicas: 1
+    javaOpts: "-Xms1g -Xmx1g"
+    resources:
+      requests: { cpu: 500m, memory: 1536Mi }
+      limits: { memory: 2560Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  web:
+    replicas: 1
+    javaOpts: "-Xms512m -Xmx512m"
+    # Workspace micro-frontend config. The image ships the default (/cairn workspace); set this to
+    # replace it (mounted at /etc/cairn/mfe.config.yaml). Restart the web pods after changing it.
+    mfeConfigOverride: ""
+    resources:
+      requests: { cpu: 200m, memory: 768Mi }
+      limits: { memory: 1280Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  executor:
+    enabled: true
+    replicas: 1
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { memory: 2Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Runs as a pre-install / pre-upgrade hook: schema, search indices, topics, seed data.
+  setup:
+    backoffLimit: 3
+    activeDeadlineSeconds: 1800
+    resources:
+      requests: { cpu: 200m, memory: 1Gi }
+      limits: { memory: 2Gi }
+
+  # Single host for the UI, the Cairn API, the workspace MFE and remote MCP. The engine's developer
+  # consoles (/openapi/swagger-ui, /openapi/v3/api-docs, /api/graphiql) are answered with 404 through an
+  # ingress-nginx server-snippet (requires allow-snippet-annotations on the controller); with another
+  # controller, block those paths there.
+  ingress:
+    enabled: false
+    className: nginx
+    host: cairn.example.com
+    annotations: {}
+    tls: []
+    blockDeveloperConsoles: true
+
+# ============================================================================================
+# Cairn control plane
+# ============================================================================================
+cairn:
+  # Cairn Core endpoints as seen from inside the cluster. Empty = this release's core / web Services.
+  core:
+    url: ""
+    frontendUrl: ""
+
+  # Kubernetes Secret holding control-plane credentials. Create it yourself (or with ExternalSecrets / Vault):
+  #   kubectl create secret generic cairn-secrets \
+  #     --from-literal=service-token=$(openssl rand -hex 32) \
+  #     --from-literal=core-token=<Cairn access token of the admin account (Settings → Access Tokens)> \
+  #     --from-literal=database-url='postgresql+psycopg://cairn:***@cairn-postgres:5432/cairn' \
+  #     --from-literal=action-link-secret=$(openssl rand -hex 32) \
+  #     --from-literal=embed-signing-secret=$(openssl rand -hex 32) \
+  #     --from-literal=anthropic-api-key=<optional>
+  secrets:
+    name: cairn-secrets
+    serviceTokenKey: service-token
+    coreTokenKey: core-token
+    databaseUrlKey: database-url
+    anthropicApiKeyKey: anthropic-api-key
+    # Active Metadata layer: HMAC secrets for one-click action links (Teams/email) and embed tokens.
+    actionLinkSecretKey: action-link-secret
+    embedSigningSecretKey: embed-signing-secret
+
+  auth:
+    # additive | authoritative  (authoritative requires core.nativePoliciesEnabled=false)
+    mode: additive
+    importNativePolicies: true
+    decisionCacheTtlSeconds: 30
+    rootUsers:
+      - urn:li:corpuser:admin
+
+  kafka:
+    # Empty = core.kafka.bootstrap / this release's core schema registry.
+    bootstrap: ""
+    schemaRegistryUrl: ""
+
+  ai:
+    # anthropic | ollama | none
+    llmProvider: none
+    model: claude-opus-5-5
+    effort: high
+    ollamaUrl: http://ollama:11434
+    # hashing | ollama
+    embeddingProvider: hashing
+    auditPrompts: false
+
+  # ABAC policy bundle (YAML documents) mounted at CAIRN_POLICY_DIR. Empty → the policies baked into the
+  # image (/etc/cairn/config/policies) are used. Alternatively reference an existing ConfigMap.
+  policies:
+    existingConfigMap: ""
+    files: {}
+    #  10-pii.yaml: |
+    #    policies: [...]
+
+  extraEnv: []
+
+  # ============================================================ Active Metadata layer
+  # Public base URL users reach Cairn on (Slack/Teams links, embed snippets, OAuth-style redirects).
+  publicUrl: https://cairn.example.com
+
+  embeds:
+    # Origins allowed to frame Cairn embeds (CSP frame-ancestors) and call the embed API.
+    allowedOrigins: []
+    #  - https://acme.looker.com
+    #  - https://*.online.tableau.com
+    #  - https://app.powerbi.com
+
+  integrations:
+    slack:
+      enabled: false
+      # Secret with the Slack app credentials (see deploy/slack/app-manifest.yaml).
+      existingSecret: cairn-slack
+      botTokenKey: bot-token
+      signingSecretKey: signing-secret
+    teams:
+      enabled: false
+      # Secret with the default Teams Workflows webhook URL (per-domain routes live in Cairn).
+      existingSecret: cairn-teams
+      webhookUrlKey: webhook-url
+    email:
+      enabled: false
+      existingSecret: cairn-smtp
+      smtpUrlKey: smtp-url
+
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile:
+      type: RuntimeDefault
+
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+
+  # -------------------------------------------------------------------------- components
+  api:
+    enabled: true
+    replicas: 2
+    port: 8800
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # Standalone ingress for the API only; core.ingress already routes /cairn/api on the UI host.
+    ingress:
+      enabled: false
+      className: ""
+      host: cairn.example.com
+      path: /cairn/api
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  pdp:
+    enabled: true
+    # The PDP is on the Cairn Core authorization hot path: keep >= 2 replicas.
+    replicas: 2
+    port: 8810
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    pdb:
+      enabled: true
+      minAvailable: 1
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  gateway:
+    enabled: true
+    replicas: 2
+    port: 8820
+    publicUrl: https://cairn-gateway.example.com
+    # The gateway's X25519/Ed25519 identity must be identical on every replica. Provide it as a Secret
+    # (files: gateway_x25519.key, gateway_ed25519.key). If empty, a PVC is used and replicas is forced to 1.
+    keys:
+      existingSecret: ""
+      persistence:
+        size: 64Mi
+        storageClass: ""
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    autoscaling:
+      enabled: true
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # Public (or PrivateLink / VPC endpoint) exposure for remote agents.
+    service:
+      type: ClusterIP
+      annotations: {}
+    ingress:
+      enabled: false
+      className: ""
+      host: cairn-gateway.example.com
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  mcp:
+    enabled: true
+    replicas: 1
+    port: 8830
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  scheduler:
+    enabled: true
+    # Leader election uses a Postgres advisory lock; standby replicas take over within one tick.
+    replicas: 2
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  actions:
+    piiPropagation:
+      enabled: true
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 768Mi }
+    # Rule-based tag/term propagation (edit files/actions/label_propagation.yml for the rules).
+    labelPropagation:
+      enabled: false
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 768Mi }
+    vectorIndexer:
+      enabled: true
+      replicas: 1
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 1Gi }
+
+  # ---------------------------------------------------------------- Active Metadata components
+  # Masking middleware between the web application and Cairn Core. It sits on the UI hot path: keep
+  # >= 2 replicas with a PDB. Stateless; scales horizontally.
+  coreProxy:
+    enabled: true
+    replicas: 2
+    port: 8890
+    # Upstream Cairn Core; empty = cairn.core.url.
+    upstream: ""
+    # Session-token signing key, used read-only to verify session JWTs (actorId claim).
+    # Empty secretRef = core.secrets.name / core.secrets.sessionSigningKeyKey.
+    sessionSigningKey:
+      secretRef: ""
+      secretKey: ""
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 768Mi }
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 70
+    pdb:
+      enabled: true
+      minAvailable: 1
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Context Agents: mine queries, dbt, BI semantics and run histories (findings, drift, ontology).
+  contextMiner:
+    enabled: true
+    replicas: 1
+    intervalSeconds: 300
+    resources:
+      requests: { cpu: 200m, memory: 384Mi }
+      limits: { memory: 1536Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Notification hub fan-out to Slack / Teams / email / in-app.
+  notifier:
+    enabled: true
+    replicas: 1
+    intervalSeconds: 10
+    resources:
+      requests: { cpu: 50m, memory: 192Mi }
+      limits: { memory: 512Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
+  consumerUi:
+    enabled: true
+    replicas: 2
+    port: 8080
+    image:
+      repository: ""   # empty = <global.cairn.registry>/consumer-ui
+      tag: ""            # defaults to .Chart.AppVersion
+      pullPolicy: IfNotPresent
+    resources:
+      requests: { cpu: 20m, memory: 32Mi }
+      limits: { memory: 128Mi }
+    pdb:
+      enabled: true
+      minAvailable: 1
+    # Standalone ingress for /cairn-ui only (core.ingress already routes it). Must share the UI's origin
+    # so the MFE can use the session cookie.
+    ingress:
+      enabled: false
+      className: ""
+      host: cairn.example.com
+      path: /cairn-ui
+      annotations: {}
+      tls: []
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
+  networkPolicy:
+    enabled: true
+    # Pods allowed to call the PDP besides this release's Cairn Core and control plane (e.g. an
+    # external Cairn Core when core.enabled=false). Empty = none.
+    extraPdpClientSelector: {}
+    # Egress for the notifier (Slack / Teams / SMTP over 443/587). Empty = allow any destination on
+    # those ports; restrict with ipBlock / namespaceSelector entries for an egress proxy.
+    notifierEgressTo: []
+    # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
+    apiIngressFrom:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx
+
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    labels: {}
+
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}

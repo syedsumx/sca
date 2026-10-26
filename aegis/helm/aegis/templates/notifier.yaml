@@ -1,6 +1,0 @@
-{{- if .Values.aegis.notifier.enabled }}
-{{- /* No port: drains aegis_notifications and fans out to Slack / Teams / email. */}}
-{{- $n := .Values.aegis.notifier }}
-{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) }}
-{{ include "aegis.deployment" $ctx }}
-{{- end }}

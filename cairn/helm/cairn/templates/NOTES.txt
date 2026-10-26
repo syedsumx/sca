@@ -1,0 +1,54 @@
+Cairn {{ .Chart.AppVersion }} installed as release "{{ .Release.Name }}".
+{{- if .Values.core.enabled }}
+
+Cairn Core:
+  Web      http://{{ include "cairn.fullname" . }}-web:9002{{ if .Values.core.ingress.enabled }}   (public: https://{{ .Values.core.ingress.host }}){{ end }}
+  API      {{ include "cairn.coreUrl" . }}   (internal; not exposed by the ingress)
+  Sign in as "admin" with the password in Secret "{{ .Values.core.secrets.name }}" key "{{ .Values.core.secrets.adminPasswordKey }}".
+  Required Secret "{{ .Values.core.secrets.name }}" keys: {{ .Values.core.secrets.adminPasswordKey }}, {{ .Values.core.secrets.systemClientSecretKey }}, {{ .Values.core.secrets.sessionSigningKeyKey }}, {{ .Values.core.secrets.tokenSaltKey }}, {{ .Values.core.secrets.webSecretKey }}, {{ .Values.core.secrets.dbPasswordKey }}
+  Data stores: MySQL {{ .Values.core.database.host }}:{{ .Values.core.database.port }}/{{ .Values.core.database.name }} · OpenSearch {{ .Values.core.search.host }}:{{ .Values.core.search.port }} · Kafka {{ .Values.core.kafka.bootstrap }}
+{{- end }}
+
+Control plane services:
+{{- if .Values.cairn.api.enabled }}
+  API      http://{{ include "cairn.fullname" . }}-api:{{ .Values.cairn.api.port }}
+{{- end }}
+{{- if .Values.cairn.pdp.enabled }}
+  PDP      http://{{ include "cairn.fullname" . }}-pdp:{{ .Values.cairn.pdp.port }}   (Cairn Core authorizer plugin target)
+{{- end }}
+{{- if .Values.cairn.gateway.enabled }}
+  Gateway  http://{{ include "cairn.fullname" . }}-gateway:{{ .Values.cairn.gateway.port }}   public URL: {{ .Values.cairn.gateway.publicUrl }}
+{{- end }}
+{{- if .Values.cairn.mcp.enabled }}
+  MCP      http://{{ include "cairn.fullname" . }}-mcp:{{ .Values.cairn.mcp.port }}/mcp
+{{- end }}
+
+Authorization mode: {{ .Values.cairn.auth.mode }}
+{{- if and (eq .Values.cairn.auth.mode "authoritative") .Values.core.nativePoliciesEnabled }}
+  ⚠ Set core.nativePoliciesEnabled=false; otherwise the native authorizer can still ALLOW what Cairn
+    denies (the authorizer chain is first-ALLOW-wins).
+{{- end }}
+
+{{- if and .Values.cairn.gateway.enabled (eq .Values.cairn.gateway.keys.existingSecret "") }}
+
+  ⚠ Gateway keys are on a PVC, so the gateway runs as a single replica. For HA, provide
+    cairn.gateway.keys.existingSecret (same identity on every replica).
+{{- end }}
+
+Required Secret "{{ .Values.cairn.secrets.name }}" keys: {{ .Values.cairn.secrets.serviceTokenKey }}, {{ .Values.cairn.secrets.coreTokenKey }}, {{ .Values.cairn.secrets.databaseUrlKey }}, {{ .Values.cairn.secrets.actionLinkSecretKey }}, {{ .Values.cairn.secrets.embedSigningSecretKey }}{{ if eq .Values.cairn.ai.llmProvider "anthropic" }}, {{ .Values.cairn.secrets.anthropicApiKeyKey }}{{ end }}
+  ({{ .Values.cairn.secrets.coreTokenKey }}: an access token of the admin account, created in Settings → Access Tokens after
+  the first start; restart the control plane after adding it.)
+
+Remote agents: install the "cairn-remote-agent" chart inside each private VPC cluster with
+  gateway.url={{ .Values.cairn.gateway.publicUrl }}
+
+Active Metadata layer
+---------------------
+{{- if .Values.cairn.coreProxy.enabled }}
+* Masking middleware: web → {{ include "cairn.fullname" . }}-core-proxy:{{ .Values.cairn.coreProxy.port }} → Cairn Core.
+{{- end }}
+{{- if .Values.cairn.consumerUi.enabled }}
+* Workspace MFE: /cairn-ui/* is served by {{ include "cairn.fullname" . }}-consumer-ui on the SAME host as the UI
+  ({{ if .Values.core.ingress.enabled }}routed by the Cairn ingress{{ else if .Values.cairn.consumerUi.ingress.enabled }}ingress enabled for {{ .Values.cairn.consumerUi.ingress.host }}{{ else }}enable core.ingress or route /cairn-ui in your own ingress{{ end }}).
+{{- end }}
+* Slack: {{ if .Values.cairn.integrations.slack.enabled }}enabled (secret {{ .Values.cairn.integrations.slack.existingSecret }}){{ else }}disabled{{ end }} · Teams: {{ if .Values.cairn.integrations.teams.enabled }}enabled{{ else }}disabled{{ end }} · Embed origins: {{ join ", " .Values.cairn.embeds.allowedOrigins | default "none" }}

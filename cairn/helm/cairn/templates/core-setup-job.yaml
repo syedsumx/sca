@@ -1,0 +1,46 @@
+{{- if .Values.core.enabled }}
+{{- $c := .Values.core }}
+{{- $ctx := dict "root" $ "component" "setup" }}
+# Schema, search indices, topics and seed data. Runs before every install and upgrade; Cairn Core
+# waits for it on start.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ $c.setup.backoffLimit }}
+  activeDeadlineSeconds: {{ $c.setup.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      automountServiceAccountToken: false
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- include "cairn.corePodSecurity" . | nindent 8 }}
+      containers:
+        - name: setup
+          image: {{ include "cairn.namedImage" (dict "root" $ "name" "setup") }}
+          imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+          env:
+            {{- include "cairn.coreEnv" . | nindent 12 }}
+            - name: CAIRN_CORE_API_HOST
+              value: {{ include "cairn.coreHost" . | quote }}
+            - name: CAIRN_CORE_API_PORT
+              value: "8080"
+          resources:
+            {{- toYaml $c.setup.resources | nindent 12 }}
+          securityContext:
+            {{- include "cairn.coreContainerSecurity" . | nindent 12 }}
+{{- end }}

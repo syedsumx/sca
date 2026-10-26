@@ -1,0 +1,31 @@
+# Authorizer plugin config, baked into the cairn/core image next to the jar
+# (<core plugin dir>/auth/config.yml and <core plugin dir>/auth/cairn-authorizer/cairn-authorizer.jar).
+# The plugin directory name must equal the `name` below.
+#
+# Cairn Core env to set alongside:
+#   additive mode      → CAIRN_NATIVE_POLICIES_ENABLED=true   (native policies stay in the chain)
+#   authoritative mode → CAIRN_NATIVE_POLICIES_ENABLED=false  (this plugin is the only authorizer)
+plugins:
+  - name: "cairn-authorizer"
+    type: "authorizer"
+    enabled: "true"
+    params:
+      className: "io.cairn.authorization.CairnAuthorizer"
+      configs:
+        pdpUrl: "${CAIRN_PDP_URL:-http://cairn-pdp:8810}"
+        # Read from the Cairn Core process environment; never put the token in this file.
+        serviceTokenEnv: "CAIRN_SERVICE_TOKEN"
+        mode: "${CAIRN_AUTHZ_MODE:-additive}"
+        connectTimeoutMs: 500
+        requestTimeoutMs: 1500
+        cacheTtlSeconds: 5
+        cacheMaxEntries: 50000
+        resolveResourceAttributes: "true"
+        # Break-glass actors that are always allowed, even if the PDP is down.
+        rootUsers:
+          - "urn:li:corpuser:admin"
+        # Privileges allowed when the PDP is unreachable. Keep this list empty in regulated setups.
+        failOpenPrivileges: []
+        circuitBreaker:
+          failureThreshold: 5
+          openSeconds: 10
