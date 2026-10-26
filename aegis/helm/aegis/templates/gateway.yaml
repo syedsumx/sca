@@ -1,0 +1,80 @@
+{{- if .Values.aegis.gateway.enabled }}
+{{- $gw := .Values.aegis.gateway }}
+{{- $sharedKeys := ne $gw.keys.existingSecret "" }}
+{{- /* Without a shared key Secret the identity lives on a RWO PVC → single replica, no HPA. */}}
+{{- $cfg := $gw }}
+{{- if not $sharedKeys }}
+{{- $cfg = merge (dict "autoscaling" (dict "enabled" false) "pdb" (dict "enabled" false)) (omit $gw "autoscaling" "pdb") }}
+{{- end }}
+{{- $volumes := list }}
+{{- if $sharedKeys }}
+{{- $volumes = list (dict "name" "gateway-keys" "secret" (dict "secretName" $gw.keys.existingSecret "defaultMode" 0400)) }}
+{{- else }}
+{{- $volumes = list (dict "name" "gateway-keys" "persistentVolumeClaim" (dict "claimName" (printf "%s-gateway-keys" (include "aegis.fullname" $)))) }}
+{{- end }}
+{{- $mounts := list (dict "name" "gateway-keys" "mountPath" "/var/lib/aegis/keys" "readOnly" $sharedKeys) }}
+{{- $ctx := dict "root" $ "component" "gateway" "cfg" $cfg "replicas" (ternary $gw.replicas 1 $sharedKeys) "recreate" (not $sharedKeys) "port" (int $gw.port) "args" (list "gateway" "--host" "0.0.0.0" "--port" (toString $gw.port)) "extraVolumes" $volumes "extraVolumeMounts" $mounts }}
+{{ include "aegis.deployment" $ctx }}
+---
+{{ include "aegis.service" (merge (dict "port" $gw.port "type" $gw.service.type "annotations" $gw.service.annotations) $ctx) }}
+{{- with (include "aegis.hpa" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "aegis.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- if not $sharedKeys }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-gateway-keys" (include "aegis.fullname" $) }}
+  labels:
+    {{- include "aegis.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $gw.keys.persistence.storageClass }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $gw.keys.persistence.size }}
+{{- end }}
+{{- if $gw.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "aegis.componentName" $ctx }}
+  labels:
+    {{- include "aegis.componentLabels" $ctx | nindent 4 }}
+  {{- with $gw.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $gw.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with $gw.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ $gw.ingress.host | quote }}
+      http:
+        paths:
+          # Only the agent protocol is exposed; admin endpoints stay on aegis-api.
+          - path: /agents
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "aegis.componentName" $ctx }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

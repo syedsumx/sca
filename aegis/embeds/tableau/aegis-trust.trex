@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Tableau dashboard extension: shows DataHub trust signals (certification, quality, freshness,
+  owners) for the data source behind a dashboard. Replace DATAHUB_HOST with your DataHub origin and
+  URN / TOKEN with the values from DataHub → Workspace → Settings → Embeds (one token per asset).
+  Tableau requires https:// for extension URLs (http://localhost is allowed for testing).
+-->
+<manifest manifest-version="0.1" xmlns="http://www.tableau.com/xml/extension_manifest">
+  <dashboard-extension id="io.aegis.trust" extension-version="0.2.0">
+    <default-locale>en_US</default-locale>
+    <name resource-id="name"/>
+    <description>DataHub trust card: certification, data quality, freshness and owners.</description>
+    <author name="Aegis" email="data-platform@example.com" organization="Aegis" website="https://datahub.io"/>
+    <min-api-version>1.4</min-api-version>
+    <source-location>
+      <url>https://DATAHUB_HOST/aegis/api/embed/v1/frame/card?urn=URN&amp;token=TOKEN</url>
+    </source-location>
+    <icon>iVBORw0KGgoAAAANSUhEUgAAAEYAAABGCAYAAABxLuKEAAAA5UlEQVR42u3ZwQ1CQQhAQRuzCqu1Oo33r2LyWcCdl2wBTLIXuFwkSWrf7Xp/7PDAgAEDBgwYMGDAgAEDBgwYMGDAgAEDpsF7BeYABcwBCJgPKGDeoGwP86ltYb61JUyk7WDORvkLmLNB2sL8MkwWSjuY6EAZX6ctTHSoFShtYKKDrUJpARMdbiVKOUx0wNUopTDRIStQymC6o5TAnIXyV6vNKShLYSKDVn6dEphpKEtgJn2fFjBZm7fRMFl72tEwWVv90TBZN6DRMBnXwvEwGbdlR30wYMCAAQMGDBgwYEpgJEla3hPWq+Zy6VRPeAAAAABJRU5ErkJggg==</icon>
+  </dashboard-extension>
+  <resources>
+    <resource id="name">
+      <text locale="en_US">DataHub Trust</text>
+    </resource>
+  </resources>
+</manifest>

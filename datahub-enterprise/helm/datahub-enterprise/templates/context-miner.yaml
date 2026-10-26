@@ -1,6 +1,0 @@
-{{- if .Values.dhe.contextMiner.enabled }}
-{{- /* No port: incremental miner loop; cursors and findings live in the DHE database. */}}
-{{- $c := .Values.dhe.contextMiner }}
-{{- $ctx := dict "root" $ "component" "context-miner" "cfg" $c "replicas" $c.replicas "args" (list "context-miner" "--interval" (toString $c.intervalSeconds)) }}
-{{ include "dhe.deployment" $ctx }}
-{{- end }}

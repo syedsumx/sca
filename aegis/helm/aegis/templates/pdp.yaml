@@ -1,0 +1,10 @@
+{{- if .Values.aegis.pdp.enabled }}
+{{- $ctx := dict "root" $ "component" "pdp" "cfg" .Values.aegis.pdp "replicas" .Values.aegis.pdp.replicas "port" (int .Values.aegis.pdp.port) "args" (list "pdp" "--host" "0.0.0.0" "--port" (toString .Values.aegis.pdp.port)) }}
+{{ include "aegis.deployment" $ctx }}
+---
+{{ include "aegis.service" (merge (dict "port" .Values.aegis.pdp.port) $ctx) }}
+{{- with (include "aegis.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- end }}

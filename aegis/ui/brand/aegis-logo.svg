@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Aegis">
+  <title>Aegis</title>
+  <path d="M32 4 L56 13 V31 C56 45.5 46 55.5 32 60 C18 55.5 8 45.5 8 31 V13 Z" fill="#533fd1"/>
+  <path d="M32 11 L50 18 V31 C50 42 42.5 50 32 53.8 C21.5 50 14 42 14 31 V18 Z" fill="#6f5ce0"/>
+  <path d="M32 18 L43 44 H37.6 L35.2 38 H28.8 L26.4 44 H21 Z M32 27 L30.4 33 H33.6 Z" fill="#ffffff"/>
+</svg>

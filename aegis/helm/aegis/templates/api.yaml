@@ -1,0 +1,48 @@
+{{- if .Values.aegis.api.enabled }}
+{{- $ctx := dict "root" $ "component" "api" "cfg" .Values.aegis.api "replicas" .Values.aegis.api.replicas "port" (int .Values.aegis.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.aegis.api.port)) }}
+{{ include "aegis.deployment" $ctx }}
+---
+{{ include "aegis.service" (merge (dict "port" .Values.aegis.api.port) $ctx) }}
+{{- with (include "aegis.hpa" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- with (include "aegis.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
+{{- if .Values.aegis.api.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "aegis.componentName" $ctx }}
+  labels:
+    {{- include "aegis.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/rewrite-target: /$2
+    {{- with .Values.aegis.api.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- with .Values.aegis.api.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.aegis.api.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.aegis.api.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ printf "%s(/|$)(.*)" (trimSuffix "/" .Values.aegis.api.ingress.path) }}
+            pathType: ImplementationSpecific
+            backend:
+              service:
+                name: {{ include "aegis.componentName" $ctx }}
+                port:
+                  name: http
+{{- end }}
+{{- end }}

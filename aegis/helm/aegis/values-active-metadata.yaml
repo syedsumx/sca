@@ -1,0 +1,59 @@
+# Overlay: Active Metadata & AI Context layer, fully enabled (UX_ACTIVE_METADATA_SPEC.md Part 8).
+#   helm upgrade --install datahub . -f values.yaml -f values-active-metadata.yaml
+#
+# Prerequisite secrets (in addition to aegis-secrets with action-link-secret / embed-signing-secret):
+#   kubectl create secret generic aegis-slack --from-literal=bot-token=xoxb-… --from-literal=signing-secret=…
+#   kubectl create secret generic aegis-teams --from-literal=webhook-url=https://…logic.azure.com/…
+#   kubectl create secret generic aegis-smtp  --from-literal=smtp-url='smtp://user:pass@smtp.example.com:587?starttls=true'
+aegis:
+  publicUrl: https://aegis.example.com
+
+  embeds:
+    allowedOrigins:
+      - https://acme.looker.com
+      - https://*.online.tableau.com
+      - https://app.powerbi.com
+
+  integrations:
+    slack:
+      enabled: true
+    teams:
+      enabled: true
+    email:
+      enabled: true
+
+  gmsProxy:
+    enabled: true
+    replicas: 3
+    autoscaling:
+      enabled: true
+      minReplicas: 3
+      maxReplicas: 10
+
+  contextMiner:
+    enabled: true
+    intervalSeconds: 300
+
+  notifier:
+    enabled: true
+
+  consumerUi:
+    enabled: true
+    ingress:
+      enabled: true
+      className: nginx
+      host: datahub.example.com
+      path: /aegis-ui
+      tls:
+        - hosts: [datahub.example.com]
+          secretName: datahub-tls
+
+  api:
+    ingress:
+      enabled: true
+      className: nginx
+      host: datahub.example.com
+      path: /aegis/api
+      tls:
+        - hosts: [datahub.example.com]
+          secretName: datahub-tls

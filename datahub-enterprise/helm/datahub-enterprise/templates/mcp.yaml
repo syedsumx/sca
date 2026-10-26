@@ -1,6 +1,0 @@
-{{- if .Values.dhe.mcp.enabled }}
-{{- $ctx := dict "root" $ "component" "mcp" "cfg" .Values.dhe.mcp "replicas" .Values.dhe.mcp.replicas "port" (int .Values.dhe.mcp.port) "args" (list "mcp" "--transport" "streamable-http" "--host" "0.0.0.0" "--port" (toString .Values.dhe.mcp.port)) }}
-{{ include "dhe.deployment" $ctx }}
----
-{{ include "dhe.service" (merge (dict "port" .Values.dhe.mcp.port) $ctx) }}
-{{- end }}

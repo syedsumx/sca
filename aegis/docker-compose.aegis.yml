@@ -1,0 +1,650 @@
+# Aegis: full local stack.
+#
+#   cp .env.example .env            # then edit secrets
+#   docker compose -f docker-compose.aegis.yml up -d
+#   docker compose -f docker-compose.aegis.yml --profile ai-local up -d   # + Ollama
+#
+# Topology (see ARCHITECTURE.md §2.8):
+#   network "datahub"      DataHub core + Aegis control plane
+#   network "vpc-egress"   the ONLY path between the private VPC and the control plane: gateway <-> agent
+#   network "vpc-finance"  simulated customer VPC: remote agent + private source DB (internal, no egress)
+#
+# The DataHub core services mirror upstream docker/quickstart/docker-compose.quickstart-profile.yml
+# (DataHub ${DATAHUB_VERSION}), with token auth enabled and the Aegis authorizer plugin mounted into GMS.
+
+name: aegis
+
+x-mysql-env: &mysql-env
+  EBEAN_DATASOURCE_USERNAME: root
+  EBEAN_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD:-datahub}
+  EBEAN_DATASOURCE_HOST: mysql:3306
+  EBEAN_DATASOURCE_URL: jdbc:mysql://mysql:3306/datahub?verifyServerCertificate=false&useSSL=true&useUnicode=yes&characterEncoding=UTF-8&rewriteBatchedStatements=true&enabledTLSProtocols=TLSv1.2
+  EBEAN_DATASOURCE_DRIVER: com.mysql.jdbc.Driver
+
+x-search-env: &search-env
+  ELASTICSEARCH_HOST: search
+  ELASTICSEARCH_PORT: "9200"
+  ELASTICSEARCH_PROTOCOL: http
+  ELASTICSEARCH_USE_SSL: "false"
+  ELASTICSEARCH_IMPLEMENTATION: opensearch
+  GRAPH_SERVICE_IMPL: elasticsearch
+
+x-kafka-env: &kafka-env
+  KAFKA_BOOTSTRAP_SERVER: broker:29092
+  SCHEMA_REGISTRY_TYPE: INTERNAL
+  KAFKA_SCHEMAREGISTRY_URL: http://datahub-gms:8080/schema-registry/api/
+
+x-auth-env: &auth-env
+  DATAHUB_SYSTEM_CLIENT_SECRET: ${DATAHUB_SYSTEM_CLIENT_SECRET:?set DATAHUB_SYSTEM_CLIENT_SECRET in .env}
+  DATAHUB_TOKEN_SERVICE_SIGNING_KEY: ${DATAHUB_TOKEN_SERVICE_SIGNING_KEY:?set DATAHUB_TOKEN_SERVICE_SIGNING_KEY in .env}
+  DATAHUB_TOKEN_SERVICE_SALT: ${DATAHUB_TOKEN_SERVICE_SALT:?set DATAHUB_TOKEN_SERVICE_SALT in .env}
+
+# ---------------------------------------------------------------- Aegis common
+x-aegis-env: &aegis-env
+  AEGIS_GMS_URL: http://datahub-gms:8080
+  AEGIS_FRONTEND_URL: http://datahub-frontend-react:9002
+  AEGIS_GMS_TOKEN_FILE: /run/aegis/gms_token
+  AEGIS_DATABASE_URL: postgresql+psycopg://aegis:${AEGIS_POSTGRES_PASSWORD:-aegis}@aegis-postgres:5432/aegis
+  AEGIS_SERVICE_TOKEN: ${AEGIS_SERVICE_TOKEN:?set AEGIS_SERVICE_TOKEN in .env}
+  AEGIS_AUTHZ_MODE: ${AEGIS_AUTHZ_MODE:-additive}
+  AEGIS_POLICY_DIR: /etc/aegis/config/policies
+  AEGIS_KAFKA_BOOTSTRAP: broker:29092
+  AEGIS_SCHEMA_REGISTRY_URL: http://datahub-gms:8080/schema-registry/api/
+  AEGIS_GATEWAY_PUBLIC_URL: http://aegis-gateway:8820
+  AEGIS_GATEWAY_KEY_DIR: /var/lib/aegis/keys
+  AEGIS_LLM_PROVIDER: ${AEGIS_LLM_PROVIDER:-none}
+  AEGIS_AI_MODEL: ${AEGIS_AI_MODEL:-claude-opus-5-5}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  AEGIS_OLLAMA_URL: ${AEGIS_OLLAMA_URL:-http://ollama:11434}
+  AEGIS_EMBEDDING_PROVIDER: ${AEGIS_EMBEDDING_PROVIDER:-hashing}
+  AEGIS_ROOT_USERS: urn:li:corpuser:datahub
+  # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
+  AEGIS_PUBLIC_URL: ${AEGIS_PUBLIC_URL:-http://localhost:9000}
+  AEGIS_MASKING_PROXY_ENABLED: "true"   # datahub-frontend talks to GMS through aegis-gms-proxy
+  AEGIS_ACTION_LINK_SECRET: ${AEGIS_ACTION_LINK_SECRET:?set AEGIS_ACTION_LINK_SECRET in .env}
+  AEGIS_EMBED_SIGNING_SECRET: ${AEGIS_EMBED_SIGNING_SECRET:?set AEGIS_EMBED_SIGNING_SECRET in .env}
+  AEGIS_EMBED_ALLOWED_ORIGINS: ${AEGIS_EMBED_ALLOWED_ORIGINS:-}
+  AEGIS_SLACK_BOT_TOKEN: ${AEGIS_SLACK_BOT_TOKEN:-}
+  AEGIS_SLACK_SIGNING_SECRET: ${AEGIS_SLACK_SIGNING_SECRET:-}
+  AEGIS_TEAMS_WEBHOOK_URL: ${AEGIS_TEAMS_WEBHOOK_URL:-}
+  AEGIS_SMTP_URL: ${AEGIS_SMTP_URL:-}
+
+x-aegis-service: &aegis-service
+  image: ${AEGIS_IMAGE:-aegis/platform}:${AEGIS_VERSION:-0.1.0}
+  build:
+    context: .
+    dockerfile: docker/Dockerfile
+  restart: unless-stopped
+  entrypoint: ["/opt/aegis/bin/dumb-init", "--", "/opt/aegis-bootstrap/with-token.sh"]
+  environment:
+    <<: *aegis-env
+  volumes:
+    - ./config:/etc/aegis/config:ro
+    - ./deploy/bootstrap:/opt/aegis-bootstrap:ro
+    - ./deploy/actions:/etc/aegis/actions:ro
+    - aegis-bootstrap:/run/aegis:ro
+  depends_on: &aegis-depends
+    aegis-postgres:
+      condition: service_healthy
+    aegis-bootstrap:
+      condition: service_completed_successfully
+  networks: [datahub]
+  read_only: true
+  tmpfs:
+    - /tmp:mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop: [ALL]
+
+x-aegis-http-healthcheck: &aegis-http-healthcheck
+  interval: 10s
+  timeout: 5s
+  retries: 6
+  start_period: 20s
+
+services:
+  # ============================================================ DataHub core storage
+  mysql:
+    image: mysql:8.2
+    hostname: mysql
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_bin
+      - --default-authentication-plugin=caching_sha2_password
+    environment:
+      MYSQL_DATABASE: datahub
+      MYSQL_USER: datahub
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-datahub}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-datahub}
+      MYSQL_ROOT_HOST: "%"
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h mysql -u $$MYSQL_USER --password=$$MYSQL_PASSWORD"]
+      interval: 2s
+      timeout: 10s
+      retries: 10
+      start_period: 20s
+    volumes:
+      - mysqldata:/var/lib/mysql
+    networks: [datahub]
+    restart: on-failure
+
+  search:
+    image: opensearchproject/opensearch:2.19.3
+    hostname: search
+    environment:
+      discovery.type: single-node
+      DISABLE_SECURITY_PLUGIN: "true"
+      OPENSEARCH_JAVA_OPTS: -Xms768m -Xmx1024m -Dlog4j2.formatMsgNoLookups=true
+      # Local dev: OpenSearch blocks index creation at the 95% disk flood stage, which laptops and
+      # quota-limited sandboxes hit easily. Set to "true" for production-like behaviour.
+      cluster.routing.allocation.disk.threshold_enabled: ${AEGIS_SEARCH_DISK_THRESHOLD_ENABLED:-false}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail 'http://search:9200/_cluster/health?wait_for_status=yellow&timeout=0s'"]
+      interval: 5s
+      timeout: 15s
+      retries: 20
+      start_period: 1m
+    volumes:
+      - osdata:/usr/share/opensearch/data
+    networks: [datahub]
+
+  broker:
+    image: confluentinc/cp-kafka:8.2.2
+    hostname: broker
+    command:
+      - /bin/bash
+      - -c
+      - |
+        file_path="/var/lib/kafka/data/clusterID"
+        if [ ! -f "$$file_path" ]; then
+          /bin/kafka-storage random-uuid > $$file_path
+          kafka-storage format --ignore-formatted -t $$(cat "$$file_path") -c /etc/kafka/kafka.properties
+        fi
+        export CLUSTER_ID=$$(cat "$$file_path")
+        /etc/confluent/docker/run
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_BROKER_ID: "1"
+      KAFKA_PROCESS_ROLES: controller, broker
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:39092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENERS: BROKER://broker:29092,EXTERNAL://broker:9092,CONTROLLER://broker:39092
+      KAFKA_ADVERTISED_LISTENERS: BROKER://broker:29092,EXTERNAL://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: BROKER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,BROKER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_MESSAGE_MAX_BYTES: "5242880"
+      KAFKA_MAX_MESSAGE_BYTES: "5242880"
+      KAFKA_HEAP_OPTS: -Xms512m -Xmx512m
+      KAFKA_CONFLUENT_SUPPORT_METRICS_ENABLE: "false"
+      KAFKA_LOG4J_LOGGERS: org.apache.kafka.image.loader.MetadataLoader=WARN
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-broker-api-versions --bootstrap-server broker:29092 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 12
+      start_period: 1m
+    volumes:
+      - broker:/var/lib/kafka/data
+    networks: [datahub]
+
+  # ============================================================ DataHub core services
+  # Copies the Aegis authorizer plugin (jar + config.yml) into the plugin volume mounted by GMS.
+  # Image: docker/authorizer-plugin.Dockerfile (built by deploy/build-images.sh).
+  authorizer-plugin:
+    image: ${AEGIS_PLUGIN_IMAGE:-aegis/authorizer}:${AEGIS_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/authorizer-plugin.Dockerfile
+    user: "0:0"  # one-shot init writing into a root-owned named volume
+    environment:
+      PLUGIN_DIR: /plugins/auth
+    volumes:
+      - gms-plugins:/plugins
+    network_mode: none
+
+  system-update:
+    image: acryldata/datahub-upgrade:${DATAHUB_VERSION:-v1.8.0}
+    hostname: datahub-system-update
+    command: ["-u", "SystemUpdate"]
+    environment:
+      <<: [*mysql-env, *search-env, *kafka-env, *auth-env]
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: "8080"
+      DATAHUB_PRECREATE_TOPICS: "true"
+      DATAHUB_SQL_SETUP_ENABLED: "true"
+      SCHEMA_REGISTRY_SYSTEM_UPDATE: "true"
+      SPRING_KAFKA_PROPERTIES_AUTO_REGISTER_SCHEMAS: "true"
+      SPRING_KAFKA_PROPERTIES_USE_LATEST_VERSION: "true"
+      USE_CONFLUENT_SCHEMA_REGISTRY: "false"
+      ENTITY_REGISTRY_CONFIG_PATH: /datahub/datahub-gms/resources/entity-registry.yml
+      ENTITY_VERSIONING_ENABLED: "true"
+      ELASTICSEARCH_BUILD_INDICES_CLONE_INDICES: "false"
+      ELASTICSEARCH_INDEX_BUILDER_MAPPINGS_REINDEX: "true"
+      ELASTICSEARCH_INDEX_BUILDER_SETTINGS_REINDEX: "true"
+      ELASTICSEARCH_INDEX_BUILDER_REFRESH_INTERVAL_SECONDS: "3"
+      BACKFILL_BROWSE_PATHS_V2: "true"
+      REPROCESS_DEFAULT_BROWSE_PATHS_V2: "false"
+      PARTITIONS: "3"
+      ZDU_STAGE_10: "true"
+      ZDU_STAGE_20: "true"
+    labels:
+      datahub_setup_job: "true"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+    networks: [datahub]
+
+  datahub-gms:
+    image: acryldata/datahub-gms:${DATAHUB_VERSION:-v1.8.0}
+    hostname: datahub-gms
+    environment:
+      <<: [*mysql-env, *search-env, *kafka-env, *auth-env]
+      DATAHUB_SERVER_TYPE: quickstart
+      DATAHUB_TELEMETRY_ENABLED: "false"
+      ENTITY_REGISTRY_CONFIG_PATH: /datahub/datahub-gms/resources/entity-registry.yml
+      ENTITY_SERVICE_ENABLE_RETENTION: "true"
+      # Aegis branding of the DataHub shell (served by aegis-consumer-ui through the edge).
+      REACT_APP_LOGO_URL: ${AEGIS_LOGO_URL:-/aegis-ui/brand/aegis-logo.svg}
+      REACT_APP_FAVICON_URL: ${AEGIS_FAVICON_URL:-/aegis-ui/brand/favicon.svg}
+      REACT_APP_TITLE: ${AEGIS_APP_TITLE:-Aegis}
+      ENTITY_VERSIONING_ENABLED: "true"
+      ES_BULK_REFRESH_POLICY: NONE
+      ELASTICSEARCH_INDEX_REFRESH_INTERVAL_TIMESERIES_SECONDS: "3"
+      ELASTICSEARCH_INDEX_REFRESH_INTERVAL_USAGE_SECONDS: "3"
+      GRAPH_SERVICE_DIFF_MODE_ENABLED: "true"
+      MAE_CONSUMER_ENABLED: "true"
+      MCE_CONSUMER_ENABLED: "true"
+      PE_CONSUMER_ENABLED: "true"
+      MCL_CONSUMER_BATCH_ENABLED: "true"
+      MCP_CONSUMER_BATCH_ENABLED: "true"
+      UI_INGESTION_ENABLED: "true"
+      STRICT_URN_VALIDATION_ENABLED: "true"
+      THEME_V2_DEFAULT: "true"
+      JAVA_OPTS: -Xms1g -Xmx1g
+      ZDU_STAGE_10: "true"
+      ZDU_STAGE_20: "true"
+      # --- Aegis: token auth is required so Aegis services act as real, auditable principals.
+      METADATA_SERVICE_AUTH_ENABLED: "true"
+      # --- Aegis authorizer. Authoritative mode REQUIRES AUTH_POLICIES_ENABLED=false (see README).
+      AUTH_POLICIES_ENABLED: ${AEGIS_NATIVE_POLICIES_ENABLED:-true}
+      AEGIS_PDP_URL: http://aegis-pdp:8810
+      AEGIS_SERVICE_TOKEN: ${AEGIS_SERVICE_TOKEN:?set AEGIS_SERVICE_TOKEN in .env}
+      AEGIS_AUTHZ_MODE: ${AEGIS_AUTHZ_MODE:-additive}
+      # View authorization makes ABAC visibility rules apply to entity pages too.
+      VIEW_AUTHORIZATION_ENABLED: ${AEGIS_VIEW_AUTHORIZATION_ENABLED:-true}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail http://datahub-gms:8080/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 6
+      start_period: 1m30s
+    ports:
+      - "${DATAHUB_MAPPED_GMS_PORT:-8080}:8080"
+    volumes:
+      - gms-plugins:/etc/datahub/plugins
+    depends_on:
+      system-update:
+        condition: service_completed_successfully
+      authorizer-plugin:
+        condition: service_completed_successfully
+    networks: [datahub]
+
+  datahub-frontend-react:
+    image: acryldata/datahub-frontend-react:${DATAHUB_VERSION:-v1.8.0}
+    hostname: datahub-frontend-react
+    environment:
+      # All UI traffic to GMS goes through the Aegis masking middleware (aegis-gms-proxy).
+      DATAHUB_GMS_HOST: aegis-gms-proxy
+      DATAHUB_GMS_PORT: "8890"
+      # Mounts the Aegis consumer workspace (Module Federation remote) into the DataHub shell.
+      MFE_CONFIG_FILE_PATH: /etc/datahub/mfe/mfe.config.yaml
+      DATAHUB_SECRET: ${DATAHUB_FRONTEND_SECRET:?set DATAHUB_FRONTEND_SECRET in .env}
+      DATAHUB_APP_VERSION: ${DATAHUB_VERSION:-v1.8.0}
+      DATAHUB_PLAY_MEM_BUFFER_SIZE: 10MB
+      DATAHUB_SYSTEM_CLIENT_SECRET: ${DATAHUB_SYSTEM_CLIENT_SECRET}
+      DATAHUB_TRACKING_TOPIC: DataHubUsageEvent_v1
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      METADATA_SERVICE_AUTH_ENABLED: "true"
+      THEME_V2_DEFAULT: "true"
+      JAVA_OPTS: >-
+        -Xms512m -Xmx512m -Dhttp.port=9002 -Dconfig.file=datahub-frontend/conf/application.conf
+        -Djava.security.auth.login.config=datahub-frontend/conf/jaas.conf
+        -Dlogback.configurationFile=datahub-frontend/conf/logback.xml -Dlogback.debug=false
+        -Dpidfile.path=/dev/null
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail http://localhost:9002/admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 1m
+    ports:
+      - "${DATAHUB_MAPPED_FRONTEND_PORT:-9002}:9002"
+    volumes:
+      - ./deploy/mfe/mfe.config.yaml:/etc/datahub/mfe/mfe.config.yaml:ro
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+      aegis-gms-proxy:
+        condition: service_healthy
+    networks: [datahub]
+
+  datahub-actions:
+    image: acryldata/datahub-actions:${DATAHUB_VERSION:-v1.8.0}-slim
+    hostname: actions
+    environment:
+      DATAHUB_GMS_HOST: datahub-gms
+      DATAHUB_GMS_PORT: "8080"
+      DATAHUB_GMS_PROTOCOL: http
+      DATAHUB_SYSTEM_CLIENT_ID: __datahub_system
+      DATAHUB_SYSTEM_CLIENT_SECRET: ${DATAHUB_SYSTEM_CLIENT_SECRET}
+      KAFKA_BOOTSTRAP_SERVER: broker:29092
+      KAFKA_PROPERTIES_SECURITY_PROTOCOL: PLAINTEXT
+      SCHEMA_REGISTRY_URL: http://datahub-gms:8080/schema-registry/api/
+      METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME: MetadataChangeLog_Versioned_v1
+    depends_on:
+      datahub-gms:
+        condition: service_healthy
+    networks: [datahub]
+
+  # ============================================================ Aegis control plane
+  aegis-postgres:
+    image: pgvector/pgvector:pg16
+    hostname: aegis-postgres
+    environment:
+      POSTGRES_USER: aegis
+      POSTGRES_PASSWORD: ${AEGIS_POSTGRES_PASSWORD:-aegis}
+      POSTGRES_DB: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aegis -d aegis"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - aegis-pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/00-aegis.sql:ro
+    networks: [datahub]
+
+  # Mints a DataHub PAT for the Aegis services into the aegis-bootstrap volume (idempotent).
+  aegis-bootstrap:
+    image: python:3.12-slim
+    command: ["python", "/opt/aegis-bootstrap/mint_gms_token.py", "--out", "/run/aegis/gms_token"]
+    environment:
+      AEGIS_FRONTEND_URL: http://datahub-frontend-react:9002
+      AEGIS_GMS_URL: http://datahub-gms:8080
+      DATAHUB_BOOTSTRAP_USER: ${DATAHUB_BOOTSTRAP_USER:-datahub}
+      DATAHUB_BOOTSTRAP_PASSWORD: ${DATAHUB_BOOTSTRAP_PASSWORD:-datahub}
+    volumes:
+      - ./deploy/bootstrap:/opt/aegis-bootstrap:ro
+      - aegis-bootstrap:/run/aegis
+    depends_on:
+      datahub-frontend-react:
+        condition: service_healthy
+    networks: [datahub]
+
+  aegis-pdp:
+    <<: *aegis-service
+    hostname: aegis-pdp
+    command: ["pdp", "--host", "0.0.0.0", "--port", "8810"]
+    healthcheck:
+      <<: *aegis-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/aegis-healthcheck", "http://localhost:8810/health"]
+    # The PDP must start before GMS can authorize non-root users, but needs a GMS token to import
+    # native policies; it tolerates GMS being unavailable at boot and retries the import.
+    depends_on:
+      aegis-postgres:
+        condition: service_healthy
+
+  aegis-api:
+    <<: *aegis-service
+    hostname: aegis-api
+    command: ["api", "--host", "0.0.0.0", "--port", "8800"]
+    ports:
+      - "${AEGIS_MAPPED_API_PORT:-8800}:8800"
+    healthcheck:
+      <<: *aegis-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/aegis-healthcheck", "http://localhost:8800/health"]
+    depends_on:
+      <<: *aegis-depends
+      aegis-pdp:
+        condition: service_healthy
+
+  aegis-gateway:
+    <<: *aegis-service
+    hostname: aegis-gateway
+    command: ["gateway", "--host", "0.0.0.0", "--port", "8820"]
+    volumes:
+      - ./config:/etc/aegis/config:ro
+      - ./deploy/bootstrap:/opt/aegis-bootstrap:ro
+      - aegis-bootstrap:/run/aegis:ro
+      - aegis-gateway-keys:/var/lib/aegis/keys
+    healthcheck:
+      <<: *aegis-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/aegis-healthcheck", "http://localhost:8820/health"]
+    # The gateway is the only control-plane service reachable from the VPC side.
+    networks: [datahub, vpc-egress]
+
+  aegis-scheduler:
+    <<: *aegis-service
+    hostname: aegis-scheduler
+    command: ["scheduler"]
+    depends_on:
+      <<: *aegis-depends
+      datahub-gms:
+        condition: service_healthy
+
+  aegis-actions-pii:
+    <<: *aegis-service
+    hostname: aegis-actions-pii
+    command: ["actions", "-c", "/etc/aegis/actions/pii_propagation.yml"]
+    depends_on:
+      <<: *aegis-depends
+      broker:
+        condition: service_healthy
+
+  # Rule-based tag + glossary-term propagation over column lineage (rules in deploy/actions/label_propagation.yml).
+  aegis-actions-labels:
+    <<: *aegis-service
+    hostname: aegis-actions-labels
+    command: ["actions", "-c", "/etc/aegis/actions/label_propagation.yml"]
+    depends_on:
+      <<: *aegis-depends
+      broker:
+        condition: service_healthy
+
+  aegis-actions-indexer:
+    <<: *aegis-service
+    hostname: aegis-actions-indexer
+    command: ["actions", "-c", "/etc/aegis/actions/vector_indexer.yml"]
+    depends_on:
+      <<: *aegis-depends
+      broker:
+        condition: service_healthy
+
+  aegis-mcp:
+    <<: *aegis-service
+    hostname: aegis-mcp
+    command: ["mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8830"]
+    ports:
+      - "${AEGIS_MAPPED_MCP_PORT:-8830}:8830"
+    healthcheck:
+      <<: *aegis-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/aegis-healthcheck", "http://localhost:8830/health"]
+
+  # ---------------------------------------------------------- Active Metadata layer
+  # Masking middleware between datahub-frontend and GMS. Must NOT depend on aegis-bootstrap
+  # (bootstrap → frontend → proxy would be a cycle); it starts with the PDP and reads the GMS token
+  # file lazily once aegis-bootstrap has minted it.
+  aegis-gms-proxy:
+    <<: *aegis-service
+    hostname: aegis-gms-proxy
+    command: ["gms-proxy", "--host", "0.0.0.0", "--port", "8890", "--upstream", "http://datahub-gms:8080"]
+    environment:
+      <<: *aegis-env
+      # DataHub's session-token signing key, used read-only to verify session JWTs and read actorId.
+      AEGIS_SESSION_SIGNING_KEY: ${DATAHUB_TOKEN_SERVICE_SIGNING_KEY:?set DATAHUB_TOKEN_SERVICE_SIGNING_KEY in .env}
+    healthcheck:
+      <<: *aegis-http-healthcheck
+      test: ["CMD", "python", "/usr/local/bin/aegis-healthcheck", "http://localhost:8890/__aegis/health"]
+    depends_on:
+      aegis-postgres:
+        condition: service_healthy
+      aegis-pdp:
+        condition: service_healthy
+      datahub-gms:
+        condition: service_healthy
+
+  # Context Agents: mine queries, dbt, BI semantics and run histories into findings + ontology.
+  aegis-context-miner:
+    <<: *aegis-service
+    hostname: aegis-context-miner
+    command: ["context-miner", "--interval", "300"]
+    depends_on:
+      <<: *aegis-depends
+      datahub-gms:
+        condition: service_healthy
+
+  # Notification hub fan-out: Slack (Block Kit), Teams (Adaptive Cards), email, in-app.
+  aegis-notifier:
+    <<: *aegis-service
+    hostname: aegis-notifier
+    command: ["notifier", "--interval", "10"]
+    depends_on:
+      <<: *aegis-depends
+
+  # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
+  aegis-consumer-ui:
+    image: ${AEGIS_CONSUMER_UI_IMAGE:-aegis/consumer-ui}:${AEGIS_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/consumer-ui.Dockerfile
+    hostname: aegis-consumer-ui
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/aegis-ui/remoteEntry.js"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+    networks: [datahub]
+
+  # Single origin for the UI + Aegis API (+ remote MCP) on http://localhost:9000
+  edge:
+    image: nginx:1.27-alpine
+    hostname: edge
+    ports:
+      - "${AEGIS_MAPPED_EDGE_PORT:-9000}:8080"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    tmpfs:
+      - /tmp
+    read_only: true
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      datahub-frontend-react:
+        condition: service_healthy
+      aegis-api:
+        condition: service_healthy
+      aegis-consumer-ui:
+        condition: service_healthy
+    networks: [datahub]
+
+  # ============================================================ simulated private VPC "finance"
+  finance-db:
+    image: postgres:16-alpine
+    hostname: finance-db
+    environment:
+      POSTGRES_USER: finance_admin
+      POSTGRES_PASSWORD: ${FINANCE_DB_ADMIN_PASSWORD:-finance-admin-demo}
+      POSTGRES_DB: finance
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U finance_admin -d finance"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    volumes:
+      - ./docker/demo-source/init.sql:/docker-entrypoint-initdb.d/00-finance.sql:ro
+    networks: [vpc-finance]
+
+  aegis-remote-agent:
+    image: ${AEGIS_AGENT_IMAGE:-aegis/remote-agent}:${AEGIS_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/agent.Dockerfile
+      args:
+        INGEST_EXTRAS: postgres
+    hostname: aegis-remote-agent
+    restart: unless-stopped
+    environment:
+      AEGIS_AGENT_GATEWAY_URL: http://aegis-gateway:8820
+      AEGIS_AGENT_POOL: ${AEGIS_AGENT_POOL:-finance}
+      # One-time token from: POST /agents/pools/finance/enrollment-tokens (see README quickstart).
+      AEGIS_AGENT_ENROLLMENT_TOKEN: ${AEGIS_AGENT_ENROLLMENT_TOKEN:-}
+      AEGIS_AGENT_STATE_DIR: /var/lib/aegis-agent
+      # Resolved locally for ${FINANCE_PG_PASSWORD} references in recipes; never sent upstream.
+      FINANCE_PG_PASSWORD: reader-demo-only
+    volumes:
+      - ./docker/agent/agent.yml:/etc/aegis-agent/agent.yml:ro
+      - aegis-agent-state:/var/lib/aegis-agent
+    tmpfs:
+      - /tmp/aegis:mode=1777  # default tmpfs is root:root 0755, unwritable for uid 10001
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    depends_on:
+      finance-db:
+        condition: service_healthy
+      aegis-gateway:
+        condition: service_healthy
+    # vpc-finance: reach the private source; vpc-egress: reach ONLY the gateway. No route to GMS.
+    networks: [vpc-finance, vpc-egress]
+
+  # ============================================================ optional in-VPC LLM
+  ollama:
+    image: ollama/ollama:0.6.8
+    hostname: ollama
+    profiles: [ai-local]
+    volumes:
+      - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [datahub]
+
+networks:
+  datahub:
+    name: aegis_datahub
+  vpc-egress:
+    name: aegis_vpc_egress
+    internal: true
+  vpc-finance:
+    name: aegis_vpc_finance
+    internal: true
+
+volumes:
+  mysqldata:
+  osdata:
+  broker:
+  gms-plugins:
+  aegis-pgdata:
+  aegis-bootstrap:
+  aegis-gateway-keys:
+  aegis-agent-state:
+  ollama:

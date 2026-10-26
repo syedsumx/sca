@@ -1,0 +1,23 @@
+# Certification / approval workflow templates (AEGIS_WORKFLOW_DIR).
+templates:
+  standard-certification:
+    kind: CERTIFICATION
+    reviewer_groups: [owners, urn:li:corpGroup:data-stewards]
+    quorum: 1
+    validity_days: 180
+    sla_hours: 72
+    checks: [has_owner, has_description, "documented_columns:0.8", no_open_incidents]
+  regulated-certification:
+    kind: CERTIFICATION
+    reviewer_groups: [urn:li:corpGroup:data-stewards, urn:li:corpGroup:compliance]
+    quorum: 2
+    validity_days: 90
+    sla_hours: 48
+    checks: [has_owner, has_description, "documented_columns:1.0", no_open_incidents]
+    auto_revoke_on_critical_dq: true
+  ai-documentation:
+    kind: DOCUMENTATION
+    reviewer_groups: [owners, urn:li:corpGroup:data-stewards]
+    quorum: 1
+    validity_days: null
+    checks: []

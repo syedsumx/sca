@@ -1,0 +1,39 @@
+# datahub-actions pipeline: keep the Aegis semantic (pgvector) index fresh from MCL.
+# Run with: aegis actions -c deploy/actions/vector_indexer.yml
+name: aegis_vector_indexer
+source:
+  type: kafka
+  config:
+    connection:
+      bootstrap: ${AEGIS_KAFKA_BOOTSTRAP:-broker:29092}
+      schema_registry_url: ${AEGIS_SCHEMA_REGISTRY_URL:-http://datahub-gms:8080/schema-registry/api/}
+    topic_routes:
+      mcl: ${METADATA_CHANGE_LOG_VERSIONED_TOPIC_NAME:-MetadataChangeLog_Versioned_v1}
+filter:
+  event_type: MetadataChangeLogEvent_v1
+  event:
+    entityType: [dataset, dashboard, chart, dataJob, dataFlow, mlModel, glossaryTerm, domain, dataProduct]
+    aspectName:
+      - datasetProperties
+      - editableDatasetProperties
+      - schemaMetadata
+      - editableSchemaMetadata
+      - globalTags
+      - glossaryTerms
+      - domains
+      - ownership
+      - dashboardInfo
+      - chartInfo
+      - status
+action:
+  type: aegis_vector_indexer
+  config:
+    database_url: ${AEGIS_DATABASE_URL}
+    embedding_provider: ${AEGIS_EMBEDDING_PROVIDER:-hashing}
+datahub:
+  server: ${AEGIS_GMS_URL:-http://datahub-gms:8080}
+  token: ${AEGIS_GMS_TOKEN}
+options:
+  retry_count: 5
+  failure_mode: CONTINUE
+  failed_events_dir: /tmp/aegis/failed_events

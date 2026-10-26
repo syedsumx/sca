@@ -1,6 +1,0 @@
-{{- if .Values.dhe.notifier.enabled }}
-{{- /* No port: drains dhe_notifications and fans out to Slack / Teams / email. */}}
-{{- $n := .Values.dhe.notifier }}
-{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) }}
-{{ include "dhe.deployment" $ctx }}
-{{- end }}

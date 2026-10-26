@@ -1,0 +1,6 @@
+{{- if .Values.aegis.mcp.enabled }}
+{{- $ctx := dict "root" $ "component" "mcp" "cfg" .Values.aegis.mcp "replicas" .Values.aegis.mcp.replicas "port" (int .Values.aegis.mcp.port) "args" (list "mcp" "--transport" "streamable-http" "--host" "0.0.0.0" "--port" (toString .Values.aegis.mcp.port)) }}
+{{ include "aegis.deployment" $ctx }}
+---
+{{ include "aegis.service" (merge (dict "port" .Values.aegis.mcp.port) $ctx) }}
+{{- end }}

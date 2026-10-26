@@ -1,0 +1,20 @@
+# DataHub micro-frontend config for the Aegis consumer workspace.
+# datahub-frontend reads it once at startup (MFE_CONFIG_FILE_PATH) and serves it with a 5-minute
+# browser cache: restart datahub-frontend after editing.
+#
+# remoteEntry is same-origin (served by aegis-consumer-ui behind the edge proxy / ingress at /aegis-ui/),
+# so the workspace can call /api/v2/graphql and /aegis/api/* with the user's DataHub session cookie.
+# Keep in sync with ui/mfe.config.yaml.
+topLevelMenuTitle: Workspace
+subNavigationMode: false
+loadTimeoutMs: 30000
+microFrontends:
+  - id: AegisWorkspace
+    label: Workspace
+    path: /aegis
+    remoteEntry: /aegis-ui/remoteEntry.js
+    module: aegisConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Compass

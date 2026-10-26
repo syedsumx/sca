@@ -1,0 +1,10 @@
+Aegis remote agent "{{ include "agent.fullname" . }}" (pool: {{ .Values.pool }}) deployed.
+
+  Gateway: {{ .Values.gateway.url }}
+  The agent opens no ports; it enrols with the one-time token, then authenticates with its own keys
+  stored in {{ if .Values.state.persistence.enabled }}PVC {{ include "agent.fullname" . }}-state{{ else }}an emptyDir (re-enrols after every restart!){{ end }}.
+
+Check enrolment:
+  kubectl logs deploy/{{ include "agent.fullname" . }} | grep -i enrol
+
+Route ingestion to this pool by setting the ingestion source's executor id to "{{ .Values.pool }}".
