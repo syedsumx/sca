@@ -94,8 +94,8 @@ export function DiscoverPage() {
     );
     const bookmarks = useBookmarks();
     const recent = useDheQuery<RecentItem[]>('/collab/recent', (c, signal) => c.recent(6, { signal }));
-    const products = useDheQuery<ProductCard[]>('/marketplace/products?sort=popular', (c, signal) =>
-        c.listProducts({ sort: 'popular' }, { signal }),
+    const products = useDheQuery<ProductCard[]>('/marketplace/products?sort=consumers', (c, signal) =>
+        c.listProducts({ sort: 'consumers' }, { signal }),
     );
     const activity = useDheQuery<ActivityItem[]>('/collab/activity', (c, signal) => c.activity(8, { signal }));
     const name = session.config?.user.display_name?.split(' ')[0];

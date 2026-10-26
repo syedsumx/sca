@@ -166,7 +166,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 "teams": bool(cfg.teams_webhook_url),
                 "email": bool(cfg.smtp_url),
                 "embeds": bool(cfg.embed_signing_secret),
-                "masking_proxy": bool(cfg.session_signing_key),
+                "masking_proxy": cfg.masking_proxy_enabled or bool(cfg.session_signing_key),
             },
         }
 

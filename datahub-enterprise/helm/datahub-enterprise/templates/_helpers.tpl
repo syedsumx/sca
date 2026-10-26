@@ -118,6 +118,8 @@ app.kubernetes.io/component: {{ .component }}
 {{- end }}
 - name: DHE_PUBLIC_URL
   value: {{ .Values.dhe.publicUrl | quote }}
+- name: DHE_MASKING_PROXY_ENABLED
+  value: {{ .Values.dhe.gmsProxy.enabled | quote }}
 - name: DHE_EMBED_ALLOWED_ORIGINS
   value: {{ join "," .Values.dhe.embeds.allowedOrigins | quote }}
 - name: DHE_ACTION_LINK_SECRET

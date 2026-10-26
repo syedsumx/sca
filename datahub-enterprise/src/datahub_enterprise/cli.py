@@ -76,31 +76,12 @@ def cmd_scheduler(a) -> None:
     Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions).run_forever()
 
 
-def _every(seconds: float, fn, name: str) -> None:
-    import threading
-
-    log = logging.getLogger(f"dhe.{name}")
-
-    def loop() -> None:
-        while True:
-            time.sleep(seconds)
-            try:
-                fn()
-            except Exception:
-                log.exception("%s failed", name)
-
-    threading.Thread(target=loop, daemon=True, name=name).start()
-
-
 def cmd_gms_proxy(a) -> None:
     """Masking reverse proxy in the datahub-frontend → GMS path."""
     from datahub_enterprise.gmsproxy.proxy import MaskingService, ProxyIdentity, create_proxy_app
 
     s = _services(with_gateway=False, with_ai=False)
-    s.start_background()
-    # Personas/purposes are edited through `dhe api`; pick up changes from the shared database.
-    _every(a.reload_interval, s.personas.reload, "persona-reload")
-    _every(a.reload_interval, lambda: s.pdp.set_bundle(s.policy_repo.latest() or s.pdp.bundle), "bundle-reload")
+    s.start_background(layer_reload_interval=a.reload_interval)
     identity = ProxyIdentity(s.settings.active.session_signing_key, a.upstream)
     app = create_proxy_app(a.upstream, MaskingService(s.pdp, s.attributes), identity, a.timeout)
     _serve(app, a.host, a.port)
@@ -224,7 +205,7 @@ def build_parser() -> argparse.ArgumentParser:
     gp = http("gms-proxy", 8890, cmd_gms_proxy, "PII-masking reverse proxy between datahub-frontend and GMS")
     gp.add_argument("--upstream", default=os.environ.get("DHE_GMS_URL", "http://localhost:8080"))
     gp.add_argument("--timeout", type=float, default=120.0)
-    gp.add_argument("--reload-interval", type=float, default=30.0)
+    gp.add_argument("--reload-interval", type=float, default=10.0)
 
     cm = sub.add_parser("context-miner", help="context-mining worker (queries, dbt, BI, runs → findings)")
     cm.add_argument("--interval", type=int, default=300)

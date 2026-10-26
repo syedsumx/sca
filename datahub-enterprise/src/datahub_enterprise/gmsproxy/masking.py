@@ -133,6 +133,8 @@ def build_plan(obligations: list[dict], resource: dict) -> DatasetPlan:
             plan.mask_queries = True
             if params.get("purpose"):
                 plan.policies.add(f"purpose:{params['purpose']}")
+            elif ob.get("policy_id"):
+                plan.policies.add(ob["policy_id"])
             # Several purposes may hit the same dataset: the strongest strategy wins.
             if chosen is None or _STRATEGY_STRENGTH.get(strategy, 0) > _STRATEGY_STRENGTH.get(chosen, 0):
                 chosen = strategy

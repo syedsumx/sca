@@ -204,6 +204,9 @@ class InMemoryGraph:
         for mcp in mcps:
             self.emitted.append(mcp)
             key = (mcp["entityUrn"], mcp["aspectName"])
+            if mcp.get("changeType") == "PATCH":
+                self.aspects[key] = _apply_keyed_patch(self.aspects.get(key), json.loads(mcp["aspect"]["value"]))
+                continue
             value = aspect_value(mcp)
             if "timestampMillis" in value:
                 self.timeseries.setdefault(key, []).insert(0, value)
@@ -227,3 +230,44 @@ class InMemoryGraph:
         if self.graphql_handler is None:
             return {}
         return self.graphql_handler(query, variables or {})
+
+
+# Keyed arrays in DataHub's patch semantics: segment after the array name is the element's id.
+_PATCH_KEYS = {"editableSchemaFieldInfo": "fieldPath", "terms": "urn", "tags": "tag"}
+
+
+def _apply_keyed_patch(aspect: Optional[dict], ops: list[dict]) -> dict:
+    """Minimal GMS-compatible JSON-patch for keyed arrays (``editableSchemaMetadata`` labels)."""
+    doc = json.loads(json.dumps(aspect or {}))
+    for op in ops:
+        segs = [p.replace("~1", "/").replace("~0", "~") for p in op["path"].split("/")[1:]]
+        node: Any = doc
+        i = 0
+        while i < len(segs):
+            seg, last = segs[i], i == len(segs) - 1
+            if seg in _PATCH_KEYS and i + 1 < len(segs):
+                items = node.setdefault(seg, [])
+                key, ident = _PATCH_KEYS[seg], segs[i + 1]
+                found = next((x for x in items if x.get(key) == ident), None)
+                if i + 1 == len(segs) - 1:
+                    if op["op"] == "remove":
+                        node[seg] = [x for x in items if x.get(key) != ident]
+                    elif found is None:
+                        items.append(op["value"])
+                    else:
+                        items[items.index(found)] = op["value"]
+                    break
+                if found is None:
+                    found = {key: ident}
+                    items.append(found)
+                node, i = found, i + 2
+                continue
+            if last:
+                if op["op"] == "remove":
+                    node.pop(seg, None)
+                else:
+                    node[seg] = op["value"]
+                break
+            node = node.setdefault(seg, {})
+            i += 1
+    return doc

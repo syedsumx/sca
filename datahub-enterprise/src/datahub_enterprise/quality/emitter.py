@@ -33,6 +33,22 @@ _INCIDENT_TYPE = {
 _RESULT_TYPE = {"PASS": "SUCCESS", "WARN": "SUCCESS", "FAIL": "FAILURE", "ERROR": "ERROR", "TRAINING": "INIT"}
 
 _SEVERITY = {"LOW": "LOW", "MEDIUM": "MEDIUM", "HIGH": "HIGH", "CRITICAL": "HIGH"}
+# assertionRunSummary field + AssertionStatus per run-event result type.
+_SUMMARY = {"SUCCESS": ("lastPassedAtMillis", "PASSING"), "FAILURE": ("lastFailedAtMillis", "FAILING"),
+            "ERROR": ("lastErroredAtMillis", "ERROR"), "INIT": ("lastInitializedAtMillis", "INIT")}
+
+
+def run_summary(current: Optional[dict], ev: Optional[Evaluation], now: int) -> dict:
+    """``assertionRunSummary`` after ``ev`` (or the initial summary when ``ev`` is None)."""
+    summary = dict(current or {})
+    if ev is None:
+        summary.setdefault("lastInitializedAtMillis", now)
+        summary.setdefault("assertionStatus", "INIT")
+        return summary
+    field, status = _SUMMARY[_RESULT_TYPE[ev.status]]
+    summary[field] = max(int(summary.get(field) or 0), ev.ts_ms)
+    summary["assertionStatus"] = status
+    return summary
 
 _PRIORITY = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
@@ -176,4 +192,5 @@ __all__ = [
     "now_ms",
     "removal_mcps",
     "run_event_mcp",
+    "run_summary",
 ]

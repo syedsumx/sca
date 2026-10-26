@@ -18,10 +18,10 @@ from typing import Callable, Iterable, Optional, Sequence
 from datahub_enterprise.common.gms import MetadataGraph
 from datahub_enterprise.common.proposals import (
     DHE_ACTOR,
-    audit_stamp,
+    field_label_op,
     glossary_term_association,
-    make_mcp,
     parse_schema_field_urn,
+    patch_mcp,
     schema_field_urn,
 )
 
@@ -221,15 +221,20 @@ query dheDownstreams($urn: String!) {
 class GraphLineage:
     """Column-level lineage from GMS: downstream datasets via graph, edges via upstreamLineage."""
 
-    def __init__(self, graph: MetadataGraph):
+    def __init__(self, graph: MetadataGraph, hints: Optional[dict[str, set[str]]] = None):
+        """``hints``: upstream dataset → downstream datasets already known to the caller (e.g. from the
+        ``upstreamLineage`` change being processed), merged with the graph index, which is updated
+        asynchronously and may not have the newest edges yet."""
         self.graph = graph
+        self.hints = hints or {}
         self._downstream_cache: dict[str, list[str]] = {}
 
     def downstream_datasets(self, dataset_urn: str) -> list[str]:
         if dataset_urn not in self._downstream_cache:
             data = self.graph.graphql(_DOWNSTREAMS_QUERY, {"urn": dataset_urn})
             rels = (((data.get("entity") or {}).get("relationships") or {}).get("relationships") or [])
-            self._downstream_cache[dataset_urn] = [r["entity"]["urn"] for r in rels if r.get("entity")]
+            found = [r["entity"]["urn"] for r in rels if r.get("entity")]
+            self._downstream_cache[dataset_urn] = found + sorted(self.hints.get(dataset_urn, set()) - set(found))
         return self._downstream_cache[dataset_urn]
 
     def __call__(self, field_urn: str) -> list[FieldEdge]:
@@ -254,14 +259,23 @@ def _field_info(esm: dict, field_path: str) -> dict:
     return info
 
 
+def _field_labels(esm: Optional[dict], field_path: str) -> list[dict]:
+    for info in (esm or {}).get("editableSchemaFieldInfo", []):
+        if info.get("fieldPath") == field_path:
+            return list((info.get("glossaryTerms") or {}).get("terms", [])) + list(
+                (info.get("globalTags") or {}).get("tags", []))
+    return []
+
+
 def apply_terms_mcps(
     graph: MetadataGraph,
     assignments: Sequence[tuple[str, str, str, dict[str, str]]],
     actor: str = DHE_ACTOR,
 ) -> list[dict]:
-    """Build ``editableSchemaMetadata`` MCPs for ``(field_urn, term, source, sourceDetail)``.
+    """``editableSchemaMetadata`` PATCH proposals adding ``(field_urn, term, source, sourceDetail)``.
 
-    Read-modify-write per dataset; existing terms (manual or propagated) are preserved.
+    Labels already on the field (manual or propagated) are skipped; everything else on the aspect is
+    left to GMS, which applies the patch atomically.
     """
     by_dataset: dict[str, list[tuple[str, str, str, dict]]] = {}
     for field_urn, term, source, detail in assignments:
@@ -269,20 +283,14 @@ def apply_terms_mcps(
         by_dataset.setdefault(ds, []).append((path, term, source, detail))
     mcps = []
     for ds, items in by_dataset.items():
-        esm = graph.get_aspect(ds, "editableSchemaMetadata") or {}
-        changed = False
+        esm = graph.get_aspect(ds, "editableSchemaMetadata")
+        ops = []
         for path, term, source, detail in items:
-            info = _field_info(esm, path)
-            terms = info.setdefault("glossaryTerms", {"terms": [], "auditStamp": audit_stamp(actor)})
-            if any(t.get("urn") == term for t in terms.get("terms", [])):
+            if any(a.get("urn") == term for a in _field_labels(esm, path)):
                 continue
-            terms.setdefault("terms", []).append(glossary_term_association(term, actor, source, detail))
-            terms["auditStamp"] = audit_stamp(actor)
-            changed = True
-        if changed:
-            esm.setdefault("created", audit_stamp(actor))
-            esm["lastModified"] = audit_stamp(actor)
-            mcps.append(make_mcp(ds, "editableSchemaMetadata", esm, system_properties={"dhe_propagated": "true"}))
+            ops.append(field_label_op("add", path, term, glossary_term_association(term, actor, source, detail)))
+        if ops:
+            mcps.append(patch_mcp(ds, "editableSchemaMetadata", ops, system_properties={"dhe_propagated": "true"}))
     return mcps
 
 
@@ -291,23 +299,15 @@ def revert_propagation_mcps(graph: MetadataGraph, dataset_urns: Iterable[str], o
     mcps = []
     for ds in dataset_urns:
         esm = graph.get_aspect(ds, "editableSchemaMetadata")
-        if not esm:
-            continue
-        changed = False
-        for info in esm.get("editableSchemaFieldInfo", []):
-            terms = (info.get("glossaryTerms") or {}).get("terms")
-            if not terms:
-                continue
-            keep = [t for t in terms if not (
-                t.get("urn") == term
-                and (t.get("attribution") or {}).get("source") == PROPAGATION_SOURCE
-                and (t.get("attribution") or {}).get("sourceDetail", {}).get("origin") == origin_field)]
-            if len(keep) != len(terms):
-                info["glossaryTerms"]["terms"] = keep
-                changed = True
-        if changed:
-            esm["lastModified"] = audit_stamp(DHE_ACTOR)
-            mcps.append(make_mcp(ds, "editableSchemaMetadata", esm, system_properties={"dhe_propagated": "true"}))
+        ops = []
+        for info in (esm or {}).get("editableSchemaFieldInfo", []):
+            for t in (info.get("glossaryTerms") or {}).get("terms", []):
+                attr = t.get("attribution") or {}
+                if (t.get("urn") == term and attr.get("source") == PROPAGATION_SOURCE
+                        and (attr.get("sourceDetail") or {}).get("origin") == origin_field):
+                    ops.append(field_label_op("remove", info["fieldPath"], term))
+        if ops:
+            mcps.append(patch_mcp(ds, "editableSchemaMetadata", ops, system_properties={"dhe_propagated": "true"}))
     return mcps
 
 

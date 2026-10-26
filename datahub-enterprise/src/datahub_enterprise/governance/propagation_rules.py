@@ -33,14 +33,19 @@ from pydantic import BaseModel, Field, field_validator
 from datahub_enterprise.common.gms import GmsClient, MetadataGraph
 from datahub_enterprise.common.proposals import (
     DHE_ACTOR,
-    audit_stamp,
+    field_label_op,
     glossary_term_association,
-    make_mcp,
     parse_schema_field_urn,
+    patch_mcp,
     schema_field_urn,
 )
-from datahub_enterprise.governance.pii import GraphLineage, _field_info, plan_propagation
-from datahub_enterprise.governance.propagation_action import TRIGGER_ASPECTS, _aspect_from_mcl
+from datahub_enterprise.governance.pii import GraphLineage, plan_propagation
+from datahub_enterprise.governance.propagation_action import (
+    TRIGGER_ASPECTS,
+    _aspect_from_mcl,
+    lineage_hints,
+    schedule_recheck,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +86,7 @@ class PropagationRule(BaseModel):
 class RulesConfig(BaseModel):
     rules: list[PropagationRule] = Field(default_factory=list)
     dry_run: bool = False
+    recheck_seconds: float = 30.0   # see PropagationConfig.recheck_seconds
     gms_url: Optional[str] = None
     gms_token: Optional[str] = None
 
@@ -110,60 +116,52 @@ def rule_origins(rule: PropagationRule, dataset_urn: str, aspect: dict, list_key
 
 def apply_labels_mcps(graph: MetadataGraph, assignments: list[tuple[str, str, str, dict]],
                       actor: str = DHE_ACTOR) -> list[dict]:
-    """``editableSchemaMetadata`` MCPs adding ``(field_urn, label, source, detail)``; existing labels kept."""
+    """``editableSchemaMetadata`` PATCH proposals adding ``(field_urn, label, source, detail)``.
+
+    PATCH (not read-modify-write) because several propagation pipelines label the same columns
+    concurrently; labels already present on the field are skipped.
+    """
     by_dataset: dict[str, list[tuple[str, str, str, dict]]] = {}
     for field_urn, label, source, detail in assignments:
         ds, path = parse_schema_field_urn(field_urn)
         by_dataset.setdefault(ds, []).append((path, label, source, detail))
     mcps = []
     for ds, items in by_dataset.items():
-        esm = graph.get_aspect(ds, "editableSchemaMetadata") or {}
-        changed = False
+        esm = graph.get_aspect(ds, "editableSchemaMetadata")
+        ops = []
         for path, label, source, detail in items:
-            info = _field_info(esm, path)
-            if any(existing == label for existing, _ in _labels_of(info)):
+            if any(existing == label for existing, _ in _labels_of(_field(esm, path))):
                 continue
             assoc = glossary_term_association(label, actor, source, detail)
             if _is_tag(label):
                 assoc = {"tag": label, "attribution": assoc["attribution"]}
-                info.setdefault("globalTags", {"tags": []}).setdefault("tags", []).append(assoc)
-            else:
-                terms = info.setdefault("glossaryTerms", {"terms": [], "auditStamp": audit_stamp(actor)})
-                terms.setdefault("terms", []).append(assoc)
-                terms["auditStamp"] = audit_stamp(actor)
-            changed = True
-        if changed:
-            esm.setdefault("created", audit_stamp(actor))
-            esm["lastModified"] = audit_stamp(actor)
-            mcps.append(make_mcp(ds, "editableSchemaMetadata", esm, system_properties={"dhe_propagated": "true"}))
+            ops.append(field_label_op("add", path, label, assoc))
+        if ops:
+            mcps.append(patch_mcp(ds, "editableSchemaMetadata", ops, system_properties={"dhe_propagated": "true"}))
     return mcps
 
 
 def revert_labels_mcps(graph: MetadataGraph, dataset_urns, source: str, origin_field: str, label: str) -> list[dict]:
-    def keep(assoc: dict, urn: str) -> bool:
-        attr = assoc.get("attribution") or {}
-        return not (urn == label and attr.get("source") == source
-                    and (attr.get("sourceDetail") or {}).get("origin") == origin_field)
-
     mcps = []
     for ds in dataset_urns:
         esm = graph.get_aspect(ds, "editableSchemaMetadata")
-        if not esm:
-            continue
-        changed = False
-        for info in esm.get("editableSchemaFieldInfo", []):
-            for container, key, urn_key in (("glossaryTerms", "terms", "urn"), ("globalTags", "tags", "tag")):
-                items = (info.get(container) or {}).get(key)
-                if not items:
-                    continue
-                kept = [a for a in items if keep(a, a.get(urn_key, ""))]
-                if len(kept) != len(items):
-                    info[container][key] = kept
-                    changed = True
-        if changed:
-            esm["lastModified"] = audit_stamp(DHE_ACTOR)
-            mcps.append(make_mcp(ds, "editableSchemaMetadata", esm, system_properties={"dhe_propagated": "true"}))
+        ops = []
+        for info in (esm or {}).get("editableSchemaFieldInfo", []):
+            for urn, assoc in _labels_of(info):
+                attr = assoc.get("attribution") or {}
+                if (urn == label and attr.get("source") == source
+                        and (attr.get("sourceDetail") or {}).get("origin") == origin_field):
+                    ops.append(field_label_op("remove", info["fieldPath"], label))
+        if ops:
+            mcps.append(patch_mcp(ds, "editableSchemaMetadata", ops, system_properties={"dhe_propagated": "true"}))
     return mcps
+
+
+def _field(esm: Optional[dict], path: str) -> dict:
+    for info in (esm or {}).get("editableSchemaFieldInfo", []):
+        if info.get("fieldPath") == path:
+            return info
+    return {}
 
 
 # --------------------------------------------------------------------------- propagator
@@ -185,34 +183,39 @@ class RulePropagator:
         dataset_urn = mcl.get("entityUrn", "")
         if not dataset_urn.startswith("urn:li:dataset:"):
             return []
+        hints: Optional[dict[str, set[str]]] = None
         if aspect_name == "upstreamLineage":
-            lineage = _aspect_from_mcl(mcl) or {}
-            datasets = {u.get("dataset") for u in lineage.get("upstreams", []) if u.get("dataset")}
-            for fgl in lineage.get("fineGrainedLineages", []):
-                datasets |= {parse_schema_field_urn(u)[0] for u in fgl.get("upstreams") or []
-                             if u.startswith("urn:li:schemaField:")}
+            datasets, hints = lineage_hints(mcl)
         else:
             datasets = {dataset_urn}
             self._revert_removed(mcl, aspect_name, dataset_urn)
         mcps: list[dict] = []
         for rule in self.rules:
             origins = [o for ds in sorted(datasets) for o in self._origins(rule, ds)]
-            if origins:
-                mcps += self.propagate(rule, origins)
+            if not origins:
+                continue
+            planned, out = self._propagate(rule, origins, hints)
+            mcps += out
+            if not planned and hints is None:
+                schedule_recheck(self.config.recheck_seconds, self.propagate, rule, origins)
         return mcps
 
-    def propagate(self, rule: PropagationRule, origins: list[tuple[str, str]]) -> list[dict]:
-        plan = plan_propagation(origins, GraphLineage(self.graph), rule.max_hops, rule.blocking_transforms)
+    def propagate(self, rule: PropagationRule, origins: list[tuple[str, str]],
+                  hints: Optional[dict[str, set[str]]] = None) -> list[dict]:
+        return self._propagate(rule, origins, hints)[1]
+
+    def _propagate(self, rule, origins, hints=None) -> tuple[int, list[dict]]:
+        plan = plan_propagation(origins, GraphLineage(self.graph, hints), rule.max_hops, rule.blocking_transforms)
         plan = [s for s in plan if rule.targets_platform(parse_schema_field_urn(s.target_field)[0])]
         if not plan:
-            return []
+            return 0, []
         mcps = apply_labels_mcps(self.graph, [
             (s.target_field, s.term, rule.source, {"origin": s.origin_field, "hops": str(s.hops),
                                                    "rule": rule.id, "propagated": "true"}) for s in plan])
         if mcps and not self.config.dry_run:
             self.graph.emit(mcps)
         logger.info("rule %s: propagated to %d fields across %d datasets", rule.id, len(plan), len(mcps))
-        return mcps
+        return len(plan), mcps
 
     def _origins(self, rule: PropagationRule, dataset_urn: str) -> list[tuple[str, str]]:
         out = []

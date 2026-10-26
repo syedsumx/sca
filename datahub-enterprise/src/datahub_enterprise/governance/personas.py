@@ -291,8 +291,12 @@ class PersonaEngine:
             for g in conn.execute(select(grants_table).where(grants_table.c.revoked.is_(False))):
                 grants.setdefault(g.actor, []).append((g.persona_id, g.expires_at_ms))
         with self._lock:
+            changed = (personas, purposes, grants) != (self._personas, self._purposes, self._grants)
             self._personas, self._purposes, self._grants = personas, purposes, grants
-        self._publish()
+        if changed:
+            self._publish()
+            if self.pdp is not None:
+                self.pdp.invalidate_decisions()
 
     def _publish(self) -> None:
         if self.pdp is None:

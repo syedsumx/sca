@@ -37,6 +37,8 @@ _MISSING = object()
 class Obligation(BaseModel):
     type: Literal["mask_columns", "require_justification", "watermark", "row_filter", "notify", "max_rows"]
     params: dict[str, Any] = Field(default_factory=dict)
+    # Set by the PDP on decisions: the policy that attached this obligation (for audit and headers).
+    policy_id: Optional[str] = None
 
 
 class Target(BaseModel):

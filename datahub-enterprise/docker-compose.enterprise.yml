@@ -60,6 +60,7 @@ x-dhe-env: &dhe-env
   DHE_ROOT_USERS: urn:li:corpuser:datahub
   # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
   DHE_PUBLIC_URL: ${DHE_PUBLIC_URL:-http://localhost:9000}
+  DHE_MASKING_PROXY_ENABLED: "true"   # datahub-frontend talks to GMS through dhe-gms-proxy
   DHE_ACTION_LINK_SECRET: ${DHE_ACTION_LINK_SECRET:?set DHE_ACTION_LINK_SECRET in .env}
   DHE_EMBED_SIGNING_SECRET: ${DHE_EMBED_SIGNING_SECRET:?set DHE_EMBED_SIGNING_SECRET in .env}
   DHE_EMBED_ALLOWED_ORIGINS: ${DHE_EMBED_ALLOWED_ORIGINS:-}
@@ -437,6 +438,16 @@ services:
     <<: *dhe-service
     hostname: dhe-actions-pii
     command: ["actions", "-c", "/etc/dhe/actions/pii_propagation.yml"]
+    depends_on:
+      <<: *dhe-depends
+      broker:
+        condition: service_healthy
+
+  # Rule-based tag + glossary-term propagation over column lineage (rules in deploy/actions/label_propagation.yml).
+  dhe-actions-labels:
+    <<: *dhe-service
+    hostname: dhe-actions-labels
+    command: ["actions", "-c", "/etc/dhe/actions/label_propagation.yml"]
     depends_on:
       <<: *dhe-depends
       broker:

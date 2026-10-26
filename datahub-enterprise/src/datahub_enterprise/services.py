@@ -176,7 +176,8 @@ class Services:
         return _record
 
     # ---- background maintenance ----------------------------------------------------
-    def start_background(self, native_policy_interval: int = 120, workflow_interval: int = 600) -> None:
+    def start_background(self, native_policy_interval: int = 120, workflow_interval: int = 600,
+                         layer_reload_interval: float = 10.0) -> None:
         """Native-policy import retries until GMS (and its token) is available."""
         stop = threading.Event()
 
@@ -199,7 +200,20 @@ class Services:
                 except Exception:
                     logger.exception("certification expiry sweep failed")
 
-        for target in (policy_loop, workflow_loop):
+        def layers_loop() -> None:
+            # Personas, purposes, grants and the active bundle are edited through `dhe api`; other
+            # processes (dhe-pdp behind the GMS plugin, dhe-gms-proxy, the scheduler) share the database.
+            while not stop.wait(layer_reload_interval):
+                try:
+                    if self.personas is not None:
+                        self.personas.reload()
+                    latest = self.policy_repo.latest()
+                    if latest is not None and latest != self.pdp.bundle:
+                        self.pdp.set_bundle(latest)
+                except Exception:
+                    logger.exception("policy layer reload failed")
+
+        for target in (policy_loop, workflow_loop, layers_loop):
             t = threading.Thread(target=target, daemon=True, name=target.__name__)
             t.start()
             self._threads.append(t)
@@ -227,7 +241,8 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     init_db(engine)
     audit = AuditLog(engine)
     if graph is None and settings.gms.url:
-        graph = GmsClient(settings.gms.url, settings.gms.token, settings.gms.timeout_seconds)
+        graph = GmsClient(settings.gms.url, settings.gms.token, settings.gms.timeout_seconds,
+                          token_file=settings.gms.token_file)
 
     identity = IdentityResolver(settings.gms.url, settings.gms.frontend_url, settings.service_token,
                                 settings.dev_trust_actor_header)

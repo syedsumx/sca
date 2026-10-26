@@ -75,6 +75,7 @@ class ActiveMetadataSettings(BaseModel):
 
     public_url: str = "http://localhost:9002"
     session_signing_key: Optional[str] = None      # = datahub-frontend DATAHUB_TOKEN_SERVICE_SIGNING_KEY
+    masking_proxy_enabled: bool = False             # the frontend → GMS path goes through dhe-gms-proxy
     action_link_secret: Optional[str] = None
     slack_bot_token: Optional[str] = None
     slack_signing_secret: Optional[str] = None
@@ -143,6 +144,7 @@ def load_settings() -> Settings:
         active=ActiveMetadataSettings(
             public_url=_env("DHE_PUBLIC_URL", "http://localhost:9002"),
             session_signing_key=_env("DHE_SESSION_SIGNING_KEY"),
+            masking_proxy_enabled=_env_bool("DHE_MASKING_PROXY_ENABLED", False),
             action_link_secret=_env("DHE_ACTION_LINK_SECRET"),
             slack_bot_token=_env("DHE_SLACK_BOT_TOKEN"),
             slack_signing_secret=_env("DHE_SLACK_SIGNING_SECRET"),

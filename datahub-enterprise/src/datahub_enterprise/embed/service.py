@@ -92,7 +92,7 @@ class EmbedService:
         self.public_url = public_url.rstrip("/")
         self.catalog = catalog
         self.attributes = attributes
-        self.quality = quality_store
+        self.quality_store = quality_store
         self.can_view_as = can_view_as or (lambda actor: (lambda urn: True))
 
     # ---- tokens ----------------------------------------------------------------------
@@ -176,7 +176,7 @@ class EmbedService:
         if not self.can_view_as(claims["sub"])(urn):
             raise EmbedError("the token owner can no longer view this asset", 403)
         monitors = []
-        for m in (self.quality.list_monitors(urn) if self.quality else []):
+        for m in (self.quality_store.list_monitors(urn) if self.quality_store else []):
             ev = m.last_evaluation
             monitors.append({"name": m.name, "type": m.type, "status": ev.status if ev else "NEVER_RUN",
                              "at": ev.ts if ev else None})
@@ -221,11 +221,11 @@ class EmbedService:
         return None
 
     def _status(self, urn: str) -> Optional[str]:
-        if self.quality is None:
+        if self.quality_store is None:
             return None
         rank = {"ERROR": 4, "FAIL": 3, "WARN": 2, "TRAINING": 1, "PASS": 0}
         worst = None
-        for m in self.quality.list_monitors(urn):
+        for m in self.quality_store.list_monitors(urn):
             ev = m.last_evaluation
             if m.enabled and ev and (worst is None or rank[ev.status] > rank[worst]):
                 worst = ev.status
@@ -233,9 +233,9 @@ class EmbedService:
                 "TRAINING": "LEARNING"}.get(worst or "", None)
 
     def _last_update(self, urn: str) -> Optional[str]:
-        if self.quality is None:
+        if self.quality_store is None:
             return None
-        for m in self.quality.list_monitors(urn):
+        for m in self.quality_store.list_monitors(urn):
             if m.type == "freshness" and m.last_evaluation:
                 last = (m.last_evaluation.details or {}).get("last_update_ms")
                 if last:

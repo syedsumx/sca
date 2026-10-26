@@ -25,6 +25,7 @@ from datahub_enterprise.governance.personas import PersonaEngine, PersonaSpec, P
 from datahub_enterprise.marketplace.service import AccessRequestIn, MarketplaceError, MarketplaceService, RequestPolicy
 from datahub_enterprise.notify.hub import Action, Event, NotificationHub
 from datahub_enterprise.notify.slack import SlackAuthError, verify_slack_signature
+from datahub_enterprise.quality.store import QualityStore
 from datahub_enterprise.services import build_services
 
 from conftest import DS
@@ -369,6 +370,11 @@ def test_embed_tokens_scopes_origins_and_revocation(engine):
         svc.verify(tok, "urn:li:dataset:(urn:li:dataPlatform:x,other,PROD)", "card")
     with pytest.raises(EmbedError):
         svc.verify(tok, DS, "card", "https://evil.example.com")
+    claims = svc.verify(tok, DS, "card")
+    assert svc.card(claims, DS)["urn"] == DS
+    q = EmbedService(engine, "embed-secret", [], "https://dh", quality_store=QualityStore(engine))
+    qtok = q.mint(ALICE, TokenRequest(urn=DS, scopes=["quality"]), DS)["token"]
+    assert q.quality(q.verify(qtok, DS, "quality"), DS)["status"] in ("UNKNOWN", "LEARNING", "HEALTHY", None)
     jti = svc.list_tokens(ALICE)[0]["jti"]
     assert svc.revoke(ALICE, jti)
     with pytest.raises(EmbedError):
@@ -430,3 +436,12 @@ def test_assistant_fallback_without_llm(api):
     assert out["conversation_id"].startswith("conv_") and out["reply_md"]
     again = s.assistant.chat(p, "and again", out["conversation_id"])
     assert again["conversation_id"] == out["conversation_id"]
+
+
+def test_gms_client_reads_token_file_lazily(tmp_path, settings):
+    tok = tmp_path / "gms_token"
+    settings.gms.token_file = str(tok)
+    s = build_services(settings, with_ai=False)
+    assert "Authorization" not in s.graph._headers  # bootstrap has not minted the token yet
+    tok.write_text("tok-1\n")
+    assert s.graph._headers["Authorization"] == "Bearer tok-1"

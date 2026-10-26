@@ -2,6 +2,7 @@ import { Alert, Button, Empty, Input, Modal, Radio, Select, Switch, Table, Tabs,
 import React, { useMemo, useState } from 'react';
 import { Link, useHistory, useLocation, useParams } from 'react-router-dom';
 
+import type { ProductAccessFilter, ProductSort } from '../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { AccessRequest, AccessRequestAction, ProductCard as ProductCardData, ProductDetail } from '../api/types';
 import { assetPath } from '../components/Assets';
@@ -16,9 +17,11 @@ export function MarketplacePage() {
     const history = useHistory();
     const params = new URLSearchParams(location.search);
     const q = params.get('q') ?? '';
-    const access = params.get('access') ?? '';
+    const accessParam = params.get('access');
+    const access: ProductAccessFilter | '' = accessParam === 'mine' || accessParam === 'requestable' ? accessParam : '';
     const certified = params.get('certified') === 'true';
-    const sort = params.get('sort') ?? 'popular';
+    const sortParam = params.get('sort');
+    const sort: ProductSort = sortParam === 'name' || sortParam === 'relevance' ? sortParam : 'consumers';
     const [requesting, setRequesting] = useState<ProductCardData | null>(null);
     const key = `/marketplace/products?${params.toString()}`;
     const products = useDheQuery<ProductCardData[]>(key, (c, signal) =>
@@ -68,7 +71,7 @@ export function MarketplacePage() {
                     onChange={(e) => update('access', e.target.value || null)}
                     options={[
                         { label: 'All', value: '' },
-                        { label: 'Mine', value: 'granted' },
+                        { label: 'Mine', value: 'mine' },
                         { label: 'Requestable', value: 'requestable' },
                     ]}
                 />
@@ -82,9 +85,9 @@ export function MarketplacePage() {
                     style={{ minWidth: 150 }}
                     onChange={(v) => update('sort', v)}
                     options={[
-                        { value: 'popular', label: 'Most used' },
+                        { value: 'consumers', label: 'Most used' },
+                        { value: 'relevance', label: 'Best match' },
                         { value: 'name', label: 'Name' },
-                        { value: 'recent', label: 'Recently updated' },
                     ]}
                 />
             </div>

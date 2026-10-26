@@ -54,6 +54,11 @@ export class GraphQLError extends Error {
 
 const enc = encodeURIComponent;
 
+/** Orderings dhe-api accepts for GET /marketplace/products. */
+export type ProductSort = 'relevance' | 'consumers' | 'name';
+/** `access` filter values for GET /marketplace/products. */
+export type ProductAccessFilter = 'mine' | 'requestable';
+
 /** Typed client for the DHE consumer endpoints plus a tiny DataHub GraphQL helper. */
 export class ConsumerClient extends DheClient {
     readonly graphqlUrl: string;
@@ -206,7 +211,7 @@ export class ConsumerClient extends DheClient {
     // --- marketplace -----------------------------------------------------------------------
 
     listProducts(
-        query: { q?: string; domain?: string; certified?: boolean; access?: string; sort?: string } = {},
+        query: { q?: string; domain?: string; certified?: boolean; access?: ProductAccessFilter; sort?: ProductSort } = {},
         opts: RequestOptions = {},
     ) {
         return this.request<ProductCard[]>('GET', '/marketplace/products', undefined, { ...opts, query });

@@ -239,10 +239,10 @@ class PolicyDecisionPoint:
         for r in matched:
             if r.effect in ("allow", "obligation"):
                 for o in by_id[r.policy_id].obligations:
-                    k = o.model_dump_json()
+                    k = o.model_dump_json(exclude={"policy_id"})
                     if k not in seen:
                         seen.add(k)
-                        obligations.append(o)
+                        obligations.append(o if o.policy_id else o.model_copy(update={"policy_id": r.policy_id}))
         obligation_ids = [r.policy_id for r in matched if r.effect == "obligation"]
         allows = [r for r in matched if r.effect == "allow"]
         if allows:

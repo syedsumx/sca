@@ -226,3 +226,23 @@ def test_scheduler_runs_due_and_reschedules(engine, graph, warehouse):
     nxt = qe.store.get_monitor(cron.id).next_run_at_ms
     assert nxt == next_run_ms(cron, T0) and nxt % HOUR == 0
     assert s.run_once(now=T0 + 2 * HOUR) == 2
+
+
+def test_assertion_run_summary_is_maintained_by_dhe(engine, graph):
+    """OSS GMS cannot patch assertionRunSummary, so DHE keeps it current for its assertions."""
+    from datahub_enterprise.quality.models import Evaluation
+
+    store = QualityStore(engine)
+    qe = QualityEngine(store, graph, {})
+    m = store.create_monitor(MonitorSpec(name="rows", dataset_urn=DS, type="volume", config={"min_rows": 1}), None)
+    qe.sync_monitor(m)
+    urn = assertion_urn(m.id)
+    assert graph.get_aspect(urn, "assertionRunSummary")["assertionStatus"] == "INIT"
+    qe.sync_monitor(m)                                       # re-sync never resets it
+    def ev(status, ts):
+        return Evaluation(id=f"e{ts}", monitor_id=m.id, ts="", ts_ms=ts, run_id=f"r{ts}", status=status,
+                          message="", metric_value=None, expected_low=None, expected_high=None, score=None)
+    graph.emit(qe._summary_mcps(m, ev("FAIL", 1000)))
+    graph.emit(qe._summary_mcps(m, ev("PASS", 2000)))
+    s = graph.get_aspect(urn, "assertionRunSummary")
+    assert s["lastFailedAtMillis"] == 1000 and s["lastPassedAtMillis"] == 2000 and s["assertionStatus"] == "PASSING"

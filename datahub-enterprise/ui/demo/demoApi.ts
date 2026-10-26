@@ -592,7 +592,15 @@ on('GET', '/marketplace/products', (_b, q) => {
     let items = PRODUCTS.filter((p) => !text || text === '*' || `${p.name} ${p.description}`.toLowerCase().includes(text)).map(card);
     if (q.get('domain')) items = items.filter((c) => c.domain?.urn === q.get('domain'));
     if (q.get('certified') === 'true') items = items.filter((c) => c.certification === 'CERTIFIED');
-    if (q.get('access')) items = items.filter((c) => c.access.status === q.get('access'));
+    // Same contract as dhe-api: access ∈ {mine, requestable}, sort ∈ {relevance, consumers, name}.
+    const accessFilter = q.get('access');
+    if (accessFilter && !['mine', 'requestable'].includes(accessFilter)) throw new HttpError(422, `invalid access filter ${accessFilter}`);
+    if (accessFilter === 'mine') items = items.filter((c) => ['GRANTED', 'PENDING'].includes(c.access.status));
+    if (accessFilter === 'requestable') items = items.filter((c) => ['NONE', 'EXPIRED', 'REJECTED'].includes(c.access.status));
+    const sort = q.get('sort') ?? 'relevance';
+    if (!['relevance', 'consumers', 'name'].includes(sort)) throw new HttpError(422, `invalid sort ${sort}`);
+    if (sort === 'consumers') items.sort((a, b) => b.consumers - a.consumers);
+    if (sort === 'name') items.sort((a, b) => a.name.localeCompare(b.name));
     return items;
 });
 on('GET', '/marketplace/products/:rest', (_b, _q, [urn]) => {

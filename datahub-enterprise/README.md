@@ -81,7 +81,7 @@ cd ui && npm install && npx tsc --noEmit && npx vitest run
 
 | Check | Result |
 |---|---|
-| Python unit/integration tests (`pytest`) | 96 passed (v0.2, incl. module E) |
+| Python unit/integration tests (`pytest`) | 99 passed (v0.2, incl. module E) |
 | Java plugin (`./gradlew test`) against `datahub-auth-api:1.5.0` | 16 passed |
 | UI (`tsc --noEmit`, `vitest`) | clean, 64 passed; MFE `remoteEntry.js` + ~162 kB gz first load; embed SDK 4 kB gz |
 | Module E API contract: UI client calls vs. backend routes and response shapes | all routes and shapes match |
@@ -92,7 +92,8 @@ cd ui && npm install && npx tsc --noEmit && npx vitest run
 | GMS loads `EnterpriseAuthorizer` (GMS runs Java 25; plugin built for 17) | passed |
 | **Live e2e** (`tests/e2e`, 8 scenarios): PAT identity · monitor → native `VOLUME` assertion + run events → incident raised and auto-resolved · native policy import · PII propagated over column lineage via Kafka → datahub-actions → GMS · SoD on certification · MCP streamable HTTP · **in-VPC agent ingesting a DB unreachable from the control plane, triggered by a native DataHub execution request** | 8 passed |
 | Secret confinement: agent DB password absent from gateway/API logs, DHE DB and GMS (only `${FINANCE_PG_PASSWORD}`) | verified |
-| Not yet run live | Helm on a real cluster, authoritative mode, Claude/Ollama calls, UI modules inside datahub-web-react; module E against the live stack (gms-proxy in the frontend path, Slack/Teams round-trips, BI tools) |
+| **Live e2e, module E** (`tests/e2e/test_active_metadata_live.py`, 13 scenarios, real users with their own PATs): personas grant within scope, and purpose denies override them · PII masked per caller on the frontend → `dhe-gms-proxy` → GMS path (partial mask for the analyst, clear for the purpose-holding steward, no masking on direct service access) · PII terms and rule-based tags both propagate over column lineage via Kafka · bookmarks, follows, @mentions, replies, reactions and trending · marketplace request blocked by SoD, then approved by a **signed Slack button**, with a time-boxed grant and revoke · quality incident → follower inbox + webhook delivered by `dhe-notifier` · certification approved inline · context miner finds metric drift and joins, accepted join written as a native `erModelRelationship` · assistant (offline mode), lineage explainer and markdown docs · embed tokens scoped, origin-bound and revocable through the edge · notifier sweep · **workspace MFE rendered inside the DataHub UI** after a real login (Discover, Marketplace, asset page) | 13 passed, alongside the 8 platform scenarios: **21/21** on DataHub v1.8.0, repeatable on a stack that already holds earlier runs' data |
+| Not yet run live | Helm on a real cluster, authoritative mode, Claude/Ollama calls (the assistant ran in offline mode), real Slack/Teams/SMTP endpoints (the Slack protocol was simulated with valid signatures), embeds inside Tableau/Looker/Power BI |
 
 ## Security notes
 

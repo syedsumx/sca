@@ -290,7 +290,9 @@ def test_apply_terms_preserves_manual_terms(graph):
     graph.aspects[(DS, "editableSchemaMetadata")] = {"editableSchemaFieldInfo": [
         {"fieldPath": "phone", "description": "manual", "glossaryTerms": {"terms": [{"urn": "urn:li:glossaryTerm:Contact"}]}}]}
     mcps = apply_terms_mcps(graph, [(f, pii_term("Phone"), PROPAGATION_SOURCE, {"origin": "x"})])
-    info = aspect_value(mcps[0])["editableSchemaFieldInfo"][0]
+    assert [m["changeType"] for m in mcps] == ["PATCH"]  # atomic in GMS: no lost updates between pipelines
+    graph.emit(mcps)
+    info = graph.get_aspect(DS, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]
     assert info["description"] == "manual" and [t["urn"] for t in info["glossaryTerms"]["terms"]] == [
         "urn:li:glossaryTerm:Contact", pii_term("Phone")]
     assert revert_propagation_mcps(graph, [DS], "other-origin", pii_term("Phone")) == []
@@ -418,3 +420,28 @@ def test_rule_propagation_tags_and_terms_with_platform_filter_and_revert(graph):
     for ds in (DS_DOWN, DS_DOWN2):
         assert graph.get_aspect(ds, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]["globalTags"]["tags"] == []
     assert graph.get_aspect(DS_DOWN, "editableSchemaMetadata")["editableSchemaFieldInfo"][0]["glossaryTerms"]["terms"]
+
+
+def test_propagation_survives_stale_lineage_index(graph):
+    """Labels written right after new lineage: the graph index does not know the edge yet."""
+    import json
+    import time
+
+    src, down, down2 = _lineage_graph(graph)
+    downstream = {DS: [], DS_DOWN: [], DS_DOWN2: []}            # index not caught up
+    graph.graphql_handler = lambda q, v: {"entity": {"relationships": {"relationships": [
+        {"entity": {"urn": u}} for u in downstream.get(v["urn"], [])]}}}
+    prop = PiiPropagator(graph, PropagationConfig(recheck_seconds=0.2))
+    esm_mcl = {"entityUrn": DS, "aspectName": "editableSchemaMetadata", "systemMetadata": {"properties": {}}}
+    assert prop.handle(esm_mcl) == []                            # nothing found yet → re-check scheduled
+    downstream.update({DS: [DS_DOWN], DS_DOWN: [DS_DOWN2]})      # index catches up
+    time.sleep(0.6)
+    assert graph.get_aspect(DS_DOWN2, "editableSchemaMetadata"), "re-check should have propagated"
+
+    # The lineage change itself carries the new edge, so it propagates without the index.
+    graph.aspects.pop((DS_DOWN, "editableSchemaMetadata"))
+    downstream.update({DS: [], DS_DOWN: []})
+    lineage = graph.get_aspect(DS_DOWN, "upstreamLineage")
+    mcl = {"entityUrn": DS_DOWN, "aspectName": "upstreamLineage", "systemMetadata": {"properties": {}},
+           "aspect": {"value": json.dumps(lineage)}}
+    assert {m["entityUrn"] for m in PiiPropagator(graph, PropagationConfig(recheck_seconds=0)).handle(mcl)} == {DS_DOWN}

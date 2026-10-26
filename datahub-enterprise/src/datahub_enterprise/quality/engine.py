@@ -11,15 +11,16 @@ import httpx
 
 from datahub_enterprise.common.audit import AuditLog
 from datahub_enterprise.common.gms import MetadataGraph
-from datahub_enterprise.common.proposals import incident_urn, now_ms
+from datahub_enterprise.common.proposals import assertion_urn, incident_urn, make_mcp, now_ms
 from datahub_enterprise.quality import detectors as d
-from datahub_enterprise.quality.collectors import Collector, Sample
+from datahub_enterprise.quality.collectors import Collector, CollectorError, Sample
 from datahub_enterprise.quality.emitter import (
     incident_is_active,
     incident_mcp,
     monitor_mcps,
     removal_mcps,
     run_event_mcp,
+    run_summary,
 )
 from datahub_enterprise.quality.models import Evaluation, Monitor
 from datahub_enterprise.quality.store import QualityStore
@@ -62,7 +63,26 @@ class QualityEngine:
 
     # ---- projection ----------------------------------------------------------------
     def sync_monitor(self, monitor: Monitor) -> None:
-        self._emit(monitor_mcps(monitor))
+        self._emit(monitor_mcps(monitor) + self._summary_mcps(monitor))
+
+    def _summary_mcps(self, monitor: Monitor, ev: Optional[Evaluation] = None) -> list[dict]:
+        """Maintain ``assertionRunSummary`` (last passed/failed/errored, status) for DHE assertions.
+
+        GMS's AssertionRunSummaryHook would do this by PATCH, but OSS GMS has no patch template for the
+        aspect (the hook fails), so DHE, the only writer of its assertions' run events, writes it. The
+        current value is read first so concurrent evaluators (scheduler, manual runs) keep each other's
+        timestamps.
+        """
+        if self.graph is None:
+            return []
+        urn = assertion_urn(monitor.id)
+        try:
+            current = self.graph.get_aspect(urn, "assertionRunSummary")
+        except Exception:
+            return []
+        if ev is None and current is not None:
+            return []
+        return [make_mcp(urn, "assertionRunSummary", run_summary(current, ev, now_ms()))]
 
     def remove_monitor(self, monitor_id: str) -> None:
         self._emit(removal_mcps(monitor_id))
@@ -72,7 +92,7 @@ class QualityEngine:
         sent = 0
         for ev in self.store.unemitted():
             monitor = self.store.get_monitor(ev.monitor_id)
-            if monitor and self._emit([run_event_mcp(monitor, ev)]):
+            if monitor and self._emit([run_event_mcp(monitor, ev)] + self._summary_mcps(monitor, ev)):
                 self.store.mark_emitted(ev.id)
                 sent += 1
         return sent
@@ -88,6 +108,9 @@ class QualityEngine:
                 raise RuntimeError(f"no collector configured for source {monitor.config.get('source')!r}")
             sample = collector.collect(monitor, now)
             detection = self._detect(monitor, sample, now)
+        except CollectorError as e:  # expected (no profile yet, source unreachable): recorded as ERROR
+            logger.warning("monitor %s could not collect: %s", monitor.id, e)
+            detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
         except Exception as e:  # collectors talk to external systems; never crash the loop
             logger.exception("monitor %s evaluation failed", monitor.id)
             detection = d.Detection("ERROR", f"{type(e).__name__}: {e}")
@@ -118,7 +141,7 @@ class QualityEngine:
         if detection.status not in ("TRAINING", "ERROR") and monitor.status == "TRAINING":
             self.store.set_status(monitor.id, "ACTIVE")
 
-        if self._emit([run_event_mcp(monitor, ev)]):
+        if self._emit([run_event_mcp(monitor, ev)] + self._summary_mcps(monitor, ev)):
             self.store.mark_emitted(ev.id)
             ev.emitted = True
         self._incident_lifecycle(monitor, ev)

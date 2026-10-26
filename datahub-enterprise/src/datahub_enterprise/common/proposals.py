@@ -104,6 +104,32 @@ def make_mcp(
     return mcp
 
 
+JSON_PATCH_CONTENT_TYPE = "application/json-patch+json"
+
+
+def patch_mcp(entity_urn: str, aspect_name: str, ops: list[dict],
+              system_properties: Optional[dict[str, str]] = None) -> dict:
+    """A ``PATCH`` proposal: GMS applies ``ops`` to the stored aspect atomically, so concurrent writers
+    (e.g. two propagation actions labelling the same column) cannot overwrite each other."""
+    mcp = make_mcp(entity_urn, aspect_name, {}, "PATCH", system_properties)
+    mcp["aspect"] = {"contentType": JSON_PATCH_CONTENT_TYPE, "value": json.dumps(ops, separators=(",", ":"))}
+    return mcp
+
+
+def pointer(*segments: str) -> str:
+    """RFC 6901 JSON pointer from raw segments (``/`` in a field path becomes ``~1``)."""
+    return "".join("/" + seg.replace("~", "~0").replace("/", "~1") for seg in segments)
+
+
+def field_label_op(op: str, field_path: str, label: str, association: Optional[dict] = None) -> dict:
+    """Add/remove one tag or glossary term on an ``editableSchemaMetadata`` field (DataHub keyed-array patch)."""
+    container, key = (("globalTags", "tags") if label.startswith("urn:li:tag:") else ("glossaryTerms", "terms"))
+    out: dict[str, Any] = {"op": op, "path": pointer("editableSchemaFieldInfo", field_path, container, key, label)}
+    if op == "add":
+        out["value"] = association
+    return out
+
+
 def aspect_value(mcp: dict) -> dict:
     """Inverse of :func:`make_mcp` for the aspect payload."""
     aspect = mcp.get("aspect") or {}

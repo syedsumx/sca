@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from typing import Any, Optional
 
 from pydantic import BaseModel
@@ -47,8 +48,30 @@ class PropagationConfig(BaseModel):
     max_hops: int = 5
     blocking_transforms: list[str] = ["HASH", "AGGREGATE", "COUNT", "ENCRYPT", "TOKENIZE", "MASK"]
     dry_run: bool = False
+    # Labels written right after new lineage can reach us before the lineage index has the edge:
+    # origins that found no downstream edges are re-checked once after this delay (0 disables).
+    recheck_seconds: float = 30.0
     gms_url: Optional[str] = None
     gms_token: Optional[str] = None
+
+
+def lineage_hints(mcl: dict) -> tuple[set[str], dict[str, set[str]]]:
+    """Upstream datasets of an ``upstreamLineage`` change, plus upstream → {this dataset} hints."""
+    downstream = mcl.get("entityUrn", "")
+    lineage = _aspect_from_mcl(mcl) or {}
+    upstreams = {u.get("dataset") for u in lineage.get("upstreams", []) if u.get("dataset")}
+    for fgl in lineage.get("fineGrainedLineages", []):
+        upstreams |= {parse_schema_field_urn(u)[0] for u in fgl.get("upstreams") or []
+                      if u.startswith("urn:li:schemaField:")}
+    return upstreams, {u: {downstream} for u in upstreams}
+
+
+def schedule_recheck(seconds: float, fn, *args) -> None:
+    if seconds <= 0:
+        return
+    t = threading.Timer(seconds, fn, args)
+    t.daemon = True
+    t.start()
 
 
 class PiiPropagator:
@@ -71,29 +94,28 @@ class PiiPropagator:
 
         if aspect_name == "upstreamLineage":
             # A new lineage edge: re-propagate from PII origins on each upstream dataset.
-            lineage = _aspect_from_mcl(mcl) or {}
-            upstreams = {u.get("dataset") for u in lineage.get("upstreams", []) if u.get("dataset")}
-            for fgl in lineage.get("fineGrainedLineages", []):
-                for up in fgl.get("upstreams") or []:
-                    if up.startswith("urn:li:schemaField:"):
-                        upstreams.add(parse_schema_field_urn(up)[0])
-            origins = []
-            for ds in upstreams:
-                origins.extend(self._origins(ds))
-        else:
-            origins = self._origins(dataset_urn)
-            removed = self._removed_origins(mcl, aspect_name, dataset_urn)
-            if removed:
-                self._revert(removed)
+            upstreams, hints = lineage_hints(mcl)
+            origins = [o for ds in sorted(upstreams) for o in self._origins(ds)]
+            return self.propagate(origins, hints) if origins else []
+        origins = self._origins(dataset_urn)
+        removed = self._removed_origins(mcl, aspect_name, dataset_urn)
+        if removed:
+            self._revert(removed)
         if not origins:
             return []
-        return self.propagate(origins)
+        planned, mcps = self._propagate(origins)
+        if not planned:
+            schedule_recheck(self.config.recheck_seconds, self.propagate, origins)
+        return mcps
 
-    def propagate(self, origins: list[tuple[str, str]]) -> list[dict]:
-        lineage = GraphLineage(self.graph)
+    def propagate(self, origins: list[tuple[str, str]], hints: Optional[dict[str, set[str]]] = None) -> list[dict]:
+        return self._propagate(origins, hints)[1]
+
+    def _propagate(self, origins, hints=None) -> tuple[int, list[dict]]:
+        lineage = GraphLineage(self.graph, hints)
         plan = plan_propagation(origins, lineage, self.config.max_hops, self.config.blocking_transforms)
         if not plan:
-            return []
+            return 0, []
         assignments = [
             (step.target_field, step.term, PROPAGATION_SOURCE,
              {"origin": step.origin_field, "hops": str(step.hops), "propagated": "true"})
@@ -103,7 +125,7 @@ class PiiPropagator:
         if mcps and not self.config.dry_run:
             self.graph.emit(mcps)
         logger.info("PII propagation: %d targets across %d datasets", len(plan), len(mcps))
-        return mcps
+        return len(plan), mcps
 
     def _origins(self, dataset_urn: str) -> list[tuple[str, str]]:
         origins = []
