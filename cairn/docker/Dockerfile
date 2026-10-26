@@ -35,6 +35,8 @@ RUN groupadd --system --gid 10001 cairn \
 COPY --from=build /opt/cairn /opt/cairn
 COPY config /etc/cairn/config
 COPY docker/healthcheck.py /usr/local/bin/cairn-healthcheck
+# Service-account bootstrap / token keeper and the token wrapper (used by Helm; compose mounts the same files).
+COPY deploy/bootstrap/mint_core_token.py deploy/bootstrap/with-token.sh /opt/cairn/bootstrap/
 ENV PATH="/opt/cairn/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \

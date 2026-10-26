@@ -138,7 +138,6 @@ cairn:
   # Kubernetes Secret holding control-plane credentials. Create it yourself (or with ExternalSecrets / Vault):
   #   kubectl create secret generic cairn-secrets \
   #     --from-literal=service-token=$(openssl rand -hex 32) \
-  #     --from-literal=core-token=<Cairn access token of the admin account (Settings → Access Tokens)> \
   #     --from-literal=database-url='postgresql+psycopg://cairn:***@cairn-postgres:5432/cairn' \
   #     --from-literal=action-link-secret=$(openssl rand -hex 32) \
   #     --from-literal=embed-signing-secret=$(openssl rand -hex 32) \
@@ -146,12 +145,27 @@ cairn:
   secrets:
     name: cairn-secrets
     serviceTokenKey: service-token
-    coreTokenKey: core-token
     databaseUrlKey: database-url
     anthropicApiKeyKey: anthropic-api-key
     # Active Metadata layer: HMAC secrets for one-click action links (Teams/email) and embed tokens.
     actionLinkSecretKey: action-link-secret
     embedSigningSecretKey: embed-signing-secret
+
+  # Control-plane service account (urn:li:corpuser:cairn-service). A post-install/post-upgrade Job
+  # creates it with a least-privilege policy and writes its token into Secret "<release>-core-token"
+  # (needs core.enabled, for the admin password); the token keeper rotates it. Pods mount the Secret.
+  coreToken:
+    rotateDays: 7
+    graceMinutes: 15
+    checkMinutes: 30
+    bootstrap:
+      backoffLimit: 6
+      activeDeadlineSeconds: 1800
+      retries: 120          # x5 s: how long the Job waits for the web app and Cairn Core
+    keeper:
+      resources:
+        requests: { cpu: 10m, memory: 48Mi }
+        limits: { memory: 128Mi }
 
   auth:
     # additive | authoritative  (authoritative requires core.nativePoliciesEnabled=false)

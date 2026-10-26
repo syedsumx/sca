@@ -136,17 +136,29 @@ jobs:
       - name: Build images
         run: deploy/build-images.sh
 
+      - name: Vulnerability database (fallback registries, retried)
+        run: |
+          mkdir -p "$RUNNER_TEMP/trivy"
+          for attempt in 1 2 3; do
+            docker run --rm -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" aquasec/trivy:0.57.1 image --download-db-only \
+              --db-repository ghcr.io/aquasecurity/trivy-db:2,public.ecr.aws/aquasecurity/trivy-db:2,mirror.gcr.io/aquasec/trivy-db:2 \
+              && exit 0
+            sleep $((attempt * 20))
+          done
+          exit 1
       - name: Scan Cairn-owned images (fail on fixable critical CVEs)
         run: |
           for img in platform remote-agent; do
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
-              --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
+              aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL --ignore-unfixed \
+              --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
           done
       - name: Scan remaining images (report only)
         run: |
           for img in consumer-ui core web setup executor; do
-            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
-              --quiet --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format table "cairn/${img}:${CAIRN_VERSION}" \
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
+              aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed \
+              --format table "cairn/${img}:${CAIRN_VERSION}" \
               > "$RUNNER_TEMP/trivy-${img}.txt" || true
           done
       - name: SBOMs
@@ -178,6 +190,9 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/pw" "playwright@${PLAYWRIGHT_VERSION}"
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
           NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
+
+      - name: Kubernetes token path (real kube-apiserver, chart RBAC)
+        run: tests/k8s/token_secret.sh
 
       - name: Brand-leak scan
         run: |

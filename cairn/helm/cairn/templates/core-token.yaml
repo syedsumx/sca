@@ -1,0 +1,154 @@
+{{- /*
+Control-plane service account token.
+  Secret        <release>-core-token     keys core_token, core_token.json; created empty and kept across upgrades
+  Job           ...-core-token-bootstrap (post-install, post-upgrade) creates urn:li:corpuser:cairn-service and
+                its least-privilege policies, then writes the token (deploy/bootstrap/mint_core_token.py)
+  Deployment    ...-token-keeper         rotates the token (the account mints its own successor)
+  RBAC          the Job and keeper may only get/patch this one Secret
+*/ -}}
+{{- $full := include "cairn.fullname" . }}
+{{- $secret := include "cairn.coreTokenSecret" . }}
+{{- $sa := printf "%s-core-token" $full }}
+{{- $t := .Values.cairn.coreToken }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $secret }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+  annotations:
+    # Written at runtime: never reset or deleted by Helm.
+    helm.sh/resource-policy: keep
+type: Opaque
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $secret | quote }}]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $sa }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $sa }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $sa }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.core.enabled }}
+---
+{{- $ctx := dict "root" $ "component" "core-token-bootstrap" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $full }}-core-token-bootstrap
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+  annotations:
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "0"
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: {{ $t.bootstrap.backoffLimit }}
+  activeDeadlineSeconds: {{ $t.bootstrap.activeDeadlineSeconds }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: {{ $sa }}
+      automountServiceAccountToken: true
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: bootstrap
+          image: {{ include "cairn.image" . }}
+          imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+          command: ["python", "/opt/cairn/bootstrap/mint_core_token.py"]
+          args: ["--k8s-secret", {{ $secret | quote }}]
+          env:
+            - name: CAIRN_FRONTEND_URL
+              value: {{ include "cairn.frontendUrl" . | quote }}
+            - name: CAIRN_CORE_URL
+              value: {{ include "cairn.coreUrl" . | quote }}
+            - name: CAIRN_BOOTSTRAP_RETRIES
+              value: {{ $t.bootstrap.retries | quote }}
+            - name: CAIRN_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.core.secrets.name }}, key: {{ .Values.core.secrets.adminPasswordKey }} }
+          resources:
+            {{- toYaml $t.keeper.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+{{- end }}
+---
+{{- $kctx := dict "root" $ "component" "token-keeper" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $full }}-token-keeper
+  labels:
+    {{- include "cairn.componentLabels" $kctx | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $kctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $kctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $sa }}
+      automountServiceAccountToken: true
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: keeper
+          image: {{ include "cairn.image" . }}
+          imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+          command: ["python", "/opt/cairn/bootstrap/mint_core_token.py"]
+          args: ["--k8s-secret", {{ $secret | quote }}, "--keep"]
+          env:
+            - name: CAIRN_CORE_URL
+              value: {{ include "cairn.coreUrl" . | quote }}
+            - name: CAIRN_TOKEN_ROTATE_DAYS
+              value: {{ $t.rotateDays | quote }}
+            - name: CAIRN_TOKEN_GRACE_MINUTES
+              value: {{ $t.graceMinutes | quote }}
+            - name: CAIRN_TOKEN_CHECK_MINUTES
+              value: {{ $t.checkMinutes | quote }}
+          resources:
+            {{- toYaml $t.keeper.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}

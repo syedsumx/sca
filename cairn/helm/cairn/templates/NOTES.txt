@@ -35,9 +35,14 @@ Authorization mode: {{ .Values.cairn.auth.mode }}
     cairn.gateway.keys.existingSecret (same identity on every replica).
 {{- end }}
 
-Required Secret "{{ .Values.cairn.secrets.name }}" keys: {{ .Values.cairn.secrets.serviceTokenKey }}, {{ .Values.cairn.secrets.coreTokenKey }}, {{ .Values.cairn.secrets.databaseUrlKey }}, {{ .Values.cairn.secrets.actionLinkSecretKey }}, {{ .Values.cairn.secrets.embedSigningSecretKey }}{{ if eq .Values.cairn.ai.llmProvider "anthropic" }}, {{ .Values.cairn.secrets.anthropicApiKeyKey }}{{ end }}
-  ({{ .Values.cairn.secrets.coreTokenKey }}: an access token of the admin account, created in Settings → Access Tokens after
-  the first start; restart the control plane after adding it.)
+Required Secret "{{ .Values.cairn.secrets.name }}" keys: {{ .Values.cairn.secrets.serviceTokenKey }}, {{ .Values.cairn.secrets.databaseUrlKey }}, {{ .Values.cairn.secrets.actionLinkSecretKey }}, {{ .Values.cairn.secrets.embedSigningSecretKey }}{{ if eq .Values.cairn.ai.llmProvider "anthropic" }}, {{ .Values.cairn.secrets.anthropicApiKeyKey }}{{ end }}
+The control plane runs as urn:li:corpuser:cairn-service. Its token is created by the
+"{{ include "cairn.fullname" . }}-core-token-bootstrap" Job and kept in Secret "{{ include "cairn.coreTokenSecret" . }}"
+(rotated every {{ .Values.cairn.coreToken.rotateDays }} days by "{{ include "cairn.fullname" . }}-token-keeper").
+{{- if not .Values.core.enabled }}
+  core.enabled=false: create the service account in your Cairn Core and put its token in that Secret
+  (keys core_token, core_token.json = {"actor": "urn:li:corpuser:cairn-service", "id": "<token id>", "issued_at": <unix time>}).
+{{- end }}
 
 Remote agents: install the "cairn-remote-agent" chart inside each private VPC cluster with
   gateway.url={{ .Values.cairn.gateway.publicUrl }}

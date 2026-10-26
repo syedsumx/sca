@@ -141,9 +141,10 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ include "cairn.coreUrl" . | quote }}
 - name: CAIRN_FRONTEND_URL
   value: {{ include "cairn.frontendUrl" . | quote }}
-- name: CAIRN_CORE_TOKEN
-  valueFrom:
-    secretKeyRef: { name: {{ $s.name }}, key: {{ $s.coreTokenKey }} }
+# Service-account token, written by the core-token bootstrap Job and rotated by the token keeper.
+# Mounted from Secret "<release>-core-token"; clients re-read the file when it changes.
+- name: CAIRN_CORE_TOKEN_FILE
+  value: /run/cairn/core_token
 - name: CAIRN_SERVICE_TOKEN
   valueFrom:
     secretKeyRef: { name: {{ $s.name }}, key: {{ $s.serviceTokenKey }} }
@@ -280,6 +281,10 @@ spec:
         - name: {{ .component }}
           image: {{ include "cairn.image" $root }}
           imagePullPolicy: {{ $root.Values.global.cairn.image.pullPolicy }}
+          {{- with .command }}
+          command:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             {{- toYaml .args | nindent 12 }}
           env:
@@ -315,6 +320,9 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            - name: core-token
+              mountPath: /run/cairn
+              readOnly: true
             {{- if include "cairn.policiesConfigMap" $root }}
             - name: policies
               mountPath: /etc/cairn/config/policies
@@ -327,6 +335,10 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 512Mi
+        - name: core-token
+          secret:
+            secretName: {{ include "cairn.coreTokenSecret" $root }}
+            optional: true
         {{- if include "cairn.policiesConfigMap" $root }}
         - name: policies
           configMap:
@@ -525,4 +537,8 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end -}}
+
+{{- define "cairn.coreTokenSecret" -}}
+{{- printf "%s-core-token" (include "cairn.fullname" .) -}}
 {{- end -}}

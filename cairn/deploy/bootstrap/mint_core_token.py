@@ -23,13 +23,16 @@ Keeper (long-running)::
   account mints its own successor (``GENERATE_PERSONAL_ACCESS_TOKENS``), the file is replaced, and the
   old token is revoked after ``--grace-minutes``. Needs no admin credentials.
 
-Token metadata (id, issued/expiry time) is kept next to the token in ``<out>.json``.
+Token metadata (id, issued/expiry time) is kept next to the token in ``<out>.json``. On Kubernetes,
+``--k8s-secret NAME`` stores both in that Secret instead (keys ``core_token`` and ``core_token.json``)
+using the pod's service account; pods mount the Secret, so a rotated token reaches them as a file.
 Standard library only so it runs in any python image.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import http.cookiejar
 import json
 import os
@@ -60,10 +63,7 @@ METADATA_PRIVILEGES = [
     "EDIT_ENTITY", "EDIT_LINEAGE", "EDIT_ENTITY_ASSERTIONS", "EXECUTE_ENTITY",
     "MANAGE_DATA_PRODUCTS", "PRODUCE_PLATFORM_EVENT_PRIVILEGE",
 ]
-POLICIES = {
-    "urn:li:dataHubPolicy:cairn-service-platform": ("PLATFORM", "Cairn service: platform"),
-    "urn:li:dataHubPolicy:cairn-service-metadata": ("METADATA", "Cairn service: metadata"),
-}
+POLICY_PREFIX = "urn:li:dataHubPolicy:cairn-service-"
 
 DURATIONS_DAYS = {"ONE_DAY": 1, "ONE_WEEK": 7, "ONE_MONTH": 30, "THREE_MONTHS": 90, "SIX_MONTHS": 180}
 
@@ -142,6 +142,77 @@ def write_state(out: str, token: str, meta: dict) -> None:
         os.replace(tmp, path)
 
 
+class FileStore:
+    def __init__(self, out: str):
+        self.out = out
+
+    def read(self) -> tuple[str | None, dict]:
+        return read_state(self.out)
+
+    def write(self, token: str, meta: dict) -> None:
+        write_state(self.out, token, meta)
+
+    def __str__(self) -> str:
+        return self.out
+
+
+class SecretStore:
+    """A Kubernetes Secret, through the API with the pod's service account (needs get + patch on it)."""
+
+    SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+
+    def __init__(self, name: str, namespace: str | None = None):
+        self.name = name
+        self.api = os.environ.get("CAIRN_K8S_API") or (
+            f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}")
+        token_file = os.environ.get("CAIRN_K8S_TOKEN_FILE", f"{self.SA}/token")
+        self.token_file = token_file
+        if namespace is None:
+            with open(os.environ.get("CAIRN_K8S_NAMESPACE_FILE", f"{self.SA}/namespace")) as f:
+                namespace = f.read().strip()
+        self.namespace = namespace
+        ctx = None
+        if self.api.startswith("https://"):
+            import ssl
+
+            ctx = ssl.create_default_context(cafile=os.environ.get("CAIRN_K8S_CA_FILE", f"{self.SA}/ca.crt"))
+        self.opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx)) if ctx else None
+
+    def _call(self, method: str, payload: dict | None = None, content_type: str = "application/json") -> dict | None:
+        with open(self.token_file) as f:
+            bearer = f.read().strip()
+        url = f"{self.api}/api/v1/namespaces/{self.namespace}/secrets/{self.name}"
+        try:
+            return _request(url, payload, {"Authorization": f"Bearer {bearer}", "Content-Type": content_type},
+                            opener=self.opener, method=method)
+        except urllib.error.HTTPError as e:
+            if e.code == 404 and method == "GET":
+                return None
+            raise RuntimeError(f"kubernetes {method} secret {self.name}: HTTP {e.code} {e.read()[:300]!r}")
+
+    def read(self) -> tuple[str | None, dict]:
+        import base64
+
+        data = ((self._call("GET") or {}).get("data")) or {}
+        token = base64.b64decode(data["core_token"]).decode().strip() if data.get("core_token") else None
+        meta = json.loads(base64.b64decode(data["core_token.json"])) if data.get("core_token.json") else {}
+        return token or None, meta
+
+    def write(self, token: str, meta: dict) -> None:
+        import base64
+
+        b64 = lambda s: base64.b64encode(s.encode()).decode()  # noqa: E731
+        self._call("PATCH", {"data": {"core_token": b64(token), "core_token.json": b64(json.dumps(meta))}},
+                   content_type="application/merge-patch+json")
+
+    def __str__(self) -> str:
+        return f"secret/{self.namespace}/{self.name}"
+
+
+def make_store(args) -> "FileStore | SecretStore":
+    return SecretStore(args.k8s_secret) if getattr(args, "k8s_secret", None) else FileStore(args.out)
+
+
 def token_meta(token_id: str, duration: str, previous: list | None = None) -> dict:
     now = time.time()
     return {"id": token_id, "actor": SERVICE_USER, "issued_at": now,
@@ -162,23 +233,55 @@ def admin_token(frontend_url: str, password: str) -> tuple[str, str]:
     return out["data"]["createAccessToken"]["accessToken"], out["data"]["createAccessToken"]["metadata"]["id"]
 
 
-def ensure_service_account(core_url: str, token: str) -> None:
-    ingest(core_url, token, "corpuser", SERVICE_USER, "corpUserInfo", {
-        "active": True, "displayName": "Cairn service", "title": "Service account",
-        "email": "cairn-service@localhost", "system": True})
-    now = int(time.time() * 1000)
-    for urn, (kind, name) in POLICIES.items():
-        privileges = PLATFORM_PRIVILEGES if kind == "PLATFORM" else METADATA_PRIVILEGES
+def desired_policies() -> dict[str, dict]:
+    """The account's policies, keyed by a URN that hashes their content.
+
+    The engine refuses edits to non-editable policies, so a changed privilege set is a new policy
+    (new URN) and the old one is deleted; an unchanged one is left alone.
+    """
+    out = {}
+    for kind, privileges in (("PLATFORM", PLATFORM_PRIVILEGES), ("METADATA", METADATA_PRIVILEGES)):
         policy = {
-            "displayName": name, "type": kind, "state": "ACTIVE", "editable": False,
-            "description": "Least-privilege grant for the Cairn control plane. Managed by Cairn; "
-                           "changes are overwritten at the next bootstrap.",
-            "privileges": privileges, "lastUpdatedTimestamp": now,
+            "displayName": f"Cairn service: {kind.lower()}", "type": kind, "state": "ACTIVE", "editable": False,
+            "description": "Least-privilege grant for the Cairn control plane. Managed by Cairn.",
+            "privileges": sorted(privileges),
             "actors": {"users": [SERVICE_USER], "allUsers": False, "allGroups": False, "resourceOwners": False},
         }
         if kind == "METADATA":
             policy["resources"] = {"allResources": True}
-        ingest(core_url, token, "dataHubPolicy", urn, "dataHubPolicyInfo", policy)
+        digest = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()[:10]
+        out[f"{POLICY_PREFIX}{kind.lower()}-{digest}"] = policy
+    return out
+
+
+LIST_POLICIES = """query($start: Int!) { listPolicies(input: { start: $start, count: 100, query: "*" }) {
+  total policies { urn } } }"""
+
+
+def existing_policies(core_url: str, token: str) -> set[str]:
+    found, start = set(), 0
+    while True:
+        page = gql(core_url, token, LIST_POLICIES, {"start": start})["listPolicies"]
+        found |= {p["urn"] for p in page["policies"] if p["urn"].startswith(POLICY_PREFIX)}
+        start += 100
+        if start >= page["total"]:
+            return found
+
+
+def ensure_service_account(core_url: str, token: str) -> None:
+    ingest(core_url, token, "corpuser", SERVICE_USER, "corpUserInfo", {
+        "active": True, "displayName": "Cairn service", "title": "Service account",
+        "email": "cairn-service@localhost", "system": True})
+    desired = desired_policies()
+    present = existing_policies(core_url, token)
+    now = int(time.time() * 1000)
+    for urn, policy in desired.items():          # create first: never a moment without the grant
+        if urn not in present:
+            ingest(core_url, token, "dataHubPolicy", urn, "dataHubPolicyInfo", {**policy, "lastUpdatedTimestamp": now})
+            log(f"created policy {urn}")
+    for urn in present - set(desired):
+        gql(core_url, token, "mutation($urn: String!) { deletePolicy(urn: $urn) }", {"urn": urn})
+        log(f"deleted superseded policy {urn}")
 
 
 def wait_effective(core_url: str, token: str, timeout: float = 300) -> None:
@@ -193,40 +296,52 @@ def wait_effective(core_url: str, token: str, timeout: float = 300) -> None:
 
 
 def bootstrap(args) -> None:
-    token, meta = read_state(args.out)
+    store = make_store(args)
+    token, meta = store.read()
     if token and meta.get("actor") == SERVICE_USER and meta.get("expires_at", 0) - time.time() > 2 * 86400:
         me = whoami(args.core_url, token)
         if me and me["corpUser"]["urn"] == SERVICE_USER:
-            log(f"existing service token in {args.out} is valid; nothing to do")
+            log(f"existing service token in {store} is valid; nothing to do")
             return
     if not args.password:
         raise SystemExit("CAIRN_ADMIN_PASSWORD (or --password) is required to bootstrap the service account")
     admin, admin_id = admin_token(args.frontend_url, args.password)
+    seed_id = None
     try:
         ensure_service_account(args.core_url, admin)
-        new, new_id = mint(args.core_url, admin, SERVICE_USER, args.duration, f"cairn-service {time.strftime('%Y-%m-%d')}",
+        # A short-lived seed token lets the account mint its own long-lived token: tokens are owned by
+        # whoever mints them, and only owned tokens can later be revoked by the keeper.
+        seed, seed_id = mint(args.core_url, admin, SERVICE_USER, "ONE_DAY", "cairn-service seed",
+                             "Bootstrap seed (revoked immediately)")
+        wait_effective(args.core_url, seed)
+        new, new_id = mint(args.core_url, seed, SERVICE_USER, args.duration, f"cairn-service {time.strftime('%Y-%m-%d')}",
                            "Cairn control plane (rotated automatically)")
-        wait_effective(args.core_url, new)
-        write_state(args.out, new, token_meta(new_id, args.duration))
-        log(f"service token for {SERVICE_USER} written to {args.out}")
+        store.write(new, token_meta(new_id, args.duration))
+        log(f"service token for {SERVICE_USER} written to {store}")
     finally:
-        try:
-            revoke(args.core_url, admin, admin_id)
-        except Exception as e:  # noqa: BLE001 - the admin token also expires within the hour
-            log(f"could not revoke bootstrap admin token: {e}")
+        for tid in filter(None, (seed_id, admin_id)):
+            try:
+                revoke(args.core_url, admin, tid)
+            except Exception as e:  # noqa: BLE001 - both expire on their own (one day / one hour)
+                log(f"could not revoke bootstrap token {tid}: {e}")
 
 
 # ---------------------------------------------------------------------------------------- keeper
 def rotate_once(args, now: float | None = None) -> bool:
     """Rotate when due; revoke retired tokens past their grace period. Returns True if rotated."""
     now = now or time.time()
-    token, meta = read_state(args.out)
+    store = make_store(args)
+    token, meta = store.read()
     if not token or meta.get("actor") != SERVICE_USER:
         log("no service token yet; waiting for bootstrap")
         return False
     retired = meta.get("retired", [])
     keep = []
+    lifetime = DURATIONS_DAYS[args.duration] * 86400
     for r in retired:
+        if now - r["retired_at"] >= lifetime:
+            log(f"retired token {r['id']} has expired; dropping it")
+            continue
         if now - r["retired_at"] >= args.grace_minutes * 60:
             try:
                 revoke(args.core_url, token, r["id"])
@@ -242,12 +357,12 @@ def rotate_once(args, now: float | None = None) -> bool:
                            f"cairn-service {time.strftime('%Y-%m-%d')}", "Cairn control plane (rotated automatically)")
         keep.append({"id": meta["id"], "retired_at": now})
         meta = token_meta(new_id, args.duration, keep)
-        write_state(args.out, new, meta)
+        store.write(new, meta)
         log(f"rotated service token; previous one is revoked in {args.grace_minutes} min")
         rotated = True
     elif keep != retired:
         meta["retired"] = keep
-        write_state(args.out, token, meta)
+        store.write(token, meta)
     return rotated
 
 
@@ -257,6 +372,8 @@ def main() -> int:
     p.add_argument("--core-url", default=os.environ.get("CAIRN_CORE_URL", "http://cairn-core:8080"))
     p.add_argument("--password", default=os.environ.get("CAIRN_ADMIN_PASSWORD"))
     p.add_argument("--out", default="/run/cairn/core_token")
+    p.add_argument("--k8s-secret", default=os.environ.get("CAIRN_TOKEN_SECRET"),
+                   help="store the token in this Kubernetes Secret instead of --out")
     p.add_argument("--duration", default=os.environ.get("CAIRN_CORE_TOKEN_DURATION", "ONE_MONTH"),
                    choices=sorted(DURATIONS_DAYS))
     p.add_argument("--keep", action="store_true", help="run as the rotation keeper")
@@ -266,7 +383,7 @@ def main() -> int:
     p.add_argument("--rotate-days", type=float, default=float(os.environ.get("CAIRN_TOKEN_ROTATE_DAYS", "7")))
     p.add_argument("--grace-minutes", type=float, default=float(os.environ.get("CAIRN_TOKEN_GRACE_MINUTES", "15")))
     p.add_argument("--check-minutes", type=float, default=float(os.environ.get("CAIRN_TOKEN_CHECK_MINUTES", "30")))
-    p.add_argument("--retries", type=int, default=60)
+    p.add_argument("--retries", type=int, default=int(os.environ.get("CAIRN_BOOTSTRAP_RETRIES", "60")))
     args = p.parse_args()
     if args.rotate_days >= DURATIONS_DAYS[args.duration]:
         p.error("--rotate-days must be shorter than the token lifetime (--duration)")

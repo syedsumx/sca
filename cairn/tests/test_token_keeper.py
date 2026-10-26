@@ -94,3 +94,163 @@ def test_least_privilege_grant():
                  "RESTORE_INDICES_PRIVILEGE", "TRUNCATE_TIMESERIES_INDEX_PRIVILEGE", "SET_WRITEABLE_PRIVILEGE",
                  "DELETE_ENTITY"}
     assert not dangerous & set(mct.PLATFORM_PRIVILEGES + mct.METADATA_PRIVILEGES)
+
+
+# ------------------------------------------------------------------------------ Kubernetes Secret store
+@pytest.fixture
+def fake_k8s(tmp_path, monkeypatch):
+    """Minimal API server: GET/PATCH one Secret, bearer token required, merge-patch semantics."""
+    import base64
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    secrets = {"cairn-core-token": {"metadata": {"name": "cairn-core-token"}, "data": {}}}
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def _secret(self):
+            assert self.headers["Authorization"] == "Bearer sa-token"
+            parts = self.path.split("/")
+            assert parts[:5] == ["", "api", "v1", "namespaces", "cairn"]
+            return parts[-1]
+
+        def do_GET(self):
+            name = self._secret()
+            body = json.dumps(secrets[name]).encode() if name in secrets else b"{}"
+            self.send_response(200 if name in secrets else 404)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_PATCH(self):
+            name = self._secret()
+            seen.append(self.headers["Content-Type"])
+            patch = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if name not in secrets:
+                self.send_response(404)
+                self.end_headers()
+                return
+            secrets[name]["data"].update(patch["data"])
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(json.dumps(secrets[name]).encode())
+
+        def log_message(self, *a):
+            pass
+
+    srv = HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    (tmp_path / "token").write_text("sa-token")
+    (tmp_path / "namespace").write_text("cairn")
+    monkeypatch.setenv("CAIRN_K8S_NAMESPACE_FILE", str(tmp_path / "namespace"))
+    monkeypatch.setenv("CAIRN_K8S_API", f"http://127.0.0.1:{srv.server_port}")
+    monkeypatch.setenv("CAIRN_K8S_TOKEN_FILE", str(tmp_path / "token"))
+    yield secrets, seen, base64
+    srv.shutdown()
+
+
+def test_secret_store_round_trip(fake_k8s):
+    secrets, seen, base64 = fake_k8s
+    store = mct.SecretStore("cairn-core-token", namespace="cairn")
+    assert store.read() == (None, {})
+    store.write("tok1", {"id": "id1", "actor": mct.SERVICE_USER})
+    assert seen == ["application/merge-patch+json"]
+    assert base64.b64decode(secrets["cairn-core-token"]["data"]["core_token"]) == b"tok1"
+    assert store.read() == ("tok1", {"id": "id1", "actor": mct.SERVICE_USER})
+
+
+def test_secret_store_missing_secret_is_an_error(fake_k8s):
+    store = mct.SecretStore("not-created-by-the-chart", namespace="cairn")
+    assert store.read() == (None, {})
+    with pytest.raises(RuntimeError, match="HTTP 404"):
+        store.write("tok", {})
+
+
+def test_rotation_through_secret_store(fake_k8s, monkeypatch):
+    calls = []
+    monkeypatch.setattr(mct, "mint", lambda *a: (calls.append(a[1]) or "tok2", "id2"))
+    monkeypatch.setattr(mct, "revoke", lambda *a: None)
+    store = mct.SecretStore("cairn-core-token")          # namespace read from the service-account mount
+    store.write("tok1", {"id": "id1", "actor": mct.SERVICE_USER, "issued_at": 0, "retired": []})
+    args = argparse.Namespace(out="/unused", k8s_secret="cairn-core-token", core_url="http://core",
+                              duration="ONE_MONTH", rotate_days=7, grace_minutes=15)
+    assert mct.rotate_once(args, now=8 * DAY)
+    assert calls == ["tok1"] and store.read()[0] == "tok2"
+
+
+# ------------------------------------------------------------------------------ service-account policies
+def test_policy_urns_are_content_addressed():
+    a, b = mct.desired_policies(), mct.desired_policies()
+    assert a == b and len(a) == 2
+    assert all(u.startswith(mct.POLICY_PREFIX) and not p["editable"] for u, p in a.items())
+
+
+@pytest.fixture
+def core_calls(monkeypatch):
+    calls = {"ingest": [], "deleted": [], "present": set()}
+    monkeypatch.setattr(mct, "ingest", lambda core, tok, et, urn, aspect, body: calls["ingest"].append((et, urn)))
+
+    def fake_gql(core, tok, query, variables=None):
+        if "listPolicies" in query:
+            return {"listPolicies": {"total": len(calls["present"]), "policies": [{"urn": u} for u in calls["present"]]
+                                     + [{"urn": "urn:li:dataHubPolicy:0"}]}}
+        if "deletePolicy" in query:
+            calls["deleted"].append(variables["urn"])
+            return {"deletePolicy": variables["urn"]}
+        raise AssertionError(query)
+    monkeypatch.setattr(mct, "gql", fake_gql)
+    return calls
+
+
+def test_first_bootstrap_creates_user_and_policies(core_calls):
+    mct.ensure_service_account("http://core", "admin")
+    assert ("corpuser", mct.SERVICE_USER) in core_calls["ingest"]
+    assert {u for et, u in core_calls["ingest"] if et == "dataHubPolicy"} == set(mct.desired_policies())
+    assert core_calls["deleted"] == []
+
+
+def test_rerun_leaves_unchanged_policies_alone(core_calls):
+    core_calls["present"] = set(mct.desired_policies())
+    mct.ensure_service_account("http://core", "admin")
+    assert [u for et, u in core_calls["ingest"] if et == "dataHubPolicy"] == []   # non-editable: never re-written
+    assert core_calls["deleted"] == []
+
+
+def test_changed_grant_replaces_policy_and_deletes_old(core_calls):
+    old = {"urn:li:dataHubPolicy:cairn-service-platform", "urn:li:dataHubPolicy:cairn-service-metadata"}
+    core_calls["present"] = old | {next(iter(mct.desired_policies()))}
+    mct.ensure_service_account("http://core", "admin")
+    created = [u for et, u in core_calls["ingest"] if et == "dataHubPolicy"]
+    assert len(created) == 1 and sorted(core_calls["deleted"]) == sorted(old)   # never root policies
+
+
+def test_bootstrap_token_is_minted_by_the_account_itself(tmp_path, monkeypatch):
+    log = []
+    monkeypatch.setattr(mct, "admin_token", lambda url, pw: ("ADMIN", "admin-id"))
+    monkeypatch.setattr(mct, "ensure_service_account", lambda core, tok: log.append(("ensure", tok)))
+    monkeypatch.setattr(mct, "wait_effective", lambda core, tok: log.append(("wait", tok)))
+    monkeypatch.setattr(mct, "whoami", lambda core, tok: None)
+
+    def fake_mint(core, tok, actor, duration, name, desc):
+        log.append(("mint", tok, duration))
+        return ("SEED", "seed-id") if tok == "ADMIN" else ("LONG", "long-id")
+    monkeypatch.setattr(mct, "mint", fake_mint)
+    monkeypatch.setattr(mct, "revoke", lambda core, tok, tid: log.append(("revoke", tok, tid)))
+    args = argparse.Namespace(out=str(tmp_path / "t"), core_url="http://core", frontend_url="http://web",
+                              password="pw", duration="ONE_MONTH")
+    mct.bootstrap(args)
+    assert ("mint", "SEED", "ONE_MONTH") in log                 # long-lived token minted by the account
+    assert mct.read_state(args.out)[0] == "LONG"
+    assert ("revoke", "ADMIN", "seed-id") in log and ("revoke", "ADMIN", "admin-id") in log
+
+
+def test_expired_retired_tokens_are_dropped(keeper, monkeypatch):
+    args, calls = keeper
+    mct.rotate_once(args, now=7 * DAY)
+    _, meta = state(args)
+    meta["issued_at"] = 7 * DAY
+    mct.write_state(args.out, "tok1", meta)
+    monkeypatch.setattr(mct, "revoke", lambda *a: (_ for _ in ()).throw(RuntimeError("403")))
+    mct.rotate_once(args, now=8 * DAY)
+    assert state(args)[1]["retired"]                             # still retried within its lifetime
+    mct.rotate_once(args, now=7 * DAY + 31 * DAY)
+    assert "id0" not in [r["id"] for r in state(args)[1]["retired"]]   # expired: nothing left to revoke

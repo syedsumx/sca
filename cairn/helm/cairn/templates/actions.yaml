@@ -14,7 +14,7 @@ data:
 {{- range $name, $p := $pipelines }}
 {{- if $p.cfg.enabled }}
 ---
-{{- $ctx := dict "root" $ "component" (printf "actions-%s" $name) "cfg" $p.cfg "replicas" $p.cfg.replicas "args" (list "actions" "-c" (printf "/etc/cairn/actions/%s" $p.file)) "extraVolumes" (list (dict "name" "actions" "configMap" (dict "name" $cm))) "extraVolumeMounts" (list (dict "name" "actions" "mountPath" "/etc/cairn/actions" "readOnly" true)) }}
+{{- $ctx := dict "root" $ "component" (printf "actions-%s" $name) "cfg" $p.cfg "replicas" $p.cfg.replicas "command" (list "/opt/cairn/bin/dumb-init" "--" "/opt/cairn/bootstrap/with-token.sh") "args" (list "actions" "-c" (printf "/etc/cairn/actions/%s" $p.file)) "extraEnv" (list (dict "name" "CAIRN_RESTART_ON_TOKEN_CHANGE" "value" "1")) "extraVolumes" (list (dict "name" "actions" "configMap" (dict "name" $cm))) "extraVolumeMounts" (list (dict "name" "actions" "mountPath" "/etc/cairn/actions" "readOnly" true)) }}
 {{ include "cairn.deployment" $ctx }}
 {{- end }}
 {{- end }}
