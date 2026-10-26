@@ -137,18 +137,16 @@ jobs:
         run: deploy/build-images.sh
 
       - name: Scan Cairn-owned images (fail on fixable critical CVEs)
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: image
-          image-ref: cairn/platform:${{ env.CAIRN_VERSION }}
-          severity: CRITICAL
-          ignore-unfixed: true
-          exit-code: "1"
+        run: |
+          for img in platform remote-agent; do
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
+              --quiet --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
+          done
       - name: Scan remaining images (report only)
         run: |
-          for img in consumer-ui remote-agent core web setup executor; do
+          for img in consumer-ui core web setup executor; do
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy:0.57.1 image \
-              --quiet --severity CRITICAL,HIGH --ignore-unfixed --format table "cairn/${img}:${CAIRN_VERSION}" \
+              --quiet --scanners vuln --severity CRITICAL,HIGH --ignore-unfixed --format table "cairn/${img}:${CAIRN_VERSION}" \
               > "$RUNNER_TEMP/trivy-${img}.txt" || true
           done
       - name: SBOMs
