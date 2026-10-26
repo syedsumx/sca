@@ -59,21 +59,29 @@ def get_engine(url: str) -> Engine:
         return engine
 
 
-def init_db(engine: Engine) -> None:
-    # Import table modules so they register on `metadata`.
+def load_models() -> MetaData:
+    """Import every table module so its tables register on :data:`metadata`."""
     from cairn.agent import store as _agent_store  # noqa: F401
-    from cairn.common import audit as _audit  # noqa: F401
-    from cairn.governance import certification as _cert  # noqa: F401
-    from cairn.quality import store as _quality_store  # noqa: F401
     from cairn.ai import assistant as _assistant  # noqa: F401
     from cairn.collab import service as _collab  # noqa: F401
+    from cairn.common import audit as _audit  # noqa: F401
     from cairn.context import miner as _context  # noqa: F401
     from cairn.embed import service as _embed  # noqa: F401
+    from cairn.governance import certification as _cert  # noqa: F401
+    from cairn.governance import pdp as _pdp  # noqa: F401
     from cairn.governance import personas as _personas  # noqa: F401
     from cairn.marketplace import service as _marketplace  # noqa: F401
     from cairn.notify import hub as _notify  # noqa: F401
+    from cairn.quality import store as _quality_store  # noqa: F401
 
-    metadata.create_all(engine)
+    return metadata
+
+
+def init_db(engine: Engine) -> None:
+    """Migrate the schema to the current revision (cairn.migrations)."""
+    from cairn import migrations
+
+    migrations.upgrade(engine)
 
 
 @contextmanager

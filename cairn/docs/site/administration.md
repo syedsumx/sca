@@ -42,5 +42,13 @@ consoles are disabled at the edge.
 
 ## Upgrades
 
-Run the new version's images; the `cairn-setup` job migrates schemas and indices before the services
-start. Read the release notes for setting changes first.
+Run the new version's images. The `cairn-setup` job migrates the catalog's schema, indices and topics
+before the services start, and the control-plane services migrate their own database on start (one
+at a time, under a database lock). Read the release notes for setting changes first.
+
+```bash
+cairn db current     # schema revision of the control-plane database, and the latest one
+cairn db check       # non-zero exit if the schema is not at the latest revision or differs from it
+```
+
+Back up the control-plane database before upgrading; migrations move forward only.

@@ -25,6 +25,15 @@ env:
 jobs:
   python:
     runs-on: ubuntu-latest
+    services:
+      postgres:          # migration tests also run on Postgres (CAIRN_TEST_PG_URL)
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: cairn
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -32,10 +41,12 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: cairn/pyproject.toml
-      - run: pip install -e ".[server,ai,test]" ruff
+      - run: pip install -e ".[server,ai,test,postgres]" ruff
       - name: Lint
         run: ruff check .
       - name: Unit and integration tests
+        env:
+          CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
         run: pytest -q
       - name: Policy bundle
         run: cairn policies validate config/policies
@@ -183,6 +194,9 @@ jobs:
             .env.example >> .env
           docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900 \
             || docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 600
+
+      - name: Database schema matches the models
+        run: docker compose -f docker-compose.cairn.yml exec -T cairn-api cairn db check
 
       - name: Live e2e
         run: |

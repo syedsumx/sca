@@ -17,6 +17,7 @@ dependencies = [
   "croniter>=2.0",
   "cryptography>=42",
   "sqlglot>=25",
+  "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
@@ -44,7 +45,7 @@ cairn_vector_indexer = "cairn.ai.indexer_action:VectorIndexerAction"
 where = ["src"]
 
 [tool.setuptools.package-data]
-cairn = ["py.typed"]
+cairn = ["py.typed", "migrations/script.py.mako", "migrations/alembic.ini"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

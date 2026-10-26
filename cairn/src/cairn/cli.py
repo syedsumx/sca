@@ -169,6 +169,23 @@ def cmd_audit_verify(_a) -> None:
     sys.exit(0 if result["valid"] else 1)
 
 
+def cmd_db(a) -> None:
+    from cairn import migrations
+    from cairn.common.config import get_settings
+    from cairn.common.db import get_engine
+
+    engine = get_engine(get_settings().database_url)
+    if a.db_command == "upgrade":
+        print(f"schema at {migrations.upgrade(engine)}")
+    elif a.db_command == "current":
+        print(json.dumps({"current": migrations.current(engine), "head": migrations.head()}))
+    elif a.db_command == "check":
+        diffs = migrations.check(engine)
+        cur, head = migrations.current(engine), migrations.head()
+        print(json.dumps({"current": cur, "head": head, "differences": [str(d) for d in diffs]}, indent=2))
+        sys.exit(0 if not diffs and cur == head else 1)
+
+
 def cmd_policies_validate(a) -> None:
     from cairn.governance.pdp import load_bundle_from_dir
 
@@ -240,6 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit = sub.add_parser("audit", help="audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
     audit_sub.add_parser("verify").set_defaults(fn=cmd_audit_verify)
+
+    db = sub.add_parser("db", help="control-plane database schema (migrations)")
+    db_sub = db.add_subparsers(dest="db_command", required=True)
+    for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
+                        ("check", "fail if the schema differs from the models or is not at head")):
+        db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
 
     pol = sub.add_parser("policies", help="policy bundle tools")
     pol_sub = pol.add_subparsers(dest="policies_command", required=True)

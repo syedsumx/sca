@@ -97,7 +97,7 @@ writes nothing until it is approved.
 | 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ✅ build (`deploy/build-images.sh`, apt-free images); ⬜ scan, SBOM, signing, registry push in CI |
 | 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (Cairn Core/PDP/gateway outages) | ✅ API smoke suite `tests/e2e` (8 scenarios); ⬜ Playwright UI, chaos tests, CI job |
 | 5.3 | Load test PDP (target p99 < 5 ms cached, < 25 ms uncached at 2k rps) and gateway (100 agents, 1 GB metadata/run) | ⬜ |
-| 5.4 | Alembic migrations for the `cairn` schema (v0.1 uses `create_all`) | ⬜ |
+| 5.4 | Alembic migrations for the `cairn` schema; v0.1 databases (`create_all`) are adopted at the baseline | ✅ SQLite + Postgres tests, live upgrade of a v0.1 database, `cairn db check` in CI |
 | 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ⬜ |
 | 5.6 | Upgrade playbook: pin-and-test matrix against Cairn Core minor releases (aspect shapes, GraphQL fields) | ⬜ |
 
