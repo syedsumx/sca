@@ -33,7 +33,7 @@ aspects and lists, and `/openapi/v2` timeseries).
 * A **purpose** (for example *GDPR personal data*) states why data may be used. Purpose denies take
   priority over persona grants.
 
-Manage both in **Workspace → Governance**. Grants can be time-boxed; holders are warned before they
+Manage both in **Workspace → Governance studio**. Grants can be time-boxed; holders are warned before they
 expire.
 
 ## PII and masking
@@ -46,7 +46,7 @@ masked for people without a matching purpose; the asset page says when something
 ## Rule-based propagation
 
 Tags and glossary terms can follow lineage by rule (for example: *gdpr-subject* flows to every
-downstream table). Rules live in Workspace → Governance.
+downstream table). Rules live in Workspace → Governance studio.
 
 ## Certification
 

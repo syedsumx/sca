@@ -489,6 +489,21 @@ def test_13_workspace_renders_inside_catalog_ui():
     assert not result["errors"], result["errors"]
 
 
+def test_13b_workspace_sections_are_catalog_navigation_entries():
+    """One navigation: each workspace section is an entry in the catalog's left navigation, and
+    switching sections inside the workspace moves the catalog's navigation with it."""
+    out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_nav.js")], capture_output=True,
+                         text=True, timeout=240, env={
+                             **os.environ, "EDGE": EDGE, "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", ""),
+                             "UI_USER": os.environ.get("CAIRN_E2E_UI_USER", "admin"),
+                             "UI_PASSWORD": os.environ["CAIRN_E2E_UI_PASSWORD"]})
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert not result["missing"] and not result["errors"], result
+    assert result["viaShell"] == {"url": "/mfe/cairn-requests#/requests", "active": "Requests"}, result
+    assert result["viaWorkspace"] == {"url": "/mfe/cairn-marketplace#/marketplace", "active": "Marketplace"}, result
+
+
 # --------------------------------------------------------------------------- authorization mode
 AUTHZ_MODE = os.environ.get("CAIRN_E2E_AUTHZ_MODE", "additive")
 SERVICE_TOKEN = os.environ.get("CAIRN_E2E_PDP_TOKEN", "")

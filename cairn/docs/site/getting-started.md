@@ -11,8 +11,10 @@ credentials your administrator gave you. The first administrator account is `adm
 
 ## Two ways in
 
-* **Workspace** (left navigation → *Workspace*) is the everyday view: Discover, faceted search,
-  bookmarks, trending assets, data products and the assistant.
+* **Workspace** (the *Workspace* group in the left navigation) is the everyday view: **Discover**
+  (search, bookmarks, trending assets), **Data marketplace** (data products), **Requests**, **Governance
+  studio**, **Context inbox** and the **Assistant**. Each has its own place in the navigation and
+  its own address, so you can bookmark or share it.
 * **Catalog** pages (Home, Glossary, Domains, Data Sources, Settings) are where stewards and
   administrators curate metadata, manage ingestion and configure access.
 

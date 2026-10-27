@@ -7,7 +7,7 @@ order: 7
 ## Notifications
 
 Cairn notifies people in the workspace inbox and, per their settings, in Slack, Microsoft Teams or
-email. Routes per domain or event type are configured in **Workspace → Settings → Notifications**;
+email. Routes per domain or event type are configured in **Workspace → Workspace settings → Notifications**;
 generic webhooks receive the same events as JSON.
 
 | Channel | Setup |

@@ -1,11 +1,12 @@
 import { Badge, Button } from 'antd';
 import React from 'react';
-import { NavLink } from 'react-router-dom';
+import { NavLink, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useDheQuery } from '../api/hooks';
 import type { InboxItem } from '../api/types';
 import { useDheSession } from '../context/CairnProvider';
+import { isHosted, navigateHost } from '../hostNav';
 import { useHotkeys } from '../utils/useHotkeys';
 import { AssistantSlideOver } from './Assistant';
 import { focusRing, tokens } from './tokens';
@@ -57,13 +58,19 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     });
     useHotkeys({ 'mod+j': () => session.setAssistantOpen(!session.assistantOpen) });
     const unread = inbox.data?.length ?? 0;
+    useLocation(); // re-render on navigation (hosted mode reads window.location)
+    const hosted = typeof window !== 'undefined' && isHosted(window.location.pathname);
+    // In the catalog shell, sections are shell navigation entries: switching moves the shell along.
+    const onTab = (to: string) => (e: React.MouseEvent) => {
+        if (hosted && navigateHost(to)) e.preventDefault();
+    };
     return (
         <div style={{ minHeight: '100%', background: tokens.color.surfaceAlt }}>
             <Bar>
                 <strong style={{ marginRight: 16, color: tokens.color.primary }}>Workspace</strong>
                 <nav aria-label="Workspace sections" style={{ display: 'flex', gap: 4, flex: 1 }}>
                     {NAV.filter((n) => !n.feature || session.feature(n.feature)).map((n) => (
-                        <Tab key={n.to} to={n.to}>
+                        <Tab key={n.to} to={n.to} onClick={onTab(n.to)}>
                             {n.badge ? (
                                 <Badge count={unread} size="small" offset={[8, -2]}>
                                     {n.label}

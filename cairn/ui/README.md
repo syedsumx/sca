@@ -131,6 +131,12 @@ npm run build         # both
   hash: `/mfe/cairn#/search?q=orders&f.platform=…`, `/mfe/cairn#/asset/<urn>`. Search state (query,
   facets, page) lives in the hash and is shareable. Set `data-cairn-router="browser"` on the mount
   element, or pass `routerMode: 'browser'`, when hosting it at a non-exact route.
+- **One navigation.** Each section (Discover, Data marketplace, Requests, Governance studio, Context inbox,
+  Assistant, settings) is its own entry in the host's left navigation, all mounting this bundle
+  (`/mfe/cairn`, `/mfe/cairn-marketplace`, ...). Mounted on an entry, the workspace opens on that
+  section; its own section tabs move the host to the matching entry, so the host's navigation always
+  shows where you are. The list lives in `src/consumer/hostNav.ts` and must match `mfe.config.yaml`
+  (a unit test checks).
 - **No shared deps.** The host shares nothing, so the remote bundles its own React 17, antd,
   styled-components and react-router. It renders into the host DOM and uses the host's antd 4 CSS;
   the bundle has no CSS of its own.

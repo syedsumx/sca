@@ -2,6 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom';
 
 import { ConsumerApp, ConsumerAppProps } from './ConsumerApp';
+import { applyInitialSection } from './hostNav';
 
 /**
  * Module-Federation entry for Cairn Core's MFE host (`app/mfeframework/MFEConfigurableContainer.tsx`).
@@ -13,6 +14,7 @@ import { ConsumerApp, ConsumerAppProps } from './ConsumerApp';
  */
 export function mount(el: HTMLElement, props: Partial<ConsumerAppProps> = {}): () => void {
     const routerMode = props.routerMode ?? (el.dataset.cairnRouter === 'browser' ? 'browser' : 'hash');
+    if (routerMode === 'hash') applyInitialSection();
     ReactDOM.render(<ConsumerApp {...props} routerMode={routerMode} />, el);
     return () => {
         ReactDOM.unmountComponentAtNode(el);

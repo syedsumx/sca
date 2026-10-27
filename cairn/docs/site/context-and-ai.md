@@ -7,7 +7,7 @@ order: 5
 ## Context agents
 
 Context agents read query history, dbt models, BI definitions and pipeline runs and turn them into
-**findings** for stewards to review in **Workspace → Context**:
+**findings** for stewards to review in **Workspace → Context inbox**:
 
 | Finding | Meaning |
 |---|---|

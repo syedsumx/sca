@@ -6,11 +6,14 @@
 # so the workspace can call /api/v2/graphql and /cairn/api/* with the user's Cairn Core session cookie.
 # Keep in sync with ui/mfe.config.yaml.
 topLevelMenuTitle: Workspace
+# false: each section is its own item in the left navigation, grouped under "Workspace".
 subNavigationMode: false
 loadTimeoutMs: 30000
+# One bundle, one entry per section: the workspace opens on the section of the path it is mounted on
+# (ui/src/consumer/hostNav.ts keeps the same list).
 microFrontends:
-  - id: CairnWorkspace
-    label: Workspace
+  - id: CairnDiscover
+    label: Discover
     path: /cairn
     remoteEntry: /cairn-ui/remoteEntry.js
     module: cairnConsumer/mount
@@ -18,3 +21,57 @@ microFrontends:
       enabled: true
       showInNav: true
     navIcon: Compass
+  - id: CairnMarketplace
+    label: Data marketplace
+    path: /cairn-marketplace
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Storefront
+  - id: CairnRequests
+    label: Requests
+    path: /cairn-requests
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Tray
+  - id: CairnGovernance
+    label: Governance studio
+    path: /cairn-governance
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: ShieldCheck
+  - id: CairnContext
+    label: Context inbox
+    path: /cairn-context
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Lightbulb
+  - id: CairnAssistant
+    label: Assistant
+    path: /cairn-assistant
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Sparkle
+  - id: CairnSettings
+    label: Workspace settings
+    path: /cairn-settings
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Gear

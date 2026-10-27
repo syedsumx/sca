@@ -164,3 +164,28 @@ describe('mount()', () => {
         el.remove();
     });
 });
+
+describe('mount() inside the catalog shell', () => {
+    afterEach(() => window.history.replaceState(null, '', '/'));
+
+    it('opens the section of its shell entry, and section tabs move the shell', async () => {
+        window.history.replaceState(null, '', '/mfe/cairn-requests');
+        const fetchImpl = mockFetch(routes());
+        const el = document.createElement('div');
+        document.body.append(el);
+        const cleanup = mount(el, { client: new ConsumerClient({ fetchImpl }), cache: new QueryCache() });
+        expect(window.location.hash).toBe('#/requests');
+        const popped: string[] = [];
+        const onPop = () => popped.push(`${window.location.pathname}${window.location.hash}`);
+        window.addEventListener('popstate', onPop);
+        const tab = await screen.findByRole('link', { name: 'Marketplace' });
+        fireEvent.click(tab);
+        expect(popped).toEqual(['/mfe/cairn-marketplace#/marketplace']);
+        // Search has no shell entry of its own: it stays inside the workspace.
+        fireEvent.click(screen.getByRole('link', { name: 'Search' }));
+        expect(popped).toHaveLength(1);
+        window.removeEventListener('popstate', onPop);
+        cleanup();
+        el.remove();
+    });
+});
