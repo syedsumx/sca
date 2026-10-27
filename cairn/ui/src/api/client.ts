@@ -4,6 +4,7 @@ import type {
     AgentPoolInput,
     AgentRun,
     AskResponse,
+    CancelResult,
     DatasetHealth,
     DocGenerateResponse,
     EnrollmentToken,
@@ -17,6 +18,7 @@ import type {
     SemanticSearchResponse,
     SimulateRequest,
     SimulateResponse,
+    TaskLogs,
     Workflow,
     WorkflowAction,
     WorkflowCreate,
@@ -268,7 +270,18 @@ export class CairnClient {
     }
 
     revokeAgent(agentId: string, opts?: RequestOptions) {
-        return this.request<Agent>('POST', `/agents/${encodeURIComponent(agentId)}/revoke`, {}, opts);
+        return this.request<void>('POST', `/agents/${encodeURIComponent(agentId)}/revoke`, {}, opts);
+    }
+
+    cancelTask(taskId: string, opts?: RequestOptions) {
+        return this.request<CancelResult>('POST', `/agents/tasks/${encodeURIComponent(taskId)}/cancel`, {}, opts);
+    }
+
+    getTaskLogs(taskId: string, after = 0, opts?: RequestOptions) {
+        return this.request<TaskLogs>('GET', `/agents/tasks/${encodeURIComponent(taskId)}/logs`, undefined, {
+            ...opts,
+            query: { ...(opts?.query ?? {}), after },
+        });
     }
 
     // --- ai --------------------------------------------------------------------------------

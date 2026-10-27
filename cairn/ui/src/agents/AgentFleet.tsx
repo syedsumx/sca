@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     Alert,
     Button,
     Card,
+    Drawer,
     Form,
     Input,
     InputNumber,
@@ -19,7 +20,7 @@ import {
 } from 'antd';
 
 import { useDheClient, useMutation, usePolling } from '../api/hooks';
-import type { Agent, AgentPool, AgentPoolInput, AgentRun, AgentStatus, EnrollmentToken } from '../api/types';
+import type { Agent, AgentPool, AgentPoolInput, AgentRun, AgentStatus, EnrollmentToken, TaskLogs } from '../api/types';
 import { formatRelative, formatTimestamp } from '../common/format';
 import { EmptyState, ErrorState, LoadingState, Mono, PageContainer, PageHeader } from '../common/States';
 
@@ -45,31 +46,127 @@ export function runStatusColor(status: string): string {
     }
 }
 
-/** Shell snippet for starting an agent with a fresh enrollment token. */
+/** Shell snippet for starting an agent with a fresh enrollment token (the token decides the pool). */
 export function enrollmentCommand(gatewayUrl: string, pool: string, token: string): string {
     return [
+        `# Agent for pool "${pool}": run inside the private network. The token works once.`,
         'docker run -d --name cairn-remote-agent --restart unless-stopped \\',
-        `  -e CAIRN_GATEWAY_URL=${gatewayUrl} \\`,
-        `  -e CAIRN_AGENT_POOL=${pool} \\`,
-        `  -e CAIRN_ENROLLMENT_TOKEN=${token} \\`,
+        `  -e CAIRN_AGENT_GATEWAY_URL=${gatewayUrl} \\`,
+        `  -e CAIRN_AGENT_ENROLLMENT_TOKEN=${token} \\`,
         '  -v cairn-agent-state:/var/lib/cairn-agent \\',
-        '  cairn/platform:latest cairn agent run',
+        '  cairn/remote-agent',
     ].join('\n');
+}
+
+/** Same thing with the Helm chart, for Kubernetes. */
+export function enrollmentHelmCommand(gatewayUrl: string, token: string): string {
+    return [
+        'helm install cairn-remote-agent ./helm/cairn-remote-agent \\',
+        `  --set gateway.url=${gatewayUrl} \\`,
+        `  --set enrollment.token=${token}`,
+    ].join('\n');
+}
+
+const ACTIVE = new Set(['QUEUED', 'LEASED', 'RUNNING']);
+
+/** Whether a run can still be cancelled. */
+export function cancellable(status: string): boolean {
+    return ACTIVE.has(status.toUpperCase());
+}
+
+/** Live tail of a task's logs: polls for new lines until the task finishes. */
+export function RunLogs({ taskId, pollIntervalMs = 2000 }: { taskId: string; pollIntervalMs?: number }) {
+    const client = useDheClient();
+    const [state, setState] = useState<{ lines: string[]; next: number; done: boolean; status: string }>({
+        lines: [],
+        next: 0,
+        done: false,
+        status: '',
+    });
+    const [error, setError] = useState<string | null>(null);
+    const bottom = useRef<HTMLDivElement | null>(null);
+    useEffect(() => {
+        let stopped = false;
+        let next = 0;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const controller = new AbortController();
+        const tick = async () => {
+            try {
+                const page: TaskLogs = await client.getTaskLogs(taskId, next, { signal: controller.signal });
+                if (stopped) return;
+                next = page.next;
+                setState((prev) => ({
+                    lines: page.lines.length ? [...prev.lines, ...page.lines] : prev.lines,
+                    next: page.next,
+                    done: page.done,
+                    status: page.status,
+                }));
+                setError(null);
+                if (!page.done) timer = setTimeout(tick, pollIntervalMs);
+            } catch (e) {
+                if (stopped || (e as Error).name === 'AbortError') return;
+                setError((e as Error).message);
+                timer = setTimeout(tick, pollIntervalMs * 2);
+            }
+        };
+        void tick();
+        return () => {
+            stopped = true;
+            controller.abort();
+            if (timer) clearTimeout(timer);
+        };
+    }, [client, taskId, pollIntervalMs]);
+    useEffect(() => {
+        bottom.current?.scrollIntoView?.({ block: 'end' });
+    }, [state.lines.length]);
+    return (
+        <Space direction="vertical" style={{ width: '100%' }}>
+            <Space>
+                {state.status && <Tag color={runStatusColor(state.status)}>{state.status}</Tag>}
+                {!state.done && state.status && <Typography.Text type="secondary">following live…</Typography.Text>}
+            </Space>
+            {error && <Alert type="warning" showIcon message={`Could not refresh: ${error}`} />}
+            <pre
+                aria-label="Run log"
+                style={{
+                    background: '#0f172a',
+                    color: '#e2e8f0',
+                    padding: 12,
+                    borderRadius: 6,
+                    fontSize: 12,
+                    maxHeight: '70vh',
+                    overflow: 'auto',
+                    whiteSpace: 'pre-wrap',
+                    margin: 0,
+                }}
+            >
+                {state.lines.length ? state.lines.join('\n') : 'No log lines yet.'}
+                <div ref={bottom} />
+            </pre>
+        </Space>
+    );
 }
 
 export interface AgentFleetProps {
     /** Public URL agents should use to reach the gateway; shown in the enrollment snippet. */
     gatewayUrl?: string;
     pollIntervalMs?: number;
+    /** Inside another page (workspace settings): no page header. */
+    embedded?: boolean;
 }
 
-export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', pollIntervalMs = 15000 }: AgentFleetProps) {
+export function AgentFleet({
+    gatewayUrl = 'https://cairn-gateway.example.com',
+    pollIntervalMs = 15000,
+    embedded = false,
+}: AgentFleetProps) {
     const client = useDheClient();
     const pools = usePolling((signal) => client.listPools({ signal }), pollIntervalMs, [client]);
     const agents = usePolling((signal) => client.listAgents({ signal }), pollIntervalMs, [client]);
     const runs = usePolling((signal) => client.listRuns({ signal }), pollIntervalMs, [client]);
     const [poolModal, setPoolModal] = useState(false);
     const [token, setToken] = useState<{ pool: string; token: EnrollmentToken } | null>(null);
+    const [logsFor, setLogsFor] = useState<AgentRun | null>(null);
     const tokenMutation = useMutation((pool: string) => client.createEnrollmentToken(pool));
 
     const issueToken = async (pool: string) => {
@@ -83,9 +180,23 @@ export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', p
 
     const revoke = async (agent: Agent) => {
         try {
-            const updated = await client.revokeAgent(agent.agent_id);
-            agents.setData((prev) => (prev ?? []).map((a) => (a.agent_id === agent.agent_id ? { ...a, ...updated } : a)));
+            await client.revokeAgent(agent.agent_id);
+            agents.setData((prev) =>
+                (prev ?? []).map((a) => (a.agent_id === agent.agent_id ? { ...a, status: 'REVOKED' as AgentStatus } : a)),
+            );
             message.success(`Revoked ${agent.hostname}`);
+        } catch (e) {
+            message.error((e as Error).message);
+        }
+    };
+
+    const cancel = async (run: AgentRun) => {
+        try {
+            const out = await client.cancelTask(run.task_id);
+            runs.setData((prev) =>
+                (prev ?? []).map((r) => (r.task_id === run.task_id ? { ...r, status: out.status } : r)),
+            );
+            message.success(out.was === 'QUEUED' ? 'Cancelled before it started' : 'Cancelling: the agent stops at its next step');
         } catch (e) {
             message.error((e as Error).message);
         }
@@ -197,11 +308,20 @@ export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', p
         if (!runs.data?.length) return <EmptyState description="No remote runs yet" />;
         return (
             <Table<AgentRun>
-                rowKey="run_id"
+                rowKey="task_id"
                 dataSource={runs.data}
                 pagination={{ pageSize: 25, hideOnSinglePage: true }}
                 columns={[
-                    { title: 'Run', dataIndex: 'run_id', render: (v: string) => <Mono>{v}</Mono> },
+                    {
+                        title: 'Task',
+                        dataIndex: 'task_id',
+                        render: (v: string, r) => (
+                            <Space direction="vertical" size={0}>
+                                <Mono>{v}</Mono>
+                                {r.run_id && <Typography.Text type="secondary">{r.run_id}</Typography.Text>}
+                            </Space>
+                        ),
+                    },
                     { title: 'Pool', dataIndex: 'pool' },
                     { title: 'Agent', dataIndex: 'agent_id', render: (v: string | null) => (v ? <Mono>{v}</Mono> : '—') },
                     {
@@ -212,26 +332,51 @@ export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', p
                     },
                     { title: 'Started', dataIndex: 'started_at', render: (v: string | null) => formatTimestamp(v) },
                     { title: 'Finished', dataIndex: 'finished_at', render: (v: string | null) => formatTimestamp(v) },
-                    { title: 'MCPs', dataIndex: 'mcps_forwarded', width: 90 },
                     {
-                        title: 'Execution request',
-                        dataIndex: 'execution_request_urn',
-                        render: (v: string | null) => (v ? <Mono>{v}</Mono> : '—'),
+                        title: 'Changes',
+                        dataIndex: 'mcps_forwarded',
+                        width: 100,
+                        render: (v: number, r) => (
+                            <Tooltip title={r.mcps_rejected ? `${r.mcps_rejected} refused by the pool policy` : undefined}>
+                                {v}
+                                {r.mcps_rejected ? <Typography.Text type="warning"> (+{r.mcps_rejected})</Typography.Text> : null}
+                            </Tooltip>
+                        ),
+                    },
+                    {
+                        title: '',
+                        width: 160,
+                        render: (_: unknown, r) => (
+                            <Space>
+                                <Button size="small" onClick={() => setLogsFor(r)}>
+                                    Logs
+                                </Button>
+                                {cancellable(r.status) && (
+                                    <Popconfirm
+                                        title="Cancel this run? A queued run never starts; a running one stops at its next step."
+                                        onConfirm={() => cancel(r)}
+                                    >
+                                        <Button size="small" danger>
+                                            Cancel
+                                        </Button>
+                                    </Popconfirm>
+                                )}
+                            </Space>
+                        ),
                     },
                 ]}
             />
         );
     };
 
-    return (
-        <PageContainer>
-            <PageHeader>
-                <h1>Remote ingestion agents</h1>
-                <Button type="primary" onClick={() => setPoolModal(true)}>
-                    New pool
-                </Button>
-            </PageHeader>
-            <Card size="small">
+    const newPool = (
+        <Button type="primary" onClick={() => setPoolModal(true)}>
+            New pool
+        </Button>
+    );
+    const body = (
+        <>
+            <Card size="small" extra={embedded ? newPool : undefined} title={embedded ? 'Remote ingestion agents' : undefined}>
                 <Tabs
                     items={[
                         { key: 'pools', label: `Pools${pools.data ? ` (${pools.data.length})` : ''}`, children: poolsTab() },
@@ -240,6 +385,15 @@ export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', p
                     ]}
                 />
             </Card>
+            <Drawer
+                open={!!logsFor}
+                onClose={() => setLogsFor(null)}
+                width={760}
+                title={logsFor ? `Logs: ${logsFor.task_id}` : ''}
+                destroyOnClose
+            >
+                {logsFor && <RunLogs taskId={logsFor.task_id} />}
+            </Drawer>
             <CreatePoolModal
                 open={poolModal}
                 onClose={() => setPoolModal(false)}
@@ -276,9 +430,25 @@ export function AgentFleet({ gatewayUrl = 'https://cairn-gateway.example.com', p
                                 {enrollmentCommand(gatewayUrl, token.pool, token.token.token)}
                             </pre>
                         </Typography.Paragraph>
+                        <Typography.Text strong>Or on Kubernetes:</Typography.Text>
+                        <Typography.Paragraph copyable={{ text: enrollmentHelmCommand(gatewayUrl, token.token.token) }}>
+                            <pre style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+                                {enrollmentHelmCommand(gatewayUrl, token.token.token)}
+                            </pre>
+                        </Typography.Paragraph>
                     </Space>
                 )}
             </Modal>
+        </>
+    );
+    if (embedded) return body;
+    return (
+        <PageContainer>
+            <PageHeader>
+                <h1>Remote ingestion agents</h1>
+                {newPool}
+            </PageHeader>
+            {body}
         </PageContainer>
     );
 }

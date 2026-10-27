@@ -20,8 +20,9 @@ import yaml
 from pydantic import BaseModel, Field
 
 from cairn.agent.client import AgentState, GatewayClient, GatewayHTTPError, with_backoff
+from cairn.agent.runlog import RunLogShipper
 from cairn.agent.secrets import SecretNotFound, SecretResolver
-from cairn.agent.sink import RunChannel, register_channel, unregister_channel
+from cairn.agent.sink import RunCancelled, RunChannel, SpoolFull, register_channel, unregister_channel
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +38,8 @@ class AgentConfig(BaseModel):
     tls_ca_bundle: Optional[str] = None
     batch_max_items: int = 500
     batch_max_bytes: int = 1 << 20
+    spool_max_bytes: int = 512 << 20       # sealed batches kept on disk while the gateway is unreachable
+    log_interval_seconds: float = 2.0
 
     @classmethod
     def load(cls, path: Optional[str]) -> "AgentConfig":
@@ -77,6 +80,8 @@ class AgentWorker:
         self.runner = runner
         self.pool = ThreadPoolExecutor(max_workers=config.max_parallel_tasks, thread_name_prefix="cairn-task")
         self.running: dict[str, Future] = {}
+        self.cancels: dict[str, threading.Event] = {}
+        self.spool_dir = os.path.join(config.state_dir, "spool")
         self._stop = threading.Event()
 
     def ensure_enrolled(self) -> None:
@@ -87,36 +92,69 @@ class AgentWorker:
         body = with_backoff(lambda: self.client.enroll(self.config.enrollment_token))  # type: ignore[arg-type]
         logger.info("enrolled as %s in pool %s", body["agent_id"], body["pool"])
 
-    def prepare_recipe(self, task: dict) -> dict:
+    def prepare_recipe(self, task: dict, seen: Optional[set] = None) -> dict:
         recipe = copy.deepcopy(task["recipe"])
-        recipe = self.secrets.resolve(recipe)
+        recipe = self.secrets.resolve(recipe, seen)
         recipe["sink"] = {"type": "cairn-encrypted", "config": {"run_id": task["run_id"]}}
         recipe.setdefault("pipeline_name", f"cairn-{task['task_id']}")
         recipe["run_id"] = task["run_id"]
         return recipe
 
     def run_task(self, task: dict) -> str:
-        run_id = task["run_id"]
-        channel = RunChannel(self.client, run_id, self.config.batch_max_items, self.config.batch_max_bytes)
+        run_id, task_id = task["run_id"], task["task_id"]
+        cancelled = self.cancels.setdefault(task_id, threading.Event())
+        channel = RunChannel(self.client, run_id, self.config.batch_max_items, self.config.batch_max_bytes,
+                             cancelled=cancelled, spool_dir=self.spool_dir,
+                             spool_max_bytes=self.config.spool_max_bytes)
         register_channel(channel)
         status, report = "SUCCESS", {}
+        secrets: set = set()
+        shipper = RunLogShipper(self.client, run_id, interval=self.config.log_interval_seconds)
         try:
-            recipe = self.prepare_recipe(task)
+            recipe = self.prepare_recipe(task, secrets)
+            shipper.secrets = sorted({v for v in secrets if len(v) >= 4}, key=len, reverse=True)
+            shipper.start()
+            shipper.line(f"run {run_id} started on the agent ({recipe.get('source', {}).get('type', '?')} source)")
+            if cancelled.is_set():
+                raise RunCancelled(f"run {run_id} was cancelled")
             report = self.runner(recipe) or {}
             channel.flush()
         except SecretNotFound as e:
             status, report = "FAILURE", {"error": f"secret {e.args[0]!r} not found in any configured backend"}
         except Exception as e:
-            status = "FAILURE"
-            report = {**report, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()[-8000:]}
-            try:
-                channel.flush()
-            except Exception:
-                pass
+            status = "CANCELLED" if cancelled.is_set() or isinstance(e, RunCancelled) else "FAILURE"
+            if status == "FAILURE":
+                report = {**report, "error": f"{type(e).__name__}: {e}", "traceback": traceback.format_exc()[-8000:]}
+                if not isinstance(e, SpoolFull):
+                    try:
+                        channel.flush()
+                    except Exception:
+                        pass
         finally:
             unregister_channel(run_id)
+        if status == "SUCCESS" and channel.pending:
+            # Batches are spooled: the run only succeeds once the gateway has every one of them.
+            lease = float(task.get("lease_seconds") or 300)
+            shipper.line(f"waiting for the gateway to accept {channel.pending} spooled batch(es)")
+            if not channel.wait_drained(timeout=lease):
+                shipper.stop()
+                channel.discard_spool()
+                self.cancels.pop(task_id, None)
+                logger.error("run %s: gateway unreachable for %.0fs; giving the task back", run_id, lease)
+                return "ABANDONED"
         report["mcps_sent"] = channel.sent
-        with_backoff(lambda: self.client.complete(run_id, status, _scrub(report), channel.seq))
+        if channel.spooled_total:
+            report["batches_spooled"] = channel.spooled_total
+        shipper.line(f"run {run_id} finished: {status} ({channel.sent} metadata changes sent)")
+        shipper.stop()
+        channel.discard_spool()
+        self.cancels.pop(task_id, None)
+        try:
+            with_backoff(lambda: self.client.complete(run_id, status, _scrub(report, secrets), channel.seq))
+        except GatewayHTTPError as e:
+            if e.status != 409:
+                raise
+            logger.info("run %s was closed by the gateway (%s)", run_id, e)
         logger.info("run %s finished: %s (%d MCPs)", run_id, status, channel.sent)
         return status
 
@@ -132,10 +170,16 @@ class AgentWorker:
                 logger.info("leased task %s (run %s)", task["task_id"], task["run_id"])
                 self.running[task["task_id"]] = self.pool.submit(self.run_task, task)
 
+    def handle_heartbeat(self, reply: Optional[dict]) -> None:
+        for task_id in (reply or {}).get("cancel_task_ids") or []:
+            if task_id in self.running:
+                logger.info("task %s was cancelled in Cairn; stopping it", task_id)
+                self.cancels.setdefault(task_id, threading.Event()).set()
+
     def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():
             try:
-                self.client.heartbeat(list(self.running))
+                self.handle_heartbeat(self.client.heartbeat(list(self.running)))
             except Exception as e:
                 logger.warning("heartbeat failed: %s", e)
             self._stop.wait(self.config.heartbeat_interval_seconds)
@@ -163,12 +207,21 @@ class AgentWorker:
         self.pool.shutdown(wait=True)
 
 
-def _scrub(report: dict) -> dict:
-    """Reports go to the central plane: drop anything that looks like resolved config."""
+def _scrub(report: dict, secrets: Optional[set] = None) -> dict:
+    """Reports go to the central plane: drop anything that looks like resolved config, and every
+    secret value used for the run wherever it appears (error messages, tracebacks)."""
+    import json
+
     report = dict(report)
     for key in ("recipe", "config", "source_config"):
         report.pop(key, None)
-    return report
+    values = sorted({s for s in secrets or () if len(s) >= 4}, key=len, reverse=True)
+    if not values:
+        return report
+    text = json.dumps(report, default=str)
+    for v in values:
+        text = text.replace(json.dumps(v)[1:-1], "***")
+    return json.loads(text)
 
 
 def main(config_path: Optional[str]) -> None:

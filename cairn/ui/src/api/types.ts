@@ -222,7 +222,25 @@ export interface AgentRun {
     started_at: IsoTimestamp | null;
     finished_at: IsoTimestamp | null;
     mcps_forwarded: number;
+    mcps_rejected?: number;
+    attempts?: number;
     execution_request_urn: string | null;
+}
+
+export interface TaskLogs {
+    task_id: string;
+    run_id: string | null;
+    status: string;
+    lines: string[];
+    /** Pass as `after` on the next call to get only new lines. */
+    next: number;
+    done: boolean;
+}
+
+export interface CancelResult {
+    task_id: string;
+    status: 'CANCELLED';
+    was: string;
 }
 
 // ---------------------------------------------------------------------------------------------

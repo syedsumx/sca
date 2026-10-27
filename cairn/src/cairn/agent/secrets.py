@@ -112,11 +112,17 @@ class SecretResolver:
                 return value
         raise SecretNotFound(name)
 
-    def resolve(self, obj: Any) -> Any:
+    def resolve(self, obj: Any, seen: Optional[set] = None) -> Any:
+        """Replace ``${NAME}`` references; every value used is added to ``seen`` (for log scrubbing)."""
         if isinstance(obj, str):
-            return _REF.sub(lambda m: self.lookup(m.group(1)), obj)
+            def sub(m):
+                value = self.lookup(m.group(1))
+                if seen is not None:
+                    seen.add(value)
+                return value
+            return _REF.sub(sub, obj)
         if isinstance(obj, list):
-            return [self.resolve(v) for v in obj]
+            return [self.resolve(v, seen) for v in obj]
         if isinstance(obj, dict):
-            return {k: self.resolve(v) for k, v in obj.items()}
+            return {k: self.resolve(v, seen) for k, v in obj.items()}
         return obj

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 import os
 import time
 import uuid
@@ -231,6 +232,44 @@ def test_remote_agent_ingests_private_source(api):
     recipe_in_core = gql("query($u: String!){ ingestionSource(urn:$u){ config { recipe } } }",
                         {"u": src})["ingestionSource"]["config"]["recipe"]
     assert "${FINANCE_PG_PASSWORD}" in recipe_in_core  # only the reference ever leaves the VPC
+    # The run's log streamed back from the agent, with the resolved password scrubbed in the VPC.
+    logs = api.get(f"/agents/tasks/{run['task_id']}/logs").json()
+    text = "\n".join(logs["lines"])
+    assert logs["done"] and "--- attempt 1 on cairn-remote-agent" in text, text[-2000:]
+    assert "started on the agent (postgres source)" in text and "finished: SUCCESS" in text
+    assert "reader-demo-only" not in text
+    assert api.get(f"/agents/tasks/{run['task_id']}/logs", params={"after": logs["next"]}).json()["lines"] == []
+
+
+def test_remote_agents_in_workspace_settings(api):
+    """People who manage ingestion get a Remote agents tab in Workspace settings: pools, runs, live logs."""
+    done = [r for r in api.get("/agents/runs").json() if r["status"] == "SUCCESS" and r["pool"] == "finance"]
+    if not done or not os.environ.get("CAIRN_E2E_UI_PASSWORD"):
+        pytest.skip("needs a finished remote run and CAIRN_E2E_UI_PASSWORD")
+    out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_agents.js")], capture_output=True,
+                         text=True, timeout=240, env={
+                             **os.environ, "EDGE": EDGE, "TASK_ID": done[0]["task_id"],
+                             "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", ""),
+                             "UI_USER": os.environ.get("CAIRN_E2E_UI_USER", "admin"),
+                             "UI_PASSWORD": os.environ["CAIRN_E2E_UI_PASSWORD"]})
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["tab"] and result["pool"] and result["run"] and not result["errors"], result
+    assert "finished: SUCCESS" in result["log"] and "reader-demo-only" not in result["log"]
+
+
+def test_remote_agent_tasks_can_be_cancelled(api):
+    """A task in a pool with no agent waits in the queue; cancelling it means it never runs."""
+    pool = f"e2e-idle-{RUN}"
+    assert api.post("/agents/pools", json={"name": pool, "allowed_platforms": ["postgres"]}).status_code == 201
+    task = api.post("/agents/tasks", json={"pool": pool, "recipe": {"source": {"type": "postgres", "config": {
+        "host_port": "x:5432", "password": "${NOPE}"}}}}).json()
+    r = api.post(f"/agents/tasks/{task['task_id']}/cancel")
+    assert r.status_code == 200 and r.json()["was"] == "QUEUED", r.text
+    assert api.post(f"/agents/tasks/{task['task_id']}/cancel").status_code == 409
+    run = next(x for x in api.get("/agents/runs").json() if x["task_id"] == task["task_id"])
+    assert run["status"] == "CANCELLED" and run["agent_id"] is None
+    assert any("cancelled by" in line for line in api.get(f"/agents/tasks/{task['task_id']}/logs").json()["lines"])
 
 
 def test_product_docs_served():

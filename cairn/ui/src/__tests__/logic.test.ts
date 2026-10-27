@@ -1,4 +1,4 @@
-import { enrollmentCommand, runStatusColor } from '../agents/AgentFleet';
+import { cancellable, enrollmentCommand, runStatusColor } from '../agents/AgentFleet';
 import { planChips } from '../ai/AskCairnPanel';
 import { draftFromPayload } from '../ai/DocDraftReview';
 import { datasetNameFromUrn, formatNumber, formatRelative, platformFromUrn } from '../common/format';
@@ -110,8 +110,13 @@ describe('ai + agents helpers', () => {
     });
     it('enrollmentCommand and runStatusColor', () => {
         const cmd = enrollmentCommand('https://gw', 'finance', 'tok');
-        expect(cmd).toContain('CAIRN_ENROLLMENT_TOKEN=tok');
-        expect(cmd).toContain('CAIRN_AGENT_POOL=finance');
+        expect(cmd).toContain('CAIRN_AGENT_ENROLLMENT_TOKEN=tok');
+        expect(cmd).toContain('CAIRN_AGENT_GATEWAY_URL=https://gw');
+        expect(cmd).toContain('cairn/remote-agent');
+        expect(cmd).toContain('pool "finance"');
+        expect(cancellable('RUNNING')).toBe(true);
+        expect(cancellable('queued')).toBe(true);
+        expect(cancellable('SUCCESS')).toBe(false);
         expect(runStatusColor('succeeded')).toBe('green');
         expect(runStatusColor('FAILED')).toBe('red');
     });

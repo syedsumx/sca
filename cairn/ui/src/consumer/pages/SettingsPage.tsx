@@ -1,6 +1,8 @@
 import { Alert, Button, Checkbox, Input, InputNumber, List, Switch, Tabs, Typography, message } from 'antd';
 import React, { useEffect, useState } from 'react';
 
+import { AgentFleet } from '../../agents/AgentFleet';
+import { CairnClientProvider } from '../../api/hooks';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
@@ -213,7 +215,19 @@ export function EmbedBuilder() {
     );
 }
 
+/** Pools, enrolment, agents and their runs; for people who manage ingestion. */
+export function RemoteAgentsSettings() {
+    const { client } = useConsumerApi();
+    const session = useDheSession();
+    return (
+        <CairnClientProvider client={client}>
+            <AgentFleet embedded gatewayUrl={session.config?.gateway_url} />
+        </CairnClientProvider>
+    );
+}
+
 export function SettingsPage() {
+    const session = useDheSession();
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
@@ -224,6 +238,9 @@ export function SettingsPage() {
                     { key: 'notifications', label: 'Notifications', children: <NotificationSettings /> },
                     { key: 'inbox', label: 'Inbox', children: <Inbox /> },
                     { key: 'embeds', label: 'Embeds', children: <EmbedBuilder /> },
+                    ...(session.config?.can_manage_agents
+                        ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
+                        : []),
                 ]}
             />
         </Page>

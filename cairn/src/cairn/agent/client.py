@@ -95,11 +95,17 @@ class GatewayClient:
                                        crypto.aad_for(self.state.agent_id, out["task_id"]))
         return json.loads(plaintext)
 
-    def upload_batch(self, run_id: str, seq: int, mcps: list[dict]) -> dict:
-        envelope = crypto.seal(self.state.gateway_public, json.dumps(mcps).encode(),
-                               crypto.aad_for(self.state.agent_id, run_id, str(seq)))
+    def seal_batch(self, run_id: str, seq: int, mcps: list[dict]) -> dict:
+        """Encrypt a batch for the gateway (bound to this agent, run and sequence number)."""
+        return crypto.seal(self.state.gateway_public, json.dumps(mcps).encode(),
+                           crypto.aad_for(self.state.agent_id, run_id, str(seq)))
+
+    def send_batch(self, run_id: str, seq: int, envelope: dict) -> dict:
         return self._signed_post(f"/agents/{self.state.agent_id}/runs/{run_id}/batches",
                                  {"seq": seq, "envelope": envelope})
+
+    def upload_batch(self, run_id: str, seq: int, mcps: list[dict]) -> dict:
+        return self.send_batch(run_id, seq, self.seal_batch(run_id, seq, mcps))
 
     def upload_logs(self, run_id: str, seq: int, lines: list[str]) -> None:
         envelope = crypto.seal(self.state.gateway_public, json.dumps(lines).encode(),
@@ -124,6 +130,11 @@ def _raise(resp: httpx.Response) -> None:
         except ValueError:
             detail = resp.text
         raise GatewayHTTPError(resp.status_code, str(detail)[:500])
+
+
+def is_transient(e: BaseException) -> bool:
+    """Worth retrying later: the gateway is unreachable or failing, not refusing."""
+    return isinstance(e, httpx.HTTPError) or (isinstance(e, GatewayHTTPError) and e.status >= 500)
 
 
 def with_backoff(fn, attempts: int = 6, base: float = 1.0, cap: float = 60.0, retry_on=(httpx.HTTPError,)):

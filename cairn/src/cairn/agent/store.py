@@ -66,6 +66,7 @@ tasks = Table(
     Column("mcps_rejected", Integer, nullable=False, default=0),
     Column("report", JSONText, nullable=True),
     Column("logs", JSONText, nullable=True),
+    Column("last_log_seq", Integer, nullable=False, default=-1, server_default="-1"),
 )
 
 nonces = Table(

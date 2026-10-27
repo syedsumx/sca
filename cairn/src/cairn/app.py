@@ -154,6 +154,12 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "embed" in modules and services.embed is not None:
         app.include_router(embed_router(services.embed, cp, services.can_view))
 
+    def _allowed(p: Principal, privilege: str) -> bool:
+        try:
+            return services.authorize(p, privilege, None, raise_on_deny=False)
+        except Exception:  # noqa: BLE001 - a UI hint; the endpoints enforce
+            return False
+
     @app.get("/ui/config")
     def ui_config(p: Principal = Depends(cp)):
         """Feature flags + caller context for the consumer UI (one round-trip on mount)."""
@@ -179,6 +185,8 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             "teams_enabled": bool(cfg.teams_webhook_url),
             "embed_allowed_origins": cfg.embed_allowed_origins,
             "is_admin": services.is_admin(p.urn),
+            "can_manage_agents": services.gateway is not None and _allowed(p, "MANAGE_INGESTION"),
+            "gateway_url": services.settings.gateway.public_url,
             "public_url": cfg.public_url,
             "features": {
                 "assistant": services.assistant is not None,

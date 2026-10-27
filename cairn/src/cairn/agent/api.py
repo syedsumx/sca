@@ -106,10 +106,15 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
             authorize(p, "MANAGE_INGESTION", None)
             return _wrap(lambda: service.enqueue(req, p.urn))
 
-        @router.post("/tasks/{task_id}/cancel", status_code=204)
+        @router.post("/tasks/{task_id}/cancel")
         def cancel(task_id: str, p: Principal = Depends(current_principal)):
             authorize(p, "MANAGE_INGESTION", None)
-            service.cancel(task_id, p.urn)
+            return _wrap(lambda: service.cancel(task_id, p.urn))
+
+        @router.get("/tasks/{task_id}/logs")
+        def task_logs(task_id: str, after: int = 0, p: Principal = Depends(current_principal)):
+            authorize(p, "MANAGE_INGESTION", None)
+            return _wrap(lambda: service.task_logs(task_id, after))
 
         @router.post("/{agent_id}/revoke", status_code=204)
         def revoke(agent_id: str, p: Principal = Depends(current_principal)):

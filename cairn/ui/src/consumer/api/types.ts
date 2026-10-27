@@ -325,6 +325,11 @@ export interface UiConfig {
     slack_enabled: boolean;
     teams_enabled: boolean;
     embed_allowed_origins: string[];
+    is_admin?: boolean;
+    /** The caller holds MANAGE_INGESTION and the remote-agent gateway is configured. */
+    can_manage_agents?: boolean;
+    /** URL agents use to reach the gateway (shown in the enrolment command). */
+    gateway_url?: string;
 }
 
 // ------------------------------------------------------------- Cairn Core GraphQL search

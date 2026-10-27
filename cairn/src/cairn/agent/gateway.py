@@ -34,6 +34,7 @@ _SECRET_KEY = re.compile(r"(pass(word)?|secret|token|private_?key|api_?key|crede
 _SECRET_REF = re.compile(r"^\$\{[A-Za-z0-9_]+\}$")
 _DATASET_PLATFORM = re.compile(r"urn:li:dataPlatform:([A-Za-z0-9_\-]+)")
 OFFLINE_AFTER_MS = 90_000
+MAX_LOG_LINES = 5000
 _PROTECTED_ENTITY_TYPES = {
     "corpuser", "corpGroup", "dataHubPolicy", "dataHubRole", "dataHubSecret", "dataHubAccessToken",
     "dataHubExecutionRequest", "dataHubIngestionSource", "globalSettings",
@@ -384,14 +385,18 @@ class GatewayService:
                              crypto.aad_for(agent["agent_id"], candidate.task_id))
         if candidate.execution_request_urn:
             self._update_execution_request(candidate.execution_request_urn, "RUNNING", None, now, None)
+        marker = f"--- attempt {candidate.attempts + 1} on {agent['hostname']} ({agent['agent_id']}), run {run_id} ---"
+        with self.engine.begin() as conn:
+            conn.execute(update(tasks).where(tasks.c.task_id == candidate.task_id).values(
+                logs=((candidate.logs or []) + [marker])[-MAX_LOG_LINES:], last_log_seq=-1))
         return {"task_id": candidate.task_id, "envelope": sealed}
 
-    def _task_for_run(self, agent: dict, run_id: str) -> Any:
+    def _task_for_run(self, agent: dict, run_id: str, allow_cancelled: bool = False) -> Any:
         with self.engine.connect() as conn:
             task = conn.execute(select(tasks).where(tasks.c.run_id == run_id)).first()
         if not task or task.agent_id != agent["agent_id"]:
             raise GatewayError("unknown run for this agent", 404)
-        if task.status not in ("LEASED", "RUNNING"):
+        if task.status not in ("LEASED", "RUNNING") and not (allow_cancelled and task.status == "CANCELLED"):
             raise GatewayError(f"run is {task.status}", 409)
         return task
 
@@ -474,16 +479,40 @@ class GatewayService:
         return accepted, rejected
 
     def append_logs(self, agent: dict, run_id: str, envelope: dict, seq: int) -> None:
-        task = self._task_for_run(agent, run_id)
+        task = self._task_for_run(agent, run_id, allow_cancelled=True)
         lines = json.loads(crypto.open_sealed(self.keys.identity.encryption_key, envelope,
                                               crypto.aad_for(agent["agent_id"], run_id, f"log-{seq}")))
-        logs = (task.logs or []) + [str(x)[:2000] for x in lines]
+        if not isinstance(lines, list):
+            raise GatewayError("logs must be a JSON list of lines", 400)
         with self.engine.begin() as conn:
-            conn.execute(update(tasks).where(tasks.c.task_id == task.task_id).values(logs=logs[-2000:]))
+            # Only the next sequence number is applied, so a retried upload is never stored twice.
+            res = conn.execute(update(tasks).where(and_(tasks.c.task_id == task.task_id,
+                                                        tasks.c.last_log_seq < seq)).values(
+                logs=((task.logs or []) + [str(x)[:2000] for x in lines])[-MAX_LOG_LINES:], last_log_seq=seq))
+        if not res.rowcount:
+            raise GatewayError(f"log sequence {seq} already received", 409)
+
+    def task_logs(self, task_id: str, after: int = 0) -> dict:
+        """Log lines of a task (all attempts), from line ``after``: poll with the returned ``next``."""
+        with self.engine.connect() as conn:
+            task = conn.execute(select(tasks.c.status, tasks.c.logs, tasks.c.run_id).where(
+                tasks.c.task_id == task_id)).first()
+        if task is None:
+            raise GatewayError("task not found", 404)
+        lines = task.logs or []
+        after = max(0, min(after, len(lines)))
+        return {"task_id": task_id, "run_id": task.run_id, "status": task.status, "lines": lines[after:],
+                "next": len(lines), "done": task.status in ("SUCCESS", "FAILURE", "CANCELLED")}
 
     def complete(self, agent: dict, run_id: str, req: CompleteRequest) -> dict:
-        task = self._task_for_run(agent, run_id)
+        task = self._task_for_run(agent, run_id, allow_cancelled=True)
         now = _now()
+        if task.status == "CANCELLED":   # the agent stopped because it was asked to: keep its final report
+            with self.engine.begin() as conn:
+                conn.execute(update(tasks).where(tasks.c.task_id == task.task_id).values(
+                    report={**req.report, "cancelled": True}, lease_expires_ms=None))
+            self._audit("run.cancelled", agent["agent_id"], run_id, {"forwarded": task.mcps_forwarded})
+            return {"status": "CANCELLED"}
         status = req.status
         # A run that reports SUCCESS but whose final batches never arrived is a failure.
         if status == "SUCCESS" and req.final_seq != task.last_seq:
@@ -503,13 +532,26 @@ class GatewayService:
                     {"status": status, "forwarded": task.mcps_forwarded, "retrying": new_status == "QUEUED"})
         return {"status": new_status}
 
-    def cancel(self, task_id: str, actor: str) -> None:
+    def cancel(self, task_id: str, actor: str) -> dict:
+        """Queued tasks never start; running ones stop at the agent's next heartbeat or batch."""
+        now = _now()
         with self.engine.begin() as conn:
-            conn.execute(update(tasks).where(and_(tasks.c.task_id == task_id,
-                                                  or_(tasks.c.status == "QUEUED", tasks.c.status == "LEASED",
-                                                      tasks.c.status == "RUNNING")))
-                         .values(status="CANCELLED", finished_at_ms=_now()))
-        self._audit("task.cancelled", actor, task_id, {})
+            task = conn.execute(select(tasks).where(tasks.c.task_id == task_id)).first()
+            if task is None:
+                raise GatewayError("task not found", 404)
+            res = conn.execute(update(tasks).where(and_(tasks.c.task_id == task_id,
+                                                        or_(tasks.c.status == "QUEUED", tasks.c.status == "LEASED",
+                                                            tasks.c.status == "RUNNING")))
+                               .values(status="CANCELLED", finished_at_ms=now))
+            if not res.rowcount:
+                raise GatewayError(f"task already finished ({task.status})", 409)
+            conn.execute(update(tasks).where(tasks.c.task_id == task_id).values(
+                logs=((task.logs or []) + [f"--- cancelled by {actor} ---"])[-MAX_LOG_LINES:]))
+        if task.execution_request_urn:
+            self._update_execution_request(task.execution_request_urn, "CANCELLED", {"cancelled_by": actor},
+                                           task.started_at_ms, now - (task.started_at_ms or now))
+        self._audit("task.cancelled", actor, task_id, {"was": task.status, "agent": task.agent_id})
+        return {"task_id": task_id, "status": "CANCELLED", "was": task.status}
 
     # ---- helpers ---------------------------------------------------------------------
     def _update_execution_request(self, urn: str, status: str, report: Optional[dict], start_ms: Optional[int],

@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import pytest
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import MetaData, create_engine, inspect, text
 
 from cairn import migrations
 from cairn.common.db import load_models
@@ -45,8 +45,9 @@ def test_legacy_create_all_database_is_adopted(url):
     migrations.upgrade(baseline, migrations.BASELINE)
     v01 = set(inspect(baseline).get_table_names()) - {"alembic_version"}
     engine = fresh(url)
-    models = load_models()                         # how v0.1 created its schema (its tables only)
-    models.create_all(engine, tables=[t for name, t in models.tables.items() if name in v01])
+    legacy = MetaData()                            # v0.1's schema exactly, as its create_all made it
+    legacy.reflect(baseline, only=sorted(v01))
+    legacy.create_all(engine)
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO cairn_bookmarks (actor, urn, created_at_ms) VALUES ('u', 'x', 1)"))
     assert migrations.upgrade(engine) == migrations.head()
