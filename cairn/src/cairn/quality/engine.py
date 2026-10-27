@@ -61,6 +61,12 @@ class QualityEngine:
         self.notifier = notifier
         self.audit = audit
 
+    @property
+    def connections(self):
+        """The SQL connection registry (profiling, SQL monitors); None without SQL support."""
+        sql = self.collectors.get("sql")
+        return getattr(sql, "registry", None)
+
     # ---- projection ----------------------------------------------------------------
     def sync_monitor(self, monitor: Monitor) -> None:
         self._emit(monitor_mcps(monitor) + self._summary_mcps(monitor))

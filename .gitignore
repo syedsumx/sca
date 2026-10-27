@@ -102,3 +102,6 @@ cairn/deploy/tls/*.pem
 
 # e2e throwaway TLS material
 cairn/tests/e2e/.tls/
+
+# e2e auto-monitor rules (tests/e2e write and remove them)
+cairn/config/quality/e2e-*.yaml

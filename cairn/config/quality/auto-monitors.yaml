@@ -1,0 +1,21 @@
+# Auto-monitors: rules that keep monitors on every dataset they select (docs: Data quality).
+# Selection uses the policy condition grammar on dataset attributes. Every *.yaml file in this
+# directory is read on each sweep (every 10 minutes, or POST /cairn/api/quality/auto/sweep).
+rules:
+  - id: certified
+    description: Freshness and volume on every certified dataset
+    select: {attr: resource.certification, op: eq, value: CERTIFIED}
+    monitors:
+      - {type: freshness, severity: HIGH}
+      - {type: volume, severity: HIGH}
+
+  # Profiling over a SQL connection (CAIRN_QUALITY_CONNECTIONS) for datasets whose ingestion does
+  # not profile them, then null-rate monitors on classified columns. Example, off by default:
+  # - id: warehouse-pii
+  #   select:
+  #     all:
+  #       - {attr: resource.platform, op: eq, value: postgres}
+  #       - {attr: resource.classification, op: contains, value: PII}
+  #   profile: {connection: demo_postgres, every_hours: 24}
+  #   monitors:
+  #     - {type: field_metric, fields: {labelled: [PII]}, config: {metric: null_pct, max: 5}}

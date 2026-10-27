@@ -474,3 +474,17 @@ def test_failed_attribute_reads_are_not_cached_for_the_full_ttl(monkeypatch):
     clock[0] += 30
     resolver.subject("urn:li:corpuser:bob")
     assert graph.calls == calls                                            # a clean load keeps the full TTL
+
+
+def test_catalog_definitions_are_created_once(settings, graph):
+    import threading
+
+    from cairn.governance.certification import CERT_STATUS_PROP
+    from cairn.services import build_services
+
+    s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
+    s.bootstrap_catalog(threading.Event())
+    assert graph.aspects[(CERT_STATUS_PROP, "propertyDefinition")]["allowedValues"]
+    emitted = len(graph.emitted)
+    s.bootstrap_catalog(threading.Event())                      # already there: nothing written
+    assert len(graph.emitted) == emitted

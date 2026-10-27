@@ -177,8 +177,24 @@ class Services:
         return _record
 
     # ---- background maintenance ----------------------------------------------------
+    def bootstrap_catalog(self, stop: threading.Event, retry_seconds: float = 15) -> None:
+        """Create the definitions Cairn relies on (certification properties, Certified tag, PII
+        terms) once Cairn Core answers. Skipped when they already exist; idempotent anyway."""
+        from cairn.governance.certification import CERT_STATUS_PROP, bootstrap_mcps
+
+        while not stop.is_set() and self.graph is not None:
+            try:
+                if self.graph.get_aspect(CERT_STATUS_PROP, "propertyDefinition") is None:
+                    mcps = bootstrap_mcps()
+                    self.graph.emit(mcps)
+                    logger.info("created %d catalog definitions (certification, PII terms)", len(mcps))
+                return
+            except Exception as e:  # noqa: BLE001 - Cairn Core or the token may not be ready yet
+                logger.info("catalog bootstrap waiting for Cairn Core: %s", e)
+                stop.wait(retry_seconds)
+
     def start_background(self, native_policy_interval: int = 120, workflow_interval: int = 600,
-                         layer_reload_interval: float = 10.0) -> None:
+                         layer_reload_interval: float = 10.0, bootstrap_catalog: bool = False) -> None:
         """Native-policy import retries until Cairn Core (and its token) is available. With Kafka
         configured, metadata changes invalidate cached attributes and decisions as they happen."""
         stop = threading.Event()
@@ -217,8 +233,11 @@ class Services:
                 except Exception:
                     logger.exception("policy layer reload failed")
 
-        for target in (policy_loop, workflow_loop, layers_loop):
-            t = threading.Thread(target=target, daemon=True, name=target.__name__)
+        targets = [policy_loop, workflow_loop, layers_loop]
+        if bootstrap_catalog:
+            targets.append(lambda: self.bootstrap_catalog(stop))
+        for target in targets:
+            t = threading.Thread(target=target, daemon=True, name=getattr(target, "__name__", "bootstrap"))
             t.start()
             self._threads.append(t)
         if os.environ.get("CAIRN_MCL_INVALIDATION", "true").lower() == "true" and self.settings.kafka_bootstrap:

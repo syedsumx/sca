@@ -34,7 +34,7 @@ def cmd_api(a) -> None:
     from cairn.app import DEFAULT_MODULES, create_api_app
 
     s = _services()
-    s.start_background()
+    s.start_background(bootstrap_catalog=True)
     _serve(create_api_app(s, a.modules.split(",") if a.modules else DEFAULT_MODULES), a.host, a.port, a.root_path)
 
 

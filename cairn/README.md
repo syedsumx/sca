@@ -49,8 +49,8 @@ docker compose -f docker-compose.cairn.yml up -d --no-build
 CAIRN_TOKEN=$(CAIRN_ADMIN_PASSWORD=... python3 deploy/bootstrap/mint_core_token.py \
   --frontend-url http://localhost:9002 --core-url http://localhost:8080 --print-admin-token)
 
-# Create the Cairn structured properties / Certified tag / PII glossary terms
-docker compose -f docker-compose.cairn.yml exec cairn-api cairn bootstrap
+# (cairn-api creates the Cairn structured properties / Certified tag / PII glossary terms at start;
+#  `docker compose -f docker-compose.cairn.yml exec cairn-api cairn bootstrap` re-applies them)
 
 # Remote agent demo: create the "finance" pool, mint an enrolment token, put it in .env
 # (CAIRN_AGENT_ENROLLMENT_TOKEN), restart the agent

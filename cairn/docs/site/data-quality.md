@@ -35,6 +35,48 @@ monitor adapts; **real** keeps it out so one incident does not shift the normal 
 failures raise one (default 1). Optional `notify` webhooks receive every incident in addition to the
 followers' own channels.
 
+## Monitors by rule
+
+Instead of adding monitors one dataset at a time, write rules that keep monitors on every dataset
+they select: every certified dataset, every table in the Finance domain, every column classified as
+personal data. Rules use the same conditions as access policies and live in YAML files in
+`config/quality/` (Kubernetes: `cairn.quality.autoMonitors` in the chart's values):
+
+```yaml
+rules:
+  - id: certified
+    select: {attr: resource.certification, op: eq, value: CERTIFIED}
+    monitors:
+      - {type: freshness, severity: HIGH}
+      - {type: volume, severity: HIGH}
+  - id: pii-nulls
+    select: {attr: resource.classification, op: contains, value: PII}
+    monitors:
+      - {type: field_metric, fields: {labelled: [PII]}, config: {metric: null_pct, max: 5}}
+```
+
+Every 10 minutes the rules are applied: newly matching datasets get the monitors, changed rules
+update them, and datasets that no longer match lose them. Monitors people created are never
+touched. Editing a rule's monitor takes it out of the rule's hands; deleting one disables it and
+keeps the rule from recreating it. Preview a change with
+`POST /cairn/api/quality/auto/sweep?dry_run=true`, apply it now without `dry_run`.
+
+## Profiling
+
+For tables whose ingestion does not collect statistics, a rule can profile them over a SQL
+connection (`CAIRN_QUALITY_CONNECTIONS`, read-only role):
+
+```yaml
+  - id: warehouse
+    select: {attr: resource.platform, op: eq, value: postgres}
+    profile: {connection: warehouse, every_hours: 24}
+```
+
+A profile (row count; per column null and distinct counts; minimum, maximum, mean and standard
+deviation for numbers) is written to the catalog when the latest one is older than `every_hours`,
+so it shows on the asset's statistics and feeds volume and column monitors. Sample values are off
+unless `sample_values` is set; when on, they are masked like any other.
+
 ## Example
 
 ```json

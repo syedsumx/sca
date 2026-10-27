@@ -134,6 +134,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "cairn.autoMonitorsConfigMap" -}}
+{{- if .Values.cairn.quality.autoMonitors.existingConfigMap -}}
+{{- .Values.cairn.quality.autoMonitors.existingConfigMap -}}
+{{- else if .Values.cairn.quality.autoMonitors.files -}}
+{{- printf "%s-auto-monitors" (include "cairn.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{/* ------------------------------------------------------------------ shared env */}}
 {{- define "cairn.env" -}}
 {{- $s := .Values.cairn.secrets -}}
@@ -328,6 +336,11 @@ spec:
               mountPath: /etc/cairn/config/policies
               readOnly: true
             {{- end }}
+            {{- if include "cairn.autoMonitorsConfigMap" $root }}
+            - name: auto-monitors
+              mountPath: /etc/cairn/config/quality
+              readOnly: true
+            {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -343,6 +356,11 @@ spec:
         - name: policies
           configMap:
             name: {{ include "cairn.policiesConfigMap" $root }}
+        {{- end }}
+        {{- if include "cairn.autoMonitorsConfigMap" $root }}
+        - name: auto-monitors
+          configMap:
+            name: {{ include "cairn.autoMonitorsConfigMap" $root }}
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}

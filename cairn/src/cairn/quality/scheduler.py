@@ -8,6 +8,7 @@ computes each monitor's next run from its cron expression or interval.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 import time
@@ -45,6 +46,21 @@ class Scheduler:
         self.partitions = partitions
         self._stop = threading.Event()
 
+    auto_interval = float(os.environ.get("CAIRN_AUTO_MONITOR_INTERVAL_SECONDS", "600"))
+
+    def sweep_auto_monitors(self) -> Optional[dict]:
+        """Keep auto monitors in line with the rules (one leader does it)."""
+        from cairn.quality.auto import load_rules, sweep
+
+        rules = load_rules()
+        if not rules.rules or self.engine.graph is None:
+            return None
+        try:
+            return sweep(self.engine.store, self.engine, self.engine.graph, rules, connections=self.engine.connections)
+        except Exception:
+            logger.exception("auto-monitor sweep failed")
+            return None
+
     def stop(self, *_args) -> None:
         self._stop.set()
 
@@ -77,10 +93,13 @@ class Scheduler:
                 logger.info("acquired scheduler leadership (partition %s/%s)", self.partition, self.partitions)
                 for monitor in self.engine.store.list_monitors():
                     self.engine.sync_monitor(monitor)
-                last_flush = 0.0
+                last_flush = last_sweep = 0.0
                 while not self._stop.is_set():
                     started = time.monotonic()
                     try:
+                        if self.partition == 0 and started - last_sweep > self.auto_interval:
+                            self.sweep_auto_monitors()
+                            last_sweep = started
                         self.run_once()
                         if started - last_flush > 300:
                             self.engine.flush_unemitted()

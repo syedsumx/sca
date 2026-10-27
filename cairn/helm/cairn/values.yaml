@@ -203,6 +203,21 @@ cairn:
     #  10-pii.yaml: |
     #    policies: [...]
 
+  # Auto-monitors: rules that keep data-quality monitors on every dataset they select
+  # (docs: Data quality). Mounted at /etc/cairn/config/quality; the scheduler sweeps every 10 min.
+  quality:
+    autoMonitors:
+      existingConfigMap: ""
+      files:
+        auto-monitors.yaml: |
+          rules:
+            - id: certified
+              description: Freshness and volume on every certified dataset
+              select: {attr: resource.certification, op: eq, value: CERTIFIED}
+              monitors:
+                - {type: freshness, severity: HIGH}
+                - {type: volume, severity: HIGH}
+
   extraEnv: []
 
   # ============================================================ Active Metadata layer

@@ -500,8 +500,8 @@ def test_13b_workspace_sections_are_catalog_navigation_entries():
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert not result["missing"] and not result["errors"], result
-    assert result["viaShell"] == {"url": "/mfe/cairn-requests#/requests", "active": "Requests"}, result
-    assert result["viaWorkspace"] == {"url": "/mfe/cairn-marketplace#/marketplace", "active": "Marketplace"}, result
+    assert result["viaShell"] == {"url": "/mfe/cairn-requests#/requests", "active": "#/requests"}, result
+    assert result["viaWorkspace"] == {"url": "/mfe/cairn-marketplace#/marketplace", "active": "#/marketplace"}, result
 
 
 # --------------------------------------------------------------------------- authorization mode
@@ -577,3 +577,54 @@ def test_15_metadata_changes_reach_cached_decisions_within_seconds(users):
     finally:
         root.put("/governance/policies", json={"policies": saved})
         emit(DS, "globalTags", {"tags": []})
+
+
+def test_16_auto_monitor_rules_create_run_alert_and_retire_monitors(users):
+    """A rule file selects this run's dataset; the sweep creates its monitor, the monitor fails and
+    alerts its webhook, and removing the rule retires the monitor."""
+    root = users["root"]
+    rule_file = os.path.join(os.path.dirname(__file__), "..", "..", "config", "quality", f"e2e-{RUN}.yaml")
+    rule = {"rules": [{"id": f"e2e-{RUN}", "select": {"attr": "resource.urn", "op": "eq", "value": DS},
+                       "monitors": [{"type": "volume", "severity": "HIGH", "config": {"min_rows": 10 ** 9},
+                                     **({"notify": [SINK]} if SINK else {})}]}]}
+    with open(rule_file, "w") as f:
+        json.dump(rule, f)                        # JSON is YAML
+    try:
+        assert f"e2e-{RUN}" in [r["id"] for r in root.get("/quality/auto/rules").json()["rules"]]
+        def preview():   # the dataset scan is search-backed: a just-seeded dataset shows up within seconds
+            found = [m for m in root.post("/quality/auto/sweep?dry_run=true").json()["created"]
+                     if m.startswith(f"auto-e2e-{RUN}")]
+            return found or None
+        mine = eventually(preview, timeout=60)
+        assert len(mine) == 1, mine
+        assert root.get(f"/quality/monitors/{mine[0]}").status_code == 404        # dry run changed nothing
+        assert mine[0] in root.post("/quality/auto/sweep").json()["created"]
+        monitor = root.get(f"/quality/monitors/{mine[0]}").json()
+        assert monitor["dataset_urn"] == DS and monitor["created_by"] == "auto-monitors"
+        ev = root.post(f"/quality/monitors/{mine[0]}/run").json()
+        assert ev["status"] == "FAIL", ev
+        if SINK_HOST:
+            eventually(lambda: [e for e in _sink_events() if e.get("monitor_id") == mine[0]], timeout=30)
+    finally:
+        os.remove(rule_file)
+    assert mine[0] in root.post("/quality/auto/sweep").json()["removed"]
+    assert root.get(f"/quality/monitors/{mine[0]}").status_code == 404
+
+
+def test_16b_shipped_rule_monitors_certified_datasets(users):
+    """cairn-api creates the certification property at start; the default rule then puts freshness
+    and volume monitors on every certified dataset."""
+    cert = "urn:li:structuredProperty:io.cairn.certification.status"
+    assert eventually(lambda: gql("""query($u: String!) { entity(urn: $u) { urn } }""", {"u": cert})["entity"],
+                      timeout=120)
+    emit(DS_DOWN, "structuredProperties", {"properties": [{"propertyUrn": cert, "values": [{"string": "CERTIFIED"}]}]})
+
+    def planned():   # pending in a preview, or already created by the scheduler's own sweep
+        root = users["root"]
+        pending = [m for m in root.post("/quality/auto/sweep?dry_run=true").json()["created"]
+                   if m.startswith("auto-certified-")]
+        existing = [m["id"] for m in root.get("/quality/monitors", params={"dataset_urn": DS_DOWN}).json()
+                    if m["id"].startswith("auto-certified-")]
+        mine = pending + existing
+        return mine if len(mine) >= 2 else None
+    assert eventually(planned, timeout=60)

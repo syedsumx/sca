@@ -7,6 +7,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from cairn.common.security import Principal
+from cairn.quality.auto import AUTO_PREFIX, DETACHED, load_rules, sweep
 from cairn.quality.engine import QualityEngine
 from cairn.quality.models import Evaluation, FeedbackRequest, Monitor, MonitorSpec
 
@@ -21,6 +22,18 @@ def build_router(engine: QualityEngine, current_principal, authorize) -> APIRout
         if m is None:
             raise HTTPException(404, f"monitor {monitor_id} not found")
         return m
+
+    @router.get("/auto/rules")
+    def auto_rules(p: Principal = Depends(current_principal)):
+        return load_rules().model_dump(mode="json")
+
+    @router.post("/auto/sweep")
+    def auto_sweep(dry_run: bool = False, p: Principal = Depends(current_principal)):
+        """Apply the auto-monitor rules now (the scheduler also does this periodically)."""
+        authorize(p, "EDIT_ENTITY_ASSERTIONS", None)
+        if engine.graph is None:
+            raise HTTPException(503, "Cairn Core not configured")
+        return sweep(store, engine, engine.graph, load_rules(), dry_run=dry_run, connections=engine.connections)
 
     @router.get("/monitors", response_model=list[Monitor])
     def list_monitors(dataset_urn: Optional[str] = None, p: Principal = Depends(current_principal)):
@@ -45,6 +58,8 @@ def build_router(engine: QualityEngine, current_principal, authorize) -> APIRout
         existing = _get(monitor_id)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", existing.dataset_urn)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", spec.dataset_urn)
+        if monitor_id.startswith(AUTO_PREFIX):
+            spec.config[DETACHED] = True       # edited by a person: the rule no longer manages it
         m = store.update_monitor(monitor_id, spec)
         engine.sync_monitor(m)  # type: ignore[arg-type]
         return m
@@ -53,6 +68,14 @@ def build_router(engine: QualityEngine, current_principal, authorize) -> APIRout
     def delete_monitor(monitor_id: str, p: Principal = Depends(current_principal)):
         m = _get(monitor_id)
         authorize(p, "EDIT_ENTITY_ASSERTIONS", m.dataset_urn)
+        if monitor_id.startswith(AUTO_PREFIX):
+            # Opting a dataset out of a rule: keep a disabled, detached record so the rule does not
+            # recreate the monitor on its next sweep.
+            spec = MonitorSpec(**m.model_dump(include=set(MonitorSpec.model_fields)))
+            spec.enabled = False
+            spec.config[DETACHED] = True
+            engine.sync_monitor(store.update_monitor(monitor_id, spec))  # type: ignore[arg-type]
+            return
         store.delete_monitor(monitor_id)
         engine.remove_monitor(monitor_id)
 

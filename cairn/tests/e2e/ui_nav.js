@@ -32,14 +32,14 @@ const { chromium } = require('playwright');
     await page.waitForURL((u) => String(u).includes('/mfe/cairn-requests#/requests'), { timeout: 60000 });
     await page.waitForSelector('nav[aria-label="Workspace sections"] a.active', { timeout: 60000 });
     result.viaShell = { url: page.url().replace(EDGE, ''),
-      active: (await page.textContent('nav[aria-label="Workspace sections"] a.active')).trim() };
+      active: (await page.getAttribute('nav[aria-label="Workspace sections"] a.active', 'href')).replace(/^[^#]*/, '') };
 
     // Workspace → shell: the Marketplace tab moves the shell to its entry.
     await page.click('nav[aria-label="Workspace sections"] >> text=Marketplace');
     await page.waitForURL((u) => String(u).includes('/mfe/cairn-marketplace#/marketplace'), { timeout: 60000 });
     await page.waitForSelector('nav[aria-label="Workspace sections"] a.active', { timeout: 60000 });
     result.viaWorkspace = { url: page.url().replace(EDGE, ''),
-      active: (await page.textContent('nav[aria-label="Workspace sections"] a.active')).trim() };
+      active: (await page.getAttribute('nav[aria-label="Workspace sections"] a.active', 'href')).replace(/^[^#]*/, '') };
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/nav-marketplace.png` });
   } catch (e) {
     errors.push(`step failed: ${e.message.split('\n')[0]} (at ${page.url()})`);
