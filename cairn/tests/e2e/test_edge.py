@@ -10,6 +10,8 @@ import pytest
 
 from test_stack_smoke import EDGE
 
+pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E") != "1", reason="set CAIRN_E2E=1 to run against a live stack")
+
 TLS_URL = os.environ.get("CAIRN_E2E_TLS_URL", "")
 TLS_CA = os.environ.get("CAIRN_E2E_TLS_CA", "")
 

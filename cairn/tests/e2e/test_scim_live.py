@@ -11,7 +11,8 @@ import pytest
 from test_stack_smoke import API, EDGE, eventually, gql
 
 SCIM_TOKEN = os.environ.get("CAIRN_E2E_SCIM_TOKEN", "")
-pytestmark = pytest.mark.skipif(not SCIM_TOKEN, reason="CAIRN_SCIM_TOKEN not configured")
+pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E") != "1" or not SCIM_TOKEN,
+                                reason="needs a live stack (CAIRN_E2E=1) with CAIRN_SCIM_TOKEN")
 
 RUN = uuid.uuid4().hex[:6]
 USER_ID = f"erin.scim{RUN}"
