@@ -5,8 +5,12 @@
 #
 # Starts a webhook sink on the stack network, enrols the demo remote agent in pool "finance"
 # (creating the pool if needed), then runs tests/e2e with credentials read from the stack and .env.
-# The stack must allow the embed origins the suite uses:
-#   CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000
+# The stack must allow the embed origins the suite uses, and send Slack and Teams to the doubles in
+# tests/e2e/sink.py (the CI workflow writes the same into .env):
+#   CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000,http://localhost:8099
+#   CAIRN_SLACK_BOT_TOKEN=xoxb-e2e-double CAIRN_SLACK_API_URL=http://cairn-e2e-sink:8099/slack/api
+#   CAIRN_SLACK_RESPONSE_HOSTS=http://cairn-e2e-sink:8099
+#   CAIRN_TEAMS_WEBHOOK_HOSTS=.webhook.office.com,.logic.azure.com,http://cairn-e2e-sink:8099
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 compose=(docker compose -f docker-compose.cairn.yml)

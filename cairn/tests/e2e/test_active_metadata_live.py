@@ -741,3 +741,97 @@ def test_18_semantic_search_similar_assets_and_index_upkeep(users):
     assert result["related"] == expected and not result["errors"], (result, expected)
     assert result["similar"] == [h["urn"] for h in similar], (result, similar)
 
+
+# --------------------------------------------------------------------------- 19-20. Slack, Teams, embeds
+def _double(kind: str) -> list:
+    return httpx.get(f"{SINK_HOST.rstrip('/')}/{kind}", timeout=10).json()
+
+
+def test_19_slack_and_teams_deliveries_are_valid_and_actionable(users):
+    """With the Slack and Teams doubles (tests/e2e/sink.py) standing in for the real services: the
+    notifier finds Carol in Slack by email, sends Block Kit Slack accepts and an Adaptive Card Teams
+    renders; the card's signed link approves the request, and the Slack button then reports it is
+    already decided through response_url."""
+    from cairn.notify.channels import validate_adaptive_card, validate_blocks
+
+    bob, carol = users["bob"], users["carol"]
+    if not SINK_HOST or not carol.get("/ui/config").json()["slack_enabled"]:
+        pytest.skip("needs the e2e sink and CAIRN_SLACK_* pointing at it (see run.sh / CI)")
+    settings = carol.get("/notify/settings").json()
+    settings["channels"]["teams"] = {"enabled": True, "webhook_url": "https://169.254.169.254/latest/meta-data"}
+    r = carol.put("/notify/settings", json=settings)
+    assert r.status_code == 400 and "Microsoft webhook host" in r.text          # not a Teams webhook
+    teams_hook = f"http://cairn-e2e-sink:8099/teams/carol-{RUN}"
+    settings["channels"]["teams"] = {"enabled": True, "webhook_url": teams_hook}
+    settings["channels"]["slack"] = {"enabled": True, "user_id": None}          # found by email
+    assert carol.put("/notify/settings", json=settings).status_code == 200
+
+    req = bob.post("/marketplace/access-requests", json={
+        "product_urn": PRODUCT, "purpose": "Churn analysis", "duration_days": 7,
+        "justification": "Validate Slack and Teams delivery"})
+    assert req.status_code in (200, 201), req.text
+    rid = req.json()["id"]
+
+    def slack_message():
+        for e in _double("slack"):
+            blocks = (e.get("body") or {}).get("blocks") or []
+            if e.get("method") == "chat.postMessage" and rid in json.dumps(blocks):
+                return e
+    msg = eventually(slack_message, timeout=90)
+    assert validate_blocks(msg["body"]["blocks"]) == [], msg["body"]["blocks"]
+    assert msg["auth"].startswith("Bearer xoxb")
+    carol_email = f"{CAROL.split(':')[-1]}@example.com"
+    lookups = [e for e in _double("slack") if e.get("method") == "users.lookupByEmail"]
+    assert any(e["query"]["email"] == carol_email for e in lookups), lookups
+    slack_user = msg["body"]["channel"]
+    buttons = {b["action_id"]: b for b in msg["body"]["blocks"][1]["elements"]}
+    assert buttons["cairn:access_request:approve"]["value"] == rid and "url" in buttons["cairn:open"]
+
+    def teams_card():   # the hook was set just now, so its only access-request card is this one
+        cards = [e for e in _double("teams") if e["path"] == f"/teams/carol-{RUN}"
+                 and any(a.get("title") == "Approve" for a in
+                         ((e["body"].get("attachments") or [{}])[0].get("content") or {}).get("actions") or [])]
+        return cards[-1] if cards else None
+    card = eventually(teams_card, timeout=90)
+    assert validate_adaptive_card(card["body"]) == [], card["body"]
+    links = {a["title"]: a["url"] for a in card["body"]["attachments"][0]["content"]["actions"]}
+    approve = links["Approve"].replace("http://localhost:9000", EDGE)
+    as_carol = {"Authorization": f"Bearer {users['tokens']['carol']}"}
+    assert httpx.get(approve, headers={"Authorization": f"Bearer {users['tokens']['bob']}"}, timeout=30).status_code == 403
+    page = httpx.get(approve, headers=as_carol, timeout=30)
+    assert page.status_code == 200 and "<form" in page.text
+    done = httpx.post(approve, headers=as_carol, data={"comment": "approved from Teams"}, timeout=30)
+    assert done.status_code == 200, done.text
+    assert bob.get(f"/marketplace/access-requests/{rid}").json()["state"] == "APPROVED"
+    assert httpx.post(approve, headers=as_carol, timeout=30).status_code == 403          # single use
+
+    # The Slack button for the same request: Carol is recognised from her Slack profile email,
+    # and is told through response_url that it is already decided (the message is kept).
+    payload = {"type": "block_actions", "user": {"id": slack_user},
+               "response_url": f"http://cairn-e2e-sink:8099/slack/response/{RUN}",
+               "actions": [{"action_id": "cairn:access_request:approve", "value": rid}]}
+    out = slack_post("/integrations/slack/interactions", {"payload": json.dumps(payload)})
+    assert out.status_code == 200 and out.json()["text"].startswith("⚠️"), out.text
+    reply = eventually(lambda: next((e for e in _double("slack") if e.get("path") == f"/slack/response/{RUN}"),
+                                    None), timeout=30)
+    assert reply["body"]["replace_original"] is False and reply["body"]["response_type"] == "ephemeral"
+    assert carol.post(f"/marketplace/access-requests/{rid}/revoke", json={"comment": "e2e"}).status_code == 200
+
+
+def test_20_embeds_render_on_allowed_partner_pages_only(users):
+    """A partner page on an allowed origin shows the embedded card (web component and iframe); the
+    same page on an origin that is not allowed gets neither."""
+    if not SINK_HOST:
+        pytest.skip("needs the e2e sink (it serves the partner page)")
+    bob = users["bob"]
+    tok = bob.post("/embed/v1/tokens", json={"urn": DS, "scopes": ["card", "quality"], "ttl_seconds": 3600}).json()
+    out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_embed.js")], capture_output=True,
+                         text=True, timeout=240, env={
+                             **os.environ, "EDGE": EDGE, "URN": DS, "TOKEN": tok["token"],
+                             "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", "")})
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    allowed, blocked = result["allowed"], result["blocked"]
+    assert "customers" in allowed["component"] and "customers" in allowed["frame"], result
+    assert "customers" not in blocked["component"] and "customers" not in blocked["frame"], result
+    assert blocked["frame_blocked"], result

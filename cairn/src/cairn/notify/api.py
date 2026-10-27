@@ -47,7 +47,10 @@ def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], curre
 
     @router.put("/notify/settings", response_model=NotifySettings)
     def put_settings(settings: NotifySettings, p: Principal = Depends(current_principal)):
-        return hub.put_settings(p.urn, settings)
+        try:
+            return hub.put_settings(p.urn, settings)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @router.get("/notify/routes", response_model=list[Route])
     def get_routes(p: Principal = Depends(current_principal)):
@@ -57,7 +60,10 @@ def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], curre
     @router.put("/notify/routes", response_model=list[Route])
     def put_routes(routes: list[Route], p: Principal = Depends(current_principal)):
         authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
-        return hub.put_routes(routes)
+        try:
+            return hub.put_routes(routes)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     @router.post("/notify/test")
     def test(req: TestRequest, p: Principal = Depends(current_principal)):

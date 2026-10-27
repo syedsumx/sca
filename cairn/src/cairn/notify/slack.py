@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import threading
 import time
 from typing import Callable, Optional
@@ -28,6 +29,19 @@ logger = logging.getLogger(__name__)
 
 class SlackAuthError(Exception):
     pass
+
+
+def response_url_allowed(url: str) -> bool:
+    """Replies go only to Slack's own hooks host (``CAIRN_SLACK_RESPONSE_HOSTS`` adds origins, e.g.
+    for an Enterprise Grid proxy)."""
+    from urllib.parse import urlparse
+
+    u = urlparse(url or "")
+    if u.scheme == "https" and u.hostname == "hooks.slack.com":
+        return True
+    origin = f"{u.scheme}://{u.netloc}"
+    extra = [e.strip().rstrip("/") for e in os.environ.get("CAIRN_SLACK_RESPONSE_HOSTS", "").split(",") if e.strip()]
+    return origin in extra
 
 
 def verify_slack_signature(secret: str, timestamp: str, body: bytes, signature: str, now: Optional[float] = None,
@@ -129,7 +143,7 @@ class SlackInteractions:
         return {"response_type": "ephemeral", "text": "Usage: `/cairn search <text>` · `/cairn ask <question>`"}
 
     def _respond(self, url: str, payload: dict) -> None:
-        if not url.startswith("https://hooks.slack.com/"):
+        if not response_url_allowed(url):
             logger.warning("refusing to post to non-Slack response_url")
             return
         try:

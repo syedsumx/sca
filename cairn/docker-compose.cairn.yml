@@ -56,6 +56,10 @@ x-cairn-env: &cairn-env
   CAIRN_EMBED_ALLOWED_ORIGINS: ${CAIRN_EMBED_ALLOWED_ORIGINS:-}
   CAIRN_SLACK_BOT_TOKEN: ${CAIRN_SLACK_BOT_TOKEN:-}
   CAIRN_SLACK_SIGNING_SECRET: ${CAIRN_SLACK_SIGNING_SECRET:-}
+  CAIRN_SLACK_API_URL: ${CAIRN_SLACK_API_URL:-https://slack.com/api}       # e.g. https://slack-gov.com/api
+  CAIRN_SLACK_RESPONSE_HOSTS: ${CAIRN_SLACK_RESPONSE_HOSTS:-}              # extra origins for Slack replies
+  CAIRN_TEAMS_WEBHOOK_HOSTS: ${CAIRN_TEAMS_WEBHOOK_HOSTS:-.webhook.office.com,.logic.azure.com,.powerplatform.com,.powerautomate.com}
+  CAIRN_WEBHOOK_ALLOW_PRIVATE: ${CAIRN_WEBHOOK_ALLOW_PRIVATE:-true}        # false: webhooks only to public addresses
   CAIRN_TEAMS_WEBHOOK_URL: ${CAIRN_TEAMS_WEBHOOK_URL:-}
   CAIRN_SMTP_URL: ${CAIRN_SMTP_URL:-}
 

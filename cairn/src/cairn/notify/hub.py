@@ -160,6 +160,12 @@ class NotificationHub:
         return merged
 
     def put_settings(self, actor: str, settings: NotifySettings) -> NotifySettings:
+        from cairn.notify.channels import teams_webhook_allowed
+
+        teams = settings.channels.get("teams")
+        if teams and teams.webhook_url and not teams_webhook_allowed(teams.webhook_url):
+            raise ValueError("The Teams webhook URL must be an https address on a Microsoft webhook host "
+                             "(from Teams: Workflows → 'Post to a chat when a webhook request is received').")
         doc = settings.model_dump(mode="json")
         with self.engine.begin() as conn:
             if conn.execute(select(notify_settings.c.actor).where(notify_settings.c.actor == actor)).first():
@@ -183,6 +189,11 @@ class NotificationHub:
             return [Route.model_validate(r.doc) for r in conn.execute(select(notify_routes))]
 
     def put_routes(self, routes: list[Route]) -> list[Route]:
+        from cairn.notify.channels import teams_webhook_allowed
+
+        for r in routes:
+            if r.channel == "teams" and not teams_webhook_allowed(r.target):
+                raise ValueError(f"route {r.id}: Teams target must be an https Microsoft webhook URL")
         with self.engine.begin() as conn:
             conn.execute(notify_routes.delete())
             for r in routes:

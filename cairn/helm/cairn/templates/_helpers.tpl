@@ -219,6 +219,12 @@ app.kubernetes.io/component: {{ .component }}
   valueFrom:
     secretKeyRef: { name: {{ $s.name }}, key: {{ $s.embedSigningSecretKey }} }
 {{- $i := .Values.cairn.integrations }}
+- name: CAIRN_SLACK_API_URL
+  value: {{ $i.slack.apiUrl | default "https://slack.com/api" | quote }}
+- name: CAIRN_TEAMS_WEBHOOK_HOSTS
+  value: {{ $i.teams.webhookHosts | quote }}
+- name: CAIRN_WEBHOOK_ALLOW_PRIVATE
+  value: {{ $i.webhooks.allowPrivateNetworks | quote }}
 {{- if $i.slack.enabled }}
 - name: CAIRN_SLACK_BOT_TOKEN
   valueFrom:

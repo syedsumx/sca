@@ -243,11 +243,20 @@ cairn:
       existingSecret: cairn-slack
       botTokenKey: bot-token
       signingSecretKey: signing-secret
+      # Slack Web API base, e.g. https://slack-gov.com/api for GovSlack.
+      apiUrl: https://slack.com/api
     teams:
       enabled: false
       # Secret with the default Teams Workflows webhook URL (per-domain routes live in Cairn).
       existingSecret: cairn-teams
       webhookUrlKey: webhook-url
+      # Hosts Teams webhooks may point at (host suffixes, or exact origins such as a corporate proxy).
+      # Personal webhook URLs are user input: anything else is refused.
+      webhookHosts: ".webhook.office.com,.logic.azure.com,.powerplatform.com,.powerautomate.com"
+    webhooks:
+      # Generic webhooks never reach loopback or link-local (cloud metadata) addresses; set false to
+      # also refuse private networks.
+      allowPrivateNetworks: true
     email:
       enabled: false
       existingSecret: cairn-smtp
