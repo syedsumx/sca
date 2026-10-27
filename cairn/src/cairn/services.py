@@ -498,7 +498,7 @@ def _build_active_metadata(s: Services) -> None:
                 email = slack_sender.user_email(slack_user_id)
             except Exception:
                 return None
-            return f"urn:li:corpuser:{email}" if email else None
+            return actor_for_email(s.graph, email) if email else None
 
         def slack_search(actor: str, query: str) -> list[dict]:
             if s.catalog is None:
@@ -511,6 +511,33 @@ def _build_active_metadata(s: Services) -> None:
             return out["reply_md"]
 
         s.slack = SlackInteractions(hub, cfg.slack_signing_secret, resolve_slack_actor, slack_search, slack_ask)
+
+
+_USERS_BY_EMAIL = """query($i: SearchAcrossEntitiesInput!) { searchAcrossEntities(input: $i) {
+  searchResults { entity { urn ... on CorpUser { properties { email } info { email } } } } } }"""
+
+
+def actor_for_email(graph: Optional[MetadataGraph], email: str) -> Optional[str]:
+    """The Cairn Core user whose profile has this email (usernames need not be emails). Falls back
+    to a user whose username is the email; None when nobody matches or the match is ambiguous."""
+    email = email.strip().lower()
+    if graph is None or not email:
+        return None
+    try:
+        data = graph.graphql(_USERS_BY_EMAIL, {"i": {"types": ["CORP_USER"], "query": f'"{email}"', "start": 0,
+                                                     "count": 10}})
+        hits = {r["entity"]["urn"] for r in (data.get("searchAcrossEntities") or {}).get("searchResults") or []
+                if email in {str(((r["entity"].get(k) or {}).get("email")) or "").lower()
+                             for k in ("properties", "info")}}
+        if len(hits) == 1:
+            return hits.pop()
+        if len(hits) > 1:
+            logger.warning("%d Cairn Core users share the email %s; not guessing", len(hits), email)
+            return None
+    except Exception:
+        logger.exception("user lookup by email failed")
+    urn = f"urn:li:corpuser:{email}"
+    return urn if graph.get_aspect(urn, "corpUserKey") or graph.get_aspect(urn, "corpUserInfo") else None
 
 
 def _hook_workflow_events(s: Services, Event) -> None:

@@ -754,9 +754,13 @@ def test_19_slack_and_teams_deliveries_are_valid_and_actionable(users):
     already decided through response_url."""
     from cairn.notify.channels import validate_adaptive_card, validate_blocks
 
-    bob, carol = users["bob"], users["carol"]
+    root, bob, carol = users["root"], users["bob"], users["carol"]
     if not SINK_HOST or not carol.get("/ui/config").json()["slack_enabled"]:
         pytest.skip("needs the e2e sink and CAIRN_SLACK_* pointing at it (see run.sh / CI)")
+    pol = root.put(f"/marketplace/products/{urllib.parse.quote(PRODUCT, safe='')}/policy", json={
+        "approvers": [CAROL], "max_duration_days": 30, "purposes": ["Churn analysis", "Other"],
+        "requires_justification": True, "grant_permissions": ["view", "view_samples"]})
+    assert pol.status_code == 200, pol.text
     settings = carol.get("/notify/settings").json()
     settings["channels"]["teams"] = {"enabled": True, "webhook_url": "https://169.254.169.254/latest/meta-data"}
     r = carol.put("/notify/settings", json=settings)

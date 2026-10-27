@@ -174,3 +174,25 @@ def test_refused_targets_fail_the_delivery_not_the_notifier(engine):
                       actions=[Action("ack", "finding", "f1", "Ack")]))
     stats = hub.dispatch_pending(max_attempts=1)
     assert stats == {"sent": 0, "failed": 1, "skipped": 0}
+
+
+# --------------------------------------------------------------------------- Slack user → Cairn user
+def test_slack_users_are_matched_by_profile_email_not_username():
+    from cairn.common.core import InMemoryGraph
+    from cairn.services import actor_for_email
+
+    graph = InMemoryGraph()
+    people = [("urn:li:corpuser:carol", "Carol@Example.com"), ("urn:li:corpuser:dup1", "shared@example.com"),
+              ("urn:li:corpuser:dup2", "shared@example.com")]
+
+    def handler(query, variables):
+        q = variables["i"]["query"].strip('"').lower()
+        return {"searchAcrossEntities": {"searchResults": [
+            {"entity": {"urn": u, "properties": {"email": e}}} for u, e in people if q in e.lower() or q in u]}}
+    graph.graphql_handler = handler
+    assert actor_for_email(graph, "carol@example.com") == "urn:li:corpuser:carol"     # username is not the email
+    assert actor_for_email(graph, "shared@example.com") is None                       # ambiguous: refuse
+    assert actor_for_email(graph, "nobody@example.com") is None
+    graph.aspects[("urn:li:corpuser:ana@example.com", "corpUserKey")] = {"username": "ana@example.com"}
+    assert actor_for_email(graph, "ana@example.com") == "urn:li:corpuser:ana@example.com"
+    assert actor_for_email(None, "carol@example.com") is None
