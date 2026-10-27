@@ -11,7 +11,7 @@ estimated cost and latency so a model or prompt change can be compared before it
 Case files are YAML (``cases:`` list) in ``config/ai-evals``::
 
     - id: nlq-hides-restricted
-      feature: nlq                       # nlq | docgen | explain
+      feature: nlq                       # nlq | docgen | explain | semantic
       question: which tables have salary data?
       catalog:
         - {urn: ..., name: salaries, description: ..., fields: [id, salary]}
@@ -48,10 +48,11 @@ from cairn.ai.usage import MeteredProvider, UsageMeter, set_actor
 from cairn.common.core import InMemoryGraph
 
 EVAL_ACTOR = "urn:li:corpuser:cairn-eval"
-FEATURES = {"nlq", "docgen", "explain"}
+FEATURES = {"nlq", "docgen", "explain", "semantic"}
 _EXPECT_KEYS = {"planner", "prompt_excludes", "prompt_includes", "results_include", "results_exclude",
                 "citations_within_results", "answer_excludes", "answer_includes", "columns_within_schema",
-                "confidence_between", "max_cost_usd", "max_latency_ms", "causes_include", "causes_exclude"}
+                "confidence_between", "max_cost_usd", "max_latency_ms", "causes_include", "causes_exclude",
+                "first_result"}
 
 
 class EvalCaseError(ValueError):
@@ -108,7 +109,7 @@ def _graph(case: dict) -> InMemoryGraph:
             return {"searchAcrossEntities": {"facets": [{"field": "platform", "aggregations": [
                 {"value": f"urn:li:dataPlatform:{p}", "count": 1} for p in platforms]}]}}
         if "searchAcrossEntities" in query:
-            q = (variables["input"].get("query") or "*").lower()
+            q = ((variables.get("input") or variables.get("i") or {}).get("query") or "*").lower()
             words = [w for w in q.replace("*", " ").split() if len(w) > 2]
             hits = [e for e in entities.values()
                     if not words or any(w.rstrip("s") in json.dumps(e).lower() for w in words)]
@@ -166,10 +167,19 @@ def _scripted(case: dict) -> StaticProvider:
 
 
 # ---- running a case ---------------------------------------------------------------------------
-def _run_feature(case: dict, llm, graph) -> dict:
+def _run_feature(case: dict, llm, graph, embedder=None) -> dict:
     hidden = set(case.get("hidden") or [])
     can_view = (lambda u: u not in hidden)    # noqa: E731
     catalog = Catalog(graph)
+    if case["feature"] == "semantic":
+        from cairn.ai.embeddings import HashingEmbedder, InMemoryVectorStore
+        from cairn.ai.semantic import SemanticIndex
+
+        index = SemanticIndex(catalog, embedder or HashingEmbedder(), InMemoryVectorStore())
+        index.index_many([e["urn"] for e in case.get("catalog") or []])
+        hits = index.search(case["question"], int(case.get("limit", 3)), None, can_view)
+        return {"results": [h["urn"] for h in hits], "citations": [], "answer": "",
+                "matched": {h["urn"]: h.get("matched", []) for h in hits}}
     if case["feature"] == "nlq":
         out = NaturalLanguageQuery(catalog, llm).ask(case["question"], can_view)
         return {"planner": out["planner"], "answer": out["answer"], "citations": out["citations"],
@@ -198,6 +208,8 @@ def _check(case: dict, got: dict, prompts: list[str], cost: float, latency_ms: f
     exp = case.get("expect") or {}
     problems: list[str] = []
     prompt_text = "\n".join(prompts)
+    if "first_result" in exp and (got["results"][:1] or [None])[0] != exp["first_result"]:
+        problems.append(f"first result {(got['results'][:1] or [None])[0]} != {exp['first_result']}")
     if "planner" in exp and got.get("planner") != exp["planner"]:
         problems.append(f"planner {got.get('planner')!r} != {exp['planner']!r}")
     for s in exp.get("prompt_excludes") or []:
@@ -237,7 +249,7 @@ def _check(case: dict, got: dict, prompts: list[str], cost: float, latency_ms: f
     return problems
 
 
-def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = None) -> list[dict]:
+def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = None, embedder=None) -> list[dict]:
     """Run ``cases`` with ``provider`` (a live provider) or, when None, each case's scripted output."""
     from cairn.common.db import get_engine, init_db
 
@@ -256,7 +268,7 @@ def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = No
             llm = MeteredProvider(recorder, meter)
             started = time.monotonic()
             try:
-                got = _run_feature(case, llm, _graph(case))
+                got = _run_feature(case, llm, _graph(case), embedder)
                 latency = (time.monotonic() - started) * 1000
                 after = meter.summary(group_by="task")["total"]
                 cost = after["cost_usd"] - before["cost_usd"]

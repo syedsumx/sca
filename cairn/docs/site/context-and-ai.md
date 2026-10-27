@@ -28,6 +28,22 @@ metadata you are allowed to see, redacts personal data before anything reaches a
 assets it used, and can explain lineage anomalies. It runs on Claude or on a local model for
 air-gapped installs; without a model it falls back to search-based answers.
 
+## Search by meaning
+
+Search results add a **Related by meaning** section: assets whose descriptions, columns, tags and
+terms are close to what you typed even when the words differ ("money each region made per day"
+finds `revenue_daily`). Each result shows the words it matched. Asset pages list **Similar assets**,
+which helps find the certified copy of a table or the other half of a join. Both only ever show
+assets you can see.
+
+The index fills itself from the catalog when Cairn starts, follows changes as they happen, and is
+reconciled with the catalog every 6 hours (`CAIRN_SEMANTIC_RECONCILE_SECONDS`), which also drops
+deleted assets. Embeddings are computed inside your deployment: by the built-in embedder (no model,
+no network), or by a local model through Ollama (`CAIRN_EMBEDDING_PROVIDER=ollama`,
+`CAIRN_EMBEDDING_MODEL`, `CAIRN_EMBEDDING_DIM`). Changing the embedder re-indexes everything in the
+background. Operators can check the index with `GET /cairn/api/ai/index/status` and force a pass
+with `POST /cairn/api/ai/index/rebuild`.
+
 ## Documentation drafts
 
 The assistant can draft descriptions for assets and columns. Drafts are never published without a

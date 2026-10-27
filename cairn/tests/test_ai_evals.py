@@ -17,7 +17,7 @@ def _failed() -> set[str]:
 def test_shipped_cases_pass():
     results = evals.run_cases(evals.load_cases(CASES))
     assert results and all(r["ok"] for r in results), [r for r in results if not r["ok"]]
-    assert {r["feature"] for r in results} == {"nlq", "docgen", "explain"}
+    assert {r["feature"] for r in results} == {"nlq", "docgen", "explain", "semantic"}
 
 
 def test_without_redaction_pii_cases_fail(monkeypatch):
@@ -34,8 +34,15 @@ def test_without_tag_escaping_injection_cases_fail(monkeypatch):
 
 
 def test_without_authorization_filtering_restricted_cases_fail(monkeypatch):
-    monkeypatch.setattr("cairn.ai.nlq.filter_viewable", lambda items, can_view: list(items))
-    assert _failed() >= {"nlq-restricted-assets-never-reach-prompt-or-answer", "nlq-falls-back-without-a-model"}
+    for mod in ("cairn.ai.nlq", "cairn.ai.semantic"):
+        monkeypatch.setattr(f"{mod}.filter_viewable", lambda items, can_view: list(items))
+    assert _failed() >= {"nlq-restricted-assets-never-reach-prompt-or-answer", "nlq-falls-back-without-a-model",
+                         "semantic-never-returns-hidden-assets"}
+
+
+def test_without_plural_folding_semantic_ranking_regresses(monkeypatch):
+    monkeypatch.setattr("cairn.ai.embeddings._stem", lambda w: w)
+    assert "semantic-never-returns-hidden-assets" in _failed()
 
 
 def test_without_citation_filter_hallucinations_are_caught(monkeypatch):
@@ -78,14 +85,14 @@ def test_cli(capsys, tmp_path):
         main(["ai", "eval", CASES])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    assert "9/9 AI eval cases passed" in out and "nlq-drops-hallucinated-citations" in out
+    assert "12/12 AI eval cases passed" in out and "nlq-drops-hallucinated-citations" in out
     report = tmp_path / "r.json"
     with pytest.raises(SystemExit):
         main(["ai", "eval", CASES, "--json", str(report)])
     import json
 
     body = json.loads(report.read_text())
-    assert body["summary"]["passed"] == 9 and body["mode"] == "offline"
+    assert body["summary"]["passed"] == 12 and body["mode"] == "offline"
     with pytest.raises(SystemExit) as e:
         main(["ai", "eval", CASES, "--live"])            # no provider configured
     assert "needs an LLM provider" in str(e.value.code)

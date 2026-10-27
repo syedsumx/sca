@@ -9,6 +9,7 @@ import { AssetRow, assetPath } from '../components/Assets';
 import { useBookmarkToggle, useBookmarks } from '../components/Engagement';
 import { FACET_LABELS, FacetPanel } from '../components/FacetPanel';
 import { OmniSearchBar } from '../components/OmniSearchBar';
+import { RelatedByMeaning } from '../components/Semantic';
 import { Muted, Page, Skeleton } from '../components/tokens';
 import { SearchState, parseSearchState, serializeSearchState, toggleFilter } from '../utils/urlState';
 import { useHotkeys } from '../utils/useHotkeys';
@@ -125,7 +126,13 @@ export function SearchPage() {
                         ))}
                     {result.error && <div role="alert">Search failed: {result.error.message}</div>}
                     {result.data && result.data.results.length === 0 && (
-                        <Empty description={state.query ? `No results for “${state.query}”. Try fewer filters or ask the assistant.` : 'No results'} />
+                        <Empty
+                            description={
+                                state.query
+                                    ? `No exact matches for “${state.query}”. Try fewer filters, see related assets below, or ask the assistant.`
+                                    : 'No results'
+                            }
+                        />
                     )}
                     {result.data?.results.map((r, i) => (
                         <AssetRow
@@ -147,6 +154,9 @@ export function SearchPage() {
                             showSizeChanger={false}
                             onChange={(page) => navigate({ ...state, page })}
                         />
+                    )}
+                    {result.data && state.page === 1 && !Object.keys(state.filters).length && (
+                        <RelatedByMeaning query={state.query} exclude={urns} enrichment={enrichment.data} />
                     )}
                     <Muted style={{ display: 'block', marginTop: 12, fontSize: 12 }}>
                         Shortcuts: j/k move · enter open · b bookmark · / search

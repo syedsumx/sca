@@ -669,7 +669,7 @@ def test_17_ai_usage_is_metered_and_evals_ship_in_the_image(users):
     out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "cairn", "ai", "eval"], capture_output=True,
                          text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
-    assert "9/9 AI eval cases passed" in out.stdout
+    assert "12/12 AI eval cases passed" in out.stdout
 
     out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "python", "-"], input=_FAKE_MODEL, capture_output=True,
                          text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -689,3 +689,55 @@ def test_17_ai_usage_is_metered_and_evals_ship_in_the_image(users):
                          headers={"Authorization": f"Bearer {users['tokens']['root']}"})
     assert via_edge.status_code == 200 and via_edge.json()["group_by"] == "day"
     assert root.get("/ai/usage", params={"group_by": "nope"}).status_code == 400
+
+
+def test_18_semantic_search_similar_assets_and_index_upkeep(users):
+    """New assets reach the semantic index as they are written; search explains its matches,
+    similar assets follow shared columns, and the workspace shows both."""
+    root, bob = users["root"], users["bob"]
+    status = root.get("/ai/index/status").json()
+    assert status["embedder"] == "hashing" and status["entries"] > 0, status
+    assert bob.get("/ai/index/status").status_code == 403
+
+    def found():
+        hits = root.post("/ai/search/semantic", json={"query": f"am {RUN} customers contact details",
+                                                      "limit": 10}).json()["results"]
+        return next((h for h in hits if h["urn"] == DS), None)
+    hit = eventually(found, timeout=90)
+    assert {"customers", "contact"} <= set(hit["matched"]) and hit["platform"] == "postgres", hit
+    assert not hit["description"].startswith("dataset ")
+    # Keyword hits the page already shows can be left out.
+    rest = root.post("/ai/search/semantic", json={"query": f"am {RUN} customers contact details",
+                                                  "exclude": [DS]}).json()["results"]
+    assert DS not in [h["urn"] for h in rest]
+
+    # Similar assets: the downstream mart sharing its columns, and copies of the table from other runs
+    # on a long-lived stack, rank first.
+    similar = eventually(lambda: root.get("/ai/similar", params={"urn": DS}).json()["results"] or None, timeout=60)
+    assert DS not in [h["urn"] for h in similar]
+    assert {h["name"] for h in similar[:3]} <= {"customers", "customer_orders"}, similar
+
+    # The workspace leaves out what keyword search already shows; pick a query where meaning adds something.
+    def keyword(q):
+        data = gql("""query($i: SearchAcrossEntitiesInput!) { searchAcrossEntities(input: $i) {
+                        searchResults { entity { urn } } } }""", {"i": {"query": q, "start": 0, "count": 20}})
+        return [r["entity"]["urn"] for r in data["searchAcrossEntities"]["searchResults"]]
+
+    def adds(q):
+        kw = keyword(q)
+        extra = root.post("/ai/search/semantic", json={"query": q, "limit": 5, "exclude": kw,
+                                                       "min_score": 0.15}).json()["results"]
+        return (q, [h["urn"] for h in extra]) if extra else None
+    query, expected = next(filter(None, map(adds, [f"custmer contactt detials {RUN}", "people we can email",
+                                                     "buyer contact info", f"am {RUN} customers contact details"])))
+    out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_semantic.js")], capture_output=True,
+                         text=True, timeout=240, env={
+                             **os.environ, "EDGE": EDGE, "QUERY": query,
+                             "ASSET_URN": DS, "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", ""),
+                             "UI_USER": os.environ.get("CAIRN_E2E_UI_USER", "admin"),
+                             "UI_PASSWORD": os.environ["CAIRN_E2E_UI_PASSWORD"]})
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["related"] == expected and not result["errors"], (result, expected)
+    assert result["similar"] == [h["urn"] for h in similar], (result, similar)
+

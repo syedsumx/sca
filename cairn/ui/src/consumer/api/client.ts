@@ -30,6 +30,7 @@ import type {
     RecentItem,
     SearchEntity,
     SearchResponse,
+    SemanticHit,
     Thread,
     TrendingItem,
     UiConfig,
@@ -125,6 +126,25 @@ export class ConsumerClient extends CairnClient {
             signal,
         );
         return parseSearch(data.searchAcrossEntities);
+    }
+
+    // --- semantic search -------------------------------------------------------------------
+
+    /** Meaning-based matches for `query`, leaving out `exclude` (the keyword hits already shown). */
+    semanticRelated(query: string, exclude: string[], limit = 5, minScore = 0, opts?: RequestOptions) {
+        return this.request<{ results: SemanticHit[] }>(
+            'POST',
+            '/ai/search/semantic',
+            { query, limit, exclude: exclude.slice(0, 200), min_score: minScore },
+            opts,
+        );
+    }
+
+    similarAssets(urn: string, limit = 5, opts: RequestOptions = {}) {
+        return this.request<{ urn: string; results: SemanticHit[] }>('GET', '/ai/similar', undefined, {
+            ...opts,
+            query: { ...(opts.query ?? {}), urn, limit },
+        });
     }
 
     // --- UI bootstrap ----------------------------------------------------------------------

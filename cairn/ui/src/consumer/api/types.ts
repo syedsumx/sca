@@ -332,6 +332,20 @@ export interface UiConfig {
     gateway_url?: string;
 }
 
+// ------------------------------------------------------------- semantic search
+
+export interface SemanticHit {
+    urn: string;
+    name: string;
+    type: string;
+    platform?: string | null;
+    description?: string | null;
+    /** Cosine similarity, 0..1. */
+    score: number;
+    /** Query words found in the asset (search only, not "similar"). */
+    matched?: string[];
+}
+
 // ------------------------------------------------------------- Cairn Core GraphQL search
 
 export interface SearchEntity {

@@ -8,6 +8,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, ExplainResponse } from '../api/types';
 import { DiscussionPanel } from '../components/Discussion';
 import { BookmarkToggle, FollowButton } from '../components/Engagement';
+import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
@@ -204,37 +205,40 @@ export function AssetPage() {
                         key: 'summary',
                         label: 'Summary',
                         children: (
-                            <Surface style={{ padding: 18 }}>
-                                <h3>What it is</h3>
-                                {description ? (
-                                    <MarkdownView source={description} />
-                                ) : (
-                                    <Muted>No description yet. Start a discussion or generate one with AI from the Context inbox.</Muted>
-                                )}
-                                <h3 style={{ marginTop: 16 }}>Owners</h3>
-                                {(d?.ownership?.owners ?? []).length === 0 && <Muted>No owners assigned.</Muted>}
-                                {(d?.ownership?.owners ?? []).map((o) => (
-                                    <Tag key={o.owner.urn}>
-                                        {o.owner.username || o.owner.name || actorName(o.owner.urn)}
-                                        {o.ownershipType?.info?.name ? ` (${o.ownershipType.info.name})` : ''}
-                                    </Tag>
-                                ))}
-                                <h3 style={{ marginTop: 16 }}>Business terms & tags</h3>
-                                {(d?.glossaryTerms?.terms ?? []).map((t) => (
-                                    <Tag color="purple" key={t.term.urn}>
-                                        {t.term.properties?.name ?? t.term.urn.split(':').pop()}
-                                    </Tag>
-                                ))}
-                                {(d?.tags?.tags ?? []).map((t) => (
-                                    <Tag key={t.tag.urn}>{t.tag.properties?.name ?? t.tag.urn.split(':').pop()}</Tag>
-                                ))}
-                                {!(d?.glossaryTerms?.terms ?? []).length && !(d?.tags?.tags ?? []).length && <Muted>None yet.</Muted>}
-                                {e && (
-                                    <p style={{ marginTop: 16, color: tokens.color.textMuted }}>
-                                        👁 {e.views_7d} views this week · ☆ {e.bookmarks} bookmarks · 💬 {e.threads_open} open discussions
-                                    </p>
-                                )}
-                            </Surface>
+                            <>
+                                <Surface style={{ padding: 18 }}>
+                                    <h3>What it is</h3>
+                                    {description ? (
+                                        <MarkdownView source={description} />
+                                    ) : (
+                                        <Muted>No description yet. Start a discussion or generate one with AI from the Context inbox.</Muted>
+                                    )}
+                                    <h3 style={{ marginTop: 16 }}>Owners</h3>
+                                    {(d?.ownership?.owners ?? []).length === 0 && <Muted>No owners assigned.</Muted>}
+                                    {(d?.ownership?.owners ?? []).map((o) => (
+                                        <Tag key={o.owner.urn}>
+                                            {o.owner.username || o.owner.name || actorName(o.owner.urn)}
+                                            {o.ownershipType?.info?.name ? ` (${o.ownershipType.info.name})` : ''}
+                                        </Tag>
+                                    ))}
+                                    <h3 style={{ marginTop: 16 }}>Business terms & tags</h3>
+                                    {(d?.glossaryTerms?.terms ?? []).map((t) => (
+                                        <Tag color="purple" key={t.term.urn}>
+                                            {t.term.properties?.name ?? t.term.urn.split(':').pop()}
+                                        </Tag>
+                                    ))}
+                                    {(d?.tags?.tags ?? []).map((t) => (
+                                        <Tag key={t.tag.urn}>{t.tag.properties?.name ?? t.tag.urn.split(':').pop()}</Tag>
+                                    ))}
+                                    {!(d?.glossaryTerms?.terms ?? []).length && !(d?.tags?.tags ?? []).length && <Muted>None yet.</Muted>}
+                                    {e && (
+                                        <p style={{ marginTop: 16, color: tokens.color.textMuted }}>
+                                            👁 {e.views_7d} views this week · ☆ {e.bookmarks} bookmarks · 💬 {e.threads_open} open discussions
+                                        </p>
+                                    )}
+                                </Surface>
+                                <SimilarAssets urn={urn} />
+                            </>
                         ),
                     },
                     {

@@ -193,6 +193,27 @@ class Services:
                 logger.info("catalog bootstrap waiting for Cairn Core: %s", e)
                 stop.wait(retry_seconds)
 
+    def maintain_semantic_index(self, stop: threading.Event, interval: float, retry_seconds: float = 30) -> None:
+        """Fill the semantic index when it is empty, then reconcile it with the catalog every
+        ``interval`` seconds (live changes arrive through the indexer action in between)."""
+        if self.semantic is None:
+            return
+        built = False
+        while not stop.is_set():
+            try:
+                if not built:
+                    logger.info("semantic index ready: %s", self.semantic.ensure_built())
+                    built = True
+                elif interval > 0:
+                    logger.info("semantic index reconciled: %s", self.semantic.rebuild())
+            except Exception as e:  # noqa: BLE001 - Cairn Core may not be ready yet
+                logger.info("semantic index maintenance waiting: %s", e)
+                stop.wait(retry_seconds)
+                continue
+            if interval <= 0 and built:
+                return
+            stop.wait(interval if interval > 0 else retry_seconds)
+
     def start_background(self, native_policy_interval: int = 120, workflow_interval: int = 600,
                          layer_reload_interval: float = 10.0, bootstrap_catalog: bool = False) -> None:
         """Native-policy import retries until Cairn Core (and its token) is available. With Kafka
@@ -236,6 +257,8 @@ class Services:
         targets = [policy_loop, workflow_loop, layers_loop]
         if bootstrap_catalog:
             targets.append(lambda: self.bootstrap_catalog(stop))
+            interval = float(os.environ.get("CAIRN_SEMANTIC_RECONCILE_SECONDS", "21600"))
+            targets.append(lambda: self.maintain_semantic_index(stop, interval))
         for target in targets:
             t = threading.Thread(target=target, daemon=True, name=getattr(target, "__name__", "bootstrap"))
             t.start()

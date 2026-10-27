@@ -22,6 +22,8 @@ class SemanticRequest(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     limit: int = Field(default=10, ge=1, le=50)
     entity_types: Optional[list[str]] = None
+    exclude: list[str] = Field(default_factory=list, max_length=200)   # e.g. the keyword hits already shown
+    min_score: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class DocRequest(BaseModel):
@@ -60,7 +62,23 @@ def build_router(services, current_principal) -> APIRouter:
     def semantic(req: SemanticRequest, p: Principal = Depends(current_principal)):
         if services.semantic is None:
             raise HTTPException(503, "semantic search not configured")
-        return {"results": services.semantic.search(req.query, req.limit, req.entity_types, services.can_view(p))}
+        return {"results": services.semantic.search(req.query, req.limit, req.entity_types, services.can_view(p),
+                                                    req.exclude, req.min_score)}
+
+    @router.get("/similar")
+    def similar(urn: str = Query(pattern=r"^urn:li:"), limit: int = Query(5, ge=1, le=20),
+                p: Principal = Depends(current_principal)):
+        if services.semantic is None:
+            raise HTTPException(503, "semantic search not configured")
+        services.authorize(p, "VIEW_ENTITY_PAGE", urn)
+        return {"urn": urn, "results": services.semantic.similar(urn, limit, None, services.can_view(p))}
+
+    @router.get("/index/status")
+    def index_status(p: Principal = Depends(current_principal)):
+        services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+        if services.semantic is None:
+            raise HTTPException(503, "semantic search not configured")
+        return services.semantic.status()
 
     @router.post("/docs/generate", status_code=201)
     def generate_docs(req: DocRequest, p: Principal = Depends(current_principal)):

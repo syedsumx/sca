@@ -301,12 +301,14 @@ def cmd_policies_test(a) -> None:
 def cmd_ai_eval(a) -> None:
     from cairn.ai import evals
 
-    provider = None
+    provider = embedder = None
     if a.live:
+        from cairn.ai.embeddings import build_embedder
         from cairn.ai.llm import build_provider
         from cairn.common.config import get_settings
 
         provider = build_provider(get_settings())
+        embedder = build_embedder(get_settings())
         if provider is None:
             sys.exit("cairn: --live needs an LLM provider (set CAIRN_LLM_PROVIDER=anthropic or ollama)")
     try:
@@ -315,7 +317,7 @@ def cmd_ai_eval(a) -> None:
         sys.exit(f"cairn: {e}")
     if a.only:
         cases = [c for c in cases if any(o in c["id"] for o in a.only)]
-    results = evals.run_cases(cases, provider)
+    results = evals.run_cases(cases, provider, embedder=embedder)
     summary = evals.summarize(results)
     for r in results:
         cost = f"  {r['tokens']} tok ${r['cost_usd']:.4f} {r['latency_ms']:.0f}ms" if a.live else ""

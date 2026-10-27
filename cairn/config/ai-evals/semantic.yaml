@@ -1,0 +1,56 @@
+# Semantic search: meaning-based retrieval ranks the right asset first and never returns hidden ones.
+# Offline cases use the built-in hashing embedder; `--live` uses the configured one.
+cases:
+  - id: semantic-finds-columns-by-wording
+    feature: semantic
+    question: customer email addresses
+    limit: 2
+    catalog:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)
+        name: contacts
+        description: People we talk to at client companies.
+        fields: [contact_id, customerEmail, phone_number]
+      - urn: urn:li:dataset:(urn:li:dataPlatform:snowflake,finance.revenue_daily,PROD)
+        name: revenue_daily
+        description: Daily recognised revenue by region.
+        fields: [day, region, revenue]
+      - urn: urn:li:dataset:(urn:li:dataPlatform:snowflake,ops.warehouse_shipments,PROD)
+        name: warehouse_shipments
+        description: Parcels leaving each warehouse.
+        fields: [shipment_id, warehouse, shipped_at]
+    expect:
+      first_result: urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)
+
+  - id: semantic-ranks-by-description
+    feature: semantic
+    question: how much money did each region make per day
+    limit: 3
+    catalog:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,crm.public.contacts,PROD)
+        name: contacts
+        description: People we talk to at client companies.
+        fields: [contact_id, customer_email]
+      - urn: urn:li:dataset:(urn:li:dataPlatform:snowflake,finance.revenue_daily,PROD)
+        name: revenue_daily
+        description: Money recognised per region each day.
+        fields: [day, region, revenue_usd]
+    expect:
+      first_result: urn:li:dataset:(urn:li:dataPlatform:snowflake,finance.revenue_daily,PROD)
+
+  - id: semantic-never-returns-hidden-assets
+    feature: semantic
+    question: employee salaries
+    limit: 5
+    catalog:
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)
+        name: salaries
+        description: Employee salaries and bonuses.
+        fields: [employee_id, salary, bonus]
+      - urn: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salary_bands_public,PROD)
+        name: salary_bands_public
+        description: Published salary bands per level.
+        fields: [level, band_min, band_max]
+    hidden: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)"]
+    expect:
+      results_exclude: ["urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)"]
+      first_result: urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salary_bands_public,PROD)
