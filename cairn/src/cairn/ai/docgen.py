@@ -12,6 +12,7 @@ from typing import Any, Callable, Optional
 from cairn.ai.catalog import Catalog, entity_document
 from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact, untrusted
 from cairn.ai.llm import LLMError, LLMProvider, validate_against_schema
+from cairn.ai.usage import llm_task
 from cairn.common.core import MetadataGraph
 from cairn.common.proposals import CAIRN_AI_ACTOR, audit_stamp, make_mcp
 
@@ -76,7 +77,8 @@ class DocGenerator:
         if self.llm is None:
             raise LLMError("no LLM provider configured (set CAIRN_LLM_PROVIDER=anthropic or ollama)")
         details, context = self.build_context(urn)
-        draft, usage = self.llm.generate_json(DOC_SYSTEM, untrusted(context), DRAFT_SCHEMA, model=self.model)
+        with llm_task("docgen.draft"):
+            draft, usage = self.llm.generate_json(DOC_SYSTEM, untrusted(context), DRAFT_SCHEMA, model=self.model)
         validate_against_schema(draft, DRAFT_SCHEMA)
         if self.on_llm_call:
             self.on_llm_call("docgen.draft", usage)

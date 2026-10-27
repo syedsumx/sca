@@ -628,3 +628,64 @@ def test_16b_shipped_rule_monitors_certified_datasets(users):
         mine = pending + existing
         return mine if len(mine) >= 2 else None
     assert eventually(planned, timeout=60)
+
+
+_FAKE_MODEL = r'''
+import json, os, subprocess, sys, threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+class H(BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        props = req["format"].get("properties", {})
+        if "unknowns" in props:
+            out = {"summary": "s", "description": "d", "columns": [], "suggested_terms": [], "confidence": 0.5,
+                   "unknowns": []}
+        elif "citations" in props:
+            out = {"answer": "a", "citations": []}
+        elif "summary_md" in props:
+            out = {"summary_md": "m"}
+        else:
+            out = {"intent": "find", "query": "*", "entity_types": [], "filters": [], "limit": 5,
+                   "lineage": {"direction": "NONE", "target": "", "max_hops": 1}}
+        body = json.dumps({"message": {"content": json.dumps(out)}, "prompt_eval_count": 120,
+                           "eval_count": 30}).encode()
+        self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+
+srv = HTTPServer(("127.0.0.1", 0), H)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+env = dict(os.environ, CAIRN_LLM_PROVIDER="ollama", CAIRN_OLLAMA_URL=f"http://127.0.0.1:{srv.server_port}")
+r = subprocess.run(["cairn", "ai", "eval", "--live", "--json", "/tmp/ai-eval.json"], env=env,
+                   capture_output=True, text=True)
+print(open("/tmp/ai-eval.json").read())
+'''
+
+
+def test_17_ai_usage_is_metered_and_evals_ship_in_the_image(users):
+    """The shipped eval cases pass in the image; a live run meters tokens per call; usage reporting
+    shows each user their own and everyone's only to operators."""
+    out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "cairn", "ai", "eval"], capture_output=True,
+                         text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "9/9 AI eval cases passed" in out.stdout
+
+    out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "python", "-"], input=_FAKE_MODEL, capture_output=True,
+                         text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
+    assert out.returncode == 0, out.stderr[-2000:]
+    report = json.loads(out.stdout)
+    assert report["mode"] == "live" and report["provider"] == "ollama"
+    called = [r for r in report["results"] if r["model_calls"]]
+    assert called and all(r["tokens"] == 150 * r["model_calls"] for r in called), report["results"]
+    assert report["summary"]["cost_usd"] == 0.0                     # self-hosted models cost nothing
+
+    bob, root = users["bob"], users["root"]
+    assert bob.post("/ai/ask", json={"question": "customers with contact details"}).status_code == 200
+    mine = bob.get("/ai/usage", params={"mine": "true"}).json()
+    assert set(mine) >= {"groups", "total", "budget"} and mine["total"]["calls"] == 0   # no model configured
+    assert bob.get("/ai/usage").status_code == 403
+    via_edge = httpx.get(f"{EDGE}/cairn/api/ai/usage", params={"group_by": "day", "days": 7}, timeout=30,
+                         headers={"Authorization": f"Bearer {users['tokens']['root']}"})
+    assert via_edge.status_code == 200 and via_edge.json()["group_by"] == "day"
+    assert root.get("/ai/usage", params={"group_by": "nope"}).status_code == 400

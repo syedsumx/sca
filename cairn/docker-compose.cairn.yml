@@ -42,6 +42,9 @@ x-cairn-env: &cairn-env
   CAIRN_LLM_PROVIDER: ${CAIRN_LLM_PROVIDER:-none}
   CAIRN_AI_MODEL: ${CAIRN_AI_MODEL:-claude-opus-5-5}
   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  CAIRN_AI_DAILY_BUDGET_USD: ${CAIRN_AI_DAILY_BUDGET_USD:-}      # empty = no cap; AI features fall back when reached
+  CAIRN_AI_USER_DAILY_TOKENS: ${CAIRN_AI_USER_DAILY_TOKENS:-}
+  CAIRN_AI_PRICES: ${CAIRN_AI_PRICES:-}                          # JSON {"model-prefix": [in, out]} USD per MTok
   CAIRN_OLLAMA_URL: ${CAIRN_OLLAMA_URL:-http://ollama:11434}
   CAIRN_EMBEDDING_PROVIDER: ${CAIRN_EMBEDDING_PROVIDER:-hashing}
   CAIRN_ROOT_USERS: urn:li:corpuser:admin

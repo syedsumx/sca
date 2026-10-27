@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from cairn.ai.llm import LLMError
+from cairn.ai.usage import LLMBudgetExceeded
 from cairn.common.security import Principal
 from cairn.governance.certification import CreateWorkflowRequest, WorkflowError
 
@@ -40,6 +42,10 @@ class RebuildRequest(BaseModel):
     urns: Optional[list[str]] = None
 
 
+def _llm_status(e: LLMError) -> int:
+    return 429 if isinstance(e, LLMBudgetExceeded) else 502
+
+
 def build_router(services, current_principal) -> APIRouter:
     router = APIRouter(prefix="/ai", tags=["ai"])
 
@@ -47,7 +53,7 @@ def build_router(services, current_principal) -> APIRouter:
     def ask(req: AskRequest, p: Principal = Depends(current_principal)):
         if services.nlq is None:
             raise HTTPException(503, "AI catalog access not configured")
-        services.nlq.on_llm_call = services.record_llm_call(p)
+        services.ai_actor(p)
         return services.nlq.ask(req.question, services.can_view(p))
 
     @router.post("/search/semantic")
@@ -61,13 +67,13 @@ def build_router(services, current_principal) -> APIRouter:
         if services.docgen is None:
             raise HTTPException(503, "documentation generation not configured")
         services.authorize(p, "EDIT_ENTITY_DOCS", req.dataset_urn)
-        services.docgen.on_llm_call = services.record_llm_call(p)
+        services.ai_actor(p)
         try:
             draft = services.docgen.draft(req.dataset_urn)
         except LookupError as e:
             raise HTTPException(404, str(e))
         except LLMError as e:
-            raise HTTPException(502, f"LLM failure: {e}")
+            raise HTTPException(_llm_status(e), f"LLM failure: {e}")
         try:
             wf = services.workflows.create(CreateWorkflowRequest(
                 kind="DOCUMENTATION", entity_urn=req.dataset_urn, payload={"draft": draft}), p.urn)
@@ -82,7 +88,7 @@ def build_router(services, current_principal) -> APIRouter:
         try:
             return services.assistant.chat(p, req.message, req.conversation_id)
         except LLMError as e:
-            raise HTTPException(502, f"LLM failure: {e}")
+            raise HTTPException(_llm_status(e), f"LLM failure: {e}")
 
     @router.post("/explain/lineage")
     def explain(req: UrnRequest, p: Principal = Depends(current_principal)):
@@ -100,7 +106,7 @@ def build_router(services, current_principal) -> APIRouter:
         if services.docgen is not None and services.docgen.llm is not None:
             services.authorize(p, "EDIT_ENTITY_DOCS", req.urn)
             try:
-                services.docgen.on_llm_call = services.record_llm_call(p)
+                services.ai_actor(p)
                 draft = services.docgen.draft(req.urn)
                 wf = services.workflows.create(CreateWorkflowRequest(
                     kind="DOCUMENTATION", entity_urn=req.urn, payload={"draft": draft}), p.urn)
@@ -118,5 +124,20 @@ def build_router(services, current_principal) -> APIRouter:
         if req.urns:
             return services.semantic.index_many(req.urns)
         return services.semantic.rebuild(req.entity_types)
+
+    @router.get("/usage")
+    def usage(group_by: str = "task", days: int = Query(30, ge=1, le=366), mine: bool = False,
+              p: Principal = Depends(current_principal)):
+        """Model calls, tokens and estimated cost. Everyone may see their own; all usage needs
+        MANAGE_SYSTEM_OPERATIONS."""
+        if services.ai_usage is None:
+            raise HTTPException(503, "AI usage metering not configured")
+        if not mine:
+            services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+        since = int(time.time() * 1000) - days * 86_400_000
+        try:
+            return services.ai_usage.summary(since, group_by=group_by, actor=p.urn if mine else None)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
 
     return router

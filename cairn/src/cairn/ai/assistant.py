@@ -21,6 +21,8 @@ from sqlalchemy import BigInteger, Column, String, Table, select, update
 from sqlalchemy.engine import Engine
 
 from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact
+from cairn.ai.llm import LLMError, LLMUsage
+from cairn.ai.usage import set_actor
 from cairn.common.db import JSONText, metadata
 
 logger = logging.getLogger(__name__)
@@ -144,8 +146,17 @@ class Assistant:
     def chat(self, principal, message: str, conversation_id: Optional[str] = None) -> dict:
         cid, history = self._load(conversation_id, principal.urn)
         clean = redact(message.strip())[:4000]
-        if self.llm is None or getattr(self.llm, "name", "") != "anthropic":
+        set_actor(principal.urn)
+        metered = hasattr(self.llm, "check") and hasattr(self.llm, "record")
+        budget_note = ""
+        if metered and getattr(self.llm, "name", "") == "anthropic":
+            try:
+                self.llm.check()
+            except LLMError as e:   # over budget: answer without the model rather than fail
+                budget_note = f"\n\n_AI answers are paused: {e}. This answer comes from catalog search._"
+        if self.llm is None or getattr(self.llm, "name", "") != "anthropic" or budget_note:
             reply, citations, calls = self._fallback(principal, clean)
+            reply += budget_note
             history += [{"role": "user", "content": clean}, {"role": "assistant", "content": reply}]
             self._save(cid, principal.urn, history[-40:])
             return self._response(cid, reply, citations, calls)
@@ -163,6 +174,14 @@ class Assistant:
                                                    **kwargs)
             else:
                 resp = client.messages.create(**kwargs)
+            if metered:
+                usage = getattr(resp, "usage", None)
+                self.llm.record(LLMUsage(model=getattr(resp, "model", self.model),
+                                         input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                                         output_tokens=getattr(usage, "output_tokens", 0) or 0,
+                                         cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
+                                         cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0),
+                                "assistant.chat")
             content = [_block_to_dict(b) for b in resp.content]
             messages.append({"role": "assistant", "content": content})
             if resp.stop_reason == "refusal":

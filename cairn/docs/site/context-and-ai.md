@@ -33,6 +33,44 @@ air-gapped installs; without a model it falls back to search-based answers.
 The assistant can draft descriptions for assets and columns. Drafts are never published without a
 reviewer's approval.
 
+## Usage, cost and budgets
+
+Every model call is recorded with who asked, which feature (`nlq.plan`, `nlq.answer`,
+`docgen.draft`, `lineage.explain`, `assistant.chat`), the model, tokens and an estimated cost, and
+is written to the audit log under category `ai`.
+
+```
+GET /cairn/api/ai/usage?group_by=task|actor|model|provider|day&days=30
+GET /cairn/api/ai/usage?mine=true          # anyone: their own usage
+```
+
+Seeing everyone's usage needs `MANAGE_SYSTEM_OPERATIONS`. Costs use list prices, including
+prompt-cache reads and writes; set `CAIRN_AI_PRICES` (`{"model-prefix": [input, output]}` in USD per
+million tokens) for negotiated rates. Self-hosted models cost nothing.
+
+| Setting | Effect when reached |
+|---|---|
+| `CAIRN_AI_DAILY_BUDGET_USD` | All AI features fall back to search-based answers until the next UTC day |
+| `CAIRN_AI_USER_DAILY_TOKENS` | The same, for that one user |
+
+Documentation drafts return `429` instead of falling back, since there is no non-AI draft.
+
+## Evaluating changes
+
+`cairn ai eval` runs golden cases (`config/ai-evals/*.yaml`) through the search, documentation and
+lineage-explanation features. Offline, a scripted model checks the guardrails deterministically:
+personal data is redacted before the prompt, catalog text stays inside its untrusted-data wrapper,
+assets the asker cannot see never reach the prompt or the answer, invented citations and columns are
+dropped. `--live` runs the same cases against the configured model and reports tokens, cost and
+latency per case, so a model or prompt change can be compared before rollout:
+
+```
+docker compose exec cairn-api cairn ai eval                  # offline, in CI
+docker compose exec cairn-api cairn ai eval --live --json /tmp/eval.json
+```
+
+Add a case for every incident the assistant gets wrong; the command exits non-zero on any failure.
+
 ## MCP for AI tools
 
 Cairn exposes the catalog to AI coding tools over the Model Context Protocol at `/cairn/mcp/mcp`.

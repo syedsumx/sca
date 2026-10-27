@@ -194,6 +194,11 @@ cairn:
     # hashing | ollama
     embeddingProvider: hashing
     auditPrompts: false
+    # Spend controls: when reached, AI features fall back to their non-AI answers until the next UTC day.
+    dailyBudgetUsd: ""          # deployment-wide estimated spend per day, e.g. "50"
+    userDailyTokens: ""         # per-user tokens per day, e.g. "200000"
+    # Price overrides in USD per million tokens, e.g. {"claude-opus-5-5": [4, 20]} (negotiated rates, gateways).
+    prices: {}
 
   # ABAC policy bundle (YAML documents) mounted at CAIRN_POLICY_DIR. Empty → the policies baked into the
   # image (/etc/cairn/config/policies) are used. Alternatively reference an existing ConfigMap.

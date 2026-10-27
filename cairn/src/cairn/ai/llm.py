@@ -38,6 +38,8 @@ class LLMUsage:
     model: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0       # prompt-cache hits, billed at a fraction of the input price
+    cache_write_tokens: int = 0      # prompt-cache writes, billed at a premium
     extra: dict = field(default_factory=dict)
 
 
@@ -97,6 +99,8 @@ class AnthropicProvider:
             raise LLMError("no text block in response")
         usage = LLMUsage(model=response.model, input_tokens=response.usage.input_tokens,
                          output_tokens=response.usage.output_tokens,
+                         cache_read_tokens=getattr(response.usage, "cache_read_input_tokens", None) or 0,
+                         cache_write_tokens=getattr(response.usage, "cache_creation_input_tokens", None) or 0,
                          extra={"request_id": getattr(response, "_request_id", None)})
         return json.loads(text), usage
 

@@ -298,6 +298,39 @@ def cmd_policies_test(a) -> None:
     sys.exit(1 if failed or not results else 0)
 
 
+def cmd_ai_eval(a) -> None:
+    from cairn.ai import evals
+
+    provider = None
+    if a.live:
+        from cairn.ai.llm import build_provider
+        from cairn.common.config import get_settings
+
+        provider = build_provider(get_settings())
+        if provider is None:
+            sys.exit("cairn: --live needs an LLM provider (set CAIRN_LLM_PROVIDER=anthropic or ollama)")
+    try:
+        cases = evals.load_cases(a.cases)
+    except (evals.EvalCaseError, OSError) as e:
+        sys.exit(f"cairn: {e}")
+    if a.only:
+        cases = [c for c in cases if any(o in c["id"] for o in a.only)]
+    results = evals.run_cases(cases, provider)
+    summary = evals.summarize(results)
+    for r in results:
+        cost = f"  {r['tokens']} tok ${r['cost_usd']:.4f} {r['latency_ms']:.0f}ms" if a.live else ""
+        print(f"{'ok  ' if r['ok'] else 'FAIL'} {r['feature']:<8} {r['id']}{cost}")
+        for p in r["problems"]:
+            print(f"       {p}")
+    print(f"{summary['passed']}/{summary['cases']} AI eval cases passed"
+          + (f"; {summary['tokens']} tokens, est. ${summary['cost_usd']:.4f}" if a.live else ""))
+    if a.json:
+        with open(a.json, "w") as f:
+            json.dump({"mode": "live" if a.live else "offline", "provider": getattr(provider, "name", "scripted"),
+                       "summary": summary, "results": results}, f, indent=2)
+    sys.exit(0 if results and not summary["failed"] else 1)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="cairn", description="Cairn extension layer")
     sub = p.add_subparsers(dest="command", required=True)
@@ -401,6 +434,16 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("dir", help="policy bundle directory")
     t.add_argument("tests", help="YAML file or directory of decision test cases")
     t.set_defaults(fn=cmd_policies_test)
+
+    ai = sub.add_parser("ai", help="AI feature tools")
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True)
+    ev = ai_sub.add_parser("eval", help="run golden-case evaluations of the AI features")
+    ev.add_argument("cases", nargs="?", default=os.environ.get("CAIRN_AI_EVALS", "/etc/cairn/config/ai-evals"),
+                    help="YAML file or directory of eval cases")
+    ev.add_argument("--live", action="store_true", help="call the configured model instead of scripted replies")
+    ev.add_argument("--only", action="append", help="run cases whose id contains this text (repeatable)")
+    ev.add_argument("--json", help="also write the report as JSON to this path")
+    ev.set_defaults(fn=cmd_ai_eval)
     return p
 
 

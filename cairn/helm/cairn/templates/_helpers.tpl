@@ -189,6 +189,18 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.cairn.ai.embeddingProvider | quote }}
 - name: CAIRN_AI_AUDIT_PROMPTS
   value: {{ .Values.cairn.ai.auditPrompts | quote }}
+{{- with .Values.cairn.ai.dailyBudgetUsd }}
+- name: CAIRN_AI_DAILY_BUDGET_USD
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.cairn.ai.userDailyTokens }}
+- name: CAIRN_AI_USER_DAILY_TOKENS
+  value: {{ . | quote }}
+{{- end }}
+{{- with .Values.cairn.ai.prices }}
+- name: CAIRN_AI_PRICES
+  value: {{ toJson . | quote }}
+{{- end }}
 {{- if eq .Values.cairn.ai.llmProvider "anthropic" }}
 - name: ANTHROPIC_API_KEY
   valueFrom:

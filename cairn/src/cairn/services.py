@@ -19,6 +19,7 @@ from cairn.ai.embeddings import build_embedder, build_vector_store
 from cairn.ai.llm import LLMProvider, build_provider
 from cairn.ai.nlq import NaturalLanguageQuery
 from cairn.ai.semantic import SemanticIndex
+from cairn.ai.usage import MeteredProvider, UsageMeter, set_actor
 from cairn.common.audit import AuditLog
 from cairn.common.config import Settings
 from cairn.common.db import get_engine, init_db
@@ -73,6 +74,7 @@ class Services:
     context: Optional[Any] = None
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
+    ai_usage: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -155,6 +157,7 @@ class Services:
     def explainer_for(self, principal: Principal):
         from cairn.ai.lineage_explainer import LineageExplainer
 
+        self.ai_actor(principal)
         return LineageExplainer(self.catalog, self.quality.store, self.context, self.llm,
                                 self.settings.ai.model, self.can_view(principal))
 
@@ -169,12 +172,9 @@ class Services:
 
         return _Scoped(self)
 
-    def record_llm_call(self, principal: Optional[Principal]):
-        def _record(task: str, usage: Any) -> None:
-            self.audit.record("ai", task, principal.urn if principal else "unknown", None, {
-                "model": getattr(usage, "model", None), "input_tokens": getattr(usage, "input_tokens", 0),
-                "output_tokens": getattr(usage, "output_tokens", 0)})
-        return _record
+    def ai_actor(self, principal: Optional[Principal]) -> None:
+        """Attribute the model calls this request makes (usage, cost, budgets) to ``principal``."""
+        set_actor(principal.urn if principal else None)
 
     # ---- background maintenance ----------------------------------------------------
     def bootstrap_catalog(self, stop: threading.Event, retry_seconds: float = 15) -> None:
@@ -330,16 +330,19 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
                                  settings.gateway.max_clock_skew_seconds, settings.gateway.task_lease_seconds)
 
     catalog = nlq = semantic = docgen = None
+    ai_usage = UsageMeter.from_env(engine, audit)
     if with_ai and graph is not None:
         catalog = Catalog(graph)
         llm = llm if llm is not None else build_provider(settings)
+        if llm is not None:
+            llm = MeteredProvider(llm, ai_usage)
         nlq = NaturalLanguageQuery(catalog, llm, settings.ai.model_nlq)
         embedder = build_embedder(settings)
         semantic = SemanticIndex(catalog, embedder, build_vector_store(engine, embedder.dim))
         docgen = DocGenerator(catalog, llm, settings.ai.model_docgen)
 
     services = Services(settings, engine, graph, audit, identity, attributes, pdp, policy_repo, quality, workflows,
-                        gateway, catalog, llm, nlq, semantic, docgen)
+                        gateway, catalog, llm, nlq, semantic, docgen, ai_usage=ai_usage)
     _build_active_metadata(services)
     return services
 

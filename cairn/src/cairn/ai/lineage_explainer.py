@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact, untrusted
 from cairn.ai.llm import LLMError, validate_against_schema
+from cairn.ai.usage import llm_task
 
 SIGNAL_WEIGHTS = {"incident": 1.0, "monitor_fail": 0.9, "schema_break": 0.85, "freshness": 0.8,
                   "run_failure": 0.75, "monitor_error": 0.5, "monitor_warn": 0.4}
@@ -115,9 +116,10 @@ class LineageExplainer:
             listing = "\n".join(f"{i + 1}. {c['name']} ({c['urn']}), score {c['score']}: {'; '.join(c['evidence'])}"
                                 for i, c in enumerate(causes[:5]))
             try:
-                out, _ = self.llm.generate_json(NARRATIVE_SYSTEM, f"Asset: {urn}\nRanked evidence:\n"
-                                                + untrusted(redact(listing)), NARRATIVE_SCHEMA, model=self.model,
-                                                max_tokens=2000)
+                with llm_task("lineage.explain"):
+                    out, _ = self.llm.generate_json(NARRATIVE_SYSTEM, f"Asset: {urn}\nRanked evidence:\n"
+                                                    + untrusted(redact(listing)), NARRATIVE_SCHEMA, model=self.model,
+                                                    max_tokens=2000)
                 validate_against_schema(out, NARRATIVE_SCHEMA)
                 summary, used_llm = out["summary_md"], True
             except LLMError:

@@ -72,7 +72,7 @@ class CairnTools:
         if self.s.nlq is None:
             raise RuntimeError("natural-language query is not configured")
         p = self.principal()
-        self.s.nlq.on_llm_call = self.s.record_llm_call(p)
+        self.s.ai_actor(p)
         return self.s.nlq.ask(question, self.s.can_view(p))
 
     def get_asset(self, urn: str) -> dict:
@@ -136,7 +136,7 @@ class CairnTools:
             raise RuntimeError("documentation generation is not configured")
         p = self.principal()
         self.s.authorize(p, "EDIT_ENTITY_DOCS", dataset_urn)
-        self.s.docgen.on_llm_call = self.s.record_llm_call(p)
+        self.s.ai_actor(p)
         draft = self.s.docgen.draft(dataset_urn)
         wf = self.s.workflows.create(CreateWorkflowRequest(kind="DOCUMENTATION", entity_urn=dataset_urn,
                                                            payload={"draft": draft}), p.urn)

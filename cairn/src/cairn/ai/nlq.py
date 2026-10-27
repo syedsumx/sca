@@ -15,6 +15,7 @@ from typing import Any, Callable, Optional
 from cairn.ai.catalog import FILTER_FIELDS, Catalog
 from cairn.ai.guardrails import UNTRUSTED_NOTICE, filter_viewable, redact, untrusted
 from cairn.ai.llm import LLMError, LLMProvider, validate_against_schema
+from cairn.ai.usage import llm_task
 
 logger = logging.getLogger(__name__)
 
@@ -156,8 +157,9 @@ class NaturalLanguageQuery:
             user = f"Question: {question}\n\nFilter vocabulary (facet values present in the catalog):\n" + \
                    untrusted(redact(str(vocab)))
             try:
-                plan, usage = self.llm.generate_json(PLAN_SYSTEM, user, SEARCH_PLAN_SCHEMA, model=self.model,
-                                                     max_tokens=4000)
+                with llm_task("nlq.plan"):
+                    plan, usage = self.llm.generate_json(PLAN_SYSTEM, user, SEARCH_PLAN_SCHEMA, model=self.model,
+                                                         max_tokens=4000)
                 validate_against_schema(plan, SEARCH_PLAN_SCHEMA)
                 if self.on_llm_call:
                     self.on_llm_call("nlq.plan", usage)
@@ -202,8 +204,9 @@ class NaturalLanguageQuery:
                                 f"{(r.get('description') or '')[:300]}" for r in results)
             user = f"Question: {question}\n\nSearch results:\n{untrusted(redact(listing))}"
             try:
-                out, usage = self.llm.generate_json(ANSWER_SYSTEM, user, ANSWER_SCHEMA, model=self.model,
-                                                    max_tokens=4000)
+                with llm_task("nlq.answer"):
+                    out, usage = self.llm.generate_json(ANSWER_SYSTEM, user, ANSWER_SCHEMA, model=self.model,
+                                                        max_tokens=4000)
                 validate_against_schema(out, ANSWER_SCHEMA)
                 if self.on_llm_call:
                     self.on_llm_call("nlq.answer", usage)
