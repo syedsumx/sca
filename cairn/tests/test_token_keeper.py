@@ -226,8 +226,8 @@ def test_changed_grant_replaces_policy_and_deletes_old(core_calls):
 def test_bootstrap_token_is_minted_by_the_account_itself(tmp_path, monkeypatch):
     log = []
     monkeypatch.setattr(mct, "admin_token", lambda url, pw: ("ADMIN", "admin-id"))
-    monkeypatch.setattr(mct, "ensure_service_account", lambda core, tok: log.append(("ensure", tok)))
-    monkeypatch.setattr(mct, "wait_effective", lambda core, tok: log.append(("wait", tok)))
+    monkeypatch.setattr(mct, "ensure_service_account", lambda core, tok, account=None: log.append(("ensure", tok)))
+    monkeypatch.setattr(mct, "wait_effective", lambda core, tok, account=None: log.append(("wait", tok)))
     monkeypatch.setattr(mct, "whoami", lambda core, tok: None)
 
     def fake_mint(core, tok, actor, duration, name, desc):
@@ -254,3 +254,28 @@ def test_expired_retired_tokens_are_dropped(keeper, monkeypatch):
     assert state(args)[1]["retired"]                             # still retried within its lifetime
     mct.rotate_once(args, now=7 * DAY + 31 * DAY)
     assert "id0" not in [r["id"] for r in state(args)[1]["retired"]]   # expired: nothing left to revoke
+
+
+# ------------------------------------------------------------------------------ provisioning account
+def test_provisioner_is_limited_to_people_and_groups():
+    p = mct.PROVISIONER
+    assert set(p.platform) == {"MANAGE_USERS_AND_GROUPS", "GENERATE_PERSONAL_ACCESS_TOKENS"}
+    policies = mct.desired_policies(p)
+    meta = next(v for v in policies.values() if v["type"] == "METADATA")
+    assert meta["resources"] == {"allResources": False, "filter": {"criteria": [
+        {"field": "TYPE", "values": ["corpuser", "corpGroup"], "condition": "EQUALS"}]}}
+    assert all(u.startswith("urn:li:dataHubPolicy:cairn-provisioner-") for u in policies)
+    # The control-plane account never gets user management (it could change its own groups).
+    assert "MANAGE_USERS_AND_GROUPS" not in mct.PLATFORM_PRIVILEGES
+
+
+def test_service_policy_urns_are_stable():
+    """Existing installs keep their policies: the service account's policy content did not change."""
+    assert sorted(mct.desired_policies()) == sorted(mct.desired_policies(mct.SERVICE))
+    assert all(v["displayName"].startswith("Cairn service: ") for v in mct.desired_policies().values())
+
+
+def test_each_account_has_its_own_token_file(tmp_path):
+    args = argparse.Namespace(out=str(tmp_path / "core_token"), k8s_secret=None)
+    assert str(mct.make_store(args)) == str(tmp_path / "core_token")
+    assert str(mct.make_store(args, mct.PROVISIONER)) == str(tmp_path / "provisioner_token")

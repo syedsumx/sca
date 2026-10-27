@@ -26,6 +26,11 @@ final class CairnAuthorizerConfig {
   }
 
   static final String DEFAULT_PDP_URL = "http://cairn-pdp:8810";
+  /** The identity the PDP reads subject and resource attributes with (the control-plane account). */
+  static final String DEFAULT_TRUSTED_READER = "urn:li:corpuser:cairn-service";
+  /** Privileges Cairn Core checks when an aspect or entity is read. */
+  static final String DEFAULT_READ_PRIVILEGES =
+      "VIEW_ENTITY_PAGE,VIEW_ENTITY,GET_ENTITY_PRIVILEGE,GET_TIMESERIES_ASPECT_PRIVILEGE";
 
   final String pdpUrl;
   final String serviceToken;
@@ -36,6 +41,8 @@ final class CairnAuthorizerConfig {
   final Mode mode;
   final Set<String> rootUsers;
   final Set<String> failOpenPrivileges;
+  final Set<String> trustedReaders;
+  final Set<String> readPrivileges;
   final int circuitFailureThreshold;
   final long circuitOpenSeconds;
   final boolean resolveResourceAttributes;
@@ -60,6 +67,10 @@ final class CairnAuthorizerConfig {
             str(cfg, "mode", "additive", env).trim().toUpperCase(Locale.ROOT).replace('-', '_'));
     this.rootUsers = set(cfg.get("rootUsers"), env);
     this.failOpenPrivileges = set(cfg.get("failOpenPrivileges"), env);
+    this.trustedReaders =
+        set(cfg.containsKey("trustedReaders") ? cfg.get("trustedReaders") : DEFAULT_TRUSTED_READER, env);
+    this.readPrivileges =
+        set(cfg.containsKey("readPrivileges") ? cfg.get("readPrivileges") : DEFAULT_READ_PRIVILEGES, env);
     this.resolveResourceAttributes =
         Boolean.parseBoolean(str(cfg, "resolveResourceAttributes", "true", env));
 

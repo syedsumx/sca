@@ -15,7 +15,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -38,6 +38,37 @@ _PROTECTED_ENTITY_TYPES = {
     "corpuser", "corpGroup", "dataHubPolicy", "dataHubRole", "dataHubSecret", "dataHubAccessToken",
     "dataHubExecutionRequest", "dataHubIngestionSource", "globalSettings",
 }
+
+
+# Vocabulary people curate in Cairn: an agent writing these could, e.g., redefine the PII
+# classification terms that masking relies on.
+_CURATED_ENTITY_TYPES = {
+    "glossaryTerm", "glossaryNode", "domain", "structuredProperty", "form", "dataProduct", "dataHubView",
+    "businessAttribute", "dataContract", "ownershipType", "dataType", "entityType", "dataHubConnection",
+}
+# Platform named by the first element of the URN tuple: urn:li:chart:(looker,123)
+_TUPLE_PLATFORM = re.compile(r"^urn:li:(?:chart|dashboard|dataFlow|dataProcess):\(([A-Za-z0-9_\-]+),")
+_JOB_PLATFORM = re.compile(r"^urn:li:dataJob:\(urn:li:dataFlow:\(([A-Za-z0-9_\-]+),")
+
+
+# Entities whose URN names no platform, and the aspects that do.
+_PLATFORM_EVIDENCE = {
+    "container": ("dataPlatformInstance",),
+    "query": ("querySubjects", "queryProperties", "dataPlatformInstance"),
+}
+
+
+def _etype(urn: str) -> str:
+    return urn.split(":", 3)[2] if urn.count(":") >= 3 else ""
+
+
+def _platforms_of(urn: str) -> set[str]:
+    found = set(_DATASET_PLATFORM.findall(urn))
+    for rx in (_TUPLE_PLATFORM, _JOB_PLATFORM):
+        m = rx.match(urn)
+        if m:
+            found.add(m.group(1))
+    return found
 
 
 class GatewayError(Exception):
@@ -374,7 +405,7 @@ class GatewayService:
         if not isinstance(mcps, list):
             raise GatewayError("batch must be a JSON list of MCPs", 400)
         pool = self.get_pool(agent["pool"])
-        accepted, rejected = self.filter_mcps(mcps, pool)
+        accepted, rejected = self.filter_mcps(mcps, pool, self.graph.get_aspect if self.graph is not None else None)
         if accepted and self.graph is not None:
             self.graph.emit(accepted)
         with self.engine.begin() as conn:
@@ -387,25 +418,54 @@ class GatewayService:
         return {"accepted": len(accepted), "rejected": len(rejected)}
 
     @staticmethod
-    def filter_mcps(mcps: list[dict], pool: dict) -> tuple[list[dict], list[str]]:
+    def filter_mcps(mcps: list[dict], pool: dict,
+                    lookup: Optional[Callable[[str, str], Optional[dict]]] = None) -> tuple[list[dict], list[str]]:
+        """Pool policy for MCPs from an agent (see docs: remote agents, security model).
+
+        Always refused: protected identity/security entities, curated vocabulary (glossary, domains,
+        structured properties, data products, ...), user-owned ``editable*`` aspects, deletes. With
+        an ``allowed_platforms`` list, every write must be provably on an allowed platform: the
+        platform is read from the URN (datasets, schema fields, charts, dashboards, flows, jobs, ML
+        assets) or, for containers, from their ``dataPlatformInstance`` (in the batch or stored).
+        """
         allowed_platforms = set(pool.get("allowed_platforms") or [])
         allowed_aspects = set(pool.get("allowed_aspects") or [])
+        declared: dict[str, set[str]] = {}
+        for mcp in mcps:
+            if mcp.get("aspectName") in _PLATFORM_EVIDENCE.get(_etype(str(mcp.get("entityUrn", ""))), ()):
+                declared.setdefault(str(mcp.get("entityUrn", "")), set()).update(
+                    _DATASET_PLATFORM.findall(json.dumps(aspect_value(mcp))))
         accepted, rejected = [], []
         for mcp in mcps:
             urn = str(mcp.get("entityUrn", ""))
-            aspect = mcp.get("aspectName")
+            aspect = str(mcp.get("aspectName") or "")
+            etype = urn.split(":", 3)[2] if urn.count(":") >= 3 else ""
             reason = None
             if not urn.startswith("urn:li:") or mcp.get("changeType", "UPSERT") not in ("UPSERT", "CREATE", "PATCH"):
                 reason = "invalid urn or change type"
-            elif urn.split(":", 3)[2] in _PROTECTED_ENTITY_TYPES:
+            elif etype in _PROTECTED_ENTITY_TYPES:
                 reason = "identity/security entities may not be written by remote agents"
+            elif etype in _CURATED_ENTITY_TYPES:
+                reason = f"{etype} definitions are curated in Cairn, not ingested by remote agents"
+            elif aspect.startswith("editable"):
+                reason = f"{aspect} is edited by people in Cairn, not by remote agents"
             elif allowed_aspects and aspect not in allowed_aspects:
                 reason = f"aspect {aspect} not allowed"
             elif allowed_platforms:
-                platforms = set(_DATASET_PLATFORM.findall(urn))
+                platforms = _platforms_of(urn)
                 if aspect == "dataPlatformInstance":
-                    platforms |= set(_DATASET_PLATFORM.findall(json.dumps(aspect_value(mcp))))
-                if platforms and not platforms <= allowed_platforms:
+                    platforms |= declared.get(urn, set())
+                if etype in _PLATFORM_EVIDENCE and not platforms:
+                    # No platform in the URN: take it from the entity's own platform record (a
+                    # container's dataPlatformInstance, a query's subjects), in this batch or stored.
+                    platforms = declared.get(urn, set())
+                    if not platforms and lookup is not None:
+                        for evidence in _PLATFORM_EVIDENCE[etype]:
+                            platforms |= set(_DATASET_PLATFORM.findall(json.dumps(lookup(urn, evidence) or {})))
+                if not platforms:
+                    reason = "cannot tell which platform this belongs to; the pool is limited to " + \
+                        ", ".join(sorted(allowed_platforms))
+                elif not platforms <= allowed_platforms:
                     reason = f"platform(s) {sorted(platforms - allowed_platforms)} not allowed for pool"
             if reason:
                 rejected.append(f"{urn}#{aspect}: {reason}")

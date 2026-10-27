@@ -175,6 +175,11 @@ cairn:
     rootUsers:
       - urn:li:corpuser:admin
 
+  # SCIM 2.0 provisioning at <public URL>/cairn/api/scim/v2. Set tokenSecret to an existing Secret
+  # holding the identity provider's bearer token, e.g. {name: cairn-scim, key: token}. Unset = SCIM off.
+  scim:
+    tokenSecret: null
+
   kafka:
     # Empty = core.kafka.bootstrap / this release's core schema registry.
     bootstrap: ""

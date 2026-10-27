@@ -13,7 +13,7 @@ import json
 import threading
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 from sqlalchemy import Column, Integer, String, Table, select
 from sqlalchemy.engine import Engine
@@ -103,3 +103,74 @@ class AuditLog:
                 prev = r["hash"]
                 count += 1
         return {"valid": True, "entries_checked": count, "head": prev}
+
+    def export(self, after_seq: int = 0, since: Optional[str] = None, until: Optional[str] = None,
+               category: Optional[str] = None, batch: int = 1000) -> Iterator[dict]:
+        """Entries in chain order (``seq`` ascending) after ``after_seq``, with their hashes, so a
+        receiver can verify the export on its own (:func:`verify_entries`) and resume from the last
+        ``seq`` it stored. ``since``/``until`` are ISO-8601 timestamps (inclusive / exclusive)."""
+        cursor = after_seq
+        while True:
+            stmt = select(audit_log).where(audit_log.c.seq > cursor).order_by(audit_log.c.seq).limit(batch)
+            if since:
+                stmt = stmt.where(audit_log.c.ts >= since)
+            if until:
+                stmt = stmt.where(audit_log.c.ts < until)
+            if category:
+                stmt = stmt.where(audit_log.c.category == category)
+            with self.engine.connect() as conn:
+                rows = [dict(r._mapping) for r in conn.execute(stmt)]
+            yield from rows
+            if len(rows) < batch:
+                return
+            cursor = rows[-1]["seq"]
+
+
+def verify_entries(entries: Iterable[dict]) -> dict:
+    """Verify an exported, contiguous slice of the chain (e.g. a JSONL export) without the database.
+
+    Each entry's hash must match its content and the previous entry's hash. The first entry's
+    ``prev_hash`` is taken as given; compare it with the ``head`` of the previous export to prove
+    nothing was removed between exports."""
+    prev: Optional[str] = None
+    count = 0
+    first_prev = None
+    for e in entries:
+        body = {k: e.get(k) for k in ("id", "ts", "category", "action", "actor", "subject", "details")}
+        if prev is None:
+            first_prev = e.get("prev_hash")
+        elif e.get("prev_hash") != prev:
+            return {"valid": False, "broken_at_seq": e.get("seq"), "entries_checked": count,
+                    "reason": "gap or reordering (prev_hash does not match the previous entry)"}
+        if _entry_hash(e.get("prev_hash") or "", body) != e.get("hash"):
+            return {"valid": False, "broken_at_seq": e.get("seq"), "entries_checked": count,
+                    "reason": "entry content does not match its hash"}
+        prev = e["hash"]
+        count += 1
+    return {"valid": True, "entries_checked": count, "starts_after": first_prev, "head": prev}
+
+
+EXPORT_FIELDS = ("seq", "id", "ts", "category", "action", "actor", "subject", "details", "prev_hash", "hash")
+
+
+def export_lines(entries: Iterable[dict], fmt: str = "jsonl", header: bool = True) -> Iterator[str]:
+    """JSON Lines (one entry per line) or CSV (``details`` as JSON) for :meth:`AuditLog.export`."""
+    if fmt == "csv":
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        if header:
+            writer.writerow(EXPORT_FIELDS)
+        for e in entries:
+            writer.writerow([json.dumps(e.get(k), sort_keys=True) if k == "details" else e.get(k)
+                             for k in EXPORT_FIELDS])
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate()
+        if buf.tell():
+            yield buf.getvalue()
+        return
+    for e in entries:
+        yield json.dumps({k: e.get(k) for k in EXPORT_FIELDS}, sort_keys=True, default=str) + "\n"

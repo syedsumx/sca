@@ -8,12 +8,15 @@ than waiting out the TTL.
 
 from __future__ import annotations
 
+import logging
 import re
 import threading
 import time
 from typing import Any, Optional
 
 from cairn.common.core import MetadataGraph
+
+log = logging.getLogger(__name__)
 
 PII_TERM_PREFIX = "urn:li:glossaryTerm:Classification.PII"
 CLASSIFICATION_TERM_PREFIX = "urn:li:glossaryTerm:Classification."
@@ -53,9 +56,14 @@ def parse_dataset_urn(urn: str) -> dict[str, str]:
 
 
 class AttributeResolver:
+    # A load that hit a read error is incomplete (e.g. no groups): keep it only briefly, so one
+    # failed lookup does not decide every request for a full TTL.
+    DEGRADED_TTL_SECONDS = 2.0
+
     def __init__(self, graph: Optional[MetadataGraph], ttl_seconds: int = 60):
         self.graph = graph
         self.ttl = ttl_seconds
+        self._local = threading.local()
         self._cache: dict[str, tuple[float, dict]] = {}
         self._versions: dict[str, int] = {}
         self._lock = threading.Lock()
@@ -74,9 +82,11 @@ class AttributeResolver:
             hit = self._cache.get(urn)
             if hit and hit[0] > now:
                 return hit[1]
+        self._local.errors = 0
         value = loader(urn)
+        ttl = self.ttl if not self._local.errors else min(self.ttl, self.DEGRADED_TTL_SECONDS)
         with self._lock:
-            self._cache[urn] = (now + self.ttl, value)
+            self._cache[urn] = (now + ttl, value)
         return value
 
     def _aspect(self, urn: str, name: str) -> Optional[dict]:
@@ -84,7 +94,9 @@ class AttributeResolver:
             return None
         try:
             return self.graph.get_aspect(urn, name)
-        except Exception:
+        except Exception as exc:
+            self._local.errors = getattr(self._local, "errors", 0) + 1
+            log.warning("attribute read failed for %s/%s: %s", urn, name, exc)
             return None
 
     # ---- subject ------------------------------------------------------------------
@@ -116,19 +128,21 @@ class AttributeResolver:
     def resource(self, urn: str) -> dict:
         return self._cached(urn, self._load_resource)
 
-    def _load_resource(self, urn: str) -> dict:
+    def _load_resource(self, urn: str, get=None) -> dict:
+        """``get(aspect_name)`` reads one aspect (default: from Cairn Core); see :func:`resource_from_aspects`."""
+        get = get or (lambda name: self._aspect(urn, name))
         entity_type = urn.split(":", 3)[2] if urn.startswith("urn:li:") else "unknown"
-        ownership = self._aspect(urn, "ownership") or {}
+        ownership = get("ownership") or {}
         owners = [o.get("owner") for o in ownership.get("owners", []) if o.get("owner")]
         owner_types = sorted({o.get("typeUrn") or o.get("type") for o in ownership.get("owners", [])} - {None})
-        tags = [t.get("tag") for t in (self._aspect(urn, "globalTags") or {}).get("tags", [])]
-        terms = [t.get("urn") for t in (self._aspect(urn, "glossaryTerms") or {}).get("terms", [])]
+        tags = [t.get("tag") for t in (get("globalTags") or {}).get("tags", [])]
+        terms = [t.get("urn") for t in (get("glossaryTerms") or {}).get("terms", [])]
         field_terms: list[str] = []
         sensitive_fields: dict[str, list[str]] = {}
         # Every label attached to a column: tag urns, term urns and classification labels.
         field_labels: dict[str, set[str]] = {}
         for aspect_name, list_key in (("editableSchemaMetadata", "editableSchemaFieldInfo"), ("schemaMetadata", "fields")):
-            for f in (self._aspect(urn, aspect_name) or {}).get(list_key, []):
+            for f in (get(aspect_name) or {}).get(list_key, []):
                 path = f.get("fieldPath")
                 ft = [t.get("urn") for t in (f.get("glossaryTerms") or {}).get("terms", []) if t.get("urn")]
                 ftags = [t.get("tag") for t in (f.get("globalTags") or {}).get("tags", []) if t.get("tag")]
@@ -139,15 +153,15 @@ class AttributeResolver:
                 if cls:
                     sensitive_fields.setdefault(path, [])
                     sensitive_fields[path] = sorted(set(sensitive_fields[path]) | set(cls))
-        domains = (self._aspect(urn, "domains") or {}).get("domains", [])
-        container = (self._aspect(urn, "container") or {}).get("container")
-        dpi = self._aspect(urn, "dataPlatformInstance") or {}
-        sp_aspect = self._aspect(urn, "structuredProperties")
+        domains = (get("domains") or {}).get("domains", [])
+        container = (get("container") or {}).get("container")
+        dpi = get("dataPlatformInstance") or {}
+        sp_aspect = get("structuredProperties")
         props = _sp_values(sp_aspect)
         parsed = parse_dataset_urn(urn) if entity_type == "dataset" else {}
         certification = (props.get("io.cairn.certification.status") or [None])[0]
         data_products = [d.get("destinationUrn") for d in
-                         (self._aspect(urn, "dataProducts") or {}).get("dataProducts", []) if d.get("destinationUrn")]
+                         (get("dataProducts") or {}).get("dataProducts", []) if d.get("destinationUrn")]
         return {
             "urn": urn,
             "type": entity_type,
@@ -170,3 +184,8 @@ class AttributeResolver:
             "structured_properties": props,
             "structured_property_urns": [p.get("propertyUrn") for p in (sp_aspect or {}).get("properties", [])],
         }
+
+
+def resource_from_aspects(urn: str, aspects: dict) -> dict:
+    """Resource attributes from aspects already at hand (e.g. a scroll), without reading Cairn Core."""
+    return AttributeResolver(None)._load_resource(urn, aspects.get)

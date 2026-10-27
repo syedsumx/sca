@@ -24,6 +24,10 @@ plugins:
         # Break-glass actors that are always allowed, even if the PDP is down.
         rootUsers:
           - "urn:li:corpuser:admin"
+        # Reads by the identity the PDP resolves attributes with are allowed here: sending them to the
+        # PDP would make each decision wait on itself.
+        trustedReaders:
+          - "${CAIRN_PDP_READER:-urn:li:corpuser:cairn-service}"
         # Privileges allowed when the PDP is unreachable. Keep this list empty in regulated setups.
         failOpenPrivileges: []
         circuitBreaker:

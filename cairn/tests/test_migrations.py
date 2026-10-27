@@ -41,8 +41,12 @@ def test_upgrade_is_idempotent(url):
 
 @pytest.mark.parametrize("url", URLS)
 def test_legacy_create_all_database_is_adopted(url):
+    baseline = fresh("sqlite://")
+    migrations.upgrade(baseline, migrations.BASELINE)
+    v01 = set(inspect(baseline).get_table_names()) - {"alembic_version"}
     engine = fresh(url)
-    load_models().create_all(engine)              # how v0.1 created its schema
+    models = load_models()                         # how v0.1 created its schema (its tables only)
+    models.create_all(engine, tables=[t for name, t in models.tables.items() if name in v01])
     with engine.begin() as conn:
         conn.execute(text("INSERT INTO cairn_bookmarks (actor, urn, created_at_ms) VALUES ('u', 'x', 1)"))
     assert migrations.upgrade(engine) == migrations.head()

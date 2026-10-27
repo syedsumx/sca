@@ -94,3 +94,11 @@ logs/
 .DS_Store
 Thumbs.db
 dashboard/node_modules/
+
+# Edge TLS material (cairn/deploy/tls)
+cairn/deploy/tls/*.crt
+cairn/deploy/tls/*.key
+cairn/deploy/tls/*.pem
+
+# e2e throwaway TLS material
+cairn/tests/e2e/.tls/

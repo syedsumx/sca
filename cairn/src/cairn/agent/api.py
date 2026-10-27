@@ -8,10 +8,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import ValidationError
 
 from cairn.agent.crypto import CryptoError
 from cairn.agent.gateway import (
@@ -26,11 +29,24 @@ from cairn.agent.gateway import (
 from cairn.common.security import Principal
 
 
-def _client_ip(request: Request) -> Optional[str]:
+def _trusted_proxies() -> list:
+    raw = os.environ.get("CAIRN_GATEWAY_TRUSTED_PROXIES", "")
+    return [ipaddress.ip_network(c.strip(), strict=False) for c in raw.split(",") if c.strip()]
+
+
+def _client_ip(request: Request, trusted: Optional[list] = None) -> Optional[str]:
+    """The agent's address. ``X-Forwarded-For`` counts only when the peer is a trusted proxy
+    (``CAIRN_GATEWAY_TRUSTED_PROXIES``, CIDRs); otherwise an agent could choose what is audited."""
+    peer = request.client.host if request.client else None
+    trusted = _trusted_proxies() if trusted is None else trusted
     fwd = request.headers.get("x-forwarded-for")
-    if fwd:
-        return fwd.split(",")[0].strip()
-    return request.client.host if request.client else None
+    if fwd and peer and trusted:
+        try:
+            if any(ipaddress.ip_address(peer) in net for net in trusted):
+                return fwd.split(",")[0].strip()
+        except ValueError:
+            pass
+    return peer
 
 
 def _relative_path(request: Request) -> str:
@@ -50,6 +66,8 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
             raise HTTPException(e.status, str(e))
         except CryptoError as e:
             raise HTTPException(400, str(e))
+        except (ValueError, KeyError, TypeError, ValidationError) as e:   # malformed payloads (JSON, fields)
+            raise HTTPException(400, f"malformed request: {type(e).__name__}") from None
 
     async def _agent(request: Request) -> tuple[dict, bytes]:
         body = await request.body()
@@ -121,15 +139,14 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
         async def batch(agent_id: str, run_id: str, request: Request):
             agent, body = await _agent(request)
             _same(agent, agent_id)
-            payload = json.loads(body)
-            return _wrap(lambda: service.ingest_batch(agent, run_id, int(payload["seq"]), payload["envelope"]))
+            return _wrap(lambda: service.ingest_batch(agent, run_id, *_seq_envelope(body)))
 
         @router.post("/{agent_id}/runs/{run_id}/logs", status_code=204)
         async def logs(agent_id: str, run_id: str, request: Request):
             agent, body = await _agent(request)
             _same(agent, agent_id)
-            payload = json.loads(body)
-            _wrap(lambda: service.append_logs(agent, run_id, payload["envelope"], int(payload["seq"])))
+            seq, envelope = _wrap(lambda: _seq_envelope(body))
+            _wrap(lambda: service.append_logs(agent, run_id, envelope, seq))
 
         @router.post("/{agent_id}/runs/{run_id}/complete")
         async def complete(agent_id: str, run_id: str, request: Request):
@@ -138,6 +155,14 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
             return _wrap(lambda: service.complete(agent, run_id, CompleteRequest.model_validate_json(body)))
 
     return router
+
+
+def _seq_envelope(body: bytes) -> tuple[int, dict]:
+    payload = json.loads(body)
+    seq, envelope = payload["seq"], payload["envelope"]
+    if not isinstance(seq, int) or isinstance(seq, bool) or not isinstance(envelope, dict):
+        raise ValueError("seq must be an integer and envelope an object")
+    return seq, envelope
 
 
 def _same(agent: dict, agent_id: str) -> None:

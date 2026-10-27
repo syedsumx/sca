@@ -13,6 +13,9 @@ on-premises data centre.
 * **Signed and encrypted.** Every batch is signed by the agent and end-to-end encrypted, and the
   gateway only accepts the platforms and metadata types allowed for the agent's pool.
 
+The protocol's threat model and what the gateway refuses from an agent are on
+[Remote agent security](agent-security.html).
+
 ## Set up a pool
 
 1. An administrator creates a pool and its allowlist: `POST /cairn/api/agents/pools`.

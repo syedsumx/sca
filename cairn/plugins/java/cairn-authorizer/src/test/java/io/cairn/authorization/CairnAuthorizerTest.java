@@ -171,6 +171,24 @@ class CairnAuthorizerTest {
   }
 
   @Test
+  void pdpAttributeReaderReadsWithoutCallingPdp() {
+    CairnAuthorizer a = authorizer(Map.of());
+    String reader = CairnAuthorizerConfig.DEFAULT_TRUSTED_READER;
+    responseBody.set("{\"decision\":\"DENY\"}");
+    assertEquals(AuthorizationResult.Type.ALLOW, a.authorize(req(reader, "VIEW_ENTITY_PAGE")).getType());
+    assertTrue(received.isEmpty());
+    // Anything but a read still goes to the PDP.
+    assertEquals(AuthorizationResult.Type.DENY, a.authorize(req(reader, "EDIT_ENTITY_TAGS")).getType());
+    assertEquals(1, received.size());
+    // Other actors' reads are decided by the PDP.
+    assertEquals(AuthorizationResult.Type.DENY, a.authorize(req(ALICE, "VIEW_ENTITY_PAGE")).getType());
+    assertEquals(2, received.size());
+    // An empty list turns the shortcut off.
+    CairnAuthorizer none = authorizer(Map.of("trustedReaders", ""));
+    assertEquals(AuthorizationResult.Type.DENY, none.authorize(req(reader, "VIEW_ENTITY_PAGE")).getType());
+  }
+
+  @Test
   void decisionsAreCachedUntilTtlExpires() {
     CairnAuthorizer a = authorizer(Map.of());
     a.authorize(req(ALICE, "EDIT_ENTITY_TAGS"));

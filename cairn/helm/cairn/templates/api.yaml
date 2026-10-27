@@ -1,5 +1,17 @@
 {{- if .Values.cairn.api.enabled }}
-{{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) }}
+{{- /* SCIM: the provisioning account's token (only this component mounts it) and the identity
+       provider's SCIM bearer token (cairn.scim.tokenSecret). */ -}}
+{{- $scimEnv := list (dict "name" "CAIRN_SCIM_CORE_TOKEN_FILE" "value" "/run/cairn-provisioner/provisioner_token") }}
+{{- with .Values.cairn.scim.tokenSecret }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SCIM_TOKEN_FILE" "value" "/run/cairn-scim/token") }}
+{{- end }}
+{{- $mounts := list (dict "name" "provisioner-token" "mountPath" "/run/cairn-provisioner" "readOnly" true) }}
+{{- $vols := list (dict "name" "provisioner-token" "secret" (dict "secretName" (include "cairn.provisionerTokenSecret" .) "optional" true "items" (list (dict "key" "provisioner_token" "path" "provisioner_token")))) }}
+{{- with .Values.cairn.scim.tokenSecret }}
+{{- $mounts = append $mounts (dict "name" "scim-token" "mountPath" "/run/cairn-scim" "readOnly" true) }}
+{{- $vols = append $vols (dict "name" "scim-token" "secret" (dict "secretName" .name "items" (list (dict "key" .key "path" "token")))) }}
+{{- end }}
+{{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}
 ---
 {{ include "cairn.service" (merge (dict "port" .Values.cairn.api.port) $ctx) }}

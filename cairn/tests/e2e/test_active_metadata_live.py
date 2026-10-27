@@ -34,6 +34,7 @@ SINK_HOST = os.environ.get("CAIRN_E2E_SINK_HOST", "")  # same sink, as seen from
 COMPOSE = ["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml")]
 
 RUN = uuid.uuid4().hex[:8]
+STARTED_MS = int(time.time() * 1000) - 60_000
 ROOT = "urn:li:corpuser:admin"
 BOB = f"urn:li:corpuser:e2e_bob_{RUN}"
 CAROL = f"urn:li:corpuser:e2e_carol_{RUN}"
@@ -207,6 +208,39 @@ def test_03_masking_proxy_masks_pii_per_caller(users):
     direct = httpx.post(f"{CORE}/api/graphql", json={"query": PROFILE_Q, "variables": {"urn": DS}},
                         headers={"Authorization": f"Bearer {tokens['root']}"}, timeout=30)
     assert _samples(direct)["email"][0] == "jane.doe@example.com"
+
+
+def _openapi_emails(body, urn=None) -> list:
+    """Email sample lists under DS in an OpenAPI response (one aspect, an entity, or a list of entities)."""
+    found = []
+    if isinstance(body, dict):
+        urn = body.get("urn", urn)
+        if urn in (None, DS):
+            found += [p.get("sampleValues") for p in body.get("fieldProfiles") or [] if p.get("fieldPath") == "email"]
+        for v in body.values():
+            found += _openapi_emails(v, urn)
+    elif isinstance(body, list):
+        for v in body:
+            found += _openapi_emails(v, urn)
+    return found
+
+
+def test_03b_masking_covers_the_openapi_read_paths(users):
+    tokens, ds = users["tokens"], urllib.parse.quote(DS, safe="")
+    paths = [f"/openapi/v3/entity/dataset/{ds}/datasetprofile",                      # one aspect
+             f"/openapi/v3/entity/dataset/{ds}?aspects=datasetProfile",               # one entity
+             f"/openapi/v2/timeseries/dataset/datasetProfile?count=1000&startTimeMillis={STARTED_MS}",  # v2 scroll
+             f"/openapi/v3/entity/dataset?aspects=datasetProfile&count=50&query=am_{RUN}"]  # entity list
+    for path in paths:
+        def masked(path=path):
+            r = httpx.get(f"{FRONTEND}{path}", headers={"Authorization": f"Bearer {tokens['bob']}"}, timeout=60)
+            assert r.status_code == 200, (path, r.status_code, r.text[:300])
+            return r if _openapi_emails(r.json()) else None   # the list endpoint is search-backed
+        r = eventually(masked, timeout=60, interval=3)
+        assert _openapi_emails(r.json()) == [["j•••@•••.com", "l•••@•••.org"]], (path, r.text[:500])
+        assert int(r.headers["X-Cairn-Masked"]) >= 1, path
+        carol = httpx.get(f"{FRONTEND}{path}", headers={"Authorization": f"Bearer {tokens['carol']}"}, timeout=60)
+        assert _openapi_emails(carol.json()) == [["jane.doe@example.com", "li@example.org"]], path
 
 
 # --------------------------------------------------------------------------- 4. propagation
@@ -453,3 +487,78 @@ def test_13_workspace_renders_inside_catalog_ui():
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["discover"] and result["marketplace"] and result["asset"], result
     assert not result["errors"], result["errors"]
+
+
+# --------------------------------------------------------------------------- authorization mode
+AUTHZ_MODE = os.environ.get("CAIRN_E2E_AUTHZ_MODE", "additive")
+SERVICE_TOKEN = os.environ.get("CAIRN_E2E_PDP_TOKEN", "")
+VIEW_Q = "query($u: String!) { dataset(urn: $u) { urn properties { name } } }"
+
+
+def test_14_cairn_deny_is_enforced_only_in_authoritative_mode(users):
+    """A Cairn deny on something the native policies allow (bob viewing DS).
+
+    Authoritative mode: Cairn is the only authorizer, so Cairn Core refuses bob.
+    Additive mode: the authorizer chain is first-ALLOW-wins, so the native allow still applies."""
+    root = users["root"]
+    saved = root.get("/governance/policies").json()["policies"]
+    deny = {"id": f"e2e-deny-view-{RUN}", "description": "e2e: bob may not view this dataset", "effect": "deny",
+            "priority": 500, "actions": ["VIEW_ENTITY_PAGE"],
+            "condition": {"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]}}
+    assert root.put("/governance/policies", json={"policies": saved + [deny]}).status_code == 200
+    try:
+        def pdp_denies():
+            r = httpx.post(f"{API}/governance/v1/authorize", headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+                           json={"actor": BOB, "privilege": "VIEW_ENTITY_PAGE",
+                                 "resource": {"type": "dataset", "urn": DS}}, timeout=30)
+            return r.status_code == 200 and r.json()["decision"] == "DENY"
+        eventually(pdp_denies, timeout=60)
+
+        def bob_can_view() -> bool:
+            body = frontend_gql(users["tokens"]["bob"], VIEW_Q, {"u": DS}).json()
+            # A hidden asset keeps only its identity (urn, type): its properties are gone.
+            return bool(((body.get("data") or {}).get("dataset") or {}).get("properties")) and not body.get("errors")
+
+        if AUTHZ_MODE == "authoritative":
+            eventually(lambda: not bob_can_view(), timeout=120, interval=5)     # Cairn Core refuses bob
+            assert frontend_gql(users["tokens"]["carol"], VIEW_Q, {"u": DS}).json()["data"]["dataset"]
+        else:
+            time.sleep(65)                                                       # past every decision cache
+            assert bob_can_view(), "additive mode: the native allow must still apply"
+    finally:
+        root.put("/governance/policies", json={"policies": saved})
+    if AUTHZ_MODE == "authoritative":
+        eventually(bob_can_view, timeout=120, interval=5)                        # access returns after removal
+
+
+def test_15_metadata_changes_reach_cached_decisions_within_seconds(users):
+    """Tagging a dataset changes cached PDP decisions at once (MCL invalidation), not after the
+    attribute TTL (60 s) or decision TTL (30 s)."""
+    root = users["root"]
+    tag = f"urn:li:tag:e2e-quarantine-{RUN}"
+    saved = root.get("/governance/policies").json()["policies"]
+    deny = {"id": f"e2e-quarantine-{RUN}", "description": "e2e: quarantined data is hidden", "effect": "deny",
+            "priority": 500, "actions": ["VIEW_DATASET_PROFILE"],
+            "condition": {"attr": "resource.tags", "op": "contains", "value": tag}}
+    assert root.put("/governance/policies", json={"policies": saved + [deny]}).status_code == 200
+
+    def decision():
+        r = httpx.post(f"{API}/governance/v1/authorize", headers={"Authorization": f"Bearer {SERVICE_TOKEN}"},
+                       json={"actor": BOB, "privilege": "VIEW_DATASET_PROFILE",
+                             "resource": {"type": "dataset", "urn": DS}}, timeout=30)
+        assert r.status_code == 200, r.text
+        return r.json()["decision"]
+
+    try:
+        eventually(lambda: decision() != "DENY", timeout=60)       # bundle loaded, attributes now cached
+        emit(DS, "globalTags", {"tags": [{"tag": tag}]})
+        started = time.monotonic()
+        eventually(lambda: decision() == "DENY", timeout=15, interval=0.5)
+        took = time.monotonic() - started
+        emit(DS, "globalTags", {"tags": []})
+        eventually(lambda: decision() != "DENY", timeout=15, interval=0.5)
+        assert took < 15
+    finally:
+        root.put("/governance/policies", json={"policies": saved})
+        emit(DS, "globalTags", {"tags": []})

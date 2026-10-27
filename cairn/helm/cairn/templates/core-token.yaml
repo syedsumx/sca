@@ -4,10 +4,13 @@ Control-plane service account token.
   Job           ...-core-token-bootstrap (post-install, post-upgrade) creates urn:li:corpuser:cairn-service and
                 its least-privilege policies, then writes the token (deploy/bootstrap/mint_core_token.py)
   Deployment    ...-token-keeper         rotates the token (the account mints its own successor)
-  RBAC          the Job and keeper may only get/patch this one Secret
+  Secret        <release>-provisioner-token  the SCIM provisioning account (urn:li:corpuser:cairn-provisioner):
+                people and groups only; mounted into the API pods alone
+  RBAC          the Job and keeper may only get/patch these two Secrets
 */ -}}
 {{- $full := include "cairn.fullname" . }}
 {{- $secret := include "cairn.coreTokenSecret" . }}
+{{- $provSecret := include "cairn.provisionerTokenSecret" . }}
 {{- $sa := printf "%s-core-token" $full }}
 {{- $t := .Values.cairn.coreToken }}
 apiVersion: v1
@@ -18,6 +21,16 @@ metadata:
     {{- include "cairn.labels" . | nindent 4 }}
   annotations:
     # Written at runtime: never reset or deleted by Helm.
+    helm.sh/resource-policy: keep
+type: Opaque
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $provSecret }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+  annotations:
     helm.sh/resource-policy: keep
 type: Opaque
 ---
@@ -37,7 +50,7 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: [{{ $secret | quote }}]
+    resourceNames: [{{ $secret | quote }}, {{ $provSecret | quote }}]
     verbs: ["get", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -89,7 +102,7 @@ spec:
           image: {{ include "cairn.image" . }}
           imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
           command: ["python", "/opt/cairn/bootstrap/mint_core_token.py"]
-          args: ["--k8s-secret", {{ $secret | quote }}]
+          args: ["--k8s-secret", {{ $secret | quote }}, "--k8s-provisioner-secret", {{ $provSecret | quote }}]
           env:
             - name: CAIRN_FRONTEND_URL
               value: {{ include "cairn.frontendUrl" . | quote }}
@@ -138,7 +151,7 @@ spec:
           image: {{ include "cairn.image" . }}
           imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
           command: ["python", "/opt/cairn/bootstrap/mint_core_token.py"]
-          args: ["--k8s-secret", {{ $secret | quote }}, "--keep"]
+          args: ["--k8s-secret", {{ $secret | quote }}, "--k8s-provisioner-secret", {{ $provSecret | quote }}, "--keep"]
           env:
             - name: CAIRN_CORE_URL
               value: {{ include "cairn.coreUrl" . | quote }}

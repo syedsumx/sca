@@ -94,12 +94,17 @@ writes nothing until it is approved.
 
 | # | Deliverable | Status |
 |---|---|---|
-| 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ✅ build (`deploy/build-images.sh`, apt-free images); ⬜ scan, SBOM, signing, registry push in CI |
-| 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (Cairn Core/PDP/gateway outages) | ✅ API smoke suite `tests/e2e` (8 scenarios); ⬜ Playwright UI, chaos tests, CI job |
+| 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ✅ build (`deploy/build-images.sh`), Trivy gate, SBOMs, cosign signing and registry push from `main` in CI |
+| 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (Cairn Core/PDP/gateway outages) | ✅ e2e suite (API, Playwright UI, SSO, SCIM, edge) in CI on a fresh stack; ⬜ chaos tests |
 | 5.3 | Load test PDP (target p99 < 5 ms cached, < 25 ms uncached at 2k rps) and gateway (100 agents, 1 GB metadata/run) | ⬜ |
 | 5.4 | Alembic migrations for the `cairn` schema; v0.1 databases (`create_all`) are adopted at the baseline | ✅ SQLite + Postgres tests, live upgrade of a v0.1 database, `cairn db check` in CI |
-| 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ⬜ |
+| 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ✅ threat model (`docs/site/agent-security.md`) with a negative test per attack, gateway hardening (vocabulary, `editable*`, platform proof, body cap, trusted proxies); ⬜ external pentest, KMS/HSM |
 | 5.6 | Upgrade playbook: pin-and-test matrix against Cairn Core minor releases (aspect shapes, GraphQL fields) | ⬜ |
+| 5.7 | Authoritative mode proven live: Cairn denies hold on REST and GraphQL (proxy view enforcement); PDP attribute reads no longer re-enter the authorizer | ✅ e2e test_14 in both modes |
+| 5.8 | Masking on every read path (GraphQL, OpenAPI v3 entity/aspect/list, v2 timeseries) | ✅ e2e test_03b |
+| 5.9 | Metadata changes reach access decisions within seconds (MCL-driven invalidation) | ✅ unit tests, e2e test_15 |
+| 5.10 | SSO (OIDC) with guided check (`cairn sso check`); SCIM 2.0 provisioning with a separate least-privilege account | ✅ mock IdP + Playwright sign-in, SCIM e2e incl. account separation |
+| 5.11 | Edge TLS + HSTS, rate limits, audit export (`/governance/audit/export`, `cairn audit export/verify-file`), `*_FILE` secrets | ✅ e2e test_edge, unit tests |
 
 ## M6 — Active Metadata & AI Context Layer (UX_ACTIVE_METADATA_SPEC.md)
 

@@ -1,18 +1,38 @@
 #!/bin/sh
 # Cairn Core entrypoint shim: translates the documented CAIRN_* settings into the names the
 # engine reads (tables in /etc/cairn/env.d/*.map), runs the init hooks in /etc/cairn/init.d,
-# then execs the service. An engine-native variable that is already set always wins.
+# then execs the service.
+#
+# Precedence: a CAIRN_* setting that is set always wins, over the engine defaults baked into the
+# image too. An engine variable set directly applies when its CAIRN_* counterpart is unset.
+#
+# Secrets as files: CAIRN_X_FILE=/run/secrets/x sets CAIRN_X to the file's content (setting both
+# is an error). CAIRN_LOCAL_USERS_FILE and CAIRN_WEB_USERS_FILE are paths, not secrets.
 set -e
-for map in /etc/cairn/env.d/*.map; do
+root="${CAIRN_ENV_ROOT:-/etc/cairn}"
+for name in $(env | sed -n 's/^\(CAIRN_[A-Za-z0-9_]*\)_FILE=.*/\1/p'); do
+  case "$name" in CAIRN_LOCAL_USERS|CAIRN_WEB_USERS|CAIRN_CORE_TOKEN|CAIRN_SCIM_TOKEN) continue ;; esac
+  eval "file=\${${name}_FILE}; cur=\${${name}-}"
+  if [ -n "$cur" ]; then
+    echo "cairn: both $name and ${name}_FILE are set; use one" >&2
+    exit 64
+  fi
+  if [ ! -r "$file" ]; then
+    echo "cairn: ${name}_FILE: cannot read $file" >&2
+    exit 64
+  fi
+  val="$(cat "$file")"
+  export "$name=$val"
+done
+for map in "$root"/env.d/*.map; do
   [ -f "$map" ] || continue
   while read -r from to; do
     case "$from" in ''|\#*) continue ;; esac
     eval "val=\${$from-}"
-    eval "cur=\${$to-}"
-    if [ -n "$val" ] && [ -z "$cur" ]; then export "$to=$val"; fi
+    if [ -n "$val" ]; then export "$to=$val"; fi
   done < "$map"
 done
-for hook in /etc/cairn/init.d/*.sh; do
+for hook in "$root"/init.d/*.sh; do
   [ -f "$hook" ] && . "$hook"
 done
 exec "$@"

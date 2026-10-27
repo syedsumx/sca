@@ -31,11 +31,11 @@ def _serve(app, host: str, port: int, root_path: str = "") -> None:
 
 
 def cmd_api(a) -> None:
-    from cairn.app import create_api_app
+    from cairn.app import DEFAULT_MODULES, create_api_app
 
     s = _services()
     s.start_background()
-    _serve(create_api_app(s, a.modules.split(",")), a.host, a.port, a.root_path)
+    _serve(create_api_app(s, a.modules.split(",") if a.modules else DEFAULT_MODULES), a.host, a.port, a.root_path)
 
 
 def cmd_pdp(a) -> None:
@@ -169,6 +169,44 @@ def cmd_audit_verify(_a) -> None:
     sys.exit(0 if result["valid"] else 1)
 
 
+def cmd_audit_export(a) -> None:
+    """Write the audit log in chain order; ``--follow`` keeps writing new entries (for log shippers)."""
+    from cairn.common.audit import AuditLog, export_lines
+    from cairn.common.config import get_settings
+    from cairn.common.db import get_engine
+
+    audit = AuditLog(get_engine(get_settings().database_url))
+    out = open(a.out, "a" if a.follow else "w") if a.out else sys.stdout
+    cursor, header = a.after_seq, True
+    try:
+        while True:
+            batch = list(audit.export(cursor, a.since, a.until, a.category))
+            if batch or header:
+                out.writelines(export_lines(batch, a.format, header=header))
+                out.flush()
+                header = False
+            cursor = batch[-1]["seq"] if batch else cursor
+            if not a.follow:
+                break
+            time.sleep(a.interval)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if a.out:
+            out.close()
+
+
+def cmd_audit_verify_file(a) -> None:
+    from cairn.common.audit import verify_entries
+
+    with open(a.path) as f:
+        result = verify_entries(json.loads(line) for line in f if line.strip())
+    if a.after_head and result.get("valid") and result.get("entries_checked") and result["starts_after"] != a.after_head:
+        result = {**result, "valid": False, "reason": "export does not continue from the given head"}
+    print(json.dumps(result, indent=2))
+    sys.exit(0 if result["valid"] else 1)
+
+
 def cmd_db(a) -> None:
     from cairn import migrations
     from cairn.common.config import get_settings
@@ -184,6 +222,24 @@ def cmd_db(a) -> None:
         cur, head = migrations.current(engine), migrations.head()
         print(json.dumps({"current": cur, "head": head, "differences": [str(d) for d in diffs]}, indent=2))
         sys.exit(0 if not diffs and cur == head else 1)
+
+
+def cmd_sso_check(a) -> None:
+    from cairn.common import sso
+
+    env = os.environ.get
+    report = sso.check(a.discovery_url or env("CAIRN_SSO_DISCOVERY_URL", ""), a.client_id or env("CAIRN_SSO_CLIENT_ID", ""),
+                       env("CAIRN_SSO_CLIENT_SECRET", ""), a.base_url or env("CAIRN_PUBLIC_URL", ""),
+                       env("CAIRN_SSO_CLIENT_AUTH_METHOD", "client_secret_basic"))
+    if a.json:
+        print(json.dumps(report.as_dict(), indent=2))
+    else:
+        print(f"Redirect URI to register with the identity provider: {report.callback_url}\n")
+        for c in report.checks:
+            mark = "ok  " if c.ok else ("warn" if c.warning else "FAIL")
+            print(f"  [{mark}] {c.name}: {c.detail}")
+        print("\nSingle sign-on settings look right." if report.ok else "\nFix the failed checks, then run again.")
+    sys.exit(0 if report.ok else 1)
 
 
 def cmd_policies_validate(a) -> None:
@@ -255,7 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
         return sp
 
     api = http("api", 8800, cmd_api, "control-plane API (quality, governance, ai, agent admin)")
-    api.add_argument("--modules", default="quality,governance,ai,agents,collab,marketplace,context,notify,embed")
+    api.add_argument("--modules", default=None, help="comma-separated API modules (default: all)")
     http("pdp", 8810, cmd_pdp, "policy decision point")
     gw = http("gateway", 8820, cmd_gateway, "remote agent gateway")
     gw.add_argument("--no-dispatcher", action="store_true")
@@ -305,13 +361,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     audit = sub.add_parser("audit", help="audit log tools")
     audit_sub = audit.add_subparsers(dest="audit_command", required=True)
-    audit_sub.add_parser("verify").set_defaults(fn=cmd_audit_verify)
+    audit_sub.add_parser("verify", help="verify the hash chain in the database").set_defaults(fn=cmd_audit_verify)
+    ex = audit_sub.add_parser("export", help="export entries in chain order (JSON Lines or CSV)")
+    ex.add_argument("--after-seq", type=int, default=0, help="resume after this sequence number")
+    ex.add_argument("--since", help="ISO-8601 timestamp (inclusive)")
+    ex.add_argument("--until", help="ISO-8601 timestamp (exclusive)")
+    ex.add_argument("--category")
+    ex.add_argument("--format", choices=["jsonl", "csv"], default="jsonl")
+    ex.add_argument("--out", help="file to write (default stdout)")
+    ex.add_argument("--follow", action="store_true", help="keep exporting new entries")
+    ex.add_argument("--interval", type=float, default=5.0, help="seconds between polls with --follow")
+    ex.set_defaults(fn=cmd_audit_export)
+    vf = audit_sub.add_parser("verify-file", help="verify a JSON Lines export without the database")
+    vf.add_argument("path")
+    vf.add_argument("--after-head", help="head hash of the previous export: proves nothing is missing between")
+    vf.set_defaults(fn=cmd_audit_verify_file)
 
     db = sub.add_parser("db", help="control-plane database schema (migrations)")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
                         ("check", "fail if the schema differs from the models or is not at head")):
         db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
+
+    sso = sub.add_parser("sso", help="single sign-on (OpenID Connect) setup")
+    sso_sub = sso.add_subparsers(dest="sso_command", required=True)
+    sc = sso_sub.add_parser("check", help="validate CAIRN_SSO_* settings against the identity provider")
+    sc.add_argument("--discovery-url", default="")
+    sc.add_argument("--client-id", default="")
+    sc.add_argument("--base-url", default="", help="public URL of Cairn (default CAIRN_PUBLIC_URL)")
+    sc.add_argument("--json", action="store_true")
+    sc.set_defaults(fn=cmd_sso_check)
 
     pol = sub.add_parser("policies", help="policy bundle tools")
     pol_sub = pol.add_subparsers(dest="policies_command", required=True)
@@ -326,8 +405,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> None:
+    from cairn.common.config import load_secret_files
+
     _setup_logging()
     args = build_parser().parse_args(argv)
+    try:
+        load_secret_files()
+    except RuntimeError as e:
+        sys.exit(f"cairn: {e}")
     args.fn(args)
 
 

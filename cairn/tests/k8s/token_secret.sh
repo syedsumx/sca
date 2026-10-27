@@ -61,6 +61,7 @@ docker run --rm -v "$PWD:/w" -w /w "${HELM_IMAGE:-alpine/helm:3.16.4}" template 
 "${K[@]}" -n cairn apply -f "$work/core-token.yaml" >/dev/null
 as_sa=(--as system:serviceaccount:cairn:cairn-core-token)
 [ "$("${K[@]}" -n cairn auth can-i patch secret/cairn-core-token "${as_sa[@]}")" = yes ] || fail "cannot patch own secret"
+[ "$("${K[@]}" -n cairn auth can-i patch secret/cairn-provisioner-token "${as_sa[@]}")" = yes ] || fail "cannot patch provisioner secret"
 [ "$("${K[@]}" -n cairn auth can-i get secret/cairn-core-secrets "${as_sa[@]}" || true)" = no ] || fail "can read other secrets"
 [ "$("${K[@]}" -n cairn auth can-i list secrets "${as_sa[@]}" || true)" = no ] || fail "can list secrets"
 
@@ -72,9 +73,11 @@ pod() {
   docker run --rm --network cairn_catalog -v "$sa:/var/run/secrets/kubernetes.io/serviceaccount:ro" \
     -e KUBERNETES_SERVICE_HOST=cairn-k8s-api -e KUBERNETES_SERVICE_PORT=6443 \
     -e CAIRN_FRONTEND_URL=http://cairn-web:9002 -e CAIRN_CORE_URL=http://cairn-core:8080 -e CAIRN_BOOTSTRAP_RETRIES=5 \
-    "$@" --entrypoint python "cairn/platform:${VERSION}" /opt/cairn/bootstrap/mint_core_token.py --k8s-secret cairn-core-token "${POD_ARGS[@]}"
+    "$@" --entrypoint python "cairn/platform:${VERSION}" /opt/cairn/bootstrap/mint_core_token.py --k8s-secret cairn-core-token \
+    --k8s-provisioner-secret cairn-provisioner-token "${POD_ARGS[@]}"
 }
 secret_token() { "${K[@]}" -n cairn get secret cairn-core-token -o jsonpath='{.data.core_token}' | base64 -d; }
+prov_token() { "${K[@]}" -n cairn get secret cairn-provisioner-token -o jsonpath='{.data.provisioner_token}' | base64 -d; }
 whoami() {
   curl -s localhost:8080/api/graphql -H "Authorization: Bearer $1" -H 'Content-Type: application/json' \
     -d '{"query":"{ me { corpUser { urn } } }"}' | grep -o 'urn:li:corpuser:[a-z-]*' || echo none
@@ -84,11 +87,20 @@ admin_pw="$(grep -E '^CAIRN_ADMIN_PASSWORD=' .env | cut -d= -f2-)"
 POD_ARGS=(); pod -e CAIRN_ADMIN_PASSWORD="$admin_pw"
 first="$(secret_token)"
 [ "$(whoami "$first")" = urn:li:corpuser:cairn-service ] || fail "bootstrap token is not the service account's"
-POD_ARGS=(); pod -e CAIRN_ADMIN_PASSWORD=wrong | grep -q "nothing to do" || fail "re-run was not idempotent"
+prov_first="$(prov_token)"
+[ "$(whoami "$prov_first")" = urn:li:corpuser:cairn-provisioner ] || fail "provisioner token missing or wrong account"
+[ -z "$("${K[@]}" -n cairn get secret cairn-core-token -o jsonpath='{.data.provisioner_token}')" ] \
+  || fail "provisioner token leaked into the control-plane secret"
+POD_ARGS=(); rerun="$(pod -e CAIRN_ADMIN_PASSWORD=wrong)"
+[ "$(grep -c "nothing to do" <<<"$rerun")" = 2 ] || fail "re-run was not idempotent: $rerun"
 POD_ARGS=(--keep --once --rotate-days 0 --grace-minutes 0); pod
 POD_ARGS=(--keep --once --rotate-days 20 --grace-minutes 0); pod
 second="$(secret_token)"
 [ "$second" != "$first" ] || fail "keeper did not rotate"
 [ "$(whoami "$second")" = urn:li:corpuser:cairn-service ] || fail "rotated token does not work"
 [ "$(whoami "$first")" = none ] || fail "retired token was not revoked"
-echo "k8s token path: OK (RBAC, bootstrap, idempotent re-run, rotation, revocation)"
+prov_second="$(prov_token)"
+[ "$prov_second" != "$prov_first" ] && [ "$(whoami "$prov_second")" = urn:li:corpuser:cairn-provisioner ] \
+  || fail "provisioner token did not rotate"
+[ "$(whoami "$prov_first")" = none ] || fail "retired provisioner token was not revoked"
+echo "k8s token path: OK (RBAC, bootstrap, idempotent re-run, rotation, revocation; service and provisioner)"

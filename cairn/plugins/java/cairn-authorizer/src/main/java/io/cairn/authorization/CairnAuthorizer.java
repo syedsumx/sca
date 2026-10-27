@@ -38,6 +38,10 @@ import java.util.logging.Logger;
  *
  * <p>Failure handling is fail-closed: if the PDP is unreachable, slow, or the circuit breaker is
  * open, the request is denied unless the privilege is listed in {@code failOpenPrivileges}.
+ *
+ * <p>Reads by a {@code trustedReaders} actor are allowed without asking the PDP: the PDP resolves
+ * attributes by reading Cairn Core as that actor, so routing those reads back to the PDP would make
+ * every decision wait on itself (and time out, fail-closed, in authoritative mode).
  */
 public class CairnAuthorizer implements Authorizer {
 
@@ -99,6 +103,12 @@ public class CairnAuthorizer implements Authorizer {
     }
     if (actor != null && cfg.rootUsers.contains(actor)) {
       return allow(request, "Cairn: break-glass root user");
+    }
+    if (actor != null
+        && cfg.trustedReaders.contains(actor)
+        && request.getPrivilege() != null
+        && cfg.readPrivileges.contains(request.getPrivilege())) {
+      return allow(request, "Cairn: PDP attribute reader");
     }
 
     String key = cacheKey(request);

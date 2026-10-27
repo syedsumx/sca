@@ -14,6 +14,35 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field
 
 
+# Settings whose value *is* a path (read by the code itself), not a secret delivered as a file.
+PATH_SETTINGS = frozenset({
+    "CAIRN_CORE_TOKEN_FILE", "CAIRN_SCIM_TOKEN_FILE", "CAIRN_LOCAL_USERS_FILE", "CAIRN_WEB_USERS_FILE",
+    "CAIRN_K8S_TOKEN_FILE", "CAIRN_K8S_NAMESPACE_FILE", "CAIRN_K8S_CA_FILE",
+})
+_SECRET_FILE_PREFIXES = ("CAIRN_", "ANTHROPIC_API_KEY")
+
+
+def load_secret_files(environ=None) -> list[str]:
+    """``CAIRN_X_FILE=/run/secrets/x`` sets ``CAIRN_X`` to the file's content (trailing newline
+    stripped), for Docker and Kubernetes secrets mounted as files. Setting both is an error.
+    Returns the names that were loaded."""
+    env = os.environ if environ is None else environ
+    loaded = []
+    for name, path in list(env.items()):
+        if not name.endswith("_FILE") or name in PATH_SETTINGS or not name.startswith(_SECRET_FILE_PREFIXES):
+            continue
+        base = name[:-len("_FILE")]
+        if env.get(base):
+            raise RuntimeError(f"both {base} and {name} are set; use one")
+        try:
+            with open(path) as f:
+                env[base] = f.read().rstrip("\r\n")
+        except OSError as e:
+            raise RuntimeError(f"{name}: cannot read {path}: {e.strerror}") from None
+        loaded.append(base)
+    return loaded
+
+
 def _env(name: str, default: Optional[str] = None) -> Optional[str]:
     value = os.environ.get(name)
     return value if value not in (None, "") else default

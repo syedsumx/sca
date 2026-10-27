@@ -227,6 +227,18 @@ services:
       CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:?set CAIRN_ADMIN_PASSWORD in .env}
       CAIRN_SYSTEM_CLIENT_SECRET: ${CAIRN_SYSTEM_CLIENT_SECRET}
       CAIRN_KAFKA_BOOTSTRAP: broker:29092
+      # Single sign-on (docs: Administration → Single sign-on). Empty = off.
+      CAIRN_SSO_ENABLED: ${CAIRN_SSO_ENABLED:-}
+      CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
+      CAIRN_SSO_CLIENT_SECRET: ${CAIRN_SSO_CLIENT_SECRET:-}
+      CAIRN_SSO_DISCOVERY_URL: ${CAIRN_SSO_DISCOVERY_URL:-}
+      CAIRN_SSO_BASE_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
+      CAIRN_SSO_SCOPE: ${CAIRN_SSO_SCOPE:-}
+      CAIRN_SSO_USER_CLAIM: ${CAIRN_SSO_USER_CLAIM:-preferred_username}
+      CAIRN_SSO_GROUPS_CLAIM: ${CAIRN_SSO_GROUPS_CLAIM:-groups}
+      CAIRN_SSO_REQUIRED_GROUPS: ${CAIRN_SSO_REQUIRED_GROUPS:-}
+      CAIRN_SSO_EXTRACT_GROUPS: ${CAIRN_SSO_EXTRACT_GROUPS:-true}
+      CAIRN_SSO_JIT_PROVISIONING: ${CAIRN_SSO_JIT_PROVISIONING:-}
     healthcheck:
       test: ["CMD-SHELL", "curl -sS --fail http://127.0.0.1:9002/admin"]
       interval: 10s
@@ -279,7 +291,8 @@ services:
   # and writes its token into the cairn-bootstrap volume (idempotent). See deploy/bootstrap/mint_core_token.py.
   cairn-bootstrap:
     image: python:3.12-slim
-    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token"]
+    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token",
+              "--provisioner-out", "/run/cairn-provisioner/provisioner_token"]
     environment:
       CAIRN_FRONTEND_URL: http://cairn-web:9002
       CAIRN_CORE_URL: http://cairn-core:8080
@@ -287,6 +300,8 @@ services:
     volumes:
       - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
       - cairn-bootstrap:/run/cairn
+      # The provisioning (SCIM) token: only cairn-api mounts it.
+      - cairn-provisioner:/run/cairn-provisioner
     depends_on:
       cairn-web:
         condition: service_healthy
@@ -296,7 +311,8 @@ services:
   # revokes the previous token after a grace period. Holds no admin credentials.
   cairn-token-keeper:
     image: python:3.12-slim
-    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token", "--keep"]
+    command: ["python", "/opt/cairn-bootstrap/mint_core_token.py", "--out", "/run/cairn/core_token",
+              "--provisioner-out", "/run/cairn-provisioner/provisioner_token", "--keep"]
     restart: unless-stopped
     environment:
       CAIRN_CORE_URL: http://cairn-core:8080
@@ -306,6 +322,8 @@ services:
     volumes:
       - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
       - cairn-bootstrap:/run/cairn
+      # The provisioning (SCIM) token: only cairn-api mounts it.
+      - cairn-provisioner:/run/cairn-provisioner
     depends_on:
       cairn-bootstrap:
         condition: service_completed_successfully
@@ -328,6 +346,21 @@ services:
     <<: *cairn-service
     hostname: cairn-api
     command: ["api", "--host", "0.0.0.0", "--port", "8800"]
+    volumes:
+      - ./config:/etc/cairn/config:ro
+      - ./deploy/bootstrap:/opt/cairn-bootstrap:ro
+      - ./deploy/actions:/etc/cairn/actions:ro
+      - cairn-bootstrap:/run/cairn:ro
+      - cairn-provisioner:/run/cairn-provisioner:ro
+    environment:
+      <<: *cairn-env
+      # SCIM provisioning (Administration → User provisioning). Empty = SCIM answers 503.
+      CAIRN_SCIM_TOKEN: ${CAIRN_SCIM_TOKEN:-}
+      CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
+      # For `cairn sso check` (the web app does the actual sign-in).
+      CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
+      CAIRN_SSO_CLIENT_SECRET: ${CAIRN_SSO_CLIENT_SECRET:-}
+      CAIRN_SSO_DISCOVERY_URL: ${CAIRN_SSO_DISCOVERY_URL:-}
     ports:
       - "${CAIRN_MAPPED_API_PORT:-8800}:8800"
     healthcheck:
@@ -477,13 +510,22 @@ services:
     hostname: edge
     ports:
       - "${CAIRN_MAPPED_EDGE_PORT:-9000}:8080"
+      - "${CAIRN_MAPPED_EDGE_TLS_PORT:-9443}:8443"
+    environment:
+      # HTTPS: put tls.crt and tls.key (PEM) in CAIRN_TLS_DIR. Set CAIRN_TLS_REDIRECT=true to send
+      # HTTP to HTTPS; CAIRN_TLS_PUBLIC_PORT is the HTTPS port users reach (default 443).
+      CAIRN_TLS_REDIRECT: ${CAIRN_TLS_REDIRECT:-false}
+      CAIRN_TLS_PUBLIC_PORT: ${CAIRN_TLS_PUBLIC_PORT:-443}
     volumes:
       - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./docker/nginx/locations.conf:/etc/nginx/cairn/locations.conf:ro
+      - ./docker/nginx/40-cairn-edge.sh:/docker-entrypoint.d/40-cairn-edge.sh:ro
+      - ${CAIRN_TLS_DIR:-./deploy/tls}:/etc/cairn/tls:ro
     tmpfs:
       - /tmp
     read_only: true
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8081/healthz"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -577,6 +619,7 @@ volumes:
   broker:
   cairn-pgdata:
   cairn-bootstrap:
+  cairn-provisioner:
   cairn-gateway-keys:
   cairn-agent-state:
   ollama:

@@ -188,13 +188,13 @@ jobs:
             echo "CAIRN_ADMIN_PASSWORD=$(openssl rand -hex 16)"
             for k in CAIRN_SYSTEM_CLIENT_SECRET CAIRN_SESSION_SIGNING_KEY CAIRN_TOKEN_SALT CAIRN_WEB_SECRET \
                      CAIRN_DB_PASSWORD CAIRN_DB_ROOT_PASSWORD CAIRN_SERVICE_TOKEN CAIRN_ACTION_LINK_SECRET \
-                     CAIRN_EMBED_SIGNING_SECRET CAIRN_SLACK_SIGNING_SECRET; do
+                     CAIRN_EMBED_SIGNING_SECRET CAIRN_SLACK_SIGNING_SECRET CAIRN_SCIM_TOKEN; do
               echo "${k}=$(openssl rand -hex 32)"
             done
           } > .env
           # Embed origins the e2e suite exercises (test_11).
           echo "CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000" >> .env
-          grep -vE '^(CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET)=' \
+          grep -vE '^(CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET|CAIRN_SCIM_TOKEN)=' \
             .env.example >> .env
           docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900 \
             || docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 600

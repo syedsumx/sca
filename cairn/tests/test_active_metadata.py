@@ -484,3 +484,40 @@ def test_core_client_reads_token_file_lazily(tmp_path, settings):
     assert "Authorization" not in s.graph._headers  # bootstrap has not minted the token yet
     tok.write_text("tok-1\n")
     assert s.graph._headers["Authorization"] == "Bearer tok-1"
+
+
+def test_proxy_hides_entities_the_caller_is_denied_in_authoritative_mode(gov):
+    pdp, _, attrs = gov
+    other = DS.replace("orders", "invoices")
+    pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="view-all", effect="allow", actions=["VIEW_ENTITY_PAGE"]),
+        Policy(id="hide-orders-from-bob", effect="deny", actions=["VIEW_ENTITY_PAGE"],
+               condition={"all": [{"attr": "subject.urn", "op": "eq", "value": BOB},
+                                  {"attr": "resource.urn", "op": "eq", "value": DS}]})]))
+    doc = {"data": {"search": {"total": 2, "searchResults": [
+        {"entity": {"urn": DS, "type": "DATASET", "__typename": "Dataset", "properties": {"name": "orders"},
+                    "ownership": {"owners": [{"owner": {"urn": ALICE}}]}}},
+        {"entity": {"urn": other, "type": "DATASET", "__typename": "Dataset", "properties": {"name": "invoices"}}},
+    ]}, "tag": {"urn": "urn:li:tag:PII", "properties": {"name": "PII"}}}}
+
+    def upstream(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=doc)
+
+    masking = MaskingService(pdp, attrs)
+    app = create_proxy_app("http://core", masking, ProxyIdentity("sk", "http://core"),
+                           transport=httpx.MockTransport(upstream))
+    token = lambda who: {"Authorization": f"Bearer {_jwt({'actorId': who, 'exp': time.time() + 60}, b'sk')}"}  # noqa: E731
+    with TestClient(app) as c:
+        r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("bob"))
+        hits = r.json()["data"]["search"]["searchResults"]
+        assert hits[0]["entity"] == {"urn": DS, "type": "DATASET", "__typename": "Dataset", "properties": None,
+                                     "ownership": None}
+        assert hits[1]["entity"]["properties"] == {"name": "invoices"}            # not denied
+        assert r.json()["data"]["tag"]["properties"] == {"name": "PII"}           # vocabulary never hidden
+        assert r.headers["X-Cairn-Restricted"] == "1"
+        r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("carol"))
+        assert r.json()["data"]["search"]["searchResults"][0]["entity"]["properties"] == {"name": "orders"}
+        assert "X-Cairn-Restricted" not in r.headers
+        pdp.mode = "additive"                                                      # native allow wins
+        r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("bob"))
+        assert r.json()["data"]["search"]["searchResults"][0]["entity"]["properties"] == {"name": "orders"}

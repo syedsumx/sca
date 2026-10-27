@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from typing import Iterable, Optional
 
@@ -82,7 +83,8 @@ def _base_app(name: str, services: Services) -> FastAPI:
     return app
 
 
-DEFAULT_MODULES = ("quality", "governance", "ai", "agents", "collab", "marketplace", "context", "notify", "embed")
+DEFAULT_MODULES = ("quality", "governance", "ai", "agents", "collab", "marketplace", "context", "notify", "embed",
+                   "scim")
 
 
 def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES) -> FastAPI:
@@ -103,8 +105,30 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         app.include_router(ai_router(services, cp))
     if "agents" in modules and services.gateway is not None:
         app.include_router(agents_router(services.gateway, cp, authz, admin=True, protocol=False))
+    if "scim" in modules and services.graph is not None:
+        from cairn.identity.scim import ScimService, install_error_handler
+        from cairn.identity.scim import build_router as scim_router
+
+        public = services.settings.active.public_url.rstrip("/")
+        scim = ScimService(services.engine, _provisioning_graph(services), services.audit,
+                           f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate)
+        app.include_router(scim_router(scim))
+        install_error_handler(app)
     _include_active_metadata(app, services, modules, cp, authz)
     return app
+
+
+def _provisioning_graph(services: Services):
+    """SCIM writes people and groups as cairn-provisioner, never as the control-plane account (which
+    must not be able to change group membership). Its token sits next to the control plane's."""
+    core = services.settings.core
+    path = os.environ.get("CAIRN_SCIM_CORE_TOKEN_FILE") or (
+        os.path.join(os.path.dirname(core.token_file), "provisioner_token") if core.token_file else None)
+    if not path or not core.url:
+        return services.graph            # tests and single-process demos
+    from cairn.common.core import CoreClient
+
+    return CoreClient(core.url, None, core.timeout_seconds, token_file=path)
 
 
 def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp, authz) -> None:
@@ -187,4 +211,46 @@ def create_gateway_app(services: Services) -> FastAPI:
         raise RuntimeError("gateway service not configured")
     app = _base_app("gateway", services)
     app.include_router(agents_router(services.gateway, admin=False, protocol=True))
+    # The gateway faces private networks directly: cap request bodies before anything reads them.
+    app.add_middleware(BodyLimit, max_bytes=int(os.environ.get("CAIRN_GATEWAY_MAX_BODY_BYTES", 32 << 20)))
     return app
+
+
+class BodyLimit:
+    """ASGI middleware: 413 for request bodies over ``max_bytes`` (declared or streamed)."""
+
+    def __init__(self, app, max_bytes: int):
+        self.app, self.max_bytes = app, max_bytes
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+        declared = dict(scope.get("headers") or []).get(b"content-length")
+        if declared is not None and declared.isdigit() and int(declared) > self.max_bytes:
+            return await _too_large(send)
+        seen = 0
+
+        async def limited():
+            nonlocal seen
+            message = await receive()
+            if message["type"] == "http.request":
+                seen += len(message.get("body", b""))
+                if seen > self.max_bytes:
+                    raise _BodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited, send)
+        except _BodyTooLarge:
+            await _too_large(send)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _too_large(send) -> None:
+    body = b'{"detail":"request body too large"}'
+    await send({"type": "http.response.start", "status": 413,
+                "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+    await send({"type": "http.response.body", "body": body})

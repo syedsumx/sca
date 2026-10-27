@@ -36,11 +36,13 @@ from cairn.coreproxy.masking import (
     needs_inspection,
 )
 from cairn.governance.pdp import AuthorizeRequest, PolicyDecisionPoint, ResourceRef
+from cairn.coreproxy.visibility import entity_type, restrict_document
 
 logger = logging.getLogger(__name__)
 
 HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers",
               "transfer-encoding", "upgrade", "host", "content-length"}
+GRAPHQL_PATHS = ("/api/graphql", "/api/v2/graphql")
 INSPECT_PREFIXES = ("/api/graphql", "/openapi/", "/aspects", "/entities", "/api/v2/graphql")
 UNMASKED_ACTORS = {"urn:li:corpuser:__datahub_system", "urn:li:corpuser:__cairn_service"}
 
@@ -143,6 +145,23 @@ class MaskingService:
                                policies=set(decision.policy_ids) or {"no-profile-access"})
         return build_plan([o.model_dump() for o in decision.obligations], resource or {})
 
+    @property
+    def enforces_view(self) -> bool:
+        """Authoritative mode: Cairn's view denies hold on GraphQL too (see :mod:`visibility`)."""
+        return self.pdp.mode == "authoritative"
+
+    def view_denied(self, actor: str, urn: str) -> bool:
+        if actor in UNMASKED_ACTORS:
+            return False
+        try:
+            decision = self.pdp.decide(AuthorizeRequest(
+                actor=actor, privilege="VIEW_ENTITY_PAGE", resource=ResourceRef(type=entity_type(urn), urn=urn),
+                environment={"channel": "core-proxy"}))
+        except Exception as e:  # fail closed, like masking
+            logger.warning("view decision failed for %s on %s (%s); hiding it", actor, urn, e)
+            return True
+        return decision.decision == "DENY"
+
 
 # Ingestion run logs (Data Sources -> Run History) are free text written by the ingestion framework;
 # they name its packages, paths and CLI. Rewritten for display only: report and structuredReport.
@@ -236,6 +255,7 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
             url += f"?{request.url.query}"
         headers = [(k, v) for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP]
         inspect = request.method in ("GET", "POST") and path.startswith(INSPECT_PREFIXES)
+        graphql = path.startswith(GRAPHQL_PATHS)
         if inspect:
             # Ask for an uncompressed body so it can be inspected without re-compressing.
             headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]
@@ -257,13 +277,18 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
         if relabeled is not None:
             raw = relabeled
         actor = await identity.resolve(request.headers.get("authorization"), client)
-        if resp.status_code >= 400 or not actor or not needs_inspection(raw):
+        restrict = graphql and masking.enforces_view and b'"urn"' in raw
+        if resp.status_code >= 400 or not actor or not (restrict or needs_inspection(raw)):
             return Response(raw, status_code=resp.status_code, headers=out_headers)
         t0 = time.perf_counter()
         try:
             doc = json.loads(raw)
         except json.JSONDecodeError:
             return Response(raw, status_code=resp.status_code, headers=out_headers)
+        restricted = restrict_document(doc, lambda urn: masking.view_denied(actor, urn)).restricted if restrict \
+            else set()
+        if restricted:
+            out_headers["X-Cairn-Restricted"] = str(len(restricted))
         result = mask_document(doc, lambda urn: masking.plan(actor, urn), _context_urn(path))
         if _INSPECTED:
             _INSPECTED.labels(str(result.masked_values > 0).lower()).inc()
@@ -274,6 +299,7 @@ def create_proxy_app(upstream: str, masking: MaskingService, identity: ProxyIden
         if result.masked_values:
             out_headers["X-Cairn-Masked"] = str(result.masked_values)
             out_headers["X-Cairn-Masking-Policies"] = ",".join(sorted(result.policies))
+        if result.masked_values or restricted:
             raw = json.dumps(doc, separators=(",", ":")).encode()
         return Response(raw, status_code=resp.status_code, headers=out_headers)
 

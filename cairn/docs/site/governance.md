@@ -11,12 +11,20 @@ rules (who you are) with attribute-based rules (what the data is: domain, tags, 
 certification) using **deny-overrides**: a single matching deny wins. Decisions are cached briefly
 and every decision is written to a tamper-evident audit log (`GET /cairn/api/governance/audit`).
 
+Metadata changes take effect within seconds: when an owner, tag, term, domain, column label or group
+membership changes, cached attributes and decisions for that asset or person are dropped at once, and
+a changed catalog policy is re-imported immediately (`CAIRN_MCL_INVALIDATION`, on by default).
+
 Two modes:
 
 * **Additive** (default): Cairn's rules can grant access on top of the catalog's native policies.
   Good for a gradual rollout.
 * **Authoritative**: Cairn is the only authority and its deny rules are enforced everywhere. Set
-  `CAIRN_NATIVE_POLICIES_ENABLED=false`.
+  `CAIRN_AUTHZ_MODE=authoritative` and `CAIRN_NATIVE_POLICIES_ENABLED=false`; the catalog's native
+  policies are then imported into Cairn and evaluated alongside its own rules.
+
+Masking applies to every read path: the UI, GraphQL and the REST API (`/openapi/v3` entities,
+aspects and lists, and `/openapi/v2` timeseries).
 
 ## Personas and purposes
 

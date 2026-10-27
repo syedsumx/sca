@@ -27,7 +27,7 @@ ai = ["anthropic>=2.0", "mcp>=2.0"]
 actions = ["acryl-datahub-actions>=1.0"]
 agent = ["acryl-datahub>=1.0"]
 warehouse = ["snowflake-sqlalchemy>=1.5", "sqlalchemy-bigquery>=1.9", "databricks-sql-connector>=3.0"]
-test = ["pytest>=8", "fastapi>=0.110"]
+test = ["pytest>=8", "fastapi>=0.110", "pyjwt>=2.8"]
 all = ["cairn-platform[server,postgres,ai,actions,agent]"]
 
 [project.scripts]

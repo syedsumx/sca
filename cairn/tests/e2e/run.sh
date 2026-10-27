@@ -38,8 +38,32 @@ if ! "${compose[@]}" logs cairn-remote-agent 2>/dev/null | grep -q "enrolled as"
   done
 fi
 
+# Single sign-on against a test identity provider (CAIRN_E2E_SSO=0 skips it). cairn-web keeps
+# password sign-in alongside SSO, so the other tests are unaffected.
+if [ "${CAIRN_E2E_SSO:-1}" = 1 ]; then
+  "${compose[@]}" -f tests/e2e/docker-compose.sso.yml up -d --no-build --wait cairn-oidc cairn-web >/dev/null
+  export CAIRN_E2E_SSO=1 CAIRN_E2E_SSO_SECRET="${CAIRN_E2E_SSO_SECRET:-e2e-sso-secret}"
+fi
+
+# Edge HTTPS with a throwaway certificate (CAIRN_E2E_TLS=0 skips it).
+if [ "${CAIRN_E2E_TLS:-1}" = 1 ]; then
+  tls_dir="$PWD/tests/e2e/.tls"
+  if [ ! -f "$tls_dir/tls.crt" ]; then
+    mkdir -p "$tls_dir"
+    openssl req -x509 -newkey rsa:2048 -nodes -days 7 -subj "/CN=localhost" \
+      -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" -keyout "$tls_dir/tls.key" -out "$tls_dir/tls.crt" 2>/dev/null
+    chmod a+r "$tls_dir"/tls.*
+  fi
+  CAIRN_TLS_DIR="$tls_dir" "${compose[@]}" up -d --no-build --no-deps --wait edge >/dev/null
+  tls_port="$(env_val CAIRN_MAPPED_EDGE_TLS_PORT || true)"
+  export CAIRN_E2E_TLS_URL="https://localhost:${tls_port:-9443}" CAIRN_E2E_TLS_CA="$tls_dir/tls.crt"
+fi
+
 export CAIRN_E2E=1 CAIRN_E2E_TOKEN="${token}" CAIRN_E2E_SERVICE_TOKEN="${service_token}"
 export CAIRN_E2E_UI_PASSWORD="$(env_val CAIRN_ADMIN_PASSWORD)"
 export CAIRN_E2E_SLACK_SECRET="$(env_val CAIRN_SLACK_SIGNING_SECRET)"
+export CAIRN_E2E_PDP_TOKEN="$(env_val CAIRN_SERVICE_TOKEN)"
+export CAIRN_E2E_SCIM_TOKEN="$(env_val CAIRN_SCIM_TOKEN || true)"
+export CAIRN_E2E_AUTHZ_MODE="$(env_val CAIRN_AUTHZ_MODE || true)"; CAIRN_E2E_AUTHZ_MODE="${CAIRN_E2E_AUTHZ_MODE:-additive}"
 export CAIRN_E2E_SINK=http://cairn-e2e-sink:8099/ CAIRN_E2E_SINK_HOST=http://127.0.0.1:8099/
 "$PY" -m pytest tests/e2e -p no:cacheprovider "$@"

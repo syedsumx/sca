@@ -539,6 +539,10 @@ spec:
       {{- end }}
 {{- end -}}
 
+{{- define "cairn.provisionerTokenSecret" -}}
+{{- printf "%s-provisioner-token" (include "cairn.fullname" .) -}}
+{{- end -}}
+
 {{- define "cairn.coreTokenSecret" -}}
 {{- printf "%s-core-token" (include "cairn.fullname" .) -}}
 {{- end -}}

@@ -173,6 +173,22 @@ def build_router(
         authorize(p, "MANAGE_POLICIES", None)
         return {"entries": audit.entries(category, limit) if audit else []}
 
+    @router.get("/audit/export")
+    def audit_export(after_seq: int = 0, since: Optional[str] = None, until: Optional[str] = None,
+                     category: Optional[str] = None, format: str = Query("jsonl", pattern="^(jsonl|csv)$"),  # noqa: A002
+                     p: Principal = Depends(current_principal)):
+        """Stream the audit log in chain order for a SIEM or archive. Resume with
+        ``after_seq`` = the last ``seq`` received; verify a file with ``cairn audit verify-file``."""
+        authorize(p, "MANAGE_POLICIES", None)
+        from fastapi.responses import StreamingResponse
+
+        from cairn.common.audit import export_lines
+
+        rows = audit.export(after_seq, since, until, category) if audit else iter(())
+        media = "application/x-ndjson" if format == "jsonl" else "text/csv"
+        return StreamingResponse(export_lines(rows, format), media_type=media, headers={
+            "Content-Disposition": f'attachment; filename="cairn-audit.{format}"'})
+
     @router.get("/audit/verify")
     def audit_verify(p: Principal = Depends(current_principal)):
         authorize(p, "MANAGE_POLICIES", None)

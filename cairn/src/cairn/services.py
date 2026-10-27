@@ -73,6 +73,7 @@ class Services:
     context: Optional[Any] = None
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
+    invalidator: Any = None
     _threads: list = field(default_factory=list)
 
     # ---- authorization helper shared by every Cairn API ------------------------------
@@ -178,18 +179,21 @@ class Services:
     # ---- background maintenance ----------------------------------------------------
     def start_background(self, native_policy_interval: int = 120, workflow_interval: int = 600,
                          layer_reload_interval: float = 10.0) -> None:
-        """Native-policy import retries until Cairn Core (and its token) is available."""
+        """Native-policy import retries until Cairn Core (and its token) is available. With Kafka
+        configured, metadata changes invalidate cached attributes and decisions as they happen."""
         stop = threading.Event()
+        policy_changed = threading.Event()
 
         def policy_loop() -> None:
             while not stop.is_set():
+                wait = native_policy_interval
                 if self.graph is not None and self.settings.authz.import_native_policies:
                     n = sync_native_policies(self.pdp, self.graph)
                     if n >= 0:
                         logger.info("imported %d native Cairn Core policies", n)
-                    stop.wait(native_policy_interval if n >= 0 else 15)
-                else:
-                    stop.wait(native_policy_interval)
+                    wait = native_policy_interval if n >= 0 else 15
+                policy_changed.wait(wait)
+                policy_changed.clear()
 
         def workflow_loop() -> None:
             while not stop.wait(workflow_interval):
@@ -217,7 +221,15 @@ class Services:
             t = threading.Thread(target=target, daemon=True, name=target.__name__)
             t.start()
             self._threads.append(t)
-        self._threads.append(stop)
+        if os.environ.get("CAIRN_MCL_INVALIDATION", "true").lower() == "true" and self.settings.kafka_bootstrap:
+            from cairn.governance.invalidation import MclInvalidator, start_consumer
+
+            self.invalidator = MclInvalidator(self.attributes, policy_changed.set)
+            t = start_consumer(self.invalidator, self.settings.kafka_bootstrap, self.settings.schema_registry_url,
+                               stop)
+            if t is not None:
+                self._threads.append(t)
+        self._threads += [stop, policy_changed]   # set on stop: wakes the policy loop too
 
     def stop_background(self) -> None:
         for t in self._threads:

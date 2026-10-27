@@ -446,3 +446,31 @@ def test_propagation_survives_stale_lineage_index(graph):
     mcl = {"entityUrn": DS_DOWN, "aspectName": "upstreamLineage", "systemMetadata": {"properties": {}},
            "aspect": {"value": json.dumps(lineage)}}
     assert {m["entityUrn"] for m in PiiPropagator(graph, PropagationConfig(recheck_seconds=0)).handle(mcl)} == {DS_DOWN}
+
+
+def test_failed_attribute_reads_are_not_cached_for_the_full_ttl(monkeypatch):
+    class Flaky:
+        def __init__(self):
+            self.fail = True
+            self.calls = 0
+
+        def get_aspect(self, urn, name):
+            self.calls += 1
+            if self.fail:
+                raise RuntimeError("HTTP 403")
+            return {"groups": ["urn:li:corpGroup:data-stewards"]} if name == "groupMembership" else None
+
+    graph = Flaky()
+    resolver = AttributeResolver(graph, ttl_seconds=60)
+    clock = [1000.0]
+    monkeypatch.setattr("cairn.governance.attributes.time.monotonic", lambda: clock[0])
+    assert resolver.subject("urn:li:corpuser:bob")["groups"] == []
+    graph.fail = False
+    clock[0] += 1
+    assert resolver.subject("urn:li:corpuser:bob")["groups"] == []        # degraded entry, briefly
+    clock[0] += AttributeResolver.DEGRADED_TTL_SECONDS
+    assert resolver.subject("urn:li:corpuser:bob")["groups"] == ["urn:li:corpGroup:data-stewards"]
+    calls = graph.calls
+    clock[0] += 30
+    resolver.subject("urn:li:corpuser:bob")
+    assert graph.calls == calls                                            # a clean load keeps the full TTL

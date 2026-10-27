@@ -65,6 +65,30 @@ METADATA_PRIVILEGES = [
 ]
 POLICY_PREFIX = "urn:li:dataHubPolicy:cairn-service-"
 
+# User provisioning (SCIM) only: manages people and groups, nothing else. Kept apart from the
+# control-plane account so that account can never change group membership (and so its own access).
+PROVISIONER_USER = "urn:li:corpuser:cairn-provisioner"
+PROVISIONER_PLATFORM_PRIVILEGES = ["MANAGE_USERS_AND_GROUPS", "GENERATE_PERSONAL_ACCESS_TOKENS"]
+PROVISIONER_METADATA_PRIVILEGES = ["VIEW_ENTITY_PAGE", "GET_ENTITY_PRIVILEGE", "SEARCH_PRIVILEGE", "EDIT_ENTITY"]
+
+
+class Account:
+    def __init__(self, key: str, user: str, display: str, platform: list[str], metadata: list[str],
+                 resource_types: list[str] | None, ready_privilege: str, token_name: str):
+        self.key, self.user, self.display = key, user, display
+        self.platform, self.metadata, self.resource_types = platform, metadata, resource_types
+        self.ready_privilege = ready_privilege    # platformPrivileges field that shows the grant applies
+        self.token_name = token_name              # file name / Secret key
+        self.policy_prefix = f"urn:li:dataHubPolicy:{user.rsplit(':', 1)[-1]}-"
+
+
+SERVICE = Account("service", SERVICE_USER, "Cairn service", PLATFORM_PRIVILEGES, METADATA_PRIVILEGES, None,
+                  "manageIngestion", "core_token")
+PROVISIONER = Account("provisioner", PROVISIONER_USER, "Cairn provisioning", PROVISIONER_PLATFORM_PRIVILEGES,
+                      PROVISIONER_METADATA_PRIVILEGES, ["corpuser", "corpGroup"], "manageIdentities",
+                      "provisioner_token")
+ACCOUNTS = {a.key: a for a in (SERVICE, PROVISIONER)}
+
 DURATIONS_DAYS = {"ONE_DAY": 1, "ONE_WEEK": 7, "ONE_MONTH": 30, "THREE_MONTHS": 90, "SIX_MONTHS": 180}
 
 
@@ -100,7 +124,7 @@ def ingest(core_url: str, token: str, entity_type: str, urn: str, aspect_name: s
 MINT = """mutation($input: CreateAccessTokenInput!) {
   createAccessToken(input: $input) { accessToken metadata { id } } }"""
 REVOKE = "mutation($id: String!) { revokeAccessToken(tokenId: $id) }"
-ME = "{ me { corpUser { urn } platformPrivileges { manageIngestion manageGlossaries manageTags } } }"
+ME = "{ me { corpUser { urn } platformPrivileges { manageIngestion manageIdentities manageGlossaries manageTags } } }"
 
 
 def mint(core_url: str, token: str, actor: str, duration: str, name: str, description: str) -> tuple[str, str]:
@@ -161,8 +185,9 @@ class SecretStore:
 
     SA = "/var/run/secrets/kubernetes.io/serviceaccount"
 
-    def __init__(self, name: str, namespace: str | None = None):
+    def __init__(self, name: str, namespace: str | None = None, key: str = "core_token"):
         self.name = name
+        self.key = key
         self.api = os.environ.get("CAIRN_K8S_API") or (
             f"https://{os.environ['KUBERNETES_SERVICE_HOST']}:{os.environ.get('KUBERNETES_SERVICE_PORT', '443')}")
         token_file = os.environ.get("CAIRN_K8S_TOKEN_FILE", f"{self.SA}/token")
@@ -194,28 +219,36 @@ class SecretStore:
         import base64
 
         data = ((self._call("GET") or {}).get("data")) or {}
-        token = base64.b64decode(data["core_token"]).decode().strip() if data.get("core_token") else None
-        meta = json.loads(base64.b64decode(data["core_token.json"])) if data.get("core_token.json") else {}
+        k = self.key
+        token = base64.b64decode(data[k]).decode().strip() if data.get(k) else None
+        meta = json.loads(base64.b64decode(data[f"{k}.json"])) if data.get(f"{k}.json") else {}
         return token or None, meta
 
     def write(self, token: str, meta: dict) -> None:
         import base64
 
         b64 = lambda s: base64.b64encode(s.encode()).decode()  # noqa: E731
-        self._call("PATCH", {"data": {"core_token": b64(token), "core_token.json": b64(json.dumps(meta))}},
+        self._call("PATCH", {"data": {self.key: b64(token), f"{self.key}.json": b64(json.dumps(meta))}},
                    content_type="application/merge-patch+json")
 
     def __str__(self) -> str:
         return f"secret/{self.namespace}/{self.name}"
 
 
-def make_store(args) -> "FileStore | SecretStore":
-    return SecretStore(args.k8s_secret) if getattr(args, "k8s_secret", None) else FileStore(args.out)
+def make_store(args, account: Account = SERVICE) -> "FileStore | SecretStore":
+    if account is PROVISIONER and getattr(args, "k8s_provisioner_secret", None):
+        return SecretStore(args.k8s_provisioner_secret, key=account.token_name)
+    if getattr(args, "k8s_secret", None):
+        return SecretStore(args.k8s_secret, key=account.token_name)
+    if account is SERVICE:
+        return FileStore(args.out)
+    return FileStore(getattr(args, "provisioner_out", None)
+                     or os.path.join(os.path.dirname(args.out) or ".", account.token_name))
 
 
-def token_meta(token_id: str, duration: str, previous: list | None = None) -> dict:
+def token_meta(token_id: str, duration: str, previous: list | None = None, account: Account | None = None) -> dict:
     now = time.time()
-    return {"id": token_id, "actor": SERVICE_USER, "issued_at": now,
+    return {"id": token_id, "actor": (account or SERVICE).user, "issued_at": now,
             "expires_at": now + DURATIONS_DAYS[duration] * 86400, "retired": previous or []}
 
 
@@ -233,24 +266,30 @@ def admin_token(frontend_url: str, password: str) -> tuple[str, str]:
     return out["data"]["createAccessToken"]["accessToken"], out["data"]["createAccessToken"]["metadata"]["id"]
 
 
-def desired_policies() -> dict[str, dict]:
+def desired_policies(account: Account | None = None) -> dict[str, dict]:
     """The account's policies, keyed by a URN that hashes their content.
 
     The engine refuses edits to non-editable policies, so a changed privilege set is a new policy
     (new URN) and the old one is deleted; an unchanged one is left alone.
     """
+    account = account or SERVICE
     out = {}
-    for kind, privileges in (("PLATFORM", PLATFORM_PRIVILEGES), ("METADATA", METADATA_PRIVILEGES)):
+    for kind, privileges in (("PLATFORM", account.platform), ("METADATA", account.metadata)):
         policy = {
-            "displayName": f"Cairn service: {kind.lower()}", "type": kind, "state": "ACTIVE", "editable": False,
-            "description": "Least-privilege grant for the Cairn control plane. Managed by Cairn.",
+            "displayName": f"{account.display}: {kind.lower()}", "type": kind, "state": "ACTIVE", "editable": False,
+            "description": f"Least-privilege grant for {account.user.rsplit(':', 1)[-1]}. Managed by Cairn.",
             "privileges": sorted(privileges),
-            "actors": {"users": [SERVICE_USER], "allUsers": False, "allGroups": False, "resourceOwners": False},
+            "actors": {"users": [account.user], "allUsers": False, "allGroups": False, "resourceOwners": False},
         }
+        if account is SERVICE:   # unchanged wording: existing installs keep their policy URNs
+            policy["displayName"] = f"Cairn service: {kind.lower()}"
+            policy["description"] = "Least-privilege grant for the Cairn control plane. Managed by Cairn."
         if kind == "METADATA":
-            policy["resources"] = {"allResources": True}
+            policy["resources"] = {"allResources": True} if not account.resource_types else {
+                "allResources": False, "filter": {"criteria": [
+                    {"field": "TYPE", "values": account.resource_types, "condition": "EQUALS"}]}}
         digest = hashlib.sha256(json.dumps(policy, sort_keys=True).encode()).hexdigest()[:10]
-        out[f"{POLICY_PREFIX}{kind.lower()}-{digest}"] = policy
+        out[f"{account.policy_prefix}{kind.lower()}-{digest}"] = policy
     return out
 
 
@@ -258,22 +297,24 @@ LIST_POLICIES = """query($start: Int!) { listPolicies(input: { start: $start, co
   total policies { urn } } }"""
 
 
-def existing_policies(core_url: str, token: str) -> set[str]:
+def existing_policies(core_url: str, token: str, prefix: str = POLICY_PREFIX) -> set[str]:
     found, start = set(), 0
     while True:
         page = gql(core_url, token, LIST_POLICIES, {"start": start})["listPolicies"]
-        found |= {p["urn"] for p in page["policies"] if p["urn"].startswith(POLICY_PREFIX)}
+        found |= {p["urn"] for p in page["policies"] if p["urn"].startswith(prefix)}
         start += 100
         if start >= page["total"]:
             return found
 
 
-def ensure_service_account(core_url: str, token: str) -> None:
-    ingest(core_url, token, "corpuser", SERVICE_USER, "corpUserInfo", {
-        "active": True, "displayName": "Cairn service", "title": "Service account",
-        "email": "cairn-service@localhost", "system": True})
-    desired = desired_policies()
-    present = existing_policies(core_url, token)
+def ensure_service_account(core_url: str, token: str, account: Account | None = None) -> None:
+    account = account or SERVICE
+    name = account.user.rsplit(":", 1)[-1]
+    ingest(core_url, token, "corpuser", account.user, "corpUserInfo", {
+        "active": True, "displayName": account.display, "title": "Service account",
+        "email": f"{name}@localhost", "system": True})
+    desired = desired_policies(account)
+    present = existing_policies(core_url, token, account.policy_prefix)
     now = int(time.time() * 1000)
     for urn, policy in desired.items():          # create first: never a moment without the grant
         if urn not in present:
@@ -284,40 +325,43 @@ def ensure_service_account(core_url: str, token: str) -> None:
         log(f"deleted superseded policy {urn}")
 
 
-def wait_effective(core_url: str, token: str, timeout: float = 300) -> None:
+def wait_effective(core_url: str, token: str, timeout: float = 300, account: Account | None = None) -> None:
     """Policies reach the authorizer through a periodic cache refresh; wait until they apply."""
+    account = account or SERVICE
     deadline = time.time() + timeout
     while time.time() < deadline:
         me = whoami(core_url, token)
-        if me and me["corpUser"]["urn"] == SERVICE_USER and me["platformPrivileges"]["manageIngestion"]:
+        if me and me["corpUser"]["urn"] == account.user and me["platformPrivileges"][account.ready_privilege]:
             return
         time.sleep(5)
     raise RuntimeError("service account policies did not take effect in time")
 
 
-def bootstrap(args) -> None:
-    store = make_store(args)
+def bootstrap(args, account: Account | None = None) -> None:
+    account = account or SERVICE
+    name = account.user.rsplit(":", 1)[-1]
+    store = make_store(args, account)
     token, meta = store.read()
-    if token and meta.get("actor") == SERVICE_USER and meta.get("expires_at", 0) - time.time() > 2 * 86400:
+    if token and meta.get("actor") == account.user and meta.get("expires_at", 0) - time.time() > 2 * 86400:
         me = whoami(args.core_url, token)
-        if me and me["corpUser"]["urn"] == SERVICE_USER:
-            log(f"existing service token in {store} is valid; nothing to do")
+        if me and me["corpUser"]["urn"] == account.user:
+            log(f"existing {name} token in {store} is valid; nothing to do")
             return
     if not args.password:
         raise SystemExit("CAIRN_ADMIN_PASSWORD (or --password) is required to bootstrap the service account")
     admin, admin_id = admin_token(args.frontend_url, args.password)
     seed_id = None
     try:
-        ensure_service_account(args.core_url, admin)
+        ensure_service_account(args.core_url, admin, account)
         # A short-lived seed token lets the account mint its own long-lived token: tokens are owned by
         # whoever mints them, and only owned tokens can later be revoked by the keeper.
-        seed, seed_id = mint(args.core_url, admin, SERVICE_USER, "ONE_DAY", "cairn-service seed",
+        seed, seed_id = mint(args.core_url, admin, account.user, "ONE_DAY", f"{name} seed",
                              "Bootstrap seed (revoked immediately)")
-        wait_effective(args.core_url, seed)
-        new, new_id = mint(args.core_url, seed, SERVICE_USER, args.duration, f"cairn-service {time.strftime('%Y-%m-%d')}",
-                           "Cairn control plane (rotated automatically)")
-        store.write(new, token_meta(new_id, args.duration))
-        log(f"service token for {SERVICE_USER} written to {store}")
+        wait_effective(args.core_url, seed, account=account)
+        new, new_id = mint(args.core_url, seed, account.user, args.duration, f"{name} {time.strftime('%Y-%m-%d')}",
+                           f"{account.display} (rotated automatically)")
+        store.write(new, token_meta(new_id, args.duration, account=account))
+        log(f"service token for {account.user} written to {store}")
     finally:
         for tid in filter(None, (seed_id, admin_id)):
             try:
@@ -327,13 +371,15 @@ def bootstrap(args) -> None:
 
 
 # ---------------------------------------------------------------------------------------- keeper
-def rotate_once(args, now: float | None = None) -> bool:
+def rotate_once(args, now: float | None = None, account: Account | None = None) -> bool:
     """Rotate when due; revoke retired tokens past their grace period. Returns True if rotated."""
+    account = account or SERVICE
+    name = account.user.rsplit(":", 1)[-1]
     now = now or time.time()
-    store = make_store(args)
+    store = make_store(args, account)
     token, meta = store.read()
-    if not token or meta.get("actor") != SERVICE_USER:
-        log("no service token yet; waiting for bootstrap")
+    if not token or meta.get("actor") != account.user:
+        log(f"no {name} token yet; waiting for bootstrap")
         return False
     retired = meta.get("retired", [])
     keep = []
@@ -353,12 +399,12 @@ def rotate_once(args, now: float | None = None) -> bool:
             keep.append(r)
     rotated = False
     if now - meta.get("issued_at", 0) >= args.rotate_days * 86400:
-        new, new_id = mint(args.core_url, token, SERVICE_USER, args.duration,
-                           f"cairn-service {time.strftime('%Y-%m-%d')}", "Cairn control plane (rotated automatically)")
+        new, new_id = mint(args.core_url, token, account.user, args.duration,
+                           f"{name} {time.strftime('%Y-%m-%d')}", f"{account.display} (rotated automatically)")
         keep.append({"id": meta["id"], "retired_at": now})
-        meta = token_meta(new_id, args.duration, keep)
+        meta = token_meta(new_id, args.duration, keep, account)
         store.write(new, meta)
-        log(f"rotated service token; previous one is revoked in {args.grace_minutes} min")
+        log(f"rotated {name} token; previous one is revoked in {args.grace_minutes} min")
         rotated = True
     elif keep != retired:
         meta["retired"] = keep
@@ -366,14 +412,27 @@ def rotate_once(args, now: float | None = None) -> bool:
     return rotated
 
 
+def _secret(name: str) -> str | None:
+    """``NAME`` or the content of the file named by ``NAME_FILE`` (Docker/Kubernetes secrets)."""
+    path = os.environ.get(f"{name}_FILE")
+    if path:
+        with open(path) as f:
+            return f.read().rstrip("\r\n")
+    return os.environ.get(name)
+
+
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--frontend-url", default=os.environ.get("CAIRN_FRONTEND_URL", "http://cairn-web:9002"))
     p.add_argument("--core-url", default=os.environ.get("CAIRN_CORE_URL", "http://cairn-core:8080"))
-    p.add_argument("--password", default=os.environ.get("CAIRN_ADMIN_PASSWORD"))
+    p.add_argument("--password", default=_secret("CAIRN_ADMIN_PASSWORD"))
     p.add_argument("--out", default="/run/cairn/core_token")
+    p.add_argument("--provisioner-out", default=os.environ.get("CAIRN_PROVISIONER_TOKEN_OUT"),
+                   help="where the provisioning (SCIM) account's token goes (default: next to --out)")
     p.add_argument("--k8s-secret", default=os.environ.get("CAIRN_TOKEN_SECRET"),
                    help="store the token in this Kubernetes Secret instead of --out")
+    p.add_argument("--k8s-provisioner-secret", default=os.environ.get("CAIRN_PROVISIONER_TOKEN_SECRET"),
+                   help="Kubernetes Secret for the provisioning account's token (default: --k8s-secret)")
     p.add_argument("--duration", default=os.environ.get("CAIRN_CORE_TOKEN_DURATION", "ONE_MONTH"),
                    choices=sorted(DURATIONS_DAYS))
     p.add_argument("--keep", action="store_true", help="run as the rotation keeper")
@@ -384,28 +443,37 @@ def main() -> int:
     p.add_argument("--grace-minutes", type=float, default=float(os.environ.get("CAIRN_TOKEN_GRACE_MINUTES", "15")))
     p.add_argument("--check-minutes", type=float, default=float(os.environ.get("CAIRN_TOKEN_CHECK_MINUTES", "30")))
     p.add_argument("--retries", type=int, default=int(os.environ.get("CAIRN_BOOTSTRAP_RETRIES", "60")))
+    p.add_argument("--accounts", default=os.environ.get("CAIRN_TOKEN_ACCOUNTS", "service,provisioner"),
+                   help="comma-separated: service (control plane), provisioner (SCIM)")
     args = p.parse_args()
+    try:
+        accounts = [ACCOUNTS[a.strip()] for a in args.accounts.split(",") if a.strip()]
+    except KeyError as e:
+        p.error(f"unknown account {e}; choose from {', '.join(ACCOUNTS)}")
     if args.rotate_days >= DURATIONS_DAYS[args.duration]:
         p.error("--rotate-days must be shorter than the token lifetime (--duration)")
 
     if args.print_admin_token:
         print(admin_token(args.frontend_url, args.password)[0])
         return 0
-    if args.keep and args.once:
-        rotate_once(args)
-        return 0
     if args.keep:
         while True:
-            try:
-                rotate_once(args)
-            except Exception as e:  # noqa: BLE001 - keep running; next cycle retries
-                log(f"rotation check failed: {e}")
+            for account in accounts:
+                try:
+                    rotate_once(args, account=account)
+                except Exception as e:  # noqa: BLE001 - keep running; next cycle retries
+                    log(f"rotation check for {account.key} failed: {e}")
+            if args.once:
+                return 0
             time.sleep(args.check_minutes * 60)
 
     last_err: Exception | None = None
+    pending = list(accounts)
     for attempt in range(1, args.retries + 1):
         try:
-            bootstrap(args)
+            while pending:
+                bootstrap(args, pending[0])
+                pending.pop(0)
             return 0
         except SystemExit:
             raise
