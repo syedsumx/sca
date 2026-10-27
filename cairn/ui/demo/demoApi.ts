@@ -516,7 +516,8 @@ const on = (method: string, pattern: string, h: Handler) =>
 
 on('GET', '/ui/config', () => ({
     actor: ME, user: { urn: ME, display_name: PEOPLE[ME] },
-    personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true,
+    personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true, can_manage_agents: true,
+    gateway_url: 'https://cairn-gateway.northwind.example',
     features: { assistant: true, assistant_llm: true, marketplace: true, context: true, semantic_search: true, slack: true, teams: false, email: false, embeds: true, masking_proxy: true },
     slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
 }));
@@ -742,6 +743,89 @@ class HttpError extends Error {
         super(message);
     }
 }
+
+// ------------------------------------------------------------------------------- semantic search
+const SYNONYMS: Record<string, string[]> = {
+    money: ['revenue', 'amount', 'spend'], earn: ['revenue'], made: ['revenue'], sales: ['revenue', 'order'],
+    buyer: ['customer'], client: ['customer'], people: ['customer'], email: ['email'], contact: ['email', 'phone'],
+    stock: ['inventory'], warehouse: ['inventory', 'shipment'], delivery: ['shipment'], parcel: ['shipment'],
+    ad: ['campaign'], advertising: ['campaign', 'spend'], bill: ['invoice'], daily: ['day'], each: [],
+};
+const stem = (w: string) => (w.length > 4 && w.endsWith('ies') ? `${w.slice(0, -3)}y` : w.length > 3 && w.endsWith('s') && !w.endsWith('ss') ? w.slice(0, -1) : w);
+const words = (t: string) => t.toLowerCase().replace(/([a-z])([A-Z])/g, '$1 $2').split(/[^a-z0-9]+/).filter((w) => w.length > 2).map(stem);
+const docOf = (a: Asset) => words(`${a.name} ${a.description} ${(a.columns ?? []).map((c) => c.fieldPath).join(' ')}`);
+function semanticHits(query: string, exclude: string[], limit: number, skip?: string) {
+    const terms = words(query).filter((w) => !['show', 'what', 'which', 'where', 'table', 'data', 'the', 'per'].includes(w));
+    return ASSETS.filter((a) => a.urn !== skip && !exclude.includes(a.urn)).map((a) => {
+        const doc = new Set(docOf(a));
+        const matched = terms.filter((w) => doc.has(w) || (SYNONYMS[w] ?? []).some((x) => doc.has(x)));
+        return { a, matched, score: terms.length ? matched.length / terms.length : 0 };
+    }).filter((h) => h.score > 0).sort((x, y) => y.score - x.score).slice(0, limit).map(({ a, matched, score }) => ({
+        urn: a.urn, name: a.name, type: a.type.toLowerCase(), platform: a.platform, description: a.description,
+        score: Math.round((0.35 + score * 0.5) * 1000) / 1000, matched,
+    }));
+}
+on('POST', '/ai/search/semantic', (b) => ({ results: semanticHits(b.query, b.exclude ?? [], b.limit ?? 5) }));
+on('GET', '/ai/similar', (_b, q) => {
+    const a = ASSETS.find((x) => x.urn === q.get('urn'));
+    return { urn: q.get('urn'), results: a ? semanticHits(docOf(a).join(' '), [], Number(q.get('limit') ?? 5), a.urn) : [] };
+});
+
+// ------------------------------------------------------------------------------- remote agents
+const agentState = {
+    pools: [
+        { name: 'finance-vpc', description: 'Billing and ERP databases in the finance VPC', allowed_platforms: ['postgres'], max_concurrency: 2, agents_online: 1 },
+        { name: 'plant-floor', description: 'On-premises warehouse systems', allowed_platforms: ['postgres', 'mysql'], max_concurrency: 1, agents_online: 0 },
+    ],
+    agents: [
+        { agent_id: 'agt_7f3a91c2d4e5b6a7', pool: 'finance-vpc', hostname: 'ingest-01.finance.internal', version: '0.1.0', status: 'ONLINE', last_heartbeat: iso(12_000), enrolled_at: iso(9 * DAY), running_tasks: 1 },
+        { agent_id: 'agt_19c0de44aa21f003', pool: 'plant-floor', hostname: 'wms-gw.plant.local', version: '0.1.0', status: 'OFFLINE', last_heartbeat: iso(2 * DAY), enrolled_at: iso(30 * DAY), running_tasks: 0 },
+    ],
+    runs: [
+        { run_id: 'run_a1b2c3d4e5f60718', task_id: 'task_running_billing', pool: 'finance-vpc', agent_id: 'agt_7f3a91c2d4e5b6a7', status: 'RUNNING', attempts: 1, started_at: iso(95_000), finished_at: null, mcps_forwarded: 214, mcps_rejected: 0, execution_request_urn: null },
+        { run_id: 'run_0f9e8d7c6b5a4932', task_id: 'task_nightly_erp', pool: 'finance-vpc', agent_id: 'agt_7f3a91c2d4e5b6a7', status: 'SUCCESS', attempts: 1, started_at: iso(DAY), finished_at: iso(DAY - 240_000), mcps_forwarded: 1873, mcps_rejected: 3, execution_request_urn: null },
+        { run_id: null, task_id: 'task_queued_wms', pool: 'plant-floor', agent_id: null, status: 'QUEUED', attempts: 0, started_at: null, finished_at: null, mcps_forwarded: 0, mcps_rejected: 0, execution_request_urn: null },
+    ] as Json[],
+    logs: {
+        task_running_billing: ['--- attempt 1 on ingest-01.finance.internal (agt_7f3a91c2d4e5b6a7), run run_a1b2c3d4e5f60718 ---',
+            'run run_a1b2c3d4e5f60718 started on the agent (postgres source)',
+            'INFO ingestion.source.postgres connecting to billing-db:5432 as catalog_reader with password ***',
+            'INFO ingestion.source.postgres found 3 schemas, 41 tables'],
+        task_nightly_erp: ['--- attempt 1 on ingest-01.finance.internal (agt_7f3a91c2d4e5b6a7), run run_0f9e8d7c6b5a4932 ---',
+            'run run_0f9e8d7c6b5a4932 started on the agent (postgres source)',
+            'INFO ingestion.source.postgres read 112 tables, 1,873 metadata changes',
+            'run run_0f9e8d7c6b5a4932 finished: SUCCESS (1873 metadata changes sent)'],
+        task_queued_wms: [],
+    } as Record<string, string[]>,
+};
+let tick = 0;
+on('GET', '/agents/pools', () => agentState.pools);
+on('POST', '/agents/pools', (b) => { const p = { ...b, agents_online: 0 }; agentState.pools.push(p); return p; });
+on('GET', '/agents', () => agentState.agents);
+on('GET', '/agents/runs', () => agentState.runs);
+on('POST', '/agents/pools/:id/enrollment-tokens', () => ({ token: `cairn_enr_demo${Math.random().toString(36).slice(2, 14)}`, expires_at: iso(-3600_000) }));
+on('POST', '/agents/:id/revoke', (_b, _q, [aid]) => { const a = agentState.agents.find((x) => x.agent_id === aid); if (a) a.status = 'REVOKED'; });
+on('POST', '/agents/tasks/:id/cancel', (_b, _q, [tid]) => {
+    const r = agentState.runs.find((x) => x.task_id === tid);
+    if (!r) throw new HttpError(404, 'task not found');
+    if (!['QUEUED', 'LEASED', 'RUNNING'].includes(r.status)) throw new HttpError(409, `task already finished (${r.status})`);
+    const was = r.status; r.status = 'CANCELLED'; r.finished_at = new Date().toISOString();
+    agentState.logs[tid].push(`--- cancelled by ${ME} ---`);
+    if (was === 'RUNNING') agentState.logs[tid].push(`run ${r.run_id} finished: CANCELLED (${r.mcps_forwarded} metadata changes sent)`);
+    return { task_id: tid, status: 'CANCELLED', was };
+});
+on('GET', '/agents/tasks/:id/logs', (_b, q, [tid]) => {
+    const r = agentState.runs.find((x) => x.task_id === tid);
+    const lines = agentState.logs[tid] ?? [];
+    if (r?.status === 'RUNNING' && lines.length < 12) {      // a live run keeps writing
+        tick += 1;
+        lines.push(`INFO ingestion.source.postgres extracted table billing.public.${['invoices', 'payments', 'credit_notes', 'tax_rates', 'ledger'][tick % 5]}`);
+        r.mcps_forwarded = Number(r.mcps_forwarded) + 37;
+    }
+    const after = Math.min(Number(q.get('after') ?? 0), lines.length);
+    return { task_id: tid, run_id: r?.run_id ?? null, status: r?.status ?? 'QUEUED', lines: lines.slice(after), next: lines.length,
+        done: ['SUCCESS', 'FAILURE', 'CANCELLED'].includes(String(r?.status)) };
+});
 
 const json = (value: unknown, status = 200) =>
     new Response(value === undefined ? '' : JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
