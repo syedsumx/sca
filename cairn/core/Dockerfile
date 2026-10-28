@@ -78,7 +78,6 @@ ENV DATAHUB_TELEMETRY_ENABLED=false \
     ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.yml \
     ENTITY_SERVICE_ENABLE_RETENTION=true \
     ENTITY_VERSIONING_ENABLED=true \
-    EBEAN_DATASOURCE_DRIVER=com.mysql.jdbc.Driver \
     ELASTICSEARCH_PORT=9200 \
     ELASTICSEARCH_USE_SSL=false \
     ELASTICSEARCH_IMPLEMENTATION=opensearch \
@@ -164,7 +163,6 @@ COPY core/rootfs/etc/cairn/env.d/00-common.map /etc/cairn/env.d/
 COPY core/rootfs/etc/cairn/init.d/10-db-url.sh core/rootfs/etc/cairn/init.d/15-schema-registry.sh /etc/cairn/init.d/
 ENV ENTITY_REGISTRY_CONFIG_PATH=/datahub/datahub-gms/resources/entity-registry.yml \
     ENTITY_VERSIONING_ENABLED=true \
-    EBEAN_DATASOURCE_DRIVER=com.mysql.jdbc.Driver \
     ELASTICSEARCH_PORT=9200 \
     ELASTICSEARCH_USE_SSL=false \
     ELASTICSEARCH_IMPLEMENTATION=opensearch \

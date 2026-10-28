@@ -53,8 +53,9 @@ def test_secrets_and_db_url_are_mapped(tmp_path):
 
 
 def test_catalog_can_live_in_postgres(tmp_path):
+    # The image bakes the MySQL driver; the type must win over it.
     env = run(tmp_path, {"CAIRN_DB_TYPE": "postgres", "CAIRN_DB_HOST": "cairn-postgres:5432",
-                         "CAIRN_DB_USER": "cairn"})
+                         "CAIRN_DB_USER": "cairn", "EBEAN_DATASOURCE_DRIVER": "com.mysql.jdbc.Driver"})
     assert env["EBEAN_DATASOURCE_URL"] == "jdbc:postgresql://cairn-postgres:5432/cairn_catalog?sslmode=prefer"
     assert env["EBEAN_DATASOURCE_DRIVER"] == "org.postgresql.Driver"
     assert env["EBEAN_DATASOURCE_HOST"] == "cairn-postgres:5432" and env["EBEAN_DATASOURCE_USERNAME"] == "cairn"
