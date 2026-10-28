@@ -82,8 +82,8 @@ def build_router(services, current_principal) -> APIRouter:
 
     @router.post("/docs/generate", status_code=201)
     def generate_docs(req: DocRequest, p: Principal = Depends(current_principal)):
-        if services.docgen is None:
-            raise HTTPException(503, "documentation generation not configured")
+        if services.docgen is None or services.docgen.llm is None:
+            raise HTTPException(503, "documentation generation not configured (no LLM provider)")
         services.authorize(p, "EDIT_ENTITY_DOCS", req.dataset_urn)
         services.ai_actor(p)
         try:

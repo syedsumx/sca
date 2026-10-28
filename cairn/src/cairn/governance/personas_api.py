@@ -64,7 +64,8 @@ def build_router(personas: PersonaEngine, current_principal, authorize, graph=No
         if not personas.delete_persona(pid, p.urn):
             raise HTTPException(404, "persona not found")
 
-    @router.api_route("/personas/{pid}/preview", methods=["GET", "POST"])
+    @router.get("/personas/{pid}/preview", operation_id="preview_persona")
+    @router.post("/personas/{pid}/preview", operation_id="preview_persona_post")
     def preview(pid: str, _p: Principal = Depends(admin)):
         try:
             return personas.preview(pid, graph)

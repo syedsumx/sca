@@ -45,7 +45,8 @@ sql_id() { echo "${id//-/_}"; }
 
 helm_args() {
     local db; db=$(sql_id)
-    echo --namespace "$(ns)" -f "$CHART/values.yaml" -f "$CHART/values-tenant.yaml" "${values[@]}" \
+    echo --namespace "$(ns)" -f "$CHART/values.yaml" -f "$CHART/values-ha.yaml" -f "$CHART/values-tenant.yaml" \
+        "${values[@]}" \
         --set "core.database.host=$CAIRN_PG_HOST" --set "core.database.name=cairn_catalog_$db" \
         --set "core.database.user=cairn_$db" \
         --set "core.search.host=$CAIRN_SEARCH_HOST" --set "core.search.indexPrefix=${db}_" \

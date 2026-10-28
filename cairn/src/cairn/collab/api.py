@@ -144,7 +144,8 @@ def build_router(collab: CollabService, current_principal, authorize, can_view,
         _view(p, t["entity_urn"])
         return collab.set_status(p.urn, thread_id, "RESOLVED" if action == "resolve" else "OPEN")
 
-    @router.api_route("/comments/{comment_id}/reactions", methods=["POST", "DELETE"])
+    @router.post("/comments/{comment_id}/reactions", operation_id="add_comment_reaction")
+    @router.delete("/comments/{comment_id}/reactions", operation_id="remove_comment_reaction")
     def react(comment_id: str, body: ReactionIn, request: Request, p: Principal = Depends(current_principal)):
         entity = collab.thread_author_of_comment(comment_id)
         if entity is None:

@@ -77,8 +77,14 @@ async def run(api: str, token: str, users: int, duration: float, only: list[str]
     headers = {"Authorization": f"Bearer {token}"}
     limits = httpx.Limits(max_connections=users * 2, max_keepalive_connections=users * 2)
     async with httpx.AsyncClient(base_url=api.rstrip("/"), headers=headers, timeout=30, limits=limits) as c:
-        me = (await c.get("/me")).json()["urn"]
-        urns = [a["urn"] for a in (await c.get("/reports/assets", params={"limit": 200})).json()] or []
+        async def setup_get(path: str, **kw):
+            r = await c.get(path, **kw)
+            if r.status_code != 200:
+                raise SystemExit(f"GET {path}: {r.status_code} {r.text[:200]} (the token needs admin rights)")
+            return r.json()
+
+        me = (await setup_get("/me"))["urn"]
+        urns = [a["urn"] for a in await setup_get("/reports/assets", params={"limit": 200})] or []
         if not urns:
             raise SystemExit("no datasets visible to this token: seed the catalog first")
         ctx = {"me": me, "urns": urns}

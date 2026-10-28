@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cairn.common.audit import AuditLog
 from cairn.common.security import Principal
@@ -36,8 +36,14 @@ class SimulateRequest(BaseModel):
     environment: dict[str, Any] = Field(default_factory=dict)
 
 
+class ClassifyField(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    fieldPath: str = Field(min_length=1)
+    nativeDataType: Optional[str] = None
+
+
 class ClassifyRequest(BaseModel):
-    fields: list[dict[str, Any]] = Field(description="[{fieldPath, nativeDataType?}]")
+    fields: list[ClassifyField]
     samples: dict[str, list[str]] = Field(default_factory=dict)
     auto_apply_threshold: float = 0.9
     suggest_threshold: float = 0.6
@@ -113,7 +119,8 @@ def build_router(
     # ---- PII -----------------------------------------------------------------------
     @router.post("/pii/classify")
     def classify(req: ClassifyRequest, p: Principal = Depends(current_principal)):
-        results = classify_schema(req.fields, req.samples, req.auto_apply_threshold, req.suggest_threshold)
+        results = classify_schema([f.model_dump() for f in req.fields], req.samples, req.auto_apply_threshold,
+                                  req.suggest_threshold)
         return {"classifications": [r.as_dict() for r in results]}
 
     @router.post("/pii/propagation/plan")

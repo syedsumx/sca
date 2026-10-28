@@ -103,13 +103,18 @@ jobs:
             | tar -xz -C /usr/local/bin kubeconform
       - name: Lint and validate every values profile
         run: |
+          set -o pipefail   # a chart that fails to render must fail the step, not validate nothing
           helm lint helm/cairn helm/cairn-remote-agent
-          for values in "" "-f helm/cairn/values-active-metadata.yaml" "-f helm/cairn/values-authoritative.yaml"; do
+          for values in "" "-f helm/cairn/values-active-metadata.yaml" "-f helm/cairn/values-authoritative.yaml" \
+              "-f helm/cairn/values-ha.yaml" "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml" \
+              "--set core.database.type=postgres" \
+              "--set cairn.metadataExport.enabled=true --set cairn.metadataExport.destination=s3://bucket/cairn" \
+              "--set cairn.serviceMonitor.enabled=true --set cairn.prometheusRule.enabled=true --set cairn.grafanaDashboard.enabled=true"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
-          helm template agent helm/cairn-remote-agent \
+          helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
 
   # Builds every image, starts the full stack and runs the live suites against it. One job, because
