@@ -145,6 +145,8 @@ class NotificationHub:
         self.domains_of = domains_of or (lambda urn: [])
         self.action_handlers: dict[str, ActionHandler] = {}
         self.channels: dict[str, Any] = {}   # channel name → sender (see channels.py)
+        # Routes owned by something else (installed extensions); not editable through the routes API.
+        self.route_providers: list[Callable[[], list[Route]]] = []
 
     # ---- configuration --------------------------------------------------------------
     def register_action(self, kind: str, handler: ActionHandler) -> None:
@@ -233,7 +235,7 @@ class NotificationHub:
                 rows.append(dict(recipient=r, channel=ch, target=target,
                                  status="SENT" if ch == "in_app" else "PENDING"))
         domains = set(self.domains_of(event.entity_urn)) if event.entity_urn else set()
-        for route in self.list_routes():
+        for route in [*self.list_routes(), *(r for provide in self.route_providers for r in provide())]:
             if route.event_types and event.type not in route.event_types:
                 continue
             if route.domains and not domains & set(route.domains):

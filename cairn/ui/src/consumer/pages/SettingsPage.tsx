@@ -5,6 +5,7 @@ import { AgentFleet } from '../../agents/AgentFleet';
 import { CairnClientProvider } from '../../api/hooks';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
+import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
@@ -249,7 +250,10 @@ export function SettingsPage() {
                         ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
                         : []),
                     ...(session.config?.is_admin
-                        ? [{ key: 'licence', label: 'Licence', children: <LicenceSettings /> }]
+                        ? [
+                              { key: 'extensions', label: 'Extensions', children: <ExtensionsAdmin /> },
+                              { key: 'licence', label: 'Licence', children: <LicenceSettings /> },
+                          ]
                         : []),
                 ]}
             />

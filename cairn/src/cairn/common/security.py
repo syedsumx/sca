@@ -32,7 +32,7 @@ _ME_QUERY = "query { me { corpUser { urn username } } }"
 @dataclass(frozen=True)
 class Principal:
     urn: str
-    via: str  # service | token | session | dev
+    via: str  # service | token | session | dev | extension
     groups: tuple[str, ...] = field(default_factory=tuple)
 
     @property
@@ -64,6 +64,8 @@ class IdentityResolver:
         self._me_lookup = me_lookup or self._graphql_me
         self._cache: dict[str, tuple[float, Principal]] = {}
         self._lock = threading.Lock()
+        # Extension tokens (cx_…): token -> the extension's actor, or None (set by the services).
+        self.extension_lookup: Optional[Callable[[str], Optional[str]]] = None
 
     def resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
@@ -71,6 +73,11 @@ class IdentityResolver:
             token = auth[7:].strip()
             if self.service_token and hmac.compare_digest(token, self.service_token):
                 return Principal(SERVICE_PRINCIPAL, "service")
+            if token.startswith("cx_") and self.extension_lookup is not None:
+                actor = self.extension_lookup(token)
+                if actor is None:
+                    raise AuthenticationError("unknown or disabled extension token")
+                return Principal(actor, "extension")
             return self._cached(
                 "t:" + token,
                 lambda: self._lookup_or_fail(

@@ -23,6 +23,7 @@ const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const ExtensionsPage = React.lazy(() => import('./components/Extensions').then((m) => ({ default: m.ExtensionsPage })));
 
 export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; exact?: boolean }[] = [
     { path: '/discover', component: DiscoverPage, exact: true },
@@ -36,6 +37,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/governance', component: GovernanceStudioPage, exact: true },
     { path: '/reports', component: ReportsPage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
+    { path: '/extensions', component: ExtensionsPage, exact: true },
 ];
 
 class ErrorBoundary extends React.Component<{ children?: React.ReactNode }, { error: Error | null }> {

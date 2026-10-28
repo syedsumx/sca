@@ -41,7 +41,8 @@ def _principal_dependency(services: Services):
         if services.licence is not None:
             route = getattr(request.scope.get("route"), "path", request.url.path)
             try:
-                services.licence.check(principal.urn, principal.is_service, request.method, route)
+                services.licence.check(principal.urn, principal.is_service or principal.via == "extension",
+                                       request.method, route)
             except LicenceRefused as e:
                 raise HTTPException(402, str(e))
         return principal
@@ -126,6 +127,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                            f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate)
         app.include_router(scim_router(scim))
         install_error_handler(app)
+    if services.extensions is not None:
+        from cairn.extensions.api import build_router as extensions_router
+
+        app.include_router(extensions_router(services.extensions, cp, authz))
     if services.licence is not None:
         from cairn.common.licence_api import build_router as licence_router
 

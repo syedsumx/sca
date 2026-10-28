@@ -88,6 +88,7 @@ class Services:
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
     licence: Optional[Any] = None
+    extensions: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
     _product_assets_cache: dict = field(default_factory=dict)
@@ -97,6 +98,13 @@ class Services:
                   raise_on_deny: bool = True) -> bool:
         if principal.is_service:
             return True
+        if principal.via == "extension":
+            # Exactly the manifest's permissions on its scope; the policy engine is not consulted.
+            allowed = self.extensions is not None and self.extensions.allows(principal.urn, privilege, resource_urn)
+            if not allowed and raise_on_deny:
+                raise Forbidden(f"{privilege} is not among this extension's permissions"
+                                + (f" for {resource_urn}" if resource_urn else ""))
+            return allowed
         resource = None
         if resource_urn:
             resource = ResourceRef(type=resource_urn.split(":", 3)[2] if resource_urn.startswith("urn:li:")
@@ -118,6 +126,8 @@ class Services:
         """True only for an explicit DENY (strict denies such as purposes); NOT_APPLICABLE is not a deny."""
         if principal.is_service:
             return False
+        if principal.via == "extension":
+            return not self.authorize(principal, privilege, resource_urn, raise_on_deny=False)
         resource = ResourceRef(type=resource_urn.split(":", 3)[2], urn=resource_urn) \
             if resource_urn and resource_urn.startswith("urn:li:") else None
         return self.pdp.decide(AuthorizeRequest(actor=principal.urn, privilege=privilege, resource=resource,
@@ -422,6 +432,10 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     from cairn.common.licence import from_env as licence_from_env
 
     services.licence = licence_from_env(engine, audit)
+    from cairn.extensions.service import ExtensionService
+
+    services.extensions = ExtensionService(engine, attributes, audit)
+    identity.extension_lookup = services.extensions.actor_for_token
     from cairn.common.metrics import watch_licence
 
     watch_licence(services.licence)
@@ -473,7 +487,9 @@ def _build_active_metadata(s: Services) -> None:
         return out
 
     hub = NotificationHub(s.engine, cfg.public_url, cfg.action_link_secret, s.audit, followers, owners, domains_of)
-    hub.channels["webhook"] = WebhookSender()
+    hub.channels["webhook"] = WebhookSender(signing_secret=s.extensions.signing_secret_for_route if s.extensions else None)
+    if s.extensions is not None:
+        hub.route_providers.append(s.extensions.routes)
     hub.channels["teams"] = TeamsSender()
     from cairn.notify.ticketing import TicketingService
     s.ticketing = TicketingService(s.engine, hub, lambda email: actor_for_email(s.graph, email), audit=s.audit)

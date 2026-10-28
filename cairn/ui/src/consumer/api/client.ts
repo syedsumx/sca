@@ -11,11 +11,14 @@ import type {
     EmbedToken,
     EmbedTokenRequest,
     EnrichmentMap,
+    ExtensionInstallResult,
+    ExtensionSection,
     ExplainResponse,
     Facet,
     Finding,
     Follow,
     InboxItem,
+    InstalledExtension,
     LicenceState,
     MarkdownDocResponse,
     NotifySettings,
@@ -178,6 +181,33 @@ export class ConsumerClient extends CairnClient {
 
     getUiConfig(opts?: RequestOptions) {
         return this.request<UiConfig>('GET', '/ui/config', undefined, opts);
+    }
+
+    // --- extensions ------------------------------------------------------------------------
+
+    extensionSections(opts?: RequestOptions) {
+        return this.request<ExtensionSection[]>('GET', '/extensions/ui', undefined, opts);
+    }
+
+    listExtensions(opts?: RequestOptions) {
+        return this.request<InstalledExtension[]>('GET', '/admin/extensions', undefined, opts);
+    }
+
+    installExtension(manifest: string) {
+        return this.request<ExtensionInstallResult>('PUT', '/admin/extensions', manifest, {
+            contentType: 'application/yaml',
+        });
+    }
+
+    setExtensionEnabled(name: string, enabled: boolean) {
+        return this.request<InstalledExtension>(
+            'POST',
+            `/admin/extensions/${enc(name)}/${enabled ? 'enable' : 'disable'}`,
+        );
+    }
+
+    removeExtension(name: string) {
+        return this.request<void>('DELETE', `/admin/extensions/${enc(name)}`);
     }
 
     // --- licence ---------------------------------------------------------------------------

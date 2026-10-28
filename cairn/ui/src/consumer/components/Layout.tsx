@@ -9,6 +9,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { isHosted, navigateHost } from '../hostNav';
 import { useHotkeys } from '../utils/useHotkeys';
 import { AssistantSlideOver } from './Assistant';
+import { useExtensionSections } from './Extensions';
 import { LicenceBanner } from './Licence';
 import { focusRing, tokens } from './tokens';
 
@@ -60,6 +61,10 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     });
     useHotkeys({ 'mod+j': () => session.setAssistantOpen(!session.assistantOpen) });
     const unread = inbox.data?.length ?? 0;
+    const hasExtensions = useExtensionSections('workspace').length > 0;
+    const nav = hasExtensions
+        ? [...NAV.slice(0, -1), { to: '/extensions', label: 'Extensions' }, NAV[NAV.length - 1]]
+        : NAV;
     useLocation(); // re-render on navigation (hosted mode reads window.location)
     const hosted = typeof window !== 'undefined' && isHosted(window.location.pathname);
     // In the catalog shell, sections are shell navigation entries: switching moves the shell along.
@@ -71,7 +76,7 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
             <Bar>
                 <strong style={{ marginRight: 16, color: tokens.color.primary }}>Workspace</strong>
                 <nav aria-label="Workspace sections" style={{ display: 'flex', gap: 4, flex: 1 }}>
-                    {NAV.filter((n) => !n.feature || session.feature(n.feature)).map((n) => (
+                    {nav.filter((n) => !('feature' in n && n.feature) || session.feature(n.feature)).map((n) => (
                         <Tab key={n.to} to={n.to} onClick={onTab(n.to)}>
                             {n.badge ? (
                                 <Badge count={unread} size="small" offset={[8, -2]}>

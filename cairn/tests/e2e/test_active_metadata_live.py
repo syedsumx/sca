@@ -1434,3 +1434,89 @@ def test_32_licence_edition_seats_and_expiry(users):
     finally:
         assert root.delete("/admin/licence").json()["status"] == "evaluation"
     assert carol.put(f"/collab/bookmarks/{DS}").status_code == 200
+
+
+def test_33_extension_token_events_and_sections(users):
+    """An installed extension gets a token limited to its manifest, signed events its own service
+    accepts, and workspace sections; disabling it cuts all three."""
+    from pathlib import Path
+
+    root, bob = users["root"], users["bob"]
+    folder = Path(__file__).resolve().parents[2] / "examples/extensions/incident-log"
+    name = f"incident-log-{RUN}"
+    host = f"cairn-e2e-ext-{RUN}"
+    manifest = (folder / "cairn-extension.yaml").read_text() \
+        .replace("name: incident-log", f"name: {name}") \
+        .replace("http://incident-log:8098/events", f"http://{host}:8098/events") \
+        .replace("types: [quality.incident.raised, quality.incident.resolved, contract.broken, contract.restored]",
+                 "types: [subscription.update]")
+    assert bob.put("/admin/extensions", content=manifest).status_code == 403
+    out = root.put("/admin/extensions", content=manifest).json()
+    token, secret = out["token"], out["signing_secret"]
+    subprocess.run(["docker", "rm", "-f", host], capture_output=True)
+    subprocess.run(["docker", "run", "-d", "--name", host, "--network", "cairn_catalog", "-p", "127.0.0.1:8098:8098",
+                    "-e", "CAIRN_API_URL=http://cairn-api:8800", "-e", f"CAIRN_EXTENSION_TOKEN={token}",
+                    "-e", f"CAIRN_SIGNING_SECRET={secret}", "-v", f"{folder}:/app:ro", "python:3.12-slim",
+                    "python", "/app/app.py"], check=True, capture_output=True)
+    try:
+        ext = client(token)
+        assert ext.get("/me").json() == {"urn": out["actor"], "via": "extension"}
+        got = ext.post("/collab/enrich", json={"urns": [DS]})
+        assert got.status_code == 200 and DS in got.json(), got.text                # VIEW_ENTITY_PAGE: allowed
+        assert ext.get("/admin/extensions").status_code == 403
+        assert ext.post("/governance/tag-sync/x/sync", json={"dry_run": True}).status_code in (403, 404)
+
+        sections = bob.get("/extensions/ui").json()
+        mine = [s for s in sections if s["extension"] == name]
+        assert {s["placement"] for s in mine} == {"workspace", "asset"}, sections
+
+        eventually(lambda: httpx.get("http://127.0.0.1:8098/health", timeout=2).status_code == 200 or None, timeout=60)
+        assert root.post("/notify/test", json={"channel": "in_app"}).status_code == 200
+        delivered = eventually(lambda: [e for e in httpx.get("http://127.0.0.1:8098/events.json").json()
+                                        if e["type"] == "subscription.update"] or None, timeout=90)
+        assert delivered[0]["title"] == "Test notification"                          # signed: the example checked it
+        refused = httpx.post("http://127.0.0.1:8098/events", content=b'{"type":"forged"}')
+        assert refused.status_code == 401
+
+        assert root.post(f"/admin/extensions/{name}/disable").json()["enabled"] is False
+        assert client(token).get("/me").status_code == 401
+        assert not [s for s in bob.get("/extensions/ui").json() if s["extension"] == name]
+    finally:
+        root.delete(f"/admin/extensions/{name}")
+        subprocess.run(["docker", "rm", "-f", host], capture_output=True)
+
+
+def test_34_metadata_export_to_object_storage(users):
+    """The nightly export writes the catalog's tables to S3-compatible storage, readable as a
+    partitioned Parquet dataset with this run's assets, columns, owners, lineage and monitors."""
+    pafs = pytest.importorskip("pyarrow.fs")
+    pq = pytest.importorskip("pyarrow.parquet")
+    minio = f"cairn-e2e-minio-{RUN}"
+    subprocess.run(["docker", "rm", "-f", minio], capture_output=True)
+    subprocess.run(["docker", "run", "-d", "--name", minio, "--network", "cairn_catalog", "-p", "127.0.0.1:9010:9000",
+                    "-e", "MINIO_ROOT_USER=cairn", "-e", "MINIO_ROOT_PASSWORD=cairn-e2e-secret",
+                    "minio/minio:RELEASE.2025-04-22T22-12-26Z", "server", "/data"], check=True, capture_output=True)
+    try:
+        s3 = pafs.S3FileSystem(access_key="cairn", secret_key="cairn-e2e-secret", endpoint_override="127.0.0.1:9010",
+                               scheme="http", allow_bucket_creation=True)
+        eventually(lambda: s3.create_dir("cairn-lake") or True, timeout=60)
+        out = compose("exec", "-T", "-e", "AWS_ACCESS_KEY_ID=cairn", "-e", "AWS_SECRET_ACCESS_KEY=cairn-e2e-secret",
+                      "cairn-api", "cairn", "export", "metadata", "--keep-days", "30", "--to",
+                      f"s3://cairn-lake/run-{RUN}?endpoint_override={minio}:9000&scheme=http", timeout=600)
+        result = json.loads(out[out.index("{"):])
+        assert result["rows"]["assets"] > 0 and result["schema_version"] == 1, result
+
+        def table(name):
+            return pq.read_table(f"cairn-lake/run-{RUN}/{name}", filesystem=s3).to_pylist()
+
+        assets = {r["urn"]: r for r in table("assets")}
+        assert assets[DS]["name"] == "customers" and assets[DS]["entity_type"] == "dataset"
+        assert str(assets[DS]["export_date"]) == result["export_date"]               # Hive partition column
+        assert {c["field_path"] for c in table("columns") if c["asset_urn"] == DS} >= {"id", "email", "amount"}
+        assert any(o["asset_urn"] == DS for o in table("owners"))
+        assert any(e["upstream_urn"] == DS and e["downstream_urn"] == DS_DOWN for e in table("lineage"))
+        assert any(m["asset_urn"] == DS for m in table("monitor_results"))
+        with s3.open_input_stream(f"cairn-lake/run-{RUN}/_manifest.json") as f:
+            assert json.loads(f.read())["tables"]["assets"][0]["name"] == "urn"
+    finally:
+        subprocess.run(["docker", "rm", "-f", minio], capture_output=True)

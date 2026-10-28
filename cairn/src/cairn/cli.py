@@ -361,6 +361,35 @@ def cmd_export_metadata(a) -> None:
     print(json.dumps(result.as_dict(), indent=2))
 
 
+def cmd_extension(a) -> None:
+    from cairn.extensions.api import parse_manifest
+    from cairn.extensions.service import ExtensionError
+
+    def manifest_text(path: str) -> str:
+        p = os.path.join(path, "cairn-extension.yaml") if os.path.isdir(path) else path
+        with open(p) as f:
+            return f.read()
+
+    try:
+        if a.extension_command == "validate":            # no database: usable in an extension's own CI
+            m = parse_manifest(manifest_text(a.path))
+            print(json.dumps({"valid": True, "name": m.name, "version": m.version,
+                              "permissions": m.permissions}, indent=2))
+            return
+        s = _services(with_gateway=False, with_ai=False)
+        actor = "urn:li:corpuser:cairn-cli"
+        if a.extension_command == "install":
+            print(json.dumps(s.extensions.install(parse_manifest(manifest_text(a.path)), actor), indent=2))
+        elif a.extension_command == "list":
+            print(json.dumps(s.extensions.list(), indent=2))
+        elif a.extension_command == "remove":
+            s.extensions.remove(a.name, actor)
+        elif a.extension_command == "rotate":
+            print(json.dumps(s.extensions.rotate(a.name, actor), indent=2))
+    except ExtensionError as e:
+        sys.exit(str(e))
+
+
 def cmd_licence(a) -> None:
     from cairn.common.audit import AuditLog
     from cairn.common.config import get_settings
@@ -590,6 +619,19 @@ def build_parser() -> argparse.ArgumentParser:
     em.add_argument("--catalog", default="default", help="iceberg: catalog name in the pyiceberg configuration")
     em.add_argument("--namespace", default="cairn", help="iceberg: namespace of the tables")
     em.set_defaults(fn=cmd_export_metadata)
+
+    xt = sub.add_parser("extension", help="extensions: validate a manifest, install, list, rotate, remove")
+    xt_sub = xt.add_subparsers(dest="extension_command", required=True)
+    for name, help_ in (("validate", "check a manifest (file or folder) without installing it"),
+                        ("install", "install or upgrade from a manifest (prints the token once)")):
+        x = xt_sub.add_parser(name, help=help_)
+        x.add_argument("path")
+        x.set_defaults(fn=cmd_extension)
+    xt_sub.add_parser("list", help="installed extensions").set_defaults(fn=cmd_extension)
+    for name, help_ in (("remove", "uninstall"), ("rotate", "new token and signing secret")):
+        x = xt_sub.add_parser(name, help=help_)
+        x.add_argument("name")
+        x.set_defaults(fn=cmd_extension)
 
     lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
     lc_sub = lc.add_subparsers(dest="licence_command", required=True)

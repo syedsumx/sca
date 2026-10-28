@@ -330,9 +330,12 @@ def webhook_target_problem(url: str, resolve: Callable[[str], list[str]] = None)
 
 
 class WebhookSender:
-    def __init__(self, http: Optional[httpx.Client] = None, resolve: Optional[Callable[[str], list[str]]] = None):
+    def __init__(self, http: Optional[httpx.Client] = None, resolve: Optional[Callable[[str], list[str]]] = None,
+                 signing_secret: Optional[Callable[[str], Optional[str]]] = None):
+        """``signing_secret(route_id)``: the secret to sign that route's deliveries with (extensions)."""
         self.http = http or httpx.Client(timeout=15, follow_redirects=False)
         self.resolve = resolve
+        self.signing_secret = signing_secret
 
     def send(self, row: dict, hub) -> str:
         problem = webhook_target_problem(row["target"], self.resolve)
@@ -340,7 +343,15 @@ class WebhookSender:
             raise RuntimeError(problem)
         payload: dict[str, Any] = {k: row[k] for k in ("id", "type", "title", "body", "entity_urn")}
         payload["url"] = _url(row)
-        resp = self.http.post(row["target"], content=json.dumps(payload), headers={"Content-Type": "application/json"})
+        body = json.dumps(payload).encode()
+        headers = {"Content-Type": "application/json"}
+        recipient = row.get("recipient") or ""
+        secret = self.signing_secret(recipient[6:]) if self.signing_secret and recipient.startswith("route:") else None
+        if secret:
+            from cairn.extensions.service import sign
+
+            headers["Cairn-Signature"] = sign(secret, body)
+        resp = self.http.post(row["target"], content=body, headers=headers)
         if resp.status_code >= 300:
             raise RuntimeError(f"webhook returned {resp.status_code}")
         return "webhook"

@@ -752,3 +752,39 @@ export interface LicenceState {
         development: boolean;
     } | null;
 }
+
+/** GET /extensions/ui: a section an installed extension adds to the workspace. */
+export interface ExtensionSection {
+    extension: string;
+    publisher: string;
+    label: string;
+    url: string;
+    placement: 'workspace' | 'asset';
+}
+
+export interface InstalledExtension {
+    name: string;
+    version: string;
+    enabled: boolean;
+    actor: string;
+    installed_by: string;
+    installed_ms: number;
+    manifest: {
+        publisher: string;
+        description: string;
+        permissions: string[];
+        scope: unknown;
+        ui: unknown[];
+        events: unknown[];
+    };
+}
+
+/** PUT /admin/extensions: token and signing_secret only on a first install (shown once). */
+export interface ExtensionInstallResult {
+    name: string;
+    version: string;
+    actor: string;
+    upgraded_from?: string;
+    token?: string;
+    signing_secret?: string;
+}

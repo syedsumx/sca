@@ -140,3 +140,41 @@ cairn export metadata --format iceberg --catalog lake --namespace cairn
 ```
 
 **Scheduling:** on Helm, set `cairn.metadataExport.enabled`, with `destination` (or `format: iceberg`), `schedule` (nightly by default) and `credentialsSecret`. On Compose, run the command from cron: `docker compose exec -T cairn-api cairn export metadata --to …`.
+
+## Extensions
+
+An extension adds to Cairn without changing it. It runs as your own service, and Cairn gives it three things:
+
+- **an API token** that can do only what its manifest asks for,
+- **events**, delivered as signed webhooks,
+- **sections in the workspace**.
+
+Everything an extension may do is declared in one file, `cairn-extension.yaml`:
+
+```yaml
+name: incident-log
+version: 1.0.0
+publisher: Acme Data Platform
+description: Recent quality incidents with each asset's trust badges.
+permissions: [VIEW_ENTITY_PAGE]                  # the token can do this and nothing else
+scope: {attr: resource.domains, op: contains, value: urn:li:domain:finance}   # optional: only these assets
+events:
+  - url: https://incident-log.acme.internal/events
+    types: [quality.incident.raised, contract.broken]                         # empty = every event
+ui:
+  - label: Incident log
+    url: https://incident-log.acme.internal/ui
+    placement: workspace                         # or asset: a tab on every asset page, called with ?urn=
+```
+
+**Install it** under **Settings → Extensions**, or with `cairn extension install <folder>`. `cairn extension validate <folder>` checks a manifest without installing it, for the extension's own CI.
+
+A first install shows the API token (`cx_…`) and the event signing secret once. Upgrading with a new version keeps both. Rotate them with `cairn extension rotate <name>`. Disabling an extension stops its token, events and sections at once; removing it deletes them. Every change is in the audit log.
+
+**What it can do:**
+
+- **The token** acts as `urn:li:corpuser:cairn-ext-<name>`. It is allowed exactly the listed `permissions`, only on assets that match `scope` (an ABAC condition, like a policy's). It can never hold administration privileges, manage extensions, or take a licence seat.
+- **Events** are the notification types listed under [Notifications](#notifications). Each delivery carries `Cairn-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>">`. Check it and refuse deliveries older than five minutes. The example has a ten-line `signature_ok` to copy.
+- **Sections** load in a sandboxed frame: scripts and forms run, but the page can't read Cairn's cookies, storage or page. It talks to its own backend, which holds the token.
+
+The example in `examples/extensions/incident-log` uses all three, with the Python standard library only.

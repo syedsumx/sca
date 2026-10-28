@@ -12,6 +12,7 @@ import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { ContractPanel } from '../components/Contract';
 import { DataPreview } from '../components/DataPreview';
+import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
@@ -112,6 +113,7 @@ export function tableNameOf(urn: string): string {
 export function AssetPage() {
     const { urn: rawUrn } = useParams<{ urn: string }>();
     const urn = decodeURIComponent(rawUrn);
+    const extensionTabs = useExtensionSections('asset');
     const { client } = useConsumerApi();
     const session = useDheSession();
     const me = session.config?.user.urn;
@@ -384,6 +386,7 @@ export function AssetPage() {
                             </Surface>
                         ),
                     },
+                    ...extensionAssetTabs(extensionTabs, urn),
                 ]}
             />
         </Page>
