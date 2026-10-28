@@ -31,7 +31,8 @@ otel = ["opentelemetry-sdk>=1.27", "opentelemetry-exporter-otlp-proto-http>=1.27
 agent = ["acryl-datahub>=1.0"]
 warehouse = ["snowflake-sqlalchemy>=1.5", "sqlalchemy-bigquery>=1.9", "databricks-sql-connector>=3.0"]
 test = ["pytest>=8", "fastapi>=0.110", "pyjwt>=2.8"]
-all = ["cairn-platform[server,postgres,ai,actions,agent]"]
+export = ["pyarrow>=15", "pyiceberg>=0.8"]
+all = ["cairn-platform[server,postgres,ai,actions,agent,export]"]
 
 [project.scripts]
 cairn = "cairn.cli:main"

@@ -347,6 +347,20 @@ def cmd_db(a) -> None:
         sys.exit(0 if not diffs and cur == head else 1)
 
 
+def cmd_export_metadata(a) -> None:
+    from cairn.export.metadata import MetadataExporter
+
+    s = _services(with_gateway=False, with_ai=False)
+    exporter = MetadataExporter(s.graph, s.quality.store, s.engine)
+    if a.format == "iceberg":
+        result = exporter.write_iceberg(a.catalog, a.namespace)
+    else:
+        if not a.to:
+            sys.exit("--to is required for parquet (a path, s3://, gs:// or abfs:// URI)")
+        result = exporter.write_parquet(a.to, a.keep_days)
+    print(json.dumps(result.as_dict(), indent=2))
+
+
 def cmd_licence(a) -> None:
     from cairn.common.audit import AuditLog
     from cairn.common.config import get_settings
@@ -566,6 +580,16 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
                         ("check", "fail if the schema differs from the models or is not at head")):
         db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
+
+    ex = sub.add_parser("export", help="export catalog metadata to the customer's storage")
+    ex_sub = ex.add_subparsers(dest="export_command", required=True)
+    em = ex_sub.add_parser("metadata", help="assets, columns, owners, labels, lineage, monitors, grants")
+    em.add_argument("--to", help="parquet: a path, or an s3://, gs:// or abfs:// URI")
+    em.add_argument("--format", choices=("parquet", "iceberg"), default="parquet")
+    em.add_argument("--keep-days", type=int, help="parquet: delete daily partitions older than this")
+    em.add_argument("--catalog", default="default", help="iceberg: catalog name in the pyiceberg configuration")
+    em.add_argument("--namespace", default="cairn", help="iceberg: namespace of the tables")
+    em.set_defaults(fn=cmd_export_metadata)
 
     lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
     lc_sub = lc.add_subparsers(dest="licence_command", required=True)

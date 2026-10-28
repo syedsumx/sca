@@ -91,3 +91,52 @@ Where approvals and on-call already live in Jira, ServiceNow, PagerDuty or Opsge
   - Recovery resolves it.
 
 **Security.** Inbound calls must carry the system's `inbound_secret`, either as `?secret=` or the `X-Cairn-Secret` header, or sign the body with it (`X-Hub-Signature: sha256=…`, as Jira does). Every decision made from a ticket is audited (`ticket.decided`). Administrators see the configured systems and their open tickets at `GET /cairn/api/notify/ticketing`.
+
+## Metadata export
+
+Cairn can write its catalog facts into your own storage every night, as tables you query alongside the data they describe. Use them to report on ownership coverage, to find uncertified tables in critical pipelines, or to join a quality status to your own controls.
+
+| Table | One row per |
+|---|---|
+| `assets` | dataset, data product, dashboard, chart or ML model: platform, name, description, domain, certification, classification, owner count |
+| `columns` | dataset column: type, description, nullable, labels, classification |
+| `owners` | asset and owner, with the ownership type |
+| `labels` | tag or glossary term on an asset or a column |
+| `lineage` | upstream to downstream dataset edge |
+| `monitor_results` | quality monitor, with its latest status and value |
+| `access_grants` | marketplace grant: product, grantee, active or expired |
+
+Every row carries `exported_at`. The table layout is versioned (`schema_version` in `_manifest.json`): new columns can appear, but a column is never renamed or removed within a version.
+
+**Parquet** in object storage or on a path. Each run writes one partition per table and day, so register each folder as an external table with Hive partitioning on `export_date`:
+
+```bash
+cairn export metadata --to s3://acme-lake/cairn --keep-days 30
+#   s3://acme-lake/cairn/assets/export_date=2026-11-02/assets.parquet, …, _manifest.json
+```
+
+```sql
+-- DuckDB
+SELECT name, certification, owner_count
+FROM read_parquet('s3://acme-lake/cairn/assets/*/*.parquet', hive_partitioning = true)
+WHERE export_date = (SELECT max(export_date) FROM read_parquet('s3://acme-lake/cairn/assets/*/*.parquet', hive_partitioning = true));
+
+-- Snowflake, over an external stage on the same bucket (other columns are VALUE:<name>)
+CREATE EXTERNAL TABLE cairn_assets (
+    export_date DATE AS TO_DATE(SPLIT_PART(SPLIT_PART(METADATA$FILENAME, 'export_date=', 2), '/', 1)))
+  PARTITION BY (export_date)
+  LOCATION = @cairn_stage/assets/
+  AUTO_REFRESH = TRUE
+  FILE_FORMAT = (TYPE = PARQUET);
+```
+
+`gs://` and `abfs://` URIs work the same way. Credentials come from the usual environment variables (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) or the machine's identity. For S3-compatible storage, add `?endpoint_override=host:port&scheme=http` to the URI.
+
+**Iceberg** in your catalog (AWS Glue, Unity, Polaris, Snowflake Open Catalog or any REST catalog). Each run is one snapshot, so time travel replaces partitions:
+
+```bash
+export PYICEBERG_CATALOG__LAKE__URI=https://catalog.example.com/api/catalog PYICEBERG_CATALOG__LAKE__TOKEN=…
+cairn export metadata --format iceberg --catalog lake --namespace cairn
+```
+
+**Scheduling:** on Helm, set `cairn.metadataExport.enabled`, with `destination` (or `format: iceberg`), `schedule` (nightly by default) and `credentialsSecret`. On Compose, run the command from cron: `docker compose exec -T cairn-api cairn export metadata --to …`.

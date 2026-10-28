@@ -1,0 +1,86 @@
+{{- $x := .Values.cairn.metadataExport }}
+{{- if $x.enabled }}
+{{- $ctx := dict "root" $ "component" "metadata-export" "cfg" $x }}
+{{- /* Writes the catalog's metadata tables to the customer's storage (cairn export metadata). */}}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  schedule: {{ $x.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: {{ $x.timeoutSeconds | default 3600 }}
+      template:
+        metadata:
+          labels:
+            {{- include "cairn.componentLabels" $ctx | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "cairn.serviceAccountName" $ }}
+          automountServiceAccountToken: false
+          {{- with .Values.global.cairn.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml .Values.cairn.podSecurityContext | nindent 12 }}
+          containers:
+            - name: metadata-export
+              image: {{ include "cairn.image" $ }}
+              imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+              args:
+                - export
+                - metadata
+                - --format
+                - {{ $x.format | default "parquet" }}
+                {{- if eq ($x.format | default "parquet") "iceberg" }}
+                - --catalog
+                - {{ $x.iceberg.catalog | quote }}
+                - --namespace
+                - {{ $x.iceberg.namespace | quote }}
+                {{- else }}
+                - --to
+                - {{ required "cairn.metadataExport.destination is required" $x.destination | quote }}
+                {{- with $x.keepDays }}
+                - --keep-days
+                - {{ . | quote }}
+                {{- end }}
+                {{- end }}
+              env:
+                {{- include "cairn.env" $ | nindent 16 }}
+                {{- with $x.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              {{- with $x.credentialsSecret }}
+              # Storage or catalog credentials, e.g. AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
+              # GOOGLE_APPLICATION_CREDENTIALS, AZURE_STORAGE_ACCOUNT_KEY, PYICEBERG_CATALOG__<NAME>__*.
+              envFrom:
+                - secretRef:
+                    name: {{ . }}
+              {{- end }}
+              resources:
+                {{- toYaml $x.resources | nindent 16 }}
+              securityContext:
+                {{- toYaml .Values.cairn.containerSecurityContext | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+                - name: core-token
+                  mountPath: /run/cairn
+                  readOnly: true
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 1Gi
+            - name: core-token
+              secret:
+                secretName: {{ include "cairn.coreTokenSecret" $ }}
+                optional: true
+{{- end }}

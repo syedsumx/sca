@@ -501,6 +501,24 @@ cairn:
           matchLabels:
             kubernetes.io/metadata.name: ingress-nginx
 
+  # Nightly export of catalog metadata (assets, columns, owners, labels, lineage, monitor results,
+  # access grants) as Parquet partitions or Iceberg tables in the customer's storage.
+  metadataExport:
+    enabled: false
+    schedule: "17 2 * * *"
+    format: parquet          # or iceberg
+    destination: ""          # parquet: s3://bucket/cairn, gs://…, abfs://container@account.dfs.core.windows.net/…
+    keepDays: 30
+    iceberg:
+      catalog: default       # configured through PYICEBERG_CATALOG__DEFAULT__* in credentialsSecret
+      namespace: cairn
+    credentialsSecret: ""    # Secret with storage or catalog credentials, loaded as environment variables
+    extraEnv: []
+    timeoutSeconds: 3600
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { memory: 2Gi }
+
   licence:
     # true: Cairn is read-only until a valid licence is installed (hosted tenants). false: without a
     # licence it runs in evaluation mode. Licences are installed in Administration, or from a Secret.
