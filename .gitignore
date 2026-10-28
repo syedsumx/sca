@@ -108,3 +108,4 @@ cairn/config/*/e2e-*.yaml
 
 # Cairn backups (deploy/ops/backup.sh)
 cairn/backups/
+cairn/evidence/
