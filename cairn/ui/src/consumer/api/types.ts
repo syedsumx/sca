@@ -502,3 +502,45 @@ export interface BulkBatch {
     created_ms: number;
     updated_ms: number;
 }
+
+export interface TagSyncTarget {
+    id: string;
+    dialect: 'snowflake' | 'databricks';
+    platform: string;
+    connection: string | null;
+    dry_run: boolean;
+    mappings: { label: string; tag: string; value: string }[];
+    managed_tags: number;
+    last_run: null | {
+        at_ms: number;
+        actor: string;
+        dry_run: boolean;
+        datasets: number;
+        tagged_objects: number;
+        planned: number;
+        applied: number;
+        failed: number;
+        conflicts: number;
+    };
+}
+
+export interface TagSyncOperation {
+    op: 'SET' | 'UNSET';
+    urn: string;
+    field: string | null;
+    tag: string;
+    value: string;
+    sql: string;
+    error?: string | null;
+}
+
+export interface TagSyncResult {
+    target: string;
+    datasets: number;
+    tagged_objects: number;
+    operations: TagSyncOperation[];
+    conflicts: string[];
+    dry_run: boolean;
+    applied: number;
+    failed: number;
+}

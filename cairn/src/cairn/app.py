@@ -153,6 +153,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             services.bulk, cp, services.authorize, services.can_view,
             lambda query, limit: services.catalog.search(query, ["dataset"], count=limit),
             lambda urn: services.attributes.resource(urn).get("classification") or []))
+    if "governance" in modules and services.tag_sync is not None:
+        from cairn.governance.tag_sync_api import build_router as tag_sync_router
+
+        app.include_router(tag_sync_router(services.tag_sync, cp, services.authorize))
     if "collab" in modules and services.collab is not None:
         app.include_router(collab_router(services.collab, cp, authz, services.can_view, services.summaries,
                                          services.trust, services.explicitly_denied))

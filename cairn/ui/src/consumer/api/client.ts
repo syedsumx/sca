@@ -40,6 +40,8 @@ import type {
     BulkApplyResult,
     BulkBatch,
     BulkPreview,
+    TagSyncResult,
+    TagSyncTarget,
     Thread,
     TrendingItem,
     UiConfig,
@@ -328,6 +330,14 @@ export class ConsumerClient extends CairnClient {
 
     bulkHistory(opts?: RequestOptions) {
         return this.request<BulkBatch[]>('GET', '/bulk', undefined, opts);
+    }
+
+    tagSyncTargets(opts?: RequestOptions) {
+        return this.request<TagSyncTarget[]>('GET', '/governance/tag-sync', undefined, opts);
+    }
+
+    tagSync(targetId: string, dryRun: boolean) {
+        return this.request<TagSyncResult>('POST', `/governance/tag-sync/${enc(targetId)}/sync`, { dry_run: dryRun });
     }
 
     listPersonas(opts?: RequestOptions) {

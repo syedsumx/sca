@@ -990,3 +990,50 @@ def test_21c_bulk_edit_from_a_spreadsheet_with_undo(users):
     assert root.post(f"/bulk/{preview['batch_id']}/undo").json()["restored"] == 2
     assert _bulk_state(DS) == before
     assert root.get("/bulk").json()[0]["state"] == "UNDONE"
+
+
+def test_22_warehouse_tag_sync_plans_tags_from_catalog_labels(users):
+    """A tag-sync target file maps catalog labels to Snowflake tags; the plan names the exact
+    ALTER statements for the table and its classified column. Admin only."""
+    root, bob = users["root"], users["bob"]
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:snowflake,am_{RUN}.public.tagged,PROD)"
+    email_term = "urn:li:glossaryTerm:Classification.PII.Email"
+    emit(ds, "schemaMetadata", {"schemaName": "tagged", "platform": "urn:li:dataPlatform:snowflake", "version": 0,
+                                "hash": "", "platformSchema": {"com.linkedin.schema.MySqlDDL": {"tableSchema": ""}},
+                                "fields": [{"fieldPath": p, "nativeDataType": "VARCHAR",
+                                            "type": {"type": {"com.linkedin.schema.StringType": {}}}}
+                                           for p in ("id", "email")]})
+    emit(ds, "editableSchemaMetadata", {"editableSchemaFieldInfo": [
+        {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": email_term}], "auditStamp": STAMP}}]})
+    emit(ds, "globalTags", {"tags": [{"tag": f"urn:li:tag:Confidential-{RUN}"}]})
+    target = f"e2e-{RUN}"
+    folder = os.path.join(os.path.dirname(__file__), "..", "..", "config", "tag-sync")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, f"{target}.yaml")
+    with open(path, "w") as f:
+        json.dump({"targets": [{"id": target, "dialect": "snowflake", "platform": "snowflake",
+                                "tag_schema": "GOV.TAGS",
+                                "mappings": [{"label": "urn:li:glossaryTerm:Classification.PII.*", "tag": "PII", "value": "pii"},
+                                             {"label": f"urn:li:tag:Confidential-{RUN}", "tag": "CONFIDENTIALITY",
+                                              "value": "high"}]}]}, f)
+    try:
+        listed = {t["id"]: t for t in root.get("/governance/tag-sync").json()}
+        assert listed[target]["dry_run"] is True and listed[target]["dialect"] == "snowflake"
+        assert bob.get("/governance/tag-sync").status_code == 403
+
+        def plan():
+            out = root.post(f"/governance/tag-sync/{target}/sync", json={"urns": [ds]}).json()
+            return out if len(out.get("operations", [])) == 2 else None
+        out = eventually(plan, timeout=60)       # the dataset scan is search-backed
+        table = f'"AM_{RUN.upper()}"."PUBLIC"."TAGGED"'
+        assert sorted(op["sql"] for op in out["operations"]) == [
+            f"ALTER TABLE {table} MODIFY COLUMN \"EMAIL\" SET TAG GOV.TAGS.PII = 'pii'",
+            f"ALTER TABLE {table} SET TAG GOV.TAGS.CONFIDENTIALITY = 'high'",
+        ], out
+        assert out["dry_run"] is True and out["applied"] == 0
+        # no connection configured: even an explicit write stays a plan
+        assert root.post(f"/governance/tag-sync/{target}/sync", json={"urns": [ds], "dry_run": False}).json()["applied"] == 0
+        assert bob.post(f"/governance/tag-sync/{target}/sync", json={}).status_code == 403
+    finally:
+        os.remove(path)
+    assert target not in [t["id"] for t in root.get("/governance/tag-sync").json()]

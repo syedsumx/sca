@@ -1,0 +1,14 @@
+# Warehouse tag sync: copy to a .yaml file in this directory to enable (docs: Governance → Warehouse tags).
+# Every *.yaml here is read on each sweep (every 15 minutes, or POST /cairn/api/governance/tag-sync/{id}/sync).
+targets:
+  - id: snowflake-prod
+    dialect: snowflake                # or databricks (Unity Catalog)
+    connection: snowflake_tags        # in CAIRN_QUALITY_CONNECTIONS; use a role that may only apply tags
+    platform: snowflake               # datasets of this platform are synced
+    tag_schema: GOVERNANCE.TAGS       # where CREATE TAG ran (Snowflake)
+    dry_run: true                     # plan only until you have reviewed the first plan
+    mappings:                         # first match wins per warehouse tag
+      - {label: "urn:li:glossaryTerm:Classification.PII.Email", tag: PII, value: email}
+      - {label: "urn:li:glossaryTerm:Classification.PII.Phone", tag: PII, value: phone}
+      - {label: "urn:li:glossaryTerm:Classification.PII.*", tag: PII, value: other}
+      - {label: "urn:li:tag:Confidential", tag: CONFIDENTIALITY, value: high}

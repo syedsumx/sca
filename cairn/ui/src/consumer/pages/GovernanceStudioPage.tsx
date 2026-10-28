@@ -1,5 +1,6 @@
 import { Alert, Button, Checkbox, Empty, Input, List, Popconfirm, Radio, Select, Space, Switch, Tabs, Tag, message } from 'antd';
 import { FormsAdmin } from '../components/Forms';
+import { TagSyncAdmin } from '../components/TagSync';
 import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
 
@@ -473,6 +474,7 @@ export function GovernanceStudioPage() {
                         ),
                     },
                     { key: 'forms', label: 'Compliance forms', children: <FormsAdmin /> },
+                    { key: 'tag-sync', label: 'Warehouse tags', children: <TagSyncAdmin /> },
                     {
                         key: 'purposes',
                         label: 'Purposes',

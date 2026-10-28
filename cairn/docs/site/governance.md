@@ -105,3 +105,36 @@ Before anything is written, the preview shows:
 **Undo** restores the previous values. It is refused if someone has edited the same aspects since the batch was applied. Only the person who imported a batch can apply or undo it.
 
 API: `GET /cairn/api/bulk/export?query=…` (or `urns=…`), `POST /cairn/api/bulk/import` with the CSV as the body, `POST /cairn/api/bulk/{id}/apply`, `POST /cairn/api/bulk/{id}/undo`, and `GET /cairn/api/bulk` for your recent batches.
+
+## Warehouse tags
+
+Classifications protect data only when queries go through Cairn, unless the warehouse knows about them too. Tag sync copies catalog labels to warehouse tags, so Snowflake and Databricks tag-based masking and row policies cover direct queries as well.
+
+A target is a reviewed YAML file in `config/tag-sync/` (or `CAIRN_TAG_SYNC`); see `snowflake.yaml.example`. It sets:
+
+- **dialect:** `snowflake` or `databricks` (Unity Catalog).
+- **connection:** a named warehouse connection. Use a role that may only apply tags.
+- **platform:** the platform whose datasets are synced.
+- **mappings:** from a tag or glossary term urn (a trailing `*` matches a prefix) to a warehouse tag and value. For each warehouse tag on a table or column, the first matching mapping wins. Two exact mappings that ask for different values are reported as a conflict.
+
+Dataset-level labels become table tags, and column labels (ingested or edited in the catalog) become column tags. Cairn records every tag it sets, so:
+
+- it unsets a tag only when Cairn applied it and the label has since gone from the catalog,
+- tags people set in the warehouse are never touched,
+- a statement that fails is retried on the next sweep.
+
+Targets sync every 15 minutes (`CAIRN_TAG_SYNC_EVERY_SECONDS`). A target without a connection, or with `dry_run: true`, only plans.
+
+In **Governance studio → Warehouse tags**, **Preview** shows each `SET` or `UNSET` with its exact statement, and **Sync now** runs them. The API is `GET /cairn/api/governance/tag-sync`, plus `POST /cairn/api/governance/tag-sync/{id}/sync` with `{"dry_run": false}` (the default is a dry run). Both need `MANAGE_GLOBAL_SETTINGS`.
+
+The warehouse does the enforcing. For example, in Snowflake:
+
+```sql
+CREATE TAG IF NOT EXISTS GOVERNANCE.TAGS.PII ALLOWED_VALUES 'email', 'phone', 'other';
+CREATE MASKING POLICY GOVERNANCE.TAGS.MASK_PII AS (v STRING) RETURNS STRING ->
+  CASE WHEN IS_ROLE_IN_SESSION('PII_READER') THEN v ELSE '***' END;
+ALTER TAG GOVERNANCE.TAGS.PII SET MASKING POLICY GOVERNANCE.TAGS.MASK_PII;
+GRANT APPLY TAG ON ACCOUNT TO ROLE CAIRN_TAGGER;   -- the role behind the connection
+```
+
+Tags you set directly in the warehouse come back into the catalog through ingestion.

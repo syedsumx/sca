@@ -77,6 +77,8 @@ class Services:
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
+    tag_sync: Optional[Any] = None
+    connections: Optional[Any] = None       # named warehouse connections (quality, tag sync)
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -372,7 +374,8 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
         docgen = DocGenerator(catalog, llm, settings.ai.model_docgen)
 
     services = Services(settings, engine, graph, audit, identity, attributes, pdp, policy_repo, quality, workflows,
-                        gateway, catalog, llm, nlq, semantic, docgen, ai_usage=ai_usage)
+                        gateway, catalog, llm, nlq, semantic, docgen, ai_usage=ai_usage,
+                        connections=connections)
     _build_active_metadata(services)
     return services
 
@@ -447,6 +450,10 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
+        from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
+        from cairn.quality.auto import Planner
+        s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
+                                    sqlalchemy_executor(s.connections), audit=s.audit)
     s.embed = EmbedService(s.engine, cfg.embed_signing_secret, cfg.embed_allowed_origins, cfg.public_url,
                            s.catalog, s.attributes, s.quality.store, s.can_view_as)
 

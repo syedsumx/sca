@@ -7,7 +7,7 @@ rules:
     select: {attr: resource.certification, op: eq, value: CERTIFIED}
     monitors:
       - {type: freshness, severity: HIGH}
-      - {type: volume, severity: HIGH}
+      - {type: volume, severity: HIGH, config: {model: learned}}   # quiet for 3 weeks while it learns
 
   # Profiling over a SQL connection (CAIRN_QUALITY_CONNECTIONS) for datasets whose ingestion does
   # not profile them, then null-rate monitors on classified columns. Example, off by default:
