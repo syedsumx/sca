@@ -149,6 +149,22 @@ The rest of the API is under `/cairn/api/reports/costs`:
 - `GET /asset?urn=…` returns one table's daily series,
 - `POST /propose-deprecation` with `{"urn", "reason"}` sends the proposal.
 
+## One database
+
+By default the catalog stores its metadata in MySQL, and Cairn's own data is in PostgreSQL. You can put the catalog in PostgreSQL too. Then you have one database server to run, back up and patch, and no MySQL licence to review.
+
+- **Compose:** add `docker-compose.postgres.yml` to every command:
+
+  ```bash
+  docker compose -f docker-compose.cairn.yml -f docker-compose.postgres.yml up -d
+  ```
+
+  The catalog goes into a `cairn_catalog` database on the `cairn-postgres` server, which a one-off job creates. MySQL is not started.
+- **Helm:** set `core.database.type: postgres` and point the host, port (5432), name and user at the server. Create the database before installing; the setup job then creates its tables. `core.database.sslMode` sets the JDBC `sslmode` (default `prefer`).
+- **Backups:** `deploy/ops/backup.sh` and `restore.sh` find the catalog wherever it is. Pass the same compose files in `COMPOSE`.
+
+Choose this when you install. Switching an existing deployment does not move its catalog: the new catalog database starts empty. Re-ingest your sources into it, or restore the backup of a deployment that already ran on PostgreSQL.
+
 ## Monitoring
 
 Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an HTTP API (notifier, scheduler, context miner) serve them on `CAIRN_METRICS_PORT`; Helm sets it to 9108.

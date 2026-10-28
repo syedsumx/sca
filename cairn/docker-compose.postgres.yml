@@ -17,11 +17,24 @@ services:
   mysql:
     profiles: [mysql]          # not started
 
+  # Creates the catalog database if it is missing; the setup job then creates its tables.
+  cairn-catalog-db:
+    image: pgvector/pgvector:pg16
+    environment:
+      PGHOST: cairn-postgres
+      PGUSER: cairn
+      PGPASSWORD: ${CAIRN_POSTGRES_PASSWORD:-cairn}
+    command: ["sh", "-c", "psql -d postgres -tAc \"select 1 from pg_database where datname = 'cairn_catalog'\" | grep -q 1 || psql -d postgres -v ON_ERROR_STOP=1 -c 'create database cairn_catalog'"]
+    depends_on:
+      cairn-postgres:
+        condition: service_healthy
+    networks: [catalog]
+
   cairn-setup:
     environment: *catalog-in-postgres
     depends_on: !override
-      cairn-postgres:
-        condition: service_healthy
+      cairn-catalog-db:
+        condition: service_completed_successfully
       search:
         condition: service_healthy
       broker:
