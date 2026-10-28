@@ -1470,7 +1470,12 @@ def test_33_extension_token_events_and_sections(users):
         mine = [s for s in sections if s["extension"] == name]
         assert {s["placement"] for s in mine} == {"workspace", "asset"}, sections
 
-        eventually(lambda: httpx.get("http://127.0.0.1:8098/health", timeout=2).status_code == 200 or None, timeout=60)
+        def up():
+            try:                                    # the port is published before the server listens
+                return httpx.get("http://127.0.0.1:8098/health", timeout=2).status_code == 200 or None
+            except httpx.HTTPError:
+                return None
+        eventually(up, timeout=60)
         assert root.post("/notify/test", json={"channel": "in_app"}).status_code == 200
         delivered = eventually(lambda: [e for e in httpx.get("http://127.0.0.1:8098/events.json").json()
                                         if e["type"] == "subscription.update"] or None, timeout=90)

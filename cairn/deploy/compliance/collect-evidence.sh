@@ -49,12 +49,18 @@ $COMPOSE images --format json > "$OUT/images.json" 2>/dev/null || $COMPOSE image
 git rev-parse HEAD > "$OUT/source-revision.txt" 2>/dev/null || true
 
 log "configuration (secrets redacted)"
-$COMPOSE config 2>/dev/null | sed -E 's/^([[:space:]]*[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|KEY|PASS)[A-Za-z0-9_]*:[[:space:]]*).*/\1"***"/I' \
+$COMPOSE config 2>/dev/null \
+    | sed -E -e 's/^([[:space:]]*[A-Za-z0-9_]*(PASSWORD|SECRET|TOKEN|KEY|PASS)[A-Za-z0-9_]*:[[:space:]]*).*/\1"***"/I' \
+             -e 's#(://[^:/@[:space:]]+):[^@[:space:]]+@#\1:***@#g' \
     > "$OUT/deployment-config.yaml"
+if grep -qE '://[^:/@[:space:]]+:[^*@[:space:]][^@[:space:]]*@' "$OUT/deployment-config.yaml"; then
+    rm -f "$OUT/deployment-config.yaml"; log "config: a credential survived redaction; not collected"; exit 1
+fi
 
 log "availability: backups and monitoring"
-{ ls -1d backups/*/ 2>/dev/null | while read -r d; do
-      [ -f "$d/manifest.json" ] && python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps({"backup": sys.argv[1], "created_at": m["created_at"], "schema": m.get("alembic_revision")}))' "$d/manifest.json"
+{ for d in backups/*/; do
+      [ -f "$d/manifest.json" ] || continue
+      python3 -c 'import json,sys; m=json.load(open(sys.argv[1])); print(json.dumps({"backup": sys.argv[1], "created_at": m["created_at"], "schema": m.get("alembic_revision")}))' "$d/manifest.json"
   done; } > "$OUT/backups.jsonl"
 cp deploy/observability/cairn-alerts.yaml "$OUT/alert-rules.yaml"
 $COMPOSE ps --format json > "$OUT/services.json" 2>/dev/null || $COMPOSE ps > "$OUT/services.txt"
