@@ -193,3 +193,29 @@ flowchart LR
 * Tag/term propagation stays **event-driven on MCL**, in the GMS processing pipeline, so that writes
   from ingestion, SDKs and the UI are all caught. That is more complete than intercepting UI writes.
 
+
+---
+
+## Upgrading the pinned upstream release
+
+Cairn Core follows upstream releases deliberately: one bump at a time, each one through this matrix
+before it merges. Read the upstream release notes for breaking changes first, in particular to the
+entity registry, the GraphQL schema, the `Authorizer` SPI and the setup (system-update) steps.
+
+1. Set `core/UPSTREAM_VERSION` and rebuild every image: `deploy/build-images.sh`.
+2. Run the test matrix:
+
+| Check | Command | What it guards |
+|---|---|---|
+| Unit tests, lint | `pytest tests --ignore=tests/e2e`, `ruff check src tests` | Cairn's own code |
+| Authorizer plugin | `plugins/java/cairn-authorizer`: `./gradlew test` (CI job `java`) | the `Authorizer` SPI and Cairn's policy bridge |
+| UI | `ui`: `npx tsc --noEmit`, `npx vitest run` | the workspace UI against GraphQL types |
+| White-label | `core/web/build.sh`, then `node core/tools/leak_scan.mjs <ui url>` (CI job `stack`) | no upstream names in what customers see |
+| Full live suite | `tests/e2e/run.sh` on a fresh stack | every API, the remote agent, SSO, the edge |
+| Upgrade from the last release | `deploy/ops/rehearse-upgrade.sh <last release tag>` | the setup job migrates existing data; no Cairn table loses rows |
+| Restore | `deploy/ops/backup.sh`, then `restore.sh` on the upgraded stack | backups from the new engine restore and reindex |
+| Load | `tests/load/loadtest.py` against the stack | the published limits still hold |
+| Helm | `helm lint` and `helm template` with `values.yaml` and `values-ha.yaml` | chart changes the new release needs |
+
+3. Write the release notes: the new upstream version, any setting changes, and the measured upgrade
+   time from the rehearsal.

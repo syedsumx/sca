@@ -260,13 +260,58 @@ audit log: altering or deleting an entry breaks the chain.
 
 ## Upgrades
 
-Run the new version's images. The `cairn-setup` job migrates the catalog's schema, indices and topics
-before the services start, and the control-plane services migrate their own database on start (one
-at a time, under a database lock). Read the release notes for setting changes first.
+Upgrades run forward only: there are no down-migrations, so the way back is the backup you take first. Releases are rehearsed by installing the previous release, filling it with data, and upgrading it with exactly these steps. The current release was rehearsed from schema revision 0009 to 0014; every table kept its data and the audit chain stayed valid.
+
+**What happens during an upgrade:**
+
+- **Cairn Core:** the `cairn-setup` job migrates the catalog's schema, search indices and topics before Core starts. On Helm it is a `pre-upgrade` hook.
+- **Cairn services:** each migrates the Cairn database when it starts, one at a time, under a database lock. The others wait.
+- **Workers:** a replica that is still on the old version keeps working until it is replaced. The leader locks keep two versions from doing the same work.
+
+**Before you start:**
+
+1. Read the release notes for setting changes and new required values.
+2. Check the current schema: `docker compose exec cairn-api cairn db current`.
+3. Take a backup: `deploy/ops/backup.sh` on Compose, or a database snapshot on Kubernetes.
+
+**Docker Compose:**
 
 ```bash
-cairn db current     # schema revision of the control-plane database, and the latest one
-cairn db check       # non-zero exit if the schema is not at the latest revision or differs from it
+deploy/ops/backup.sh                                   # 1. back up
+git pull                                               # 2. the new release's compose file and config
+export CAIRN_VERSION=<new version>                     #    (or set it in .env)
+docker compose -f docker-compose.cairn.yml pull        # 3. fetch the new images
+docker compose -f docker-compose.cairn.yml up -d --wait   # 4. migrate and restart
 ```
 
-Back up before upgrading (`deploy/ops/backup.sh`, see [Backup and restore](#backup-and-restore)); migrations move forward only.
+On the reference stack, step 4 took about two minutes. During that time the UI and API restart, so expect a short outage on a single node.
+
+**Kubernetes (Helm):**
+
+```bash
+helm upgrade cairn ./helm/cairn -f my-values.yaml [-f helm/cairn/values-ha.yaml] --wait --timeout 20m
+```
+
+The setup hook runs first. The Deployments then roll one pod at a time, and the PodDisruptionBudgets keep each service up during the roll.
+
+**After the upgrade, check:**
+
+```bash
+docker compose exec cairn-api cairn db check        # exit 0: the schema is at the release's revision
+docker compose exec cairn-api cairn audit verify    # the audit chain is intact
+docker compose ps                                   # every service healthy
+```
+
+Then sign in, open a dataset, and run a search.
+
+**If something is wrong:**
+
+1. Go back to the previous version's images.
+2. Restore the backup: `deploy/ops/restore.sh backups/cairn-<timestamp>`.
+
+A newer schema is not readable by older services, so restoring is required: rolling back the images alone is not enough.
+
+```bash
+cairn db current     # schema revision of the Cairn database, and the latest one
+cairn db check       # non-zero exit if the schema is not at the latest revision or differs from it
+```
