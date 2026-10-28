@@ -69,6 +69,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Alert rules
+        working-directory: cairn
+        run: docker run --rm --entrypoint promtool -v "$PWD/deploy/observability:/o:ro" prom/prometheus:v2.53.0 check rules /o/cairn-alerts.yaml
       - name: Browser extension
         working-directory: cairn/extension
         run: npm test && node build.mjs --cairn-url https://cairn.example.com

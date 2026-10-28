@@ -1,1 +1,0 @@
-{"targets": [{"id": "e2e-d1879c71", "dialect": "snowflake", "platform": "snowflake", "tag_schema": "GOV.TAGS", "mappings": [{"label": "urn:li:glossaryTerm:Classification.PII.*", "tag": "PII", "value": "pii"}, {"label": "urn:li:tag:Confidential-d1879c71", "tag": "CONFIDENTIALITY", "value": "high"}]}]}
