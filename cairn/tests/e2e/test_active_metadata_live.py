@@ -639,8 +639,10 @@ def test_16c_learned_monitor_learns_alerts_and_accepts_a_new_normal(users):
             assert ev["metric_value"] == rows, ev
             return ev
 
-        statuses = [run(n)["status"] for n in (1000, 1012, 995, 1006)]
-        assert statuses == ["TRAINING"] * 4, statuses
+        # four points are needed; creating the monitor may already have evaluated it once
+        statuses = [run(n)["status"] for n in (1000, 1012, 995)]
+        assert statuses == ["TRAINING"] * 3, statuses
+        run(1006)
         ok = run(1003)
         assert ok["status"] == "PASS" and ok["expected_low"] < 1003 < ok["expected_high"], ok
         assert ok["details"]["model"] == "learned"
@@ -1073,3 +1075,41 @@ def test_23_data_contract_breaks_notifies_and_checks_ci(users):
     finally:
         root.delete("/quality/contracts/one", params={"dataset": DS})
     assert root.get("/quality/contracts/one", params={"dataset": DS}).status_code == 404
+
+
+
+def _tags_and_owners(urn: str) -> tuple[list, list]:
+    d = gql("query($u: String!) { dataset(urn: $u) { tags { tags { tag { urn } } } "
+            "ownership { owners { owner { ... on CorpUser { urn } ... on CorpGroup { urn } } } } } }", {"u": urn})["dataset"]
+    tags = sorted(t["tag"]["urn"] for t in ((d.get("tags") or {}).get("tags") or []))
+    owners = sorted(o["owner"]["urn"] for o in ((d.get("ownership") or {}).get("owners") or []))
+    return tags, owners
+
+
+def test_24_automation_previews_applies_and_undoes(users):
+    """An automation over this run's dataset adds a tag and an owner where missing; a second run
+    changes nothing; undo restores the previous metadata. Admin only."""
+    root, bob = users["root"], users["bob"]
+    tag = f"urn:li:tag:automated-{RUN}"
+    spec = {"name": f"e2e automation {RUN}",
+            "select": {"attr": "resource.urn", "op": "contains", "value": f"am_{RUN}.public.customers"},
+            "actions": [{"type": "add_tag", "value": f"automated-{RUN}"}, {"type": "add_owner", "value": BOB}]}
+    assert bob.post("/governance/automations/preview", json=spec).status_code == 403
+    preview = eventually(lambda: (lambda p: p if p["matched"] == 1 else None)(
+        root.post("/governance/automations/preview", json=spec).json()), timeout=60)   # the scan is search-backed
+    assert preview["would_change"] == 1 and {c["what"] for c in preview["changes"]} == {"tags", "owners"}, preview
+    before = _tags_and_owners(DS)
+    auto = root.post("/governance/automations", json=spec, params={"enabled": "false"}).json()
+    try:
+        assert auto["enabled"] is False and auto["identity"].endswith(auto["id"])
+        run = root.post(f"/governance/automations/{auto['id']}/run").json()
+        assert run["state"] == "APPLIED" and run["changed"] == 1, run
+        tags, owners = _tags_and_owners(DS)
+        assert tag in tags and BOB in owners and set(before[1]) <= set(owners)      # nobody was removed
+        assert root.post(f"/governance/automations/{auto['id']}/run").json()["state"] == "NOOP"
+        undone = root.post(f"/governance/automations/runs/{run['id']}/undo").json()
+        assert undone["state"] == "UNDONE" and undone["restored"] == 2, undone
+        assert _tags_and_owners(DS) == before
+        assert [r["state"] for r in root.get(f"/governance/automations/{auto['id']}/runs").json()] == ["NOOP", "UNDONE"]
+    finally:
+        root.delete(f"/governance/automations/{auto['id']}")

@@ -210,7 +210,7 @@ def privilege_for(change: dict) -> str:
 
 
 def apply_changes(changes: list[dict], get: Callable[[str, str], Optional[dict]], actor: str,
-                  batch_id: str) -> tuple[list[dict], dict, dict]:
+                  batch_id: str, source: str = "bulk-edit") -> tuple[list[dict], dict, dict]:
     """MCPs for ``changes`` plus before/after snapshots of every aspect touched."""
     stamp = audit_stamp(actor)
     staged: dict[tuple[str, str], dict] = {}
@@ -261,7 +261,7 @@ def apply_changes(changes: list[dict], get: Callable[[str, str], Optional[dict]]
             info["globalTags"] = {"tags": [{"tag": t} for t in c["to"]]}
         elif what == "glossary_terms":
             info["glossaryTerms"] = {"terms": [{"urn": t} for t in c["to"]], "auditStamp": stamp}
-    props = {"cairn_source": "bulk-edit", "cairn_batch": batch_id, "cairn_edited_by": actor}
+    props = {"cairn_source": source, "cairn_batch": batch_id, "cairn_edited_by": actor}
     mcps = [make_mcp(urn, name, value, system_properties=props) for (urn, name), value in staged.items()]
     after = {f"{urn}|{name}": value for (urn, name), value in staged.items()}
     return mcps, before, after
@@ -330,6 +330,22 @@ class BulkService:
             self.audit.record("governance", "bulk.applied", actor, bid,
                               {"changes": len(todo), "assets": len({c["urn"] for c in todo}), "skipped": len(stale)})
         return {"batch_id": bid, "applied": len(todo), "already_current": len(stale), "aspects": len(mcps)}
+
+    def record(self, changes: list[dict], actor: str, source: str, details: Optional[dict] = None) -> dict:
+        """Write ``changes`` now, as one undoable batch (for automations: no preview step)."""
+        bid = f"bulk_{uuid.uuid4().hex[:12]}"
+        mcps, before, after = apply_changes(changes, self.graph.get_aspect, actor, bid, source)
+        if mcps:
+            self.graph.emit(mcps)
+        now = _now()
+        with self.engine.begin() as conn:
+            conn.execute(bulk_batches.insert().values(id=bid, actor=actor, state="APPLIED", changes=changes,
+                                                      before=before, after=after, rows=len(changes),
+                                                      created_ms=now, updated_ms=now))
+        if self.audit is not None:
+            self.audit.record("governance", f"{source}.applied", actor, bid,
+                              {"changes": len(changes), "assets": len({c["urn"] for c in changes}), **(details or {})})
+        return {"batch_id": bid, "applied": len(changes), "aspects": len(mcps)}
 
     def undo(self, bid: str, actor: str) -> dict:
         row = self._batch(bid, actor)

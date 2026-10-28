@@ -80,6 +80,7 @@ class Services:
     tag_sync: Optional[Any] = None
     connections: Optional[Any] = None       # named warehouse connections (quality, tag sync)
     contracts: Optional[Any] = None
+    automations: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -469,6 +470,7 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
         _build_contracts(s, hub, Event)
+        _build_automations(s, hub, Event)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
@@ -591,6 +593,21 @@ def _build_forms(s: Services, hub, Event) -> None:
 
     datasets = (lambda: Planner(s.graph).datasets()) if s.graph is not None else None
     s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
+
+
+def _build_automations(s: Services, hub, Event) -> None:
+    from cairn.governance.automations import AutomationService
+    from cairn.quality.auto import Planner
+
+    def notify(row: dict, recipients: list[str], urns: list[str]) -> None:
+        names = s.summaries(urns[:5])
+        listing = ", ".join((names.get(u) or {}).get("name") or u for u in urns[:5])
+        more = f" and {len(urns) - 5} more" if len(urns) > 5 else ""
+        hub.publish(Event(type="automation.applied", title=f"Automation “{row['name']}” updated {len(urns)} asset(s)",
+                          body=f"{listing}{more}.", actor=row["identity"], recipients=recipients,
+                          entity_urn=urns[0] if len(urns) == 1 else None, payload={"automation_id": row["id"]}))
+
+    s.automations = AutomationService(s.engine, s.bulk, lambda: Planner(s.graph).datasets(), notify, s.audit)
 
 
 def _build_contracts(s: Services, hub, Event) -> None:

@@ -570,3 +570,49 @@ export interface Contract {
     updated_ms: number;
     versions?: { version: string; created_by: string; created_ms: number }[];
 }
+
+export type AutomationActionType = 'add_tag' | 'add_term' | 'add_owner' | 'set_domain' | 'notify';
+
+export interface AutomationAction {
+    type: AutomationActionType;
+    value?: string | null;
+    recipients?: string[];
+}
+
+export interface AutomationSpec {
+    name: string;
+    description?: string;
+    select: Record<string, unknown>;
+    every_minutes: number;
+    actions: AutomationAction[];
+}
+
+export interface AutomationRun {
+    id: string;
+    automation_id: string;
+    started_ms: number;
+    trigger: 'schedule' | 'manual';
+    matched: number;
+    changed: number;
+    batch_id: string | null;
+    state: 'APPLIED' | 'NOOP' | 'UNDONE' | 'ERROR';
+    detail: { assets?: string[]; notified?: string[]; error?: string };
+}
+
+export interface Automation {
+    id: string;
+    name: string;
+    spec: AutomationSpec;
+    enabled: boolean;
+    created_by: string;
+    identity: string;
+    last_run: AutomationRun | null;
+}
+
+export interface AutomationPreview {
+    matched: number;
+    would_change: number;
+    changes: BulkChange[];
+    sample_matched: string[];
+    truncated: boolean;
+}

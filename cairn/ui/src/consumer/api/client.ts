@@ -42,6 +42,10 @@ import type {
     BulkPreview,
     TagSyncResult,
     Contract,
+    Automation,
+    AutomationPreview,
+    AutomationRun,
+    AutomationSpec,
     TagSyncTarget,
     Thread,
     TrendingItem,
@@ -343,6 +347,38 @@ export class ConsumerClient extends CairnClient {
 
     contract(dataset: string, opts?: RequestOptions) {
         return this.request<Contract>('GET', '/quality/contracts/one', undefined, { ...opts, query: { dataset } });
+    }
+
+    listAutomations(opts?: RequestOptions) {
+        return this.request<Automation[]>('GET', '/governance/automations', undefined, opts);
+    }
+
+    previewAutomation(spec: AutomationSpec) {
+        return this.request<AutomationPreview>('POST', '/governance/automations/preview', spec);
+    }
+
+    createAutomation(spec: AutomationSpec) {
+        return this.request<Automation>('POST', '/governance/automations', spec);
+    }
+
+    setAutomationEnabled(id: string, enabled: boolean) {
+        return this.request<Automation>('POST', `/governance/automations/${enc(id)}/enabled`, { enabled });
+    }
+
+    deleteAutomation(id: string) {
+        return this.request<void>('DELETE', `/governance/automations/${enc(id)}`);
+    }
+
+    runAutomation(id: string) {
+        return this.request<AutomationRun>('POST', `/governance/automations/${enc(id)}/run`);
+    }
+
+    automationRuns(id: string, opts?: RequestOptions) {
+        return this.request<AutomationRun[]>('GET', `/governance/automations/${enc(id)}/runs`, undefined, opts);
+    }
+
+    undoAutomationRun(runId: string) {
+        return this.request<AutomationRun>('POST', `/governance/automations/runs/${enc(runId)}/undo`);
     }
 
     listPersonas(opts?: RequestOptions) {

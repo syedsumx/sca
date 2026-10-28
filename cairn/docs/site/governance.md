@@ -138,3 +138,26 @@ GRANT APPLY TAG ON ACCOUNT TO ROLE CAIRN_TAGGER;   -- the role behind the connec
 ```
 
 Tags you set directly in the warehouse come back into the catalog through ingestion.
+
+## Automations
+
+An automation keeps a rule true across every matching dataset, now and as new datasets appear. For example: "every table in the finance schema gets the Finance domain and an owner".
+
+Build one in **Governance studio → Automations**:
+
+- **Which datasets:** name contains, platform, domain, classification or tag. **Advanced** takes any policy condition.
+- **Then:** set domain, add owner, add tag, add glossary term, or notify people.
+- **Every N minutes:** how often it runs (10 minutes at least).
+
+**Preview matches** lists the matching datasets and what a run would write. Nothing is written until you create the automation.
+
+Each run writes only what is missing. It adds tags, terms and owners without removing the ones people set, and sets the domain only where it differs. Writes are attributed to the automation's own identity, `urn:li:corpuser:cairn-automation-<id>`, so history and the audit log show which rule made each change.
+
+**Runs** shows what each run changed. **Undo** restores a run's changes, unless someone has edited the same assets since. Notify actions tell the listed people only about the assets a run actually changed. Pausing or deleting an automation keeps what it already changed.
+
+API: `/cairn/api/governance/automations`, which needs `MANAGE_GLOBAL_SETTINGS`:
+
+- `GET` and `POST` on the collection,
+- `POST /preview`,
+- `POST /{id}/run`, `POST /{id}/enabled`, `GET /{id}/runs`, `DELETE /{id}`,
+- `POST /runs/{run_id}/undo`.

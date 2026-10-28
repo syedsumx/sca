@@ -112,6 +112,9 @@ def notifier_tick(s) -> dict:
     out["grants_expired"] = len(expired)
     if s.forms is not None:
         out["forms"] = forms_tick(s, now_ms)
+    if s.automations is not None and now_ms - _SWEEP_STATE["automations_ms"] >= 60_000:
+        _SWEEP_STATE["automations_ms"] = now_ms
+        out["automations"] = s.automations.sweep(now_ms)
     if s.contracts is not None and now_ms - _SWEEP_STATE["contracts_ms"] >= 300_000:
         _SWEEP_STATE["contracts_ms"] = now_ms
         out["contracts"] = s.contracts.refresh_all()
@@ -122,7 +125,7 @@ def notifier_tick(s) -> dict:
 
 
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
-_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0}
+_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0}
 
 
 _FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}
