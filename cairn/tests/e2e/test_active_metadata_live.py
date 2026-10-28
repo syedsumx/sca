@@ -758,7 +758,11 @@ def test_18_semantic_search_similar_assets_and_index_upkeep(users):
     # on a long-lived stack, rank first.
     similar = eventually(lambda: root.get("/ai/similar", params={"urn": DS}).json()["results"] or None, timeout=60)
     assert DS not in [h["urn"] for h in similar]
-    assert {h["name"] for h in similar[:3]} <= {"customers", "customer_orders"}, similar
+    # The mart ranks above every asset that shares no columns (only other runs' copies may come first).
+    urns = [h["urn"] for h in similar]
+    assert DS_DOWN in urns, similar
+    unrelated = [i for i, h in enumerate(similar) if h["name"] not in ("customers", "customer_orders")]
+    assert not unrelated or urns.index(DS_DOWN) < unrelated[0], similar
 
     # The workspace leaves out what keyword search already shows; pick a query where meaning adds something.
     def keyword(q):
