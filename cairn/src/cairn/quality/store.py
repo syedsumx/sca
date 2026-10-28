@@ -7,7 +7,7 @@ import zlib
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, and_, delete, select, update
+from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, and_, delete, func, select, update
 from sqlalchemy.engine import Engine
 
 from cairn.common.db import JSONText, metadata
@@ -179,6 +179,12 @@ class QualityStore:
             rows = conn.execute(stmt).fetchall()
         return [dict(r._mapping) for r in reversed(rows)]
 
+    def first_point_ms(self, monitor_id: str) -> Optional[int]:
+        """When the monitor first saw data, counting points later left out of the baseline."""
+        with self.engine.connect() as conn:
+            return conn.execute(select(func.min(metric_points.c.ts_ms))
+                                .where(metric_points.c.monitor_id == monitor_id)).scalar()
+
     # ---- evaluations --------------------------------------------------------------
     def add_evaluation(self, ev: Evaluation, metric_point_id: Optional[int]) -> bool:
         """Insert idempotently on ``run_id``; returns False if it already existed."""
@@ -216,7 +222,7 @@ class QualityStore:
         return _eval_from_row(row) if row else None
 
     def set_feedback(self, evaluation_id: str, feedback: str) -> Optional[Evaluation]:
-        """EXPECTED feedback removes the point from future baselines."""
+        """REAL keeps the point out of future baselines; NEW_NORMAL drops every earlier point."""
         with self.engine.begin() as conn:
             row = conn.execute(select(evaluations).where(evaluations.c.id == evaluation_id)).first()
             if not row:
@@ -229,6 +235,12 @@ class QualityStore:
                 # the baseline.
                 conn.execute(update(metric_points).where(metric_points.c.id == point_id)
                              .values(excluded=(feedback == "REAL")))
+                if feedback == "NEW_NORMAL":   # the level moved on purpose: forget what came before
+                    point_ts = conn.execute(select(metric_points.c.ts_ms)
+                                            .where(metric_points.c.id == point_id)).scalar()
+                    conn.execute(update(metric_points).where(and_(
+                        metric_points.c.monitor_id == row._mapping["monitor_id"],
+                        metric_points.c.ts_ms < point_ts)).values(excluded=True))
         return self.get_evaluation(evaluation_id)
 
     # ---- state --------------------------------------------------------------------

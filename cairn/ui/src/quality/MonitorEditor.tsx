@@ -14,39 +14,60 @@ export interface ConfigField {
     options?: Array<{ label: string; value: string }>;
     help?: string;
     min?: number;
+    max?: number;
     defaultValue?: unknown;
 }
 
-const SOURCE_OPTIONS = {
-    freshness: [
-        { label: 'Cairn Core operations (no warehouse access)', value: 'catalog_operation' },
-        { label: 'Warehouse information_schema', value: 'information_schema' },
-        { label: 'MAX(timestamp column)', value: 'sql' },
+const SOURCE = (sqlLabel: string): ConfigField => ({
+    name: 'source',
+    label: 'Signal source',
+    kind: 'select',
+    required: true,
+    defaultValue: 'catalog',
+    options: [
+        { label: 'Catalog (profiles and operations, no warehouse access)', value: 'catalog' },
+        { label: sqlLabel, value: 'sql' },
     ],
-    volume: [
-        { label: 'Cairn Core dataset profile', value: 'catalog_profile' },
-        { label: 'Warehouse information_schema', value: 'information_schema' },
-        { label: 'COUNT(*) query', value: 'sql' },
-    ],
-};
+});
+const CONNECTION: ConfigField = { name: 'connection', label: 'Warehouse connection', kind: 'text', help: 'Cairn connection id, for SQL sources' };
+const TABLE: ConfigField = { name: 'table', label: 'Table', kind: 'text', help: 'db.schema.table, for SQL sources' };
+
+/** Learned thresholds (volume, field metrics, custom SQL): trend- and season-aware, quiet while learning. */
+export const LEARNED_FIELDS: ConfigField[] = [
+    {
+        name: 'model',
+        label: 'Threshold',
+        kind: 'select',
+        defaultValue: 'learned',
+        options: [
+            { label: 'Learned: follows trend and season, learns for a few weeks first', value: 'learned' },
+            { label: 'Recent baseline: starts judging after a few runs', value: '' },
+        ],
+    },
+    { name: 'band', label: 'Band width (standard deviations)', kind: 'number', min: 1, max: 10, help: 'Wider means fewer alerts. Empty uses the sensitivity below (low 4, medium 3, high 2.5).' },
+    { name: 'learn_days', label: 'Learning period (days)', kind: 'number', min: 0, max: 90, help: 'No alerts until this much history exists, unless a hard bound is crossed. Default 21.' },
+];
 
 /** Per-type configuration schema; keys map 1:1 to the monitor `config` object. */
 export const MONITOR_CONFIG_FIELDS: Record<MonitorType, ConfigField[]> = {
     freshness: [
-        { name: 'source', label: 'Signal source', kind: 'select', required: true, options: SOURCE_OPTIONS.freshness, defaultValue: 'catalog_operation' },
-        { name: 'timestamp_column', label: 'Timestamp column', kind: 'text', help: 'Required when source is MAX(timestamp column)' },
+        SOURCE('MAX(timestamp column)'),
+        { name: 'timestamp_column', label: 'Timestamp column', kind: 'text', help: 'Required for the SQL source' },
+        TABLE,
+        CONNECTION,
         { name: 'sla_seconds', label: 'Hard SLA (seconds)', kind: 'number', min: 60, help: 'Fail when the dataset is older than this, regardless of learned cadence' },
-        { name: 'connection_id', label: 'Warehouse connection', kind: 'text', help: 'Cairn connection id for SQL-based sources' },
     ],
     volume: [
-        { name: 'source', label: 'Signal source', kind: 'select', required: true, options: SOURCE_OPTIONS.volume, defaultValue: 'catalog_profile' },
+        SOURCE('COUNT(*) query'),
+        TABLE,
+        CONNECTION,
+        ...LEARNED_FIELDS,
         { name: 'min_rows', label: 'Minimum rows', kind: 'number', min: 0 },
         { name: 'max_rows', label: 'Maximum rows', kind: 'number', min: 0 },
         { name: 'max_change_pct', label: 'Max change vs previous (%)', kind: 'number', min: 0 },
-        { name: 'filter_sql', label: 'Row filter (WHERE clause)', kind: 'text' },
-        { name: 'connection_id', label: 'Warehouse connection', kind: 'text' },
     ],
     field_metric: [
+        SOURCE('Query the column'),
         { name: 'field', label: 'Field path', kind: 'text', required: true },
         {
             name: 'metric',
@@ -54,18 +75,18 @@ export const MONITOR_CONFIG_FIELDS: Record<MonitorType, ConfigField[]> = {
             kind: 'select',
             required: true,
             defaultValue: 'null_pct',
-            options: ['null_pct', 'distinct_pct', 'min', 'max', 'mean', 'stddev', 'length_mean', 'negative_pct'].map(
-                (v) => ({ label: v, value: v }),
-            ),
+            options: ['null_pct', 'distinct_pct', 'mean', 'min', 'max', 'stddev', 'avg_length', 'row_count'].map((v) => ({ label: v, value: v })),
         },
+        TABLE,
+        CONNECTION,
+        ...LEARNED_FIELDS,
         { name: 'min', label: 'Static lower bound', kind: 'number' },
         { name: 'max', label: 'Static upper bound', kind: 'number' },
-        { name: 'connection_id', label: 'Warehouse connection', kind: 'text', required: true },
     ],
     distribution: [
         { name: 'field', label: 'Field path', kind: 'text', required: true },
         {
-            name: 'bucketing',
+            name: 'kind',
             label: 'Bucketing',
             kind: 'select',
             required: true,
@@ -75,37 +96,22 @@ export const MONITOR_CONFIG_FIELDS: Record<MonitorType, ConfigField[]> = {
                 { label: 'Numeric (quantile buckets)', value: 'numeric' },
             ],
         },
-        { name: 'num_buckets', label: 'Buckets', kind: 'number', min: 2, defaultValue: 10 },
+        { name: 'buckets', label: 'Buckets', kind: 'number', min: 2, defaultValue: 10 },
         { name: 'psi_warn', label: 'PSI warn threshold', kind: 'number', min: 0, defaultValue: 0.2 },
         { name: 'psi_fail', label: 'PSI fail threshold', kind: 'number', min: 0, defaultValue: 0.3 },
-        { name: 'connection_id', label: 'Warehouse connection', kind: 'text', required: true },
+        TABLE,
+        { ...CONNECTION, required: true },
     ],
     schema: [
-        {
-            name: 'fail_on',
-            label: 'Fail on',
-            kind: 'select',
-            required: true,
-            defaultValue: 'breaking',
-            options: [
-                { label: 'Breaking changes (removed / retyped fields)', value: 'breaking' },
-                { label: 'Any change', value: 'any' },
-            ],
-        },
         { name: 'allow_additions', label: 'Allow new fields', kind: 'boolean', defaultValue: true },
+        { name: 'auto_accept_additions', label: 'Accept new fields into the baseline', kind: 'boolean', defaultValue: true },
     ],
     custom_sql: [
         { name: 'sql', label: 'SQL returning a single number', kind: 'sql', required: true },
-        {
-            name: 'operator',
-            label: 'Operator',
-            kind: 'select',
-            defaultValue: 'between',
-            options: ['between', 'gt', 'gte', 'lt', 'lte', 'eq', 'anomaly'].map((v) => ({ label: v, value: v })),
-        },
+        { ...CONNECTION, required: true },
+        ...LEARNED_FIELDS,
         { name: 'min', label: 'Lower bound', kind: 'number' },
         { name: 'max', label: 'Upper bound', kind: 'number' },
-        { name: 'connection_id', label: 'Warehouse connection', kind: 'text', required: true },
     ],
 };
 
@@ -299,7 +305,7 @@ export function MonitorEditor({ open, monitor, defaultDatasetUrn, onClose, onSav
                         valuePropName={f.kind === 'boolean' ? 'checked' : 'value'}
                         rules={f.required ? [{ required: true, message: `${f.label} is required` }] : undefined}
                     >
-                        {f.kind === 'number' && <InputNumber min={f.min} style={{ width: '100%' }} />}
+                        {f.kind === 'number' && <InputNumber min={f.min} max={f.max} style={{ width: '100%' }} />}
                         {f.kind === 'text' && <Input />}
                         {f.kind === 'select' && <Select options={f.options} />}
                         {f.kind === 'boolean' && <Switch />}

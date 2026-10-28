@@ -10,6 +10,8 @@ Detectors
 * :func:`detect_seasonal_robust_z`: median/MAD z-score with hour-of-week or
   day-of-week seasonality buckets (volume, custom metrics).
 * :func:`detect_ewma`: exponentially weighted mean/variance band (field metrics).
+* :func:`detect_learned`: trend-adjusted seasonal baseline that learns for a few weeks before it
+  alerts, with automatic seasonality and a band people can widen or narrow.
 * :func:`detect_freshness`: learned update cadence (p95 of inter-arrival gaps) or SLA.
 * :func:`detect_distribution`: Population Stability Index + two-sample KS statistic.
 * :func:`detect_schema_change`: breaking vs additive schema diffs.
@@ -141,6 +143,92 @@ def detect_seasonal_robust_z(
         f"value {current.value:g} vs {basis} baseline {center:g} (z={z:+.2f}, threshold ±{z_fail:g})",
         low, high, round(z, 4), {"basis": basis, "n": len(values)},
     )
+    return _merge_static(det, current.value, min_value, max_value)
+
+
+# --------------------------------------------------------------------------- learned
+DAY_MS = 86_400_000
+MAX_TREND_POINTS = 200
+
+
+def theil_sen_slope(points: Sequence[Point]) -> float:
+    """Median of pairwise slopes (value per ms): robust to outliers, unlike least squares."""
+    pts = sorted(points, key=lambda p: p.ts_ms)
+    if len(pts) > MAX_TREND_POINTS:   # evenly thinned: O(n²) pairs stay cheap
+        step = len(pts) / MAX_TREND_POINTS
+        pts = [pts[int(i * step)] for i in range(MAX_TREND_POINTS)]
+    slopes = [(b.value - a.value) / (b.ts_ms - a.ts_ms)
+              for i, a in enumerate(pts) for b in pts[i + 1:] if b.ts_ms > a.ts_ms]
+    return median(slopes) if slopes else 0.0
+
+
+def pick_seasonality(points: Sequence[Point], requested: Optional[str] = "auto") -> Optional[str]:
+    """``auto`` picks the finest cycle the history can support: hour of week once there are two
+    weeks of sub-daily points, hour of day after three days of them, day of week after three
+    weeks of daily points; otherwise none."""
+    if requested != "auto":
+        return requested
+    pts = sorted(p.ts_ms for p in points)
+    if len(pts) < 2:
+        return None
+    span_days = (pts[-1] - pts[0]) / DAY_MS
+    gap_h = median([b - a for a, b in zip(pts, pts[1:])]) / 3_600_000
+    if gap_h <= 6 and span_days >= 14:
+        return "hour_of_week"
+    if gap_h <= 6 and span_days >= 3:
+        return "hour_of_day"
+    if span_days >= 21:
+        return "day_of_week"
+    return None
+
+
+def detect_learned(
+    history: Sequence[Point],
+    current: Point,
+    sensitivity: Sensitivity = "medium",
+    band: Optional[float] = None,
+    learn_days: float = 21,
+    observed_since_ms: Optional[int] = None,
+    min_points: int = 14,
+    seasonality: Optional[str] = "auto",
+    trend: bool = True,
+    min_bucket: int = 3,
+    min_value: Optional[float] = None,
+    max_value: Optional[float] = None,
+) -> Detection:
+    """Learned threshold: stays quiet while it learns, then alerts outside
+    ``center ± band × robust scale`` where the center follows the trend and the season.
+
+    ``band`` (in robust standard deviations) overrides the sensitivity preset. ``observed_since_ms``
+    is when the monitor first saw data, so a baseline reset after a "new normal" needs only
+    ``min_points`` fresh points rather than another learning period.
+    """
+    ordered = sorted(history, key=lambda p: p.ts_ms)
+    since = observed_since_ms if observed_since_ms is not None else (ordered[0].ts_ms if ordered else current.ts_ms)
+    days = max(0.0, (current.ts_ms - since) / DAY_MS)
+    if days < learn_days or len(ordered) < min_points:
+        det = Detection("TRAINING", f"learning normal behaviour ({min(days, learn_days):.0f}/{learn_days:g} days, "
+                        f"{len(ordered)}/{min_points} points)", details={"model": "learned", "days": round(days, 2)})
+        return _merge_static(det, current.value, min_value, max_value)
+    slope = theil_sen_slope(ordered) if trend else 0.0
+    # Project every past point to "now" along the trend, so growth is not mistaken for an anomaly.
+    projected = [Point(p.ts_ms, p.value + slope * (current.ts_ms - p.ts_ms)) for p in ordered]
+    season = pick_seasonality(ordered, seasonality)
+    key = _season_key(current.ts_ms, season)
+    bucket = [p.value for p in projected if key is not None and _season_key(p.ts_ms, season) == key]
+    values = bucket if len(bucket) >= min_bucket else [p.value for p in projected]
+    basis = season if values is bucket else "all"
+    center, scale = _robust_center_scale(values)
+    width = float(band) if band else Z_THRESHOLDS[sensitivity]
+    z = (current.value - center) / scale
+    low, high = center - width * scale, center + width * scale
+    status: Status = "FAIL" if abs(z) > width else "WARN" if abs(z) > width * WARN_FRACTION else "PASS"
+    trend_per_day = slope * DAY_MS
+    msg = f"value {current.value:g}, expected {low:g} – {high:g} ({basis} baseline"
+    msg += f", trend {trend_per_day:+.3g}/day)" if trend and abs(trend_per_day) > 0 else ")"
+    det = Detection(status, msg, low, high, round(z, 4),
+                    {"model": "learned", "basis": basis, "seasonality": season, "n": len(values),
+                     "trend_per_day": round(trend_per_day, 6), "band": width, "center": center})
     return _merge_static(det, current.value, min_value, max_value)
 
 

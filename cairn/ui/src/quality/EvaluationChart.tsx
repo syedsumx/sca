@@ -26,7 +26,7 @@ export function toChartPoints(evaluations: Evaluation[]): ChartPoint[] {
             value: e.metric_value,
             low: e.expected_low,
             high: e.expected_high,
-            anomaly: (e.status === 'FAIL' || e.status === 'WARN') && e.feedback !== 'EXPECTED',
+            anomaly: (e.status === 'FAIL' || e.status === 'WARN') && e.feedback !== 'EXPECTED' && e.feedback !== 'NEW_NORMAL',
             evaluation: e,
         }))
         .filter((p) => !Number.isNaN(p.t))

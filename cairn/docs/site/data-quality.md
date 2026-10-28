@@ -25,9 +25,40 @@ appear in monitor definitions.
 ## Learned thresholds
 
 New monitors start in `TRAINING`: they learn the normal range from history, then switch to `ACTIVE`.
-`sensitivity` (`low`, `medium`, `high`) sets how far a value may move before it fails. Give
-feedback on a failure: **expected** (a legitimate change) keeps the value in the baseline so the
-monitor adapts; **real** keeps it out so one incident does not shift the normal range.
+`sensitivity` (`low`, `medium`, `high`) sets how far a value may move before it fails.
+
+### The learned model
+
+Set `config.model: learned` on `volume`, `field_metric` and `custom_sql` monitors. Monitors
+created in the editor use it by default. The learned model differs from the default baseline in four ways:
+
+- **It learns before it alerts.** The monitor stays in `TRAINING` until it has `learn_days` of
+  history (default 21) and at least `min_history` points (default 14). Hard bounds such as
+  `min_rows` or `max` still fail right away.
+- **It follows the trend.** A robust slope (Theil–Sen) is fitted on the history, and past values
+  are projected to today. A table that grows by 500 rows a day therefore isn't flagged for
+  growing, and a sudden drop still is.
+- **It picks the season.** With `seasonality: auto`, the model compares a value with the same hour
+  of the week once there are two weeks of sub-daily points. After three days of sub-daily points it
+  compares with the same hour of the day. After three weeks of daily points it compares with the
+  same weekday. Otherwise it compares with all recent points. You can also name a cycle
+  (`hour_of_week`, `day_of_week`, `hour_of_day`) or set none.
+- **The band is adjustable.** `band` is the band's half-width in robust standard deviations, from 1
+  to 10. It replaces the sensitivity preset (low 4, medium 3, high 2.5). Values beyond 75% of the
+  band are a `WARN`.
+
+Each evaluation records the expected range, the cycle used and the trend per day. The chart draws
+the expected range as a band.
+
+### Feedback
+
+Give feedback on any failure or warning:
+
+- **Expected:** a legitimate value. It stays in the baseline so the monitor adapts.
+- **Real:** an incident. It is kept out of the baseline, so one bad day doesn't shift the normal range.
+- **New normal:** an intended step change, such as a backfill or a new source. The baseline
+  restarts from this value. The monitor needs `min_history` fresh points, but not another learning
+  period.
 
 ## Severity and incidents
 

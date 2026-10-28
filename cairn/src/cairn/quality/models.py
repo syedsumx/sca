@@ -59,6 +59,17 @@ class MonitorSpec(BaseModel):
             if not sql:
                 raise ValueError("custom_sql requires config.sql")
             validate_readonly_sql(sql)
+        if c.get("model") not in (None, "learned"):
+            raise ValueError("config.model must be 'learned' or omitted")
+        if c.get("model") == "learned":
+            if self.type not in ("volume", "field_metric", "custom_sql"):
+                raise ValueError("learned thresholds apply to volume, field_metric and custom_sql monitors")
+            if c.get("band") is not None and not 1 <= float(c["band"]) <= 10:
+                raise ValueError("config.band must be between 1 and 10 standard deviations")
+            if not 0 <= float(c.get("learn_days", 21)) <= 90:
+                raise ValueError("config.learn_days must be between 0 and 90")
+            if c.get("seasonality", "auto") not in ("auto", None, "hour_of_week", "day_of_week", "hour_of_day"):
+                raise ValueError("config.seasonality must be auto, hour_of_week, day_of_week, hour_of_day or null")
         if self.type == "freshness" and source == "sql" and not c.get("timestamp_column"):
             raise ValueError("SQL freshness requires config.timestamp_column")
         return self
@@ -111,12 +122,14 @@ class Evaluation(BaseModel):
     score: Optional[float]
     message: str
     details: dict[str, Any] = Field(default_factory=dict)
-    feedback: Optional[Literal["EXPECTED", "REAL"]] = None
+    feedback: Optional[Literal["EXPECTED", "REAL", "NEW_NORMAL"]] = None
     emitted: bool = False
 
 
 class FeedbackRequest(BaseModel):
-    feedback: Literal["EXPECTED", "REAL"]
+    # EXPECTED: a legitimate value, kept in the baseline. REAL: an incident, kept out of it.
+    # NEW_NORMAL: an intended step change; the baseline restarts from this point.
+    feedback: Literal["EXPECTED", "REAL", "NEW_NORMAL"]
 
 
 Monitor.model_rebuild()

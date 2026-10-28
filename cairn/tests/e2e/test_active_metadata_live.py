@@ -611,6 +611,48 @@ def test_16_auto_monitor_rules_create_run_alert_and_retire_monitors(users):
     assert root.get(f"/quality/monitors/{mine[0]}").status_code == 404
 
 
+def test_16c_learned_monitor_learns_alerts_and_accepts_a_new_normal(users):
+    """A learned volume monitor stays quiet while it learns, then fails on a drop; marking the jump
+    as the new normal restarts its baseline from that value."""
+    root = users["root"]
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:postgres,am_{RUN}.public.learned,PROD)"
+    emit(ds, "datasetProperties", {"name": "learned", "description": "E2E learned volume."})
+
+    def profile(rows: int) -> None:
+        emit(ds, "datasetProfile", {"timestampMillis": int(time.time() * 1000), "rowCount": rows, "columnCount": 1})
+
+    spec = {"name": f"learned volume {RUN}", "dataset_urn": ds, "type": "volume",
+            "config": {"model": "learned", "learn_days": 0, "min_history": 4, "seasonality": None, "trend": False}}
+    resp = root.post("/quality/monitors", json=spec)
+    assert resp.status_code in (200, 201), resp.text
+    mid = resp.json()["id"]
+    try:
+        assert root.post("/quality/monitors", json={**spec, "config": {"model": "learned", "band": 50}}).status_code == 422
+
+        def run(rows: int) -> dict:
+            profile(rows)
+            # profiles are timeseries, indexed asynchronously: wait until the new one is readable
+            eventually(lambda: (gql("query($u: String!) { dataset(urn: $u) { datasetProfiles(limit: 1) { rowCount } } }",
+                                    {"u": ds})["dataset"].get("datasetProfiles") or [{}])[0].get("rowCount") == rows,
+                       timeout=60, interval=1)
+            ev = root.post(f"/quality/monitors/{mid}/run").json()
+            assert ev["metric_value"] == rows, ev
+            return ev
+
+        statuses = [run(n)["status"] for n in (1000, 1012, 995, 1006)]
+        assert statuses == ["TRAINING"] * 4, statuses
+        ok = run(1003)
+        assert ok["status"] == "PASS" and ok["expected_low"] < 1003 < ok["expected_high"], ok
+        assert ok["details"]["model"] == "learned"
+        jump = run(5000)
+        assert jump["status"] == "FAIL", jump
+        fb = root.post(f"/quality/evaluations/{jump['id']}/feedback", json={"feedback": "NEW_NORMAL"})
+        assert fb.status_code == 200 and fb.json()["feedback"] == "NEW_NORMAL", fb.text
+        assert run(5010)["status"] == "TRAINING"        # one point left; four needed
+    finally:
+        root.delete(f"/quality/monitors/{mid}")
+
+
 def test_16b_shipped_rule_monitors_certified_datasets(users):
     """cairn-api creates the certification property at start; the default rule then puts freshness
     and volume monitors on every certified dataset."""

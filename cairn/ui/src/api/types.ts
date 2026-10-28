@@ -14,7 +14,7 @@ export type Sensitivity = 'low' | 'medium' | 'high';
 export type Severity = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 export type MonitorStatus = 'TRAINING' | 'ACTIVE' | 'PAUSED';
 export type EvaluationStatus = 'PASS' | 'FAIL' | 'WARN' | 'TRAINING' | 'ERROR';
-export type EvaluationFeedback = 'EXPECTED' | 'REAL';
+export type EvaluationFeedback = 'EXPECTED' | 'REAL' | 'NEW_NORMAL';
 
 export interface MonitorSchedule {
     cron?: string;

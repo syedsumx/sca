@@ -26,6 +26,8 @@ from cairn.quality.models import Evaluation, Monitor
 from cairn.quality.store import QualityStore
 
 logger = logging.getLogger(__name__)
+# Learned thresholds look back further: four weeks of hourly runs plus room for retries.
+LEARNED_HISTORY = 2000
 
 Notifier = Callable[[Monitor, Evaluation, str], None]
 
@@ -176,10 +178,18 @@ class QualityEngine:
 
         if sample.value is None:
             return d.Detection("ERROR", "collector returned no value")
-        history = [d.Point(p["ts_ms"], float(p["value"])) for p in self.store.history(monitor.id)
+        learned = c.get("model") == "learned"
+        history = [d.Point(p["ts_ms"], float(p["value"]))
+                   for p in self.store.history(monitor.id, limit=LEARNED_HISTORY if learned else 500)
                    if p["value"] is not None]
         current = d.Point(now, float(sample.value))
         lo, hi = _bounds(monitor)
+        if learned:
+            return d.detect_learned(
+                history, current, sens, band=c.get("band"), learn_days=float(c.get("learn_days", 21)),
+                observed_since_ms=self.store.first_point_ms(monitor.id),
+                min_points=int(c.get("min_history", 14)), seasonality=c.get("seasonality", "auto"),
+                trend=bool(c.get("trend", True)), min_value=lo, max_value=hi)
         if monitor.type == "field_metric":
             return d.detect_ewma(history, current, sens, min_history=int(c.get("min_history", 10)),
                                  min_value=lo, max_value=hi)

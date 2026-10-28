@@ -14,6 +14,13 @@ export interface MonitorDetailProps {
     refreshKey?: number;
 }
 
+const FEEDBACK_DONE: Record<EvaluationFeedback, string> = {
+    EXPECTED: 'Marked as expected: kept in the baseline so the monitor learns',
+    REAL: 'Confirmed as a real anomaly: kept out of the baseline',
+    NEW_NORMAL: 'Baseline restarted from this value',
+};
+const FEEDBACK_TAG: Record<EvaluationFeedback, string> = { EXPECTED: 'Expected', REAL: 'Confirmed', NEW_NORMAL: 'New normal' };
+
 /** Chart + evaluation history for one monitor, with "expected / real" anomaly feedback. */
 export function MonitorDetail({ monitor, limit = 200, refreshKey = 0 }: MonitorDetailProps) {
     const client = useDheClient();
@@ -26,11 +33,7 @@ export function MonitorDetail({ monitor, limit = 200, refreshKey = 0 }: MonitorD
         try {
             const updated = await client.sendFeedback(ev.id, feedback);
             setData((prev) => (prev ?? []).map((e) => (e.id === ev.id ? { ...e, ...updated } : e)));
-            message.success(
-                feedback === 'EXPECTED'
-                    ? 'Marked as expected — excluded from future baselines'
-                    : 'Confirmed as a real anomaly',
-            );
+            message.success(FEEDBACK_DONE[feedback]);
         } catch (e) {
             message.error((e as Error).message);
         }
@@ -73,17 +76,22 @@ export function MonitorDetail({ monitor, limit = 200, refreshKey = 0 }: MonitorD
                     { title: 'Message', dataIndex: 'message', ellipsis: true },
                     {
                         title: 'Feedback',
-                        width: 200,
+                        width: 280,
                         render: (_: unknown, ev) => {
                             if (ev.status !== 'FAIL' && ev.status !== 'WARN') return null;
                             if (ev.feedback) {
-                                return <Tag>{ev.feedback === 'EXPECTED' ? 'Expected' : 'Confirmed'}</Tag>;
+                                return <Tag>{FEEDBACK_TAG[ev.feedback]}</Tag>;
                             }
                             return (
                                 <Space size={4}>
-                                    <Tooltip title="Not a real issue — exclude from baseline">
+                                    <Tooltip title="Not a real issue: keep it in the baseline so the monitor learns">
                                         <Button size="small" onClick={() => giveFeedback(ev, 'EXPECTED')}>
                                             Expected
+                                        </Button>
+                                    </Tooltip>
+                                    <Tooltip title="An intended step change: restart the baseline from this value">
+                                        <Button size="small" onClick={() => giveFeedback(ev, 'NEW_NORMAL')}>
+                                            New normal
                                         </Button>
                                     </Tooltip>
                                     <Button size="small" danger onClick={() => giveFeedback(ev, 'REAL')}>
