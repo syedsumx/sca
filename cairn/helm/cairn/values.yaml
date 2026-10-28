@@ -45,10 +45,15 @@ core:
     webSecretKey: web-secret
     dbPasswordKey: db-password
 
-  database:          # MySQL 8
+  database:          # MySQL 8, or PostgreSQL 14+ (type: postgres)
+    # postgres puts the catalog in PostgreSQL, e.g. the same server as the Cairn database (port 5432,
+    # name cairn_catalog); the setup job creates the database. Choose it at install time.
+    type: mysql
     host: mysql
     port: 3306
     name: cairn
+    # postgres only: the JDBC sslmode (disable, prefer, require, verify-full).
+    sslMode: prefer
     # The setup job creates the schema: the user needs DDL rights on the database.
     user: root
   search:            # OpenSearch 2.x

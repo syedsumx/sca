@@ -13,13 +13,12 @@ import time
 import httpx
 import pytest
 
-from test_stack_smoke import API, CORE, TOKEN, eventually
+from test_stack_smoke import API, COMPOSE, CORE, TOKEN, eventually
 
 pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E") != "1", reason="set CAIRN_E2E=1 to run against a live stack")
 
 SERVICE = "urn:li:corpuser:cairn-service"
 ROOT_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-COMPOSE = ["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml")]
 
 
 def gql_as(token: str, query: str, variables: dict | None = None) -> dict:

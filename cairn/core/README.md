@@ -24,7 +24,7 @@ ONLY="authorizer core web setup executor" deploy/build-images.sh
 | UI packaging | `web/package.py` | Renames bundle assets that carry the engine's name (images get the Cairn mark) and rewrites their references; adds `assets/brand/` |
 | Server relabel | `tools/relabel.py` | In compiled classes, rewrites only prose string constants (text with a space) and the root-account URN; in seed data (bootstrap MCPs, root policies) renames the root account to `urn:li:corpuser:admin`, relabels display names and default source names |
 | Settings | `rootfs/usr/local/bin/cairn-env`, `rootfs/etc/cairn/env.d/*.map` | Entrypoint shim: maps the documented `CAIRN_*` settings onto the engine's variable names; an engine variable that is already set wins |
-| Init hooks | `rootfs/etc/cairn/init.d/` | JDBC URL from `CAIRN_DB_HOST`/`CAIRN_DB_NAME`; schema-registry URL from the core API address; the `admin` login from `CAIRN_ADMIN_PASSWORD` (the engine's sample accounts are removed) |
+| Init hooks | `rootfs/etc/cairn/init.d/` | JDBC URL and driver from `CAIRN_DB_TYPE`/`CAIRN_DB_HOST`/`CAIRN_DB_NAME`; schema-registry URL from the core API address; the `admin` login from `CAIRN_ADMIN_PASSWORD` (the engine's sample accounts are removed) |
 
 Engine defaults that used to live in compose (consumers, search implementation, theme, token auth, …)
 are `ENV` in `Dockerfile`, so deployments only set `CAIRN_*`.
@@ -37,7 +37,7 @@ are `ENV` in `Dockerfile`, so deployments only set `CAIRN_*`.
 | `CAIRN_SYSTEM_CLIENT_SECRET` | all | internal service-to-service secret |
 | `CAIRN_SESSION_SIGNING_KEY`, `CAIRN_TOKEN_SALT` | core, setup | access/session token signing; `cairn-core-proxy` reads the key too |
 | `CAIRN_WEB_SECRET` | web | cookie signing |
-| `CAIRN_DB_HOST`, `CAIRN_DB_NAME`, `CAIRN_DB_USER`, `CAIRN_DB_PASSWORD` (or `CAIRN_DB_URL`) | core, setup | MySQL |
+| `CAIRN_DB_TYPE` (`mysql` or `postgres`), `CAIRN_DB_HOST`, `CAIRN_DB_NAME`, `CAIRN_DB_USER`, `CAIRN_DB_PASSWORD` (or `CAIRN_DB_URL`), `CAIRN_DB_SSLMODE` (postgres) | core, setup | the catalog's database: MySQL, or PostgreSQL |
 | `CAIRN_SEARCH_HOST`, `CAIRN_SEARCH_PORT`, `CAIRN_SEARCH_USE_SSL`, `CAIRN_SEARCH_USERNAME`, `CAIRN_SEARCH_PASSWORD` | core, setup | OpenSearch |
 | `CAIRN_KAFKA_BOOTSTRAP`, `CAIRN_SCHEMA_REGISTRY_URL` | all | Kafka |
 | `CAIRN_CORE_API_HOST`, `CAIRN_CORE_API_PORT`, `CAIRN_CORE_API_PROTOCOL` | web, setup, executor | web points at `cairn-core-proxy` |

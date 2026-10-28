@@ -49,6 +49,19 @@ def test_secrets_and_db_url_are_mapped(tmp_path):
     assert env["DATAHUB_SYSTEM_CLIENT_SECRET"] == "s3"
     assert env["DATAHUB_TOKEN_SERVICE_SIGNING_KEY"] == "k"
     assert env["EBEAN_DATASOURCE_URL"].startswith("jdbc:mysql://mysql:3306/cairn?")
+    assert env["EBEAN_DATASOURCE_DRIVER"] == "com.mysql.cj.jdbc.Driver"
+
+
+def test_catalog_can_live_in_postgres(tmp_path):
+    env = run(tmp_path, {"CAIRN_DB_TYPE": "postgres", "CAIRN_DB_HOST": "cairn-postgres:5432",
+                         "CAIRN_DB_USER": "cairn"})
+    assert env["EBEAN_DATASOURCE_URL"] == "jdbc:postgresql://cairn-postgres:5432/cairn_catalog?sslmode=prefer"
+    assert env["EBEAN_DATASOURCE_DRIVER"] == "org.postgresql.Driver"
+    assert env["EBEAN_DATASOURCE_HOST"] == "cairn-postgres:5432" and env["EBEAN_DATASOURCE_USERNAME"] == "cairn"
+    explicit = run(tmp_path, {"CAIRN_DB_TYPE": "postgres", "CAIRN_DB_URL": "jdbc:postgresql://db/x?sslmode=require"})
+    assert explicit["EBEAN_DATASOURCE_URL"] == "jdbc:postgresql://db/x?sslmode=require"
+    with pytest.raises(subprocess.CalledProcessError):
+        run(tmp_path, {"CAIRN_DB_TYPE": "oracle"})
 
 
 def test_schema_registry_derived_from_core_address(tmp_path):

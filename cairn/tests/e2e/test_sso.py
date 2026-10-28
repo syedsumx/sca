@@ -15,12 +15,11 @@ import uuid
 import httpx
 import pytest
 
-from test_stack_smoke import API, EDGE, TOKEN, eventually, gql
+from test_stack_smoke import API, COMPOSE, EDGE, TOKEN, eventually, gql
 
 pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E_SSO") != "1", reason="SSO stack not enabled")
 
 ROOT_DIR = os.path.join(os.path.dirname(__file__), "..", "..")
-COMPOSE = ["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml")]
 USER = "urn:li:corpuser:dana.sso"
 GROUP = "urn:li:corpGroup:sso-analysts"
 LEAK = re.compile(r"data\s?hub|acryl|atlan(?![a-z])", re.I)

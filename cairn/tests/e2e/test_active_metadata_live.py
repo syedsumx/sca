@@ -23,7 +23,7 @@ import uuid
 import httpx
 import pytest
 
-from test_stack_smoke import API, CORE, EDGE, TOKEN, emit, eventually, gql
+from test_stack_smoke import API, COMPOSE, CORE, EDGE, TOKEN, emit, eventually, gql
 
 pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E") != "1", reason="set CAIRN_E2E=1 to run against a live stack")
 
@@ -31,7 +31,6 @@ FRONTEND = os.environ.get("CAIRN_E2E_FRONTEND", "http://localhost:9002")
 SLACK_SECRET = os.environ.get("CAIRN_E2E_SLACK_SECRET", "")
 SINK = os.environ.get("CAIRN_E2E_SINK", "")            # as seen from inside the compose network
 SINK_HOST = os.environ.get("CAIRN_E2E_SINK_HOST", "")  # same sink, as seen from the test runner
-COMPOSE = ["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml")]
 
 RUN = uuid.uuid4().hex[:8]
 STARTED_MS = int(time.time() * 1000) - 60_000

@@ -27,6 +27,9 @@ API = os.environ.get("CAIRN_E2E_API", "http://localhost:8800")
 MCP = os.environ.get("CAIRN_E2E_MCP", "http://localhost:8830/mcp")
 EDGE = os.environ.get("CAIRN_E2E_EDGE", "http://localhost:9000")
 TOKEN = os.environ.get("CAIRN_E2E_TOKEN", "")
+# The stack's compose files, colon-separated like COMPOSE_FILE (e.g. with docker-compose.postgres.yml).
+COMPOSE = ["docker", "compose", *[a for f in os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml").split(":")
+                                  for a in ("-f", f)]]
 RUN = uuid.uuid4().hex[:8]
 DS = f"urn:li:dataset:(urn:li:dataPlatform:postgres,e2e_{RUN}.public.orders,PROD)"
 DS_DOWN = f"urn:li:dataset:(urn:li:dataPlatform:snowflake,e2e_{RUN}.analytics.orders_enriched,PROD)"

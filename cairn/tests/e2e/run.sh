@@ -13,7 +13,11 @@
 #   CAIRN_TEAMS_WEBHOOK_HOSTS=.webhook.office.com,.logic.azure.com,http://cairn-e2e-sink:8099
 set -euo pipefail
 cd "$(dirname "$0")/../.."
-compose=(docker compose -f docker-compose.cairn.yml)
+# CAIRN_E2E_COMPOSE: the stack's compose files, colon-separated (e.g. with docker-compose.postgres.yml).
+compose=(docker compose)
+IFS=: read -r -a compose_files <<< "${CAIRN_E2E_COMPOSE:-docker-compose.cairn.yml}"
+for f in "${compose_files[@]}"; do compose+=(-f "$f"); done
+export CAIRN_E2E_COMPOSE="${CAIRN_E2E_COMPOSE:-docker-compose.cairn.yml}"
 PY="${PYTHON:-python3}"
 env_val() { grep -E "^$1=" .env | cut -d= -f2-; }
 

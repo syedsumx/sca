@@ -99,6 +99,12 @@ app.kubernetes.io/component: {{ .component }}
 {{- define "cairn.coreEnv" -}}
 {{- $c := .Values.core -}}
 {{- $s := $c.secrets -}}
+- name: CAIRN_DB_TYPE
+  value: {{ $c.database.type | default "mysql" | quote }}
+{{- if eq ($c.database.type | default "mysql") "postgres" }}
+- name: CAIRN_DB_SSLMODE
+  value: {{ $c.database.sslMode | default "prefer" | quote }}
+{{- end }}
 - name: CAIRN_DB_HOST
   value: {{ printf "%s:%v" $c.database.host $c.database.port | quote }}
 - name: CAIRN_DB_NAME

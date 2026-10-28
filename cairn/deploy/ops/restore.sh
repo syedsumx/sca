@@ -3,8 +3,8 @@
 #
 #   deploy/ops/restore.sh BACKUP_DIR [--yes]
 #
-# Stops every Cairn service except the databases, replaces the Cairn (Postgres) and catalog (MySQL)
-# databases and the gateway keys with the backup's, rebuilds the search index from MySQL and starts
+# Stops every Cairn service except the databases, replaces the Cairn and catalog databases and the
+# gateway keys with the backup's, rebuilds the search index from the catalog database and starts
 # everything again. Anything written after the backup was taken is lost. The backup's config/ is not
 # unpacked over yours; set RESTORE_CONFIG=1 to do that too.
 set -euo pipefail
@@ -35,7 +35,7 @@ fi
 apps=$($COMPOSE ps --services --status running | grep -vxF -f <(tr ' ' '\n' <<< "$DATA_SERVICES") || true)
 log "stopping: $(echo $apps)"
 [ -z "$apps" ] || $COMPOSE stop $apps
-$COMPOSE up -d --wait $DATA_SERVICES
+$COMPOSE up -d --wait $(comm -12 <(tr ' ' '\n' <<< "$DATA_SERVICES" | sort) <($COMPOSE config --services | sort))
 
 log "postgres: restoring database cairn"
 $COMPOSE exec -T cairn-postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -q \
@@ -45,9 +45,18 @@ $COMPOSE exec -T cairn-postgres sh -c 'psql -U "$POSTGRES_USER" -d cairn -q -c "
 $COMPOSE exec -T cairn-postgres sh -c 'exec pg_restore -U "$POSTGRES_USER" -d cairn --no-owner --exit-on-error' \
     < "$IN/cairn-postgres.dump"
 
-log "mysql: restoring database cairn"
-$COMPOSE exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "drop database if exists cairn" 2>/dev/null'
-gzip -dc "$IN/cairn-mysql.sql.gz" | $COMPOSE exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+if [ -f "$IN/cairn-mysql.sql.gz" ]; then
+    log "mysql: restoring the catalog database cairn"
+    $COMPOSE exec -T mysql sh -c 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -e "drop database if exists cairn" 2>/dev/null'
+    gzip -dc "$IN/cairn-mysql.sql.gz" | $COMPOSE exec -T mysql sh -c 'exec mysql -uroot -p"$MYSQL_ROOT_PASSWORD" 2>/dev/null'
+else
+    log "postgres: restoring the catalog database cairn_catalog"
+    $COMPOSE exec -T cairn-postgres sh -c 'psql -U "$POSTGRES_USER" -d postgres -v ON_ERROR_STOP=1 -q \
+        -c "select pg_terminate_backend(pid) from pg_stat_activity where datname = '\''cairn_catalog'\'' and pid <> pg_backend_pid()" \
+        -c "drop database if exists cairn_catalog" -c "create database cairn_catalog owner \"$POSTGRES_USER\"" >/dev/null'
+    $COMPOSE exec -T cairn-postgres sh -c 'exec pg_restore -U "$POSTGRES_USER" -d cairn_catalog --no-owner --exit-on-error' \
+        < "$IN/cairn-catalog-postgres.dump"
+fi
 
 log "gateway: restoring identity keys"
 $COMPOSE run --rm --no-deps -T --entrypoint sh cairn-gateway \

@@ -6,7 +6,7 @@ Cairn Core:
   API      {{ include "cairn.coreUrl" . }}   (internal; not exposed by the ingress)
   Sign in as "admin" with the password in Secret "{{ .Values.core.secrets.name }}" key "{{ .Values.core.secrets.adminPasswordKey }}".
   Required Secret "{{ .Values.core.secrets.name }}" keys: {{ .Values.core.secrets.adminPasswordKey }}, {{ .Values.core.secrets.systemClientSecretKey }}, {{ .Values.core.secrets.sessionSigningKeyKey }}, {{ .Values.core.secrets.tokenSaltKey }}, {{ .Values.core.secrets.webSecretKey }}, {{ .Values.core.secrets.dbPasswordKey }}
-  Data stores: MySQL {{ .Values.core.database.host }}:{{ .Values.core.database.port }}/{{ .Values.core.database.name }} · OpenSearch {{ .Values.core.search.host }}:{{ .Values.core.search.port }} · Kafka {{ .Values.core.kafka.bootstrap }}
+  Data stores: {{ if eq (.Values.core.database.type | default "mysql") "postgres" }}PostgreSQL{{ else }}MySQL{{ end }} {{ .Values.core.database.host }}:{{ .Values.core.database.port }}/{{ .Values.core.database.name }} · OpenSearch {{ .Values.core.search.host }}:{{ .Values.core.search.port }} · Kafka {{ .Values.core.kafka.bootstrap }}
 {{- end }}
 
 Control plane services:

@@ -8,7 +8,7 @@ import uuid
 import httpx
 import pytest
 
-from test_stack_smoke import API, EDGE, eventually, gql
+from test_stack_smoke import API, COMPOSE, EDGE, eventually, gql
 
 SCIM_TOKEN = os.environ.get("CAIRN_E2E_SCIM_TOKEN", "")
 pytestmark = pytest.mark.skipif(os.environ.get("CAIRN_E2E") != "1" or not SCIM_TOKEN,
@@ -88,7 +88,7 @@ def _compose_cat(path: str) -> str:
     import subprocess
 
     root = os.path.join(os.path.dirname(__file__), "..", "..")
-    out = subprocess.run(["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml"),
+    out = subprocess.run([*COMPOSE,
                           "exec", "-T", "cairn-api", "cat", path], capture_output=True, text=True, timeout=60, cwd=root)
     assert out.returncode == 0, out.stderr
     return out.stdout.strip()
@@ -125,7 +125,7 @@ def test_provisioning_and_control_plane_accounts_are_separated():
     import subprocess
 
     root = os.path.join(os.path.dirname(__file__), "..", "..")
-    other = subprocess.run(["docker", "compose", "-f", os.environ.get("CAIRN_E2E_COMPOSE", "docker-compose.cairn.yml"),
+    other = subprocess.run([*COMPOSE,
                             "exec", "-T", "cairn-mcp", "ls", "/run/cairn-provisioner"],
                            capture_output=True, text=True, timeout=60, cwd=root)
     assert other.returncode != 0

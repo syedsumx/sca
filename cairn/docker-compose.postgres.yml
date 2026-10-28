@@ -1,0 +1,31 @@
+# One PostgreSQL for everything: the catalog's store moves from MySQL into the cairn-postgres
+# instance (database cairn_catalog, created by the setup job), and MySQL is not started.
+#
+#   docker compose -f docker-compose.cairn.yml -f docker-compose.postgres.yml up -d
+#
+# Choose this at install time: it does not move an existing MySQL catalog (see Administration ->
+# One database). Pass this file on every compose command for the deployment, backups included
+# (COMPOSE="docker compose -f docker-compose.cairn.yml -f docker-compose.postgres.yml").
+x-catalog-in-postgres: &catalog-in-postgres
+  CAIRN_DB_TYPE: postgres
+  CAIRN_DB_HOST: cairn-postgres:5432
+  CAIRN_DB_NAME: cairn_catalog
+  CAIRN_DB_USER: cairn
+  CAIRN_DB_PASSWORD: ${CAIRN_POSTGRES_PASSWORD:-cairn}
+
+services:
+  mysql:
+    profiles: [mysql]          # not started
+
+  cairn-setup:
+    environment: *catalog-in-postgres
+    depends_on: !override
+      cairn-postgres:
+        condition: service_healthy
+      search:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  cairn-core:
+    environment: *catalog-in-postgres
