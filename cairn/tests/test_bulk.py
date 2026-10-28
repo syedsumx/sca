@@ -103,3 +103,11 @@ def test_parse_errors():
     with pytest.raises(BulkError, match="header"):
         parse_csv("name,description\nx,y\n")
     assert parse_csv("﻿urn,description\n,\n" + f"{QDS},x\n") == [{"urn": DS, "description": "x"}]
+
+
+def test_undo_ignores_what_the_catalog_derives(svc):
+    bulk, graph = svc
+    out = bulk.preview(f"urn,field,owners\n{QDS},,ana;bob\n", ANA, lambda p, u: True)
+    bulk.apply(out["batch_id"], ANA, lambda p, u: True)
+    graph.aspects[(DS, "ownership")]["ownerTypes"] = {"urn:li:ownershipType:__system__dataowner": [ANA]}
+    assert bulk.undo(out["batch_id"], ANA)["restored"] == 1

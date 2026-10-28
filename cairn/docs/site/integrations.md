@@ -70,3 +70,24 @@ The **Cairn for BI** Chrome extension (Manifest V3, in `extension/`) shows the c
 - **Custom domains:** a self-hosted Looker or Tableau Server, for example, are added in the extension's options. The browser asks for access to each host you add, and to nothing else.
 
 **Rolling it out.** `node extension/build.mjs --cairn-url https://cairn.example.com` builds `extension/dist/` with your Cairn address and its host permission built in, ready to load unpacked, publish privately, or force-install through Chrome enterprise policy. Without `--cairn-url`, people enter the address in the options. `npm test` in `extension/` runs its unit tests.
+
+## Ticketing and incident tools
+
+Where approvals and on-call already live in Jira, ServiceNow, PagerDuty or Opsgenie, Cairn opens tickets there and listens for the decision. Approvals don't need a second queue.
+
+**Set up:**
+
+1. Describe each system in a YAML file in `config/ticketing/`, or point `CAIRN_TICKETING` at one; see `ticketing.yaml.example`. Secrets are `${ENV}` references.
+2. Add notification routes with `channel: ticket` and `target: <system id>`, filtered by event type and domain like any route. For example, `access.requested` and `certification.requested` go to `jira-it`, and `quality.incident.raised` and `quality.incident.resolved` go to `pagerduty`.
+
+**What each system does:**
+
+- **Jira and ServiceNow.**
+  - A request opens one issue (or `sc_request`), labelled `cairn`, with a link back and a `kind:id` reference. Later events about the same request are added as comments or work notes.
+  - When the issue reaches one of the `approve_statuses` or `reject_statuses`, the Jira webhook, or a ServiceNow business rule posting `{sys_id, approval, approver_email}`, calls `POST /cairn/api/notify/inbound/<system id>`.
+  - Cairn then decides the request as the person who decided in the ticket, matched by their email. Cairn's own approval rules still apply, so someone who couldn't approve in Cairn can't approve from a ticket. People who don't map to a Cairn user are refused.
+- **PagerDuty and Opsgenie.**
+  - A quality incident at or above `min_severity` triggers an incident, using Events API v2 or an Opsgenie alert, with a stable dedup key per monitor.
+  - Recovery resolves it.
+
+**Security.** Inbound calls must carry the system's `inbound_secret`, either as `?secret=` or the `X-Cairn-Secret` header, or sign the body with it (`X-Hub-Signature: sha256=…`, as Jira does). Every decision made from a ticket is audited (`ticket.decided`). Administrators see the configured systems and their open tickets at `GET /cairn/api/notify/ticketing`.

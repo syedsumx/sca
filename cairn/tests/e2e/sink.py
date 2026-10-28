@@ -7,7 +7,11 @@
 * ``POST /teams/<id>``: a Teams Workflows webhook (answers 202 like Teams).
 * ``GET /embed.html?edge=&urn=&token=&kind=``: a third-party page embedding Cairn (web component and
   iframe), so a browser can load it from an allowed and a disallowed origin.
-* ``GET /``: everything recorded, oldest first; ``GET /slack``, ``/teams`` and ``/webhooks`` filter it.
+* ``/jira/rest/api/3/issue[/<key>/comment]``, ``/servicenow/api/now/table/<t>``,
+  ``/pagerduty/v2/enqueue``, ``/opsgenie/v2/alerts[/<alias>/close]``: ticketing APIs, answered like
+  the real ones and recorded.
+* ``GET /``: everything recorded, oldest first; ``GET /slack``, ``/teams``, ``/webhooks``, ``/jira``,
+  ``/servicenow``, ``/pagerduty`` and ``/opsgenie`` filter it.
 """
 import hashlib
 import html
@@ -58,6 +62,17 @@ class H(BaseHTTPRequestHandler):
         if path.startswith("/teams/"):
             EVENTS.append({"_double": "teams", "path": path, "body": body})
             return self._send(202)
+        for tool in ("jira", "servicenow", "pagerduty", "opsgenie"):
+            if path.startswith(f"/{tool}/"):
+                entry = {"_double": tool, "path": path, "body": body}
+                EVENTS.append(entry)
+                if path == "/jira/rest/api/3/issue":
+                    entry["key"] = f"DATA-{len(EVENTS)}"
+                    return self._send(201, {"id": str(len(EVENTS)), "key": entry["key"]})
+                if tool == "servicenow" and path.count("/") == 5:
+                    entry["sys_id"] = hashlib.sha1(str(len(EVENTS)).encode()).hexdigest()[:32]
+                    return self._send(201, {"result": {"sys_id": entry["sys_id"], "number": f"REQ{len(EVENTS):07d}"}})
+                return self._send(202 if tool in ("pagerduty", "opsgenie") else 201, {"status": "success"})
         EVENTS.append(body)
         self._send(204)
 
@@ -85,7 +100,9 @@ class H(BaseHTTPRequestHandler):
   src="{edge}/cairn/api/embed/v1/frame/card?urn={urn}&amp;token={token}"></iframe>
 </body></html>"""
             return self._send(200, page.encode(), "text/html; charset=utf-8")
-        kinds = {"/slack": ("slack", "slack_response"), "/teams": ("teams",), "/webhooks": (None,)}
+        kinds = {"/slack": ("slack", "slack_response"), "/teams": ("teams",), "/webhooks": (None,),
+                 "/jira": ("jira",), "/servicenow": ("servicenow",), "/pagerduty": ("pagerduty",),
+                 "/opsgenie": ("opsgenie",)}
         if u.path in kinds:
             return self._send(200, [e for e in EVENTS if e.get("_double") in kinds[u.path]])
         self._send(200, EVENTS)

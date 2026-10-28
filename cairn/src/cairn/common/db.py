@@ -76,6 +76,7 @@ def load_models() -> MetaData:
     from cairn.governance import automations as _automations  # noqa: F401
     from cairn.reports import service as _reports  # noqa: F401
     from cairn.reports import costs as _costs  # noqa: F401
+    from cairn.notify import ticketing as _ticketing  # noqa: F401
     from cairn.governance import pdp as _pdp  # noqa: F401
     from cairn.governance import personas as _personas  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401

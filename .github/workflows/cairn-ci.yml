@@ -69,6 +69,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+      - name: Browser extension
+        working-directory: cairn/extension
+        run: npm test && node build.mjs --cairn-url https://cairn.example.com
 
   java:
     runs-on: ubuntu-latest

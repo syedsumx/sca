@@ -11,6 +11,7 @@ import { BookmarkToggle, FollowButton } from '../components/Engagement';
 import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { ContractPanel } from '../components/Contract';
+import { DataPreview } from '../components/DataPreview';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
@@ -101,6 +102,12 @@ const Header = styled(Surface)`
         font-weight: 600;
     }
 `;
+
+/** schema.table from a dataset urn, for the starting query. */
+export function tableNameOf(urn: string): string {
+    const m = /^urn:li:dataset:\([^,]+,(.+),[^,]+\)$/.exec(urn);
+    return m ? m[1].split('.').slice(-2).join('.') : 'schema.table';
+}
 
 export function AssetPage() {
     const { urn: rawUrn } = useParams<{ urn: string }>();
@@ -243,6 +250,11 @@ export function AssetPage() {
                                 <SimilarAssets urn={urn} />
                             </>
                         ),
+                    },
+                    {
+                        key: 'data',
+                        label: 'Data',
+                        children: <DataPreview urn={urn} tableName={tableNameOf(urn)} />,
                     },
                     {
                         key: 'contract',

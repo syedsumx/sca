@@ -1,0 +1,28 @@
+# Ticketing systems (docs: Integrations → Ticketing and incident tools). Copy to a .yaml file here.
+# ${VARS} come from the environment; then add notification routes with channel "ticket".
+systems:
+  - id: jira-it
+    type: jira
+    url: https://acme.atlassian.net
+    project: DATA
+    issue_type: Task
+    user: ${JIRA_USER}
+    token: ${JIRA_API_TOKEN}
+    approve_statuses: [Done, Approved]
+    reject_statuses: ["Won't Do", Rejected]
+    inbound_secret: ${JIRA_WEBHOOK_SECRET}
+  - id: servicenow
+    type: servicenow
+    url: https://acme.service-now.com
+    table: sc_request
+    user: ${SNOW_USER}
+    password: ${SNOW_PASSWORD}
+    inbound_secret: ${SNOW_WEBHOOK_SECRET}
+  - id: pagerduty
+    type: pagerduty
+    routing_key: ${PAGERDUTY_ROUTING_KEY}
+    min_severity: HIGH
+  - id: opsgenie
+    type: opsgenie
+    api_key: ${OPSGENIE_API_KEY}
+    min_severity: HIGH

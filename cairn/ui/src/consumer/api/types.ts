@@ -662,3 +662,12 @@ export interface CostTotal {
     monthly_storage_usd?: number;
     cost_per_read_usd?: number;
 }
+
+export interface DataResult {
+    columns: string[];
+    rows: unknown[][];
+    masked_columns: string[];
+    truncated: boolean;
+    elapsed_ms: number;
+    tables: string[];
+}

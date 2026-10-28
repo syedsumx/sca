@@ -95,8 +95,8 @@ class Route(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9\-]{1,62}$")
     event_types: list[str] = Field(default_factory=list, description="empty = all")
     domains: list[str] = Field(default_factory=list, description="empty = all domains")
-    channel: str = Field(pattern=r"^(slack|teams|webhook)$")
-    target: str = Field(description="Slack channel id/name, Teams or generic webhook URL")
+    channel: str = Field(pattern=r"^(slack|teams|webhook|ticket)$")
+    target: str = Field(description="Slack channel id/name, Teams or generic webhook URL, or a ticketing system id")
 
 
 @dataclass

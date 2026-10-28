@@ -157,6 +157,14 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.quality.contracts_api import build_router as contracts_router
 
         app.include_router(contracts_router(services.contracts, cp, services.authorize, services.can_view))
+    if "notify" in modules and services.ticketing is not None:
+        from cairn.notify.ticketing_api import build_router as ticketing_router
+
+        app.include_router(ticketing_router(services.ticketing, cp, services.authorize))
+    if "quality" in modules and services.data_access is not None:
+        from cairn.dataaccess.api import build_router as data_router
+
+        app.include_router(data_router(services.data_access, cp))
     if "governance" in modules and services.reports is not None:
         from cairn.reports.api import build_router as reports_router
 

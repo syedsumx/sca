@@ -268,10 +268,11 @@ def apply_changes(changes: list[dict], get: Callable[[str, str], Optional[dict]]
 
 
 def _same(a: Any, b: Any) -> bool:
-    """Compare aspects ignoring audit stamps the catalog may rewrite."""
+    """Compare aspects ignoring what the catalog adds or rewrites itself: audit stamps, and the
+    ``ownerTypes`` index it derives from the owners list."""
     def strip(v: Any) -> Any:
         if isinstance(v, dict):
-            return {k: strip(x) for k, x in v.items() if k not in ("lastModified", "created", "auditStamp")}
+            return {k: strip(x) for k, x in v.items() if k not in ("lastModified", "created", "auditStamp", "ownerTypes")}
         if isinstance(v, list):
             return [strip(x) for x in v]
         return v

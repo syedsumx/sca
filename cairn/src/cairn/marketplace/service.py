@@ -452,7 +452,7 @@ class MarketplaceService:
         from cairn.notify.hub import Event
 
         self.notify.publish(Event(type=etype, title=title, body=body, actor=actor, entity_urn=r["product_urn"],
-                                  recipients=recipients))
+                                  recipients=recipients, payload={"request_id": r["id"]}))
 
     def action_handler(self, action: str, object_id: str, actor: str, comment: Optional[str]) -> str:
         """Entry point for Slack buttons / signed links (``kind = access_request``)."""

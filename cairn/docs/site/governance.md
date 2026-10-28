@@ -161,3 +161,30 @@ API: `/cairn/api/governance/automations`, which needs `MANAGE_GLOBAL_SETTINGS`:
 - `POST /preview`,
 - `POST /{id}/run`, `POST /{id}/enabled`, `GET /{id}/runs`, `DELETE /{id}`,
 - `POST /runs/{run_id}/undo`.
+
+## Data preview and SQL
+
+An asset's **Data** tab shows the table's first 100 rows, and a small SQL editor runs read-only queries over the same connection. Both use a named warehouse connection whose `catalog` block says which datasets it serves:
+
+```yaml
+# config/connections/warehouse.yml (re-read when it changes; *.example.yml files are skipped)
+connections:
+  warehouse:
+    url: postgresql+psycopg://${WH_READER}:${WH_READER_PASSWORD}@warehouse:5432/analytics
+    catalog: {platform: postgres, database: analytics}   # serves analytics.<schema>.<table>
+```
+
+Use a role that can only `SELECT`. Cairn also opens each Postgres session read-only and with a statement timeout.
+
+**Rules:**
+
+- **Authorization.** Every table a query reads must be in the catalog, and the caller needs `VIEW_DATASET_PROFILE` on it. That is the same privilege that guards sample values, so a policy that hides profiles from contractors hides rows too.
+- **Masking.** Results are masked with the caller's masking plan, as profiles are. For a query, an output column is masked when it is computed from a masked column, so `upper(email) AS who` is masked as well. `SELECT *` is masked by column name. Aggregates that reveal no value, such as `count(*)`, are not.
+- **What can run.** Only one `SELECT` (or `WITH … SELECT`) statement at a time, with schema-qualified table names. A query returns at most 1,000 rows and runs for at most 15 seconds.
+- **Audit.** Every preview and query is recorded in the audit log under `data`, with the SQL (literals masked), the tables and the masked columns. Refused queries are recorded too.
+
+API:
+
+- `GET /cairn/api/data/sources` lists the connections that serve datasets,
+- `GET /cairn/api/data/preview?urn=…` returns a table's first rows,
+- `POST /cairn/api/data/query` with `{"sql", "urn" or "connection", "limit"}` runs a query.

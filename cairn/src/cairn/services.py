@@ -83,6 +83,8 @@ class Services:
     automations: Optional[Any] = None
     reports: Optional[Any] = None
     costs: Optional[Any] = None
+    data_access: Optional[Any] = None
+    ticketing: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -339,7 +341,8 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     pdp.set_bundle(policy_repo.latest() or file_bundle)
 
     quality_store = QualityStore(engine)
-    connections = ConnectionRegistry.from_file(os.environ.get("CAIRN_QUALITY_CONNECTIONS"))
+    connections = ConnectionRegistry.from_file(os.environ.get("CAIRN_QUALITY_CONNECTIONS")
+                                               or "/etc/cairn/config/connections")
     collectors = {"catalog": CoreSignalCollector(graph), "sql": SqlCollector(connections)} if graph else \
         {"sql": SqlCollector(connections)}
 
@@ -447,6 +450,9 @@ def _build_active_metadata(s: Services) -> None:
     hub = NotificationHub(s.engine, cfg.public_url, cfg.action_link_secret, s.audit, followers, owners, domains_of)
     hub.channels["webhook"] = WebhookSender()
     hub.channels["teams"] = TeamsSender()
+    from cairn.notify.ticketing import TicketingService
+    s.ticketing = TicketingService(s.engine, hub, lambda email: actor_for_email(s.graph, email), audit=s.audit)
+    hub.channels["ticket"] = s.ticketing.sender
     slack_sender = None
     if cfg.slack_bot_token:
         slack_sender = SlackSender(cfg.slack_bot_token, email_of)
@@ -476,6 +482,7 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.reports.service import ReportService
         s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
         _build_costs(s, hub, Event)
+        _build_data_access(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
@@ -598,6 +605,22 @@ def _build_forms(s: Services, hub, Event) -> None:
 
     datasets = (lambda: Planner(s.graph).datasets()) if s.graph is not None else None
     s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
+
+
+def _build_data_access(s: Services) -> None:
+    from cairn.coreproxy.proxy import MaskingService
+    from cairn.dataaccess.service import DataAccessService
+
+    masking = MaskingService(s.pdp, s.attributes)
+
+    def can_read(actor: str, urn: str) -> bool:
+        p = Principal(urn=actor, via="delegated")
+        return s.can_view(p)(urn) and s.authorize(p, "VIEW_DATASET_PROFILE", urn, raise_on_deny=False)
+
+    def known(urn: str) -> bool:
+        return s.graph is not None and any(s.graph.get_aspect(urn, a) for a in ("schemaMetadata", "datasetProperties"))
+
+    s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known)
 
 
 def _build_costs(s: Services, hub, Event) -> None:

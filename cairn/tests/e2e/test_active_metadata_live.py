@@ -1041,11 +1041,18 @@ def test_22_warehouse_tag_sync_plans_tags_from_catalog_labels(users):
     assert target not in [t["id"] for t in root.get("/governance/tag-sync").json()]
 
 
+def _dave() -> str:
+    """A signed-up user with no rights on this run's assets."""
+    dave = f"urn:li:corpuser:e2e_dave_{RUN}"
+    emit(dave, "corpUserInfo", {"active": True, "displayName": "Dave E2E", "email": f"e2e_dave_{RUN}@example.com"})
+    return dave
+
+
 def test_23_data_contract_breaks_notifies_and_checks_ci(users):
     """A schema contract on this run's dataset is met; a breaking schema change breaks it and tells
     the owner; versions are immutable; the CI check flags a proposed breaking change."""
     root, carol = users["root"], users["carol"]
-    outsider = client(mint_token(f"urn:li:corpuser:e2e_dave_{RUN}"))     # Bob owns DS by now (test_21)
+    outsider = client(mint_token(_dave()))                                # Bob owns DS by now (test_21)
     spec = {"dataset": DS, "version": "1.0.0", "owner": CAROL,
             "schema": {"columns": [{"name": "id", "type": "integer"}, {"name": "email", "type": "string"}]}}
     assert outsider.put("/quality/contracts", json=spec).status_code == 403
@@ -1188,3 +1195,114 @@ def test_27_browser_extension_shows_the_dashboard_card(users):
     assert result["card"] and result["unknown"] and not result["errors"], result
     assert "Daily revenue by region." in result["card"]["text"] and CAROL.split(":")[-1] in result["card"]["text"]
     assert result["card"]["open"].endswith(f"/cairn/asset/{dash}")
+
+
+def test_28_data_preview_and_sql_are_authorized_masked_and_audited(users):
+    """A read-only warehouse connection serves a catalogued table: previews and queries mask the PII
+    column for Bob but not for Carol (a steward), refuse writes and uncatalogued tables, and are audited."""
+    bob, carol = users["bob"], users["carol"]
+    schema, role, pw = f"e2e_wh_{RUN}", f"e2e_reader_{RUN}", uuid.uuid4().hex
+    compose("exec", "-T", "cairn-postgres", "psql", "-U", "cairn", "-d", "cairn", "-v", "ON_ERROR_STOP=1", "-c",
+            f"CREATE SCHEMA {schema}; CREATE TABLE {schema}.customers (id int, email text, region text); "
+            f"INSERT INTO {schema}.customers SELECT g, 'user' || g || '@example.com', 'EMEA' FROM generate_series(1, 150) g; "
+            f"CREATE ROLE {role} LOGIN PASSWORD '{pw}'; GRANT USAGE ON SCHEMA {schema} TO {role}; "
+            f"GRANT SELECT ON ALL TABLES IN SCHEMA {schema} TO {role};")
+    conn_file = os.path.join(os.path.dirname(__file__), "..", "..", "config", "connections", f"e2e-{RUN}.yml")
+    with open(conn_file, "w") as f:
+        json.dump({"connections": {f"e2e_{RUN}": {
+            "url": f"postgresql+psycopg://{role}:{pw}@cairn-postgres:5432/cairn",
+            "catalog": {"platform": "postgres", "database": "cairn"}}}}, f)
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:postgres,cairn.{schema}.customers,PROD)"
+    fields = [{"fieldPath": p, "nativeDataType": t, "type": {"type": {"com.linkedin.schema.StringType": {}}}}
+              for p, t in (("id", "INT"), ("email", "TEXT"), ("region", "TEXT"))]
+    emit(ds, "schemaMetadata", {"schemaName": "customers", "platform": "urn:li:dataPlatform:postgres", "version": 0,
+                                "hash": "", "platformSchema": {"com.linkedin.schema.MySqlDDL": {"tableSchema": ""}},
+                                "fields": fields})
+    emit(ds, "editableSchemaMetadata", {"created": STAMP, "lastModified": STAMP, "editableSchemaFieldInfo": [{
+        "fieldPath": "email", "glossaryTerms": {"terms": [{"urn": PII_EMAIL}], "auditStamp": STAMP}}]})
+    try:
+        assert {s["connection"] for s in bob.get("/data/sources").json()} >= {f"e2e_{RUN}"}
+        def preview(who):
+            r = who.get("/data/preview", params={"urn": ds})
+            return r.json() if r.status_code == 200 else None
+        seen = eventually(lambda: preview(bob), timeout=60)          # attribute caches catch the new label
+        assert seen["columns"] == ["id", "email", "region"] and len(seen["rows"]) == 100 and seen["truncated"]
+        assert seen["masked_columns"] == ["email"] and seen["rows"][0][1] == "u•••@•••.com", seen["rows"][:2]
+        assert preview(carol)["rows"][0][1] == "user1@example.com"
+        q = bob.post("/data/query", json={"urn": ds, "sql": f"SELECT id, upper(email) AS who FROM {schema}.customers "
+                                                            "WHERE id <= 3 ORDER BY id"}).json()
+        assert q["masked_columns"] == ["who"] and [r[0] for r in q["rows"]] == [1, 2, 3], q
+        n = carol.post("/data/query", json={"urn": ds, "sql": f"SELECT count(*) AS n FROM {schema}.customers"}).json()
+        assert n["rows"] == [[150]]
+        assert bob.post("/data/query", json={"urn": ds, "sql": f"DELETE FROM {schema}.customers"}).status_code == 400
+        uncatalogued = bob.post("/data/query", json={"urn": ds, "sql": "SELECT usename FROM pg_catalog.pg_user"})
+        assert uncatalogued.status_code == 403 and "not in the catalog" in uncatalogued.text
+        entries = users["root"].get("/governance/audit", params={"category": "data", "limit": 200}).json()["entries"]
+        actions = {(e["action"], e["actor"]) for e in entries}
+        assert ("data.queried", BOB) in actions and ("data.previewed", CAROL) in actions, actions
+    finally:
+        os.remove(conn_file)
+        compose("exec", "-T", "cairn-postgres", "psql", "-U", "cairn", "-d", "cairn", "-c",
+                f"DROP SCHEMA {schema} CASCADE; DROP ROLE {role};")
+
+
+def test_29_jira_decides_access_and_pagerduty_follows_incidents(users):
+    """A Jira ticket per access request; the Jira webhook approves it as Carol (by email, through
+    Cairn's approval rules). A critical quality incident triggers PagerDuty and recovery resolves it."""
+    if not SINK_HOST:
+        pytest.skip("needs the integration doubles (KEEP_SINK=1)")
+    root = users["root"]
+    dave = client(mint_token(_dave()))
+    jira, pd, secret = f"jira-{RUN}", f"pd-{RUN}", uuid.uuid4().hex
+    path = os.path.join(os.path.dirname(__file__), "..", "..", "config", "ticketing", f"e2e-{RUN}.yaml")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        json.dump({"systems": [
+            {"id": jira, "type": "jira", "url": "http://cairn-e2e-sink:8099/jira", "project": "DATA", "user": "bot",
+             "token": "t", "inbound_secret": secret},
+            {"id": pd, "type": "pagerduty", "url": "http://cairn-e2e-sink:8099/pagerduty", "routing_key": f"rk-{RUN}",
+             "min_severity": "HIGH"}]}, f)
+    before = root.get("/notify/routes").json()
+    routes = before + [
+        {"id": f"e2e-jira-{RUN}", "event_types": ["access.requested"], "domains": [], "channel": "ticket", "target": jira},
+        {"id": f"e2e-pd-{RUN}", "event_types": ["quality.incident.raised", "quality.incident.resolved"], "domains": [],
+         "channel": "ticket", "target": pd}]
+    assert root.put("/notify/routes", json=routes).status_code == 200
+    monitor = None
+    try:
+        assert {s["id"] for s in root.get("/notify/ticketing").json()} >= {jira, pd}
+        req = dave.post("/marketplace/access-requests", json={"product_urn": PRODUCT, "purpose": "Other",
+                                                              "duration_days": 7, "justification": "Ticket flow"}).json()
+        assert req["state"] == "PENDING", req
+        issue = eventually(lambda: [e for e in _double("jira") if f"access_request:{req['id']}" in json.dumps(e["body"])],
+                           timeout=90)[0]
+        key = issue["key"]
+        assert issue["body"]["fields"]["project"] == {"key": "DATA"} and "cairn" in issue["body"]["fields"]["labels"]
+        hook = {"issue": {"key": key, "fields": {"status": {"name": "Done"}}},
+                "user": {"emailAddress": f"e2e_carol_{RUN}@example.com"}}
+        raw = json.dumps(hook).encode()
+        forged = httpx.post(f"{API}/notify/inbound/{jira}", content=raw, headers={"X-Hub-Signature": "sha256=00"})
+        assert forged.status_code == 401
+        sig = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
+        done = httpx.post(f"{API}/notify/inbound/{jira}", content=raw,
+                          headers={"X-Hub-Signature": f"sha256={sig}", "Content-Type": "application/json"}, timeout=30)
+        assert done.status_code == 200 and done.json()["decision"] == "approve" and done.json()["actor"] == CAROL, done.text
+        assert dave.get(f"/marketplace/access-requests/{req['id']}").json()["state"] == "APPROVED"
+
+        monitor = root.post("/quality/monitors", json={"name": f"pd volume {RUN}", "dataset_urn": DS, "type": "volume",
+                                                       "severity": "CRITICAL", "config": {"min_rows": 10**9}}).json()
+        assert root.post(f"/quality/monitors/{monitor['id']}/run").json()["status"] == "FAIL"
+        trigger = eventually(lambda: [e for e in _double("pagerduty") if e["body"].get("dedup_key") == f"cairn-{monitor['id']}"],
+                             timeout=90)[0]["body"]
+        assert trigger["event_action"] == "trigger" and trigger["payload"]["severity"] == "critical"
+        assert trigger["routing_key"] == f"rk-{RUN}"
+        spec = {k: monitor[k] for k in ("name", "dataset_urn", "type", "severity")} | {"config": {"min_rows": 0}}
+        assert root.put(f"/quality/monitors/{monitor['id']}", json=spec).status_code == 200
+        assert root.post(f"/quality/monitors/{monitor['id']}/run").json()["status"] == "PASS"
+        eventually(lambda: [e for e in _double("pagerduty") if e["body"].get("dedup_key") == f"cairn-{monitor['id']}"
+                            and e["body"].get("event_action") == "resolve"], timeout=90)
+    finally:
+        root.put("/notify/routes", json=before)
+        os.remove(path)
+        if monitor:
+            root.delete(f"/quality/monitors/{monitor['id']}")

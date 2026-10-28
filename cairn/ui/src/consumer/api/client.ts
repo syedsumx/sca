@@ -45,6 +45,7 @@ import type {
     Automation,
     CoverageFacet,
     CostTotal,
+    DataResult,
     ReportAsset,
     ReportSnapshot,
     AutomationPreview,
@@ -414,6 +415,14 @@ export class ConsumerClient extends CairnClient {
 
     proposeDeprecation(urn: string, reason: string) {
         return this.request<{ proposed: boolean }>('POST', '/reports/costs/propose-deprecation', { urn, reason });
+    }
+
+    previewData(urn: string, opts?: RequestOptions) {
+        return this.request<DataResult>('GET', '/data/preview', undefined, { ...opts, query: { urn } });
+    }
+
+    runQuery(sql: string, urn: string, limit = 200) {
+        return this.request<DataResult>('POST', '/data/query', { sql, urn, limit });
     }
 
     listPersonas(opts?: RequestOptions) {

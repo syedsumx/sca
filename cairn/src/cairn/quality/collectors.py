@@ -132,19 +132,50 @@ class ConnectionRegistry:
             url: snowflake://${SF_USER}:${SF_PASSWORD}@acct/db?warehouse=WH&role=CAIRN_READONLY
     """
 
-    def __init__(self, connections: Optional[dict[str, dict]] = None):
+    def __init__(self, connections: Optional[dict[str, dict]] = None, path: Optional[str] = None):
         self._defs = connections or {}
         self._engines: dict[str, Engine] = {}
+        self._path = path
+        self._stamp: Optional[tuple] = None
 
     @classmethod
     def from_file(cls, path: Optional[str]) -> "ConnectionRegistry":
-        if not path or not os.path.exists(path):
-            return cls({})
-        with open(path) as fh:
-            data = yaml.safe_load(fh) or {}
-        return cls(data.get("connections", {}))
+        """A YAML file, or a directory whose ``*.yml``/``*.yaml`` files are merged (``*.example.*``
+        skipped). Files are re-read when they change, so connections can be added without a restart."""
+        reg = cls({}, path)
+        reg._reload()
+        return reg
+
+    def _files(self) -> list[str]:
+        p = self._path
+        if not p or not os.path.exists(p):
+            return []
+        if os.path.isfile(p):
+            return [p]
+        return sorted(os.path.join(p, f) for f in os.listdir(p)
+                      if f.endswith((".yml", ".yaml")) and ".example." not in f)
+
+    def _reload(self) -> None:
+        if self._path is None:
+            return
+        files = self._files()
+        stamp = tuple((f, os.path.getmtime(f)) for f in files)
+        if stamp == self._stamp:
+            return
+        defs: dict[str, dict] = {}
+        for f in files:
+            with open(f) as fh:
+                defs.update((yaml.safe_load(fh) or {}).get("connections") or {})
+        for name in [n for n in self._engines if self._defs.get(n) != defs.get(n)]:
+            self._engines.pop(name).dispose()
+        self._defs, self._stamp = defs, stamp
+
+    def definitions(self) -> dict[str, dict]:
+        self._reload()
+        return dict(self._defs)
 
     def engine(self, name: str) -> Engine:
+        self._reload()
         if name not in self._engines:
             d = self._defs.get(name)
             if d is None:
