@@ -16,6 +16,7 @@ import type {
     Finding,
     Follow,
     InboxItem,
+    LicenceState,
     MarkdownDocResponse,
     NotifySettings,
     Ontology,
@@ -177,6 +178,20 @@ export class ConsumerClient extends CairnClient {
 
     getUiConfig(opts?: RequestOptions) {
         return this.request<UiConfig>('GET', '/ui/config', undefined, opts);
+    }
+
+    // --- licence ---------------------------------------------------------------------------
+
+    getLicence(opts?: RequestOptions) {
+        return this.request<LicenceState>('GET', '/admin/licence', undefined, opts);
+    }
+
+    installLicence(key: string) {
+        return this.request<LicenceState>('PUT', '/admin/licence', { key });
+    }
+
+    removeLicence() {
+        return this.request<LicenceState>('DELETE', '/admin/licence');
     }
 
     // --- collaboration ---------------------------------------------------------------------

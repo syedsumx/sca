@@ -347,6 +347,28 @@ def cmd_db(a) -> None:
         sys.exit(0 if not diffs and cur == head else 1)
 
 
+def cmd_licence(a) -> None:
+    from cairn.common.audit import AuditLog
+    from cairn.common.config import get_settings
+    from cairn.common.db import get_engine
+    from cairn.common.licence import LicenceError, from_env, verify
+
+    if a.licence_command == "verify":                      # no database needed
+        try:
+            print(json.dumps(verify(open(a.file).read(), tenant=os.environ.get("CAIRN_TENANT_ID")).public(), indent=2))
+        except LicenceError as e:
+            sys.exit(f"invalid: {e}")
+        return
+    engine = get_engine(get_settings().database_url)
+    svc = from_env(engine, AuditLog(engine))
+    if a.licence_command == "install":
+        try:
+            svc.install(open(a.file).read(), "urn:li:corpuser:cairn-cli")
+        except LicenceError as e:
+            sys.exit(f"not installed: {e}")
+    print(json.dumps(svc.state(), indent=2))
+
+
 def cmd_sso_check(a) -> None:
     from cairn.common import sso
 
@@ -544,6 +566,14 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
                         ("check", "fail if the schema differs from the models or is not at head")):
         db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
+
+    lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
+    lc_sub = lc.add_subparsers(dest="licence_command", required=True)
+    lc_sub.add_parser("show", help="the installed licence, seats and status").set_defaults(fn=cmd_licence)
+    for name, help_ in (("verify", "check a key file without installing it"), ("install", "install a key file")):
+        x = lc_sub.add_parser(name, help=help_)
+        x.add_argument("file")
+        x.set_defaults(fn=cmd_licence)
 
     ct = sub.add_parser("contract", help="data contracts: check in CI, publish")
     ct_sub = ct.add_subparsers(dest="contract_command", required=True)

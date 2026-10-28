@@ -46,11 +46,14 @@ try:
     WORKER_LAST_SUCCESS = Gauge("cairn_worker_last_success_timestamp_seconds",
                                 "When a background worker last finished a cycle without error", ["worker"])
     WORKER_ERRORS = Counter("cairn_worker_errors_total", "Background worker cycles that failed", ["worker"])
+    LICENCE_DAYS_LEFT = Gauge("cairn_licence_days_left", "Days until the licence expires (negative: expired)")
+    LICENCE_SEATS = Gauge("cairn_licence_seats", "People active in the last 30 days, and the licence's limit", ["kind"])
+    LICENCE_READ_ONLY = Gauge("cairn_licence_read_only", "1 when the licence leaves Cairn read-only")
     ENABLED = True
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
     NOTIFICATIONS_PENDING = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = _Noop()
-    WORKER_LAST_SUCCESS = WORKER_ERRORS = _Noop()
+    WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
     ENABLED = False
 
 
@@ -59,6 +62,27 @@ def worker_cycle(worker: str, ok: bool) -> None:
         WORKER_LAST_SUCCESS.labels(worker).set(time.time())
     else:
         WORKER_ERRORS.labels(worker).inc()
+
+
+def watch_licence(licence) -> None:
+    """Report the licence state when Prometheus scrapes (no stale values between API calls)."""
+    if not ENABLED:
+        return
+    nan = float("nan")
+
+    def field(name):
+        def read():
+            try:
+                v = licence.state().get(name)
+            except Exception:  # noqa: BLE001 - a scrape must not fail on a database hiccup
+                return nan
+            return nan if v is None else float(v)
+        return read
+
+    LICENCE_DAYS_LEFT.set_function(field("days_left"))
+    LICENCE_SEATS.labels("used").set_function(field("seats_used"))
+    LICENCE_SEATS.labels("limit").set_function(field("seats_limit"))
+    LICENCE_READ_ONLY.set_function(field("read_only"))
 
 
 def serve_worker_metrics(port: Optional[int] = None) -> Optional[int]:

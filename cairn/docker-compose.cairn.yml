@@ -28,6 +28,8 @@ x-core-env: &core-env
 
 # ---------------------------------------------------------------- Cairn common
 x-cairn-env: &cairn-env
+  CAIRN_LICENCE_REQUIRED: ${CAIRN_LICENCE_REQUIRED:-false}   # true: read-only until a licence is installed
+  CAIRN_TENANT_ID: ${CAIRN_TENANT_ID:-}                      # a licence for another tenant is refused
   CAIRN_CORE_URL: http://cairn-core:8080
   CAIRN_FRONTEND_URL: http://cairn-web:9002
   CAIRN_CORE_TOKEN_FILE: /run/cairn/core_token

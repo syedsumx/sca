@@ -12,3 +12,5 @@ plugins/java/cairn-authorizer/.gradle
 # keep plugins/java/cairn-authorizer/build/libs (used by JAR_STAGE=prebuilt)
 plugins/java/cairn-authorizer/build/*
 !plugins/java/cairn-authorizer/build/libs
+# the development signing key never goes into an image
+deploy/licence/dev-private-key.pem

@@ -9,6 +9,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { isHosted, navigateHost } from '../hostNav';
 import { useHotkeys } from '../utils/useHotkeys';
 import { AssistantSlideOver } from './Assistant';
+import { LicenceBanner } from './Licence';
 import { focusRing, tokens } from './tokens';
 
 const Bar = styled.header`
@@ -92,6 +93,7 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                     ✨ Ask
                 </Button>
             </Bar>
+            <LicenceBanner />
             <main>{children}</main>
             <AssistantSlideOver />
         </div>

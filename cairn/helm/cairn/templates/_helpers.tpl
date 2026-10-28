@@ -112,6 +112,10 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_DB_USER
   value: {{ $c.database.user | quote }}
 {{ include "cairn.secretEnv" (dict "name" "CAIRN_DB_PASSWORD" "secret" $s.name "key" $s.dbPasswordKey) }}
+{{- with $c.search.indexPrefix }}
+- name: INDEX_PREFIX
+  value: {{ . | quote }}
+{{- end }}
 - name: CAIRN_SEARCH_HOST
   value: {{ $c.search.host | quote }}
 - name: CAIRN_SEARCH_PORT
@@ -165,6 +169,16 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_DATABASE_URL
   valueFrom:
     secretKeyRef: { name: {{ $s.name }}, key: {{ $s.databaseUrlKey }} }
+- name: CAIRN_LICENCE_REQUIRED
+  value: {{ .Values.cairn.licence.required | default false | quote }}
+{{- with .Values.cairn.licence.tenantId }}
+- name: CAIRN_TENANT_ID
+  value: {{ . | quote }}
+{{- end }}
+{{- if .Values.cairn.licence.existingSecret }}
+- name: CAIRN_LICENCE_FILE
+  value: /run/cairn-licence/licence
+{{- end }}
 - name: CAIRN_AUTHZ_MODE
   value: {{ .Values.cairn.auth.mode | quote }}
 - name: CAIRN_IMPORT_NATIVE_POLICIES
@@ -376,6 +390,11 @@ spec:
               mountPath: /etc/cairn/config/quality
               readOnly: true
             {{- end }}
+            {{- if $root.Values.cairn.licence.existingSecret }}
+            - name: licence
+              mountPath: /run/cairn-licence
+              readOnly: true
+            {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -396,6 +415,12 @@ spec:
         - name: auto-monitors
           configMap:
             name: {{ include "cairn.autoMonitorsConfigMap" $root }}
+        {{- end }}
+        {{- with $root.Values.cairn.licence.existingSecret }}
+        - name: licence
+          secret:
+            secretName: {{ . }}
+            items: [{ key: {{ $root.Values.cairn.licence.secretKey | default "licence" }}, path: licence }]
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}

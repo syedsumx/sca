@@ -87,6 +87,7 @@ class Services:
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
+    licence: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
     _product_assets_cache: dict = field(default_factory=dict)
@@ -418,6 +419,12 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     services = Services(settings, engine, graph, audit, identity, attributes, pdp, policy_repo, quality, workflows,
                         gateway, catalog, llm, nlq, semantic, docgen, ai_usage=ai_usage,
                         connections=connections)
+    from cairn.common.licence import from_env as licence_from_env
+
+    services.licence = licence_from_env(engine, audit)
+    from cairn.common.metrics import watch_licence
+
+    watch_licence(services.licence)
     _build_active_metadata(services)
     return services
 

@@ -5,6 +5,7 @@ import { AgentFleet } from '../../agents/AgentFleet';
 import { CairnClientProvider } from '../../api/hooks';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
+import { LicenceSettings } from '../components/Licence';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { relativeTime } from '../utils/format';
@@ -246,6 +247,9 @@ export function SettingsPage() {
                     { key: 'embeds', label: 'Embeds', children: <EmbedBuilder /> },
                     ...(session.config?.can_manage_agents
                         ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
+                        : []),
+                    ...(session.config?.is_admin
+                        ? [{ key: 'licence', label: 'Licence', children: <LicenceSettings /> }]
                         : []),
                 ]}
             />

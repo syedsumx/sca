@@ -31,11 +31,20 @@ except ImportError:  # pragma: no cover
 
 
 def _principal_dependency(services: Services):
+    from cairn.common.licence import LicenceRefused
+
     def current_principal(request: Request) -> Principal:
         try:
-            return services.identity.resolve(dict(request.headers), dict(request.cookies))
+            principal = services.identity.resolve(dict(request.headers), dict(request.cookies))
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
+        if services.licence is not None:
+            route = getattr(request.scope.get("route"), "path", request.url.path)
+            try:
+                services.licence.check(principal.urn, principal.is_service, request.method, route)
+            except LicenceRefused as e:
+                raise HTTPException(402, str(e))
+        return principal
     return current_principal
 
 
@@ -117,6 +126,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                            f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate)
         app.include_router(scim_router(scim))
         install_error_handler(app)
+    if services.licence is not None:
+        from cairn.common.licence_api import build_router as licence_router
+
+        app.include_router(licence_router(services.licence, cp, authz))
     _include_active_metadata(app, services, modules, cp, authz)
     return app
 

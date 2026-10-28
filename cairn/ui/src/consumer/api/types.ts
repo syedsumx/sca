@@ -725,3 +725,30 @@ export interface DefinitionEdits {
     expression?: string;
     description?: string;
 }
+
+export type LicenceStatus = 'evaluation' | 'valid' | 'expiring' | 'expired' | 'invalid' | 'missing';
+
+/** GET /admin/licence. Everyone gets status, read_only, days_left, over_seats; admins the rest. */
+export interface LicenceState {
+    status: LicenceStatus;
+    read_only: boolean;
+    days_left: number | null;
+    over_seats?: boolean;
+    required?: boolean;
+    tenant?: string | null;
+    seats_used?: number;
+    seats_limit?: number | null;
+    problem?: string | null;
+    licence?: {
+        id: string;
+        customer: string;
+        tenant: string | null;
+        edition: string;
+        features: string[];
+        max_users: number | null;
+        issued_at: string;
+        expires_at: string;
+        grace_days: number;
+        development: boolean;
+    } | null;
+}

@@ -1387,3 +1387,50 @@ def test_31_context_layer_answers_definitions_and_semantic_exports(users):
                                                          "source": DS, "datasets": [DS, DS_DOWN]}).text
     assert "WITH METRICS" in db and f"name: gross_revenue_{RUN}" in db, db
     assert root.get("/context/definitions/export", params={"format": "databricks"}).status_code == 422
+
+
+def test_32_licence_edition_seats_and_expiry(users):
+    """A licence limits the edition's features and the number of people who may change things, and
+    an expired one leaves Cairn read-only; without one Cairn is in evaluation mode again."""
+    from datetime import date, timedelta
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives import serialization
+
+    from cairn.common.licence import issue
+
+    root, bob, carol = users["root"], users["bob"], users["carol"]
+    root.delete("/admin/licence")                                         # a run that stopped half-way
+    assert root.get("/admin/licence").json()["status"] == "evaluation"
+    key = serialization.load_pem_private_key(
+        (Path(__file__).resolve().parents[2] / "deploy/licence/dev-private-key.pem").read_bytes(), None)
+    today = date.today()
+
+    def lic(start=today, days=30, **extra):
+        return issue(key, "cairn-dev", id=f"lic_{RUN}", customer="E2E", edition="standard",
+                     issued_at=start.isoformat(), expires_at=(start + timedelta(days=days)).isoformat(), **extra)
+
+    assert bob.put("/admin/licence", json={"key": lic(max_users=2)}).status_code == 403
+    assert root.put("/admin/licence", json={"key": lic()[:-4] + "AAAA"}).status_code == 422
+    try:
+        st = root.put("/admin/licence", json={"key": lic(max_users=2)}).json()
+        assert st["status"] == "valid" and st["licence"]["development"] and st["seats_limit"] == 2, st
+        assert "licence" not in bob.get("/admin/licence").json()
+        r = root.get("/ai/index/status")                                  # the standard edition has no AI
+        assert r.status_code == 402 and "standard edition" in r.json()["detail"], r.text
+        assert root.put(f"/collab/bookmarks/{DS}").status_code == 200      # seat 1
+        assert bob.put(f"/collab/bookmarks/{DS}").status_code == 200       # seat 2
+        r = carol.put(f"/collab/bookmarks/{DS}")
+        assert r.status_code == 402 and "2 seats are taken" in r.json()["detail"], r.text
+        assert carol.get("/collab/bookmarks").status_code == 200          # reading is fine
+        assert carol.post("/collab/enrich", json={"urns": [DS]}).status_code == 200
+        assert root.get("/admin/licence").json()["over_seats"] is True
+
+        old = lic(start=today - timedelta(days=40), days=30, grace_days=7)  # expired 10 days ago
+        assert root.put("/admin/licence", json={"key": old}).json()["status"] == "expired"
+        r = bob.put(f"/collab/bookmarks/{DS}")
+        assert r.status_code == 402 and "expired" in r.json()["detail"], r.text
+        assert bob.get("/collab/bookmarks").status_code == 200
+    finally:
+        assert root.delete("/admin/licence").json()["status"] == "evaluation"
+    assert carol.put(f"/collab/bookmarks/{DS}").status_code == 200

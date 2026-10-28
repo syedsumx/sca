@@ -78,3 +78,21 @@ groups:
         labels: {severity: info}
         annotations:
           summary: "AI calls are being refused by the daily budget"
+  - name: cairn.licence
+    rules:
+      - alert: CairnLicenceExpiring
+        expr: cairn_licence_days_left < 21
+        labels: {severity: warning}
+        annotations:
+          summary: "The Cairn licence expires in {{ $value }} days: renew it before Cairn turns read-only"
+      - alert: CairnLicenceReadOnly
+        expr: cairn_licence_read_only == 1
+        labels: {severity: critical}
+        annotations:
+          summary: "Cairn is read-only: no valid licence (missing, invalid or expired past its grace)"
+      - alert: CairnLicenceSeatsFull
+        expr: cairn_licence_seats{kind="used"} > on() cairn_licence_seats{kind="limit"}
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "More people use Cairn than the licence allows: the newest can only read"

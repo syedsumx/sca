@@ -79,6 +79,7 @@ def load_models() -> MetaData:
     from cairn.notify import ticketing as _ticketing  # noqa: F401
     from cairn.ai import steward as _steward  # noqa: F401
     from cairn.context import layer as _context_layer  # noqa: F401
+    from cairn.common import licence as _licence  # noqa: F401
     from cairn.governance import pdp as _pdp  # noqa: F401
     from cairn.governance import personas as _personas  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401

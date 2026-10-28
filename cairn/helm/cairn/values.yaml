@@ -59,6 +59,8 @@ core:
   search:            # OpenSearch 2.x
     host: opensearch
     port: 9200
+    # Prefix for every index name, so several deployments (tenants) can share one cluster.
+    indexPrefix: ""
     useSsl: false
     username: ""
     # Key in core.secrets.name holding the search password; empty = no authentication.
@@ -498,6 +500,16 @@ cairn:
       - namespaceSelector:
           matchLabels:
             kubernetes.io/metadata.name: ingress-nginx
+
+  licence:
+    # true: Cairn is read-only until a valid licence is installed (hosted tenants). false: without a
+    # licence it runs in evaluation mode. Licences are installed in Administration, or from a Secret.
+    required: false
+    # A licence bound to another tenant is refused.
+    tenantId: ""
+    # Secret holding the licence key (key secretKey); installed at start when it changes.
+    existingSecret: ""
+    secretKey: licence
 
   ha:
     # Spread replicas of every component over nodes and zones (when it runs more than one).
