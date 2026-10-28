@@ -24,6 +24,8 @@ export const EVENT_COPY: Record<string, string> = {
     'context.drift': 'Definition drift on assets I own',
     'form.assigned': 'A compliance form needs my answers',
     'form.due': 'My compliance form tasks are overdue',
+    'contract.broken': 'A data contract on something I own, follow or subscribe to breaks',
+    'contract.restored': 'A broken data contract holds again',
 };
 
 function NotificationSettings() {

@@ -165,6 +165,7 @@ export function AssetRow({
                     certification={enrichment?.certification}
                     qualityStatus={enrichment?.quality_status}
                     compliance={enrichment?.compliance}
+                    contract={enrichment?.contract}
                     compact
                 />
                 <Meta>

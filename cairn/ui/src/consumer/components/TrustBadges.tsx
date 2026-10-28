@@ -39,10 +39,17 @@ export interface TrustBadgesProps {
     lastUpdated?: string | null;
     compact?: boolean;
     compliance?: 'COMPLIANT' | 'INCOMPLETE' | null;
+    contract?: 'MET' | 'BROKEN' | 'PENDING' | null;
 }
 
+const CONTRACT = {
+    MET: { label: 'Contract met', icon: '🤝', title: 'Every part of the data contract holds' },
+    BROKEN: { label: 'Contract broken', icon: '⚠', title: 'The producer is not keeping the data contract' },
+    PENDING: { label: 'Contract pending', icon: '🤝', title: 'Some contract checks have not reported yet' },
+};
+
 /** Same compact trust language on every card, row, embed and chat answer (spec principle 3). */
-export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdated, compact, compliance }: TrustBadgesProps) {
+export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdated, compact, compliance, contract }: TrustBadgesProps) {
     const tone = qualityTone(qualityStatus);
     const certified = (certification || '').toUpperCase() === 'CERTIFIED';
     return (
@@ -70,6 +77,16 @@ export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdat
                     <span aria-hidden>☐</span>
                     {!compact && 'Forms open'}
                     {compact && <span className="sr-only">Forms open</span>}
+                </Pill>
+            )}
+            {contract && (
+                <Pill
+                    fg={contract === 'MET' ? tokens.color.good : contract === 'BROKEN' ? tokens.color.bad : tokens.color.textMuted}
+                    title={CONTRACT[contract].title}
+                >
+                    <span aria-hidden>{CONTRACT[contract].icon}</span>
+                    {!compact && CONTRACT[contract].label}
+                    {compact && <span className="sr-only">{CONTRACT[contract].label}</span>}
                 </Pill>
             )}
             {sensitive && (

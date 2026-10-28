@@ -153,6 +153,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             services.bulk, cp, services.authorize, services.can_view,
             lambda query, limit: services.catalog.search(query, ["dataset"], count=limit),
             lambda urn: services.attributes.resource(urn).get("classification") or []))
+    if "quality" in modules and services.contracts is not None:
+        from cairn.quality.contracts_api import build_router as contracts_router
+
+        app.include_router(contracts_router(services.contracts, cp, services.authorize, services.can_view))
     if "governance" in modules and services.tag_sync is not None:
         from cairn.governance.tag_sync_api import build_router as tag_sync_router
 

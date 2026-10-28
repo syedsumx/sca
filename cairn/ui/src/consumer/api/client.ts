@@ -41,6 +41,7 @@ import type {
     BulkBatch,
     BulkPreview,
     TagSyncResult,
+    Contract,
     TagSyncTarget,
     Thread,
     TrendingItem,
@@ -338,6 +339,10 @@ export class ConsumerClient extends CairnClient {
 
     tagSync(targetId: string, dryRun: boolean) {
         return this.request<TagSyncResult>('POST', `/governance/tag-sync/${enc(targetId)}/sync`, { dry_run: dryRun });
+    }
+
+    contract(dataset: string, opts?: RequestOptions) {
+        return this.request<Contract>('GET', '/quality/contracts/one', undefined, { ...opts, query: { dataset } });
     }
 
     listPersonas(opts?: RequestOptions) {

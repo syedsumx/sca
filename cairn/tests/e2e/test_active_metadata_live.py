@@ -1037,3 +1037,39 @@ def test_22_warehouse_tag_sync_plans_tags_from_catalog_labels(users):
     finally:
         os.remove(path)
     assert target not in [t["id"] for t in root.get("/governance/tag-sync").json()]
+
+
+def test_23_data_contract_breaks_notifies_and_checks_ci(users):
+    """A schema contract on this run's dataset is met; a breaking schema change breaks it and tells
+    the owner; versions are immutable; the CI check flags a proposed breaking change."""
+    root, bob, carol = users["root"], users["bob"], users["carol"]
+    spec = {"dataset": DS, "version": "1.0.0", "owner": CAROL,
+            "schema": {"columns": [{"name": "id", "type": "integer"}, {"name": "email", "type": "string"}]}}
+    assert bob.put("/quality/contracts", json=spec).status_code == 403
+    out = root.put("/quality/contracts", json=spec)
+    assert out.status_code == 200 and out.json()["status"] == "MET", out.text
+    try:
+        assert root.put("/quality/contracts", json={**spec, "schema": {"columns": [{"name": "id"}]}}).status_code == 409
+        check = root.post("/quality/contracts/check", json={"dataset": DS, "columns": {
+            "id": {"type": "bigint"}, "email_address": {"type": "text"}}}).json()
+        assert check["ok"] is False and check["violations"] == ["column email is missing"], check
+
+        fields = [{"fieldPath": p, "nativeDataType": t, "type": {"type": {"com.linkedin.schema.StringType": {}}}}
+                  for p, t in (("id", "INT"), ("amount", "NUMERIC"), ("region", "VARCHAR"))]
+        schema = {"schemaName": "customers", "platform": "urn:li:dataPlatform:postgres", "version": 0, "hash": "",
+                  "platformSchema": {"com.linkedin.schema.MySqlDDL": {"tableSchema": ""}}, "fields": fields}
+        before = root.get("/quality/contracts/one", params={"dataset": DS}).json()
+        emit(DS, "schemaMetadata", schema)                              # email dropped upstream
+        broken = root.get("/quality/contracts/one", params={"dataset": DS}).json()
+        assert broken["status"] == "BROKEN" and "email is missing" in broken["parts"][0]["detail"], broken
+        enrich = root.post("/collab/enrich", json={"urns": [DS]}).json()
+        assert enrich[DS]["contract"] == "BROKEN", enrich
+        eventually(lambda: [n for n in carol.get("/notify/inbox").json() if n["type"] == "contract.broken"
+                            and n.get("entity_urn") == DS], timeout=30)
+        restored = {**schema, "fields": fields[:1] + [{**fields[2], "fieldPath": "email"}] + fields[1:]}
+        emit(DS, "schemaMetadata", restored)
+        assert root.get("/quality/contracts/one", params={"dataset": DS}).json()["status"] == "MET"
+        assert before["status"] == "MET"
+    finally:
+        root.delete("/quality/contracts/one", params={"dataset": DS})
+    assert root.get("/quality/contracts/one", params={"dataset": DS}).status_code == 404

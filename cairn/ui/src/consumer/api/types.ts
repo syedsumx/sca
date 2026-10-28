@@ -27,7 +27,11 @@ export interface Enrichment {
     quality_status: TrustStatus;
     /** Compliance forms: COMPLIANT when every assigned form is done, INCOMPLETE while any is open. */
     compliance?: 'COMPLIANT' | 'INCOMPLETE' | null;
+    /** Data contract: MET, BROKEN, or PENDING while its monitors have not reported. */
+    contract?: ContractStatus | null;
 }
+
+export type ContractStatus = 'MET' | 'BROKEN' | 'PENDING';
 
 export type EnrichmentMap = Record<string, Enrichment>;
 
@@ -96,6 +100,7 @@ export interface ProductCard {
     tags: string[];
     certification: TrustStatus;
     quality_status: TrustStatus;
+    contract?: ContractStatus | null;
     assets_count: number;
     consumers: number;
     sla: { freshness: string | null; availability: string | null };
@@ -543,4 +548,25 @@ export interface TagSyncResult {
     dry_run: boolean;
     applied: number;
     failed: number;
+}
+
+export interface ContractPart {
+    part: 'schema' | 'freshness' | 'volume' | 'quality';
+    name?: string;
+    monitor_id?: string;
+    status: ContractStatus;
+    detail: string;
+}
+
+export interface Contract {
+    dataset: string;
+    version: string;
+    owner: string | null;
+    status: ContractStatus;
+    parts: ContractPart[];
+    checked_ms: number;
+    spec: Record<string, unknown>;
+    created_by: string;
+    updated_ms: number;
+    versions?: { version: string; created_by: string; created_ms: number }[];
 }

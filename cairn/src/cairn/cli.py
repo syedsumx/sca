@@ -112,14 +112,17 @@ def notifier_tick(s) -> dict:
     out["grants_expired"] = len(expired)
     if s.forms is not None:
         out["forms"] = forms_tick(s, now_ms)
-    if s.tag_sync is not None and now_ms - _TAG_SYNC_STATE["synced_ms"] >= TAG_SYNC_EVERY_MS:
-        _TAG_SYNC_STATE["synced_ms"] = now_ms
+    if s.contracts is not None and now_ms - _SWEEP_STATE["contracts_ms"] >= 300_000:
+        _SWEEP_STATE["contracts_ms"] = now_ms
+        out["contracts"] = s.contracts.refresh_all()
+    if s.tag_sync is not None and now_ms - _SWEEP_STATE["synced_ms"] >= TAG_SYNC_EVERY_MS:
+        _SWEEP_STATE["synced_ms"] = now_ms
         out["tag_sync"] = s.tag_sync.sweep()
     return out
 
 
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
-_TAG_SYNC_STATE = {"synced_ms": 0}
+_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0}
 
 
 _FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}
@@ -246,6 +249,52 @@ def cmd_audit_verify_file(a) -> None:
         result = {**result, "valid": False, "reason": "export does not continue from the given head"}
     print(json.dumps(result, indent=2))
     sys.exit(0 if result["valid"] else 1)
+
+
+def _load_doc(path: str) -> dict:
+    import yaml
+
+    with open(path) as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def cmd_contract_check(a) -> None:
+    """Offline, for CI: does the proposed dbt model (or a columns file) keep the contract? Exit 1 if not."""
+    from cairn.quality.contracts import ContractSpec, check_proposed, dbt_columns
+
+    spec = ContractSpec.model_validate(_load_doc(a.contract))
+    if a.manifest:
+        if not a.model:
+            raise SystemExit("cairn contract check: --model is required with --manifest")
+        with open(a.manifest) as fh:
+            columns = dbt_columns(json.load(fh), a.model)
+    else:
+        columns = _load_doc(a.columns)
+    violations = check_proposed(spec, columns)
+    if violations:
+        print(f"contract {spec.version} for {spec.dataset} would break:")
+        for v in violations:
+            print(f"  - {v}")
+        raise SystemExit(1)
+    print(f"contract {spec.version} for {spec.dataset}: the proposed schema keeps it ({len(columns)} columns)")
+
+
+def cmd_contract_publish(a) -> None:
+    """Publish contract files through the API (CAIRN_API_URL, CAIRN_TOKEN)."""
+    import httpx
+
+    failed = 0
+    for path in a.files:
+        r = httpx.put(f"{a.api.rstrip('/')}/quality/contracts", json=_load_doc(path), timeout=60,
+                      headers={"Authorization": f"Bearer {a.token}"} if a.token else {})
+        if r.status_code >= 400:
+            failed += 1
+            print(f"{path}: {r.status_code} {r.text[:500]}")
+        else:
+            out = r.json()
+            print(f"{path}: {out['dataset']} v{out['version']} {out['status']}")
+    if failed:
+        raise SystemExit(1)
 
 
 def cmd_db(a) -> None:
@@ -458,6 +507,21 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
                         ("check", "fail if the schema differs from the models or is not at head")):
         db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
+
+    ct = sub.add_parser("contract", help="data contracts: check in CI, publish")
+    ct_sub = ct.add_subparsers(dest="contract_command", required=True)
+    cc = ct_sub.add_parser("check", help="fail if a proposed dbt model or columns file breaks a contract.yaml")
+    cc.add_argument("contract")
+    src = cc.add_mutually_exclusive_group(required=True)
+    src.add_argument("--manifest", help="dbt target/manifest.json")
+    src.add_argument("--columns", help="YAML/JSON file: {column: {type, nullable}}")
+    cc.add_argument("--model", help="dbt model name or unique id (with --manifest)")
+    cc.set_defaults(fn=cmd_contract_check)
+    cpub = ct_sub.add_parser("publish", help="publish contract files (a new version for changed terms)")
+    cpub.add_argument("files", nargs="+")
+    cpub.add_argument("--api", default=os.environ.get("CAIRN_API_URL", "http://localhost:8000/cairn/api"))
+    cpub.add_argument("--token", default=os.environ.get("CAIRN_TOKEN"))
+    cpub.set_defaults(fn=cmd_contract_publish)
 
     sso = sub.add_parser("sso", help="single sign-on (OpenID Connect) setup")
     sso_sub = sso.add_subparsers(dest="sso_command", required=True)

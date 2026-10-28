@@ -59,7 +59,7 @@ export function ProductCard({ product, onRequest }: { product: ProductCardData; 
             <div style={{ fontSize: 13, color: tokens.color.textMuted, minHeight: 36 }}>
                 {product.description || 'No description yet.'}
             </div>
-            <TrustBadges certification={product.certification} qualityStatus={product.quality_status} />
+            <TrustBadges certification={product.certification} qualityStatus={product.quality_status} contract={product.contract} />
             {(product.sla.freshness || product.sla.availability) && (
                 <div style={{ fontSize: 12 }}>
                     {product.sla.availability && <Tag>SLA {product.sla.availability}</Tag>}

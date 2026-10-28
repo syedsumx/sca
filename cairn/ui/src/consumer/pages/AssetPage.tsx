@@ -10,6 +10,7 @@ import { DiscussionPanel } from '../components/Discussion';
 import { BookmarkToggle, FollowButton } from '../components/Engagement';
 import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
+import { ContractPanel } from '../components/Contract';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
@@ -180,6 +181,7 @@ export function AssetPage() {
                         certification={e?.certification}
                         qualityStatus={health.data?.status ?? e?.quality_status}
                         compliance={e?.compliance}
+                        contract={e?.contract}
                         sensitive={sensitive}
                     />
                 </div>
@@ -241,6 +243,11 @@ export function AssetPage() {
                                 <SimilarAssets urn={urn} />
                             </>
                         ),
+                    },
+                    {
+                        key: 'contract',
+                        label: e?.contract ? `Contract (${e.contract === 'MET' ? 'met' : e.contract.toLowerCase()})` : 'Contract',
+                        children: <ContractPanel urn={urn} />,
                     },
                     {
                         key: 'columns',

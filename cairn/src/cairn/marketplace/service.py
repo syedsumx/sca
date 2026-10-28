@@ -176,6 +176,7 @@ class MarketplaceService:
             "tags": [t["tag"]["urn"] for t in ((p.get("tags") or {}).get("tags") or []) if t.get("tag")],
             "certification": (badges.get(p["urn"]) or {}).get("certification"),
             "quality_status": (badges.get(p["urn"]) or {}).get("quality_status"),
+            "contract": (badges.get(p["urn"]) or {}).get("contract"),
             "assets_count": props.get("numAssets") or 0,
             "consumers": consumers.get(p["urn"], 0),
             "sla": {"freshness": custom.get("sla.freshness"), "availability": custom.get("sla.availability")},

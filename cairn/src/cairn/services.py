@@ -79,6 +79,7 @@ class Services:
     bulk: Optional[Any] = None
     tag_sync: Optional[Any] = None
     connections: Optional[Any] = None       # named warehouse connections (quality, tag sync)
+    contracts: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -149,7 +150,24 @@ class Services:
                     out[urn]["compliance"] = self.forms.asset_status(urn)["status"]
                 except Exception:
                     logger.exception("compliance status lookup failed for %s", urn)
+        if self.contracts is not None and urns and self.contracts.any():
+            try:
+                self._contract_badges(urns, out)
+            except Exception:
+                logger.exception("contract status lookup failed")
         return out
+
+    def _contract_badges(self, urns: list[str], out: dict[str, dict]) -> None:
+        """A dataset shows its contract's status; a data product the worst of its datasets'."""
+        rank = {"BROKEN": 2, "PENDING": 1, "MET": 0}
+        assets = {u: [a.get("destinationUrn") for a in (self.graph.get_aspect(u, "dataProductProperties") or {})
+                      .get("assets") or [] if a.get("destinationUrn")]
+                  for u in urns if u.startswith("urn:li:dataProduct:") and self.graph is not None}
+        found = self.contracts.statuses(sorted({*urns, *(a for v in assets.values() for a in v)}))
+        for urn in urns:
+            statuses = [found[a] for a in assets.get(urn, [urn]) if a in found]
+            if statuses:
+                out[urn]["contract"] = max(statuses, key=rank.get)
 
     def summaries(self, urns: list[str]) -> dict[str, dict]:
         """Display data per urn. Without catalog access, names are derived from the urn so callers can
@@ -450,6 +468,7 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
+        _build_contracts(s, hub, Event)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
@@ -574,6 +593,30 @@ def _build_forms(s: Services, hub, Event) -> None:
     s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
 
 
+def _build_contracts(s: Services, hub, Event) -> None:
+    from cairn.quality.contracts import ContractService
+
+    def notify(kind: str, row: dict, old: str, new: str) -> None:
+        dataset = row["dataset_urn"]
+        subscribers: list[str] = []
+        if s.marketplace is not None:
+            for product in s.graph.scroll_entities("dataProduct", ["dataProductProperties"]):
+                if any(a.get("destinationUrn") == dataset
+                       for a in (product.get("dataProductProperties") or {}).get("assets") or []):
+                    subscribers += s.marketplace.subscribers(product["urn"])
+        name = (s.summaries([dataset]).get(dataset) or {}).get("name") or dataset
+        parts = [p for p in (s.contracts.get(dataset) or {}).get("status_detail", {}).get("parts", [])
+                 if p["status"] == "BROKEN"]
+        hub.publish(Event(
+            type=f"contract.{kind}",
+            title=f"Contract {'broken' if kind == 'broken' else 'met again'}: {name} v{row['version']}",
+            body="; ".join(f"{p['part']}: {p['detail']}" for p in parts) or "All parts of the contract hold.",
+            actor="urn:li:corpuser:cairn-quality", entity_urn=dataset, recipients=sorted(set(subscribers)),
+            include_owners=True, include_followers=True, payload={"version": row["version"], "from": old, "to": new}))
+
+    s.contracts = ContractService(s.engine, s.graph, s.quality, notify, s.audit)
+
+
 def _hook_workflow_events(s: Services, Event) -> None:
     """Certification requests / decisions → notifications with inline Approve / Reject."""
     from cairn.notify.hub import Action
@@ -617,5 +660,10 @@ def _hook_quality_events(s: Services, Event) -> None:
                 payload={"monitor_id": monitor.id, "severity": monitor.severity}))
         except Exception:
             logger.exception("quality notification failed")
+        if s.contracts is not None and monitor.config.get("contract"):
+            try:
+                s.contracts.refresh(monitor.config["contract"])
+            except Exception:
+                logger.exception("contract refresh failed")
 
     s.quality.notifier = notifier

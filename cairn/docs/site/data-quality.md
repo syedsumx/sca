@@ -60,6 +60,57 @@ Give feedback on any failure or warning:
   restarts from this value. The monitor needs `min_history` fresh points, but not another learning
   period.
 
+## Data contracts
+
+A contract is a producer's versioned promise about one dataset. It passes or fails as a whole, so consumers can see "the producer broke a promise" rather than "this table broke". A contract can cover:
+
+- **schema:** columns, their types, and which must not be null. Extra columns are allowed unless `allow_extra_columns: false`.
+- **freshness:** `max_age_hours`.
+- **volume:** `min_rows` and `max_rows`, or `learned: true` for learned thresholds.
+- **quality:** named rules, each written like a monitor (`field_metric`, `custom_sql`, `distribution` or `volume`).
+
+```yaml
+dataset: urn:li:dataset:(urn:li:dataPlatform:snowflake,analytics.public.orders,PROD)
+version: 1.2.0
+owner: urn:li:corpGroup:orders-team
+schema:
+  columns:
+    - {name: id, type: integer, required: true}
+    - {name: email, type: string}
+freshness: {max_age_hours: 24}
+quality:
+  - {name: email nulls, type: field_metric, config: {field: email, metric: null_pct, max: 5}}
+```
+
+How the parts are checked:
+
+- **Schema** is checked against the catalog. Types compare by family: `VARCHAR(255)`, `text` and `STRING` are all strings, and `NUMBER(38,0)` and `bigint` are both integers.
+- **Freshness, volume and quality** become monitors that the contract owns. They are created, updated and removed with the contract.
+- The contract is **broken** if any part fails, **pending** while a monitor hasn't reported, and **met** otherwise.
+- The status shows as a trust badge on the asset and its data products' marketplace cards, and in the asset's **Contract** tab.
+
+When a contract breaks or holds again, these people are notified (`contract.broken`, `contract.restored`):
+
+- the dataset's owners,
+- its followers,
+- subscribers of every data product that contains it.
+
+**Versions.** Published versions are immutable. To change the terms, publish a new `version`; republishing the same version with the same terms changes nothing.
+
+**In CI.** `cairn contract check contract.yaml --manifest target/manifest.json --model orders` fails, with exit code 1, when a proposed dbt model would break the schema part. The check flags:
+
+- missing columns,
+- changed type families,
+- a required column without a `not_null` test.
+
+It runs offline. `--columns cols.yaml` (`{column: {type, nullable}}`) works for plain SQL changes.
+
+`cairn contract publish contract.yaml` publishes through the API (`CAIRN_API_URL`, `CAIRN_TOKEN`). The API is:
+
+- `PUT /cairn/api/quality/contracts` to publish (needs edit rights on the dataset's assertions),
+- `GET` or `DELETE /cairn/api/quality/contracts/one?dataset=…` to read or retire,
+- `POST /cairn/api/quality/contracts/check` to check a proposed schema.
+
 ## Severity and incidents
 
 `severity` (`LOW` … `CRITICAL`) ranks incidents. `incident_after_failures` sets how many consecutive
