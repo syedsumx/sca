@@ -43,9 +43,14 @@ import type {
     TagSyncResult,
     Contract,
     Automation,
+    ContextDefinition,
+    DefinitionEdits,
+    PastAnswer,
     CoverageFacet,
     CostTotal,
     DataResult,
+    StewardProposal,
+    StewardRun,
     ReportAsset,
     ReportSnapshot,
     AutomationPreview,
@@ -425,6 +430,18 @@ export class ConsumerClient extends CairnClient {
         return this.request<DataResult>('POST', '/data/query', { sql, urn, limit });
     }
 
+    runSteward(limit = 100) {
+        return this.request<StewardRun>('POST', '/ai/steward/run', { limit });
+    }
+
+    stewardProposals(kind?: string, opts?: RequestOptions) {
+        return this.request<StewardProposal[]>('GET', '/ai/steward/proposals', undefined, { ...opts, query: { kind } });
+    }
+
+    decideProposals(ids: string[], action: 'accept' | 'reject', edits: Record<string, unknown> = {}) {
+        return this.request<{ decided: number; batch_id: string | null }>('POST', '/ai/steward/decide', { ids, action, edits });
+    }
+
     listPersonas(opts?: RequestOptions) {
         return this.request<Persona[]>('GET', '/governance/personas', undefined, opts);
     }
@@ -476,8 +493,20 @@ export class ConsumerClient extends CairnClient {
         return this.request<Finding[]>('GET', '/context/findings', undefined, { ...opts, query });
     }
 
-    actOnFinding(id: string, action: 'accept' | 'dismiss') {
-        return this.request<Finding>('POST', `/context/findings/${enc(id)}/${action}`, {});
+    actOnFinding(id: string, action: 'accept' | 'dismiss', edits: DefinitionEdits = {}) {
+        return this.request<Finding>('POST', `/context/findings/${enc(id)}/${action}`, edits);
+    }
+
+    contextDefinitions(opts?: RequestOptions) {
+        return this.request<ContextDefinition[]>('GET', '/context/definitions', undefined, opts);
+    }
+
+    exportDefinitions(format: 'snowflake' | 'databricks', name: string, source?: string) {
+        return this.request<string>('GET', '/context/definitions/export', undefined, { query: { format, name, source } });
+    }
+
+    pastAnswers(question: string, opts?: RequestOptions) {
+        return this.request<PastAnswer[]>('GET', '/context/answers', undefined, { ...opts, query: { question } });
     }
 
     ontology(query: { domain?: string; limit?: number } = {}, opts: RequestOptions = {}) {

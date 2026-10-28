@@ -713,7 +713,7 @@ def test_17_ai_usage_is_metered_and_evals_ship_in_the_image(users):
     out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "cairn", "ai", "eval"], capture_output=True,
                          text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
-    assert "12/12 AI eval cases passed" in out.stdout
+    assert "19/19 AI eval cases passed" in out.stdout
 
     out = subprocess.run(COMPOSE + ["exec", "-T", "cairn-api", "python", "-"], input=_FAKE_MODEL, capture_output=True,
                          text=True, timeout=300, cwd=os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -1306,3 +1306,81 @@ def test_29_jira_decides_access_and_pagerduty_follows_incidents(users):
         os.remove(path)
         if monitor:
             root.delete(f"/quality/monitors/{monitor['id']}")
+
+
+def test_30_ai_steward_proposes_owner_and_pii_and_review_writes_them(users):
+    """An unowned, undocumented table queried mostly by Carol, with email-looking samples: the
+    steward proposes Carol as owner and the PII term for the column, with evidence; Bob may not
+    decide them; an admin accepts both and they are written."""
+    root, bob = users["root"], users["bob"]
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:postgres,steward_{RUN}.public.contacts,PROD)"
+    fields = [{"fieldPath": p, "nativeDataType": "TEXT", "type": {"type": {"com.linkedin.schema.StringType": {}}}}
+              for p in ("contact", "status")]
+    emit(ds, "schemaMetadata", {"schemaName": "contacts", "platform": "urn:li:dataPlatform:postgres", "version": 0,
+                                "hash": "", "platformSchema": {"com.linkedin.schema.MySqlDDL": {"tableSchema": ""}},
+                                "fields": fields})
+    now = int(time.time() * 1000)
+    emit(ds, "datasetProfile", {"timestampMillis": now, "rowCount": 3, "columnCount": 2, "fieldProfiles": [
+        {"fieldPath": "contact", "sampleValues": ["jane.doe@example.com", "li@example.org", "sam@example.net"]},
+        {"fieldPath": "status", "sampleValues": ["active", "churned"]}]})
+    emit(ds, "datasetUsageStatistics", {"timestampMillis": now - 3_600_000, "eventGranularity": {"unit": "DAY", "multiple": 1},
+                                        "uniqueUserCount": 2, "totalSqlQueries": 33,
+                                        "userCounts": [{"user": CAROL, "count": 30}, {"user": BOB, "count": 3}]})
+    email = "urn:li:glossaryTerm:Classification.PII.Email"
+
+    def proposals():
+        root.post("/ai/steward/run", json={"urns": [ds], "max_drafts": 0})
+        got = {(p["kind"], p["field"], p["value"] if isinstance(p["value"], str) else ""): p
+               for p in root.get("/ai/steward/proposals", params={"urn": ds}).json()}
+        return got if ("owner", "", CAROL) in got and ("term", "contact", email) in got else None
+
+    got = eventually(proposals, timeout=120, interval=5)        # the scan and the usage timeseries are indexed
+    owner, term = got[("owner", "", CAROL)], got[("term", "contact", email)]
+    assert any("30 of the 33" in e for e in owner["evidence"]), owner
+    assert term["confidence"] >= 0.9 and ("term", "status", email) not in got
+    assert bob.post("/ai/steward/decide", json={"ids": [owner["id"]], "action": "accept"}).status_code == 403
+    assert bob.post("/ai/steward/run", json={"urns": [ds]}).status_code == 403
+    out = root.post("/ai/steward/decide", json={"ids": [owner["id"], term["id"]], "action": "accept"}).json()
+    assert out["decided"] == 2 and out["batch_id"], out
+    data = gql("query($u: String!) { dataset(urn: $u) { ownership { owners { owner { ... on CorpUser { urn } } } } "
+               "editableSchemaMetadata { editableSchemaFieldInfo { fieldPath glossaryTerms { terms { term { urn } } } } } } }",
+               {"u": ds})["dataset"]
+    assert [o["owner"]["urn"] for o in data["ownership"]["owners"]] == [CAROL]
+    infos = {f["fieldPath"]: f for f in data["editableSchemaMetadata"]["editableSchemaFieldInfo"]}
+    assert [t["term"]["urn"] for t in infos["contact"]["glossaryTerms"]["terms"]] == [email]
+    assert {p["id"] for p in root.get("/ai/steward/proposals", params={"state": "ACCEPTED", "urn": ds}).json()} \
+        >= {owner["id"], term["id"]}
+
+
+def test_31_context_layer_answers_definitions_and_semantic_exports(users):
+    """Mined queries are found by the question they answer; the join accepted in test_09 is an
+    approved definition; a metric approved with edits is versioned and exported to Snowflake and
+    Databricks semantic layers."""
+    root = users["root"]
+
+    def answered():
+        compose("exec", "-T", "cairn-context-miner", "cairn", "context-miner", "--once")
+        got = root.get("/context/answers", params={"question": f"revenue_{RUN} by region"}).json()
+        return got if got and got[0]["urn"] == f"urn:li:query:am_{RUN}_0" else None
+
+    best = eventually(answered, timeout=120, interval=5)[0]
+    assert "group by region" in best["sql"] and DS in best["tables"]
+    defs = root.get("/context/definitions").json()
+    assert any(d["kind"] == "join" and set(d["doc"]["datasets"]) == {DS, DS_DOWN} for d in defs), defs
+    metric = next(f for f in root.get("/context/findings", params={"entity_urn": DS, "type": "METRIC_DEFINITION",
+                                                                   "limit": 200}).json()
+                  if f"revenue_{RUN}" in f["title"])
+    acc = root.post(f"/context/findings/{metric['id']}/accept",
+                    json={"name": f"gross_revenue_{RUN}", "expression": "sum(amount)", "description": "All orders."})
+    assert acc.status_code == 200, acc.text
+    d = acc.json()["definition"]
+    assert d["name"] == f"gross_revenue_{RUN}" and d["version"] == 1 and d["doc"]["expression"] == "sum(amount)"
+    assert root.get(f"/context/definitions/{d['id']}/versions").json()[0]["version"] == 1
+    sf = root.get("/context/definitions/export", params={"format": "snowflake", "name": f"sv_{RUN}",
+                                                         "datasets": [DS, DS_DOWN]}).text
+    assert f"CREATE OR REPLACE SEMANTIC VIEW sv_{RUN}" in sf and f"gross_revenue_{RUN} AS sum(amount)" in sf
+    assert "RELATIONSHIPS" in sf and f"AM_{RUN.upper()}.PUBLIC.CUSTOMERS" in sf, sf
+    db = root.get("/context/definitions/export", params={"format": "databricks", "name": f"main.mv_{RUN}",
+                                                         "source": DS, "datasets": [DS, DS_DOWN]}).text
+    assert "WITH METRICS" in db and f"name: gross_revenue_{RUN}" in db, db
+    assert root.get("/context/definitions/export", params={"format": "databricks"}).status_code == 422

@@ -157,6 +157,11 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.quality.contracts_api import build_router as contracts_router
 
         app.include_router(contracts_router(services.contracts, cp, services.authorize, services.can_view))
+    if "ai" in modules and services.steward is not None:
+        from cairn.ai.steward_api import build_router as steward_router
+
+        app.include_router(steward_router(services.steward, cp, services.authorize, services.can_view,
+                                          services.summaries))
     if "notify" in modules and services.ticketing is not None:
         from cairn.notify.ticketing_api import build_router as ticketing_router
 

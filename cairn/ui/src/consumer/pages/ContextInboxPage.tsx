@@ -1,10 +1,11 @@
 import { Alert, Button, Empty, Radio, Select, Tabs, Tag, message } from 'antd';
+import { ApproveDefinition, DEFINABLE, DefinitionsView, PastAnswersView } from '../components/ContextLayer';
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { Finding, FindingType, Ontology } from '../api/types';
+import type { DefinitionEdits, Finding, FindingType, Ontology } from '../api/types';
 import { assetPath } from '../components/Assets';
 import { Muted, Page, SectionTitle, Skeleton, Surface, tokens } from '../components/tokens';
 import { ConfidenceMeter } from '../components/TrustBadges';
@@ -35,9 +36,16 @@ const FindingCard = styled(Surface)`
     }
 `;
 
-export function FindingView({ finding, onAct }: { finding: Finding; onAct?: (action: 'accept' | 'dismiss') => void }) {
+export function FindingView({
+    finding,
+    onAct,
+}: {
+    finding: Finding;
+    onAct?: (action: 'accept' | 'dismiss', edits?: DefinitionEdits) => void;
+}) {
     const meta = FINDING_LABELS[finding.type] ?? { label: finding.type, icon: '•', color: 'default' };
     const [showEvidence, setShowEvidence] = useState(false);
+    const [approving, setApproving] = useState(false);
     return (
         <FindingCard aria-label={`${meta.label}: ${finding.title}`}>
             <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, alignItems: 'flex-start' }}>
@@ -55,6 +63,11 @@ export function FindingView({ finding, onAct }: { finding: Finding; onAct?: (act
                         <Button type="primary" size="small" onClick={() => onAct('accept')}>
                             Accept
                         </Button>
+                        {DEFINABLE.includes(finding.type) && (
+                            <Button size="small" onClick={() => setApproving(true)}>
+                                Edit &amp; approve
+                            </Button>
+                        )}
                         <Button size="small" onClick={() => onAct('dismiss')}>
                             Dismiss
                         </Button>
@@ -87,6 +100,17 @@ export function FindingView({ finding, onAct }: { finding: Finding; onAct?: (act
                             </div>
                         ))}
                 </div>
+            )}
+            {approving && onAct && (
+                <ApproveDefinition
+                    finding={finding}
+                    open
+                    onClose={() => setApproving(false)}
+                    onApprove={(edits) => {
+                        setApproving(false);
+                        onAct('accept', edits);
+                    }}
+                />
             )}
         </FindingCard>
     );
@@ -175,10 +199,10 @@ export function ContextInboxPage() {
     const findings = useDheQuery<Finding[]>(key, (c, signal) => c.listFindings({ status, type }, { signal }));
     const ontology = useDheQuery<Ontology>('/context/ontology', (c, signal) => c.ontology({ limit: 150 }, { signal }));
 
-    const act = async (f: Finding, action: 'accept' | 'dismiss') => {
+    const act = async (f: Finding, action: 'accept' | 'dismiss', edits?: DefinitionEdits) => {
         cache.set<Finding[]>(key, (prev) => (prev ?? []).filter((x) => x.id !== f.id));
         try {
-            await client.actOnFinding(f.id, action);
+            await client.actOnFinding(f.id, action, edits);
             message.success(action === 'accept' ? 'Accepted — metadata updated' : 'Dismissed');
             cache.invalidate('/context');
         } catch (e) {
@@ -243,13 +267,15 @@ export function ContextInboxPage() {
                                             {FINDING_LABELS[t as FindingType]?.icon} {FINDING_LABELS[t as FindingType]?.label ?? t} ({items.length})
                                         </h3>
                                         {items.map((f) => (
-                                            <FindingView key={f.id} finding={f} onAct={(a) => void act(f, a)} />
+                                            <FindingView key={f.id} finding={f} onAct={(a, edits) => void act(f, a, edits)} />
                                         ))}
                                     </section>
                                 ))}
                             </>
                         ),
                     },
+                    { key: 'definitions', label: 'Definitions', children: <DefinitionsView /> },
+                    { key: 'answers', label: 'Answered before', children: <PastAnswersView /> },
                     {
                         key: 'ontology',
                         label: 'Ontology',

@@ -17,7 +17,7 @@ def _failed() -> set[str]:
 def test_shipped_cases_pass():
     results = evals.run_cases(evals.load_cases(CASES))
     assert results and all(r["ok"] for r in results), [r for r in results if not r["ok"]]
-    assert {r["feature"] for r in results} == {"nlq", "docgen", "explain", "semantic"}
+    assert {r["feature"] for r in results} == {"nlq", "docgen", "explain", "semantic", "steward", "text2sql"}
 
 
 def test_without_redaction_pii_cases_fail(monkeypatch):
@@ -85,14 +85,14 @@ def test_cli(capsys, tmp_path):
         main(["ai", "eval", CASES])
     assert e.value.code == 0
     out = capsys.readouterr().out
-    assert "12/12 AI eval cases passed" in out and "nlq-drops-hallucinated-citations" in out
+    assert "19/19 AI eval cases passed" in out and "nlq-drops-hallucinated-citations" in out
     report = tmp_path / "r.json"
     with pytest.raises(SystemExit):
         main(["ai", "eval", CASES, "--json", str(report)])
     import json
 
     body = json.loads(report.read_text())
-    assert body["summary"]["passed"] == 12 and body["mode"] == "offline"
+    assert body["summary"]["passed"] == 19 and body["mode"] == "offline"
     with pytest.raises(SystemExit) as e:
         main(["ai", "eval", CASES, "--live"])            # no provider configured
     assert "needs an LLM provider" in str(e.value.code)

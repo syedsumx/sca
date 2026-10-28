@@ -48,11 +48,11 @@ from cairn.ai.usage import MeteredProvider, UsageMeter, set_actor
 from cairn.common.core import InMemoryGraph
 
 EVAL_ACTOR = "urn:li:corpuser:cairn-eval"
-FEATURES = {"nlq", "docgen", "explain", "semantic"}
+FEATURES = {"nlq", "docgen", "explain", "semantic", "steward", "text2sql"}
 _EXPECT_KEYS = {"planner", "prompt_excludes", "prompt_includes", "results_include", "results_exclude",
                 "citations_within_results", "answer_excludes", "answer_includes", "columns_within_schema",
                 "confidence_between", "max_cost_usd", "max_latency_ms", "causes_include", "causes_exclude",
-                "first_result"}
+                "first_result", "correct_with", "correct_without"}
 
 
 class EvalCaseError(ValueError):
@@ -151,7 +151,11 @@ def _scripted(case: dict) -> StaticProvider:
 
     def respond(system: str, user: str, schema: dict) -> dict:
         props = schema.get("properties", {})
-        if schema is DRAFT_SCHEMA or "unknowns" in props:
+        if "sql" in props and "explanation" in props:
+            from cairn.ai.text2sql import CONTEXT_MARKER
+
+            key = "sql_with_context" if CONTEXT_MARKER in user else "sql_without_context"
+        elif schema is DRAFT_SCHEMA or "unknowns" in props:
             key = "draft"
         elif schema is ANSWER_SCHEMA or "citations" in props:
             key = "answer"
@@ -184,6 +188,19 @@ def _run_feature(case: dict, llm, graph, embedder=None) -> dict:
         out = NaturalLanguageQuery(catalog, llm).ask(case["question"], can_view)
         return {"planner": out["planner"], "answer": out["answer"], "citations": out["citations"],
                 "results": [r["urn"] for r in out["results"]]}
+    if case["feature"] == "text2sql":
+        return _run_text2sql(case, llm)
+    if case["feature"] == "steward":
+        from cairn.ai.steward import owner_candidates
+        from cairn.governance.pii import classify_schema
+
+        owners = owner_candidates(case.get("usage") or [], case.get("modifiers") or [],
+                                  case.get("domain_owners") or [], case.get("upstream_owners") or [])
+        fields = [{"fieldPath": f} for e in case.get("catalog") or [] if e["urn"] == case.get("urn")
+                  for f in e.get("fields") or []]
+        terms = [c.as_dict() for c in classify_schema(fields, case.get("samples") or {})]
+        return {"results": [o["owner"] for o in owners] + [f"{t['field_path']}={t['term']}" for t in terms],
+                "answer": "", "citations": [], "confidence": owners[0]["confidence"] if owners else 0.0}
     if case["feature"] == "docgen":
         draft = DocGenerator(catalog, llm).draft(case["urn"])
         return {"answer": draft["description"], "columns": [c["field_path"] for c in draft["columns"]],
@@ -202,6 +219,37 @@ def _run_feature(case: dict, llm, graph, embedder=None) -> dict:
     out = LineageExplainer(catalog, _NoMonitors(), _Findings(), llm, None, can_view).explain(case["urn"])
     return {"answer": out["summary_md"], "results": [c["urn"] for c in out["likely_causes"]], "citations": [],
             "planner": "llm" if out["used_llm"] else "heuristic"}
+
+
+def _run_text2sql(case: dict, llm) -> dict:
+    """The question answered with schema only, then with Cairn's context; each SQL run on the case's
+    warehouse (an in-memory SQLite database) and compared with the expected result."""
+    import sqlite3
+
+    from cairn.ai.text2sql import TextToSQL, same_result
+
+    db = sqlite3.connect(":memory:")
+    schema: dict[str, list[str]] = {}
+    for table, spec in (case.get("warehouse") or {}).items():
+        cols = spec["columns"]
+        schema[table] = cols
+        db.execute(f"CREATE TABLE {table} ({', '.join(cols)})")
+        db.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' * len(cols))})", spec["rows"])
+    expected = db.execute(case["expected_sql"]).fetchall()
+    gen = TextToSQL(llm)
+    out: dict = {"results": [], "answer": "", "citations": []}
+    for label, defs, examples in (("without", None, None),
+                                  ("with", case.get("definitions") or [], case.get("past_queries") or [])):
+        try:
+            sql = gen.generate(case["question"], schema, "sqlite", defs, examples)["sql"]
+            rows = db.execute(sql).fetchall()
+            out[f"correct_{label}"] = same_result(rows, expected, bool(case.get("ordered")))
+            out[f"sql_{label}"] = sql
+        except Exception as e:  # noqa: BLE001 - an unusable answer is a wrong answer
+            out[f"correct_{label}"] = False
+            out[f"error_{label}"] = f"{type(e).__name__}: {e}"
+    out["results"] = [k for k in ("correct_without", "correct_with") if out.get(k)]
+    return out
 
 
 def _check(case: dict, got: dict, prompts: list[str], cost: float, latency_ms: float) -> list[str]:
@@ -242,6 +290,10 @@ def _check(case: dict, got: dict, prompts: list[str], cost: float, latency_ms: f
         lo, hi = exp["confidence_between"]
         if not lo <= got.get("confidence", -1) <= hi:
             problems.append(f"confidence {got.get('confidence')} outside [{lo}, {hi}]")
+    for k in ("correct_with", "correct_without"):
+        if k in exp and bool(got.get(k)) != exp[k]:
+            problems.append(f"{k} is {bool(got.get(k))}" + (f" ({got.get('error_' + k.split('_')[1])})"
+                                                            if got.get("error_" + k.split("_")[1]) else ""))
     if "max_cost_usd" in exp and cost > exp["max_cost_usd"]:
         problems.append(f"cost ${cost:.4f} > ${exp['max_cost_usd']}")
     if "max_latency_ms" in exp and latency_ms > exp["max_latency_ms"]:
@@ -267,6 +319,7 @@ def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = No
             recorder = _Recorder(provider if provider is not None else _scripted(case))
             llm = MeteredProvider(recorder, meter)
             started = time.monotonic()
+            got: dict = {}
             try:
                 got = _run_feature(case, llm, _graph(case), embedder)
                 latency = (time.monotonic() - started) * 1000
@@ -280,7 +333,9 @@ def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = No
                     f"{type(e).__name__}: {e}"]
             results.append({"id": case["id"], "file": case["_file"], "feature": case["feature"],
                             "ok": not problems, "problems": problems, "model_calls": len(recorder.prompts),
-                            "tokens": tokens, "cost_usd": round(cost, 6), "latency_ms": round(latency, 1)})
+                            "tokens": tokens, "cost_usd": round(cost, 6), "latency_ms": round(latency, 1),
+                            **({k: bool(got.get(k)) for k in ("correct_with", "correct_without")}
+                               if case["feature"] == "text2sql" else {})})
     finally:
         if tmp is not None:
             tmp.cleanup()
@@ -288,7 +343,11 @@ def run_cases(cases: list[dict], provider=None, meter: Optional[UsageMeter] = No
 
 
 def summarize(results: list[dict]) -> dict[str, Any]:
-    return {"cases": len(results), "passed": sum(r["ok"] for r in results),
+    t2s = [r for r in results if r["feature"] == "text2sql" and "correct_with" in r]
+    extra = {"text2sql": {"cases": len(t2s),
+                          "accuracy_without_context": round(sum(r["correct_without"] for r in t2s) / len(t2s), 3),
+                          "accuracy_with_context": round(sum(r["correct_with"] for r in t2s) / len(t2s), 3)}} if t2s else {}
+    return {**extra, "cases": len(results), "passed": sum(r["ok"] for r in results),
             "failed": [r["id"] for r in results if not r["ok"]],
             "tokens": sum(r["tokens"] for r in results),
             "cost_usd": round(sum(r["cost_usd"] for r in results), 6),

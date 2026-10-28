@@ -671,3 +671,57 @@ export interface DataResult {
     elapsed_ms: number;
     tables: string[];
 }
+
+export interface StewardProposal {
+    id: string;
+    urn: string;
+    name: string;
+    kind: 'owner' | 'term' | 'description';
+    field: string;
+    value: string | { description: string; columns: unknown[]; model?: string };
+    evidence: string[];
+    confidence: number;
+    state: 'PROPOSED' | 'ACCEPTED' | 'AUTO_ACCEPTED' | 'REJECTED';
+}
+
+export interface StewardRun {
+    run_id: string;
+    datasets_with_gaps: number;
+    examined: number;
+    proposed: number;
+    auto_accepted: number;
+    by_kind: Record<'owner' | 'term' | 'description', number>;
+}
+
+export interface ContextDefinition {
+    id: string;
+    kind: 'metric' | 'join';
+    name: string;
+    version: number;
+    doc: {
+        expression?: string;
+        description?: string;
+        datasets?: string[];
+        source?: string;
+        destination?: string;
+        source_field?: string;
+        destination_field?: string;
+    };
+    approved_by: string;
+    updated_ms: number;
+}
+
+export interface PastAnswer {
+    urn: string;
+    title: string;
+    sql: string;
+    tables: string[];
+    score: number;
+    definitions: { name: string; kind: string; version: number; expression?: string }[];
+}
+
+export interface DefinitionEdits {
+    name?: string;
+    expression?: string;
+    description?: string;
+}

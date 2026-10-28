@@ -1,0 +1,66 @@
+# Text to SQL with and without Cairn's context (approved definitions and past queries). Offline the
+# model output is scripted; `cairn ai eval --live` asks the configured model and reports accuracy
+# both ways (summary: text2sql.accuracy_with_context vs accuracy_without_context).
+cases:
+  - id: text2sql-net-revenue-needs-the-definition
+    feature: text2sql
+    question: What was net revenue last quarter?
+    warehouse:
+      orders:
+        columns: [id, amount, refunded, created_at]
+        rows: [[1, 100.0, 0, "2026-08-01"], [2, 50.0, 1, "2026-08-15"], [3, 70.0, 0, "2026-09-30"], [4, 30.0, 0, "2026-06-30"]]
+    definitions:
+      - kind: metric
+        name: net_revenue
+        doc: {expression: "SUM(CASE WHEN refunded = 0 THEN amount ELSE 0 END)", datasets: [], description: excludes refunded orders}
+    past_queries:
+      - title: Net revenue by quarter
+        sql: "SELECT SUM(CASE WHEN refunded = 0 THEN amount ELSE 0 END) FROM orders WHERE created_at >= '2026-07-01' AND created_at < '2026-10-01'"
+    expected_sql: "SELECT 170.0"
+    model_output:
+      sql_without_context: {sql: "SELECT SUM(amount) FROM orders WHERE created_at >= '2026-07-01' AND created_at < '2026-10-01'",
+                            explanation: Sums all orders in the quarter.}
+      sql_with_context: {sql: "SELECT SUM(CASE WHEN refunded = 0 THEN amount ELSE 0 END) FROM orders WHERE created_at >= '2026-07-01' AND created_at < '2026-10-01'",
+                         explanation: Uses the approved net_revenue definition.}
+    expect:
+      correct_without: false
+      correct_with: true
+      prompt_includes: ["net_revenue = SUM(CASE WHEN refunded = 0 THEN amount ELSE 0 END)", "Net revenue by quarter"]
+
+  - id: text2sql-active-customers-join
+    feature: text2sql
+    question: How many active customers placed an order?
+    warehouse:
+      customers:
+        columns: [id, status]
+        rows: [[1, active], [2, churned], [3, active]]
+      orders:
+        columns: [id, customer_id]
+        rows: [[10, 1], [11, 1], [12, 2]]
+    definitions:
+      - kind: join
+        name: orders_to_customers
+        doc: {source: "urn:li:dataset:(urn:li:dataPlatform:sqlite,orders,PROD)", destination: "urn:li:dataset:(urn:li:dataPlatform:sqlite,customers,PROD)",
+              source_field: customer_id, destination_field: id, datasets: []}
+    expected_sql: "SELECT 1"
+    model_output:
+      sql_without_context: {sql: "SELECT COUNT(*) FROM orders o JOIN customers c ON o.id = c.id WHERE c.status = 'active'",
+                            explanation: Joins on id.}
+      sql_with_context: {sql: "SELECT COUNT(DISTINCT c.id) FROM orders o JOIN customers c ON o.customer_id = c.id WHERE c.status = 'active'",
+                         explanation: Uses the approved join.}
+    expect:
+      correct_without: false
+      correct_with: true
+
+  - id: text2sql-writes-are-wrong-answers
+    feature: text2sql
+    question: Remove the test orders
+    warehouse:
+      orders: {columns: [id], rows: [[1]]}
+    expected_sql: "SELECT 0"
+    model_output:
+      sql_without_context: {sql: "DELETE FROM orders", explanation: deletes}
+      sql_with_context: {sql: "DELETE FROM orders", explanation: deletes}
+    expect:
+      correct_without: false
+      correct_with: false

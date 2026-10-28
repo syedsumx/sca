@@ -85,6 +85,8 @@ class Services:
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     ticketing: Optional[Any] = None
+    steward: Optional[Any] = None
+    context_layer: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -469,7 +471,11 @@ def _build_active_metadata(s: Services) -> None:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn
 
     s.collab = CollabService(s.engine, hub, entity_name)
-    s.context = ContextStore(s.engine, s.graph, s.collab, s.audit, hub)
+    from cairn.ai.embeddings import HashingEmbedder
+    from cairn.context.layer import ContextLayer
+    embedder = s.semantic.embedder if s.semantic is not None else HashingEmbedder()
+    s.context_layer = ContextLayer(s.engine, lambda text: embedder.embed([text])[0], s.audit)
+    s.context = ContextStore(s.engine, s.graph, s.collab, s.audit, hub, layer=s.context_layer)
     if s.graph is not None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
@@ -483,6 +489,7 @@ def _build_active_metadata(s: Services) -> None:
         s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
         _build_costs(s, hub, Event)
         _build_data_access(s)
+        _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
@@ -605,6 +612,25 @@ def _build_forms(s: Services, hub, Event) -> None:
 
     datasets = (lambda: Planner(s.graph).datasets()) if s.graph is not None else None
     s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
+
+
+def _build_steward(s: Services) -> None:
+    from cairn.ai.steward import StewardService
+    from cairn.collab.service import views
+
+    def popularity(urn: str) -> float:
+        from sqlalchemy import func, select
+        with s.engine.connect() as conn:
+            return float(conn.execute(select(func.count()).select_from(views).where(views.c.urn == urn)).scalar() or 0)
+
+    def upstreams(urn: str) -> list[str]:
+        try:
+            return [u["urn"] for u in s.catalog.lineage(urn, "UPSTREAM", 1, 10)] if s.catalog else []
+        except Exception:
+            return []
+
+    s.steward = StewardService(s.engine, s.graph, s.bulk, popularity=popularity, upstreams=upstreams,
+                               docgen=s.docgen if s.llm is not None else None, audit=s.audit)
 
 
 def _build_data_access(s: Services) -> None:

@@ -134,7 +134,7 @@ def fetch_snapshot(graph, max_datasets: int = 5000, max_runs: int = 500) -> Snap
         ds_subjects = [s for s in subjects if s.startswith("urn:li:dataset:")]
         platform = _dataset_parts(ds_subjects[0])[0] if ds_subjects else None
         snap.queries.append({"urn": row["urn"], "sql": sql, "subjects": ds_subjects, "platform": platform,
-                             "name": props.get("name")})
+                             "name": props.get("name"), "description": props.get("description")})
     for row in graph.scroll_entities("dataset", ["schemaMetadata", "editableSchemaMetadata", "viewProperties",
                                                  "datasetProperties", "editableDatasetProperties", "ownership"])[:max_datasets]:
         snap.datasets[row["urn"]] = row
@@ -369,7 +369,8 @@ def mine(snap: Snapshot, min_term_occurrences: int = 3) -> list[Finding]:
 # --------------------------------------------------------------------------- store + actions
 class ContextStore:
     def __init__(self, engine: Engine, graph=None, collab=None, audit: Optional[AuditLog] = None,
-                 notify=None):
+                 notify=None, layer=None):
+        self.layer = layer          # ContextLayer: approved definitions and query patterns
         self.engine = engine
         self.graph = graph
         self.collab = collab
@@ -443,17 +444,32 @@ class ContextStore:
             self.audit.record("context", f"finding.{status.lower()}", actor, fid, {})
         return self.get(fid)
 
-    def accept(self, fid: str, actor: str) -> dict:
+    def accept(self, fid: str, actor: str, edits: Optional[dict] = None) -> dict:
+        """Apply a finding's changes. ``edits`` (name, expression, description) refine a metric or
+        join before it becomes an approved, versioned definition."""
         f = self.get(fid)
         if f["status"] != "OPEN":
             raise ValueError(f"finding is {f['status']}")
+        with self.engine.connect() as conn:
+            raw = conn.execute(select(findings_table.c.doc).where(findings_table.c.id == fid)).scalar()
+        f["data"] = (raw or {}).get("data") or {}
+        if edits:
+            for change in f.get("proposed_changes", []):
+                if change["kind"] == "create_term":
+                    v = change["value"]
+                    v["name"] = edits.get("name") or v["name"]
+                    if edits.get("expression"):
+                        v["expression"] = edits["expression"]
+                        v["definition"] = edits.get("description") or f"Computed as `{edits['expression']}`."
         mcps: list[dict] = []
         for change in f.get("proposed_changes", []):
             mcps += self._apply(change, actor, f)
         if mcps and self.graph is not None:
             self.graph.emit(mcps)
+        definition = self.layer.record(f, actor, edits) if self.layer is not None else None
         out = self.set_status(fid, "ACCEPTED", actor)
         out["applied_changes"] = len(mcps)
+        out["definition"] = definition
         return out
 
     def _apply(self, change: dict, actor: str, finding: dict) -> list[dict]:
@@ -561,6 +577,8 @@ class ContextMiner:
         snap = fetch_snapshot(self.graph)
         findings = mine(snap)
         stats = self.store.upsert(findings)
+        if self.store.layer is not None:
+            stats["query_patterns"] = self.store.layer.index_queries(snap.queries)
         status = {"started_at": _iso(started), "duration_ms": _now() - started, "queries": len(snap.queries),
                   "datasets": len(snap.datasets), "charts": len(snap.charts), "runs": len(snap.runs),
                   "findings": len(findings), **stats}

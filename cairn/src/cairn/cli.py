@@ -426,6 +426,10 @@ def cmd_ai_eval(a) -> None:
             print(f"       {p}")
     print(f"{summary['passed']}/{summary['cases']} AI eval cases passed"
           + (f"; {summary['tokens']} tokens, est. ${summary['cost_usd']:.4f}" if a.live else ""))
+    if "text2sql" in summary:
+        t = summary["text2sql"]
+        print(f"text to SQL: {t['accuracy_with_context']:.0%} correct with Cairn context, "
+              f"{t['accuracy_without_context']:.0%} without ({t['cases']} questions)")
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"mode": "live" if a.live else "offline", "provider": getattr(provider, "name", "scripted"),

@@ -246,6 +246,10 @@ services:
       CAIRN_SSO_REQUIRED_GROUPS: ${CAIRN_SSO_REQUIRED_GROUPS:-}
       CAIRN_SSO_EXTRACT_GROUPS: ${CAIRN_SSO_EXTRACT_GROUPS:-true}
       CAIRN_SSO_JIT_PROVISIONING: ${CAIRN_SSO_JIT_PROVISIONING:-}
+    volumes:
+      # The catalog's left navigation (workspace sections); baked into the image too, mounted so a
+      # new section needs no web image rebuild. Read at start: restart cairn-web after changing it.
+      - ./deploy/mfe/mfe.config.yaml:/etc/cairn/mfe.config.yaml:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -sS --fail http://127.0.0.1:9002/admin"]
       interval: 10s

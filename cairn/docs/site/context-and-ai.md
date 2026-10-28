@@ -96,3 +96,39 @@ Each request carries the user's own access token, so tools see exactly what the 
 claude mcp add --transport http cairn https://<cairn-host>/cairn/mcp/mcp \
   --header "Authorization: Bearer <your access token>"
 ```
+
+## AI steward
+
+Coverage is a catalog's weak point: most tables have no description and no owner, and nobody has time to write ten thousand of them. The AI steward proposes them for people to review.
+
+A run, started from **Governance studio → AI steward → Find gaps now** or `POST /cairn/api/ai/steward/run`, walks the datasets that lack a description, an owner or a classification, most viewed first. Each proposal carries its evidence and a confidence:
+
+- **Owners.** The people who ran most of the recent queries, who last edited the dataset's metadata, and who own its domain and its upstream tables. Service accounts and Cairn's own automation identities never count, and their queries don't dilute anyone's share. With no clear evidence, nobody is proposed.
+- **Classifications.** PII terms for columns, from column names and sampled values. These are the same detectors that label PII during ingestion.
+- **Descriptions.** A grounded draft from the schema, lineage and neighbouring documentation, when a model is configured. Drafts count against the AI budget (`max_drafts` per run); when the budget runs out, the run keeps proposing everything else.
+
+**Review.** In the review screen, select many proposals and **Accept** or **Reject** them together. You can edit a description or owner before accepting.
+
+- Each proposal needs the right to make that edit on its dataset (`EDIT_ENTITY_OWNERS`, `EDIT_DATASET_COL_GLOSSARY_TERMS` or `EDIT_ENTITY_DOCS`).
+- Accepted owners and terms are written as one bulk batch attributed to the reviewer, so they can be undone like any batch.
+- Rejected proposals are not made again, and pending ones aren't repeated.
+- Set `CAIRN_STEWARD_AUTO_ACCEPT=0.9` to apply classifications at or above that confidence without review. They are recorded as `AUTO_ACCEPTED`.
+
+`cairn ai eval` includes deterministic cases for owner inference and classification (`config/ai-evals/steward.yaml`). API: `GET /cairn/api/ai/steward/proposals?state=&kind=&urn=` and `POST /cairn/api/ai/steward/decide` with `{"ids", "action", "edits"}`.
+
+## Context layer for analytics agents
+
+Text-to-SQL agents fail mostly on business meaning, not syntax: which revenue, which customer status. Cairn gives them vetted meaning from what your teams already do.
+
+**How was this answered before.** Every mined query is indexed by the question it answers: its name and description, the metrics it computes, what it groups by, and the tables it reads. **Context inbox → Answered before** searches them, and so do agents, through the `how_was_this_answered` MCP tool or `GET /cairn/api/context/answers?question=…`. Results show the SQL people actually ran, with the approved definitions it uses. Only queries over tables the caller may see are returned.
+
+**Approved definitions.** In the Context inbox, **Edit & approve** on a metric or join finding lets the owner set the name, expression and description before accepting. The result is an approved definition. Each change makes a new version, and earlier versions are kept (`GET /cairn/api/context/definitions/{id}/versions`). Agents read them with the `get_definitions` MCP tool.
+
+**Exports to the warehouse's semantic layer.** **Context inbox → Definitions** exports the approved metrics and joins:
+
+- **Snowflake:** a `CREATE SEMANTIC VIEW` with tables, relationships and metrics, for Cortex Analyst and Snowflake Intelligence.
+- **Databricks:** a Unity Catalog metric view (`WITH METRICS LANGUAGE YAML`) over the fact table you choose, for Genie.
+
+Review the SQL before running it. Primary keys come from approved join targets. The API is `GET /cairn/api/context/definitions/export?format=snowflake|databricks&name=&source=&datasets=`.
+
+**Measuring it.** `cairn ai eval` includes `text2sql` cases. Each one asks the question twice, first with the schema only and then with Cairn's context (approved definitions and similar past queries). It runs both answers against a small warehouse, compares them with the expected result, and reports accuracy both ways. Offline, the model output is scripted. With `--live` it asks your configured model, so you can see what the context layer is worth on your own questions: add cases to `config/ai-evals/`. The generator refuses anything but a single read-only `SELECT`.
