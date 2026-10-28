@@ -78,3 +78,30 @@ assignee.
 A dataset shows **Compliant** once every form assigned to it is complete (and signed off where the
 form asks for it), and **Forms open** until then, on search results and asset pages.
 **Progress** breaks each form down by domain and by assignee.
+
+## Bulk editing
+
+Search results have **Export CSV** and **Bulk edit…** buttons. The export has one row per dataset and one per column, with these columns: `urn`, `field`, `name`, `platform`, `description`, `owners`, `tags`, `glossary_terms`, `domain` and `classification`.
+
+To make changes, edit the cells in any spreadsheet and load the file back:
+
+- Separate several values with `;`. Usernames, tag names and term names are enough; you don't need full urns.
+- Leave a cell empty to keep its current value, or put `-` to clear it.
+- `name`, `platform` and `classification` are read-only. Owners and domain apply only to dataset rows.
+- Values you type replace the current ones. For example, `gold;pii` in `tags` adds whichever of the two is missing and removes any other tag.
+
+Before anything is written, the preview shows:
+
+- every change, as additions and removals,
+- the changes you aren't allowed to make (per asset and per column, using the same privileges as editing in the catalog), which are skipped,
+- row problems: unknown urns, unknown columns, and assets you can't see.
+
+**Apply** writes the whole batch at once:
+
+- Your rights are checked again at that point.
+- Changes someone has already made since the preview are skipped.
+- Each write is tagged with the batch id.
+
+**Undo** restores the previous values. It is refused if someone has edited the same aspects since the batch was applied. Only the person who imported a batch can apply or undo it.
+
+API: `GET /cairn/api/bulk/export?query=…` (or `urns=…`), `POST /cairn/api/bulk/import` with the CSV as the body, `POST /cairn/api/bulk/{id}/apply`, `POST /cairn/api/bulk/{id}/undo`, and `GET /cairn/api/bulk` for your recent batches.

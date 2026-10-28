@@ -146,6 +146,13 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
 
         app.include_router(forms_router(services.forms, cp, services.authorize, services.can_view,
                                         services.subject_of))
+    if "governance" in modules and services.bulk is not None and services.catalog is not None:
+        from cairn.governance.bulk_api import build_router as bulk_router
+
+        app.include_router(bulk_router(
+            services.bulk, cp, services.authorize, services.can_view,
+            lambda query, limit: services.catalog.search(query, ["dataset"], count=limit),
+            lambda urn: services.attributes.resource(urn).get("classification") or []))
     if "collab" in modules and services.collab is not None:
         app.include_router(collab_router(services.collab, cp, authz, services.can_view, services.summaries,
                                          services.trust, services.explicitly_denied))

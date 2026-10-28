@@ -907,3 +907,44 @@ def test_21b_forms_in_the_workspace(users):
         assert data["dataset"]["editableProperties"]["description"] == f"Mart {RUN}"
     finally:
         root.delete(f"/governance/forms/{form['id']}")
+
+
+
+def _bulk_state(urn: str) -> tuple:
+    data = gql("query($u: String!) { dataset(urn: $u) { editableProperties { description } "
+               "editableSchemaMetadata { editableSchemaFieldInfo { fieldPath globalTags { tags { tag { urn } } } } } } }",
+               {"u": urn})["dataset"]
+    tags = {f["fieldPath"]: sorted(t["tag"]["urn"] for t in (f.get("globalTags") or {}).get("tags") or [])
+            for f in (data.get("editableSchemaMetadata") or {}).get("editableSchemaFieldInfo") or []}
+    return (data.get("editableProperties") or {}).get("description"), tags.get("region", [])
+
+
+def test_21c_bulk_edit_from_a_spreadsheet_with_undo(users):
+    """Export to CSV, edit cells, import: the preview lists the changes, apply writes them to the
+    catalog in one batch that only its importer can apply, and undo restores the previous values."""
+    import csv
+    import io
+
+    root, bob = users["root"], users["bob"]
+    before = _bulk_state(DS)
+    resp = root.get("/bulk/export", params={"urns": [DS]})
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/csv")
+    rows = list(csv.DictReader(io.StringIO(resp.text)))
+    assert [r["field"] for r in rows] == ["", "id", "email", "amount", "region"]
+    rows[0]["description"] = f"Edited in a spreadsheet {RUN}"
+    rows[4]["tags"] = f"bulk-{RUN}"
+    out = io.StringIO()
+    writer = csv.DictWriter(out, fieldnames=list(rows[0]))
+    writer.writeheader()
+    writer.writerows(rows)
+    preview = root.post("/bulk/import", content=out.getvalue().encode(), headers={"Content-Type": "text/csv"}).json()
+    assert {(c["field"], c["what"]) for c in preview["changes"]} == {("", "description"), ("region", "tags")}, preview
+    assert preview["rows"] == 5 and not preview["errors"]
+    assert bob.post(f"/bulk/{preview['batch_id']}/apply").status_code == 404     # not Bob's batch
+    applied = root.post(f"/bulk/{preview['batch_id']}/apply").json()
+    assert applied["applied"] == 2, applied
+    assert _bulk_state(DS) == (f"Edited in a spreadsheet {RUN}", [f"urn:li:tag:bulk-{RUN}"])
+    assert root.post(f"/bulk/{preview['batch_id']}/apply").status_code == 409
+    assert root.post(f"/bulk/{preview['batch_id']}/undo").json()["restored"] == 2
+    assert _bulk_state(DS) == before
+    assert root.get("/bulk").json()[0]["state"] == "UNDONE"

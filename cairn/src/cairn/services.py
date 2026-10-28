@@ -76,6 +76,7 @@ class Services:
     assistant: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
+    bulk: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -443,6 +444,9 @@ def _build_active_metadata(s: Services) -> None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
     _build_forms(s, hub, Event)
+    if s.graph is not None:
+        from cairn.governance.bulk import BulkService
+        s.bulk = BulkService(s.engine, s.graph, s.audit)
     s.embed = EmbedService(s.engine, cfg.embed_signing_secret, cfg.embed_allowed_origins, cfg.public_url,
                            s.catalog, s.attributes, s.quality.store, s.can_view_as)
 
