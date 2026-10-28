@@ -104,7 +104,7 @@ cairn/deploy/tls/*.pem
 cairn/tests/e2e/.tls/
 
 # e2e auto-monitor rules (tests/e2e write and remove them)
-cairn/config/quality/e2e-*.yaml
+cairn/config/*/e2e-*.yaml
 
 # Cairn backups (deploy/ops/backup.sh)
 cairn/backups/
