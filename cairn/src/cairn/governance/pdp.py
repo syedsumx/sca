@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import Column, Integer, String, Table, select
 from sqlalchemy.engine import Engine
 
+from cairn.common import metrics
 from cairn.common.audit import AuditLog
 from cairn.common.db import JSONText, metadata
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, RuleResult, evaluate_policy
@@ -195,9 +196,13 @@ class PolicyDecisionPoint:
             with self._lock:
                 hit = self._cache.get(key)
                 if hit and hit[0] > time.monotonic():
+                    metrics.PDP_DECISIONS.labels(hit[1].decision, self.mode).inc()
                     return hit[1]
 
+        started = time.perf_counter()
         decision = self._evaluate(req, explain)
+        metrics.PDP_SECONDS.observe(time.perf_counter() - started)
+        metrics.PDP_DECISIONS.labels(decision.decision, self.mode).inc()
         if cacheable:
             with self._lock:
                 self._cache[key] = (time.monotonic() + self.cache_ttl, decision)

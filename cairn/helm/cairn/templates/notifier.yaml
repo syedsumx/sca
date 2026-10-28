@@ -1,6 +1,10 @@
 {{- if .Values.cairn.notifier.enabled }}
 {{- /* No port: drains cairn_notifications and fans out to Slack / Teams / email. */}}
 {{- $n := .Values.cairn.notifier }}
-{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) }}
+{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "metricsPort" 9108 "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) }}
 {{ include "cairn.deployment" $ctx }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
 {{- end }}

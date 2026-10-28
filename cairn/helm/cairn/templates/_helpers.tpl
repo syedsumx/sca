@@ -289,14 +289,15 @@ spec:
         {{- include "cairn.componentLabels" . | nindent 8 }}
       annotations:
         checksum/policies: {{ toYaml $root.Values.cairn.policies | sha256sum | trunc 16 }}
-        {{- if .port }}
+        {{- if or .port .metricsPort }}
         prometheus.io/scrape: "true"
-        prometheus.io/port: {{ .port | quote }}
+        prometheus.io/port: {{ default .port .metricsPort | quote }}
         prometheus.io/path: {{ default "/metrics" .metricsPath }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "cairn.serviceAccountName" $root }}
       automountServiceAccountToken: false
+      {{- include "cairn.spread" (merge (dict "replicas" $replicas) $) | nindent 6 }}
       {{- with $root.Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -318,6 +319,16 @@ spec:
             {{- with .extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+            {{- if .metricsPort }}
+            - name: CAIRN_METRICS_PORT
+              value: {{ .metricsPort | quote }}
+            {{- end }}
+          {{- if and .metricsPort (not .port) }}
+          ports:
+            - name: metrics
+              containerPort: {{ .metricsPort }}
+              protocol: TCP
+          {{- end }}
           {{- if .port }}
           ports:
             - name: http
@@ -453,6 +464,22 @@ spec:
         target:
           type: Utilization
           averageUtilization: {{ .cfg.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- end -}}
+
+{{/* Spread a component's replicas over nodes and zones (cairn.ha.spreadReplicas, > 1 replica).
+Context: the component context plus "replicas". */}}
+{{- define "cairn.spread" -}}
+{{- if and .root.Values.cairn.ha.spreadReplicas (gt (int .replicas) 1) }}
+topologySpreadConstraints:
+  {{- range $key := list "kubernetes.io/hostname" "topology.kubernetes.io/zone" }}
+  - maxSkew: 1
+    topologyKey: {{ $key }}
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels:
+        {{- include "cairn.selectorLabels" $ | nindent 8 }}
+  {{- end }}
 {{- end }}
 {{- end -}}
 

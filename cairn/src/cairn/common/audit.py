@@ -18,6 +18,7 @@ from typing import Any, Iterable, Iterator, Optional
 from sqlalchemy import Column, Integer, String, Table, select
 from sqlalchemy.engine import Engine
 
+from cairn.common import metrics
 from cairn.common.db import JSONText, metadata
 
 GENESIS = "0" * 64
@@ -70,6 +71,7 @@ class AuditLog:
             "subject": subject,
             "details": details or {},
         }
+        metrics.AUDIT_EVENTS.labels(category).inc()
         with self._lock, self.engine.begin() as conn:
             if conn.dialect.name == "postgresql":
                 conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")

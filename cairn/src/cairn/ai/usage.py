@@ -29,6 +29,7 @@ from typing import Any, Iterator, Optional
 from sqlalchemy import BigInteger, Column, Float, Integer, String, Table, func, select
 from sqlalchemy.engine import Engine
 
+from cairn.common import metrics
 from cairn.ai.llm import LLMError, LLMUsage
 from cairn.common.db import metadata
 
@@ -164,11 +165,13 @@ class UsageMeter:
         if self.daily_budget_usd is not None:
             spent = self.spent_today()
             if spent >= self.daily_budget_usd:
+                metrics.AI_BUDGET_REFUSALS.inc()
                 raise LLMBudgetExceeded(f"daily AI budget of ${self.daily_budget_usd:.2f} reached "
                                         f"(${spent:.2f} spent today)")
         if self.user_daily_tokens is not None and actor != "unknown":
             used = self.tokens_today(actor)
             if used >= self.user_daily_tokens:
+                metrics.AI_BUDGET_REFUSALS.inc()
                 raise LLMBudgetExceeded(f"daily AI allowance of {self.user_daily_tokens} tokens reached for {actor}")
 
     def record(self, actor: str, task: str, provider: str, usage: LLMUsage) -> float:
@@ -180,6 +183,9 @@ class UsageMeter:
                 model=(usage.model or "unknown")[:128], input_tokens=int(usage.input_tokens or 0),
                 output_tokens=int(usage.output_tokens or 0), cache_read_tokens=int(usage.cache_read_tokens or 0),
                 cache_write_tokens=int(usage.cache_write_tokens or 0), cost_usd=cost))
+        metrics.AI_TOKENS.labels(task[:64], "input").inc(int(usage.input_tokens or 0))
+        metrics.AI_TOKENS.labels(task[:64], "output").inc(int(usage.output_tokens or 0))
+        metrics.AI_COST.labels(task[:64]).inc(cost)
         if self.audit is not None:
             self.audit.record("ai", task, actor, None, {"model": usage.model, "input_tokens": usage.input_tokens,
                                                         "output_tokens": usage.output_tokens,

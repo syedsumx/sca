@@ -49,8 +49,11 @@ def _authorize(services: Services):
 
 
 def _base_app(name: str, services: Services) -> FastAPI:
+    from cairn.common.tracing import setup_tracing
+
     app = FastAPI(title=f"Cairn — {name}", version=__version__)
     app.state.services = services
+    setup_tracing(app, name, getattr(services, "engine", None))
 
     @app.middleware("http")
     async def metrics(request: Request, call_next):

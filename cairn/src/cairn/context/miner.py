@@ -31,6 +31,7 @@ from typing import Any, Callable, Iterable, Optional
 from sqlalchemy import BigInteger, Column, Float, String, Table, select, update
 from sqlalchemy.engine import Engine
 
+from cairn.common import metrics
 from cairn.common.audit import AuditLog
 from cairn.common.db import JSONText, metadata
 from cairn.common.proposals import audit_stamp, make_mcp, schema_field_urn
@@ -566,6 +567,9 @@ class ContextStore:
                 conn.execute(cursors_table.insert().values(source=source, cursor=value, updated_at_ms=_now()))
 
 
+MINER_LOCK_KEY = 0x0D4E_0102
+
+
 class ContextMiner:
     def __init__(self, graph, store: ContextStore, interval_seconds: int = 300):
         self.graph = graph
@@ -591,7 +595,13 @@ class ContextMiner:
         stop = stop or threading.Event()
         while not stop.is_set():
             try:
-                logger.info("context mining cycle: %s", self.run_once())
+                from cairn.common.db import advisory_lock
+
+                with advisory_lock(self.store.engine, MINER_LOCK_KEY) as leader:   # one miner at a time
+                    if leader:
+                        logger.info("context mining cycle: %s", self.run_once())
+                metrics.worker_cycle("context-miner", True)
             except Exception:
+                metrics.worker_cycle("context-miner", False)
                 logger.exception("context mining cycle failed")
             stop.wait(self.interval)

@@ -1,5 +1,9 @@
 {{- if .Values.cairn.scheduler.enabled }}
 {{- /* No port: leader election through a Postgres advisory lock, liveness via process supervision. */}}
-{{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.cairn.scheduler "replicas" .Values.cairn.scheduler.replicas "args" (list "scheduler") }}
+{{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.cairn.scheduler "replicas" .Values.cairn.scheduler.replicas "metricsPort" 9108 "args" (list "scheduler") }}
 {{ include "cairn.deployment" $ctx }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
 {{- end }}

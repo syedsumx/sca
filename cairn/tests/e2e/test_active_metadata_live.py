@@ -1369,7 +1369,7 @@ def test_31_context_layer_answers_definitions_and_semantic_exports(users):
     assert any(d["kind"] == "join" and set(d["doc"]["datasets"]) == {DS, DS_DOWN} for d in defs), defs
     metric = next(f for f in root.get("/context/findings", params={"entity_urn": DS, "type": "METRIC_DEFINITION",
                                                                    "limit": 200}).json()
-                  if f"revenue_{RUN}" in f["title"])
+                  if f"revenue {RUN}" in f["title"].replace("_", " "))
     acc = root.post(f"/context/findings/{metric['id']}/accept",
                     json={"name": f"gross_revenue_{RUN}", "expression": "sum(amount)", "description": "All orders."})
     assert acc.status_code == 200, acc.text

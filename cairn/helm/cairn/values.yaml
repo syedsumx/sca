@@ -494,10 +494,23 @@ cairn:
           matchLabels:
             kubernetes.io/metadata.name: ingress-nginx
 
+  ha:
+    # Spread replicas of every component over nodes and zones (when it runs more than one).
+    # PodDisruptionBudgets are per component (<component>.pdb); values-ha.yaml turns them all on.
+    spreadReplicas: true
   serviceMonitor:
+    # ServiceMonitor for the HTTP services and a PodMonitor for the workers (metrics on port 9108).
     enabled: false
     interval: 30s
     labels: {}
+  prometheusRule:
+    # Cairn's alert rules (deploy/observability/cairn-alerts.yaml) as a PrometheusRule.
+    enabled: false
+    labels: {}
+  grafanaDashboard:
+    # The Cairn overview dashboard as a ConfigMap, picked up by the Grafana sidecar.
+    enabled: false
+    labels: {grafana_dashboard: "1"}
 
   serviceAccount:
     create: true

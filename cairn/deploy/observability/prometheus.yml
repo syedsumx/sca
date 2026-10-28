@@ -1,0 +1,15 @@
+# Scrape config for the observability overlay (docker-compose.observability.yml).
+global:
+  scrape_interval: 30s
+rule_files: [/etc/prometheus/cairn-alerts.yaml]
+scrape_configs:
+  - job_name: cairn-api
+    static_configs: [{targets: ["cairn-api:8000"]}]
+  - job_name: cairn-pdp
+    static_configs: [{targets: ["cairn-pdp:8810"]}]
+  - job_name: cairn-gateway
+    static_configs: [{targets: ["cairn-gateway:8820"]}]
+  - job_name: cairn-core-proxy
+    static_configs: [{targets: ["cairn-core-proxy:8890"]}]
+  - job_name: cairn-workers
+    static_configs: [{targets: ["cairn-notifier:9108", "cairn-scheduler:9108", "cairn-context-miner:9108"]}]

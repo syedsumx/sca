@@ -23,10 +23,11 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
 from pydantic import BaseModel, Field
-from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, select, update
+from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
+from cairn.common import metrics
 from cairn.common.audit import AuditLog
 from cairn.common.db import JSONText, metadata
 
@@ -281,17 +282,23 @@ class NotificationHub:
             if sender is None:
                 self._set(r.id, status="SKIPPED", error=f"channel {r.channel} not configured")
                 stats["skipped"] += 1
+                metrics.NOTIFICATIONS.labels(r.channel, "skipped").inc()
                 continue
             try:
                 ref = sender.send(dict(r._mapping), self)
                 self._set(r.id, status="SENT", attempts=r.attempts + 1, external_ref=ref)
                 stats["sent"] += 1
+                metrics.NOTIFICATIONS.labels(r.channel, "sent").inc()
             except Exception as e:
                 attempts = r.attempts + 1
                 self._set(r.id, status="FAILED" if attempts >= max_attempts else "PENDING", attempts=attempts,
                           error=str(e)[:1000])
                 stats["failed"] += 1
+                metrics.NOTIFICATIONS.labels(r.channel, "failed").inc()
                 logger.warning("notification %s via %s failed: %s", r.id, r.channel, e)
+        with self.engine.connect() as conn:
+            metrics.NOTIFICATIONS_PENDING.set(conn.execute(select(func.count()).select_from(notifications)
+                                                           .where(notifications.c.status == "PENDING")).scalar() or 0)
         return stats
 
     def _set(self, nid: str, **values: Any) -> None:

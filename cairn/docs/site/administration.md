@@ -149,6 +149,78 @@ The rest of the API is under `/cairn/api/reports/costs`:
 - `GET /asset?urn=…` returns one table's daily series,
 - `POST /propose-deprecation` with `{"urn", "reason"}` sends the proposal.
 
+## Monitoring
+
+Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an HTTP API (notifier, scheduler, context miner) serve them on `CAIRN_METRICS_PORT`; Helm sets it to 9108.
+
+**Metrics:**
+
+| Metric | What it measures |
+|---|---|
+| `cairn_http_requests_total`, `cairn_http_request_seconds` | requests and latency per service and route |
+| `cairn_pdp_decisions_total{decision,mode}`, `cairn_pdp_decision_seconds` | authorization decisions and their latency |
+| `cairn_quality_evaluations_total{type,status}`, `cairn_quality_incidents_total{event}` | monitor runs and incidents |
+| `cairn_notifications_total{channel,outcome}`, `cairn_notifications_pending` | deliveries and backlog |
+| `cairn_ai_tokens_total`, `cairn_ai_cost_usd_total`, `cairn_ai_budget_refusals_total` | AI use per task |
+| `cairn_audit_events_total{category}` | audit log entries |
+| `cairn_worker_last_success_timestamp_seconds{worker}`, `cairn_worker_errors_total` | background worker health |
+| `cairn_proxy_masked_total{policy}` | values the core proxy masked |
+
+**Dashboards and alerts** live in `deploy/observability/`:
+
+- `cairn-overview.json`, a Grafana dashboard,
+- `cairn-alerts.yaml`, Prometheus rules (checked with `promtool` in CI) covering: a service down, server errors above 5%, slow requests, slow policy decisions, a spike in denials, a stalled or failing worker, a notification backlog or failing channel, a burst of quality incidents, and the AI budget reached.
+
+**To run them:**
+
+- **Compose:** `docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d` adds Prometheus (`localhost:9090`) and Grafana (`localhost:3300`, with `GRAFANA_ADMIN_PASSWORD` in `.env`), pre-loaded with both.
+- **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor). `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
+
+**Tracing** is optional OpenTelemetry. Install the `otel` extra and set `CAIRN_OTEL_ENDPOINT` to an OTLP/HTTP collector. Requests, outgoing calls and database queries are then traced, sampled at `CAIRN_OTEL_SAMPLE_RATIO` (default 10%). Health and metrics endpoints are not traced.
+
+## High availability
+
+`helm/cairn/values-ha.yaml` is a profile for production clusters:
+
+```bash
+helm install cairn ./helm/cairn -f my-values.yaml -f helm/cairn/values-ha.yaml
+```
+
+- **Stateless services** (API, policy service, core proxy) run 3 replicas, and the MCP server and workspace UI run 2. Each component's replicas are spread over nodes and zones (`cairn.ha.spreadReplicas`), and a PodDisruptionBudget keeps enough of them up during node drains.
+- **Workers** (scheduler, notifier, context miner) run 2 replicas. A Postgres advisory lock makes one of them the leader for each cycle, so work is never done twice. If the leader's node goes away, the standby takes over on its next cycle.
+- **The gateway** runs more than one replica only when its keys come from a shared Secret (`gateway.keys.existingSecret`). Without one, the keys live on a volume, the gateway runs a single replica and it gets no PodDisruptionBudget.
+- **Databases:** point `global.*` at managed, replicated Postgres, MySQL and OpenSearch. The databases the chart can run are single instances.
+
+## Backup and restore
+
+Docker Compose deployments are backed up with one script:
+
+```bash
+deploy/ops/backup.sh                    # writes backups/cairn-<timestamp>/
+deploy/ops/restore.sh backups/cairn-<timestamp>
+```
+
+**A backup holds:**
+
+- the Cairn database (`pg_dump`),
+- the catalog database (`mysqldump --single-transaction`),
+- the gateway's identity keys, so remote agents keep trusting it,
+- `config/`,
+- a `manifest.json` with each file's checksum, the Cairn version and the schema revision.
+
+Both dumps are consistent and taken while Cairn runs. The search index is not backed up: it is rebuilt from the catalog database.
+
+**A restore** first checks the checksums and asks you to confirm. It then:
+
+1. stops Cairn, but not its databases,
+2. replaces both databases and the gateway keys,
+3. rebuilds the search index,
+4. starts Cairn again.
+
+Anything written after the backup was taken is lost. `config/` is unpacked only with `RESTORE_CONFIG=1`. Backups contain secrets and personal data, so keep them encrypted.
+
+On Kubernetes, use your database service's backups (point-in-time recovery) and back up the gateway key Secret. After restoring the catalog database, rebuild the index by running the setup image with `-u RestoreIndices -a clean`.
+
 ## Audit log
 
 Denied access decisions, policy, persona and purpose changes, grants, access requests,
@@ -174,4 +246,4 @@ cairn db current     # schema revision of the control-plane database, and the la
 cairn db check       # non-zero exit if the schema is not at the latest revision or differs from it
 ```
 
-Back up the control-plane database before upgrading; migrations move forward only.
+Back up before upgrading (`deploy/ops/backup.sh`, see [Backup and restore](#backup-and-restore)); migrations move forward only.

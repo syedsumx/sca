@@ -1,0 +1,35 @@
+# Monitoring overlay: Prometheus (with Cairn's alert rules) and Grafana (with the Cairn dashboard).
+#   docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d
+# Grafana: http://localhost:3300 (admin / ${GRAFANA_ADMIN_PASSWORD}); Prometheus: http://localhost:9090
+services:
+  cairn-notifier:
+    environment: {CAIRN_METRICS_PORT: "9108"}
+  cairn-scheduler:
+    environment: {CAIRN_METRICS_PORT: "9108"}
+  cairn-context-miner:
+    environment: {CAIRN_METRICS_PORT: "9108"}
+
+  cairn-prometheus:
+    image: prom/prometheus:v2.53.0
+    hostname: cairn-prometheus
+    restart: unless-stopped
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=15d"]
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/observability/cairn-alerts.yaml:/etc/prometheus/cairn-alerts.yaml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    networks: [catalog]
+
+  cairn-grafana:
+    image: grafana/grafana:11.1.0
+    hostname: cairn-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - ./deploy/observability/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/cairn.yaml:ro
+      - ./deploy/observability/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/cairn.yaml:ro
+      - ./deploy/observability/cairn-overview.json:/var/lib/grafana/dashboards/cairn-overview.json:ro
+    ports: ["127.0.0.1:3300:3000"]
+    networks: [catalog]

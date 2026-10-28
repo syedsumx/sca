@@ -71,8 +71,11 @@ def cmd_gateway(a) -> None:
 def cmd_scheduler(a) -> None:
     from cairn.quality.scheduler import Scheduler
 
+    from cairn.common.metrics import serve_worker_metrics
+
     s = _services(with_gateway=False, with_ai=False)
     s.start_background()
+    serve_worker_metrics()
     Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions).run_forever()
 
 
@@ -97,6 +100,9 @@ def cmd_context_miner(a) -> None:
     if a.once:
         print(json.dumps(miner.run_once(), indent=2))
         return
+    from cairn.common.metrics import serve_worker_metrics
+
+    serve_worker_metrics()
     miner.run_forever()
 
 
@@ -167,13 +173,29 @@ def forms_tick(s, now_ms: int, assign_every_ms: int = 3_600_000, remind_every_ms
     return out
 
 
+NOTIFIER_LOCK_KEY = 0x0D4E_0101     # leader lock: one notifier delivers at a time
+
+
 def cmd_notifier(a) -> None:
+    from cairn.common.db import advisory_lock
+    from cairn.common.metrics import serve_worker_metrics, worker_cycle
+
     s = _services(with_gateway=False, with_ai=False)
     log = logging.getLogger("cairn.notifier")
+    serve_worker_metrics()
     last_purge = 0.0
     while True:
         try:
-            stats = notifier_tick(s)
+            # One notifier works at a time (no double deliveries); more replicas are hot standbys.
+            with advisory_lock(s.engine, NOTIFIER_LOCK_KEY) as leader:
+                if not leader:
+                    worker_cycle("notifier", True)
+                    if a.once:
+                        return
+                    time.sleep(a.interval)
+                    continue
+                stats = notifier_tick(s)
+            worker_cycle("notifier", True)
             if time.time() - last_purge > 3600:
                 stats["conversations_purged"] = s.assistant.purge_older_than(
                     s.settings.active.conversation_retention_days)
@@ -181,6 +203,7 @@ def cmd_notifier(a) -> None:
             if any(v for v in stats["delivery"].values()) or stats.get("grants_expired"):
                 log.info("notifier tick: %s", stats)
         except Exception:
+            worker_cycle("notifier", False)
             log.exception("notifier tick failed")
         if a.once:
             return

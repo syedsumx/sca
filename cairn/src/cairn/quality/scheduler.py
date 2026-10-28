@@ -18,6 +18,7 @@ from typing import Optional
 
 from croniter import croniter
 
+from cairn.common import metrics
 from cairn.common.db import advisory_lock
 from cairn.common.proposals import now_ms
 from cairn.quality.engine import QualityEngine
@@ -87,6 +88,7 @@ class Scheduler:
         while not self._stop.is_set():
             with advisory_lock(store_engine, LEADER_LOCK_KEY + self.partition) as leader:
                 if not leader:
+                    metrics.worker_cycle("scheduler", True)   # a healthy standby is not stalled
                     logger.debug("standby: another scheduler holds the leader lock")
                     self._stop.wait(self.tick_seconds)
                     continue
@@ -104,7 +106,9 @@ class Scheduler:
                         if started - last_flush > 300:
                             self.engine.flush_unemitted()
                             last_flush = started
+                        metrics.worker_cycle("scheduler", True)
                     except Exception:
+                        metrics.worker_cycle("scheduler", False)
                         logger.exception("scheduler tick failed")
                     self._stop.wait(max(0.0, self.tick_seconds - (time.monotonic() - started)))
         self.pool.shutdown(wait=True)

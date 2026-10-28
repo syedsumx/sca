@@ -9,6 +9,7 @@ from typing import Callable, Optional
 
 import httpx
 
+from cairn.common import metrics
 from cairn.common.audit import AuditLog
 from cairn.common.core import MetadataGraph
 from cairn.common.proposals import assertion_urn, incident_urn, make_mcp, now_ms
@@ -141,7 +142,9 @@ class QualityEngine:
             message=detection.message,
             details=detection.details,
         )
-        if not self.store.add_evaluation(ev, point_id):
+        if self.store.add_evaluation(ev, point_id):
+            metrics.QUALITY_EVALUATIONS.labels(monitor.type, ev.status).inc()
+        else:
             logger.info("duplicate run %s ignored", run_id)
             existing = [e for e in self.store.evaluations(monitor.id, limit=50) if e.run_id == run_id]
             return existing[0] if existing else ev
@@ -242,6 +245,7 @@ class QualityEngine:
                     self.audit.record("quality", "incident.raised", "urn:li:corpuser:cairn-system", urn,
                                       {"monitor_id": monitor.id, "evaluation_id": ev.id})
                 if self.notifier:
+                    metrics.QUALITY_INCIDENTS.labels("raised").inc()
                     self.notifier(monitor, ev, "failing")
             return
 
@@ -256,6 +260,7 @@ class QualityEngine:
                 self._emit([incident_mcp(monitor, open_urn, ev, active=False, started_at_ms=started)])
             self.store.save_state(monitor.id, open_incident_urn=None)
             if self.notifier:
+                metrics.QUALITY_INCIDENTS.labels("resolved").inc()
                 self.notifier(monitor, ev, "recovered")
 
     def _emit(self, mcps: list[dict]) -> bool:

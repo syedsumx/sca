@@ -1,0 +1,50 @@
+{{- /* Monitoring extras (docs: Administration → Monitoring). Rule and dashboard files are copies of
+deploy/observability; tests keep them identical. */}}
+{{- if .Values.cairn.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: {{ include "cairn.fullname" . }}-workers
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+    {{- with .Values.cairn.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: cairn
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  podMetricsEndpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.cairn.serviceMonitor.interval }}
+{{- end }}
+{{- if .Values.cairn.prometheusRule.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "cairn.fullname" . }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+    {{- with .Values.cairn.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{ .Files.Get "files/cairn-alerts.yaml" | indent 2 }}
+{{- end }}
+{{- if .Values.cairn.grafanaDashboard.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.fullname" . }}-dashboard
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+    {{- toYaml .Values.cairn.grafanaDashboard.labels | nindent 4 }}
+data:
+  cairn-overview.json: |-
+{{ .Files.Get "files/cairn-overview.json" | indent 4 }}
+{{- end }}

@@ -1,0 +1,3 @@
+# Published limits (docs: Administration → Limits), checked by loadtest.py. Measured on the
+# reference single-node Compose stack; scale out the API (and the PDP) for more.
+scenarios: {}

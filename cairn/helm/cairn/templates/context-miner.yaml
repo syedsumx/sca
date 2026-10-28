@@ -1,6 +1,10 @@
 {{- if .Values.cairn.contextMiner.enabled }}
 {{- /* No port: incremental miner loop; cursors and findings live in the Cairn database. */}}
 {{- $c := .Values.cairn.contextMiner }}
-{{- $ctx := dict "root" $ "component" "context-miner" "cfg" $c "replicas" $c.replicas "args" (list "context-miner" "--interval" (toString $c.intervalSeconds)) }}
+{{- $ctx := dict "root" $ "component" "context-miner" "cfg" $c "replicas" $c.replicas "metricsPort" 9108 "args" (list "context-miner" "--interval" (toString $c.intervalSeconds)) }}
 {{ include "cairn.deployment" $ctx }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
 {{- end }}

@@ -3,4 +3,8 @@
 {{ include "cairn.deployment" $ctx }}
 ---
 {{ include "cairn.service" (merge (dict "port" .Values.cairn.mcp.port) $ctx) }}
+{{- with (include "cairn.pdb" $ctx) }}
+---
+{{ . }}
+{{- end }}
 {{- end }}

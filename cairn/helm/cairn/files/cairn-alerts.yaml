@@ -1,0 +1,80 @@
+# Prometheus alert rules for Cairn (docs: Administration → Monitoring). Loaded by Prometheus as a
+# rule file, or by the Helm chart as a PrometheusRule (cairn.prometheusRule.enabled).
+groups:
+  - name: cairn.availability
+    rules:
+      - alert: CairnTargetDown
+        expr: up{job=~"cairn.*"} == 0
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.job }} on {{ $labels.instance }} is not answering /metrics"
+          runbook: "docs/site/administration.md#monitoring"
+      - alert: CairnHighErrorRate
+        expr: |
+          sum by (app) (rate(cairn_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum by (app) (rate(cairn_http_requests_total[5m])), 1e-9) > 0.05
+        for: 10m
+        labels: {severity: critical}
+        annotations:
+          summary: "More than 5% of {{ $labels.app }} requests fail with a server error"
+      - alert: CairnSlowRequests
+        expr: histogram_quantile(0.95, sum by (le, app) (rate(cairn_http_request_seconds_bucket[5m]))) > 2
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "95th percentile latency of {{ $labels.app }} is above 2 s"
+  - name: cairn.authorization
+    rules:
+      - alert: CairnPolicyDecisionsSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(cairn_pdp_decision_seconds_bucket[5m]))) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "99th percentile policy decision takes more than 50 ms (check policy size and attribute lookups)"
+      - alert: CairnDenySpike
+        expr: sum(rate(cairn_pdp_decisions_total{decision="DENY"}[10m])) > 5 * sum(rate(cairn_pdp_decisions_total{decision="DENY"}[1d] offset 1d))
+          and sum(rate(cairn_pdp_decisions_total{decision="DENY"}[10m])) > 1
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Denied requests are five times yesterday's rate: a policy change, or someone probing"
+  - name: cairn.workers
+    rules:
+      - alert: CairnWorkerStalled
+        expr: time() - cairn_worker_last_success_timestamp_seconds > 900
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "The {{ $labels.worker }} has not finished a cycle in 15 minutes"
+      - alert: CairnWorkerFailing
+        expr: increase(cairn_worker_errors_total[15m]) > 3
+        labels: {severity: warning}
+        annotations:
+          summary: "The {{ $labels.worker }} failed more than 3 cycles in 15 minutes (see its logs)"
+  - name: cairn.notifications
+    rules:
+      - alert: CairnNotificationBacklog
+        expr: cairn_notifications_pending > 500
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value }} notifications are waiting to be delivered"
+      - alert: CairnNotificationsFailing
+        expr: sum by (channel) (rate(cairn_notifications_total{outcome="failed"}[15m])) > 0.1
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "Deliveries through {{ $labels.channel }} keep failing (credentials or an allow list?)"
+  - name: cairn.data
+    rules:
+      - alert: CairnQualityIncidentSpike
+        expr: increase(cairn_quality_incidents_total{event="raised"}[1h]) > 20
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 20 data-quality incidents raised in an hour: an upstream outage?"
+      - alert: CairnAIBudgetReached
+        expr: increase(cairn_ai_budget_refusals_total[1h]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "AI calls are being refused by the daily budget"
