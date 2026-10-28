@@ -149,6 +149,16 @@ class MarketplaceService:
             row = conn.execute(select(product_policies).where(product_policies.c.product_urn == product_urn)).first()
         return RequestPolicy.model_validate(row.doc) if row else RequestPolicy()
 
+    def get_policies(self, product_urns: list[str]) -> dict[str, RequestPolicy]:
+        """:meth:`get_policy` for many products in one query."""
+        if not product_urns:
+            return {}
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(product_policies.c.product_urn, product_policies.c.doc)
+                                .where(product_policies.c.product_urn.in_(product_urns))).all()
+        found = {u: RequestPolicy.model_validate(doc) for u, doc in rows}
+        return {u: found.get(u) or RequestPolicy() for u in product_urns}
+
     def put_policy(self, product_urn: str, policy: RequestPolicy, actor: str) -> RequestPolicy:
         self._require_owner_or_admin(actor, product_urn)
         doc = policy.model_dump(mode="json")
@@ -163,11 +173,12 @@ class MarketplaceService:
     def _owners(self, product: dict) -> list[str]:
         return [o["owner"]["urn"] for o in ((product.get("ownership") or {}).get("owners") or []) if o.get("owner")]
 
-    def _card(self, p: dict, actor: str, access: dict[str, dict], badges: dict, consumers: dict[str, int]) -> dict:
+    def _card(self, p: dict, actor: str, access: dict[str, dict], badges: dict, consumers: dict[str, int],
+              policy: Optional[RequestPolicy] = None) -> dict:
         props = p.get("properties") or {}
         custom = _custom(props)
         dom = ((p.get("domain") or {}).get("domain") or {})
-        policy = self.get_policy(p["urn"])
+        policy = policy or self.get_policy(p["urn"])
         owners = self._owners(p)
         return {
             "urn": p["urn"], "name": props.get("name") or p["urn"], "description": props.get("description") or "",
@@ -225,7 +236,8 @@ class MarketplaceService:
             products = [p for p in products if can_view(p["urn"])]
         access, consumers = self._access_states(actor), self._consumers()
         badges = self.trust([p["urn"] for p in products])
-        cards = [self._card(p, actor, access, badges, consumers) for p in products]
+        policies = self.get_policies([p["urn"] for p in products])
+        cards = [self._card(p, actor, access, badges, consumers, policies[p["urn"]]) for p in products]
         if certified:
             cards = [c for c in cards if c["certification"] == "CERTIFIED"]
         if access_filter == "mine":

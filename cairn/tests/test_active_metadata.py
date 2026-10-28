@@ -355,6 +355,9 @@ def test_marketplace_auto_approve_and_policy_validation(engine, graph, gov):
         mp.put_policy(PRODUCT, RequestPolicy(), BOB)  # not an owner
     mp.put_policy(PRODUCT, RequestPolicy(auto_approve={"enabled": True, "groups": ["urn:li:corpGroup:analysts"]},
                                          max_duration_days=30), CAROL)
+    card = next(c for c in mp.list_products(BOB) if c["urn"] == PRODUCT)       # policies read in one batch
+    assert card["request_policy"]["auto_approve"] is True and card["request_policy"]["max_duration_days"] == 30
+    assert mp.get_policies([PRODUCT, "urn:li:dataProduct:none"])["urn:li:dataProduct:none"] == RequestPolicy()
     with pytest.raises(MarketplaceError):
         mp.create_request(BOB, AccessRequestIn(product_urn=PRODUCT, purpose="x", duration_days=90))
     r = mp.create_request(BOB, AccessRequestIn(product_urn=PRODUCT, purpose="Analytics",
