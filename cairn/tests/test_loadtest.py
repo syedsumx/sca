@@ -15,3 +15,11 @@ def test_check_reports_each_broken_limit():
     assert loadtest.check(results, limits) == ["enrich: p95 900.0 ms > 500 ms", "enrich: 20 req/s < 30",
                                                "enrich: error rate 5.00% > 1.00%"]
     assert loadtest._pct([5, 1, 9, 3], 0.5) == 5 and loadtest._pct([], 0.9) == 0.0
+
+
+def test_published_limits_cover_every_scenario():
+    import yaml
+
+    limits = yaml.safe_load(open(os.path.join(os.path.dirname(__file__), "load", "limits.yaml")))["scenarios"]
+    assert set(limits) == set(loadtest.SCENARIOS)
+    assert all({"p95_ms", "min_rps"} <= set(v) for v in limits.values())

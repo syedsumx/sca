@@ -178,6 +178,29 @@ Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an
 
 **Tracing** is optional OpenTelemetry. Install the `otel` extra and set `CAIRN_OTEL_ENDPOINT` to an OTLP/HTTP collector. Requests, outgoing calls and database queries are then traced, sampled at `CAIRN_OTEL_SAMPLE_RATIO` (default 10%). Health and metrics endpoints are not traced.
 
+## Limits
+
+These are measured on the reference single-node Compose stack: 4 vCPU, 16 GB, one replica of each service and a catalog of about 110 datasets and 30 data products. The load is 10 concurrent clients. They are the numbers `tests/load/limits.yaml` holds Cairn to, with headroom over the measurement.
+
+| Path | Throughput | p95 latency |
+|---|---|---|
+| Policy decision (`/governance/v1/authorize`) | at least 200 per second | under 100 ms |
+| Badges for 20 search results (`/collab/enrich`) | at least 25 per second | under 600 ms |
+| Dataset health | at least 90 per second | under 250 ms |
+| Marketplace page | at least 14 per second | under 1.5 s |
+| Inbox | at least 90 per second | under 250 ms |
+| Contracts | at least 130 per second | under 200 ms |
+
+On this node, throughput stops growing at about 10 concurrent clients; past that, only latency rises. Add replicas of the API and the policy service to serve more (see [High availability](#high-availability)).
+
+**To measure your own deployment**, run the load test against it with a token that can see the catalog:
+
+```bash
+python tests/load/loadtest.py --api https://cairn.example.com/cairn/api --token "$TOKEN" --users 10 --duration 30
+```
+
+The command exits non-zero if a path breaks its limit. Pass `--limits your-limits.yaml` to check your own targets, and `--json out.json` to keep the measurements.
+
 ## High availability
 
 `helm/cairn/values-ha.yaml` is a profile for production clusters:

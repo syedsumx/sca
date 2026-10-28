@@ -1,3 +1,21 @@
-# Published limits (docs: Administration → Limits), checked by loadtest.py. Measured on the
-# reference single-node Compose stack; scale out the API (and the PDP) for more.
-scenarios: {}
+# Published limits (docs: Administration → Limits), checked by loadtest.py at its defaults
+# (--users 10 --duration 30). Measured on the reference single-node Compose stack: 4 vCPU, 16 GB,
+# one replica of each service, the e2e catalog (~110 datasets, ~30 data products). Each limit leaves
+# headroom over the measurement (p95 about 1.5-2x, throughput about 60%) so it fails on regressions,
+# not noise. Throughput does not grow past ~10 concurrent users on this node: scale out the API (and
+# the policy service) for more.
+#
+# Measured 2026-10-28, 10 users:   req/s   p50 ms   p95 ms
+#   pdp_authorize                  358      25       50
+#   enrich (20 assets)              44     200      321
+#   dataset_health                 160      53      130
+#   marketplace (search page)       24     368      819
+#   inbox                          158      57      115
+#   contracts                      228      39       87
+scenarios:
+  pdp_authorize: {p95_ms: 100, min_rps: 200}
+  enrich: {p95_ms: 600, min_rps: 25}
+  dataset_health: {p95_ms: 250, min_rps: 90}
+  marketplace: {p95_ms: 1500, min_rps: 14}
+  inbox: {p95_ms: 250, min_rps: 90}
+  contracts: {p95_ms: 200, min_rps: 130}
