@@ -115,6 +115,9 @@ def test_completion_writes_metadata_and_verification_signs_off(svc):
     assert graph.emitted[-1]["systemMetadata"]["properties"]["cairn_form"] == f["id"]
     assert forms.submit(f["id"], ds("customers"), answers, ANA, verify=True)["state"] == "VERIFIED"
     assert forms.asset_status(ds("customers"))["status"] == "COMPLIANT"
+    batch = forms.asset_statuses([ds("customers"), ds("payments"), ds("unassigned")])
+    assert {u: v["status"] for u, v in batch.items()} == {
+        ds("customers"): "COMPLIANT", ds("payments"): "INCOMPLETE", ds("unassigned"): None}
     with pytest.raises(FormError, match="already verified"):
         forms.submit(f["id"], ds("customers"), answers, ANA, verify=True)
     # A steward with edit rights may complete a task assigned to someone else.

@@ -429,20 +429,25 @@ class FormService:
     # ---- status and progress -------------------------------------------------------------
     def asset_status(self, urn: str) -> dict:
         """COMPLIANT when every assigned form is done (verified where required); else what is open."""
+        return self.asset_statuses([urn])[urn]
+
+    def asset_statuses(self, urns: list[str]) -> dict[str, dict]:
+        """:meth:`asset_status` for many assets in one query."""
+        out: dict[str, dict] = {u: {"urn": u, "status": None, "forms": []} for u in urns}
+        if not urns:
+            return out
         with self.engine.connect() as conn:
             rows = conn.execute(select(form_tasks, forms_table.c.name, forms_table.c.spec)
                                 .join(forms_table, forms_table.c.id == form_tasks.c.form_id)
-                                .where(and_(form_tasks.c.urn == urn, forms_table.c.state == "ACTIVE"))).all()
-        if not rows:
-            return {"urn": urn, "status": None, "forms": []}
-        items = []
-        done = True
+                                .where(and_(form_tasks.c.urn.in_(urns), forms_table.c.state == "ACTIVE"))).all()
         for r in rows:
             need = "VERIFIED" if r.spec.get("kind") == "verification" else "COMPLETED"
             ok = r.state == "VERIFIED" or (need == "COMPLETED" and r.state == "COMPLETED")
-            done = done and ok
-            items.append({"form_id": r.form_id, "form_name": r.name, "state": r.state, "done": ok})
-        return {"urn": urn, "status": "COMPLIANT" if done else "INCOMPLETE", "forms": items}
+            out[r.urn]["forms"].append({"form_id": r.form_id, "form_name": r.name, "state": r.state, "done": ok})
+        for st in out.values():
+            if st["forms"]:
+                st["status"] = "COMPLIANT" if all(f["done"] for f in st["forms"]) else "INCOMPLETE"
+        return out
 
     def progress(self, form_id: str) -> dict:
         with self.engine.connect() as conn:

@@ -151,6 +151,24 @@ class QualityStore:
             rows = conn.execute(stmt).fetchall()
         return [self._monitor_from_row(r) for r in rows]
 
+    def latest_statuses(self, dataset_urns: list[str]) -> dict[str, list[str]]:
+        """Per dataset, the status of each monitor's latest evaluation (two queries for any number)."""
+        if not dataset_urns:
+            return {}
+        with self.engine.connect() as conn:
+            owners = dict(conn.execute(select(monitors.c.id, monitors.c.dataset_urn)
+                                       .where(monitors.c.dataset_urn.in_(dataset_urns))).all())
+            if not owners:
+                return {}
+            latest = select(evaluations.c.monitor_id, func.max(evaluations.c.ts_ms).label("ts")) \
+                .where(evaluations.c.monitor_id.in_(list(owners))).group_by(evaluations.c.monitor_id).subquery()
+            rows = conn.execute(select(evaluations.c.monitor_id, evaluations.c.status).join(latest, and_(
+                evaluations.c.monitor_id == latest.c.monitor_id, evaluations.c.ts_ms == latest.c.ts))).all()
+        out: dict[str, list[str]] = {}
+        for monitor_id, status in rows:
+            out.setdefault(owners[monitor_id], []).append(status)
+        return out
+
     def due_monitors(self, now_ms: int, partition: int = 0, partitions: int = 1) -> list[Monitor]:
         with self.engine.connect() as conn:
             rows = conn.execute(select(monitors).where(and_(

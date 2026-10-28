@@ -89,6 +89,7 @@ class Services:
     context_layer: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
+    _product_assets_cache: dict = field(default_factory=dict)
 
     # ---- authorization helper shared by every Cairn API ------------------------------
     def authorize(self, principal: Principal, privilege: str, resource_urn: Optional[str],
@@ -134,29 +135,30 @@ class Services:
         return self.authorize(Principal(urn=actor, via="delegated"), "MANAGE_POLICIES", None, raise_on_deny=False)
 
     def trust(self, urns: list[str]) -> dict[str, dict]:
-        """Trust badges per asset: certification status + worst current quality status."""
+        """Trust badges per asset: certification status + worst current quality status.
+
+        A fixed number of queries for any number of assets (search results and marketplace pages
+        badge dozens at a time)."""
         out: dict[str, dict] = {}
         rank = {"FAILING": 3, "ERROR": 2, "WARNING": 1, "HEALTHY": 0}
+        names = {"FAIL": "FAILING", "WARN": "WARNING", "PASS": "HEALTHY", "ERROR": "ERROR"}
+        latest = self.quality.store.latest_statuses(urns)
+        compliance: dict[str, dict] = {}
+        if self.forms is not None:
+            try:
+                compliance = self.forms.asset_statuses(urns)
+            except Exception:
+                logger.exception("compliance status lookup failed")
         for urn in urns:
             cert = None
             try:
                 cert = self.attributes.resource(urn).get("certification")
             except Exception:
                 pass
-            status = None
-            store = self.quality.store
-            for m in store.list_monitors(urn):
-                ev = m.last_evaluation
-                st = {"FAIL": "FAILING", "WARN": "WARNING", "PASS": "HEALTHY", "ERROR": "ERROR"}.get(
-                    ev.status if ev else "")
-                if st in rank and (status is None or rank[st] > rank[status]):
-                    status = st
-            out[urn] = {"certification": cert, "quality_status": status}
-            if self.forms is not None:
-                try:
-                    out[urn]["compliance"] = self.forms.asset_status(urn)["status"]
-                except Exception:
-                    logger.exception("compliance status lookup failed for %s", urn)
+            found = [names[s] for s in latest.get(urn, []) if s in names]
+            out[urn] = {"certification": cert, "quality_status": max(found, key=rank.get) if found else None}
+            if self.forms is not None and urn in compliance:
+                out[urn]["compliance"] = compliance[urn]["status"]
         if self.contracts is not None and urns and self.contracts.any():
             try:
                 self._contract_badges(urns, out)
@@ -164,12 +166,26 @@ class Services:
                 logger.exception("contract status lookup failed")
         return out
 
+    PRODUCT_ASSETS_TTL_SECONDS = 60
+
+    def _product_assets(self, urn: str) -> list[str]:
+        """A data product's datasets, cached briefly: badges are drawn many times per page."""
+        import time
+
+        cache = self._product_assets_cache
+        hit = cache.get(urn)
+        if hit and hit[0] > time.monotonic():
+            return hit[1]
+        assets = [a.get("destinationUrn") for a in (self.graph.get_aspect(urn, "dataProductProperties") or {})
+                  .get("assets") or [] if a.get("destinationUrn")]
+        cache[urn] = (time.monotonic() + self.PRODUCT_ASSETS_TTL_SECONDS, assets)
+        return assets
+
     def _contract_badges(self, urns: list[str], out: dict[str, dict]) -> None:
         """A dataset shows its contract's status; a data product the worst of its datasets'."""
         rank = {"BROKEN": 2, "PENDING": 1, "MET": 0}
-        assets = {u: [a.get("destinationUrn") for a in (self.graph.get_aspect(u, "dataProductProperties") or {})
-                      .get("assets") or [] if a.get("destinationUrn")]
-                  for u in urns if u.startswith("urn:li:dataProduct:") and self.graph is not None}
+        assets = {u: self._product_assets(u) for u in urns
+                  if u.startswith("urn:li:dataProduct:") and self.graph is not None}
         found = self.contracts.statuses(sorted({*urns, *(a for v in assets.values() for a in v)}))
         for urn in urns:
             statuses = [found[a] for a in assets.get(urn, [urn]) if a in found]
