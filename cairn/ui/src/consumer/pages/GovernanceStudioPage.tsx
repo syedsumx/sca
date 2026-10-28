@@ -2,6 +2,7 @@ import { Alert, Button, Checkbox, Empty, Input, List, Popconfirm, Radio, Select,
 import { FormsAdmin } from '../components/Forms';
 import { TagSyncAdmin } from '../components/TagSync';
 import { AutomationsAdmin } from '../components/Automations';
+import { AISystemsAdmin } from '../components/AISystems';
 import { StewardReview } from '../components/Steward';
 import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
@@ -479,6 +480,7 @@ export function GovernanceStudioPage() {
                     { key: 'steward', label: 'AI steward', children: <StewardReview /> },
                     { key: 'automations', label: 'Automations', children: <AutomationsAdmin /> },
                     { key: 'tag-sync', label: 'Warehouse tags', children: <TagSyncAdmin /> },
+                    { key: 'ai-systems', label: 'AI systems', children: <AISystemsAdmin /> },
                     {
                         key: 'purposes',
                         label: 'Purposes',

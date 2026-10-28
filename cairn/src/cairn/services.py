@@ -89,6 +89,7 @@ class Services:
     context_layer: Optional[Any] = None
     licence: Optional[Any] = None
     extensions: Optional[Any] = None
+    ai_systems: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
     _product_assets_cache: dict = field(default_factory=dict)
@@ -519,6 +520,12 @@ def _build_active_metadata(s: Services) -> None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
     _build_forms(s, hub, Event)
+    from cairn.governance.ai_systems import AISystemService
+
+    s.ai_systems = AISystemService(
+        s.engine, s.attributes, s.personas, s.audit, hub,
+        can_approve=lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_POLICIES", None,
+                                              raise_on_deny=False))
     if s.graph is not None:
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)

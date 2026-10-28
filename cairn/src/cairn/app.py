@@ -127,6 +127,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                            f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate)
         app.include_router(scim_router(scim))
         install_error_handler(app)
+    if services.ai_systems is not None:
+        from cairn.governance.ai_systems_api import build_router as ai_systems_router
+
+        app.include_router(ai_systems_router(services.ai_systems, cp, authz))
     if services.extensions is not None:
         from cairn.extensions.api import build_router as extensions_router
 

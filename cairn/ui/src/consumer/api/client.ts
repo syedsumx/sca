@@ -1,6 +1,10 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
 import type { CompiledPolicy } from './types';
 import type {
+    AIAssessment,
+    AISystem,
+    AISystemInput,
+    AISystemsReport,
     AccessRequest,
     AccessRequestAction,
     AccessRequestCreate,
@@ -181,6 +185,38 @@ export class ConsumerClient extends CairnClient {
 
     getUiConfig(opts?: RequestOptions) {
         return this.request<UiConfig>('GET', '/ui/config', undefined, opts);
+    }
+
+    // --- AI systems ------------------------------------------------------------------------
+
+    aiAssessment(opts?: RequestOptions) {
+        return this.request<AIAssessment>('GET', '/governance/ai-systems/assessment', undefined, opts);
+    }
+
+    listAISystems(opts?: RequestOptions) {
+        return this.request<AISystem[]>('GET', '/governance/ai-systems', undefined, opts);
+    }
+
+    saveAISystem(body: AISystemInput, id?: string) {
+        return id
+            ? this.request<AISystem>('PUT', `/governance/ai-systems/${enc(id)}`, body)
+            : this.request<AISystem>('POST', '/governance/ai-systems', body);
+    }
+
+    submitAISystem(id: string) {
+        return this.request<AISystem>('POST', `/governance/ai-systems/${enc(id)}/submit`, {});
+    }
+
+    decideAISystem(id: string, approve: boolean, note: string) {
+        return this.request<AISystem>('POST', `/governance/ai-systems/${enc(id)}/decision`, { approve, note });
+    }
+
+    aiSystemsReport(opts?: RequestOptions) {
+        return this.request<AISystemsReport>('GET', '/governance/ai-systems/report', undefined, opts);
+    }
+
+    aiSystemsCsv() {
+        return this.request<string>('GET', '/governance/ai-systems/report', undefined, { query: { format: 'csv' } });
     }
 
     // --- extensions ------------------------------------------------------------------------

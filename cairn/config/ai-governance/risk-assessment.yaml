@@ -1,0 +1,47 @@
+# AI system risk assessment. The default follows the risk categories of the EU AI Act (Regulation
+# (EU) 2024/1689): prohibited practices (Article 5), high-risk uses (Annex III and safety components
+# of regulated products, Article 6) and transparency duties (Article 50). It is a starting point
+# for your own framework, not legal advice: edit the questions, options and tiers, or replace the file.
+name: EU AI Act risk assessment
+# Classifications (prefixes) a high-risk system may only use under an approved purpose.
+restricted_labels: [PII, Confidential, Restricted]
+questions:
+  - id: prohibited
+    title: Does the system do any of the following?
+    type: multi
+    options:
+      - {value: manipulation, tier: unacceptable, label: Subliminal, manipulative or deceptive techniques that distort behaviour and cause significant harm}
+      - {value: exploit_vulnerable, tier: unacceptable, label: Exploiting vulnerabilities due to age, disability or social or economic situation}
+      - {value: social_scoring, tier: unacceptable, label: Social scoring that leads to detrimental or unfavourable treatment}
+      - {value: crime_prediction, tier: unacceptable, label: Predicting criminal offences from profiling or personality traits alone}
+      - {value: face_scraping, tier: unacceptable, label: Untargeted scraping of facial images to build facial recognition databases}
+      - {value: emotion_work_school, tier: unacceptable, label: Inferring emotions at work or in education (other than for medical or safety reasons)}
+      - {value: biometric_categorisation, tier: unacceptable, label: Biometric categorisation inferring race, political opinions, union membership, religion or sexual orientation}
+      - {value: realtime_biometric_id, tier: unacceptable, label: Real-time remote biometric identification in public spaces for law enforcement}
+  - id: high_risk_use
+    title: Is the system used for any of the following?
+    type: multi
+    options:
+      - {value: biometrics, tier: high, label: Remote biometric identification, biometric categorisation or emotion recognition}
+      - {value: critical_infrastructure, tier: high, label: Safety component of critical infrastructure (energy, water, traffic, digital infrastructure)}
+      - {value: education, tier: high, label: Education and training - admission, assessment, steering learning, proctoring}
+      - {value: employment, tier: high, label: Employment - recruitment, promotion, termination, task allocation or monitoring of workers}
+      - {value: essential_services, tier: high, label: Access to essential services - public benefits, credit scoring, life and health insurance pricing, emergency dispatch}
+      - {value: law_enforcement, tier: high, label: Law enforcement}
+      - {value: migration, tier: high, label: Migration, asylum and border control}
+      - {value: justice_democracy, tier: high, label: Administration of justice or influencing elections}
+  - id: safety_component
+    title: Is it a safety component of a product covered by EU product-safety law (machinery, medical devices, toys, vehicles, lifts...)?
+    type: boolean
+    tier_if_yes: high
+  - id: transparency
+    title: Does the system do any of the following?
+    type: multi
+    options:
+      - {value: interacts_with_people, tier: limited, label: Interacts directly with people (for example a chatbot or assistant)}
+      - {value: generates_content, tier: limited, label: Generates or alters images, audio, video or text}
+      - {value: deepfakes, tier: limited, label: Produces deep fakes}
+  - id: human_oversight
+    title: How do people oversee the system, and how can they stop or override it?
+    type: text
+    required_for: [high]

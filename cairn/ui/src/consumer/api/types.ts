@@ -788,3 +788,52 @@ export interface ExtensionInstallResult {
     token?: string;
     signing_secret?: string;
 }
+
+export type AITier = 'unacceptable' | 'high' | 'limited' | 'minimal';
+export type AIState = 'DRAFT' | 'IN_REVIEW' | 'APPROVED' | 'REJECTED' | 'RETIRED';
+
+export interface AIAssessment {
+    name: string;
+    restricted_labels: string[];
+    questions: {
+        id: string;
+        title: string;
+        type: 'multi' | 'boolean' | 'text';
+        options: { value: string; label: string; tier: AITier }[];
+        tier_if_yes: AITier | null;
+        required_for: string[];
+    }[];
+}
+
+export interface AISystemInput {
+    name: string;
+    purpose: string;
+    owner?: string | null;
+    models: string[];
+    datasets: string[];
+    vendor?: string | null;
+    data_purpose_id?: string | null;
+    answers: Record<string, unknown>;
+}
+
+export interface AISystem extends AISystemInput {
+    id: string;
+    owner: string;
+    state: AIState;
+    tier: AITier;
+    missing: string[];
+    violations: { dataset: string; labels: string[]; reason: string }[];
+    decided_by: string | null;
+    decided_ms: number | null;
+    decision_note: string | null;
+    updated_ms: number;
+}
+
+export interface AISystemsReport {
+    assessment: string;
+    total: number;
+    by_tier: Record<AITier, number>;
+    by_state: Record<string, number>;
+    high_risk_not_approved: string[];
+    violations: { system: string; name: string; state: AIState; dataset: string; labels: string[]; reason: string }[];
+}

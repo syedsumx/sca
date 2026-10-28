@@ -1520,3 +1520,41 @@ def test_34_metadata_export_to_object_storage(users):
             assert json.loads(f.read())["tables"]["assets"][0]["name"] == "urn"
     finally:
         subprocess.run(["docker", "rm", "-f", minio], capture_output=True)
+
+
+def test_35_ai_system_needs_a_purpose_for_restricted_data(users):
+    """A high-risk AI system using this run's PII dataset is approved by someone else only once an
+    approved purpose covers that data; the inventory report shows it."""
+    root, bob = users["root"], users["bob"]
+    answers = {"prohibited": [], "high_risk_use": ["employment"], "safety_component": False,
+               "transparency": ["interacts_with_people"], "human_oversight": "A recruiter reviews every ranking."}
+    body = {"name": f"CV screening {RUN}", "purpose": "Ranks applicants for recruiters.", "datasets": [DS],
+            "models": [], "answers": answers}
+    s = bob.post("/governance/ai-systems", json=body)
+    assert s.status_code == 201, s.text
+    s = s.json()
+    sid = s["id"]
+    try:
+        assert s["tier"] == "high" and s["owner"] == BOB and s["state"] == "DRAFT"
+        assert [v["dataset"] for v in s["violations"]] == [DS] and "PII.Email" in s["violations"][0]["labels"], s
+        assert bob.post(f"/governance/ai-systems/{sid}/submit").json()["state"] == "IN_REVIEW"
+        assert bob.post(f"/governance/ai-systems/{sid}/decision", json={"approve": True}).status_code == 403
+        r = root.post(f"/governance/ai-systems/{sid}/decision", json={"approve": True})
+        assert r.status_code == 422 and "no approved purpose" in r.json()["detail"], r.text
+
+        purpose = next(p["id"] for p in root.get("/governance/purposes").json() if p["name"] == f"Customer support {RUN}")
+        fixed = bob.put(f"/governance/ai-systems/{sid}", json={**body, "data_purpose_id": purpose}).json()
+        assert fixed["violations"] == [] and fixed["state"] == "DRAFT", fixed      # a material change: review again
+        assert bob.post(f"/governance/ai-systems/{sid}/submit").json()["state"] == "IN_REVIEW"
+        ok = root.post(f"/governance/ai-systems/{sid}/decision", json={"approve": True, "note": f"e2e {RUN}"})
+        assert ok.status_code == 200 and ok.json()["state"] == "APPROVED" and ok.json()["decided_by"] == ROOT, ok.text
+
+        rep = root.get("/governance/ai-systems/report").json()
+        mine = next(x for x in rep["systems"] if x["id"] == sid)
+        assert mine["tier"] == "high" and mine["state"] == "APPROVED" and mine["violations"] == 0
+        assert bob.get("/governance/ai-systems/report").status_code == 403
+        assert f"CV screening {RUN}" in root.get("/governance/ai-systems/report", params={"format": "csv"}).text
+        inbox = bob.get("/notify/inbox").json()
+        assert any(n["type"] == "ai_system.decided" for n in inbox), inbox[:3]
+    finally:
+        root.post(f"/governance/ai-systems/{sid}/retire")

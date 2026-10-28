@@ -188,3 +188,33 @@ API:
 - `GET /cairn/api/data/sources` lists the connections that serve datasets,
 - `GET /cairn/api/data/preview?urn=…` returns a table's first rows,
 - `POST /cairn/api/data/query` with `{"sql", "urn" or "connection", "limit"}` runs a query.
+
+## AI systems
+
+**Governance → AI systems** is the inventory of the AI your organisation runs or buys. Each entry records:
+
+- its purpose and owner,
+- the models it runs and the datasets it is trained on or reads,
+- the vendor, for bought-in systems,
+- its risk tier and approval.
+
+**The risk tier** comes from a risk assessment: the worst tier any answer points to. The default assessment (`config/ai-governance/risk-assessment.yaml`) follows the EU AI Act's categories:
+
+| Tier | When |
+|---|---|
+| Unacceptable | a prohibited practice (Article 5), such as social scoring or untargeted face scraping. It can't be approved. |
+| High | a use listed in Annex III (employment, credit scoring, education, essential services…), or a safety component of a regulated product. Needs a written account of human oversight. |
+| Limited | transparency duties (Article 50): talks to people, or generates or alters content. |
+| Minimal | none of the above. |
+
+The default is a starting point, not legal advice. Edit its questions, options and tiers to match your framework, or replace the file.
+
+**Approval** moves a system from draft to in review to approved, rejected or retired:
+
+- Approving needs `MANAGE_POLICIES`, and the owner can't approve their own system.
+- Changing a system's models, datasets, answers or purpose sends an approved system back to draft.
+- Owners are notified of decisions, and every step is in the audit log.
+
+**Restricted data needs an approved purpose.** A high-risk system that uses a dataset classified as restricted (PII, Confidential or Restricted by default; set `restricted_labels`) can only be approved if its purpose covers those classifications. Link a purpose from [Personas and purposes](#personas-and-purposes). The check runs again whenever the inventory is read: a dataset classified as restricted after approval shows up as a violation straight away.
+
+**The inventory report** (`GET /cairn/api/governance/ai-systems/report`, or **Download inventory** for CSV) counts systems by tier and state. It also lists high-risk systems that aren't approved and every use of restricted data without a purpose.
