@@ -58,9 +58,12 @@ if [ "${RESTORE_CONFIG:-0}" = 1 ]; then
     tar -xzf "$IN/config.tar.gz"
 fi
 
-log "search: rebuilding the index from the catalog database"
-$COMPOSE run --rm cairn-setup -u SystemUpdate >/dev/null
-$COMPOSE run --rm cairn-setup -u RestoreIndices -a clean >/dev/null
+log "search: rebuilding the index from the catalog database (log: $IN/restore-indices.log)"
+# The rebuild reads entities through the core service and its consumer writes the index, so the core
+# runs first (its start also runs the setup job, which migrates the restored schema if needed).
+$COMPOSE up -d --wait cairn-core
+$COMPOSE run --rm cairn-setup -u RestoreIndices -a clean > "$IN/restore-indices.log" 2>&1 \
+    || { log "search: the rebuild failed, see $IN/restore-indices.log"; exit 1; }
 
 log "starting Cairn"
 $COMPOSE up -d --wait
