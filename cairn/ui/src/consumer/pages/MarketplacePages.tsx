@@ -4,10 +4,17 @@ import { Link, useHistory, useLocation, useParams } from 'react-router-dom';
 
 import type { ProductAccessFilter, ProductSort } from '../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { AccessRequest, AccessRequestAction, ProductCard as ProductCardData, ProductDetail } from '../api/types';
+import type {
+    AccessRequest,
+    AccessRequestAction,
+    FormTask,
+    ProductCard as ProductCardData,
+    ProductDetail,
+} from '../api/types';
 import { assetPath } from '../components/Assets';
 import { ProductCard, RequestAccessDrawer, accessLabel } from '../components/Marketplace';
 import { CardGrid, Muted, Page, SectionTitle, Skeleton, Surface, tokens } from '../components/tokens';
+import { FormTasksList } from '../components/Forms';
 import { TrustBadges } from '../components/TrustBadges';
 import { actorName, entityTypeLabel, platformName, relativeTime } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
@@ -244,6 +251,7 @@ export function RequestsPage() {
     const inbox = useDheQuery<AccessRequest[]>('/marketplace/access-requests?scope=inbox', (c, signal) =>
         c.listAccessRequests({ scope: 'inbox' }, { signal }),
     );
+    const forms = useDheQuery<FormTask[]>('/governance/forms/tasks', (c, signal) => c.formTasks('PENDING', { signal }));
     const [dialog, setDialog] = useState<{ req: AccessRequest; action: AccessRequestAction } | null>(null);
     const [comment, setComment] = useState('');
     const [busy, setBusy] = useState(false);
@@ -364,6 +372,11 @@ export function RequestsPage() {
                                 locale={{ emptyText: <Link to="/marketplace">Browse the marketplace to request data →</Link> }}
                             />
                         ),
+                    },
+                    {
+                        key: 'forms',
+                        label: `Forms${forms.data?.length ? ` (${forms.data.length})` : ''}`,
+                        children: <FormTasksList />,
                     },
                 ]}
             />

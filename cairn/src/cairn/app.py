@@ -141,6 +141,11 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
 
     if "governance" in modules and services.personas is not None:
         app.include_router(personas_router(services.personas, cp, authz, services.graph))
+    if "governance" in modules and services.forms is not None:
+        from cairn.governance.forms_api import build_router as forms_router
+
+        app.include_router(forms_router(services.forms, cp, services.authorize, services.can_view,
+                                        services.subject_of))
     if "collab" in modules and services.collab is not None:
         app.include_router(collab_router(services.collab, cp, authz, services.can_view, services.summaries,
                                          services.trust, services.explicitly_denied))

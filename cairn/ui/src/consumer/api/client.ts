@@ -31,6 +31,15 @@ import type {
     SearchEntity,
     SearchResponse,
     SemanticHit,
+    FormAssignResult,
+    FormProgress,
+    FormSpec,
+    FormSummary,
+    FormTask,
+    FormTaskDetail,
+    BulkApplyResult,
+    BulkBatch,
+    BulkPreview,
     Thread,
     TrendingItem,
     UiConfig,
@@ -260,6 +269,66 @@ export class ConsumerClient extends CairnClient {
     }
 
     // --- personas & purposes ---------------------------------------------------------------
+
+    // --- compliance forms -------------------------------------------------------------------
+
+    formTasks(state: FormTask['state'] = 'PENDING', opts: RequestOptions = {}) {
+        return this.request<FormTask[]>('GET', '/governance/forms/tasks', undefined, { ...opts, query: { state } });
+    }
+
+    formTask(formId: string, urn: string, opts?: RequestOptions) {
+        return this.request<FormTaskDetail>('GET', `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`, undefined, opts);
+    }
+
+    submitFormTask(formId: string, urn: string, answers: Record<string, unknown>, verify = false) {
+        return this.request<{ state: FormTask['state'] }>('POST', `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`, {
+            answers,
+            verify,
+        });
+    }
+
+    listForms(opts?: RequestOptions) {
+        return this.request<FormSummary[]>('GET', '/governance/forms', undefined, opts);
+    }
+
+    createForm(spec: FormSpec) {
+        return this.request<FormSummary>('POST', '/governance/forms', spec);
+    }
+
+    assignForm(formId: string, dryRun = false) {
+        return this.request<FormAssignResult>('POST', `/governance/forms/${enc(formId)}/assign`, undefined, {
+            query: { dry_run: dryRun },
+        });
+    }
+
+    formProgress(formId: string, opts?: RequestOptions) {
+        return this.request<FormProgress>('GET', `/governance/forms/${enc(formId)}/progress`, undefined, opts);
+    }
+
+    archiveForm(formId: string) {
+        return this.request<void>('DELETE', `/governance/forms/${enc(formId)}`);
+    }
+
+    /** CSV of the matching datasets and their columns, ready to edit in a spreadsheet. */
+    bulkExport(query: string, opts?: RequestOptions) {
+        return this.request<string>('GET', '/bulk/export', undefined, { ...opts, query: { query: query || '*' } });
+    }
+
+    bulkImport(csv: string) {
+        return this.request<BulkPreview>('POST', '/bulk/import', csv, { contentType: 'text/csv' });
+    }
+
+    bulkApply(batchId: string) {
+        return this.request<BulkApplyResult>('POST', `/bulk/${enc(batchId)}/apply`);
+    }
+
+    bulkUndo(batchId: string) {
+        return this.request<{ batch_id: string; restored: number }>('POST', `/bulk/${enc(batchId)}/undo`);
+    }
+
+    bulkHistory(opts?: RequestOptions) {
+        return this.request<BulkBatch[]>('GET', '/bulk', undefined, opts);
+    }
 
     listPersonas(opts?: RequestOptions) {
         return this.request<Persona[]>('GET', '/governance/personas', undefined, opts);

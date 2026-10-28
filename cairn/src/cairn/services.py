@@ -75,6 +75,7 @@ class Services:
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
     ai_usage: Optional[Any] = None
+    forms: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -140,6 +141,11 @@ class Services:
                 if st in rank and (status is None or rank[st] > rank[status]):
                     status = st
             out[urn] = {"certification": cert, "quality_status": status}
+            if self.forms is not None:
+                try:
+                    out[urn]["compliance"] = self.forms.asset_status(urn)["status"]
+                except Exception:
+                    logger.exception("compliance status lookup failed for %s", urn)
         return out
 
     def summaries(self, urns: list[str]) -> dict[str, dict]:
@@ -436,6 +442,7 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
+    _build_forms(s, hub, Event)
     s.embed = EmbedService(s.engine, cfg.embed_signing_secret, cfg.embed_allowed_origins, cfg.public_url,
                            s.catalog, s.attributes, s.quality.store, s.can_view_as)
 
@@ -538,6 +545,22 @@ def actor_for_email(graph: Optional[MetadataGraph], email: str) -> Optional[str]
         logger.exception("user lookup by email failed")
     urn = f"urn:li:corpuser:{email}"
     return urn if graph.get_aspect(urn, "corpUserKey") or graph.get_aspect(urn, "corpUserInfo") else None
+
+
+def _build_forms(s: Services, hub, Event) -> None:
+    from cairn.governance.forms import FormService
+    from cairn.quality.auto import Planner
+
+    def notify(form_row, recipients: list[str], urns: list[str]) -> None:
+        names = s.summaries(urns[:5])
+        listing = ", ".join((names.get(u) or {}).get("name") or u for u in urns[:5])
+        more = f" and {len(urns) - 5} more" if len(urns) > 5 else ""
+        hub.publish(Event(type="form.assigned", title=f"Please complete “{form_row.name}”",
+                          body=f"{len(urns)} asset(s) need your answers: {listing}{more}.",
+                          recipients=recipients, url=f"{s.settings.active.public_url}/mfe/cairn-requests#/requests"))
+
+    datasets = (lambda: Planner(s.graph).datasets()) if s.graph is not None else None
+    s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
 
 
 def _hook_workflow_events(s: Services, Event) -> None:

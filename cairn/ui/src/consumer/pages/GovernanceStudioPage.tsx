@@ -1,4 +1,5 @@
 import { Alert, Button, Checkbox, Empty, Input, List, Popconfirm, Radio, Select, Space, Switch, Tabs, Tag, message } from 'antd';
+import { FormsAdmin } from '../components/Forms';
 import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
 
@@ -471,6 +472,7 @@ export function GovernanceStudioPage() {
                             </Split>
                         ),
                     },
+                    { key: 'forms', label: 'Compliance forms', children: <FormsAdmin /> },
                     {
                         key: 'purposes',
                         label: 'Purposes',

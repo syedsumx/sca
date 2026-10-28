@@ -179,6 +179,7 @@ export function AssetPage() {
                     <TrustBadges
                         certification={e?.certification}
                         qualityStatus={health.data?.status ?? e?.quality_status}
+                        compliance={e?.compliance}
                         sensitive={sensitive}
                     />
                 </div>

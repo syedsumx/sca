@@ -164,6 +164,7 @@ export function AssetRow({
                 <TrustBadges
                     certification={enrichment?.certification}
                     qualityStatus={enrichment?.quality_status}
+                    compliance={enrichment?.compliance}
                     compact
                 />
                 <Meta>

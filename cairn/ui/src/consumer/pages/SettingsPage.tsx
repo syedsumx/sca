@@ -22,6 +22,8 @@ export const EVENT_COPY: Record<string, string> = {
     'discussion.mention': 'I am @mentioned',
     'discussion.reply': 'Replies to my discussions',
     'context.drift': 'Definition drift on assets I own',
+    'form.assigned': 'A compliance form needs my answers',
+    'form.due': 'My compliance form tasks are overdue',
 };
 
 function NotificationSettings() {

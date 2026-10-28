@@ -110,6 +110,40 @@ def notifier_tick(s) -> dict:
     for g in expired:
         s.personas.revoke_grant(g["id"], "urn:li:corpuser:cairn-notifier")
     out["grants_expired"] = len(expired)
+    if s.forms is not None:
+        out["forms"] = forms_tick(s, now_ms)
+    return out
+
+
+_FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}
+
+
+def forms_tick(s, now_ms: int, assign_every_ms: int = 3_600_000, remind_every_ms: int = 86_400_000) -> dict:
+    """Hourly: give new matching assets their form tasks. Daily: remind assignees of overdue ones."""
+    from cairn.notify.hub import Event
+
+    out: dict = {}
+    if now_ms - _FORMS_STATE["assigned_ms"] >= assign_every_ms:
+        _FORMS_STATE["assigned_ms"] = now_ms
+        for f in s.forms.list():
+            try:
+                r = s.forms.assign(f["id"], "urn:li:corpuser:cairn-notifier")
+                if r["assigned"] or r["withdrawn"]:
+                    out[f["id"]] = {"assigned": len(r["assigned"]), "withdrawn": len(r["withdrawn"])}
+            except Exception:
+                logging.getLogger("cairn.notifier").exception("form assignment failed for %s", f["id"])
+    if now_ms - _FORMS_STATE["reminded_ms"] >= remind_every_ms:
+        _FORMS_STATE["reminded_ms"] = now_ms
+        by_person: dict = {}
+        for t in s.forms.overdue(now_ms):
+            for person in t["assignees"]:
+                by_person.setdefault(person, []).append(t)
+        for person, items in by_person.items():
+            forms = sorted({t["form_name"] for t in items})
+            s.notify.publish(Event(type="form.due", title=f"{len(items)} form task(s) are overdue",
+                                   body="Still waiting for your answers on: " + ", ".join(forms),
+                                   recipients=[person]))
+        out["reminded"] = len(by_person)
     return out
 
 

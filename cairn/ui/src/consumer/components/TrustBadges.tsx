@@ -38,10 +38,11 @@ export interface TrustBadgesProps {
     sensitive?: boolean;
     lastUpdated?: string | null;
     compact?: boolean;
+    compliance?: 'COMPLIANT' | 'INCOMPLETE' | null;
 }
 
 /** Same compact trust language on every card, row, embed and chat answer (spec principle 3). */
-export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdated, compact }: TrustBadgesProps) {
+export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdated, compact, compliance }: TrustBadgesProps) {
     const tone = qualityTone(qualityStatus);
     const certified = (certification || '').toUpperCase() === 'CERTIFIED';
     return (
@@ -57,6 +58,20 @@ export function TrustBadges({ certification, qualityStatus, sensitive, lastUpdat
                 <Dot fg={TONE_COLORS[tone]} aria-hidden />
                 {qualityLabel(qualityStatus)}
             </Pill>
+            {compliance === 'COMPLIANT' && (
+                <Pill fg={tokens.color.good} title="Every compliance form for this asset is complete">
+                    <span aria-hidden>☑</span>
+                    {!compact && 'Compliant'}
+                    {compact && <span className="sr-only">Compliant</span>}
+                </Pill>
+            )}
+            {compliance === 'INCOMPLETE' && (
+                <Pill fg={tokens.color.warn} title="Compliance forms for this asset are still open">
+                    <span aria-hidden>☐</span>
+                    {!compact && 'Forms open'}
+                    {compact && <span className="sr-only">Forms open</span>}
+                </Pill>
+            )}
             {sensitive && (
                 <Pill fg={tokens.color.warn} title="Contains personal data">
                     <span aria-hidden>🔒</span>PII

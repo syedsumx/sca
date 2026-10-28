@@ -839,3 +839,71 @@ def test_20_embeds_render_on_allowed_partner_pages_only(users):
     assert "customers" in allowed["component"] and "customers" in allowed["frame"], result
     assert "customers" not in blocked["component"] and "customers" not in blocked["frame"], result
     assert blocked["frame_blocked"], result
+
+
+# --------------------------------------------------------------------------- 21. compliance forms
+def test_21_compliance_forms_assign_complete_and_verify(users):
+    """A form selects this run's dataset, Carol (its data owner) gets the task and a notification,
+    her answers land in the catalog, and the asset shows as compliant only after her sign-off."""
+    root, bob, carol = users["root"], users["bob"], users["carol"]
+    spec = {"name": f"E2E PII review {RUN}", "kind": "verification", "due_days": 7,
+            "select": {"attr": "resource.urn", "op": "eq", "value": DS},
+            "assignees": {"ownership_types": ["DATAOWNER"]},
+            "questions": [{"id": "desc", "type": "description", "title": "What is in it?"},
+                          {"id": "owner", "type": "owners", "title": "Accountable owner",
+                           "ownership_type": "BUSINESS_OWNER"},
+                          {"id": "dpia", "type": "yes_no", "title": "DPIA done?", "required": False}]}
+    assert bob.post("/governance/forms", json=spec).status_code == 403
+    form = root.post("/governance/forms", json=spec).json()
+    try:
+        preview = root.post(f"/governance/forms/{form['id']}/assign", params={"dry_run": "true"}).json()
+        assert preview["assigned"] == [DS] and not carol.get("/governance/forms/tasks").json()
+        assert root.post(f"/governance/forms/{form['id']}/assign").json()["assigned"] == [DS]
+        tasks = carol.get("/governance/forms/tasks").json()
+        assert [t["urn"] for t in tasks if t["form_id"] == form["id"]] == [DS]
+        assert any(n["type"] == "form.assigned" for n in carol.get("/notify/inbox").json())
+        enc = urllib.parse.quote(DS, safe="")
+        task = carol.get(f"/governance/forms/{form['id']}/tasks/{enc}").json()
+        assert task["answers"]["desc"].startswith("E2E customers")                       # pre-filled
+        assert bob.post(f"/governance/forms/{form['id']}/tasks/{enc}", json={"answers": {}}).status_code == 403
+        answers = {"desc": f"Customers of run {RUN}, one row each.", "owner": [BOB], "dpia": True}
+        done = carol.post(f"/governance/forms/{form['id']}/tasks/{enc}", json={"answers": answers})
+        assert done.json()["state"] == "COMPLETED", done.text
+        badge = lambda: root.post("/collab/enrich", json={"urns": [DS]}).json()[DS].get("compliance")  # noqa: E731
+        assert badge() == "INCOMPLETE"
+        data = gql("""query($u: String!) { dataset(urn: $u) { editableProperties { description }
+                        ownership { owners { owner { ... on CorpUser { urn } } type } } } }""", {"u": DS})["dataset"]
+        assert data["editableProperties"]["description"] == answers["desc"]
+        assert {"owner": {"urn": BOB}, "type": "BUSINESS_OWNER"} in data["ownership"]["owners"]
+        assert carol.post(f"/governance/forms/{form['id']}/tasks/{enc}",
+                          json={"answers": answers, "verify": True}).json()["state"] == "VERIFIED"
+        assert badge() == "COMPLIANT"
+        prog = root.get(f"/governance/forms/{form['id']}/progress").json()
+        assert prog["total"]["VERIFIED"] == 1 and prog["by_domain"][DOMAIN]["done_pct"] == 100.0
+    finally:
+        root.delete(f"/governance/forms/{form['id']}")
+
+
+def test_21b_forms_in_the_workspace(users):
+    """In the browser: the admin completes a form task from Requests → Forms, and the form's
+    progress shows in the governance studio."""
+    root = users["root"]
+    spec = {"name": f"E2E mart review {RUN}", "select": {"attr": "resource.urn", "op": "eq", "value": DS_DOWN},
+            "assignees": {"owners": False, "users": ["urn:li:corpuser:admin"]},
+            "questions": [{"id": "desc", "type": "description", "title": "What is in it?"}]}
+    form = root.post("/governance/forms", json=spec).json()
+    try:
+        root.post(f"/governance/forms/{form['id']}/assign")
+        out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_forms.js")], capture_output=True,
+                             text=True, timeout=240, env={
+                                 **os.environ, "EDGE": EDGE, "FORM_NAME": spec["name"], "ANSWER": f"Mart {RUN}",
+                                 "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", ""),
+                                 "UI_USER": os.environ.get("CAIRN_E2E_UI_USER", "admin"),
+                                 "UI_PASSWORD": os.environ["CAIRN_E2E_UI_PASSWORD"]})
+        assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+        result = json.loads(out.stdout.strip().splitlines()[-1])
+        assert result["submitted"] and result["progress"] and not result["errors"], result
+        data = gql("query($u: String!) { dataset(urn: $u) { editableProperties { description } } }", {"u": DS_DOWN})
+        assert data["dataset"]["editableProperties"]["description"] == f"Mart {RUN}"
+    finally:
+        root.delete(f"/governance/forms/{form['id']}")

@@ -25,6 +25,8 @@ export interface Enrichment {
     threads_open: number;
     certification: TrustStatus;
     quality_status: TrustStatus;
+    /** Compliance forms: COMPLIANT when every assigned form is done, INCOMPLETE while any is open. */
+    compliance?: 'COMPLIANT' | 'INCOMPLETE' | null;
 }
 
 export type EnrichmentMap = Record<string, Enrichment>;
@@ -332,6 +334,98 @@ export interface UiConfig {
     gateway_url?: string;
 }
 
+// ------------------------------------------------------------- compliance forms
+
+export type FormQuestionType =
+    | 'description'
+    | 'owners'
+    | 'glossary_terms'
+    | 'tags'
+    | 'domain'
+    | 'structured_property'
+    | 'text'
+    | 'yes_no';
+
+export interface FormQuestion {
+    id: string;
+    type: FormQuestionType;
+    title: string;
+    description?: string;
+    required: boolean;
+    allowed: string[];
+    multiple: boolean;
+    property_urn?: string | null;
+    ownership_type?: string;
+}
+
+export interface FormSpec {
+    name: string;
+    description?: string;
+    kind: 'completion' | 'verification';
+    questions: FormQuestion[];
+    select: Record<string, unknown>;
+    assignees: { owners: boolean; ownership_types: string[]; users: string[] };
+    due_days?: number | null;
+    max_assets?: number;
+}
+
+export interface FormTally {
+    assets: number;
+    PENDING: number;
+    COMPLETED: number;
+    VERIFIED: number;
+    done_pct: number;
+}
+
+export interface FormSummary {
+    id: string;
+    name: string;
+    state: 'ACTIVE' | 'ARCHIVED';
+    created_by: string;
+    created_ms: number;
+    spec: FormSpec;
+    progress: FormTally;
+}
+
+export interface FormProgress {
+    form_id: string;
+    total: FormTally;
+    by_domain: Record<string, FormTally>;
+    by_assignee: Record<string, FormTally>;
+}
+
+export interface FormAssignResult {
+    matched: number;
+    assigned: string[];
+    reassigned: string[];
+    withdrawn: string[];
+    without_assignee: string[];
+    dry_run: boolean;
+}
+
+export interface FormTask {
+    form_id: string;
+    form_name: string;
+    urn: string;
+    state: 'PENDING' | 'COMPLETED' | 'VERIFIED';
+    kind: 'completion' | 'verification';
+    assigned_ms: number;
+    due_ms: number | null;
+}
+
+export interface FormTaskDetail {
+    form_id: string;
+    form_name: string;
+    urn: string;
+    state: FormTask['state'];
+    kind: FormTask['kind'];
+    assignees: string[];
+    questions: FormQuestion[];
+    answers: Record<string, unknown>;
+    completed_by: string | null;
+    verified_by: string | null;
+}
+
 // ------------------------------------------------------------- semantic search
 
 export interface SemanticHit {
@@ -372,4 +466,39 @@ export interface SearchResponse {
     total: number;
     results: SearchEntity[];
     facets: Facet[];
+}
+
+export interface BulkChange {
+    urn: string;
+    field: string;
+    what: 'description' | 'tags' | 'glossary_terms' | 'owners' | 'domain';
+    from: string | string[] | null;
+    to: string | string[] | null;
+    add?: string[];
+    remove?: string[];
+    privilege?: string;
+}
+
+export interface BulkPreview {
+    batch_id: string;
+    rows: number;
+    changes: BulkChange[];
+    denied: BulkChange[];
+    errors: string[];
+}
+
+export interface BulkApplyResult {
+    batch_id: string;
+    applied: number;
+    already_current: number;
+    aspects: number;
+}
+
+export interface BulkBatch {
+    batch_id: string;
+    state: 'PREVIEWED' | 'APPLIED' | 'UNDONE';
+    rows: number;
+    changes: number;
+    created_ms: number;
+    updated_ms: number;
 }

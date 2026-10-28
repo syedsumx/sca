@@ -69,6 +69,7 @@ def load_models() -> MetaData:
     from cairn.context import miner as _context  # noqa: F401
     from cairn.embed import service as _embed  # noqa: F401
     from cairn.governance import certification as _cert  # noqa: F401
+    from cairn.governance import forms as _forms  # noqa: F401
     from cairn.governance import pdp as _pdp  # noqa: F401
     from cairn.governance import personas as _personas  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401

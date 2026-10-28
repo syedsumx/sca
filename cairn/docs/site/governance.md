@@ -53,3 +53,28 @@ downstream table). Rules live in Workspace → Governance studio.
 Owners request certification; a steward who is not the requester approves it (separation of
 duties). Certified assets show a badge with the approver and validity date. Approvals can be given
 inline from Slack, Teams or email.
+
+## Compliance forms
+
+A compliance form asks the people responsible for a set of datasets for the metadata an audit
+needs, and tracks who answered. Create one in **Governance studio → Compliance forms**:
+
+* **Which datasets:** a classification, domain, platform or tag (all must hold). Through the API,
+  any policy condition (`POST /cairn/api/governance/forms`).
+* **Who answers:** the dataset's owners, optionally only some ownership types (data owners, say),
+  with named people as a fallback when a dataset has no such owner.
+* **Questions:** description, owners, glossary terms, tags, domain or a structured property, which
+  are written to the catalog as the person answering; or free text and yes/no answers, which are
+  kept in Cairn. Terms, tags and property values can be limited to a list of choices.
+* **Sign-off:** a *Completion + sign-off* form also asks the assignee to confirm the answers.
+
+**Assign…** previews how many datasets match and how many have nobody to answer, then creates one
+task per dataset. Matching is re-checked every hour, so new datasets get tasks and datasets that no
+longer match lose tasks nobody started. Assignees are notified (`form.assigned`) and find their
+tasks under **Requests → Forms**, with current catalog values already filled in. Overdue tasks
+trigger a daily reminder (`form.due`). People who can edit an asset may complete its task for the
+assignee.
+
+A dataset shows **Compliant** once every form assigned to it is complete (and signed off where the
+form asks for it), and **Forms open** until then, on search results and asset pages.
+**Progress** breaks each form down by domain and by assignee.

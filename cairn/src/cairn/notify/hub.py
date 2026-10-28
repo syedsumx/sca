@@ -36,7 +36,7 @@ EVENT_TYPES = [
     "access.requested", "access.granted", "access.rejected", "access.expiring", "access.revoked",
     "certification.requested", "certification.decided", "asset.deprecated",
     "quality.incident.raised", "quality.incident.resolved", "discussion.mention", "discussion.reply",
-    "context.drift", "subscription.update",
+    "context.drift", "subscription.update", "form.assigned", "form.due",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 
