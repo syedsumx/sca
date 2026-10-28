@@ -214,6 +214,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "marketplace" in modules and services.marketplace is not None:
         app.include_router(marketplace_router(services.marketplace, cp, services.can_view,
                                               lambda p: services.subject_of(p.urn)))
+        if services.publisher is not None:
+            from cairn.marketplace.publish_api import build_router as publish_router
+
+            app.include_router(publish_router(services.publisher, services.marketplace, cp, authz))
     if "context" in modules and services.context is not None:
         app.include_router(context_router(services.context, cp, authz, services.can_view))
     if "notify" in modules and services.notify is not None:

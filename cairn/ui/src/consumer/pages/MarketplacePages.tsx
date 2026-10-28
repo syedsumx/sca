@@ -15,7 +15,9 @@ import { assetPath } from '../components/Assets';
 import { ProductCard, RequestAccessDrawer, accessLabel } from '../components/Marketplace';
 import { CardGrid, Muted, Page, SectionTitle, Skeleton, Surface, tokens } from '../components/tokens';
 import { FormTasksList } from '../components/Forms';
+import { ProductPublish } from '../components/ProductPublish';
 import { TrustBadges } from '../components/TrustBadges';
+import { useDheSession } from '../context/CairnProvider';
 import { actorName, entityTypeLabel, platformName, relativeTime } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 
@@ -128,6 +130,7 @@ export function ProductPage() {
     const key = `/marketplace/products/${urn}`;
     const product = useDheQuery<ProductDetail>(key, (c, signal) => c.getProduct(urn, { signal }));
     const [requesting, setRequesting] = useState(false);
+    const session = useDheSession();
     const p = product.data;
 
     const toggleSubscribe = async (on: boolean) => {
@@ -150,6 +153,8 @@ export function ProductPage() {
     }
     if (product.error || !p) return <Page>{product.error && <Alert type="error" message={product.error.message} />}</Page>;
     const access = accessLabel(p.access.status, p.access.expires_at);
+    const me = session.config?.user.urn;
+    const canPublish = !!session.config?.is_admin || (!!me && p.owners.includes(me));
     const requestable = ['NONE', 'EXPIRED', 'REJECTED'].includes(p.access.status);
     return (
         <Page>
@@ -222,6 +227,9 @@ export function ProductPage() {
                             </Surface>
                         ),
                     },
+                    ...(canPublish
+                        ? [{ key: 'publish', label: 'Share outside', children: <ProductPublish urn={urn} /> }]
+                        : []),
                 ]}
             />
             <RequestAccessDrawer

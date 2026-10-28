@@ -837,3 +837,28 @@ export interface AISystemsReport {
     high_risk_not_approved: string[];
     violations: { system: string; name: string; state: AIState; dataset: string; labels: string[]; reason: string }[];
 }
+
+export type PublishTarget = 'snowflake' | 'databricks';
+
+export interface PublishOptions {
+    share: string;
+    listing?: string | null;
+    consumers: string[];
+    terms?: 'STANDARD' | 'OFFLINE' | 'CUSTOM';
+    terms_link?: string | null;
+    refresh_rate?: string | null;
+}
+
+export interface PublishPlan {
+    product: string;
+    target: PublishTarget;
+    tables: string[];
+    skipped: string[];
+    manifest: string | null;
+    statements: string[];
+    fingerprint: string;
+    published: { fingerprint: string; published_by: string; published_ms: number } | null;
+    in_sync: boolean;
+    applied?: boolean;
+    failed?: { sql: string; error: string }[];
+}

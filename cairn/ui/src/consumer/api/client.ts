@@ -33,6 +33,9 @@ import type {
     PersonaPreview,
     ProductCard,
     ProductDetail,
+    PublishOptions,
+    PublishPlan,
+    PublishTarget,
     Purpose,
     PurposeInput,
     RecentItem,
@@ -185,6 +188,19 @@ export class ConsumerClient extends CairnClient {
 
     getUiConfig(opts?: RequestOptions) {
         return this.request<UiConfig>('GET', '/ui/config', undefined, opts);
+    }
+
+    // --- sharing data products outside the company -----------------------------------------
+
+    planPublication(urn: string, target: PublishTarget, options: PublishOptions) {
+        return this.request<PublishPlan>('POST', `/marketplace/products/${enc(urn)}/publish/${target}/plan`, options);
+    }
+
+    publishProduct(urn: string, target: PublishTarget, options: PublishOptions, connection?: string) {
+        return this.request<PublishPlan>('POST', `/marketplace/products/${enc(urn)}/publish/${target}`, {
+            options,
+            connection: connection || null,
+        });
     }
 
     // --- AI systems ------------------------------------------------------------------------

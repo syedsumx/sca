@@ -1491,18 +1491,29 @@ def test_34_metadata_export_to_object_storage(users):
     partitioned Parquet dataset with this run's assets, columns, owners, lineage and monitors."""
     pafs = pytest.importorskip("pyarrow.fs")
     pq = pytest.importorskip("pyarrow.parquet")
-    minio = f"cairn-e2e-minio-{RUN}"
-    subprocess.run(["docker", "rm", "-f", minio], capture_output=True)
-    subprocess.run(["docker", "run", "-d", "--name", minio, "--network", "cairn_catalog", "-p", "127.0.0.1:9010:9000",
-                    "-e", "MINIO_ROOT_USER=cairn", "-e", "MINIO_ROOT_PASSWORD=cairn-e2e-secret",
-                    "minio/minio:RELEASE.2025-04-22T22-12-26Z", "server", "/data"], check=True, capture_output=True)
+    s3_host = f"cairn-e2e-s3-{RUN}"
+    subprocess.run(["docker", "rm", "-f", s3_host], capture_output=True)
+    # An S3-compatible server; older ones need the AWS SDK's default request checksums turned off.
+    checksums = {"AWS_REQUEST_CHECKSUM_CALCULATION": "when_required", "AWS_RESPONSE_CHECKSUM_VALIDATION": "when_required"}
+    os.environ.update(checksums)
+    subprocess.run(["docker", "run", "-d", "--name", s3_host, "--network", "cairn_catalog", "-p", "127.0.0.1:9010:8333",
+                    "chrislusf/seaweedfs:3.80", "server", "-s3", "-dir=/data", "-volume.max=4",
+                    "-master.volumeSizeLimitMB=64"], check=True, capture_output=True)
     try:
         s3 = pafs.S3FileSystem(access_key="cairn", secret_key="cairn-e2e-secret", endpoint_override="127.0.0.1:9010",
                                scheme="http", allow_bucket_creation=True)
-        eventually(lambda: s3.create_dir("cairn-lake") or True, timeout=60)
+
+        def bucket():
+            try:
+                s3.create_dir("cairn-lake")
+                return True
+            except OSError:
+                return None
+        eventually(bucket, timeout=90, interval=3)
         out = compose("exec", "-T", "-e", "AWS_ACCESS_KEY_ID=cairn", "-e", "AWS_SECRET_ACCESS_KEY=cairn-e2e-secret",
+                      *[a for k, v in checksums.items() for a in ("-e", f"{k}={v}")],
                       "cairn-api", "cairn", "export", "metadata", "--keep-days", "30", "--to",
-                      f"s3://cairn-lake/run-{RUN}?endpoint_override={minio}:9000&scheme=http", timeout=600)
+                      f"s3://cairn-lake/run-{RUN}?endpoint_override={s3_host}:8333&scheme=http", timeout=600)
         result = json.loads(out[out.index("{"):])
         assert result["rows"]["assets"] > 0 and result["schema_version"] == 1, result
 
@@ -1519,7 +1530,7 @@ def test_34_metadata_export_to_object_storage(users):
         with s3.open_input_stream(f"cairn-lake/run-{RUN}/_manifest.json") as f:
             assert json.loads(f.read())["tables"]["assets"][0]["name"] == "urn"
     finally:
-        subprocess.run(["docker", "rm", "-f", minio], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", s3_host], capture_output=True)
 
 
 def test_35_ai_system_needs_a_purpose_for_restricted_data(users):
@@ -1558,3 +1569,30 @@ def test_35_ai_system_needs_a_purpose_for_restricted_data(users):
         assert any(n["type"] == "ai_system.decided" for n in inbox), inbox[:3]
     finally:
         root.post(f"/governance/ai-systems/{sid}/retire")
+
+
+def test_36_data_product_published_as_a_listing_and_kept_in_sync(users):
+    """The product's owner plans a Snowflake listing (its Snowflake tables only), records the
+    publication, and is told when the product changes so the listing no longer matches."""
+    bob, carol = users["bob"], users["carol"]
+    url = f"/marketplace/products/{PRODUCT}/publish/snowflake"
+    opts = {"share": f"am_{RUN}", "consumers": ["PARTNER.PROD"], "refresh_rate": "daily"}
+    assert bob.post(f"{url}/plan", json=opts).status_code == 403
+    plan = carol.post(f"{url}/plan", json=opts).json()
+    assert plan["tables"] == [f"am_{RUN}.analytics.customer_orders"] and plan["skipped"] == [DS], plan
+    assert f'GRANT SELECT ON TABLE "AM_{RUN.upper()}"."ANALYTICS"."CUSTOMER_ORDERS" TO SHARE "AM_{RUN.upper()}"' \
+        in plan["statements"]
+    assert f"title: Customer 360 {RUN}" in plan["manifest"] and "PARTNER.PROD" in plan["manifest"]
+    done = carol.post(url, json={"options": opts}).json()                     # applied by hand
+    assert done["applied"] and done["in_sync"], done
+    assert carol.get("/marketplace/publications", params={"product": PRODUCT}).json()[0]["in_sync"] is True
+
+    emit(DS_DOWN, "editableDatasetProperties", {"description": f"Orders per customer, rebuilt {RUN}."})
+    assert eventually(lambda: not carol.post(f"{url}/plan", json=opts).json()["in_sync"] or None, timeout=60)
+
+    def told():
+        compose("exec", "-T", "cairn-notifier", "cairn", "notifier", "--once")
+        return [n for n in carol.get("/notify/inbox").json() if n["type"] == "product.listing_outdated"] or None
+    assert eventually(told, timeout=120, interval=5)[0]["entity_urn"] == PRODUCT
+    again = carol.post(url, json={"options": opts}).json()
+    assert again["in_sync"] and again["statements"][-1].startswith(f'ALTER LISTING "AM_{RUN.upper()}" AS $$')

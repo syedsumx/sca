@@ -90,6 +90,7 @@ class Services:
     licence: Optional[Any] = None
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
+    publisher: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
     _product_assets_cache: dict = field(default_factory=dict)
@@ -540,6 +541,9 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
                                     sqlalchemy_executor(s.connections), audit=s.audit)
+        from cairn.marketplace.publish import ProductPublisher
+        s.publisher = ProductPublisher(s.engine, s.graph, s.contracts, s.audit, hub,
+                                       sqlalchemy_executor(s.connections) if s.connections else None)
     s.embed = EmbedService(s.engine, cfg.embed_signing_secret, cfg.embed_allowed_origins, cfg.public_url,
                            s.catalog, s.attributes, s.quality.store, s.can_view_as)
 

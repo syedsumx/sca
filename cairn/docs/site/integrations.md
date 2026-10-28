@@ -130,7 +130,7 @@ CREATE EXTERNAL TABLE cairn_assets (
   FILE_FORMAT = (TYPE = PARQUET);
 ```
 
-`gs://` and `abfs://` URIs work the same way. Credentials come from the usual environment variables (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) or the machine's identity. For S3-compatible storage, add `?endpoint_override=host:port&scheme=http` to the URI.
+`gs://` and `abfs://` URIs work the same way. Credentials come from the usual environment variables (`AWS_*`, `GOOGLE_APPLICATION_CREDENTIALS`, `AZURE_STORAGE_*`) or the machine's identity. For S3-compatible storage, add `?endpoint_override=host:port&scheme=http` to the URI. If your S3-compatible server predates AWS's default request checksums, also set `AWS_REQUEST_CHECKSUM_CALCULATION=when_required` and `AWS_RESPONSE_CHECKSUM_VALIDATION=when_required`.
 
 **Iceberg** in your catalog (AWS Glue, Unity, Polaris, Snowflake Open Catalog or any REST catalog). Each run is one snapshot, so time travel replaces partitions:
 

@@ -131,6 +131,8 @@ def notifier_tick(s) -> dict:
     if s.contracts is not None and now_ms - _SWEEP_STATE["contracts_ms"] >= 300_000:
         _SWEEP_STATE["contracts_ms"] = now_ms
         out["contracts"] = s.contracts.refresh_all()
+        if s.publisher is not None:
+            out["outdated_publications"] = s.publisher.sweep()
     if s.tag_sync is not None and now_ms - _SWEEP_STATE["synced_ms"] >= TAG_SYNC_EVERY_MS:
         _SWEEP_STATE["synced_ms"] = now_ms
         out["tag_sync"] = s.tag_sync.sweep()
