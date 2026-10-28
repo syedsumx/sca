@@ -102,6 +102,53 @@ Any `CAIRN_*` secret can be given as a file instead: `CAIRN_DB_PASSWORD_FILE=/ru
 Setting both forms is an error, so a stale value cannot hide the file. `ANTHROPIC_API_KEY_FILE` works
 the same way.
 
+## Reports
+
+**Reports** in the workspace answers the two questions that fund a catalog: is it used, and is the estate getting governed? It has four sections:
+
+- **Coverage:** the share of datasets that are described, owned, classified, certified and monitored. It is shown overall, by domain and by platform. Click any figure to list the datasets that lack it.
+- **Adoption:** weekly and monthly active users (people who opened an asset), asset views over 7 days, access requests over 30 days (submitted, approved and pending), and the median time to a decision.
+- **Quality:** open incidents, the monitored share, and the mean time to resolve. The resolve time is measured from a monitor's first failure to its next pass, over 30 days.
+- **Governance:** personas, purposes, active grants, and grants that expire within 7 days.
+
+A snapshot is computed once a day by the notifier and kept per day, so the history shows the trend. **Recompute now** refreshes it on demand, and **Download CSV** exports coverage by domain and by platform. Reports are for administrators (`MANAGE_GLOBAL_SETTINGS`). Set `CAIRN_REPORTS_OPEN=true` to show them to everyone who is signed in; the drill-down lists still show each person only the datasets they may see.
+
+The API, under `/cairn/api/reports`:
+
+- `GET` returns the latest snapshot,
+- `POST /refresh` recomputes it,
+- `GET /history?days=90` returns the headline figures per day,
+- `GET /coverage.csv` exports coverage,
+- `GET /assets?missing=owner&domain=urn:li:domain:finance` lists the datasets behind a figure (`domain=none` means no domain; `platform=` filters by platform).
+
+### Cost per asset
+
+**Reports → Cost** lists two kinds of table:
+
+- **Idle tables:** no reads in 30 days and nothing downstream in lineage, ranked by what they cost to store.
+- **Expensive per read:** tables whose storage and query cost is high for how rarely they are read.
+
+**Propose deprecation** notifies the table's owners and followers with the figures behind the proposal.
+
+Daily figures per table come from warehouse collectors, which run once a day for the previous day. Configure them in `CAIRN_COST_SOURCES`, a YAML file whose `sources` entries use the named connections:
+
+- **Snowflake** (`platform: snowflake`) reads `ACCOUNT_USAGE`:
+  - storage from `TABLE_STORAGE_METRICS`, priced at `storage_usd_per_tb_month` (default 23),
+  - compute from `QUERY_ATTRIBUTION_HISTORY` credits, priced at `credit_usd` (default 3), split evenly across the tables each query read (`ACCESS_HISTORY`).
+
+  The connection's role needs access to the `SNOWFLAKE` database.
+- **BigQuery** (`platform: bigquery`, `region: region-us`) reads `INFORMATION_SCHEMA`:
+  - `TABLE_STORAGE` logical bytes, at `storage_usd_per_gib_month`,
+  - `JOBS` bytes billed, at `usd_per_tib`, split across the referenced tables.
+
+For other sources, post daily rows to `POST /cairn/api/reports/costs` (`{"rows": [{urn, day, storage_bytes, storage_usd, compute_usd, reads}]}`). Posting a dataset and day again replaces that row.
+
+The rest of the API is under `/cairn/api/reports/costs`:
+
+- `GET /idle?days=30` and `GET /expensive?days=30` return the two lists,
+- `GET /asset?urn=…` returns one table's daily series,
+- `POST /propose-deprecation` with `{"urn", "reason"}` sends the proposal.
+
 ## Audit log
 
 Denied access decisions, policy, persona and purpose changes, grants, access requests,

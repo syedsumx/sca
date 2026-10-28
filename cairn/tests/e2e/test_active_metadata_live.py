@@ -1044,10 +1044,11 @@ def test_22_warehouse_tag_sync_plans_tags_from_catalog_labels(users):
 def test_23_data_contract_breaks_notifies_and_checks_ci(users):
     """A schema contract on this run's dataset is met; a breaking schema change breaks it and tells
     the owner; versions are immutable; the CI check flags a proposed breaking change."""
-    root, bob, carol = users["root"], users["bob"], users["carol"]
+    root, carol = users["root"], users["carol"]
+    outsider = client(mint_token(f"urn:li:corpuser:e2e_dave_{RUN}"))     # Bob owns DS by now (test_21)
     spec = {"dataset": DS, "version": "1.0.0", "owner": CAROL,
             "schema": {"columns": [{"name": "id", "type": "integer"}, {"name": "email", "type": "string"}]}}
-    assert bob.put("/quality/contracts", json=spec).status_code == 403
+    assert outsider.put("/quality/contracts", json=spec).status_code == 403
     out = root.put("/quality/contracts", json=spec)
     assert out.status_code == 200 and out.json()["status"] == "MET", out.text
     try:
@@ -1090,10 +1091,11 @@ def test_24_automation_previews_applies_and_undoes(users):
     """An automation over this run's dataset adds a tag and an owner where missing; a second run
     changes nothing; undo restores the previous metadata. Admin only."""
     root, bob = users["root"], users["bob"]
+    DAVE = f"urn:li:corpuser:e2e_dave_{RUN}"
     tag = f"urn:li:tag:automated-{RUN}"
     spec = {"name": f"e2e automation {RUN}",
             "select": {"attr": "resource.urn", "op": "contains", "value": f"am_{RUN}.public.customers"},
-            "actions": [{"type": "add_tag", "value": f"automated-{RUN}"}, {"type": "add_owner", "value": BOB}]}
+            "actions": [{"type": "add_tag", "value": f"automated-{RUN}"}, {"type": "add_owner", "value": DAVE}]}
     assert bob.post("/governance/automations/preview", json=spec).status_code == 403
     preview = eventually(lambda: (lambda p: p if p["matched"] == 1 else None)(
         root.post("/governance/automations/preview", json=spec).json()), timeout=60)   # the scan is search-backed
@@ -1105,7 +1107,7 @@ def test_24_automation_previews_applies_and_undoes(users):
         run = root.post(f"/governance/automations/{auto['id']}/run").json()
         assert run["state"] == "APPLIED" and run["changed"] == 1, run
         tags, owners = _tags_and_owners(DS)
-        assert tag in tags and BOB in owners and set(before[1]) <= set(owners)      # nobody was removed
+        assert tag in tags and DAVE in owners and set(before[1]) <= set(owners)     # nobody was removed
         assert root.post(f"/governance/automations/{auto['id']}/run").json()["state"] == "NOOP"
         undone = root.post(f"/governance/automations/runs/{run['id']}/undo").json()
         assert undone["state"] == "UNDONE" and undone["restored"] == 2, undone
@@ -1113,3 +1115,76 @@ def test_24_automation_previews_applies_and_undoes(users):
         assert [r["state"] for r in root.get(f"/governance/automations/{auto['id']}/runs").json()] == ["NOOP", "UNDONE"]
     finally:
         root.delete(f"/governance/automations/{auto['id']}")
+
+
+def test_25_reports_cover_adoption_and_drill_down(users):
+    """The reports snapshot counts this run's datasets, its drill-down lists the ones without an
+    owner, and the CSV exports coverage. Admin only by default."""
+    root, bob = users["root"], users["bob"]
+    assert bob.get("/reports").status_code == 403
+    snap = root.post("/reports/refresh").json()
+    assert snap["assets"] >= 2 and set(snap["coverage"]["overall"]) == {"description", "owner", "classification",
+                                                                       "certified", "monitored"}
+    assert snap["adoption"]["weekly_active_users"] >= 1 and snap["quality"]["monitored_pct"] > 0, snap
+    assert snap["governance"]["personas"] >= 0
+    unowned = [a["urn"] for a in root.get("/reports/assets", params={"missing": "owner", "limit": 2000}).json()]
+    owned = [a["urn"] for a in root.get("/reports/assets", params={"missing": "description", "limit": 2000}).json()]
+    assert DS not in unowned                                            # Carol owns it
+    assert DS not in owned                                              # and it is described
+    assert root.get("/reports/assets", params={"missing": "vibes"}).status_code == 400
+    csv_text = root.get("/reports/coverage.csv").text
+    assert csv_text.splitlines()[0].startswith("day,group,key,assets,description_pct")
+    assert root.get("/reports").json()["day"] == snap["day"]
+    assert [h["day"] for h in root.get("/reports/history").json()][-1] == snap["day"]
+
+
+def test_26_cost_per_asset_finds_idle_tables_and_proposes_deprecation(users):
+    """Daily costs posted for this run's tables: the unread one with nothing downstream is idle,
+    the read one is not; proposing deprecation tells the owner."""
+    import datetime
+
+    root, bob, carol = users["root"], users["bob"], users["carol"]
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    days = [(today - datetime.timedelta(days=d)).isoformat() for d in range(1, 8)]
+    rows = [{"urn": DS, "day": d, "storage_bytes": 10**12, "storage_usd": 0.8, "compute_usd": 2.0, "reads": 30} for d in days]
+    rows += [{"urn": DS_DOWN, "day": d, "storage_bytes": 4 * 10**12, "storage_usd": 3.0, "reads": 0} for d in days]
+    assert bob.post("/reports/costs", json={"rows": rows}).status_code == 403
+    assert root.post("/reports/costs", json={"rows": rows}).json() == {"ingested": 14}
+    idle = {t["urn"]: t for t in root.get("/reports/costs/idle").json()}
+    assert DS_DOWN in idle and DS not in idle, idle.keys()          # DS is read (and feeds DS_DOWN)
+    assert idle[DS_DOWN]["storage_usd"] == 21.0 and idle[DS_DOWN]["name"] == "customer_orders"
+    expensive = [t["urn"] for t in root.get("/reports/costs/expensive").json()]
+    assert expensive.index(DS_DOWN) < expensive.index(DS)
+    series = root.get("/reports/costs/asset", params={"urn": DS}).json()
+    assert series["last_30d"] == {"storage_usd": 5.6, "compute_usd": 14.0, "reads": 210}
+    emit(DS_DOWN, "ownership", {"owners": [{"owner": CAROL, "type": "DATAOWNER"}], "lastModified": STAMP})
+    assert root.post("/reports/costs/propose-deprecation", json={"urn": DS_DOWN, "reason": "unread"}).json()["proposed"]
+    eventually(lambda: [n for n in carol.get("/notify/inbox").json()
+                        if n["type"] == "asset.deprecation_proposed" and n.get("entity_urn") == DS_DOWN], timeout=30)
+
+
+def test_27_browser_extension_shows_the_dashboard_card(users):
+    """A Looker dashboard in the catalog: the context lookup finds it from its page URL (query string
+    and all) for a signed-in user, and the extension's side panel renders its card."""
+    root = users["root"]
+    url = f"https://acme.cloud.looker.com/dashboards/{int(RUN, 16) % 10**6}"
+    dash = f"urn:li:dashboard:(looker,dashboards.e2e_{RUN})"
+    emit(dash, "dashboardInfo", {"title": f"Revenue E2E {RUN}", "description": "Daily revenue by region.",
+                                 "dashboardUrl": url, "charts": [], "customProperties": {},
+                                 "lastModified": {"created": STAMP, "lastModified": STAMP}})
+    emit(dash, "ownership", {"owners": [{"owner": CAROL, "type": "DATAOWNER"}], "lastModified": STAMP})
+    found = eventually(lambda: (lambda r: r if r["urn"] else None)(
+        root.get("/embed/v1/context", params={"url": f"{url}?Region=EU&tile=3"}).json()), timeout=90)
+    assert found["urn"] == dash and found["card"]["name"] == f"Revenue E2E {RUN}", found
+    assert root.get("/embed/v1/context", params={"url": "https://acme.cloud.looker.com/"}).json()["urn"] is None
+    out = subprocess.run(["node", os.path.join(os.path.dirname(__file__), "ui_extension.js")], capture_output=True,
+                         text=True, timeout=240, env={
+                             **os.environ, "EDGE": EDGE, "DASHBOARD_URL": url, "DASHBOARD_NAME": f"Revenue E2E {RUN}",
+                             "SHOTS": os.environ.get("CAIRN_E2E_SCREENSHOT_DIR", ""),
+                             "UI_USER": os.environ.get("CAIRN_E2E_UI_USER", "admin"),
+                             "UI_PASSWORD": os.environ["CAIRN_E2E_UI_PASSWORD"]})
+    assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+    assert result["card"] and result["unknown"] and not result["errors"], result
+    assert "Daily revenue by region." in result["card"]["text"] and CAROL.split(":")[-1] in result["card"]["text"]
+    assert result["card"]["open"].endswith(f"/cairn/asset/{dash}")

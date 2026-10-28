@@ -81,6 +81,8 @@ class Services:
     connections: Optional[Any] = None       # named warehouse connections (quality, tag sync)
     contracts: Optional[Any] = None
     automations: Optional[Any] = None
+    reports: Optional[Any] = None
+    costs: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
 
@@ -471,6 +473,9 @@ def _build_active_metadata(s: Services) -> None:
         s.bulk = BulkService(s.engine, s.graph, s.audit)
         _build_contracts(s, hub, Event)
         _build_automations(s, hub, Event)
+        from cairn.reports.service import ReportService
+        s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
+        _build_costs(s, hub, Event)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
         s.tag_sync = TagSyncService(s.engine, lambda: Planner(s.graph).datasets(),
@@ -593,6 +598,28 @@ def _build_forms(s: Services, hub, Event) -> None:
 
     datasets = (lambda: Planner(s.graph).datasets()) if s.graph is not None else None
     s.forms = FormService(s.engine, s.graph, s.audit, notify, datasets)
+
+
+def _build_costs(s: Services, hub, Event) -> None:
+    from cairn.governance.pii import GraphLineage
+    from cairn.reports.costs import CostService
+
+    def has_downstream(urn: str) -> bool:
+        try:
+            return bool(GraphLineage(s.graph).downstream_datasets(urn))
+        except Exception:  # unknown lineage: never call a table idle on a guess
+            logger.warning("lineage lookup failed for %s", urn)
+            return True
+
+    def notify(urn: str, actor: str, reason: str, figures: dict) -> None:
+        name = (s.summaries([urn]).get(urn) or {}).get("name") or urn
+        hub.publish(Event(
+            type="asset.deprecation_proposed", title=f"Deprecation proposed: {name}",
+            body=(reason or "It looks unused.") + f" Last 30 days: {figures['reads']} reads, "
+                 f"${figures['storage_usd'] + figures['compute_usd']:.2f} to store and query.",
+            actor=actor, entity_urn=urn, include_owners=True, include_followers=True, payload=figures))
+
+    s.costs = CostService(s.engine, s.graph, has_downstream, notify, registry=s.connections, audit=s.audit)
 
 
 def _build_automations(s: Services, hub, Event) -> None:

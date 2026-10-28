@@ -13,6 +13,7 @@ export const HOST_SECTIONS: { route: string; hostPath: string }[] = [
     { route: '/marketplace', hostPath: '/cairn-marketplace' },
     { route: '/requests', hostPath: '/cairn-requests' },
     { route: '/governance', hostPath: '/cairn-governance' },
+    { route: '/reports', hostPath: '/cairn-reports' },
     { route: '/context', hostPath: '/cairn-context' },
     { route: '/assistant', hostPath: '/cairn-assistant' },
     { route: '/settings', hostPath: '/cairn-settings' },

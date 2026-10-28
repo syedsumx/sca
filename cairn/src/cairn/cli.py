@@ -112,6 +112,13 @@ def notifier_tick(s) -> dict:
     out["grants_expired"] = len(expired)
     if s.forms is not None:
         out["forms"] = forms_tick(s, now_ms)
+    if s.reports is not None and now_ms - _SWEEP_STATE["reports_ms"] >= 3_600_000:
+        _SWEEP_STATE["reports_ms"] = now_ms
+        if s.reports.due(now_ms):           # once a day: the first hourly check after midnight UTC
+            if s.costs is not None:         # yesterday's warehouse costs first, so the day is complete
+                from cairn.reports.costs import _day
+                out["costs"] = s.costs.collect_day(_day(now_ms - 86_400_000))
+            out["reports"] = s.reports.compute(now_ms)["day"]
     if s.automations is not None and now_ms - _SWEEP_STATE["automations_ms"] >= 60_000:
         _SWEEP_STATE["automations_ms"] = now_ms
         out["automations"] = s.automations.sweep(now_ms)
@@ -125,7 +132,7 @@ def notifier_tick(s) -> dict:
 
 
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
-_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0}
+_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0, "reports_ms": 0}
 
 
 _FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}

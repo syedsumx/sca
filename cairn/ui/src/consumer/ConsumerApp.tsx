@@ -18,6 +18,7 @@ const ProductPage = React.lazy(() => import('./pages/MarketplacePages').then((m)
 const RequestsPage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.RequestsPage })));
 const AssistantPage = React.lazy(() => import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })));
 const ContextInboxPage = React.lazy(() => import('./pages/ContextInboxPage').then((m) => ({ default: m.ContextInboxPage })));
+const ReportsPage = React.lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
 const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
@@ -33,6 +34,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/assistant', component: AssistantPage, exact: true },
     { path: '/context', component: ContextInboxPage, exact: true },
     { path: '/governance', component: GovernanceStudioPage, exact: true },
+    { path: '/reports', component: ReportsPage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
 ];
 

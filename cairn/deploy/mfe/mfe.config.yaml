@@ -48,6 +48,15 @@ microFrontends:
       enabled: true
       showInNav: true
     navIcon: ShieldCheck
+  - id: CairnReports
+    label: Reports
+    path: /cairn-reports
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: ChartBar
   - id: CairnContext
     label: Context inbox
     path: /cairn-context

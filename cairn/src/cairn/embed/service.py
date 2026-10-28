@@ -16,7 +16,7 @@ import json
 import time
 import uuid
 from typing import Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Boolean, Column, String, Table, select, update
@@ -46,6 +46,16 @@ class TokenRequest(BaseModel):
     scopes: list[str] = Field(default_factory=lambda: ["card", "quality", "lineage"])
     ttl_seconds: int = Field(default=7 * 86_400, ge=60, le=MAX_TTL)
     audience_origin: Optional[str] = None
+
+
+def page_key(url: str) -> str:
+    """The part of a BI page's URL that identifies it: no query string, and a hash only when it is
+    a route (Tableau keeps the view path in ``#/site/…/views/…``)."""
+    head, _, frag = url.partition("#")
+    head = head.split("?")[0]
+    if frag.startswith("/"):
+        return f"{head}#{frag.split('?')[0]}"
+    return head
 
 
 class EmbedError(Exception):
@@ -208,8 +218,11 @@ class EmbedService:
     def lookup(self, url: str) -> Optional[str]:
         if self.catalog is None:
             return None
-        base = url.split("?")[0].split("#")[0]
-        for condition, values in (("EQUAL", [url, base]), ("CONTAIN", [base])):
+        base = page_key(url)
+        attempts = [("EQUAL", sorted({url, base}))]
+        if urlsplit(base).path.strip("/") or "#/" in base:   # never "contains https://host/": that is everything
+            attempts.append(("CONTAIN", [base]))
+        for condition, values in attempts:
             data = self.catalog.graph.graphql(
                 "query($i: SearchAcrossEntitiesInput!){ searchAcrossEntities(input:$i){ searchResults { entity { urn } } } }",
                 {"i": {"query": "*", "start": 0, "count": 2, "orFilters": [
@@ -219,6 +232,16 @@ class EmbedService:
             if len(hits) == 1:
                 return hits[0]
         return None
+
+    def context(self, actor: str, url: str) -> dict:
+        """For the browser extension: the catalog card of the BI page the signed-in user has open."""
+        urn = self.lookup(url)
+        if not urn or not self.can_view_as(actor)(urn):
+            return {"urn": None, "page": page_key(url)}
+        card = self.card({"sub": actor}, urn)
+        monitors = [{"name": m.name, "type": m.type, "status": m.last_evaluation.status if m.last_evaluation else None}
+                    for m in (self.quality_store.list_monitors(urn) if self.quality_store else [])]
+        return {"urn": urn, "page": page_key(url), "card": card, "monitors": monitors}
 
     def _status(self, urn: str) -> Optional[str]:
         if self.quality_store is None:

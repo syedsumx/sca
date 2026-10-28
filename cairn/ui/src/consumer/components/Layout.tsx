@@ -48,6 +48,7 @@ export const NAV = [
     { to: '/requests', label: 'Requests', badge: true },
     { to: '/context', label: 'Context', feature: 'context' },
     { to: '/governance', label: 'Governance', feature: 'governance' },
+    { to: '/reports', label: 'Reports', feature: 'governance' },
     { to: '/settings', label: 'Settings' },
 ];
 

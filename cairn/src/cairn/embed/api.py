@@ -73,6 +73,11 @@ def build_router(svc: EmbedService, current_principal, can_view) -> APIRouter:
         urn = svc.lookup(url)
         return {"urn": urn if urn and can_view(p)(urn) else None}
 
+    @router.get("/context")
+    def context(url: str = Query(..., max_length=4000), p: Principal = Depends(current_principal)):
+        """The catalog card for a BI page, for the signed-in user (the browser extension)."""
+        return svc.context(p.urn, url)
+
     @router.get("/frame/{kind}", response_class=HTMLResponse)
     def frame(kind: str, request: Request, urn: str, token: str):
         if kind not in ("card", "quality", "lineage"):

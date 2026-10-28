@@ -10,7 +10,7 @@ const { chromium } = require('playwright');
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   const result = { entries: [], viaShell: null, viaWorkspace: null, errors };
-  const want = ['Discover', 'Data marketplace', 'Requests', 'Governance studio', 'Context inbox', 'Assistant',
+  const want = ['Discover', 'Data marketplace', 'Requests', 'Governance studio', 'Reports', 'Context inbox', 'Assistant',
     'Workspace settings'];
   try {
     await page.goto(`${EDGE}/login`, { waitUntil: 'domcontentloaded' });

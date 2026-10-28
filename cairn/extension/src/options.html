@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cairn for BI: options</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <main>
+    <h1>Cairn for BI</h1>
+    <p><label>Cairn address<br /><input id="cairnUrl" size="44" placeholder="https://cairn.example.com" /></label></p>
+    <p class="muted">Custom BI hosts, one per line (for example a self-hosted Looker or Tableau Server).</p>
+    <p><label>Looker<br /><textarea id="looker" rows="2" cols="44"></textarea></label></p>
+    <p><label>Tableau<br /><textarea id="tableau" rows="2" cols="44"></textarea></label></p>
+    <p><label>Power BI<br /><textarea id="powerbi" rows="2" cols="44"></textarea></label></p>
+    <p><button id="save">Save</button> <span id="saved" class="muted" aria-live="polite"></span></p>
+  </main>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

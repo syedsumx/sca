@@ -616,3 +616,49 @@ export interface AutomationPreview {
     sample_matched: string[];
     truncated: boolean;
 }
+
+export type CoverageFacet = 'description' | 'owner' | 'classification' | 'certified' | 'monitored';
+
+export interface CoverageRow extends Record<CoverageFacet, number> {
+    key: string | null;
+    assets: number;
+}
+
+export interface ReportSnapshot {
+    day: string;
+    computed_ms: number;
+    assets: number;
+    coverage: { overall: Record<CoverageFacet, number>; by_domain: CoverageRow[]; by_platform: CoverageRow[] };
+    adoption: {
+        weekly_active_users: number;
+        monthly_active_users: number;
+        asset_views_7d: number;
+        requests_30d: number;
+        approved_30d: number;
+        pending_requests: number;
+        median_hours_to_decision: number | null;
+    };
+    quality: { open_incidents: number; monitored_pct: number; resolved_30d: number; mean_hours_to_resolve: number | null };
+    governance: { personas?: number; purposes?: number; active_grants?: number; grants_expiring_7d?: number };
+}
+
+export interface ReportAsset extends Record<CoverageFacet, boolean> {
+    urn: string;
+    name: string;
+    domain: string | null;
+    platform: string;
+}
+
+export interface CostTotal {
+    urn: string;
+    name: string;
+    platform: string;
+    storage_usd: number;
+    compute_usd: number;
+    cost_usd: number;
+    reads: number;
+    storage_bytes: number | null;
+    last_day: string;
+    monthly_storage_usd?: number;
+    cost_per_read_usd?: number;
+}

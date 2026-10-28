@@ -1,0 +1,32 @@
+{
+  "manifest_version": 3,
+  "name": "Cairn for BI",
+  "version": "0.1.0",
+  "description": "Owners, certification, quality and documentation for the dashboard you have open, from your Cairn catalog.",
+  "permissions": ["sidePanel", "storage", "scripting", "tabs"],
+  "host_permissions": [
+    "https://*.looker.com/*",
+    "https://*.cloud.looker.com/*",
+    "https://*.online.tableau.com/*",
+    "https://*.tableau.com/*",
+    "https://app.powerbi.com/*"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Cairn" },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.looker.com/*",
+        "https://*.cloud.looker.com/*",
+        "https://*.online.tableau.com/*",
+        "https://*.tableau.com/*",
+        "https://app.powerbi.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

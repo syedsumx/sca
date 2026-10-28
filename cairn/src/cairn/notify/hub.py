@@ -37,7 +37,7 @@ EVENT_TYPES = [
     "certification.requested", "certification.decided", "asset.deprecated",
     "quality.incident.raised", "quality.incident.resolved", "discussion.mention", "discussion.reply",
     "context.drift", "subscription.update", "form.assigned", "form.due", "contract.broken", "contract.restored",
-    "automation.applied",
+    "automation.applied", "asset.deprecation_proposed",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

@@ -27,6 +27,7 @@ export const EVENT_COPY: Record<string, string> = {
     'contract.broken': 'A data contract on something I own, follow or subscribe to breaks',
     'contract.restored': 'A broken data contract holds again',
     'automation.applied': 'An automation that notifies me changed assets',
+    'asset.deprecation_proposed': 'Someone proposes deprecating an asset I own or follow',
 };
 
 function NotificationSettings() {

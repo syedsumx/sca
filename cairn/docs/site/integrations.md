@@ -54,3 +54,19 @@ Show trust information inside BI tools and portals:
 Embed tokens are scoped to assets, bound to the origins in `CAIRN_EMBED_ALLOWED_ORIGINS` and can be
 revoked. A page on any other origin gets neither: the browser refuses to frame the embeddable pages
 (`Content-Security-Policy: frame-ancestors`) and refuses the web components' data requests (CORS). Packaged guides exist for Tableau, Looker and Power BI.
+
+## Browser extension for BI tools
+
+The **Cairn for BI** Chrome extension (Manifest V3, in `extension/`) shows the catalog card in a side panel for the Looker, Tableau or Power BI dashboard you have open. The card shows the description, owners, certification, data quality and checks, and an **Open in Cairn** link.
+
+- **Pages it recognises:**
+  - Looker dashboards, Looks and Explores on `*.looker.com`,
+  - Tableau views and workbooks on Tableau Cloud and `*.tableau.com`, including routes in `#/site/…`,
+  - Power BI reports and dashboards on `app.powerbi.com`.
+
+  It follows navigation inside these single-page apps.
+- **How it finds the asset:** it looks up the page through `GET /cairn/api/embed/v1/context?url=…`, using the person's own Cairn session. They see only what they may see, and a sign-in link when they aren't signed in. Query strings and in-page anchors are ignored, so filters and tiles don't stop a match.
+- **What it reads:** only the page address, never the page content.
+- **Custom domains:** a self-hosted Looker or Tableau Server, for example, are added in the extension's options. The browser asks for access to each host you add, and to nothing else.
+
+**Rolling it out.** `node extension/build.mjs --cairn-url https://cairn.example.com` builds `extension/dist/` with your Cairn address and its host permission built in, ready to load unpacked, publish privately, or force-install through Chrome enterprise policy. Without `--cairn-url`, people enter the address in the options. `npm test` in `extension/` runs its unit tests.

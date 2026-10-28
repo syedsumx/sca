@@ -43,6 +43,10 @@ import type {
     TagSyncResult,
     Contract,
     Automation,
+    CoverageFacet,
+    CostTotal,
+    ReportAsset,
+    ReportSnapshot,
     AutomationPreview,
     AutomationRun,
     AutomationSpec,
@@ -379,6 +383,37 @@ export class ConsumerClient extends CairnClient {
 
     undoAutomationRun(runId: string) {
         return this.request<AutomationRun>('POST', `/governance/automations/runs/${enc(runId)}/undo`);
+    }
+
+    report(opts?: RequestOptions) {
+        return this.request<ReportSnapshot>('GET', '/reports', undefined, opts);
+    }
+
+    refreshReport() {
+        return this.request<ReportSnapshot>('POST', '/reports/refresh');
+    }
+
+    reportCsv() {
+        return this.request<string>('GET', '/reports/coverage.csv');
+    }
+
+    reportAssets(q: { missing?: CoverageFacet; domain?: string | null; platform?: string }, opts?: RequestOptions) {
+        return this.request<ReportAsset[]>('GET', '/reports/assets', undefined, {
+            ...opts,
+            query: { missing: q.missing, platform: q.platform, domain: q.domain === null ? 'none' : q.domain },
+        });
+    }
+
+    idleTables(days = 30, opts?: RequestOptions) {
+        return this.request<CostTotal[]>('GET', '/reports/costs/idle', undefined, { ...opts, query: { days } });
+    }
+
+    expensiveTables(days = 30, opts?: RequestOptions) {
+        return this.request<CostTotal[]>('GET', '/reports/costs/expensive', undefined, { ...opts, query: { days } });
+    }
+
+    proposeDeprecation(urn: string, reason: string) {
+        return this.request<{ proposed: boolean }>('POST', '/reports/costs/propose-deprecation', { urn, reason });
     }
 
     listPersonas(opts?: RequestOptions) {

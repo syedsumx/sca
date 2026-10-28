@@ -1,0 +1,1 @@
+"""Governance and adoption reporting."""

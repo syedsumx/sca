@@ -521,3 +521,13 @@ def test_proxy_hides_entities_the_caller_is_denied_in_authoritative_mode(gov):
         pdp.mode = "additive"                                                      # native allow wins
         r = c.post("/api/v2/graphql", json={"query": "{ search }"}, headers=token("bob"))
         assert r.json()["data"]["search"]["searchResults"][0]["entity"]["properties"] == {"name": "orders"}
+
+
+def test_page_key_keeps_route_hashes_only():
+    from cairn.embed.service import page_key
+
+    assert page_key("https://acme.looker.com/dashboards/42?Region=EU#tile") == "https://acme.looker.com/dashboards/42"
+    assert page_key("https://prod.online.tableau.com/#/site/acme/views/Sales/Overview?:iid=3") == \
+        "https://prod.online.tableau.com/#/site/acme/views/Sales/Overview"
+    assert page_key("https://app.powerbi.com/groups/me/reports/abc/ReportSection?experience=power-bi") == \
+        "https://app.powerbi.com/groups/me/reports/abc/ReportSection"
