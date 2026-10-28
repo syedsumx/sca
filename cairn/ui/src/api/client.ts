@@ -67,6 +67,8 @@ export interface CairnClientOptions {
 export interface RequestOptions {
     signal?: AbortSignal;
     query?: Record<string, string | number | boolean | undefined | null>;
+    /** Send a string body as-is with this content type instead of as JSON. */
+    contentType?: string;
 }
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
@@ -115,7 +117,8 @@ export class CairnClient {
     async request<T>(method: Method, path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
         const url = `${this.baseUrl}${path}${buildQuery(opts.query)}`;
         const headers: Record<string, string> = { Accept: 'application/json' };
-        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        const raw = opts.contentType !== undefined && typeof body === 'string';
+        if (body !== undefined) headers['Content-Type'] = raw ? opts.contentType! : 'application/json';
         const token = typeof this.token === 'function' ? this.token() : this.token;
         if (token) headers.Authorization = `Bearer ${token}`;
 
@@ -124,7 +127,7 @@ export class CairnClient {
             response = await this.fetchImpl(url, {
                 method,
                 headers,
-                body: body === undefined ? undefined : JSON.stringify(body),
+                body: body === undefined ? undefined : raw ? (body as string) : JSON.stringify(body),
                 credentials: 'include',
                 signal: opts.signal,
             });

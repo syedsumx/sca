@@ -18,7 +18,8 @@ export function mockFetch(routes: Record<string, Handler | unknown>, calls: Mock
     const impl = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
         const url = new URL(String(input), 'http://localhost');
         const method = (init?.method ?? 'GET').toUpperCase();
-        const body = init?.body ? JSON.parse(String(init.body)) : undefined;
+        const ct = (init?.headers as Record<string, string> | undefined)?.['Content-Type'] ?? 'application/json';
+        const body = init?.body ? (ct === 'application/json' ? JSON.parse(String(init.body)) : String(init.body)) : undefined;
         let path = url.pathname.replace(/^\/cairn\/api/, '');
         let key = `${method} ${decodeURIComponent(path)}`;
         if (url.pathname === '/api/v2/graphql') {

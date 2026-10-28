@@ -1,4 +1,4 @@
-import { Empty, Pagination, Tag } from 'antd';
+import { Empty, Pagination, Space, Tag } from 'antd';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
@@ -6,6 +6,7 @@ import styled from 'styled-components';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, SearchResponse } from '../api/types';
 import { AssetRow, assetPath } from '../components/Assets';
+import { BulkEdit } from '../components/BulkEdit';
 import { useBookmarkToggle, useBookmarks } from '../components/Engagement';
 import { FACET_LABELS, FacetPanel } from '../components/FacetPanel';
 import { OmniSearchBar } from '../components/OmniSearchBar';
@@ -110,10 +111,13 @@ export function SearchPage() {
                                 </Tag>
                             ))}
                         </div>
-                        <Muted aria-live="polite">
-                            {result.data ? `${result.data.total.toLocaleString()} results` : ''}
-                            {latency !== null && result.data ? ` · ${latency} ms` : ''}
-                        </Muted>
+                        <Space>
+                            <Muted aria-live="polite">
+                                {result.data ? `${result.data.total.toLocaleString()} results` : ''}
+                                {latency !== null && result.data ? ` · ${latency} ms` : ''}
+                            </Muted>
+                            {result.data && result.data.total > 0 && <BulkEdit query={state.query} />}
+                        </Space>
                     </div>
                     {result.loading &&
                         Array.from({ length: 6 }).map((_, i) => (
