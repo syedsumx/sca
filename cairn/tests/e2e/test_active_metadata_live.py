@@ -788,7 +788,8 @@ def test_18_semantic_search_similar_assets_and_index_upkeep(users):
     assert out.returncode == 0, out.stdout[-3000:] + out.stderr[-3000:]
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert result["related"] == expected and not result["errors"], (result, expected)
-    assert result["similar"] == [h["urn"] for h in similar], (result, similar)
+    shown = root.get("/ai/similar", params={"urn": DS}).json()["results"]      # what the page asks for (5)
+    assert result["similar"] == [h["urn"] for h in shown], (result, shown)
 
 
 # --------------------------------------------------------------------------- 19-20. Slack, Teams, embeds
@@ -1912,7 +1913,7 @@ def test_47_openlineage_events_with_an_api_key_become_jobs_lineage_and_runs(user
         assert done.status_code == 200, done.text
         job = f"urn:li:dataJob:(urn:li:dataFlow:(airflow,{dag},PROD),load)"
         q = ("query($u:String!){ dataJob(urn:$u){ inputOutput { inputDatasets { urn } outputDatasets { urn } "
-             "fineGrainedLineages { downstreams { urn } } } } }")
+             "fineGrainedLineages { downstreams { urn path } } } } }")
 
         def landed():
             io = (gql(q, {"u": job}).get("dataJob") or {}).get("inputOutput") or {}
@@ -1920,7 +1921,8 @@ def test_47_openlineage_events_with_an_api_key_become_jobs_lineage_and_runs(user
         io = eventually(landed, timeout=60)
         assert [d["urn"] for d in io["inputDatasets"]] == [DS]
         assert io["outputDatasets"][0]["urn"] == f"urn:li:dataset:(urn:li:dataPlatform:snowflake,{out_table},PROD)"
-        assert io["fineGrainedLineages"][0]["downstreams"][0]["urn"].endswith(",total)")
+        down = io["fineGrainedLineages"][0]["downstreams"][0]           # a column: its dataset and path
+        assert down["path"] == "total" and down["urn"] == io["outputDatasets"][0]["urn"], io
         refused = httpx.post(url, json={**base, "eventType": "START"}, timeout=30)
         assert refused.status_code == 401
     finally:
