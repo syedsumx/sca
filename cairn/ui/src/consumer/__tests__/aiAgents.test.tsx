@@ -84,3 +84,26 @@ it('administrators create an automation key shown once, and change scopes', asyn
     fireEvent.click(group.querySelectorAll('input[type=checkbox]')[3]);
     await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ scopes: ['read', 'write'] }));
 });
+
+it('pauses every agent and sets an agent to apply confident suggestions', async () => {
+    const calls: MockCall[] = [];
+    wrap(
+        true,
+        {
+            'GET /me/agents': [],
+            'GET /admin/agents': [
+                { ...BOT, autonomy: 'suggest', per_minute: 120, daily_requests: 20000, requests_today: 42 },
+            ],
+            'GET /admin/agents/settings': { paused: false },
+            'POST /admin/agents/pause': { paused: true },
+            'PATCH /admin/agents/agt_bot': { ...BOT, autonomy: 'auto' },
+        },
+        calls,
+    );
+    expect(await screen.findByText(/42 request\(s\) today/)).toBeTruthy();
+    fireEvent.click(screen.getByLabelText('Pause all agents'));
+    await waitFor(() => expect(calls.find((c) => c.path === '/admin/agents/pause')?.body).toEqual({ paused: true }));
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Autonomy of Nightly doc bot' }));
+    fireEvent.click(await screen.findByText('Apply confident suggestions'));
+    await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ autonomy: 'auto' }));
+});

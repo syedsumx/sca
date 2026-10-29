@@ -223,7 +223,19 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
     @router.get("/admin/agents")
     def list_agents(p: Principal = Depends(current_principal)):
         _admin(p)
-        return svc.list()
+        used = svc.usage_today()
+        return [{**a, "requests_today": used.get(a["id"], 0)} for a in svc.list()]
+
+    @router.get("/admin/agents/settings")
+    def agent_settings(p: Principal = Depends(current_principal)):
+        _admin(p)
+        return svc.settings()
+
+    @router.post("/admin/agents/pause")
+    def pause_agents(body: dict, p: Principal = Depends(current_principal)):
+        """``{"paused": true}`` stops every agent credential at once (the kill switch)."""
+        _admin(p)
+        return svc.pause(bool(body.get("paused")), p.urn)
 
     @router.post("/admin/agents", status_code=201)
     def create_agent(spec: AgentIn, p: Principal = Depends(current_principal)):

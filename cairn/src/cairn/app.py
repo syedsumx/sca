@@ -47,6 +47,12 @@ def _principal_dependency(services: Services):
             if need is None or need not in principal.scopes:
                 why = "not allowed for agents" if need is None else f"needs scope {need}"
                 raise HTTPException(403, f"this agent may not do this ({why})")
+            from cairn.identity.agents import AgentError
+
+            try:
+                services.agents.admit(principal.agent)
+            except AgentError as e:
+                raise HTTPException(e.status, str(e), headers={"Retry-After": "60"})
         if services.licence is not None:
             route = getattr(request.scope.get("route"), "path", request.url.path)
             try:
@@ -80,7 +86,10 @@ class _AgentAttribution:
         if scope["type"] == "http" and self.services.agents is not None:
             auth = next((v.decode() for k, v in scope.get("headers", []) if k == b"authorization"), "")
             if auth[:7].lower() == "bearer " and auth[7:].strip().startswith(("ca_", "cat_")):
-                grant = self.services.agents.resolve(auth[7:].strip())
+                try:
+                    grant = self.services.agents.resolve(auth[7:].strip())
+                except Exception:  # noqa: BLE001 - paused: the request is refused when it is authenticated
+                    grant = None
                 agent = grant.agent if grant else None
         if agent is None:
             await self.app(scope, receive, send)

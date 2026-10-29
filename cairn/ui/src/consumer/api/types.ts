@@ -693,6 +693,11 @@ export interface AiAgent {
     key?: string;
     granted_scopes?: AgentScope[];
     since_ms?: number;
+    autonomy?: 'suggest' | 'auto';
+    auto_accept_at?: number;
+    per_minute?: number;
+    daily_requests?: number;
+    requests_today?: number;
 }
 
 export interface AskResult {

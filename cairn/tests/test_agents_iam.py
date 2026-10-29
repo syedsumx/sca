@@ -227,3 +227,56 @@ def test_mcp_tools_respect_agent_scopes(stack):
         assert asyncio.run(server.call_tool("get_quality_status", {"dataset_urn": DS})).structured_content["dataset_urn"] == DS
     finally:
         _principal.reset(token)
+
+
+def test_hub_pause_quotas_and_autonomy(stack):
+    from cairn.ai.mcp_server import CairnTools, _principal
+    from cairn.common.security import Principal
+
+    s, c = stack
+    admin = {"X-Cairn-Actor": ADMIN}
+    made = c.post("/admin/agents", json={"name": "Tagger", "scopes": ["read", "propose"], "owner": ADMIN},
+                  headers=admin).json()
+    h = {"Authorization": f"Bearer {made['key']}"}
+    assert made["autonomy"] == "suggest" and made["per_minute"] == 120
+
+    # Kill switch: every agent credential stops, with a clear reason; people are unaffected.
+    assert c.post("/admin/agents/pause", json={"paused": True}, headers=admin).json()["paused"] is True
+    stopped = c.get("/me", headers=h)
+    assert stopped.status_code == 401 and "paused" in stopped.text
+    assert c.get("/me", headers=admin).status_code == 200
+    c.post("/admin/agents/pause", json={"paused": False}, headers=admin)
+    assert c.get("/me", headers=h).status_code == 200
+
+    # Quotas: per minute, then counted per day.
+    c.patch(f"/admin/agents/{made['id']}", json={"per_minute": 3}, headers=admin)
+    codes = [c.get("/me", headers=h).status_code for _ in range(4)]
+    assert codes[:2] == [200, 200] and codes[-1] == 429
+    today = next(a for a in c.get("/admin/agents", headers=admin).json() if a["id"] == made["id"])["requests_today"]
+    assert today == 3                         # admitted requests only: refused ones do not use the daily quota
+
+    # Autonomy: confident suggestions apply at once, as the person (who may make the change).
+    c.patch(f"/admin/agents/{made['id']}", json={"autonomy": "auto", "auto_accept_at": 0.8, "per_minute": 100},
+            headers=admin)
+    s.graph.aspects[(DS, "schemaMetadata")] = {"fields": [{"fieldPath": "id"}]}
+    token = _principal.set(Principal(ADMIN, "agent", agent=made["id"], scopes=("read", "propose")))
+    try:
+        tools = CairnTools(s)
+        sure = tools.suggest_tags(DS, ["Gold"], confidence=0.95)
+        unsure = tools.suggest_tags(DS, ["Silver"], confidence=0.6)
+    finally:
+        _principal.reset(token)
+    assert sure["applied"] and sure["applied"][0]["state"] == "AUTO_ACCEPTED" and "Applied at once" in sure["note"]
+    assert unsure["queued"] and not unsure["applied"]
+    assert {t["tag"] for t in s.graph.get_aspect(DS, "globalTags")["tags"]} == {"urn:li:tag:Gold"}
+    # A person without the privilege: the agent's confident suggestion still waits for review.
+    token = _principal.set(Principal(ANA, "agent", agent=made["id"], scopes=("read", "propose")))
+    try:
+        s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="read", effect="allow", actions=["VIEW_ENTITY_PAGE"],
+                                                       condition={"attr": "subject.urn", "op": "exists"})]))
+        held = CairnTools(s).suggest_tags(DS, ["Bronze"], confidence=0.99)
+    finally:
+        _principal.reset(token)
+    assert held["queued"] and not held["applied"]
+    actions = [e["action"] for e in s.audit.export(category="agents")]
+    assert "agents.paused" in actions and "agents.resumed" in actions

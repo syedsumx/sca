@@ -262,7 +262,32 @@ export class ConsumerClient extends CairnClient {
         return this.request<AiAgent>('POST', '/admin/agents', { name, scopes, owner: owner || undefined });
     }
 
-    updateAiAgent(id: string, patch: { scopes?: AgentScope[]; enabled?: boolean; ai_system?: string }) {
+    agentSettings(opts?: RequestOptions) {
+        return this.request<{ paused: boolean; changed_by?: string; changed_ms?: number }>(
+            'GET',
+            '/admin/agents/settings',
+            undefined,
+            opts,
+        );
+    }
+
+    /** The kill switch: pause (or resume) every AI agent at once. */
+    pauseAgents(paused: boolean) {
+        return this.request<{ paused: boolean }>('POST', '/admin/agents/pause', { paused });
+    }
+
+    updateAiAgent(
+        id: string,
+        patch: {
+            scopes?: AgentScope[];
+            enabled?: boolean;
+            ai_system?: string;
+            autonomy?: 'suggest' | 'auto';
+            auto_accept_at?: number;
+            per_minute?: number;
+            daily_requests?: number;
+        },
+    ) {
         return this.request<AiAgent>('PATCH', `/admin/agents/${enc(id)}`, patch);
     }
 

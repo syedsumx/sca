@@ -21,6 +21,11 @@ Credentials:
 
 An agent linked to an AI system in the register only works while that system is approved. Every
 audit entry made through an agent names it.
+
+Control (the agent hub): administrators can pause every agent at once; each agent has request
+quotas (per minute and per day) and an autonomy level: ``suggest`` (everything it proposes waits for
+review) or ``auto`` (its suggestions at or above a confidence apply at once, when the person it acts
+for may make that change).
 """
 
 from __future__ import annotations
@@ -36,7 +41,7 @@ from typing import Any, Callable, Literal, Optional
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import BigInteger, Boolean, Column, Index, String, Table, delete, select, update
+from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, String, Table, delete, select, update
 
 from cairn.common.db import JSONText, metadata
 
@@ -80,6 +85,18 @@ agent_tokens = Table(
     Column("created_ms", BigInteger, nullable=False),
 )
 Index("ix_cairn_agent_tokens_actor", agent_tokens.c.actor)
+agent_settings = Table(
+    "cairn_agent_settings", metadata,
+    Column("key", String(32), primary_key=True),                # "global"
+    Column("value", JSONText, nullable=False),
+)
+agent_usage = Table(
+    "cairn_agent_usage", metadata,
+    Column("agent", String(40), primary_key=True),
+    Column("day", String(10), primary_key=True),                # UTC date
+    Column("requests", Integer, nullable=False),
+)
+DEFAULT_POLICY = {"autonomy": "suggest", "auto_accept_at": 0.9, "per_minute": 120, "daily_requests": 20_000}
 
 # The agent behind the current request (audit attribution); set where the principal is resolved.
 current_agent: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_agent", default=None)
@@ -90,6 +107,10 @@ class AgentError(ValueError):
         super().__init__(message)
         self.status = status
         self.oauth_error = oauth_error
+
+
+class AgentsPaused(Exception):
+    pass
 
 
 @dataclass(frozen=True)
@@ -149,6 +170,10 @@ class AgentPatch(BaseModel):
     enabled: Optional[bool] = None
     ai_system: Optional[str] = None
     name: Optional[str] = Field(default=None, min_length=2, max_length=200)
+    autonomy: Optional[Literal["suggest", "auto"]] = None
+    auto_accept_at: Optional[float] = Field(default=None, ge=0.5, le=1.0)
+    per_minute: Optional[int] = Field(default=None, ge=1, le=10_000)
+    daily_requests: Optional[int] = Field(default=None, ge=1, le=10_000_000)
 
     @field_validator("scopes")
     @classmethod
@@ -181,8 +206,18 @@ class AgentService:
 
     # ---- clients -------------------------------------------------------------------------
     @staticmethod
-    def _public(r) -> dict:
+    def _policy(details: Optional[dict]) -> dict:
+        return {**DEFAULT_POLICY, **((details or {}).get("policy") or {})}
+
+    def policy(self, agent_id: str) -> dict:
+        with self.engine.connect() as conn:
+            d = conn.execute(select(agent_clients.c.details).where(agent_clients.c.id == agent_id)).scalar()
+        return self._policy(d)
+
+    @classmethod
+    def _public(cls, r) -> dict:
         return {"id": r.id, "name": r.name, "kind": r.kind, "owner": r.owner, "scopes": list(r.scopes),
+                **cls._policy(r.details),
                 "redirect_uris": list(r.redirect_uris), "ai_system": r.ai_system, "enabled": r.enabled,
                 "created_by": r.created_by, "created_ms": r.created_ms, "last_used_ms": r.last_used_ms,
                 **{k: v for k, v in (r.details or {}).items() if k in ("client_uri", "software_id", "description")}}
@@ -248,12 +283,18 @@ class AgentService:
     def update(self, agent_id: str, patch: AgentPatch, actor: str) -> dict:
         self.get(agent_id)
         values = {k: v for k, v in patch.model_dump().items() if v is not None}
+        policy = {k: values.pop(k) for k in list(values) if k in DEFAULT_POLICY}
+        if policy:
+            with self.engine.connect() as conn:
+                details = conn.execute(select(agent_clients.c.details).where(agent_clients.c.id == agent_id)).scalar()
+            values["details"] = {**(details or {}), "policy": {**((details or {}).get("policy") or {}), **policy}}
         if values:
             with self.engine.begin() as conn:
                 conn.execute(update(agent_clients).where(agent_clients.c.id == agent_id).values(**values))
             if values.get("enabled") is False:
                 self._revoke(agent_id)
-        self._record("agent.updated", actor, agent_id, values)
+        self._record("agent.updated", actor, agent_id, {**{k: v for k, v in values.items() if k != "details"},
+                                                        **policy})
         return self.get(agent_id)
 
     def rotate_key(self, agent_id: str, actor: str) -> dict:
@@ -279,6 +320,55 @@ class AgentService:
             q = q.where(agent_tokens.c.actor == actor)
         with self.engine.begin() as conn:
             return conn.execute(q.values(revoked=True)).rowcount
+
+    # ---- the hub: pause, quotas, usage ---------------------------------------------------------
+    def settings(self) -> dict:
+        with self.engine.connect() as conn:
+            v = conn.execute(select(agent_settings.c.value).where(agent_settings.c.key == "global")).scalar()
+        return {"paused": False, **(v or {})}
+
+    def pause(self, paused: bool, actor: str) -> dict:
+        value = {"paused": paused, "changed_by": actor, "changed_ms": _now()}
+        with self.engine.begin() as conn:
+            if conn.execute(update(agent_settings).where(agent_settings.c.key == "global").values(value=value)).rowcount == 0:
+                conn.execute(agent_settings.insert().values(key="global", value=value))
+        self._paused_cache = (0, paused)
+        self._record("agents.paused" if paused else "agents.resumed", actor, "all", {})
+        return self.settings()
+
+    def paused(self) -> bool:
+        now = time.monotonic()
+        at, value = getattr(self, "_paused_cache", (0, False))
+        if now - at > 5:                       # cheap enough per request, fresh within seconds everywhere
+            value = bool(self.settings().get("paused"))
+            self._paused_cache = (now, value)
+        return value
+
+    def usage_today(self) -> dict[str, int]:
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        with self.engine.connect() as conn:
+            return {r.agent: r.requests for r in conn.execute(select(agent_usage).where(agent_usage.c.day == day))}
+
+    def admit(self, agent_id: str) -> None:
+        """Count one request for the agent; AgentError 429 when over its per-minute or daily quota."""
+        policy, minute = self.policy(agent_id), int(time.time() // 60)
+        window = getattr(self, "_minute", {})
+        key = (agent_id, minute)
+        window = {k: v for k, v in window.items() if k[1] == minute}
+        window[key] = window.get(key, 0) + 1
+        self._minute = window
+        if window[key] > int(policy["per_minute"]):
+            raise AgentError(f"this agent is over its limit of {policy['per_minute']} requests a minute", 429,
+                             "rate_limited")
+        day = time.strftime("%Y-%m-%d", time.gmtime())
+        with self.engine.begin() as conn:
+            q = update(agent_usage).where(agent_usage.c.agent == agent_id, agent_usage.c.day == day)
+            if conn.execute(q.values(requests=agent_usage.c.requests + 1)).rowcount == 0:
+                conn.execute(agent_usage.insert().values(agent=agent_id, day=day, requests=1))
+            used = conn.execute(select(agent_usage.c.requests).where(agent_usage.c.agent == agent_id,
+                                                                     agent_usage.c.day == day)).scalar()
+        if used > int(policy["daily_requests"]):
+            raise AgentError(f"this agent used its {policy['daily_requests']} requests for today", 429, "rate_limited")
 
     # ---- a person's connected agents --------------------------------------------------------
     def connected(self, actor: str) -> list[dict]:
@@ -398,7 +488,10 @@ class AgentService:
 
     # ---- resolving a credential -----------------------------------------------------------------
     def resolve(self, token: str) -> Optional[AgentGrant]:
-        """The grant behind an agent key or access token, or None when it is not valid now."""
+        """The grant behind an agent key or access token, or None when it is not valid now. Raises
+        :class:`AgentsPaused` while an administrator has paused every agent."""
+        if self.paused():
+            raise AgentsPaused("AI agents are paused by an administrator")
         now = _now()
         with self.engine.connect() as conn:
             if token.startswith(KEY_PREFIX):

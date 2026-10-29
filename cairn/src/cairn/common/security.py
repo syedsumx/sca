@@ -85,7 +85,10 @@ class IdentityResolver:
                     raise AuthenticationError("unknown or disabled extension token")
                 return Principal(actor, "extension")
             if token.startswith(("ca_", "cat_")) and self.agent_lookup is not None:
-                grant = self.agent_lookup(token)
+                try:
+                    grant = self.agent_lookup(token)
+                except Exception as e:  # noqa: BLE001 - paused agents: say so instead of "invalid"
+                    raise AuthenticationError(str(e)) from e
                 if grant is None:
                     raise AuthenticationError("unknown, expired or revoked agent credential")
                 return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes))

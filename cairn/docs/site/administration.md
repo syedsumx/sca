@@ -99,6 +99,20 @@ a name, the person it acts as, and its scopes. The key (`ca_…`) is shown once;
 it. To make an agent depend on the AI system register, link it to an AI system
 (`PATCH /admin/agents/{id}` with `ai_system`): it stops working whenever that system is not approved.
 
+**Controlling agents** (Settings → AI agents, for administrators):
+
+- **Pause all agents** is the kill switch. Every agent credential is refused, with the reason, until
+  you resume them. People are unaffected.
+- **Quotas:** each agent has a limit per minute (default 120) and per day (default 20,000). Over a
+  limit it gets `429` with `Retry-After`. Requests refused this way do not count against the daily
+  quota. The list shows each agent's requests today.
+- **Autonomy:**
+  - *Suggestions wait for review* (the default).
+  - *Apply confident suggestions*: an agent's suggestion at or above the confidence you set applies
+    at once, only if the person it acts for may make that change; otherwise it waits like any other.
+    Auto-applied suggestions show as *auto accepted* in the AI steward history and can be undone
+    there.
+
 ## Main settings
 
 | Setting | Purpose |

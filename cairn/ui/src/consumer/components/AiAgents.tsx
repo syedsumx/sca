@@ -1,4 +1,17 @@
-import { Alert, Button, Checkbox, Input, List, Popconfirm, Space, Switch, Tag, Typography } from 'antd';
+import {
+    Alert,
+    Button,
+    Checkbox,
+    Input,
+    InputNumber,
+    List,
+    Popconfirm,
+    Select,
+    Space,
+    Switch,
+    Tag,
+    Typography,
+} from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
@@ -79,6 +92,7 @@ function MyAgents() {
 function AllAgents() {
     const { client } = useConsumerApi();
     const q = useDheQuery<AiAgent[]>('/admin/agents', (c, signal) => c.listAiAgents({ signal }));
+    const hub = useDheQuery<{ paused: boolean }>('/admin/agents/settings', (c, signal) => c.agentSettings({ signal }));
     const [name, setName] = useState('');
     const [owner, setOwner] = useState('');
     const [scopes, setScopes] = useState<AgentScope[]>(['read']);
@@ -98,6 +112,27 @@ function AllAgents() {
     return (
         <section aria-label="All agents" style={{ marginTop: 32 }}>
             <SectionTitle as="h3">All agents</SectionTitle>
+            {hub.data?.paused && (
+                <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginBottom: 12 }}
+                    message="Every AI agent is paused: their credentials are refused until you resume them."
+                />
+            )}
+            <Space style={{ marginBottom: 12 }}>
+                <Switch
+                    aria-label="Pause all agents"
+                    checked={!!hub.data?.paused}
+                    onChange={(v) =>
+                        void run(async () => {
+                            await client.pauseAgents(v);
+                            hub.refresh();
+                        })
+                    }
+                />
+                <span>Pause all agents</span>
+            </Space>
             <List
                 dataSource={q.data ?? []}
                 locale={{ emptyText: 'No agents yet. AI tools appear here when someone connects one.' }}
@@ -154,9 +189,65 @@ function AllAgents() {
                                             void run(() => client.updateAiAgent(a.id, { scopes: v as AgentScope[] }))
                                         }
                                     />
+                                    <Space wrap size={8}>
+                                        <Select
+                                            aria-label={`Autonomy of ${a.name}`}
+                                            size="small"
+                                            style={{ width: 230 }}
+                                            value={a.autonomy ?? 'suggest'}
+                                            options={[
+                                                { value: 'suggest', label: 'Suggestions wait for review' },
+                                                { value: 'auto', label: 'Apply confident suggestions' },
+                                            ]}
+                                            onChange={(v) =>
+                                                void run(() => client.updateAiAgent(a.id, { autonomy: v }))
+                                            }
+                                        />
+                                        {a.autonomy === 'auto' && (
+                                            <InputNumber
+                                                aria-label={`Auto-apply confidence of ${a.name}`}
+                                                size="small"
+                                                min={0.5}
+                                                max={1}
+                                                step={0.05}
+                                                value={a.auto_accept_at}
+                                                addonBefore="at"
+                                                onChange={(v) =>
+                                                    v != null &&
+                                                    void run(() =>
+                                                        client.updateAiAgent(a.id, { auto_accept_at: Number(v) }),
+                                                    )
+                                                }
+                                            />
+                                        )}
+                                        <InputNumber
+                                            aria-label={`Requests a minute for ${a.name}`}
+                                            size="small"
+                                            min={1}
+                                            value={a.per_minute}
+                                            addonAfter="/ min"
+                                            onChange={(v) =>
+                                                v != null &&
+                                                void run(() => client.updateAiAgent(a.id, { per_minute: Number(v) }))
+                                            }
+                                        />
+                                        <InputNumber
+                                            aria-label={`Requests a day for ${a.name}`}
+                                            size="small"
+                                            min={1}
+                                            value={a.daily_requests}
+                                            addonAfter="/ day"
+                                            onChange={(v) =>
+                                                v != null &&
+                                                void run(() =>
+                                                    client.updateAiAgent(a.id, { daily_requests: Number(v) }),
+                                                )
+                                            }
+                                        />
+                                    </Space>
                                     <Muted>
                                         {a.owner ? `acts as ${a.owner} · ` : 'acts as whoever signs in · '}
-                                        last used {when(a.last_used_ms)}
+                                        {a.requests_today ?? 0} request(s) today · last used {when(a.last_used_ms)}
                                         {a.ai_system ? ` · AI system ${a.ai_system}` : ''}
                                     </Muted>
                                 </Space>

@@ -180,7 +180,8 @@ class CairnTools:
         return out
 
     # ---- proposals: changes that wait for a person's review ---------------------------------
-    def _suggest(self, urn: str, kind: str, values: list[str], column: Optional[str], rationale: str) -> dict:
+    def _suggest(self, urn: str, kind: str, values: list[str], column: Optional[str], rationale: str,
+                 confidence: float = 0.5) -> dict:
         from cairn.ai.steward import StewardError
 
         if self.s.steward is None:
@@ -188,27 +189,44 @@ class CairnTools:
         p = self.principal()
         if not self.s.can_view(p)(urn):
             raise Forbidden("you may not see this asset")
+        policy = self.s.agents.policy(p.agent) if p.agent and self.s.agents is not None else None
         out = []
         for v in values[:20]:
             try:
-                out.append(self.s.steward.suggest(urn, kind, v, p.urn, p.agent, column or "", rationale))
+                made = self.s.steward.suggest(urn, kind, v, p.urn, p.agent, column or "", rationale, confidence)
             except StewardError as e:
                 out.append({"value": v, "refused": str(e)})
-        return {"queued": [o for o in out if "refused" not in o], "refused": [o for o in out if "refused" in o],
-                "note": "Queued in the review queue (Governance → AI steward); nothing changed until a person accepts."}
+                continue
+            if (policy and policy["autonomy"] == "auto" and confidence >= policy["auto_accept_at"]
+                    and not made.get("duplicate")):
+                try:        # applied at once, as the person: only what they may change themselves
+                    self.s.steward.decide([made["id"]], "accept", p.urn, state="AUTO_ACCEPTED",
+                                          authorize=lambda priv, u: self.s.authorize(p, priv, u, raise_on_deny=False))
+                    made = {**made, "state": "AUTO_ACCEPTED"}
+                except StewardError:
+                    pass                                   # the person may not: it stays for review
+            out.append(made)
+        applied = [o for o in out if o.get("state") == "AUTO_ACCEPTED"]
+        return {"queued": [o for o in out if "refused" not in o and o not in applied], "applied": applied,
+                "refused": [o for o in out if "refused" in o],
+                "note": "Queued in the review queue (Governance → AI steward); nothing changed until a person accepts."
+                if not applied else "Applied at once (this agent may auto-apply confident suggestions); undo in "
+                "Governance → AI steward."}
 
-    def suggest_description(self, urn: str, description: str, column: Optional[str] = None, rationale: str = "") -> dict:
-        return self._suggest(urn, "description", [description], column, rationale)
+    def suggest_description(self, urn: str, description: str, column: Optional[str] = None, rationale: str = "",
+                            confidence: float = 0.5) -> dict:
+        return self._suggest(urn, "description", [description], column, rationale, confidence)
 
-    def suggest_tags(self, urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "") -> dict:
-        return self._suggest(urn, "tag", tags, column, rationale)
+    def suggest_tags(self, urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "",
+                     confidence: float = 0.5) -> dict:
+        return self._suggest(urn, "tag", tags, column, rationale, confidence)
 
     def suggest_glossary_terms(self, urn: str, terms: list[str], column: Optional[str] = None,
-                               rationale: str = "") -> dict:
-        return self._suggest(urn, "term", terms, column, rationale)
+                               rationale: str = "", confidence: float = 0.5) -> dict:
+        return self._suggest(urn, "term", terms, column, rationale, confidence)
 
-    def suggest_owner(self, urn: str, owner: str, rationale: str = "") -> dict:
-        return self._suggest(urn, "owner", [owner], None, rationale)
+    def suggest_owner(self, urn: str, owner: str, rationale: str = "", confidence: float = 0.5) -> dict:
+        return self._suggest(urn, "owner", [owner], None, rationale, confidence)
 
     def request_access(self, product_urn: str, purpose: str, justification: str, duration_days: int = 30) -> dict:
         from cairn.ai.guardrails import injection_signals
@@ -376,30 +394,31 @@ def build_mcp_server(services: Services):
 
     @server.tool(annotations=proposes, structured_output=True, title="Suggest a description")
     @_safe
-    def suggest_description(urn: str, description: str, column: Optional[str] = None,
-                            rationale: str = "") -> dict[str, Any]:
+    def suggest_description(urn: str, description: str, column: Optional[str] = None, rationale: str = "",
+                            confidence: float = 0.5) -> dict[str, Any]:
         """Suggest a description for a dataset (or one column). It waits in the review queue; nothing
-        changes until a person accepts it. Say in rationale what it is based on."""
-        return tools.suggest_description(urn, description, column, rationale)
+        changes until a person accepts it. Say in rationale what it is based on; confidence 0-1."""
+        return tools.suggest_description(urn, description, column, rationale, confidence)
 
     @server.tool(annotations=proposes, structured_output=True, title="Suggest tags")
     @_safe
-    def suggest_tags(urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "") -> dict[str, Any]:
+    def suggest_tags(urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "",
+                     confidence: float = 0.5) -> dict[str, Any]:
         """Suggest tags (names or urns) for a dataset or column, queued for review."""
-        return tools.suggest_tags(urn, tags, column, rationale)
+        return tools.suggest_tags(urn, tags, column, rationale, confidence)
 
     @server.tool(annotations=proposes, structured_output=True, title="Suggest glossary terms")
     @_safe
-    def suggest_glossary_terms(urn: str, terms: list[str], column: Optional[str] = None,
-                               rationale: str = "") -> dict[str, Any]:
+    def suggest_glossary_terms(urn: str, terms: list[str], column: Optional[str] = None, rationale: str = "",
+                               confidence: float = 0.5) -> dict[str, Any]:
         """Suggest glossary terms (names or urns) for a dataset or column, queued for review."""
-        return tools.suggest_glossary_terms(urn, terms, column, rationale)
+        return tools.suggest_glossary_terms(urn, terms, column, rationale, confidence)
 
     @server.tool(annotations=proposes, structured_output=True, title="Suggest an owner")
     @_safe
-    def suggest_owner(urn: str, owner: str, rationale: str = "") -> dict[str, Any]:
+    def suggest_owner(urn: str, owner: str, rationale: str = "", confidence: float = 0.5) -> dict[str, Any]:
         """Suggest an owner (user or group urn, or a username) for a dataset, queued for review."""
-        return tools.suggest_owner(urn, owner, rationale)
+        return tools.suggest_owner(urn, owner, rationale, confidence)
 
     @server.tool(annotations=proposes, structured_output=True, title="Request access")
     @_safe
@@ -517,8 +536,14 @@ class _BearerAuthMiddleware:
             challenge = f'Bearer resource_metadata="{public}/.well-known/oauth-protected-resource/cairn/mcp/mcp"'
             await _json(send, 401, {"error": str(e)}, {"www-authenticate": challenge})
             return
-        from cairn.identity.agents import current_agent
+        from cairn.identity.agents import AgentError, current_agent
 
+        if principal.via == "agent" and self.services.agents is not None:
+            try:
+                self.services.agents.admit(principal.agent)
+            except AgentError as e:
+                await _json(send, e.status, {"error": str(e)}, {"retry-after": "60"})
+                return
         token, agent = _principal.set(principal), current_agent.set(principal.agent)
         try:
             await self.app(scope, receive, send)
