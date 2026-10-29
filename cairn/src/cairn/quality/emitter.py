@@ -80,7 +80,9 @@ def assertion_info(monitor: Monitor) -> dict:
             "cairn_severity": monitor.severity,
         },
         "description": monitor.name,
-        "source": {"type": "NATIVE", "created": audit_stamp(monitor.created_by or CAIRN_ACTOR)},
+        # created_by may be a label such as "auto-monitors"; Cairn Core only takes urns here
+        "source": {"type": "NATIVE", "created": audit_stamp(
+            monitor.created_by if (monitor.created_by or "").startswith("urn:li:") else CAIRN_ACTOR)},
         "lastUpdated": audit_stamp(CAIRN_ACTOR),
         "entityUrn": ds,
     }

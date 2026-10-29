@@ -100,3 +100,22 @@ def test_endpoint(settings, graph):
     assert graph.aspects[(JOB, "dataJobInputOutput")]["outputDatasets"] == [OUT]
     bad = c.post("/openlineage/api/v1/lineage", json={"eventType": "START"}, headers={"X-Cairn-Actor": ADMIN})
     assert bad.status_code == 422
+
+
+def _nones(v, path=""):
+    if v is None:
+        return [path]
+    if isinstance(v, dict):
+        return [p for k, x in v.items() for p in _nones(x, f"{path}/{k}")]
+    if isinstance(v, list):
+        return [p for i, x in enumerate(v) for p in _nones(x, f"{path}/{i}")]
+    return []
+
+
+def test_emitted_aspects_never_carry_nulls(graph):
+    """Cairn Core rejects null for optional fields (found live: schema fields without a description)."""
+    import json
+
+    OpenLineageReceiver(graph).handle(event("COMPLETE", inputs=IN, outputs=OUTPUTS))
+    for mcp in graph.emitted:
+        assert _nones(json.loads(mcp["aspect"]["value"])) == [], (mcp["aspectName"], mcp["entityUrn"])

@@ -246,3 +246,15 @@ def test_assertion_run_summary_is_maintained_by_cairn(engine, graph):
     graph.emit(qe._summary_mcps(m, ev("PASS", 2000)))
     s = graph.get_aspect(urn, "assertionRunSummary")
     assert s["lastFailedAtMillis"] == 1000 and s["lastPassedAtMillis"] == 2000 and s["assertionStatus"] == "PASSING"
+
+
+def test_assertions_from_labelled_creators_carry_a_urn_actor():
+    """Monitors made by rules are created_by "auto-monitors"; Cairn Core wants an urn (found live)."""
+    from cairn.quality.emitter import assertion_info
+    from cairn.quality.models import Monitor
+
+    m = Monitor(id="m1", name="rows", dataset_urn=DS, type="volume", config={"source": "catalog"},
+                created_at="2026-10-30T00:00:00Z", updated_at="2026-10-30T00:00:00Z", created_by="auto-monitors")
+    assert assertion_info(m)["source"]["created"]["actor"].startswith("urn:li:corpuser:")
+    m.created_by = "urn:li:corpuser:ana"
+    assert assertion_info(m)["source"]["created"]["actor"] == "urn:li:corpuser:ana"

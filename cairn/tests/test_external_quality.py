@@ -91,3 +91,14 @@ def test_api_and_health(settings, graph):
     assert r.status_code == 200 and r.json()["failing"] == 1, r.text
     health = c.get(f"/quality/datasets/{ORDERS}/health", headers={"X-Cairn-Actor": ANA}).json()
     assert health["status"] == "FAIL" and health["external"][0]["url"] == "https://getmontecarlo.com/alerts/1"
+
+
+def test_assertions_never_carry_nulls(engine, graph):
+    import json
+
+    from test_openlineage import _nones
+
+    ExternalResults(engine, graph).ingest("soda", SODA, "postgres")
+    ExternalResults(engine, graph).ingest("dbt", {"run_results": RUN_RESULTS, "manifest": MANIFEST})
+    for mcp in graph.emitted:
+        assert _nones(json.loads(mcp["aspect"]["value"])) == [], mcp["aspectName"]

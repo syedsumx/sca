@@ -414,7 +414,8 @@ class TagSyncService:
                                     .order_by(tag_sync_runs.c.started_ms.desc()).limit(1)).first()
             out.append({"id": t.id, "dialect": t.dialect, "platform": t.platform, "connection": t.connection,
                         "descriptions": t.descriptions,
-                        "dry_run": t.dry_run or (not t.connection and t.dialect != "lakeformation"), "mappings": [m.model_dump() for m in t.mappings],
+                        "dry_run": t.dry_run or (not t.connection and t.dialect != "lakeformation"),
+                        "mappings": [m.model_dump() for m in t.mappings],
                         "managed_tags": len(self._state(t.id)),
                         "last_run": None if last is None else {"at_ms": last.started_ms, "actor": last.actor,
                                                                "dry_run": last.dry_run == "true", **last.summary}})

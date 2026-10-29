@@ -756,7 +756,9 @@ def test_18_semantic_search_similar_assets_and_index_upkeep(users):
 
     # Similar assets: the downstream mart sharing its columns, and copies of the table from other runs
     # on a long-lived stack, rank first.
-    similar = eventually(lambda: root.get("/ai/similar", params={"urn": DS}).json()["results"] or None, timeout=60)
+    # (each round on a kept stack adds a copy, so ask for enough results to get past them)
+    similar = eventually(lambda: root.get("/ai/similar", params={"urn": DS, "limit": 20}).json()["results"] or None,
+                         timeout=60)
     assert DS not in [h["urn"] for h in similar]
     # The mart ranks above every asset that shares no columns (only other runs' copies may come first).
     urns = [h["urn"] for h in similar]

@@ -91,7 +91,7 @@ def _schema(urn: str, facet: dict) -> dict:
     return {"schemaName": urn.split(",")[1], "platform": f"urn:li:dataPlatform:{platform}", "version": 0, "hash": "",
             "platformSchema": {"com.linkedin.schema.OtherSchema": {"rawSchema": ""}},
             "fields": [{"fieldPath": f["name"], "nativeDataType": str(f.get("type") or "unknown"),
-                        "description": f.get("description"),
+                        **({"description": str(f["description"])} if f.get("description") else {}),
                         "type": {"type": {"com.linkedin.schema.NullType": {}}}} for f in facet.get("fields") or []
                        if f.get("name")]}
 
