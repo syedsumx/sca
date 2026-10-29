@@ -179,6 +179,13 @@ def test_import_approve_list_and_query(stack):
     with pytest.raises(SemanticError) as e:                                    # data access still decides
         sem.query(EVE, "revenue", lambda u: True)
     assert e.value.status == 403
+    sem.data.registry = None                                                  # no warehouse serves it now
+    with pytest.raises(SemanticError) as e:                                    # a bad ask is still told first
+        sem.query(ANA, "revenue", lambda u: True, ["email"])
+    assert e.value.status == 422
+    with pytest.raises(SemanticError) as e:
+        sem.query(ANA, "revenue", lambda u: True, ["region"])
+    assert e.value.status == 404
     with pytest.raises(SemanticError, match="format is one of"):
         sem.import_definitions("dax", "x", "r", ANA)
     with pytest.raises(SemanticError, match="no metrics"):

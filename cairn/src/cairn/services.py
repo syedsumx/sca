@@ -95,6 +95,7 @@ class Services:
     agents: Optional[Any] = None
     playbooks: Optional[Any] = None
     sources: Optional[Any] = None
+    openlineage: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -556,6 +557,9 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sources.service import SourceService
 
         s.sources = SourceService(s.engine, s.graph, s.gateway, s.audit, hub)
+        from cairn.sources.openlineage import OpenLineageReceiver
+
+        s.openlineage = OpenLineageReceiver(s.graph, s.audit, os.environ.get("CAIRN_OPENLINEAGE_ENV", "PROD"))
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
         _build_contracts(s, hub, Event)

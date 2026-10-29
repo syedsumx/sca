@@ -189,6 +189,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.sources.api import build_router as sources_router
 
         app.include_router(sources_router(services.sources, cp, authz))
+    if services.openlineage is not None:
+        from cairn.sources.api import build_openlineage_router
+
+        app.include_router(build_openlineage_router(services.openlineage, cp, authz))
     if services.playbooks is not None:
         from cairn.ai.playbooks_api import build_router as playbooks_router
 

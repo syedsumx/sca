@@ -1884,3 +1884,42 @@ def test_46_a_source_set_up_in_the_product_tests_runs_and_reports_health(users):
         assert "reader-demo-only" not in log["log"]                         # the agent's secret never shows
     finally:
         assert root.delete(f"/sources/{urn}/detail").status_code == 204
+
+
+def test_47_openlineage_events_with_an_api_key_become_jobs_lineage_and_runs(users):
+    """An Airflow-style START and COMPLETE, posted through the edge with a write-scoped key, give the
+    task its input, output and column lineage in Cairn Core, and the run its result."""
+    root = users["root"]
+    made = root.post("/admin/agents", json={"name": f"e2e airflow {RUN}", "scopes": ["read", "write"],
+                                            "owner": ROOT}).json()
+    dag, out_table = f"e2e_dag_{RUN}", f"analytics.core.e2e_ol_{RUN}"
+    base = {"eventTime": "2026-10-30T02:00:00Z", "producer": "e2e", "run": {"runId": f"run-{RUN}"},
+            "job": {"namespace": "airflow://e2e", "name": f"{dag}.load"}}
+    out = [{"namespace": "snowflake://acme", "name": out_table.upper(), "facets": {
+        "schema": {"fields": [{"name": "id"}, {"name": "total"}]},
+        "columnLineage": {"fields": {"total": {"inputFields": [
+            {"namespace": "postgres://db:5432", "name": f"am_{RUN}.public.customers", "field": "email"}]}}}}}]
+    try:
+        url = f"{EDGE}/cairn/api/openlineage/api/v1/lineage"
+        headers = {"Authorization": f"Bearer {made['key']}"}
+        start = httpx.post(url, json={**base, "eventType": "START",
+                                      "inputs": [{"namespace": "postgres://db:5432", "name": f"am_{RUN}.public.customers"}]},
+                           headers=headers, timeout=30)
+        assert start.status_code == 200, start.text
+        done = httpx.post(url, json={**base, "eventType": "COMPLETE", "outputs": out}, headers=headers, timeout=30)
+        assert done.status_code == 200, done.text
+        job = f"urn:li:dataJob:(urn:li:dataFlow:(airflow,{dag},PROD),load)"
+        q = ("query($u:String!){ dataJob(urn:$u){ inputOutput { inputDatasets { urn } outputDatasets { urn } "
+             "fineGrainedLineages { downstreams { urn } } } } }")
+
+        def landed():
+            io = (gql(q, {"u": job}).get("dataJob") or {}).get("inputOutput") or {}
+            return io if io.get("outputDatasets") else None
+        io = eventually(landed, timeout=60)
+        assert [d["urn"] for d in io["inputDatasets"]] == [DS]
+        assert io["outputDatasets"][0]["urn"] == f"urn:li:dataset:(urn:li:dataPlatform:snowflake,{out_table},PROD)"
+        assert io["fineGrainedLineages"][0]["downstreams"][0]["urn"].endswith(",total)")
+        refused = httpx.post(url, json={**base, "eventType": "START"}, timeout=30)
+        assert refused.status_code == 401
+    finally:
+        root.delete(f"/admin/agents/{made['id']}")

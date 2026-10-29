@@ -119,6 +119,27 @@ Where approvals and on-call already live in Jira, ServiceNow, PagerDuty or Opsge
 
 **Security.** Inbound calls must carry the system's `inbound_secret`, either as `?secret=` or the `X-Cairn-Secret` header, or sign the body with it (`X-Hub-Signature: sha256=…`, as Jira does). Every decision made from a ticket is audited (`ticket.decided`). Administrators see the configured systems and their open tickets at `GET /cairn/api/notify/ticketing`.
 
+## OpenLineage
+
+Airflow, Spark, dbt, Dagster, Flink and other tools that emit OpenLineage can push lineage and runs to Cairn as they happen, without polling.
+
+Point the tool's OpenLineage HTTP transport at `https://<cairn>/cairn/api/openlineage` with a Cairn API key. Create the key under **Settings → AI agents** with the `write` scope; its person needs `EDIT_LINEAGE`. For Airflow:
+
+```
+OPENLINEAGE_URL=https://cairn.example.com/cairn/api/openlineage
+OPENLINEAGE_API_KEY=ca_…
+```
+
+Each event becomes catalog metadata:
+
+- **The job** becomes a pipeline and a task, with the datasets it reads and writes. Airflow's `dag.task` names put tasks under their DAG. Column-level lineage comes from the `columnLineage` facet, and the SQL from the `sql` facet. Inputs and outputs build up over a job's events, and lineage that crawlers found on the datasets is left alone.
+- **The run** becomes a run of that task, with its start and result. `COMPLETE` is a success, `FAIL` a failure, and `ABORT` skipped. Run history and failure streaks show next to the job, and the context agents use them.
+- **Datasets** the catalog doesn't know yet are created, with their schema from the `schema` facet. Catalogued datasets keep their crawled schema.
+
+Dataset names follow OpenLineage's naming: the namespace's scheme picks the platform. For example, `postgres://host:5432` with `db.schema.table` becomes a Postgres dataset, `snowflake://account` a Snowflake one (lower-cased), and `s3://bucket` with `/path` the S3 dataset `bucket/path`.
+
+Datasets are created in the `PROD` environment; set `CAIRN_OPENLINEAGE_ENV` to change it. The endpoint takes one event or a list of up to 500, and each delivery is in the audit log (`openlineage.received`).
+
 ## Metadata export
 
 Cairn can write its catalog facts into your own storage every night, as tables you query alongside the data they describe. Use them to report on ownership coverage, to find uncertified tables in critical pipelines, or to join a quality status to your own controls.

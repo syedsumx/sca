@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from cairn.common.security import Principal
 from cairn.sources.catalog import SourceError
@@ -90,5 +90,27 @@ def build_router(svc: SourceService, current_principal, authorize) -> APIRouter:
     def cancel(urn: str, body: dict, p: Principal = Depends(current_principal)):
         _admin(p)
         return _wrap(lambda: svc.cancel(urn, str(body.get("run") or ""), p.urn))
+
+    return router
+
+
+def build_openlineage_router(receiver, current_principal, authorize) -> APIRouter:
+    """``POST /openlineage/api/v1/lineage``: point an OpenLineage HTTP transport at
+    ``https://<cairn>/cairn/api/openlineage`` with a Cairn API key (``EDIT_LINEAGE``)."""
+    from cairn.sources.openlineage import OpenLineageError
+
+    router = APIRouter(prefix="/openlineage", tags=["lineage"])
+
+    @router.post("/api/v1/lineage")
+    async def lineage(request: Request, p: Principal = Depends(current_principal)):
+        authorize(p, "EDIT_LINEAGE", None)
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "the body is not JSON")
+        try:
+            return receiver.handle_many(body, p.urn)
+        except OpenLineageError as e:
+            raise HTTPException(422, str(e))
 
     return router

@@ -294,6 +294,7 @@ class SemanticService:
         urn = d["doc"]["datasets"][0]
         if not can_view(urn):
             raise SemanticError("you may not see this metric's dataset", 403)
+        compile_query(d, "t", "postgres", dimensions or [], filters or [], time_grain, limit)   # a bad ask: 422 first
         try:
             source, parts = self.data.source_for(urn)
         except DataAccessError as e:
