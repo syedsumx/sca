@@ -1696,3 +1696,58 @@ def test_39_an_agent_suggests_over_mcp_and_a_person_accepts(users):
         root.post(f"/bulk/{done['batch_id']}/undo")
     finally:
         root.delete(f"/admin/agents/{agent}")
+
+
+def test_40_a_catalog_change_triggers_an_automation_on_that_dataset(users):
+    """A tag added in the catalog flows through the change stream to the event queue; the automation
+    that triggers on it (with a condition on the added tag) runs on that dataset only."""
+    root = users["root"]
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:postgres,finance.public.e2e_events_{RUN},PROD)"
+    trigger, added = f"urn:li:tag:e2e_trigger_{RUN}", f"urn:li:tag:e2e_auto_{RUN}"
+    emit(ds, "schemaMetadata", {"schemaName": "e2e", "platform": "urn:li:dataPlatform:postgres", "version": 0,
+                                "hash": "", "platformSchema": {"com.linkedin.schema.OtherSchema": {"rawSchema": ""}},
+                                "fields": [{"fieldPath": "id", "nativeDataType": "int",
+                                            "type": {"type": {"com.linkedin.schema.NumberType": {}}}}]})
+    auto = root.post("/governance/automations", json={
+        "name": f"e2e on tag {RUN}", "select": {"attr": "resource.urn", "op": "eq", "value": ds},
+        "triggers": ["tags.changed"], "when": {"attr": "event.added", "op": "contains", "value": trigger},
+        "actions": [{"type": "add_tag", "value": added}]})
+    assert auto.status_code in (200, 201), auto.text
+    aid = auto.json()["id"]
+    try:
+        emit(ds, "globalTags", {"tags": [{"tag": trigger}]})
+
+        def applied():
+            compose("exec", "-T", "cairn-notifier", "cairn", "notifier", "--once")
+            runs = root.get(f"/governance/automations/{aid}/runs").json()
+            return [r for r in runs if r["trigger"] == "event" and r["state"] == "APPLIED"] or None
+        run = eventually(applied, timeout=180, interval=5)[0]
+        assert run["detail"]["event"]["type"] == "tags.changed" and run["detail"]["assets"] == [ds]
+        tags = gql("query($u:String!){dataset(urn:$u){globalTags{tags{tag{urn}}}}}", {"u": ds})["dataset"]["globalTags"]
+        assert {t["tag"]["urn"] for t in tags["tags"]} == {trigger, added}
+        # Its own change does not trigger it again (no loops).
+        compose("exec", "-T", "cairn-notifier", "cairn", "notifier", "--once")
+        assert len([r for r in root.get(f"/governance/automations/{aid}/runs").json() if r["trigger"] == "event"]) == 1
+    finally:
+        root.delete(f"/governance/automations/{aid}")
+
+
+def test_41_the_agent_kill_switch_and_quotas(users):
+    root = users["root"]
+    made = root.post("/admin/agents", json={"name": f"e2e quota {RUN}", "scopes": ["read"], "owner": BOB}).json()
+    try:
+        with client(made["key"]) as bot:
+            assert bot.get("/me").status_code == 200
+            assert root.post("/admin/agents/pause", json={"paused": True}).json()["paused"] is True
+            try:
+                paused = bot.get("/me")
+                assert paused.status_code == 401 and "paused" in paused.text
+                assert users["bob"].get("/me").status_code == 200          # people are unaffected
+            finally:
+                root.post("/admin/agents/pause", json={"paused": False})
+            assert eventually(lambda: bot.get("/me").status_code == 200 or None, timeout=30)
+            root.patch(f"/admin/agents/{made['id']}", json={"per_minute": 2})
+            codes = [bot.get("/me").status_code for _ in range(6)]
+            assert 429 in codes, codes
+    finally:
+        root.delete(f"/admin/agents/{made['id']}")
