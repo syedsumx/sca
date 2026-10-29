@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Column, String, Table, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.sources.catalog import BY_ID, SourceError, build_recipe, connector_for, form_values, secret_refs
+from cairn.sources.catalog import SourceError, all_connectors, build_recipe, connector_for, form_values, secret_refs
 
 logger = logging.getLogger(__name__)
 
@@ -170,7 +170,7 @@ class SourceService:
 
     # ---- reading --------------------------------------------------------------------------
     def connectors(self) -> list[dict]:
-        return [c.model_dump() for c in BY_ID.values()]
+        return [c.model_dump() for c in all_connectors()]
 
     def executors(self) -> list[dict]:
         out = [{"id": "default", "name": "Cairn (central executor)", "online": None}]

@@ -186,7 +186,32 @@ BY_ID = {c.id: c for c in CONNECTORS}
 BY_TYPE = {c.source_type: c for c in CONNECTORS}
 
 
-def connector_for(source_type: str) -> Optional[Connector]:
+def plugin_connectors() -> list[Connector]:
+    """Connectors built with the SDK (``cairn-source.yaml`` manifests); recipes run them through the bridge."""
+    from cairn.sdk.manifest import BRIDGE, load_all
+
+    out = []
+    try:
+        manifests = load_all()
+    except Exception:  # noqa: BLE001 - a broken manifest must not hide the gallery
+        return []
+    for m in manifests:
+        out.append(Connector(id=f"plugin-{m.name}", name=m.name.replace("-", " ").title(), source_type=BRIDGE,
+                             category=m.category, description=m.description or f"{m.name} {m.version} (SDK connector)",
+                             defaults={"source": m.entrypoint},
+                             fields=[FormField(path=f"config.{f.key}", **f.model_dump()) for f in m.fields]))
+    return out
+
+
+def all_connectors() -> list[Connector]:
+    return CONNECTORS + plugin_connectors()
+
+
+def connector_for(source_type: str, config: Optional[dict] = None) -> Optional[Connector]:
+    from cairn.sdk.manifest import BRIDGE
+
+    if source_type == BRIDGE:
+        return next((c for c in plugin_connectors() if c.defaults.get("source") == (config or {}).get("source")), None)
     return BY_TYPE.get(source_type)
 
 
@@ -249,7 +274,7 @@ def build_recipe(connector_id: str, values: dict[str, Any], advanced: Optional[d
             if k in recipe:
                 out[k] = recipe[k]
     else:
-        c = BY_ID.get(connector_id)
+        c = BY_ID.get(connector_id) or next((p for p in plugin_connectors() if p.id == connector_id), None)
         if c is None:
             raise SourceError(f"unknown connector {connector_id!r}")
         config = copy.deepcopy(c.defaults)
@@ -295,7 +320,7 @@ def build_recipe(connector_id: str, values: dict[str, Any], advanced: Optional[d
 def form_values(recipe: dict) -> tuple[str, dict[str, Any], dict]:
     """``(connector id, form values, advanced options)`` for an existing recipe."""
     source = recipe.get("source") or {}
-    c = connector_for(source.get("type", ""))
+    c = connector_for(source.get("type", ""), source.get("config"))
     if c is None:
         return "custom", {}, {}
     config = copy.deepcopy(source.get("config") or {})

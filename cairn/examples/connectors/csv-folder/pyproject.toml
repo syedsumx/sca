@@ -1,0 +1,7 @@
+[project]
+name = "cairn-csv-folder"
+version = "1.0.0"
+dependencies = ["cairn-platform"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

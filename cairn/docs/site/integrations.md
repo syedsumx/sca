@@ -186,6 +186,66 @@ A commit status, `cairn/impact`, fails when a removed column (or a removed model
 
 **Docs back to dbt.** On a dataset that a configured repository builds, **Send docs to dbt** opens a pull request. It writes the descriptions people edited in Cairn, the table's and its columns', into the model's properties file. Only those lines change, so comments and formatting elsewhere stay as they were. This needs edit rights on the dataset's docs, and the pull request is in the audit log.
 
+## Custom connectors (SDK)
+
+For a source no connector covers, write one in Python with the connector SDK (`cairn.sdk`), check it with the test kit, and offer it in **Settings → Sources** like the built-in ones.
+
+```python
+from pydantic import BaseModel, SecretStr
+from cairn.sdk import Dataset, Field, Lineage, Source
+
+class Config(BaseModel):
+    url: str
+    token: SecretStr
+
+class Inventory(Source):
+    platform = "inventory"                 # becomes urn:li:dataPlatform:inventory
+    config_model = Config
+
+    def test_connection(self, config):
+        return ping(config.url, config.token), "the inventory API did not answer"
+
+    def datasets(self, config):
+        for t in list_tables(config):
+            yield Dataset(name=f"stock.{t.name}", description=t.doc,
+                          fields=[Field(path=c.name, type="number" if c.numeric else "string") for c in t.columns],
+                          owners=[t.owner], tags=["Inventory"],
+                          upstreams=[Lineage(upstream="urn:li:dataset:(urn:li:dataPlatform:postgres,erp.public.items,PROD)")])
+```
+
+A dataset carries its name, description, fields (path, type, description, tags), owners, tags, properties, a link, a subtype and its upstream lineage. Cairn turns these into catalog metadata.
+
+**The manifest**, `cairn-source.yaml`, names the connector and describes its form in the gallery. Secret fields take a secret's name, as with the built-in connectors:
+
+```yaml
+name: inventory
+version: 1.0.0
+entrypoint: acme_inventory.source:Inventory
+description: Stock tables from the inventory service.
+fields:
+  - {key: url, label: API URL, required: true}
+  - {key: token, label: Token secret, kind: secret, required: true}
+example_config: {url: http://localhost:8080, token: dev-only}
+```
+
+**The test kit** checks a connector against what Cairn needs. Run `cairn source check <folder>` in the connector's CI, or call `assert_conformant(Inventory(), example_config)` in pytest. It checks that:
+
+- the example config validates, and `test_connection` returns `(bool, str)` without raising;
+- dataset names and, per dataset, field paths don't repeat;
+- lineage points at dataset urns;
+- the metadata has no `null` values, which Cairn Core refuses;
+- two runs give the same metadata, so no timestamps or random ids;
+- no secret from the config appears in the output.
+
+`cairn source run <folder> --config my.yml --dry-run` prints the metadata a run would send. Without `--dry-run`, it sends it.
+
+**Installing.**
+
+1. Put the manifest (or the connector's folder) in `config/source-plugins/`, or set `CAIRN_SOURCE_PLUGINS`. The connector then appears in the source gallery.
+2. Install its package wherever its sources run: Cairn's executor image, or the agent image of the pool that runs it.
+
+Recipes run SDK connectors through `cairn.sdk.bridge.SdkSource`, so **Test connection**, schedules, run history and health work as for any source. `examples/connectors/csv-folder` is a complete connector with its own tests.
+
 ## Metadata export
 
 Cairn can write its catalog facts into your own storage every night, as tables you query alongside the data they describe. Use them to report on ownership coverage, to find uncertified tables in critical pipelines, or to join a quality status to your own controls.

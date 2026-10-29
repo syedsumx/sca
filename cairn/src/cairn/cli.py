@@ -385,6 +385,42 @@ def cmd_export_metadata(a) -> None:
     print(json.dumps(result.as_dict(), indent=2))
 
 
+def cmd_source(a) -> None:
+    """SDK connectors: ``check`` runs the test kit on a connector folder (no database: for its own CI);
+    ``run`` ingests once from a config file (``--dry-run`` prints the metadata instead of sending it)."""
+    import yaml
+
+    from cairn.sdk import manifest as mf
+    from cairn.sdk.source import load
+    from cairn.sdk.testkit import check
+
+    m = mf.read(a.path)
+    folder = a.path if os.path.isdir(a.path) else os.path.dirname(a.path)
+    for extra in (folder, os.path.join(folder, "src")):          # a connector checked out, not installed
+        if os.path.isdir(extra) and extra not in sys.path:
+            sys.path.insert(0, extra)
+    source = load(m.entrypoint)()
+    if a.source_command == "check":
+        report = {"name": m.name, "version": m.version, **check(source, m.example_config)}
+        print(json.dumps(report, indent=2))
+        if not report["ok"]:
+            sys.exit(1)
+        return
+    with open(a.config) as fh:
+        config = yaml.safe_load(fh) or {}
+    from cairn.sdk.bridge import proposals
+
+    mcps = proposals({"source": m.entrypoint, "config": config, "env": a.env})
+    if a.dry_run:
+        print(json.dumps(mcps, indent=2))
+        return
+    s = _services(with_gateway=False, with_ai=False)
+    if s.graph is None:
+        sys.exit("CAIRN_CORE_URL is required to send metadata")
+    s.graph.emit(mcps)
+    print(json.dumps({"sent": len(mcps), "datasets": sum(1 for x in mcps if x["aspectName"] == "status")}))
+
+
 def cmd_extension(a) -> None:
     from cairn.extensions.api import parse_manifest
     from cairn.extensions.service import ExtensionError
@@ -656,6 +692,18 @@ def build_parser() -> argparse.ArgumentParser:
         x = xt_sub.add_parser(name, help=help_)
         x.add_argument("name")
         x.set_defaults(fn=cmd_extension)
+
+    sc = sub.add_parser("source", help="SDK connectors: check one with the test kit, or run it once")
+    sc_sub = sc.add_subparsers(dest="source_command", required=True)
+    x = sc_sub.add_parser("check", help="run the conformance checks on a connector folder (cairn-source.yaml)")
+    x.add_argument("path")
+    x.set_defaults(fn=cmd_source)
+    x = sc_sub.add_parser("run", help="ingest once with a config file")
+    x.add_argument("path")
+    x.add_argument("--config", required=True)
+    x.add_argument("--env", default="PROD")
+    x.add_argument("--dry-run", action="store_true", help="print the metadata instead of sending it")
+    x.set_defaults(fn=cmd_source)
 
     lc = sub.add_parser("licence", help="licence key: show the state, verify or install a key")
     lc_sub = lc.add_subparsers(dest="licence_command", required=True)
