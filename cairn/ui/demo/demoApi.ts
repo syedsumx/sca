@@ -521,6 +521,7 @@ const on = (method: string, pattern: string, h: Handler) =>
 on('GET', '/ui/config', () => ({
     actor: ME, user: { urn: ME, display_name: PEOPLE[ME] },
     personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true, can_manage_agents: true, can_manage_sources: true,
+    workspaces: [{ id: 'finance', name: 'Finance', domains: [FINANCE], role: 'admin' }, { id: 'growth', name: 'Growth marketing', domains: [MARKETING], role: 'member' }],
     gateway_url: 'https://cairn-gateway.northwind.example',
     features: { assistant: true, assistant_llm: true, marketplace: true, context: true, semantic_search: true, slack: true, teams: false, email: false, embeds: true, masking_proxy: true },
     slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
@@ -1389,6 +1390,70 @@ const SLOS = [
       kind: 'volume', objective: 99, window_days: 28, description: '', datasets: [REV_DAILY], monitors: 1,
       good: 28, total: 28, sli: 100, budget_remaining: 100, burn_rate: 0, state: 'met' },
 ];
+const HISTORY: Record<string, Json[]> = {};
+const historyFor = (urn: string): Json[] => {
+    if (!HISTORY[urn]) {
+        const a = ASSETS.find((x) => x.urn === urn);
+        const owner = a?.owners[0] ?? 'urn:li:corpuser:raj';
+        HISTORY[urn] = [
+            { id: `${urn}-3`, urn, aspect: 'globalTags', actor: 'urn:li:corpuser:mei', ts_ms: now - 2 * 3_600_000,
+              summary: 'added Tier1 (tags[urn:li:tag:Tier1])', revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: 'tags[urn:li:tag:Tier1]', op: 'added', before: null, after: { tag: 'urn:li:tag:Tier1' } }] },
+            { id: `${urn}-2`, urn, aspect: 'editableDatasetProperties', actor: owner, ts_ms: now - 26 * 3_600_000,
+              summary: 'description changed', revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: 'description', op: 'changed', before: 'Orders table.', after: a?.description ?? 'Documented.' }] },
+            { id: `${urn}-1`, urn, aspect: 'ownership', actor: 'urn:li:corpuser:tom', ts_ms: now - 9 * 86_400_000,
+              summary: `added ${owner.split(':').pop()} (owners[${owner}])`, revert_of: null, reverted_by: null, revertible: true,
+              changes: [{ field: `owners[${owner}]`, op: 'added', before: null, after: { owner, type: 'DATAOWNER' } }] },
+        ];
+    }
+    return HISTORY[urn];
+};
+on('GET', '/history', (_b, q) => historyFor(q.get('urn') ?? ''));
+on('POST', '/history/:id/revert', (_b, _q, [id]) => {
+    const urn = decodeURIComponent(id).replace(/-\d+$/, '');
+    const rows = historyFor(urn);
+    const target = rows.find((r) => r.id === decodeURIComponent(id));
+    const rid = `${urn}-${rows.length + 1}`;
+    if (target) target.reverted_by = rid;
+    const back = { ...(target ?? rows[0]), id: rid, actor: ME, ts_ms: Date.now(), revert_of: target?.id ?? null, reverted_by: null,
+        changes: (target?.changes ?? []).map((c: Json) => ({ ...c, op: c.op === 'added' ? 'removed' : c.op === 'removed' ? 'added' : 'changed', before: c.after, after: c.before })) };
+    rows.unshift(back);
+    return back;
+});
+const WORKSPACES: Json[] = [
+    { id: 'finance', name: 'Finance', description: 'Revenue, orders and the general ledger. Run by the finance data team.', domains: [FINANCE],
+      admins: [ME, 'urn:li:corpGroup:finance-data'], members: ['urn:li:corpGroup:finance', 'urn:li:corpuser:raj'],
+      admin_permissions: ['approve_access', 'certify', 'comment', 'edit_docs', 'edit_owners', 'edit_tags', 'edit_terms', 'manage_quality', 'view'],
+      member_permissions: ['comment', 'request_access', 'view'] },
+    { id: 'growth', name: 'Growth marketing', description: 'Campaigns, spend and attribution.', domains: [MARKETING],
+      admins: ['urn:li:corpuser:mei'], members: ['urn:li:corpGroup:marketing', ME],
+      admin_permissions: ['certify', 'edit_docs', 'edit_tags', 'manage_quality', 'view'], member_permissions: ['comment', 'request_access', 'view'] },
+    { id: 'supply', name: 'Supply chain', description: 'Shipments and inventory.', domains: [SUPPLY], admins: ['urn:li:corpuser:tom'], members: [],
+      admin_permissions: ['edit_docs', 'view'], member_permissions: ['view'] },
+];
+const wsAssets = (w: Json) => ASSETS.filter((a) => a.domain && (w.domains as string[]).includes(a.domain))
+    .map((a) => ({ urn: a.urn, type: a.type === 'DATA_PRODUCT' ? 'dataProduct' : a.type.toLowerCase(), domain: a.domain, owners: a.owners }));
+const wsRole = (w: Json) => ((w.admins as string[]).includes(ME) ? 'admin' : (w.members as string[]).includes(ME) ? 'member' : 'global_admin');
+on('GET', '/workspaces', () => WORKSPACES.map((w) => ({ id: w.id, name: w.name, domains: w.domains, role: wsRole(w) })));
+on('GET', '/workspaces/:id', (_b, _q, [id]) => {
+    const w = WORKSPACES.find((x) => x.id === id) ?? WORKSPACES[0];
+    const items = wsAssets(w);
+    const assets: Record<string, number> = {};
+    items.forEach((a) => { assets[a.type] = (assets[a.type] ?? 0) + 1; });
+    return { ...w, assets, unowned: items.filter((a) => !a.owners.length).length, owners: new Set(items.flatMap((a) => a.owners)).size, role: wsRole(w) };
+});
+on('GET', '/workspaces/:id/assets', (_b, _q, [id]) => {
+    const items = wsAssets(WORKSPACES.find((x) => x.id === id) ?? WORKSPACES[0]);
+    return { total: items.length, items };
+});
+on('PUT', '/workspaces/:id', (b: Json) => {
+    const i = WORKSPACES.findIndex((x) => x.id === b.id);
+    const doc = { description: '', admins: [], members: [], admin_permissions: ['view'], member_permissions: ['view'], ...(i >= 0 ? WORKSPACES[i] : {}), ...b };
+    if (i >= 0) WORKSPACES[i] = doc; else WORKSPACES.push(doc);
+    return doc;
+});
+on('DELETE', '/workspaces/:id', (_b, _q, [id]) => { const i = WORKSPACES.findIndex((x) => x.id === id); if (i >= 0) WORKSPACES.splice(i, 1); return undefined; });
 on('GET', '/marketplace/slos', (_b, q) => (q.product ? SLOS.filter((s) => s.product_urn === q.product) : SLOS));
 on('PUT', '/marketplace/slos/:id', (b: Json) => ({ ...SLOS[2], ...b, state: 'no_data', sli: null, budget_remaining: null,
     burn_rate: null, good: 0, total: 0 }));

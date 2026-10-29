@@ -59,7 +59,7 @@ class Policy(BaseModel):
     condition: Optional[dict[str, Any]] = None
     obligations: list[Obligation] = Field(default_factory=list)
     enabled: bool = True
-    source: Literal["cairn", "native", "rbac", "persona", "purpose"] = "cairn"
+    source: Literal["cairn", "native", "rbac", "persona", "purpose", "workspace"] = "cairn"
 
     @field_validator("condition")
     @classmethod

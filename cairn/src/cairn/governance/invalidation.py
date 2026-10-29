@@ -85,9 +85,12 @@ def _members(event: dict, list_key: str, urn_key: str) -> set[str]:
     return out
 
 
-def start_consumer(invalidator: MclInvalidator, bootstrap: str, schema_registry_url: str,
-                   stop: threading.Event, topic: str = MCL_TOPIC) -> Optional[threading.Thread]:
-    """Consume MCL events in a daemon thread. Returns None when Kafka support is unavailable."""
+def start_consumer(invalidator, bootstrap: str, schema_registry_url: str, stop: threading.Event,
+                   topic: str = MCL_TOPIC, group: Optional[str] = None, offset: str = "latest",
+                   name: str = "mcl_invalidator") -> Optional[threading.Thread]:
+    """Consume MCL events in a daemon thread, handing each to ``invalidator.handle``. Returns None when
+    Kafka support is unavailable. Without a ``group``, each process reads every event from now on; with
+    one, the group's members share the events and resume where it left off."""
     try:
         from confluent_kafka import Consumer
         from confluent_kafka.schema_registry import SchemaRegistryClient
@@ -97,7 +100,8 @@ def start_consumer(invalidator: MclInvalidator, bootstrap: str, schema_registry_
         logger.warning("confluent-kafka not installed: MCL cache invalidation disabled")
         return None
 
-    group = f"cairn-pdp-cache-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    shared = group is not None
+    group = group or f"cairn-pdp-cache-{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:6]}"
 
     def run() -> None:
         consumer = None
@@ -106,10 +110,10 @@ def start_consumer(invalidator: MclInvalidator, bootstrap: str, schema_registry_
                 if consumer is None:
                     deserialize = AvroDeserializer(SchemaRegistryClient({"url": schema_registry_url.rstrip("/")}))
                     consumer = Consumer({"bootstrap.servers": bootstrap, "group.id": group,
-                                         "auto.offset.reset": "latest", "enable.auto.commit": False,
+                                         "auto.offset.reset": offset, "enable.auto.commit": shared,
                                          "session.timeout.ms": 30000})
                     consumer.subscribe([topic])
-                    logger.info("MCL cache invalidation: consuming %s as %s", topic, group)
+                    logger.info("%s: consuming %s as %s", name, topic, group)
                 msg = consumer.poll(1.0)
                 if msg is None:
                     continue
@@ -118,9 +122,12 @@ def start_consumer(invalidator: MclInvalidator, bootstrap: str, schema_registry_
                     continue
                 event = deserialize(msg.value(), SerializationContext(msg.topic(), MessageField.VALUE))
                 if isinstance(event, dict):
-                    invalidator.handle(event)
+                    try:
+                        invalidator.handle(event)
+                    except Exception:  # noqa: BLE001 - one bad event must not stop the stream
+                        logger.exception("%s: could not handle an event", name)
             except Exception as exc:   # broker or schema registry not reachable yet
-                logger.warning("MCL cache invalidation: %s; reconnecting in 5 s", exc)
+                logger.warning("%s: %s; reconnecting in 5 s", name, exc)
                 if consumer is not None:
                     try:
                         consumer.close()
@@ -131,6 +138,6 @@ def start_consumer(invalidator: MclInvalidator, bootstrap: str, schema_registry_
         if consumer is not None:
             consumer.close()
 
-    t = threading.Thread(target=run, daemon=True, name="mcl_invalidator")
+    t = threading.Thread(target=run, daemon=True, name=name)
     t.start()
     return t

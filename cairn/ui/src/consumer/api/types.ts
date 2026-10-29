@@ -347,6 +347,7 @@ export interface UiConfig {
     can_manage_agents?: boolean;
     /** The caller holds MANAGE_INGESTION and source management is available. */
     can_manage_sources?: boolean;
+    workspaces?: WorkspaceRef[];
     /** URL agents use to reach the gateway (shown in the enrolment command). */
     gateway_url?: string;
 }
@@ -1165,4 +1166,58 @@ export interface ProductSlo {
     budget_remaining: number | null;
     burn_rate: number | null;
     state: 'met' | 'at_risk' | 'breached' | 'no_data';
+}
+
+export type WorkspaceRole = 'admin' | 'member' | 'global_admin';
+
+export interface WorkspaceRef {
+    id: string;
+    name: string;
+    domains: string[];
+    role: WorkspaceRole;
+}
+
+export interface WorkspaceDoc {
+    id: string;
+    name: string;
+    description: string;
+    domains: string[];
+    admins: string[];
+    members: string[];
+    admin_permissions: string[];
+    member_permissions: string[];
+}
+
+export interface WorkspaceSummary extends WorkspaceDoc {
+    assets: Record<string, number>;
+    unowned: number;
+    owners: number;
+    role: WorkspaceRole | null;
+}
+
+export interface WorkspaceAsset {
+    urn: string;
+    type: string;
+    domain: string;
+    owners: string[];
+}
+
+export interface FieldChange {
+    field: string;
+    op: 'added' | 'removed' | 'changed';
+    before: unknown;
+    after: unknown;
+}
+
+export interface MetadataChange {
+    id: string;
+    urn: string;
+    aspect: string;
+    actor: string;
+    ts_ms: number;
+    summary: string;
+    changes: FieldChange[];
+    revert_of: string | null;
+    reverted_by: string | null;
+    revertible: boolean;
 }

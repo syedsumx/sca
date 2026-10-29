@@ -21,6 +21,14 @@ Context agents read query history, dbt models, BI definitions and pipeline runs 
 Accepting a finding writes it to the catalog (glossary terms, relationships, discussions); dismissed
 findings do not come back.
 
+**Column lineage from SQL.** On each cycle the agents also read the SQL that writes data: `INSERT … SELECT` and
+`CREATE TABLE … AS SELECT` in the query log, and view definitions. Each written column is traced through CTEs,
+subqueries, joins, `SELECT *` and expressions to the physical columns it reads, using the catalogued schemas.
+The result goes straight into the target's lineage, column by column. A column copied as is is a `COPY`; anything
+computed is `SQL`. The statement that produced an edge is kept on it. Cairn only adds what is missing: edges
+from crawlers, OpenLineage or people are never removed. SQL that can't be parsed, or tables that aren't in the
+catalog, are skipped.
+
 ## Assistant
 
 Ask questions in plain English from the search bar or the assistant panel. The assistant only uses

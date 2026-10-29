@@ -101,6 +101,9 @@ class Services:
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
+    workspaces: Optional[Any] = None
+    history: Optional[Any] = None
+    history_consumer: Any = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -325,6 +328,8 @@ class Services:
                 try:
                     if self.personas is not None:
                         self.personas.reload()
+                    if self.workspaces is not None:
+                        self.workspaces.reload()
                     latest = self.policy_repo.latest()
                     if latest is not None and latest != self.pdp.bundle:
                         self.pdp.set_bundle(latest)
@@ -346,6 +351,15 @@ class Services:
             self.invalidator = MclInvalidator(self.attributes, policy_changed.set)
             t = start_consumer(self.invalidator, self.settings.kafka_bootstrap, self.settings.schema_registry_url,
                                stop)
+            if t is not None:
+                self._threads.append(t)
+        if (self.history is not None and self.settings.kafka_bootstrap
+                and os.environ.get("CAIRN_CHANGE_HISTORY", "true").lower() == "true"):
+            from cairn.governance.invalidation import start_consumer
+
+            # One shared group: each change is recorded once, whichever replica reads it.
+            t = start_consumer(self.history, self.settings.kafka_bootstrap, self.settings.schema_registry_url, stop,
+                               group="cairn-change-history", offset="earliest", name="change_history")
             if t is not None:
                 self._threads.append(t)
         self._threads += [stop, policy_changed]   # set on stop: wakes the policy loop too
@@ -488,6 +502,12 @@ def _build_active_metadata(s: Services) -> None:
 
     cfg = s.settings.active
     s.personas = PersonaEngine(s.engine, s.pdp, s.audit, s.attributes)
+    from cairn.governance.workspaces import WorkspaceService
+
+    s.workspaces = WorkspaceService(s.engine, s.pdp, s.graph, s.audit, s.attributes)
+    from cairn.governance.history import ChangeHistory
+
+    s.history = ChangeHistory(s.engine, s.graph, s.audit)
 
     def email_of(actor: str) -> Optional[str]:
         if not actor.startswith("urn:li:corpuser:"):

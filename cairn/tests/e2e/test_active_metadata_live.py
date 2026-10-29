@@ -1950,3 +1950,92 @@ def test_48_results_from_other_quality_tools_show_with_the_dataset(users):
     assert eventually(landed, timeout=60)
     ok = root.post("/quality/external/monte_carlo", json={"results": [{**body["results"][0], "status": "pass"}]})
     assert ok.json()["failing"] == 0
+
+
+def test_49_a_workspace_admin_governs_their_domains_only(users):
+    """A global admin makes a workspace of this run's domain with bob as its admin: bob may then edit
+    and certify there (and nowhere else), manage its members, but not its domains."""
+    root, bob, carol = users["root"], users["bob"], users["carol"]
+    wid = f"ws-{RUN}"
+    body = {"id": wid, "name": f"Workspace {RUN}", "domains": [DOMAIN], "admins": [BOB], "members": []}
+
+    def decide(actor, privilege, urn=DS):
+        return root.post("/governance/simulate", json={"actor": actor, "privilege": privilege,
+                                                         "resource_urn": urn}).json()["decision"]
+    assert decide(BOB, "EDIT_ENTITY_DOCS") != "ALLOW"
+    assert bob.put(f"/workspaces/{wid}", json=body).status_code == 403
+    r = root.put(f"/workspaces/{wid}", json=body)
+    assert r.status_code == 200, r.text
+    try:
+        assert eventually(lambda: decide(BOB, "EDIT_ENTITY_DOCS") == "ALLOW" or None, timeout=30)
+        assert decide(BOB, "CAIRN_APPROVE_CERTIFICATION") == "ALLOW"
+        assert decide(BOB, "EDIT_ENTITY_DOCS", DS_DOWN) != "ALLOW"                  # not in the workspace
+        assert decide(BOB, "MANAGE_POLICIES", None) != "ALLOW"                     # not a global admin
+        mine = bob.get("/workspaces").json()
+        assert [w["role"] for w in mine if w["id"] == wid] == ["admin"]
+        got = bob.get(f"/workspaces/{wid}").json()
+        assert got["assets"].get("dataset", 0) >= 1 and got["role"] == "admin", got
+        assert carol.get(f"/workspaces/{wid}").status_code == 404                  # not hers to see
+        ok = bob.put(f"/workspaces/{wid}", json={**body, "members": [CAROL]})
+        assert ok.status_code == 200, ok.text
+        assert bob.put(f"/workspaces/{wid}", json={**body, "members": [CAROL], "domains": [DOMAIN, "urn:li:domain:x"]}
+                       ).status_code == 403
+        assert any(w["id"] == wid for w in carol.get("/ui/config").json()["workspaces"])
+    finally:
+        assert root.delete(f"/workspaces/{wid}").status_code == 204
+    assert eventually(lambda: decide(BOB, "EDIT_ENTITY_DOCS") != "ALLOW" or None, timeout=30)
+
+
+def test_50_sql_in_the_query_log_becomes_column_lineage(users):
+    """An INSERT ... SELECT in the query log: the miner traces each written column to the columns it
+    reads and adds them to the target's lineage, with the query on each edge."""
+    q = f"urn:li:query:am_{RUN}_insert"
+    sql = (f"insert into am_{RUN}.analytics.customer_orders (customer_email, order_total) "
+           f"select c.email, sum(c.amount * 2) from am_{RUN}.public.customers c group by c.email")
+    emit(q, "queryProperties", {"statement": {"value": sql, "language": "SQL"}, "source": "MANUAL",
+                                "created": STAMP, "lastModified": STAMP})
+    emit(q, "querySubjects", {"subjects": [{"entity": DS_DOWN}, {"entity": DS}]})
+
+    def traced():
+        compose("exec", "-T", "cairn-context-miner", "cairn", "context-miner", "--once")
+        r = httpx.get(f"{CORE}/aspects/{urllib.parse.quote(DS_DOWN, safe='')}?aspect=upstreamLineage&version=0",
+                      timeout=30, headers={"Authorization": f"Bearer {TOKEN}", "X-RestLi-Protocol-Version": "2.0.0"})
+        if r.status_code != 200:
+            return None
+        lin = r.json()["aspect"]["com.linkedin.dataset.UpstreamLineage"]
+        fine = {f["downstreams"][0]: f for f in lin.get("fineGrainedLineages") or [] if f.get("query") == q}
+        return (lin, fine) if len(fine) == 2 else None
+
+    lin, fine = eventually(traced, timeout=120, interval=5)
+    assert DS in [u["dataset"] for u in lin["upstreams"]]
+    total = fine[f"urn:li:schemaField:({DS_DOWN},order_total)"]
+    assert total["upstreams"] == [f"urn:li:schemaField:({DS},amount)"] and total["transformOperation"] == "SQL"
+    assert fine[f"urn:li:schemaField:({DS_DOWN},customer_email)"]["transformOperation"] == "COPY"
+
+
+def test_51_metadata_changes_are_kept_with_a_diff_and_can_be_reverted(users):
+    """Two tag writes to an asset in the core show in its history, from the change log; reverting the
+    second puts the first back, and the revert is recorded for the person who asked."""
+    root, bob = users["root"], users["bob"]
+    urn = f"urn:li:dataset:(urn:li:dataPlatform:postgres,am_{RUN}.public.history_probe,PROD)"
+    gold, extra = "urn:li:tag:Gold", f"urn:li:tag:hist-{RUN}"
+    emit(urn, "datasetProperties", {"name": "history_probe"})
+    emit(urn, "globalTags", {"tags": [{"tag": gold}]})
+    emit(urn, "globalTags", {"tags": [{"tag": gold}, {"tag": extra}]})
+
+    def recorded(n):
+        rows = [r for r in root.get("/history", params={"urn": urn}).json() if r["aspect"] == "globalTags"]
+        return rows if len(rows) >= n else None
+    rows = eventually(lambda: recorded(2), timeout=60)
+    latest = rows[0]
+    assert {"field": f"tags[{extra}]", "op": "added", "before": None, "after": {"tag": extra}} in latest["changes"]
+    assert latest["revertible"] and latest["actor"].startswith("urn:li:corpuser:")
+    assert bob.post(f"/history/{latest['id']}/revert").status_code in (403, 404)
+    r = root.post(f"/history/{latest['id']}/revert")
+    assert r.status_code == 200, r.text
+    got = httpx.get(f"{CORE}/aspects/{urllib.parse.quote(urn, safe='')}?aspect=globalTags&version=0", timeout=30,
+                    headers={"Authorization": f"Bearer {TOKEN}", "X-RestLi-Protocol-Version": "2.0.0"})
+    assert got.json()["aspect"]["com.linkedin.common.GlobalTags"]["tags"] == [{"tag": gold}]
+    rows = recorded(3)
+    assert rows[0]["revert_of"] == latest["id"] and rows[1]["reverted_by"] == rows[0]["id"]
+    assert root.post(f"/history/{latest['id']}/revert").status_code == 409            # once is enough

@@ -189,6 +189,14 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.marketplace.slos_api import build_router as slos_router
 
         app.include_router(slos_router(services.slos, services.marketplace, cp, services.can_view))
+    if services.history is not None:
+        from cairn.governance.history_api import build_router as history_router
+
+        app.include_router(history_router(services.history, cp, services.can_view, authz, services.is_admin))
+    if services.workspaces is not None:
+        from cairn.governance.workspaces_api import build_router as workspaces_router
+
+        app.include_router(workspaces_router(services.workspaces, cp, services.is_admin))
     if services.privacy is not None:
         from cairn.governance.privacy_api import build_router as privacy_router
 
@@ -334,6 +342,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             "is_admin": services.is_admin(p.urn),
             "can_manage_agents": services.gateway is not None and _allowed(p, "MANAGE_INGESTION"),
             "can_manage_sources": services.sources is not None and _allowed(p, "MANAGE_INGESTION"),
+            "workspaces": services.workspaces.mine(p.urn) if services.workspaces is not None else [],
             "gateway_url": services.settings.gateway.public_url,
             "public_url": cfg.public_url,
             "features": {

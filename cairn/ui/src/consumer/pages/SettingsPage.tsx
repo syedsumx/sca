@@ -10,6 +10,7 @@ import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
 import { MyPrivacyParts } from '../components/Privacy';
 import { SourcesSettings } from '../components/Sources';
+import { WorkspacesSettings } from '../components/Workspaces';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { relativeTime } from '../utils/format';
@@ -263,6 +264,15 @@ export function SettingsPage() {
                         label: 'AI agents',
                         children: <AiAgentsSettings isAdmin={!!session.config?.is_admin} />,
                     },
+                    ...(session.config?.is_admin || session.config?.workspaces?.length
+                        ? [
+                              {
+                                  key: 'workspaces',
+                                  label: 'Workspaces',
+                                  children: <WorkspacesSettings isAdmin={!!session.config?.is_admin} />,
+                              },
+                          ]
+                        : []),
                     ...(session.config?.can_manage_sources
                         ? [{ key: 'sources', label: 'Sources', children: <SourcesSettings /> }]
                         : []),

@@ -270,6 +270,63 @@ The API is `/cairn/api/governance/privacy`:
 - `GET`, `PUT` or `DELETE /retention/{id}`, and `POST /retention/check`;
 - `GET /ropa`.
 
+## Change history
+
+Every asset has a **History** tab. It lists changes to its governed metadata, newest first:
+
+- descriptions and column documentation;
+- tags and glossary terms;
+- owners, domain and links;
+- structured properties, deprecation and lineage.
+
+Changes are read from Cairn Core's change log, so they are listed however they were made: the core UI, Cairn,
+an API client or an automation. Each change shows who made it, when, and a field-by-field diff, such as
+"added tag PII on column email" or "description: *old* → *new*".
+
+**Revert** puts back the value from before a change. Anyone who may make that kind of edit on the asset can
+revert it: for example, `EDIT_ENTITY_TAGS` for tags.
+
+- If the aspect has changed again since, the revert is refused. Revert the later change first, or overwrite
+  it.
+- The revert is recorded as a change by the person who asked for it.
+- A change can be reverted once.
+
+Admins can see every change in the catalog with `GET /cairn/api/history/recent`, filtered by `actor` and
+`since_ms`. History is kept for `CAIRN_CHANGE_HISTORY_DAYS` (365 by default). The API is
+`/cairn/api/history`:
+
+- `GET ?urn=`;
+- `GET /{id}`, with the values before and after;
+- `POST /{id}/revert` with `{"force": false}`.
+
+## Workspaces
+
+A workspace is one business unit sharing Cairn: its **domains**, the **admins** who run it and the
+**members** who work there. Manage workspaces in **Settings → Workspaces**.
+
+- **Global admins** (`MANAGE_POLICIES`) create workspaces, assign their domains and admins, and choose what
+  admins and members may do. A domain belongs to one workspace at most.
+- **Workspace admins** (users or groups) govern everything in the workspace's domains. By default they may:
+  - edit documentation, tags, terms and owners;
+  - manage quality;
+  - certify assets;
+  - approve access requests.
+
+  They also manage the workspace's members. They cannot change its domains, admins or permissions, other
+  workspaces, or policies.
+- **Members** may view, comment and request access in the workspace's domains by default. The workspace page
+  shows its assets, those without an owner, and a search limited to its domains.
+
+Workspaces compile into access policies, like personas. Policies can use `subject.workspaces` and
+`subject.workspace_admin`.
+
+The API is `/cairn/api/workspaces`:
+
+- `GET /`: yours, or all of them for a global admin;
+- `GET /{id}` and `GET /{id}/assets`;
+- `PUT /{id}`;
+- `DELETE /{id}`.
+
 ## AI systems
 
 **Governance → AI systems** is the inventory of the AI your organisation runs or buys. Each entry records:

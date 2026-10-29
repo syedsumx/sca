@@ -17,6 +17,7 @@ import { KnowledgeDocs } from '../components/Knowledge';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
+import { AssetHistory } from '../components/History';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
@@ -412,6 +413,7 @@ export function AssetPage() {
                     ...(urn.startsWith('urn:li:dataset:')
                         ? [{ key: 'ai', label: 'AI usage', children: <UsedByAi urn={urn} /> }]
                         : []),
+                    { key: 'history', label: 'History', children: <AssetHistory urn={urn} /> },
                     ...extensionAssetTabs(extensionTabs, urn),
                 ]}
             />

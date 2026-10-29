@@ -25,6 +25,7 @@ import type {
     InstalledExtension,
     LicenceState,
     MarkdownDocResponse,
+    MetadataChange,
     NotifySettings,
     Ontology,
     PermissionBundles,
@@ -65,6 +66,10 @@ import type {
     GitRepository,
     PrivacyPart,
     ProductSlo,
+    WorkspaceAsset,
+    WorkspaceDoc,
+    WorkspaceRef,
+    WorkspaceSummary,
     PrivacyRequest,
     RetentionPolicy,
     RetentionRow,
@@ -362,6 +367,41 @@ export class ConsumerClient extends CairnClient {
 
     deleteSlo(id: string) {
         return this.request<void>('DELETE', `/marketplace/slos/${enc(id)}`);
+    }
+
+    // --- change history -----------------------------------------------------------------------
+
+    history(urn: string, opts: RequestOptions = {}) {
+        return this.request<MetadataChange[]>('GET', '/history', undefined, { ...opts, query: { urn } });
+    }
+
+    revertChange(id: string, force = false) {
+        return this.request<MetadataChange>('POST', `/history/${enc(id)}/revert`, { force });
+    }
+
+    // --- workspaces ---------------------------------------------------------------------------
+
+    workspaces(opts?: RequestOptions) {
+        return this.request<WorkspaceRef[]>('GET', '/workspaces', undefined, opts);
+    }
+
+    workspace(id: string, opts?: RequestOptions) {
+        return this.request<WorkspaceSummary>('GET', `/workspaces/${enc(id)}`, undefined, opts);
+    }
+
+    workspaceAssets(id: string, query: { type?: string; start?: number; count?: number } = {}, opts: RequestOptions = {}) {
+        return this.request<{ total: number; items: WorkspaceAsset[] }>('GET', `/workspaces/${enc(id)}/assets`, undefined, {
+            ...opts,
+            query,
+        });
+    }
+
+    putWorkspace(body: Partial<WorkspaceDoc> & { id: string; name: string; domains: string[] }) {
+        return this.request<WorkspaceDoc>('PUT', `/workspaces/${enc(body.id)}`, body);
+    }
+
+    deleteWorkspace(id: string) {
+        return this.request<void>('DELETE', `/workspaces/${enc(id)}`);
     }
 
     // --- privacy ------------------------------------------------------------------------------
