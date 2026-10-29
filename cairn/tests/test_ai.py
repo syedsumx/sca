@@ -238,3 +238,47 @@ def test_anthropic_provider_request_shape():
     assert "temperature" not in kw
     with pytest.raises(LLMRefusal):
         AnthropicProvider(client=_FakeAnthropic(stop="refusal")).generate_json("s", "u", {})
+
+
+def test_mcp_resources_prompts_completion_and_structured_output(services):
+    from urllib.parse import quote
+
+    from mcp.types import CompletionArgument, PromptReference, ResourceTemplateReference
+
+    server, _ = build_mcp_server(services)
+    tools = asyncio.run(server.list_tools())
+    assert all(t.output_schema and t.title for t in tools), [t.name for t in tools if not t.output_schema]
+    templates = {r.uri_template for r in asyncio.run(server.list_resource_templates())}
+    assert {"cairn://asset/{urn}", "cairn://lineage/{urn}", "cairn://quality/{urn}"} <= templates
+    assert "cairn://definitions" in {str(r.uri) for r in asyncio.run(server.list_resources())}
+    prompts = {p.name for p in asyncio.run(server.list_prompts())}
+    assert prompts == {"document_dataset", "review_change_impact", "investigate_quality_issue", "answer_with_data"}
+    token = _principal.set(Principal(ALICE, "dev"))
+    try:
+        res = asyncio.run(server.read_resource(f"cairn://asset/{quote(DS, safe='')}"))
+        assert json.loads(res[0].content)["urn"] == DS
+        hidden = asyncio.run(server.read_resource(f"cairn://asset/{quote(SECRET_DS, safe='')}"))
+        assert json.loads(hidden[0].content)["error"] == "forbidden"
+        down = json.loads(asyncio.run(server.read_resource(f"cairn://lineage/{quote(DS, safe='')}"))[0].content)
+        assert [r["urn"] for r in down["results"]] == [DS_DOWN]
+        msg = asyncio.run(server.get_prompt("review_change_impact", {"urn": DS})).messages[0].content.text
+        assert DS in msg and "impact_analysis" in msg
+        structured = asyncio.run(server.call_tool("get_quality_status", {"dataset_urn": DS}))
+        assert structured.structured_content["dataset_urn"] == DS
+
+        hits = asyncio.run(_complete(server, PromptReference(type="ref/prompt", name="document_dataset"),
+                                     CompletionArgument(name="urn", value="orders")))
+        assert DS in hits.values and SECRET_DS not in hits.values
+        enc = asyncio.run(_complete(server, ResourceTemplateReference(type="ref/resource", uri="cairn://asset/{urn}"),
+                                    CompletionArgument(name="urn", value="orders")))
+        assert quote(DS, safe="") in enc.values
+    finally:
+        _principal.reset(token)
+
+
+async def _complete(server, ref, argument):
+    """Call the registered completion handler the way the protocol layer does."""
+    from mcp.types import CompleteRequestParams
+
+    handler = server._lowlevel_server._request_handlers["completion/complete"].handler
+    return (await handler(None, CompleteRequestParams(ref=ref, argument=argument))).completion

@@ -116,6 +116,20 @@ claude mcp add --transport http cairn https://<cairn-host>/cairn/mcp/mcp \
   --header "Authorization: Bearer <your access token>"
 ```
 
+What a client gets:
+
+- **Tools**, each with a title and structured output. They search, read assets, lineage and impact,
+  check quality and access, find definitions and past queries, answer questions with data
+  (`ask_data`), and propose documentation for review.
+- **Resources** a client can attach as context:
+  - `cairn://asset/{urn}`, `cairn://lineage/{urn}` and `cairn://quality/{urn}`, with the urn
+    percent-encoded;
+  - `cairn://definitions`, the approved metric and join definitions.
+- **Prompts** for common jobs, each chaining the right tools: *Document a dataset*, *Review the
+  impact of a change*, *Investigate a data quality issue*, *Answer a question with data*.
+- **Completion**: typing a few letters of an asset name in a prompt or resource argument suggests
+  matching assets you may see.
+
 ## AI steward
 
 Coverage is a catalog's weak point: most tables have no description and no owner, and nobody has time to write ten thousand of them. The AI steward proposes them for people to review.
