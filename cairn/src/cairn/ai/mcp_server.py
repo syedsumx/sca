@@ -195,6 +195,7 @@ def build_mcp_server(services: Services):
     tools = CairnTools(services)
     server = MCPServer(name="cairn", instructions=INSTRUCTIONS, version="0.1.0")
     read_only = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+    proposes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 
     def _safe(fn):
         @functools.wraps(fn)
@@ -264,7 +265,7 @@ def build_mcp_server(services: Services):
         """PII/classified columns of a dataset (direct and lineage-propagated)."""
         return tools.list_sensitive_fields(dataset_urn)
 
-    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False), structured_output=True, title="Generate documentation")
+    @server.tool(annotations=proposes, structured_output=True, title="Generate documentation")
     @_safe
     def generate_documentation(dataset_urn: str) -> dict[str, Any]:
         """Draft table and column documentation with AI and submit it for human review (never writes directly)."""
