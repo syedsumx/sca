@@ -27,6 +27,7 @@ import type {
     SourceRun,
     SourceTest,
 } from '../api/types';
+import { GitRepositories } from './GitDocs';
 import { Muted, SectionTitle } from './tokens';
 
 const HEALTH_COLOR: Record<SourceHealthState, string> = {
@@ -517,6 +518,9 @@ export function SourcesSettings() {
                 </Drawer>
             )}
             {history && <History source={history} onClose={() => setHistory(null)} />}
+            <div style={{ marginTop: 16 }}>
+                <GitRepositories />
+            </div>
         </section>
     );
 }

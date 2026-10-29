@@ -12,6 +12,7 @@ import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { ContractPanel } from '../components/Contract';
 import { UsedByAi } from '../components/AiUsage';
+import { SendDocsToDbt } from '../components/GitDocs';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
@@ -202,6 +203,7 @@ export function AssetPage() {
                         <Button>Request access</Button>
                     </Link>
                     <Button onClick={() => session.setAssistantOpen(true)}>✨ Ask about this asset</Button>
+                    <SendDocsToDbt urn={urn} />
                     {catalogHref && (
                         <a href={catalogHref}>
                             <Button type="link">Open catalog view ↗</Button>

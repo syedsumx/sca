@@ -1309,3 +1309,10 @@ on('GET', '/sources/test/:id', () => ({ id: 'task:demo', status: 'SUCCESS', conn
 on('POST', '/sources', (b: Json) => ({ ...SOURCES[0], ...b, urn: 'urn:li:dataHubIngestionSource:demo-new', health: { state: 'never_run', reason: 'no run yet' }, last_run: null }));
 on('PUT', '/sources/:urn/detail', (b: Json, _q, [urn]) => ({ ...SOURCES.find((x) => x.urn === urn), ...b }));
 on('DELETE', '/sources/:urn/detail', () => undefined);
+
+// ------------------------------------------------------------------------------- git (dbt)
+on('GET', '/integrations/git/repos', () => [{ id: 'analytics', provider: 'github', repo: 'acme/analytics-dbt', base_branch: 'main',
+    dbt_project_dir: '', platform: 'snowflake', database: 'analytics', schema: 'marts', token_set: true, webhook_secret_set: true }]);
+on('GET', '/integrations/git/match', (_b, q) => (q.urn === FCT_ORDERS ? { repo: 'analytics', model: 'fct_orders' } : null));
+on('POST', '/integrations/git/writeback', () => ({ repo: 'analytics', model: 'fct_orders', file: 'models/marts/_marts.yml',
+    pull_request: 'https://github.com/acme/analytics-dbt/pull/412' }));

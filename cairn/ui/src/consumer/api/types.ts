@@ -1065,3 +1065,16 @@ export interface SourceTest {
     } | null;
     error: string | null;
 }
+
+export interface GitRepository {
+    id: string;
+    provider: 'github' | 'gitlab' | 'bitbucket';
+    repo: string;
+    base_branch: string;
+    dbt_project_dir: string;
+    platform: string;
+    database: string;
+    schema: string;
+    token_set: boolean;
+    webhook_secret_set: boolean;
+}

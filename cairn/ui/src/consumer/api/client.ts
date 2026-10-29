@@ -62,6 +62,7 @@ import type {
     AgentCall,
     AIDatasetRead,
     AIReader,
+    GitRepository,
     IngestionSource,
     SourceConnector,
     SourceExecutor,
@@ -327,6 +328,27 @@ export class ConsumerClient extends CairnClient {
 
     sourceTest(id: string, opts?: RequestOptions) {
         return this.request<SourceTest>('GET', `/sources/test/${enc(id)}`, undefined, opts);
+    }
+
+    // --- git ----------------------------------------------------------------------------------
+
+    gitRepos(opts?: RequestOptions) {
+        return this.request<GitRepository[]>('GET', '/integrations/git/repos', undefined, opts);
+    }
+
+    gitMatch(urn: string, opts?: RequestOptions) {
+        return this.request<{ repo: string; model: string } | null>('GET', '/integrations/git/match', undefined, {
+            ...opts,
+            query: { urn },
+        });
+    }
+
+    gitWriteback(urn: string) {
+        return this.request<{ repo: string; model: string; file: string; pull_request: string | null; note?: string }>(
+            'POST',
+            '/integrations/git/writeback',
+            { urn },
+        );
     }
 
     playbooks(opts?: RequestOptions) {

@@ -140,6 +140,31 @@ Dataset names follow OpenLineage's naming: the namespace's scheme picks the plat
 
 Datasets are created in the `PROD` environment; set `CAIRN_OPENLINEAGE_ENV` to change it. The endpoint takes one event or a list of up to 500, and each delivery is in the audit log (`openlineage.received`).
 
+## Git and dbt
+
+Connect the GitHub, GitLab or Bitbucket repositories that hold your dbt projects. Cairn then comments on pull requests with what a change affects, and sends descriptions written in Cairn back to dbt.
+
+**Set up.** Describe each repository in `config/git/repos.yaml`, or set `CAIRN_GIT` to another file or folder. Start from `repos.yaml.example`. Each repository needs:
+
+- the provider (`github`, `gitlab` or `bitbucket`) and the repository path;
+- a token, as `${ENV}`. It needs read and write on contents and pull requests, and permission to set commit statuses;
+- a webhook secret;
+- where `dbt_project.yml` is in the repository;
+- the warehouse, database and schema the models build into, so Cairn can find the models in the catalog.
+
+Then add a webhook on the repository: `https://<cairn>/cairn/api/integrations/git/<id>/webhook`, with the same secret, for pull request (GitHub, Bitbucket) or merge request (GitLab) events. **Settings → Sources** lists the repositories, and flags a missing token or secret.
+
+**Impact on pull requests.** When a pull request is opened or updated, Cairn reads which dbt models it changes. That covers SQL files, and properties files whose columns change. Cairn posts one comment, updated on every push, showing per model:
+
+- the downstream assets, certified first, and how many dashboards;
+- the owners to tell;
+- the model's data contract, if it has one;
+- the columns the change removes.
+
+A commit status, `cairn/impact`, fails when a removed column (or a removed model) is one a contract promises. Make it a required check to stop contract-breaking merges. To refresh the comment by hand, use `POST /cairn/api/integrations/git/<id>/impact` with `{"pull_request": "7"}`.
+
+**Docs back to dbt.** On a dataset that a configured repository builds, **Send docs to dbt** opens a pull request. It writes the descriptions people edited in Cairn, the table's and its columns', into the model's properties file. Only those lines change, so comments and formatting elsewhere stay as they were. This needs edit rights on the dataset's docs, and the pull request is in the audit log.
+
 ## Metadata export
 
 Cairn can write its catalog facts into your own storage every night, as tables you query alongside the data they describe. Use them to report on ownership coverage, to find uncertified tables in critical pipelines, or to join a quality status to your own controls.
