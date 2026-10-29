@@ -198,6 +198,7 @@ class AutomationService:
         self.dataset = dataset
         self.steward = steward
         self.events = EventQueue(engine)
+        self.listeners: list[Callable[[dict], Any]] = []      # also handed every event (playbooks)
 
     # ---- definitions -------------------------------------------------------------------
     def create(self, spec: AutomationSpec, actor: str, enabled: bool = True) -> dict:
@@ -377,6 +378,11 @@ class AutomationService:
                     continue
                 self.run(r.id, "event", event=ev)
                 runs += 1
+            for listen in self.listeners:
+                try:
+                    listen(ev)
+                except Exception:  # noqa: BLE001 - one listener never stops the others
+                    logger.exception("event listener failed on %s %s", ev["type"], ev["urn"])
         return {"events": len(pending), "runs": runs}
 
 
@@ -387,7 +393,8 @@ class EventQueue:
         self.engine = engine
 
     def enqueue(self, type_: str, urn: str, details: Optional[dict] = None) -> Optional[str]:
-        if type_ not in CATALOG_EVENTS + CAIRN_EVENTS or not urn:
+        if type_ not in CATALOG_EVENTS + CAIRN_EVENTS or not urn or (details or {}).get("actor", "").startswith(
+                "urn:li:corpuser:cairn-playbooks"):
             return None
         with self.engine.begin() as conn:
             dup = conn.execute(select(automation_events.c.id).where(

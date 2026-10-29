@@ -454,7 +454,7 @@ class MarketplaceService:
             body=f"{r['requester'].split(':')[-1]} requests {r['duration_days']} days of access for "
                  f"“{r['purpose']}”. {r['justification'][:300]}",
             actor=r["requester"], entity_urn=r["product_urn"], recipients=recipients,
-            url=f"{self.notify.public_url}/cairn/requests?request={rid}",
+            url=f"{self.notify.public_url}/cairn/requests?request={rid}", payload={"request_id": rid},
             actions=[Action("approve", "access_request", rid, "Approve", "primary"),
                      Action("reject", "access_request", rid, "Reject", "danger")]))
 

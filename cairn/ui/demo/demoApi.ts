@@ -977,6 +977,32 @@ on('POST', '/data/ask', (body: { question?: string }) => ({
 }));
 on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' }]);
 
+// ------------------------------------------------------------------------------- Playbooks
+const PB_RUN = { id: 'pbr_8c21', playbook: 'incident_triage', subject: ORDERS, event: { type: 'quality.incident.raised' }, state: 'DONE',
+    created_ms: now - 3 * HOUR, steps: [
+        { name: 'root causes', status: 'ok', summary: 'raw.orders_eu (row count 41% below range since 06:10 UTC)', data: {}, ms: 220 },
+        { name: 'people to contact', status: 'ok', summary: 'raj, priya', data: {}, ms: 8 },
+        { name: 'downstream impact', status: 'ok', summary: '7 downstream asset(s), 2 certified', data: {}, ms: 140 },
+        { name: 'discussion', status: 'ok', summary: 'posted on the dataset', data: {}, ms: 30 },
+        { name: 'notify owners', status: 'ok', summary: 'told 2 people', data: {}, ms: 12 }] };
+const PLAYBOOKS = [
+    { id: 'incident_triage', name: 'Incident triage', trigger: 'quality.incident.raised', enabled: true, last_run: PB_RUN,
+      description: 'Likely root causes, people to contact and downstream impact for a quality incident; posted on the dataset and sent to its owners.',
+      steps: ['root causes', 'people to contact', 'downstream impact', 'discussion', 'notify owners'] },
+    { id: 'change_impact', name: 'Schema change impact', trigger: 'schema.changed', enabled: true, last_run: null,
+      description: 'Which downstream assets a schema change affects, certified first; their owners are told which columns changed.',
+      steps: ['downstream impact', 'people to contact', 'notify owners', 'discussion'] },
+    { id: 'access_review', name: 'Access request review', trigger: 'access.requested', enabled: false, last_run: null,
+      description: 'A recommendation for the approvers of an access request, with its reasons.', steps: ['request', 'assessment', 'notify approvers'] },
+    { id: 'dataset_onboarding', name: 'Dataset onboarding', trigger: 'dataset.created', enabled: false, last_run: null,
+      description: 'AI suggestions queued for review, default quality monitors, and a note to the owners when a dataset appears.',
+      steps: ['AI suggestions', 'quality monitors', 'people to contact', 'notify owners'] },
+];
+on('GET', '/governance/playbooks', () => PLAYBOOKS);
+on('GET', '/governance/playbooks/runs', () => [PB_RUN]);
+on('POST', '/governance/playbooks/:id/enabled', (b: { enabled: boolean }, _q, [id]) => ({ ...PLAYBOOKS.find((p) => p.id === id), enabled: b.enabled }));
+on('POST', '/governance/playbooks/:id/run', (b: { urn: string }, _q, [id]) => ({ ...PB_RUN, id: 'pbr_demo', playbook: id, subject: b.urn, created_ms: Date.now() }));
+
 // ------------------------------------------------------------------------------- AI agents
 const AGENT_DESKTOP = { id: 'agt_7f2c1a9e04bd', name: 'Claude Desktop', kind: 'oauth', owner: null, scopes: ['read', 'query_data', 'propose'],
     granted_scopes: ['read', 'query_data', 'propose'], redirect_uris: ['http://127.0.0.1:33418/callback'], ai_system: null, enabled: true,
@@ -986,7 +1012,10 @@ const AGENT_BOT = { id: 'agt_3b91d0c27e5a', name: 'Nightly documentation bot', k
     description: 'Drafts descriptions for undocumented tables every night.' };
 on('GET', '/me/agents', () => [AGENT_DESKTOP]);
 on('DELETE', '/me/agents/:id', () => ({ revoked: 2 }));
-on('GET', '/admin/agents', () => [AGENT_DESKTOP, AGENT_BOT]);
+on('GET', '/admin/agents', () => [{ ...AGENT_DESKTOP, autonomy: 'suggest', auto_accept_at: 0.9, per_minute: 120, daily_requests: 20000, requests_today: 214 },
+    { ...AGENT_BOT, autonomy: 'auto', auto_accept_at: 0.9, per_minute: 60, daily_requests: 5000, requests_today: 1380 }]);
+on('GET', '/admin/agents/settings', () => ({ paused: false }));
+on('POST', '/admin/agents/pause', (b: { paused: boolean }) => ({ paused: !!b.paused }));
 on('POST', '/admin/agents', (b: { name: string; scopes: string[] }) => ({ ...AGENT_BOT, id: 'agt_demo', name: b.name, scopes: b.scopes,
     key: 'ca_agt_demo.demo-key-shown-once' }));
 on('PATCH', '/admin/agents/:id', (b: Json, _q, [id]) => ({ ...(id === AGENT_BOT.id ? AGENT_BOT : AGENT_DESKTOP), ...b }));

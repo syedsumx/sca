@@ -1751,3 +1751,21 @@ def test_41_the_agent_kill_switch_and_quotas(users):
             assert 429 in codes, codes
     finally:
         root.delete(f"/admin/agents/{made['id']}")
+
+
+def test_42_a_playbook_triages_an_incident_and_changes_nothing(users):
+    """Incident triage, run on a live dataset: every step recorded, a discussion posted by the
+    playbook, its owner told; the catalog's metadata is unchanged."""
+    root, carol = users["root"], users["carol"]
+    before = gql("query($u:String!){dataset(urn:$u){globalTags{tags{tag{urn}}}}}", {"u": DS})
+    assert root.post("/governance/playbooks/incident_triage/enabled", json={"enabled": True}).json()["enabled"]
+    try:
+        run = root.post("/governance/playbooks/incident_triage/run", json={"urn": DS}).json()
+        assert [s["name"] for s in run["steps"]] == ["root causes", "people to contact", "downstream impact",
+                                                     "discussion", "notify owners"], run
+        assert not [s for s in run["steps"] if s["status"] == "failed"], run["steps"]
+        threads = carol.get("/collab/threads", params={"entity_urn": DS}).json()
+        assert any(t["comments"][0]["author"] == "urn:li:corpuser:cairn-playbooks" for t in threads)
+        assert gql("query($u:String!){dataset(urn:$u){globalTags{tags{tag{urn}}}}}", {"u": DS}) == before
+    finally:
+        root.post("/governance/playbooks/incident_triage/enabled", json={"enabled": False})

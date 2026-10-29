@@ -33,7 +33,7 @@ def build_router(steward: StewardService, current_principal, authorize, can_view
 
     @router.get("/proposals")
     def proposals(state: str = Query("PROPOSED", pattern="^(PROPOSED|ACCEPTED|AUTO_ACCEPTED|REJECTED)$"),
-                  kind: Optional[str] = Query(None, pattern="^(owner|term|description)$"),
+                  kind: Optional[str] = Query(None, pattern="^(owner|term|tag|description)$"),
                   urn: Optional[str] = None, limit: int = Query(200, ge=1, le=1000),
                   p: Principal = Depends(current_principal)):
         """Proposals on datasets the caller may see, most used datasets first."""

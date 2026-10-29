@@ -135,3 +135,19 @@ def test_mcp_write_tools_are_proposals_and_need_the_propose_scope(stack):
     assert answers.structured_content["answers"][0]["title"].startswith(FLAG)
     assert any(e["action"] == "ai.injection_flagged" and e["details"]["agent"] == "agt_docbot"
                for e in s.audit.export(category="ai"))
+
+
+def test_review_queue_lists_tag_suggestions(stack):
+    from fastapi.testclient import TestClient
+
+    from cairn.app import create_api_app
+
+    s, _ = stack
+    token = as_agent()
+    try:
+        CairnTools(s).suggest_tags(DS, ["Gold"])
+    finally:
+        _principal.reset(token)
+    c = TestClient(create_api_app(s))
+    r = c.get("/ai/steward/proposals", params={"kind": "tag"}, headers={"X-Cairn-Actor": ADMIN})
+    assert r.status_code == 200 and [p["value"] for p in r.json()] == ["urn:li:tag:Gold"]

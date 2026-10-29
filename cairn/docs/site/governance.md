@@ -174,6 +174,31 @@ API: `/cairn/api/governance/automations`, which needs `MANAGE_GLOBAL_SETTINGS`:
 - `POST /{id}/run`, `POST /{id}/enabled`, `GET /{id}/runs`, `DELETE /{id}`,
 - `POST /runs/{run_id}/undo`.
 
+## Playbooks
+
+Playbooks are multi-step jobs Cairn runs when something happens. Turn them on in **Governance studio
+→ Playbooks**; each is off until an administrator turns it on.
+
+| Playbook | Runs when | Steps |
+|---|---|---|
+| Incident triage | a quality incident is raised | likely root causes upstream, people to contact, downstream impact, a discussion on the dataset, a note to its owners |
+| Schema change impact | a schema changes | downstream assets (certified first), their owners, a note listing the added and removed columns |
+| Access request review | access is requested | a recommendation for the approvers (*approve*, *review carefully* or *reject unless justified*) with its reasons |
+| Dataset onboarding | a dataset appears | AI suggestions queued for review, the default quality monitors, a note to the owners (or the domain's owners) |
+
+**Limits on what a playbook does:**
+
+- It reads, notifies, posts discussions and queues suggestions. It never changes metadata or decides
+  a request: people do.
+- What it posts names only assets every recipient may see.
+- The schema change playbook stays quiet for additive changes when nothing certified is downstream.
+
+**Runs and testing:** each run is listed with every step's outcome (*ok*, *skipped* with the reason,
+or *failed*); a failed step does not stop the next one. **Run now** tries a playbook on any asset.
+
+API: `/cairn/api/governance/playbooks` (`MANAGE_GLOBAL_SETTINGS`): `GET`, `GET /runs`,
+`POST /{id}/enabled`, `POST /{id}/run`.
+
 ## Data preview and SQL
 
 An asset's **Data** tab shows the table's first 100 rows, and a small SQL editor runs read-only queries over the same connection. Both use a named warehouse connection whose `catalog` block says which datasets it serves:

@@ -92,6 +92,7 @@ class Services:
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
+    playbooks: Optional[Any] = None
     publisher: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
@@ -785,10 +786,16 @@ def _build_automations(s: Services, hub, Event) -> None:
     from cairn.governance.automations import CAIRN_EVENTS
 
     def on_event(e) -> None:
-        if e.type in CAIRN_EVENTS and e.entity_urn and e.entity_urn.startswith("urn:li:dataset:"):
+        dataset = e.entity_urn and e.entity_urn.startswith("urn:li:dataset:")
+        product = e.type == "access.requested" and e.entity_urn and e.entity_urn.startswith("urn:li:dataProduct:")
+        if e.type in CAIRN_EVENTS and (dataset or product):
             s.automations.events.enqueue(e.type, e.entity_urn, {"actor": e.actor or "", **(e.payload or {})})
 
     hub.listeners.append(on_event)
+    from cairn.ai.playbooks import PlaybookService
+
+    s.playbooks = PlaybookService(s.engine, s, s.audit)
+    s.automations.listeners.append(s.playbooks.handle)
 
 
 def _build_contracts(s: Services, hub, Event) -> None:

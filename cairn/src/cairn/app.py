@@ -185,6 +185,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.common.licence_api import build_router as licence_router
 
         app.include_router(licence_router(services.licence, cp, authz))
+    if services.playbooks is not None:
+        from cairn.ai.playbooks_api import build_router as playbooks_router
+
+        app.include_router(playbooks_router(services.playbooks, cp, authz))
     if services.agents is not None:
         from cairn.identity.agents_api import build_router as agents_iam_router
 

@@ -60,6 +60,8 @@ import type {
     CoverageFacet,
     CostTotal,
     AiAgent,
+    Playbook,
+    PlaybookRun,
     AgentScope,
     AskResult,
     DataResult,
@@ -242,6 +244,26 @@ export class ConsumerClient extends CairnClient {
 
     extensionSections(opts?: RequestOptions) {
         return this.request<ExtensionSection[]>('GET', '/extensions/ui', undefined, opts);
+    }
+
+    playbooks(opts?: RequestOptions) {
+        return this.request<Playbook[]>('GET', '/governance/playbooks', undefined, opts);
+    }
+
+    setPlaybookEnabled(id: string, enabled: boolean) {
+        return this.request<Playbook>('POST', `/governance/playbooks/${enc(id)}/enabled`, { enabled });
+    }
+
+    playbookRuns(playbook?: string, opts?: RequestOptions) {
+        return this.request<PlaybookRun[]>('GET', '/governance/playbooks/runs', undefined, {
+            ...opts,
+            query: { playbook },
+        });
+    }
+
+    /** Run a playbook now on one asset, as if its trigger had fired. */
+    runPlaybook(id: string, urn: string) {
+        return this.request<PlaybookRun>('POST', `/governance/playbooks/${enc(id)}/run`, { urn });
     }
 
     /** Agents acting for the caller (OAuth clients they connected, key agents they own). */

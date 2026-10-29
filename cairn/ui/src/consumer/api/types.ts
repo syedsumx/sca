@@ -674,6 +674,34 @@ export interface DataResult {
     tables: string[];
 }
 
+export interface PlaybookStep {
+    name: string;
+    status: 'ok' | 'skipped' | 'failed';
+    summary: string;
+    data: Record<string, unknown>;
+    ms: number;
+}
+
+export interface PlaybookRun {
+    id: string;
+    playbook: string;
+    subject: string;
+    event: { type?: string; id?: string };
+    steps: PlaybookStep[];
+    state: 'DONE' | 'PARTIAL' | 'FAILED';
+    created_ms: number;
+}
+
+export interface Playbook {
+    id: string;
+    name: string;
+    description: string;
+    trigger: string;
+    enabled: boolean;
+    steps: string[];
+    last_run: PlaybookRun | null;
+}
+
 export type AgentScope = 'read' | 'query_data' | 'propose' | 'write';
 
 export interface AiAgent {

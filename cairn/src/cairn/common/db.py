@@ -85,6 +85,7 @@ def load_models() -> MetaData:
     from cairn.marketplace import publish as _publish  # noqa: F401
     from cairn.governance import pdp as _pdp  # noqa: F401
     from cairn.governance import personas as _personas  # noqa: F401
+    from cairn.ai import playbooks as _playbooks  # noqa: F401
     from cairn.identity import agents as _agents  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401
     from cairn.marketplace import service as _marketplace  # noqa: F401
