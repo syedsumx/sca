@@ -19,6 +19,23 @@ test('recognises Looker, Tableau and Power BI pages and their catalog key', () =
     assert.equal(recognise('not a url'), null);
 });
 
+test('recognises Sigma, Superset and Preset, Metabase and Qlik pages', () => {
+    assert.deepEqual(recognise('https://app.sigmacomputing.com/acme/workbook/Sales-Overview-4f2a?:nodeId=x'), {
+        tool: 'sigma', kind: 'workbook', id: 'Sales-Overview-4f2a', key: 'https://app.sigmacomputing.com/acme/workbook/Sales-Overview-4f2a' });
+    assert.deepEqual(recognise('https://a1b2.us1a.app.preset.io/superset/dashboard/12/?native_filters=x'), {
+        tool: 'superset', kind: 'dashboard', id: '12', key: 'https://a1b2.us1a.app.preset.io/superset/dashboard/12/' });
+    assert.equal(recognise('https://a1b2.us1a.app.preset.io/explore/?slice_id=88&form_data=x').key,
+        'https://a1b2.us1a.app.preset.io/explore/?slice_id=88');
+    assert.deepEqual(recognise('https://acme.metabaseapp.com/dashboard/12-sales-overview?tab=3'), {
+        tool: 'metabase', kind: 'dashboard', id: '12', key: 'https://acme.metabaseapp.com/dashboard/12' });
+    assert.equal(recognise('https://acme.metabaseapp.com/question/7-revenue').kind, 'question');
+    assert.deepEqual(recognise('https://acme.eu.qlikcloud.com/sense/app/6f3c2c1e-0d5b-4a8e-9f00-1a2b3c4d5e6f/sheet/abc/state/analysis'), {
+        tool: 'qlik', kind: 'app', id: '6f3c2c1e-0d5b-4a8e-9f00-1a2b3c4d5e6f',
+        key: 'https://acme.eu.qlikcloud.com/sense/app/6f3c2c1e-0d5b-4a8e-9f00-1a2b3c4d5e6f' });
+    assert.equal(recognise('https://bi.acme.internal/superset/dashboard/sales/', { superset: ['bi.acme.internal'] }).id, 'sales');
+    assert.equal(recognise('https://acme.metabaseapp.com/collection/root'), null);
+});
+
 test('custom hosts', () => {
     assert.equal(recognise('https://bi.acme.internal/dashboards/9', { looker: ['bi.acme.internal'] }).id, '9');
     assert.deepEqual(patternsFor({ looker: ['bi.acme.internal'], tableau: [] }), ['https://bi.acme.internal/*']);

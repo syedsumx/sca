@@ -3,18 +3,38 @@
   "name": "Cairn for BI",
   "version": "0.1.0",
   "description": "Owners, certification, quality and documentation for the dashboard you have open, from your Cairn catalog.",
-  "permissions": ["sidePanel", "storage", "scripting", "tabs"],
+  "permissions": [
+    "sidePanel",
+    "storage",
+    "scripting",
+    "tabs"
+  ],
   "host_permissions": [
     "https://*.looker.com/*",
     "https://*.cloud.looker.com/*",
     "https://*.online.tableau.com/*",
     "https://*.tableau.com/*",
-    "https://app.powerbi.com/*"
+    "https://app.powerbi.com/*",
+    "https://app.sigmacomputing.com/*",
+    "https://*.sigmacomputing.com/*",
+    "https://*.preset.io/*",
+    "https://*.metabaseapp.com/*",
+    "https://*.qlikcloud.com/*"
   ],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "background": { "service_worker": "background.js", "type": "module" },
-  "side_panel": { "default_path": "sidepanel.html" },
-  "action": { "default_title": "Cairn" },
+  "optional_host_permissions": [
+    "https://*/*",
+    "http://*/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
+  },
+  "action": {
+    "default_title": "Cairn"
+  },
   "options_page": "options.html",
   "content_scripts": [
     {
@@ -23,9 +43,16 @@
         "https://*.cloud.looker.com/*",
         "https://*.online.tableau.com/*",
         "https://*.tableau.com/*",
-        "https://app.powerbi.com/*"
+        "https://app.powerbi.com/*",
+        "https://app.sigmacomputing.com/*",
+        "https://*.sigmacomputing.com/*",
+        "https://*.preset.io/*",
+        "https://*.metabaseapp.com/*",
+        "https://*.qlikcloud.com/*"
       ],
-      "js": ["content.js"],
+      "js": [
+        "content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

@@ -230,3 +230,13 @@ def test_core_test_connection_requests_for_a_pool_go_to_its_agents(stack):
     assert d.poll_once() == 1
     task = s.gateway.get_task(s.gateway.list_runs()[0]["task_id"])
     assert task["kind"] == "test" and task["status"] == "QUEUED"
+
+
+def test_bi_connectors():
+    sup = build_recipe("superset", {"connect_uri": "https://bi.acme.io", "username": "cairn", "password": "SUPERSET_PW"})
+    assert sup["source"] == {"type": "superset", "config": {"connect_uri": "https://bi.acme.io", "username": "cairn",
+                                                            "password": "${SUPERSET_PW}", "provider": "db"}}
+    q = build_recipe("qlik", {"tenant_hostname": "acme.eu.qlikcloud.com", "api_key": "QLIK_KEY"})
+    assert q["source"]["type"] == "qlik-sense" and q["source"]["config"]["api_key"] == "${QLIK_KEY}"
+    assert build_recipe("sigma", {"client_id": "c", "client_secret": "SIGMA"})["source"]["config"]["api_url"]
+    assert form_values(build_recipe("metabase", {"connect_uri": "https://m", "username": "u", "password": "MB"}))[0] == "metabase"

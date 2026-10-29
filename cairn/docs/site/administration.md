@@ -139,7 +139,7 @@ it. To make an agent depend on the AI system register, link it to an AI system
 - lakes: Databricks Unity Catalog, S3, Glue;
 - databases: PostgreSQL, MySQL, SQL Server, Trino, MongoDB;
 - dbt Core and dbt Cloud;
-- BI tools: Looker, Tableau, Power BI;
+- BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense;
 - Kafka.
 
 For anything else, **Another connector** takes a recipe.
