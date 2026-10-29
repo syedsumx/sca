@@ -581,6 +581,12 @@ class ContextMiner:
         snap = fetch_snapshot(self.graph)
         findings = mine(snap)
         stats = self.store.upsert(findings)
+        try:
+            from cairn.context.column_lineage import publish
+
+            stats.update(publish(snap, self.graph))
+        except Exception:  # noqa: BLE001 - column lineage never stops the other agents
+            logger.exception("column lineage from SQL failed")
         if self.store.layer is not None:
             stats["query_patterns"] = self.store.layer.index_queries(snap.queries)
         status = {"started_at": _iso(started), "duration_ms": _now() - started, "queries": len(snap.queries),
