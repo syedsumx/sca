@@ -42,6 +42,33 @@ unmatched users are refused. In Teams and email the buttons are links signed for
 they work once, only for the person they were sent to, and ask for confirmation in the browser.
 If someone already decided the request elsewhere, the button says so instead of acting twice.
 
+## The assistant in Slack and Teams
+
+**Slack:** turn on *Event Subscriptions* in the Slack app with the request URL
+`https://<cairn-host>/cairn/api/integrations/slack/events`. Subscribe to the bot events
+`app_mention` and `message.im`, and add the scopes `chat:write`, `im:history` and
+`app_mentions:read`.
+
+- A **direct message** to the app is answered in the DM with the person's own access. Follow-ups
+  in the same thread continue the conversation.
+- An **@mention in a channel** never posts a person's access to the channel:
+  - With `CAIRN_SLACK_CHANNEL_ACTOR` set (a Cairn user whose access suits everyone in your
+    channels), the answer is posted in the thread as that identity.
+  - Otherwise only the person who asked sees the answer (ephemeral).
+
+**Teams:** create an *outgoing webhook* in the team with the callback URL
+`https://<cairn-host>/cairn/api/integrations/teams/messages`, and set `CAIRN_TEAMS_OUTGOING_SECRET`
+to the security token Teams shows.
+
+- Answers are visible to the whole channel, so they run as `CAIRN_TEAMS_CHANNEL_ACTOR`, which is
+  required.
+- Teams waits five seconds for a reply. A slower answer is posted to `CAIRN_TEAMS_REPLY_WEBHOOK`
+  (an incoming webhook or Workflows URL for the channel) when set.
+- With SCIM from Entra ID, the audit log records who asked.
+
+Every question is audited (`assistant.chat_question`) with where it was asked and whose access
+answered it.
+
 ## Embeds
 
 Show trust information inside BI tools and portals:

@@ -252,11 +252,32 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_SLACK_SIGNING_SECRET
   valueFrom:
     secretKeyRef: { name: {{ $i.slack.existingSecret }}, key: {{ $i.slack.signingSecretKey }} }
+{{- with $i.slack.channelActor }}
+- name: CAIRN_SLACK_CHANNEL_ACTOR
+  value: {{ . | quote }}
+{{- end }}
 {{- end }}
 {{- if $i.teams.enabled }}
 - name: CAIRN_TEAMS_WEBHOOK_URL
   valueFrom:
     secretKeyRef: { name: {{ $i.teams.existingSecret }}, key: {{ $i.teams.webhookUrlKey }} }
+{{- end }}
+{{- with $i.teams.assistant }}
+{{- if .enabled }}
+{{- if not .channelActor }}
+{{- fail "cairn.integrations.teams.assistant.channelActor is required: Teams answers are visible to the whole channel" }}
+{{- end }}
+- name: CAIRN_TEAMS_OUTGOING_SECRET
+  valueFrom:
+    secretKeyRef: { name: {{ $i.teams.existingSecret }}, key: {{ .outgoingSecretKey }} }
+- name: CAIRN_TEAMS_CHANNEL_ACTOR
+  value: {{ .channelActor | quote }}
+{{- if .replyWebhookKey }}
+- name: CAIRN_TEAMS_REPLY_WEBHOOK
+  valueFrom:
+    secretKeyRef: { name: {{ $i.teams.existingSecret }}, key: {{ .replyWebhookKey }} }
+{{- end }}
+{{- end }}
 {{- end }}
 {{- if $i.email.enabled }}
 - name: CAIRN_SMTP_URL

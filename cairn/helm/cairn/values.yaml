@@ -250,6 +250,9 @@ cairn:
       existingSecret: cairn-slack
       botTokenKey: bot-token
       signingSecretKey: signing-secret
+      # The assistant answers DMs and @mentions (subscribe to app_mention and message.im). In channels
+      # it answers as this user, or privately to the asker when empty.
+      channelActor: ""
       # Slack Web API base, e.g. https://slack-gov.com/api for GovSlack.
       apiUrl: https://slack.com/api
     teams:
@@ -260,6 +263,13 @@ cairn:
       # Hosts Teams webhooks may point at (host suffixes, or exact origins such as a corporate proxy).
       # Personal webhook URLs are user input: anything else is refused.
       webhookHosts: ".webhook.office.com,.logic.azure.com,.powerplatform.com,.powerautomate.com"
+      # The assistant in Teams channels (an outgoing webhook): its security token in the Secret above,
+      # the identity answers run as (required), and where answers slower than five seconds go.
+      assistant:
+        enabled: false
+        outgoingSecretKey: outgoing-secret
+        channelActor: ""
+        replyWebhookKey: ""
     webhooks:
       # Generic webhooks never reach loopback or link-local (cloud metadata) addresses; set false to
       # also refuse private networks.

@@ -94,6 +94,8 @@ class Services:
     agents: Optional[Any] = None
     playbooks: Optional[Any] = None
     traces: Optional[Any] = None
+    slack_events: Optional[Any] = None
+    teams_bot: Optional[Any] = None
     publisher: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
@@ -638,6 +640,38 @@ def _build_active_metadata(s: Services) -> None:
             return out["reply_md"]
 
         s.slack = SlackInteractions(hub, cfg.slack_signing_secret, resolve_slack_actor, slack_search, slack_ask)
+        if slack_sender is not None and s.assistant is not None:
+            from cairn.notify.chatops import ChatAnswerer, SlackEvents
+
+            s.slack_events = SlackEvents(cfg.slack_signing_secret, slack_sender,
+                                         lambda u: hub.actor_for_slack_user(u) or resolve_slack_actor(u),
+                                         _chat_answerer(s, ChatAnswerer), os.environ.get("CAIRN_SLACK_CHANNEL_ACTOR"))
+    if os.environ.get("CAIRN_TEAMS_OUTGOING_SECRET") and s.assistant is not None:
+        from cairn.notify.chatops import ChatAnswerer, TeamsOutgoing
+
+        def teams_person(sender: dict) -> Optional[str]:
+            from sqlalchemy import select
+
+            from cairn.identity.scim import scim_resources
+
+            oid = sender.get("aadObjectId")
+            if not oid:
+                return None
+            with s.engine.connect() as conn:          # SCIM from Entra ID keeps the object id as externalId
+                rid = conn.execute(select(scim_resources.c.id).where(
+                    scim_resources.c.resource_type == "User", scim_resources.c.external_id == oid)).scalar()
+            return f"urn:li:corpuser:{rid}" if rid else None
+
+        s.teams_bot = TeamsOutgoing(os.environ["CAIRN_TEAMS_OUTGOING_SECRET"],
+                                    os.environ.get("CAIRN_TEAMS_CHANNEL_ACTOR"), _chat_answerer(s, ChatAnswerer),
+                                    os.environ.get("CAIRN_TEAMS_REPLY_WEBHOOK"), teams_person)
+
+
+def _chat_answerer(s: Services, cls):
+    def chat(actor: str, question: str, conversation: Optional[str]) -> dict:
+        return s.assistant.chat(Principal(urn=actor, via="delegated"), question, conversation)
+
+    return cls(chat, s.settings.active.public_url, s.audit)
 
 
 _USERS_BY_EMAIL = """query($i: SearchAcrossEntitiesInput!) { searchAcrossEntities(input: $i) {

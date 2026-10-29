@@ -63,6 +63,11 @@ x-cairn-env: &cairn-env
   CAIRN_TEAMS_WEBHOOK_HOSTS: ${CAIRN_TEAMS_WEBHOOK_HOSTS:-.webhook.office.com,.logic.azure.com,.powerplatform.com,.powerautomate.com}
   CAIRN_WEBHOOK_ALLOW_PRIVATE: ${CAIRN_WEBHOOK_ALLOW_PRIVATE:-true}        # false: webhooks only to public addresses
   CAIRN_TEAMS_WEBHOOK_URL: ${CAIRN_TEAMS_WEBHOOK_URL:-}
+  CAIRN_SLACK_CHANNEL_ACTOR: ${CAIRN_SLACK_CHANNEL_ACTOR:-}               # Slack @mentions answered as this user
+  CAIRN_TEAMS_OUTGOING_SECRET: ${CAIRN_TEAMS_OUTGOING_SECRET:-}           # the assistant in Teams channels
+  CAIRN_TEAMS_CHANNEL_ACTOR: ${CAIRN_TEAMS_CHANNEL_ACTOR:-}
+  CAIRN_TEAMS_REPLY_WEBHOOK: ${CAIRN_TEAMS_REPLY_WEBHOOK:-}
+  CAIRN_OAUTH_REGISTRATION: ${CAIRN_OAUTH_REGISTRATION:-open}            # MCP clients: open | admin | off
   CAIRN_SMTP_URL: ${CAIRN_SMTP_URL:-}
 
 x-cairn-service: &cairn-service

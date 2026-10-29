@@ -1769,3 +1769,34 @@ def test_42_a_playbook_triages_an_incident_and_changes_nothing(users):
         assert gql("query($u:String!){dataset(urn:$u){globalTags{tags{tag{urn}}}}}", {"u": DS}) == before
     finally:
         root.post("/governance/playbooks/incident_triage/enabled", json={"enabled": False})
+
+
+def test_43_the_assistant_answers_a_slack_dm_in_its_thread(users):
+    """A signed DM event for a linked Slack user is acknowledged at once and answered in the DM's
+    thread through the Slack API (the sink double), with the person's own access."""
+    if not SINK_HOST:
+        pytest.skip("needs the integration doubles (KEEP_SINK=1)")
+    carol = users["carol"]
+    settings = carol.get("/notify/settings").json()
+    settings["channels"]["slack"] = {"enabled": True, "user_id": f"UA{RUN.upper()}"}
+    assert carol.put("/notify/settings", json=settings).status_code == 200
+    ts = f"{int(time.time())}.000100"
+    body = json.dumps({"type": "event_callback", "event_id": f"Ev{RUN}", "event": {
+        "type": "message", "channel_type": "im", "channel": f"D{RUN.upper()}", "user": f"UA{RUN.upper()}",
+        "text": "which tables hold customer orders?", "ts": ts}}).encode()
+    sent = str(int(time.time()))
+    sig = "v0=" + hmac.new(SLACK_SECRET.encode(), f"v0:{sent}:".encode() + body, hashlib.sha256).hexdigest()
+    r = httpx.post(f"{API}/integrations/slack/events", content=body, timeout=30,
+                   headers={"X-Slack-Request-Timestamp": sent, "X-Slack-Signature": sig,
+                            "Content-Type": "application/json"})
+    assert r.status_code == 200 and r.json() == {"ok": True}, r.text
+    bad = httpx.post(f"{API}/integrations/slack/events", content=body, timeout=30,
+                     headers={"X-Slack-Request-Timestamp": sent, "X-Slack-Signature": "v0=bad"})
+    assert bad.status_code == 401
+
+    def answered():
+        posts = [e for e in httpx.get(f"{SINK_HOST}/slack", timeout=10).json()
+                 if e.get("method") == "chat.postMessage" and (e.get("body") or {}).get("channel") == f"D{RUN.upper()}"]
+        return posts or None
+    post = eventually(answered, timeout=90, interval=3)[0]["body"]
+    assert post["thread_ts"] == ts and post["text"].strip()

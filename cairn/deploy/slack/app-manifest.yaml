@@ -12,6 +12,9 @@ features:
   bot_user:
     display_name: Cairn
     always_online: true
+  app_home:
+    messages_tab_enabled: true               # people DM the assistant
+    messages_tab_read_only_enabled: false
   slash_commands:
     - command: /cairn
       url: https://cairn.example.com/cairn/api/integrations/slack/commands
@@ -21,12 +24,19 @@ features:
 oauth_config:
   scopes:
     bot:
+      - app_mentions:read
       - chat:write
       - commands
+      - im:history
       - im:write
       - users:read
       - users:read.email
 settings:
+  event_subscriptions:                       # the assistant: DMs and @mentions
+    request_url: https://cairn.example.com/cairn/api/integrations/slack/events
+    bot_events:
+      - app_mention
+      - message.im
   interactivity:
     is_enabled: true
     request_url: https://cairn.example.com/cairn/api/integrations/slack/interactions

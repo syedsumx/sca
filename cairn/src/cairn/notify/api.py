@@ -26,7 +26,8 @@ class ActionRequest(BaseModel):
     comment: Optional[str] = None
 
 
-def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], current_principal, authorize) -> APIRouter:
+def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], current_principal, authorize,
+                 slack_events=None, teams=None) -> APIRouter:
     router = APIRouter(tags=["notify"])
 
     @router.get("/notify/inbox")
@@ -118,6 +119,32 @@ def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], curre
         try:
             return JSONResponse(slack.handle_interaction(dict(request.headers), body))
         except SlackAuthError as e:
+            raise HTTPException(401, str(e))
+
+    @router.post("/integrations/slack/events")
+    async def slack_event(request: Request):
+        """Slack Events API: DMs to the app and @mentions, answered by the assistant (see chatops)."""
+        if slack_events is None:
+            raise HTTPException(404, "the Slack assistant is not configured")
+        body = await request.body()
+        try:
+            return JSONResponse(slack_events.handle(dict(request.headers), body))
+        except SlackAuthError as e:
+            raise HTTPException(401, str(e))
+
+    @router.post("/integrations/teams/messages")
+    async def teams_message(request: Request):
+        """Teams outgoing webhook: an @mention in a channel, answered as the channel identity."""
+        from starlette.concurrency import run_in_threadpool
+
+        from cairn.notify.chatops import TeamsAuthError
+
+        if teams is None:
+            raise HTTPException(404, "the Teams assistant is not configured")
+        body = await request.body()
+        try:
+            return JSONResponse(await run_in_threadpool(teams.handle, dict(request.headers), body))
+        except TeamsAuthError as e:
             raise HTTPException(401, str(e))
 
     @router.post("/integrations/slack/commands")
