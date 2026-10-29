@@ -148,6 +148,8 @@ class NotificationHub:
         self.channels: dict[str, Any] = {}   # channel name → sender (see channels.py)
         # Routes owned by something else (installed extensions); not editable through the routes API.
         self.route_providers: list[Callable[[], list[Route]]] = []
+        # Called with every published event (automations queue the ones they trigger on).
+        self.listeners: list[Callable[["Event"], None]] = []
 
     # ---- configuration --------------------------------------------------------------
     def register_action(self, kind: str, handler: ActionHandler) -> None:
@@ -209,6 +211,11 @@ class NotificationHub:
     def publish(self, event: Event) -> list[str]:
         if event.type not in EVENT_TYPES:
             raise ValueError(f"unknown event type {event.type}")
+        for listen in self.listeners:
+            try:
+                listen(event)
+            except Exception:  # noqa: BLE001 - a listener never stops a notification
+                logger.exception("event listener failed for %s", event.type)
         recipients: list[str] = list(dict.fromkeys(event.recipients))
         if event.entity_urn and event.include_followers:
             recipients += [r for r in self.followers(event.entity_urn) if r not in recipients]

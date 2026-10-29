@@ -125,6 +125,8 @@ def notifier_tick(s) -> dict:
                 from cairn.reports.costs import _day
                 out["costs"] = s.costs.collect_day(_day(now_ms - 86_400_000))
             out["reports"] = s.reports.compute(now_ms)["day"]
+    if s.automations is not None:
+        out["automation_events"] = s.automations.process_events()
     if s.automations is not None and now_ms - _SWEEP_STATE["automations_ms"] >= 60_000:
         _SWEEP_STATE["automations_ms"] = now_ms
         out["automations"] = s.automations.sweep(now_ms)

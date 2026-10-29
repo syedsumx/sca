@@ -571,7 +571,7 @@ export interface Contract {
     versions?: { version: string; created_by: string; created_ms: number }[];
 }
 
-export type AutomationActionType = 'add_tag' | 'add_term' | 'add_owner' | 'set_domain' | 'notify';
+export type AutomationActionType = 'add_tag' | 'add_term' | 'add_owner' | 'set_domain' | 'notify' | 'ai_steward';
 
 export interface AutomationAction {
     type: AutomationActionType;
@@ -583,6 +583,8 @@ export interface AutomationSpec {
     name: string;
     description?: string;
     select: Record<string, unknown>;
+    triggers?: string[];
+    when?: Record<string, unknown> | null;
     every_minutes: number;
     actions: AutomationAction[];
 }
@@ -591,7 +593,7 @@ export interface AutomationRun {
     id: string;
     automation_id: string;
     started_ms: number;
-    trigger: 'schedule' | 'manual';
+    trigger: 'schedule' | 'manual' | 'event';
     matched: number;
     changed: number;
     batch_id: string | null;

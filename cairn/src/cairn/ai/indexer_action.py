@@ -1,4 +1,6 @@
-"""``cairn-executor`` plugin keeping the semantic index fresh from MCL events."""
+"""``cairn-executor`` plugin keeping the semantic index fresh from MCL events, and the change listener
+for automations: catalog changes that automations trigger on are queued (see
+:func:`cairn.governance.automations.catalog_events`)."""
 
 from __future__ import annotations
 
@@ -34,10 +36,14 @@ class VectorIndexerAction(_ActionBase):  # type: ignore[misc,valid-type]
                            token_file=s.core.token_file)
         embedder = build_embedder(s)
         store = build_vector_store(get_engine(cfg.get("database_url") or s.database_url), embedder.dim)
-        return cls(SemanticIndex(Catalog(graph), embedder, store))
+        from cairn.governance.automations import EventQueue
 
-    def __init__(self, index: SemanticIndex):
+        engine = get_engine(cfg.get("database_url") or s.database_url)
+        return cls(SemanticIndex(Catalog(graph), embedder, store), EventQueue(engine))
+
+    def __init__(self, index: SemanticIndex, events=None):
         self.index = index
+        self.events = events
 
     def act(self, event: Any) -> None:
         from datahub_actions.event.event_registry import METADATA_CHANGE_LOG_EVENT_V1_TYPE
@@ -47,6 +53,14 @@ class VectorIndexerAction(_ActionBase):  # type: ignore[misc,valid-type]
         mcl = event.event.to_obj() if hasattr(event.event, "to_obj") else dict(event.event)
         if isinstance(mcl.get("aspect"), dict) and isinstance(mcl["aspect"].get("value"), bytes):
             mcl["aspect"]["value"] = json.loads(mcl["aspect"]["value"])
+        if self.events is not None:
+            from cairn.governance.automations import catalog_events
+
+            try:
+                for type_, urn, details in catalog_events(mcl):
+                    self.events.enqueue(type_, urn, details)
+            except Exception:  # noqa: BLE001 - the index must keep up even if the queue is down
+                logger.exception("automation events: could not queue a change to %s", mcl.get("entityUrn"))
         result = self.index.handle_mcl(mcl)
         if result:
             logger.debug("semantic index %s: %s", mcl.get("entityUrn"), result)

@@ -146,8 +146,20 @@ An automation keeps a rule true across every matching dataset, now and as new da
 Build one in **Governance studio → Automations**:
 
 - **Which datasets:** name contains, platform, domain, classification or tag. **Advanced** takes any policy condition.
-- **Then:** set domain, add owner, add tag, add glossary term, or notify people.
-- **Every N minutes:** how often it runs (10 minutes at least).
+- **When:** on a schedule (every N minutes, at least 10), and/or when something happens to a dataset:
+  - it appears, or its schema, tags, glossary terms, owners or description change;
+  - personal data is detected on it;
+  - a quality incident is raised, its contract breaks, or it is deprecated;
+  - access to it is requested, or its certification is decided.
+- **Then:** set domain, add owner, add tag, add glossary term, notify people, or **queue AI
+  suggestions** (owners, classifications, a description). Suggestions wait in Governance → AI
+  steward for review.
+
+An event runs the automation on the one dataset the event is about, if that dataset matches. The
+API's `when` field adds a condition over the event: `event.type`, `event.added`, `event.removed`,
+`event.actor`, plus the event's own details (for example a quality incident's `severity`). Events
+wait in a durable queue and are handled within seconds. Changes made by automations never trigger
+automations, so rules cannot loop.
 
 **Preview matches** lists the matching datasets and what a run would write. Nothing is written until you create the automation.
 

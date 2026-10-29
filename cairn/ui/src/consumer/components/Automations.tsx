@@ -34,6 +34,23 @@ const ACTIONS: { value: AutomationActionType; label: string; placeholder: string
     { value: 'add_tag', label: 'Add tag', placeholder: 'Confidential' },
     { value: 'add_term', label: 'Add glossary term', placeholder: 'Finance.Revenue' },
     { value: 'notify', label: 'Notify', placeholder: 'usernames, comma separated' },
+    { value: 'ai_steward', label: 'Queue AI suggestions', placeholder: 'owner, classification, description: reviewed' },
+];
+
+export const TRIGGERS: { value: string; label: string }[] = [
+    { value: 'schedule', label: 'On a schedule' },
+    { value: 'dataset.created', label: 'A dataset appears' },
+    { value: 'schema.changed', label: 'Its schema changes' },
+    { value: 'pii.detected', label: 'Personal data is detected' },
+    { value: 'tags.changed', label: 'Its tags change' },
+    { value: 'terms.changed', label: 'Its glossary terms change' },
+    { value: 'owners.changed', label: 'Its owners change' },
+    { value: 'description.changed', label: 'Its description changes' },
+    { value: 'quality.incident.raised', label: 'A quality incident is raised' },
+    { value: 'contract.broken', label: 'Its contract breaks' },
+    { value: 'asset.deprecated', label: 'It is deprecated' },
+    { value: 'access.requested', label: 'Access is requested' },
+    { value: 'certification.decided', label: 'Certification is decided' },
 ];
 
 export interface AutomationDraft {
@@ -45,6 +62,7 @@ export interface AutomationDraft {
     tag: string;
     advanced: string;
     everyMinutes: number;
+    triggers?: string[];
     actions: { type: AutomationActionType; value: string }[];
 }
 
@@ -57,6 +75,7 @@ const EMPTY: AutomationDraft = {
     tag: '',
     advanced: '',
     everyMinutes: 60,
+    triggers: ['schedule'],
     actions: [{ type: 'set_domain', value: '' }],
 };
 
@@ -77,9 +96,11 @@ export function draftToAutomation(d: AutomationDraft): AutomationSpec {
         select = all.length === 1 ? all[0] : { all };
     }
     const actions: AutomationAction[] = d.actions
-        .filter((a) => a.value.trim())
+        .filter((a) => a.value.trim() || a.type === 'ai_steward')
         .map((a) =>
-            a.type === 'notify'
+            a.type === 'ai_steward'
+                ? { type: 'ai_steward' }
+                : a.type === 'notify'
                 ? {
                       type: 'notify',
                       recipients: a.value
@@ -89,7 +110,8 @@ export function draftToAutomation(d: AutomationDraft): AutomationSpec {
                   }
                 : { type: a.type, value: a.value.trim() },
         );
-    return { name: d.name.trim(), select, every_minutes: d.everyMinutes, actions };
+    const triggers = d.triggers?.length ? d.triggers : ['schedule'];
+    return { name: d.name.trim(), select, triggers, every_minutes: d.everyMinutes, actions };
 }
 
 function Builder({ open, onClose, onCreated }: { open: boolean; onClose: () => void; onCreated: () => void }) {
@@ -192,6 +214,19 @@ function Builder({ open, onClose, onCreated }: { open: boolean; onClose: () => v
                     onChange={(e) => set({ advanced: e.target.value })}
                     style={{ fontFamily: 'monospace', fontSize: 12 }}
                 />
+                <h4 style={{ margin: '8px 0 0' }}>When</h4>
+                <Select
+                    aria-label="Triggers"
+                    mode="multiple"
+                    style={{ width: '100%' }}
+                    value={d.triggers ?? ['schedule']}
+                    options={TRIGGERS}
+                    onChange={(triggers) => set({ triggers })}
+                />
+                <Muted>
+                    Events run the automation on the one dataset they are about. Changes made by automations never
+                    trigger automations.
+                </Muted>
                 <h4 style={{ margin: '8px 0 0' }}>Then</h4>
                 {d.actions.map((a, i) => (
                     // eslint-disable-next-line react/no-array-index-key
@@ -377,7 +412,17 @@ export function AutomationsAdmin() {
                                     )
                                     .join(' · '),
                         },
-                        { title: 'Every', render: (_, a) => `${a.spec.every_minutes} min` },
+                        {
+                            title: 'When',
+                            render: (_, a) =>
+                                (a.spec.triggers ?? ['schedule'])
+                                    .map((x) =>
+                                        x === 'schedule'
+                                            ? `every ${a.spec.every_minutes} min`
+                                            : (TRIGGERS.find((o) => o.value === x)?.label ?? x).toLowerCase(),
+                                    )
+                                    .join(', '),
+                        },
                         {
                             title: 'Last run',
                             render: (_, a) =>

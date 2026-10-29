@@ -761,7 +761,34 @@ def _build_automations(s: Services, hub, Event) -> None:
                           body=f"{listing}{more}.", actor=row["identity"], recipients=recipients,
                           entity_urn=urns[0] if len(urns) == 1 else None, payload={"automation_id": row["id"]}))
 
-    s.automations = AutomationService(s.engine, s.bulk, lambda: Planner(s.graph).datasets(), notify, s.audit)
+    def dataset(urn: str):
+        from cairn.governance.attributes import resource_from_aspects
+        from cairn.quality.auto import _SCROLL_ASPECTS
+
+        if s.graph is None:
+            return None
+        aspects = {a: s.graph.get_aspect(urn, a) for a in _SCROLL_ASPECTS + ["datasetProperties",
+                                                                             "editableDatasetProperties"]}
+        if not aspects.get("schemaMetadata") and not aspects.get("datasetProperties"):
+            return None
+        aspects = {k: v for k, v in aspects.items() if v}
+        return resource_from_aspects(urn, aspects), aspects
+
+    def steward(urns: list[str], actor: str) -> dict:
+        if s.steward is None:
+            return {"proposed": 0}
+        return s.steward.run(actor=actor, urns=urns, limit=len(urns), max_drafts=min(len(urns), 5))
+
+    s.automations = AutomationService(s.engine, s.bulk, lambda: Planner(s.graph).datasets(), notify, s.audit,
+                                      dataset=dataset, steward=steward)
+
+    from cairn.governance.automations import CAIRN_EVENTS
+
+    def on_event(e) -> None:
+        if e.type in CAIRN_EVENTS and e.entity_urn and e.entity_urn.startswith("urn:li:dataset:"):
+            s.automations.events.enqueue(e.type, e.entity_urn, {"actor": e.actor or "", **(e.payload or {})})
+
+    hub.listeners.append(on_event)
 
 
 def _build_contracts(s: Services, hub, Event) -> None:

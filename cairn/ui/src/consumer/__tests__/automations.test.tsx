@@ -65,6 +65,7 @@ it('turns the builder into one condition and actions', () => {
     });
     expect(spec).toEqual({
         name: 'Fin',
+        triggers: ['schedule'],
         every_minutes: 30,
         select: {
             all: [
@@ -89,6 +90,23 @@ it('turns the builder into one condition and actions', () => {
         actions: [],
     });
     expect(advanced.select).toEqual({ attr: 'resource.platform', op: 'eq', value: 'dbt' });
+    const onEvent = draftToAutomation({
+        name: 'PII restricted',
+        nameContains: '',
+        platform: '',
+        domain: '',
+        classification: '',
+        tag: '',
+        advanced: '',
+        everyMinutes: 60,
+        triggers: ['pii.detected', 'dataset.created'],
+        actions: [
+            { type: 'add_tag', value: 'restricted' },
+            { type: 'ai_steward', value: '' },
+        ],
+    });
+    expect(onEvent.triggers).toEqual(['pii.detected', 'dataset.created']);
+    expect(onEvent.actions).toEqual([{ type: 'add_tag', value: 'restricted' }, { type: 'ai_steward' }]);
 });
 
 it('previews matches, creates, runs and undoes', async () => {
