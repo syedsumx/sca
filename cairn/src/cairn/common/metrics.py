@@ -49,11 +49,18 @@ try:
     LICENCE_DAYS_LEFT = Gauge("cairn_licence_days_left", "Days until the licence expires (negative: expired)")
     LICENCE_SEATS = Gauge("cairn_licence_seats", "People active in the last 30 days, and the licence's limit", ["kind"])
     LICENCE_READ_ONLY = Gauge("cairn_licence_read_only", "1 when the licence leaves Cairn read-only")
+    AGENT_TOOL_CALLS = Counter("cairn_agent_tool_calls_total", "Tool calls by AI agents and the assistant",
+                               ["channel", "tool", "status"])
+    AGENT_TOOL_SECONDS = Histogram("cairn_agent_tool_seconds", "Tool call duration", ["tool"],
+                                   buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
+    AI_INJECTIONS = Counter("cairn_ai_injection_flagged_total",
+                            "Catalog strings flagged as instructions to an AI in tool results", ["channel"])
     ENABLED = True
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
     NOTIFICATIONS_PENDING = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = _Noop()
     WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
+    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = _Noop()
     ENABLED = False
 
 

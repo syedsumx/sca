@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, func, select
 
 from cairn.ai.guardrails import redact
+from cairn.common import metrics
 from cairn.common.db import JSONText, metadata
 
 agent_calls = Table(
@@ -50,19 +51,6 @@ ai_feedback = Table(
 )
 
 KEEP_CALLS_DAYS = 30
-
-try:  # pragma: no cover - metrics are optional
-    from prometheus_client import Counter, Histogram
-
-    TOOL_CALLS = Counter("cairn_agent_tool_calls_total", "Tool calls by AI agents and the assistant",
-                         ["channel", "tool", "status"])
-    TOOL_SECONDS = Histogram("cairn_agent_tool_seconds", "Tool call duration", ["tool"],
-                             buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
-    INJECTIONS = Counter("cairn_ai_injection_flagged_total",
-                         "Catalog strings flagged as instructions to an AI in tool results", ["channel"])
-except Exception:  # noqa: BLE001
-    TOOL_CALLS = TOOL_SECONDS = INJECTIONS = None
-
 
 def _now() -> int:
     return int(time.time() * 1000)
@@ -106,11 +94,10 @@ class TraceService:
     # ---- tool calls ---------------------------------------------------------------------------
     def record(self, actor: str, agent: Optional[str], channel: str, tool: str, args: dict, status: str,
                duration_ms: int, flagged: int = 0) -> None:
-        if TOOL_CALLS is not None:
-            TOOL_CALLS.labels(channel, tool, status).inc()
-            TOOL_SECONDS.labels(tool).observe(duration_ms / 1000)
-            if flagged:
-                INJECTIONS.labels(channel).inc(flagged)
+        metrics.AGENT_TOOL_CALLS.labels(channel, tool, status).inc()
+        metrics.AGENT_TOOL_SECONDS.labels(tool).observe(duration_ms / 1000)
+        if flagged:
+            metrics.AI_INJECTIONS.labels(channel).inc(flagged)
         now = _now()
         with self.engine.begin() as conn:
             conn.execute(agent_calls.insert().values(
