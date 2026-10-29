@@ -97,6 +97,7 @@ class Services:
     sources: Optional[Any] = None
     openlineage: Optional[Any] = None
     git: Optional[Any] = None
+    external_quality: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -571,6 +572,9 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sources.service import SourceService
 
         s.sources = SourceService(s.engine, s.graph, s.gateway, s.audit, hub)
+        from cairn.quality.external import ExternalResults
+
+        s.external_quality = ExternalResults(s.engine, s.graph, hub, s.audit)
         from cairn.sources.openlineage import OpenLineageReceiver
 
         s.openlineage = OpenLineageReceiver(s.graph, s.audit, os.environ.get("CAIRN_OPENLINEAGE_ENV", "PROD"))

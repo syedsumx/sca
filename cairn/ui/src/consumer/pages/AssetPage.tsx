@@ -305,7 +305,7 @@ export function AssetPage() {
                         children: (
                             <Surface style={{ padding: 18 }}>
                                 {health.loading && <Skeleton h={60} />}
-                                {!health.loading && !health.data?.monitors.length && (
+                                {!health.loading && !health.data?.monitors.length && !health.data?.external?.length && (
                                     <Empty description="No quality monitors on this asset yet." />
                                 )}
                                 {(health.data?.monitors ?? []).map(({ monitor, last_evaluation: ev }) => (
@@ -316,6 +316,24 @@ export function AssetPage() {
                                         <span>
                                             <TrustBadges qualityStatus={ev?.status ?? 'UNKNOWN'} compact />{' '}
                                             <Muted>{ev ? relativeTime(ev.ts) : 'never run'}</Muted>
+                                        </span>
+                                    </div>
+                                ))}
+                                {(health.data?.external ?? []).map((x) => (
+                                    <div key={x.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0' }}>
+                                        <span>
+                                            <strong>{x.name}</strong> <Tag>{x.tool.replace('_', ' ')}</Tag>
+                                            {x.message && <Muted> {x.message}</Muted>}
+                                        </span>
+                                        <span>
+                                            <TrustBadges qualityStatus={x.status} compact />{' '}
+                                            {x.url ? (
+                                                <a href={x.url} target="_blank" rel="noreferrer">
+                                                    {relativeTime(new Date(x.last_ms).toISOString())}
+                                                </a>
+                                            ) : (
+                                                <Muted>{relativeTime(new Date(x.last_ms).toISOString())}</Muted>
+                                            )}
                                         </span>
                                     </div>
                                 ))}

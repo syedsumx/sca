@@ -724,7 +724,19 @@ on('GET', '/context/ontology', () => {
 on('POST', '/ai/chat', (b) => chat(b.message, b.conversation_id));
 on('POST', '/ai/explain/lineage', (b) => explain(b.urn));
 on('POST', '/ai/docs/markdown', (b) => markdownDoc(b.urn));
-on('GET', '/quality/datasets/:rest/health', (_b, _q, [urn]) => health(urn));
+const EXTERNAL: Record<string, Json[]> = {
+    [FCT_ORDERS]: [
+        { id: 'x1', tool: 'dbt', name: 'not_null_fct_orders_order_id', column: 'order_id', status: 'PASS', message: '', url: null,
+          last_ms: now - 3 * HOUR, history: [] },
+        { id: 'x2', tool: 'dbt', name: 'relationships_fct_orders_customer_id', column: 'customer_id', status: 'FAIL',
+          message: 'Got 14 results, configured to fail if != 0', url: null, last_ms: now - 3 * HOUR, history: [] },
+    ],
+    [ORDERS]: [
+        { id: 'x3', tool: 'great_expectations', name: 'expect_column_values_to_be_between(amount)', column: 'amount', status: 'PASS',
+          message: '', url: null, last_ms: now - 5 * HOUR, history: [] },
+    ],
+};
+on('GET', '/quality/datasets/:rest/health', (_b, _q, [urn]) => ({ ...health(urn), external: EXTERNAL[urn] ?? [] }));
 
 on('GET', '/notify/settings', () => state.notify);
 on('PUT', '/notify/settings', (b) => { state.notify = b; return b; });

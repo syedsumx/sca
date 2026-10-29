@@ -156,7 +156,7 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     cp, authz = _principal_dependency(services), _authorize(services)
     modules = set(modules)
     if "quality" in modules:
-        app.include_router(quality_router(services.quality, cp, authz))
+        app.include_router(quality_router(services.quality, cp, authz, services.external_quality))
     if "governance" in modules:
         app.include_router(governance_router(services.pdp, services.policy_repo, services.workflows,
                                              services.audit, services.graph, cp, authz))

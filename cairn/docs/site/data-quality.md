@@ -111,6 +111,29 @@ It runs offline. `--columns cols.yaml` (`{column: {type, nullable}}`) works for 
 - `GET` or `DELETE /cairn/api/quality/contracts/one?dataset=…` to read or retire,
 - `POST /cairn/api/quality/contracts/check` to check a proposed schema.
 
+## Results from other tools
+
+Checks you already run elsewhere can show next to Cairn's monitors. Send each tool's own output to `POST /cairn/api/quality/external/{tool}` with an API key whose person has `EDIT_ENTITY_ASSERTIONS`. Add `?platform=` for the warehouse the tables are in; the default is `snowflake`.
+
+| Tool | Send |
+|---|---|
+| `dbt` | `{"run_results": <run_results.json>, "manifest": <manifest.json>}` after `dbt test` or `dbt build`. Each test is matched to the model and column it tests. |
+| `great_expectations` | a validation result or a checkpoint result. The dataset is the batch's table, or pass `?dataset=`. |
+| `soda` | a Soda scan result (`soda scan … --srf results.json`). |
+| `monte_carlo`, `anomalo`, `generic` | `{"results": [{"table": "db.schema.table", "check": "…", "status": "pass\|warn\|fail\|error", "column"?, "message"?, "url"?}]}`. Use this from a webhook template or a small forwarder for Monte Carlo and Anomalo alerts, or for anything else. |
+
+Each check becomes an assertion attributed to its tool, with a result per run, so the asset's **Quality** tab shows it beside Cairn's monitors. A link back to the tool shows when one is given. Cairn keeps each check's last 30 results.
+
+A failing external check counts toward the dataset's health like a failing monitor. When a check starts failing, the dataset's owners and followers get `quality.external_failed`.
+
+For dbt in CI, after `dbt build`:
+
+```
+jq -n --slurpfile r target/run_results.json --slurpfile m target/manifest.json '{run_results: $r[0], manifest: $m[0]}' |
+  curl -fsS -XPOST -H "Authorization: Bearer $CAIRN_API_KEY" -H 'Content-Type: application/json' \
+    --data @- https://cairn.example.com/cairn/api/quality/external/dbt
+```
+
 ## Severity and incidents
 
 `severity` (`LOW` … `CRITICAL`) ranks incidents. `incident_after_failures` sets how many consecutive

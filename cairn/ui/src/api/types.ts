@@ -61,6 +61,8 @@ export interface DatasetHealth {
     status: EvaluationStatus | 'UNKNOWN';
     monitors: Array<{ monitor: Monitor; last_evaluation: Evaluation | null }>;
     open_incidents: number;
+    /** Checks from other tools (dbt tests, Great Expectations, Soda, generic), next to Cairn's own. */
+    external?: ExternalCheck[];
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -305,4 +307,16 @@ export interface DocumentationDraft {
 export interface DocGenerateResponse {
     workflow_id: string;
     draft: DocumentationDraft;
+}
+
+export interface ExternalCheck {
+    id: string;
+    tool: string;
+    name: string;
+    column: string | null;
+    status: 'PASS' | 'WARN' | 'FAIL' | 'ERROR';
+    message: string;
+    url: string | null;
+    last_ms: number;
+    history: { ts: number; status: string }[];
 }
