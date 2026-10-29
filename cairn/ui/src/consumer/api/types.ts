@@ -711,9 +711,9 @@ export interface StewardProposal {
     id: string;
     urn: string;
     name: string;
-    kind: 'owner' | 'term' | 'description';
+    kind: 'owner' | 'term' | 'tag' | 'description';
     field: string;
-    value: string | { description: string; columns: unknown[]; model?: string };
+    value: string | { description: string; columns?: unknown[]; model?: string; suggested?: boolean };
     evidence: string[];
     confidence: number;
     state: 'PROPOSED' | 'ACCEPTED' | 'AUTO_ACCEPTED' | 'REJECTED';

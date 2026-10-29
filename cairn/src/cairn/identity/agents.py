@@ -462,7 +462,9 @@ def required_scope(method: str, path: str, read_posts: set[str]) -> Optional[str
 
 def tool_scope(tool: str) -> str:
     """The scope an agent needs for an MCP tool."""
-    return {"ask_data": "query_data", "generate_documentation": "propose"}.get(tool, "read")
+    if tool.startswith("suggest_") or tool in ("generate_documentation", "request_access", "start_discussion"):
+        return "propose"
+    return {"ask_data": "query_data"}.get(tool, "read")
 
 
 def describe(scopes: list[str]) -> list[dict[str, Any]]:

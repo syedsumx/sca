@@ -20,7 +20,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Column, String, Table, select, update
 from sqlalchemy.engine import Engine
 
-from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact
+from cairn.ai.guardrails import UNTRUSTED_NOTICE, redact, screen
 from cairn.ai.llm import LLMError, LLMUsage
 from cairn.ai.usage import set_actor
 from cairn.common.db import JSONText, metadata
@@ -41,6 +41,7 @@ metrics, ownership, quality, access and lineage using the tools. Rules:
 - Prefer certified, healthy assets when recommending data. Mention masking or access limits plainly.
 - For "why did X change/break" questions call explain_lineage first.
 - For questions about the data itself (how many, how much, trends) call ask_data and show its SQL.
+- Only suggest changes or request access when the user asks; suggestions are queued for review, so say so.
 - Be concise: short paragraphs or bullets, markdown allowed. If tools return nothing, say so.
 {UNTRUSTED_NOTICE}"""
 
@@ -73,6 +74,25 @@ TOOL_SPECS: list[dict] = [
                                         "governed read-only SQL query; returns the SQL, an explanation and rows.",
      "input_schema": {"type": "object", "properties": {"question": {"type": "string"},
                       "dataset_urns": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}},
+    {"name": "suggest_description", "description": "Suggest a description for a dataset or column. It waits for a "
+                                                   "person's review; tell the user it was queued, not applied.",
+     "input_schema": {"type": "object", "properties": {"urn": {"type": "string"}, "description": {"type": "string"},
+                      "column": {"type": "string"}, "rationale": {"type": "string"}}, "required": ["urn", "description"]}},
+    {"name": "suggest_tags", "description": "Suggest tags for a dataset or column, queued for review.",
+     "input_schema": {"type": "object", "properties": {"urn": {"type": "string"},
+                      "tags": {"type": "array", "items": {"type": "string"}}, "column": {"type": "string"},
+                      "rationale": {"type": "string"}}, "required": ["urn", "tags"]}},
+    {"name": "suggest_glossary_terms", "description": "Suggest glossary terms for a dataset or column, queued for review.",
+     "input_schema": {"type": "object", "properties": {"urn": {"type": "string"},
+                      "terms": {"type": "array", "items": {"type": "string"}}, "column": {"type": "string"},
+                      "rationale": {"type": "string"}}, "required": ["urn", "terms"]}},
+    {"name": "suggest_owner", "description": "Suggest an owner for a dataset, queued for review.",
+     "input_schema": {"type": "object", "properties": {"urn": {"type": "string"}, "owner": {"type": "string"},
+                      "rationale": {"type": "string"}}, "required": ["urn", "owner"]}},
+    {"name": "request_access", "description": "Request access to a data product for the user (only when they ask).",
+     "input_schema": {"type": "object", "properties": {"product_urn": {"type": "string"}, "purpose": {"type": "string"},
+                      "justification": {"type": "string"}, "duration_days": {"type": "integer"}},
+                      "required": ["product_urn", "purpose", "justification"]}},
     {"name": "list_data_products", "description": "Marketplace data products matching a query, with access status.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
 ]
@@ -144,7 +164,7 @@ class Assistant:
             raise ValueError(f"unknown tool {name}")
         params = inspect.signature(fn).parameters
         allowed = {k: v for k, v in args.items() if k in params}
-        out = fn(**allowed)
+        out = screen(fn(**allowed))
         return out, f"{name.replace('_', ' ')}({', '.join(f'{k}={str(v)[:40]}' for k, v in allowed.items())})"
 
     # ---- main entry ---------------------------------------------------------------------

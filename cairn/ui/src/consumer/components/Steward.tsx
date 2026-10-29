@@ -8,7 +8,7 @@ import { actorName } from '../utils/format';
 import { assetPath } from './Assets';
 import { Muted } from './tokens';
 
-const KIND = { owner: 'Owner', term: 'Classification', description: 'Description' } as const;
+const KIND = { owner: 'Owner', term: 'Classification', tag: 'Tag', description: 'Description' } as const;
 
 function ProposedValue({ p, edit, onEdit }: { p: StewardProposal; edit?: unknown; onEdit: (v: unknown) => void }) {
     if (p.kind === 'description') {
@@ -33,6 +33,7 @@ function ProposedValue({ p, edit, onEdit }: { p: StewardProposal; edit?: unknown
             />
         );
     }
+    if (p.kind === 'tag') return <Tag color="blue">{(p.value as string).replace('urn:li:tag:', '')}</Tag>;
     return <Tag color="purple">{(p.value as string).replace('urn:li:glossaryTerm:', '')}</Tag>;
 }
 

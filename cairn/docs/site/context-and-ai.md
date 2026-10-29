@@ -134,6 +134,28 @@ What a client gets:
 - **Completion**: typing a few letters of an asset name in a prompt or resource argument suggests
   matching assets you may see.
 
+**Agents propose, people decide.**
+
+- **Suggestion tools** (`suggest_description`, `suggest_tags`, `suggest_glossary_terms` and
+  `suggest_owner`) put the agent's suggestion in the review queue (**Governance → AI steward**).
+  Each suggestion is labelled with the agent and the person it acted for. Nothing changes until
+  someone with the right permission accepts it. Accepted suggestions are written as one batch you
+  can undo.
+- **`request_access`** files an access request that the product's approvers decide.
+- **`start_discussion`** opens a thread marked as posted by an agent.
+
+These tools need the agent's `propose` scope.
+
+**Screening.** Catalog text is written by people, so it may try to instruct an AI:
+
+- Before any catalog text reaches a model or an MCP client, Cairn removes invisible characters
+  (hidden Unicode tags, zero-width and direction controls).
+- Text that reads like instructions to an AI is marked *flagged by Cairn* in place, and the event is
+  recorded in the audit log (`ai.injection_flagged`).
+- Suggestions and messages that carry such text are refused (`agent.suggestion_refused`), so an
+  agent cannot be steered into planting it in the catalog.
+- Each agent may make up to 200 suggestions an hour.
+
 ## AI steward
 
 Coverage is a catalog's weak point: most tables have no description and no owner, and nobody has time to write ten thousand of them. The AI steward proposes them for people to review.

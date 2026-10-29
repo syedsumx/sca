@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -33,7 +34,7 @@ steward_proposals = Table(
     "cairn_steward_proposals", metadata,
     Column("id", String(40), primary_key=True),
     Column("urn", String(512), nullable=False, index=True),
-    Column("kind", String(16), nullable=False),            # owner | term | description
+    Column("kind", String(16), nullable=False),            # owner | term | tag | description
     Column("field", String(512), nullable=False),          # column path, or "" for the dataset
     Column("value", JSONText, nullable=False),
     Column("evidence", JSONText, nullable=False),
@@ -51,7 +52,9 @@ SCAN_ASPECTS = ["datasetProperties", "editableDatasetProperties", "ownership", "
                 "domains", "schemaMetadata", "editableSchemaMetadata", "status"]
 SYSTEM_ACTORS = ("urn:li:corpuser:datahub", "urn:li:corpuser:__datahub_system", "urn:li:corpuser:admin",
                  "urn:li:corpuser:unknown")
-PRIVILEGE = {"owner": "EDIT_ENTITY_OWNERS", "term": "EDIT_DATASET_COL_GLOSSARY_TERMS", "description": "EDIT_ENTITY_DOCS"}
+PRIVILEGE = {"owner": "EDIT_ENTITY_OWNERS", "term": "EDIT_DATASET_COL_GLOSSARY_TERMS", "tag": "EDIT_ENTITY_TAGS",
+             "description": "EDIT_ENTITY_DOCS"}
+SUGGESTIONS_PER_HOUR = 200          # per agent (or person, for the in-product assistant)
 
 
 def _now() -> int:
@@ -232,6 +235,57 @@ class StewardService:
                 "proposed": len(made), "auto_accepted": len(auto),
                 "by_kind": {k: sum(1 for p in made if p["kind"] == k) for k in ("owner", "term", "description")}}
 
+    # ---- suggestions from AI agents --------------------------------------------------------
+    def suggest(self, urn: str, kind: str, value: Any, actor: str, agent: Optional[str] = None,
+                field: str = "", rationale: str = "", confidence: float = 0.5) -> dict:
+        """An agent's suggestion, queued for review like the steward's own (nothing changes until a
+        person with the right privilege accepts it). Refused when the text carries invisible
+        characters or reads like instructions to an AI, or when the agent exceeds its hourly quota."""
+        from cairn.ai.guardrails import injection_signals
+
+        if kind not in ("owner", "term", "tag", "description"):
+            raise StewardError("kind is owner, term, tag or description")
+        if kind == "owner" and field:
+            raise StewardError("owners are suggested for the dataset, not a column")
+        text = value if isinstance(value, str) else ""
+        signals = injection_signals(text) + injection_signals(rationale)
+        if signals:
+            if self.audit is not None:
+                self.audit.record("ai", "agent.suggestion_refused", actor, urn,
+                                  {"kind": kind, "field": field, "agent": agent, "signals": signals[:5]})
+            raise StewardError(f"refused: the suggestion contains {signals[0]}", 422)
+        if kind == "description" and not 10 <= len(text.strip()) <= 5000:
+            raise StewardError("a description is 10 to 5000 characters")
+        prefix = {"owner": "urn:li:corpuser:", "term": "urn:li:glossaryTerm:", "tag": "urn:li:tag:"}.get(kind)
+        if prefix and not text.startswith("urn:li:"):
+            text = prefix + text.strip()
+        if prefix and not re.fullmatch(r"urn:li:(corpuser|corpGroup|glossaryTerm|tag):[\w.@\-]{1,200}", text):
+            raise StewardError(f"not a valid {kind}: {text}")
+        source, now = f"agent:{agent or 'assistant'}", _now()
+        with self.engine.connect() as conn:
+            recent = conn.execute(select(steward_proposals.c.id).where(
+                steward_proposals.c.run_id == source, steward_proposals.c.created_ms > now - 3600_000)).all()
+            pending = conn.execute(select(steward_proposals).where(
+                steward_proposals.c.urn == urn, steward_proposals.c.kind == kind, steward_proposals.c.field == field,
+                steward_proposals.c.state == "PROPOSED")).all()
+        if len(recent) >= SUGGESTIONS_PER_HOUR:
+            raise StewardError(f"this agent made {SUGGESTIONS_PER_HOUR} suggestions in the last hour; try later", 429)
+        stored = {"description": text.strip(), "suggested": True} if kind == "description" else text
+        for r in pending:
+            if r.value == stored:
+                return {**self._public(r), "duplicate": True}
+        pid = f"sp_{uuid.uuid4().hex[:14]}"
+        evidence = [f"suggested by {agent or 'the assistant'} for {actor}"] + ([rationale[:500]] if rationale else [])
+        with self.engine.begin() as conn:
+            conn.execute(steward_proposals.insert().values(
+                id=pid, urn=urn, kind=kind, field=field, value=stored, evidence=evidence,
+                confidence=max(0.0, min(confidence, 1.0)), state="PROPOSED", run_id=source, priority=0.0, created_ms=now))
+        if self.audit is not None:
+            self.audit.record("ai", "agent.suggested", actor, urn, {"kind": kind, "field": field, "proposal": pid,
+                                                                   "agent": agent})
+        with self.engine.connect() as conn:
+            return self._public(conn.execute(select(steward_proposals).where(steward_proposals.c.id == pid)).first())
+
     # ---- reviewing -----------------------------------------------------------------------
     def proposals(self, state: str = "PROPOSED", kind: Optional[str] = None, urn: Optional[str] = None,
                   limit: int = 200) -> list[dict]:
@@ -255,10 +309,17 @@ class StewardService:
         from cairn.governance.bulk import ASPECTS, _current
 
         changes: dict[tuple[str, str, str], dict] = {}
+        scalar: list[dict] = []
         for r in rows:
             if r.kind == "description":
+                if (r.value or {}).get("suggested"):          # an agent's text: one description change
+                    a = {n: self.graph.get_aspect(r.urn, n) or {} for n in ASPECTS + ("domains", "ownership",
+                                                                                      "globalTags", "glossaryTerms")}
+                    text = edits.get(r.id) if isinstance(edits.get(r.id), str) else r.value["description"]
+                    scalar.append({"urn": r.urn, "field": r.field, "what": "description",
+                                   "from": _current(r.urn, r.field, a)["description"], "to": text})
                 continue
-            what = "owners" if r.kind == "owner" else "glossary_terms"
+            what = {"owner": "owners", "tag": "tags"}.get(r.kind, "glossary_terms")
             key = (r.urn, r.field, what)
             if key not in changes:
                 a = {n: self.graph.get_aspect(r.urn, n) or {} for n in ASPECTS + ("domains", "ownership", "globalTags",
@@ -271,7 +332,7 @@ class StewardService:
             if value not in c["to"]:
                 c["to"].append(value)
                 c["add"].append(value)
-        return [c for c in changes.values() if c["add"]]
+        return [c for c in changes.values() if c["add"]] + scalar
 
     def decide(self, ids: list[str], action: str, actor: str, authorize: Callable[[str, str], bool],
                edits: Optional[dict[str, Any]] = None, state: Optional[str] = None) -> dict:
@@ -290,7 +351,7 @@ class StewardService:
             if changes:
                 batch = self.bulk.record(changes, actor, "ai-steward", {"proposals": len(rows)})["batch_id"]
             for r in rows:
-                if r.kind == "description":
+                if r.kind == "description" and not (r.value or {}).get("suggested"):
                     from cairn.ai.docgen import apply_documentation
 
                     draft = dict(r.value)

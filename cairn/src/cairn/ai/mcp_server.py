@@ -179,6 +179,69 @@ class CairnTools:
             raise RuntimeError(str(e))
         return out
 
+    # ---- proposals: changes that wait for a person's review ---------------------------------
+    def _suggest(self, urn: str, kind: str, values: list[str], column: Optional[str], rationale: str) -> dict:
+        from cairn.ai.steward import StewardError
+
+        if self.s.steward is None:
+            raise RuntimeError("the review queue is not configured")
+        p = self.principal()
+        if not self.s.can_view(p)(urn):
+            raise Forbidden("you may not see this asset")
+        out = []
+        for v in values[:20]:
+            try:
+                out.append(self.s.steward.suggest(urn, kind, v, p.urn, p.agent, column or "", rationale))
+            except StewardError as e:
+                out.append({"value": v, "refused": str(e)})
+        return {"queued": [o for o in out if "refused" not in o], "refused": [o for o in out if "refused" in o],
+                "note": "Queued in the review queue (Governance → AI steward); nothing changed until a person accepts."}
+
+    def suggest_description(self, urn: str, description: str, column: Optional[str] = None, rationale: str = "") -> dict:
+        return self._suggest(urn, "description", [description], column, rationale)
+
+    def suggest_tags(self, urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "") -> dict:
+        return self._suggest(urn, "tag", tags, column, rationale)
+
+    def suggest_glossary_terms(self, urn: str, terms: list[str], column: Optional[str] = None,
+                               rationale: str = "") -> dict:
+        return self._suggest(urn, "term", terms, column, rationale)
+
+    def suggest_owner(self, urn: str, owner: str, rationale: str = "") -> dict:
+        return self._suggest(urn, "owner", [owner], None, rationale)
+
+    def request_access(self, product_urn: str, purpose: str, justification: str, duration_days: int = 30) -> dict:
+        from cairn.ai.guardrails import injection_signals
+        from cairn.marketplace.service import AccessRequestIn, MarketplaceError
+
+        if self.s.marketplace is None:
+            raise RuntimeError("the marketplace is not configured")
+        p = self.principal()
+        if not self.s.can_view(p)(product_urn):
+            raise Forbidden("you may not see this data product")
+        if signals := injection_signals(justification + " " + purpose):
+            raise ValueError(f"refused: the request contains {signals[0]}")
+        try:
+            return self.s.marketplace.create_request(p.urn, AccessRequestIn(
+                product_urn=product_urn, purpose=purpose, justification=justification,
+                duration_days=duration_days), self.s.subject_of(p.urn))
+        except MarketplaceError as e:
+            raise ValueError(str(e))
+
+    def start_discussion(self, urn: str, message: str, column: Optional[str] = None) -> dict:
+        from cairn.ai.guardrails import injection_signals
+        from cairn.collab.service import ThreadIn
+
+        if self.s.collab is None:
+            raise RuntimeError("discussions are not configured")
+        p = self.principal()
+        if not self.s.can_view(p)(urn):
+            raise Forbidden("you may not see this asset")
+        if signals := injection_signals(message):
+            raise ValueError(f"refused: the message contains {signals[0]}")
+        note = f"\n\n_Posted by an AI agent ({p.agent}) for you._" if p.agent else ""
+        return self.s.collab.create_thread(p.urn, ThreadIn(entity_urn=urn, body_md=message + note, field_path=column))
+
     def list_pending_reviews(self) -> dict:
         p = self.principal()
         items = [w for w in self.s.workflows.list() if w.state in ("SUBMITTED", "IN_REVIEW")
@@ -197,6 +260,17 @@ def build_mcp_server(services: Services):
     read_only = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
     proposes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 
+    def _screened(result, tool: str, p):
+        """Strip invisible characters and flag instruction-like catalog text before it leaves."""
+        from cairn.ai.guardrails import screen
+
+        flagged: list[str] = []
+        out = screen(result, flagged)
+        if flagged and services.audit is not None:
+            services.audit.record("ai", "ai.injection_flagged", p.urn if p else "unknown", tool,
+                                  {"tool": tool, "samples": flagged[:3], **({"agent": p.agent} if p and p.agent else {})})
+        return out
+
     def _safe(fn):
         from cairn.identity.agents import tool_scope
 
@@ -207,7 +281,9 @@ def build_mcp_server(services: Services):
                 return {"error": "forbidden",
                         "message": f"this agent's scopes do not include {tool_scope(fn.__name__)}"}
             try:
-                return fn(*args, **kwargs)
+                return _screened(fn(*args, **kwargs), fn.__name__, p)
+            except ValueError as e:
+                return {"error": "refused", "message": str(e)}
             except Forbidden as e:
                 return {"error": "forbidden", "message": str(e)}
             except AuthenticationError as e:
@@ -297,6 +373,45 @@ def build_mcp_server(services: Services):
         grounded in approved definitions and past queries, and run with the caller's permissions and
         masking. Pass dataset_urns to choose the tables; returns the SQL, its explanation and the rows."""
         return tools.ask_data(question, dataset_urns, run, limit)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Suggest a description")
+    @_safe
+    def suggest_description(urn: str, description: str, column: Optional[str] = None,
+                            rationale: str = "") -> dict[str, Any]:
+        """Suggest a description for a dataset (or one column). It waits in the review queue; nothing
+        changes until a person accepts it. Say in rationale what it is based on."""
+        return tools.suggest_description(urn, description, column, rationale)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Suggest tags")
+    @_safe
+    def suggest_tags(urn: str, tags: list[str], column: Optional[str] = None, rationale: str = "") -> dict[str, Any]:
+        """Suggest tags (names or urns) for a dataset or column, queued for review."""
+        return tools.suggest_tags(urn, tags, column, rationale)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Suggest glossary terms")
+    @_safe
+    def suggest_glossary_terms(urn: str, terms: list[str], column: Optional[str] = None,
+                               rationale: str = "") -> dict[str, Any]:
+        """Suggest glossary terms (names or urns) for a dataset or column, queued for review."""
+        return tools.suggest_glossary_terms(urn, terms, column, rationale)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Suggest an owner")
+    @_safe
+    def suggest_owner(urn: str, owner: str, rationale: str = "") -> dict[str, Any]:
+        """Suggest an owner (user or group urn, or a username) for a dataset, queued for review."""
+        return tools.suggest_owner(urn, owner, rationale)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Request access")
+    @_safe
+    def request_access(product_urn: str, purpose: str, justification: str, duration_days: int = 30) -> dict[str, Any]:
+        """Request access to a data product for the caller; its approvers decide."""
+        return tools.request_access(product_urn, purpose, justification, duration_days)
+
+    @server.tool(annotations=proposes, structured_output=True, title="Start a discussion")
+    @_safe
+    def start_discussion(urn: str, message: str, column: Optional[str] = None) -> dict[str, Any]:
+        """Open a discussion on an asset (markdown), e.g. a question for its owners; marked as posted by an agent."""
+        return tools.start_discussion(urn, message, column)
 
     @server.tool(annotations=read_only, structured_output=True, title="List pending reviews")
     @_safe

@@ -88,3 +88,32 @@ it('accepts a selection with edits and rejects another', async () => {
     fireEvent.click(screen.getByRole('button', { name: 'Find gaps now' }));
     await waitFor(() => expect(calls.some((c) => c.path === '/ai/steward/run')).toBe(true));
 });
+
+it("shows an agent's tag suggestion with who suggested it", async () => {
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /ai/steward/proposals': [
+            {
+                id: 'sp_9',
+                urn: DS,
+                name: 'orders',
+                kind: 'tag',
+                field: '',
+                value: 'urn:li:tag:Finance',
+                confidence: 0.5,
+                evidence: ['suggested by agt_docbot for urn:li:corpuser:ana', 'used by the finance dashboards'],
+                state: 'PROPOSED',
+            },
+        ],
+    });
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <StewardReview />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    expect(await screen.findByText('Finance')).toBeTruthy();
+    expect(screen.getAllByText('Tag').length).toBeGreaterThan(0);
+    expect(screen.getByText(/suggested by agt_docbot/)).toBeTruthy();
+});
