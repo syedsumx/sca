@@ -245,13 +245,20 @@ class ChangeHistory:
         if not force and diff(current, change["after"]):
             raise HistoryError(f"{aspect} has changed since; revert the later change first, or force it", 409)
         target = change["before"] if change["before"] is not None else EMPTY[aspect]
-        self.graph.emit([make_mcp(urn, aspect, target)])
         now = int(time.time() * 1000)
         rid = hashlib.sha1(f"{urn}|{aspect}|{now}|revert|{cid}".encode()).hexdigest()
+        # Recorded before the write: the change log can deliver the write's event before emit returns.
         with self.engine.begin() as conn:
             conn.execute(change_history.insert().values(id=rid, urn=urn, aspect=aspect, actor=actor, ts_ms=now,
                                                         before=current, after=target, after_hash=_hash(target),
                                                         revert_of=cid, confirmed=False))
+        try:
+            self.graph.emit([make_mcp(urn, aspect, target)])
+        except Exception:
+            with self.engine.begin() as conn:
+                conn.execute(change_history.delete().where(change_history.c.id == rid))
+            raise
+        with self.engine.begin() as conn:
             conn.execute(update(change_history).where(change_history.c.id == cid).values(reverted_by=rid))
         if self.audit is not None:
             self.audit.record("governance", "metadata.reverted", actor, urn,

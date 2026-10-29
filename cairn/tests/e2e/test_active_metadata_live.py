@@ -1957,9 +1957,13 @@ def test_49_a_workspace_admin_governs_their_domains_only(users):
     and certify there (and nowhere else), manage its members, but not its domains."""
     root, bob, carol = users["root"], users["bob"], users["carol"]
     wid = f"ws-{RUN}"
-    body = {"id": wid, "name": f"Workspace {RUN}", "domains": [DOMAIN], "admins": [BOB], "members": []}
+    domain = f"urn:li:domain:ws-{RUN}"
+    ds = f"urn:li:dataset:(urn:li:dataPlatform:postgres,am_{RUN}.public.ws_ledger,PROD)"
+    emit(ds, "datasetProperties", {"name": "ws_ledger"})
+    emit(ds, "domains", {"domains": [domain]})
+    body = {"id": wid, "name": f"Workspace {RUN}", "domains": [domain], "admins": [BOB], "members": []}
 
-    def decide(actor, privilege, urn=DS):
+    def decide(actor, privilege, urn=ds):
         return root.post("/governance/simulate", json={"actor": actor, "privilege": privilege,
                                                          "resource_urn": urn}).json()["decision"]
     assert decide(BOB, "EDIT_ENTITY_DOCS") != "ALLOW"
@@ -1973,12 +1977,13 @@ def test_49_a_workspace_admin_governs_their_domains_only(users):
         assert decide(BOB, "MANAGE_POLICIES", None) != "ALLOW"                     # not a global admin
         mine = bob.get("/workspaces").json()
         assert [w["role"] for w in mine if w["id"] == wid] == ["admin"]
-        got = bob.get(f"/workspaces/{wid}").json()
-        assert got["assets"].get("dataset", 0) >= 1 and got["role"] == "admin", got
+        got = eventually(lambda: (lambda g: g if g["assets"].get("dataset") else None)(
+            bob.get(f"/workspaces/{wid}").json()), timeout=90, interval=5)    # the asset list is cached a minute
+        assert got["role"] == "admin", got
         assert carol.get(f"/workspaces/{wid}").status_code == 404                  # not hers to see
         ok = bob.put(f"/workspaces/{wid}", json={**body, "members": [CAROL]})
         assert ok.status_code == 200, ok.text
-        assert bob.put(f"/workspaces/{wid}", json={**body, "members": [CAROL], "domains": [DOMAIN, "urn:li:domain:x"]}
+        assert bob.put(f"/workspaces/{wid}", json={**body, "members": [CAROL], "domains": [domain, "urn:li:domain:x"]}
                        ).status_code == 403
         assert any(w["id"] == wid for w in carol.get("/ui/config").json()["workspaces"])
     finally:
@@ -2003,14 +2008,19 @@ def test_50_sql_in_the_query_log_becomes_column_lineage(users):
         if r.status_code != 200:
             return None
         lin = r.json()["aspect"]["com.linkedin.dataset.UpstreamLineage"]
-        fine = {f["downstreams"][0]: f for f in lin.get("fineGrainedLineages") or [] if f.get("query") == q}
-        return (lin, fine) if len(fine) == 2 else None
+        fine = {f["downstreams"][0]: f for f in lin.get("fineGrainedLineages") or []}
+        mine = [f for f in fine.values() if f.get("query") == q]
+        return (lin, fine) if mine and f"urn:li:schemaField:({DS_DOWN},customer_email)" in fine else None
 
     lin, fine = eventually(traced, timeout=120, interval=5)
     assert DS in [u["dataset"] for u in lin["upstreams"]]
     total = fine[f"urn:li:schemaField:({DS_DOWN},order_total)"]
     assert total["upstreams"] == [f"urn:li:schemaField:({DS},amount)"] and total["transformOperation"] == "SQL"
-    assert fine[f"urn:li:schemaField:({DS_DOWN},customer_email)"]["transformOperation"] == "COPY"
+    assert total["query"] == q
+    # An edge that was already there (from earlier tests) is kept as it was, not duplicated.
+    email = [f for f in lin["fineGrainedLineages"] if f["downstreams"] == [f"urn:li:schemaField:({DS_DOWN},customer_email)"]
+             and f["upstreams"] == [f"urn:li:schemaField:({DS},email)"]]
+    assert len(email) == 1
 
 
 def test_51_metadata_changes_are_kept_with_a_diff_and_can_be_reverted(users):

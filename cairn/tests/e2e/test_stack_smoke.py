@@ -295,7 +295,7 @@ def test_product_docs_served():
         home = httpx.get(f"{EDGE}/docs/{lang}/index.html", timeout=10)
         assert home.status_code == 200 and title in home.text and f'<html lang="{lang}">' in home.text, lang
         assert httpx.get(f"{EDGE}/docs/{lang}/governance.html", timeout=10).status_code == 200
-    assert f'hreflang="de" href="de/getting-started.html"' in httpx.get(f"{EDGE}/docs/getting-started.html", timeout=10).text
+    assert 'hreflang="de" href="de/getting-started.html"' in httpx.get(f"{EDGE}/docs/getting-started.html", timeout=10).text
 
 
 def test_builtin_maintenance_sources_run_offline():
