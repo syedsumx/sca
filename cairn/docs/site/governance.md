@@ -275,3 +275,5 @@ The default is a starting point, not legal advice. Edit its questions, options a
 People's own use of the SQL editor is not counted. A dataset's **AI usage** tab lists the agents and AI tools that read it in the last 30 days, with each agent's AI system (`GET /cairn/api/ai/lineage/readers?urn=`). Other people's names are shown to administrators only.
 
 An agent linked to an AI system makes that system's reads visible on its entry: the datasets it used lately, and the ones it never declared. Undeclared datasets count for the restricted-data rule, and the inventory report lists them under `undeclared_use`. Records are kept for 400 days.
+
+The same lineage is published to the catalog's lineage graph every hour. Each agent becomes a task whose inputs are the datasets it read in the last 30 days. It sits under a pipeline for its AI system, or under "Agents without an AI system". A dataset's lineage then shows the agents it feeds. Agents that are deleted, or no longer read anything, drop out of the graph.

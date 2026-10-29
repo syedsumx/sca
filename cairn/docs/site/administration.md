@@ -140,6 +140,7 @@ it. To make an agent depend on the AI system register, link it to an AI system
 - databases: PostgreSQL, MySQL, SQL Server, Trino, MongoDB;
 - dbt Core and dbt Cloud;
 - BI tools: Looker, Tableau, Power BI, Superset, Preset, Metabase, Sigma, Qlik Sense;
+- machine learning: MLflow, Amazon SageMaker, Vertex AI;
 - Kafka.
 
 For anything else, **Another connector** takes a recipe.

@@ -111,3 +111,29 @@ def test_dataset_usage_api_and_the_ai_system_register(stack):
     assert c.get(f"/admin/agents/{agent['id']}/datasets", headers={"X-Cairn-Actor": ANA}).status_code == 403
     assert len(c.get(f"/admin/agents/{agent['id']}/datasets", headers={"X-Cairn-Actor": ADMIN}).json()) == 2
     assert len(c.get(f"/me/agents/{agent['id']}/datasets", headers={"X-Cairn-Actor": BOB}).json()) == 0
+
+
+def test_agents_publish_as_jobs_in_the_catalog_lineage(stack):
+    from cairn.ai.lineage_publish import job_urn, publish
+
+    s = stack
+    system = s.ai_systems.create(AISystemIn(name="Order bot", purpose="answers order questions", datasets=[DS]), ANA)
+    registered = s.agents.create_key_agent(AgentIn(name="Order bot key", scopes=["read"], owner=ANA,
+                                                   ai_system=system["id"]), ADMIN)
+    loose = s.agents.create_key_agent(AgentIn(name="Notebook helper", scopes=["read"], owner=BOB), ADMIN)
+    idle = s.agents.create_key_agent(AgentIn(name="Idle", scopes=["read"], owner=BOB), ADMIN)
+    s.traces.record_reads(ANA, registered["id"], "api", [DS, WH], "data")
+    s.traces.record_reads(BOB, loose["id"], "mcp", [WH], "metadata")
+    out = publish(s)
+    assert out["agents"] == 2
+    job = job_urn(system["id"], registered["id"])
+    assert s.graph.aspects[(job, "dataJobInputOutput")] == {"inputDatasets": sorted([DS, WH]), "outputDatasets": []}
+    assert s.graph.aspects[(job, "dataJobInfo")]["name"] == "Order bot key"
+    flow = s.graph.aspects[(f"urn:li:dataFlow:(cairn-ai,{system['id']},PROD)", "dataFlowInfo")]
+    assert flow["name"] == "Order bot" and flow["customProperties"]["state"] == "DRAFT"
+    assert (job_urn("unregistered", loose["id"]), "dataJobInfo") in s.graph.aspects
+    assert (job_urn("unregistered", idle["id"]), "dataJobInfo") not in s.graph.aspects     # read nothing
+    assert publish(s)["changes"] == 0                                                         # nothing new
+    s.agents.delete(loose["id"], ADMIN)
+    again = publish(s)
+    assert again["removed"] == 1 and s.graph.aspects[(job_urn("unregistered", loose["id"]), "status")] == {"removed": True}

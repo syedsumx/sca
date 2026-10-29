@@ -50,6 +50,7 @@ const CATEGORY: Record<SourceConnector['category'], string> = {
     bi: 'BI tools',
     transformation: 'Transformation',
     streaming: 'Streaming',
+    ml: 'Machine learning',
     other: 'Other',
 };
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');

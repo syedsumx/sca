@@ -40,7 +40,7 @@ class Connector(BaseModel):
     id: str
     name: str
     source_type: str
-    category: Literal["warehouse", "database", "lake", "bi", "transformation", "streaming", "other"]
+    category: Literal["warehouse", "database", "lake", "bi", "transformation", "streaming", "ml", "other"]
     description: str
     fields: list[FormField]
     defaults: dict[str, Any] = Field(default_factory=dict)
@@ -150,6 +150,20 @@ CONNECTORS: list[Connector] = [
               description="Spaces, apps, sheets and their data sources from Qlik Cloud.",
               fields=[_f("tenant_hostname", "Tenant host", required=True, help="e.g. acme.eu.qlikcloud.com"),
                       _f("api_key", "API key secret", "secret", required=True)]),
+    Connector(id="mlflow", name="MLflow", source_type="mlflow", category="ml",
+              description="Registered models, their versions and stages from an MLflow model registry.",
+              fields=[_f("tracking_uri", "Tracking URI", required=True), _f("registry_uri", "Registry URI"),
+                      _f("username", "User", path="username"), _f("password", "Password secret", "secret")]),
+    Connector(id="sagemaker", name="Amazon SageMaker", source_type="sagemaker", category="ml",
+              description="Models, endpoints, training jobs and feature groups from SageMaker.",
+              fields=[_f("aws_region", "Region", required=True),
+                      _f("aws_role", "Role to assume (ARN)", path="aws_role")]),
+    Connector(id="vertexai", name="Vertex AI", source_type="vertexai", category="ml",
+              description="Models, endpoints, training jobs and experiments from Google Cloud Vertex AI.",
+              fields=[_f("project_id", "Project", required=True), _f("region", "Region", required=True),
+                      _f("client_email", "Service account email", path="credential.client_email"),
+                      _f("private_key", "Private key secret", "secret", path="credential.private_key"),
+                      _f("private_key_id", "Private key id secret", "secret", path="credential.private_key_id")]),
     Connector(id="kafka", name="Kafka", source_type="kafka", category="streaming",
               description="Topics and their schemas from Kafka and a schema registry.",
               fields=[_f("bootstrap", "Bootstrap servers", path="connection.bootstrap", required=True),
