@@ -75,6 +75,9 @@ TOOL_SPECS: list[dict] = [
                                         "governed read-only SQL query; returns the SQL, an explanation and rows.",
      "input_schema": {"type": "object", "properties": {"question": {"type": "string"},
                       "dataset_urns": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}},
+    {"name": "search_knowledge", "description": "Search the team's documentation (Confluence, Notion, Google Docs, "
+                                               "SharePoint) for pages that explain a dataset, metric or process.",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
     {"name": "list_metrics", "description": "Governed metrics (approved definitions) with their dimensions.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}},
     {"name": "query_metric", "description": "Compute a governed metric by name, by its dimensions, with filters on "

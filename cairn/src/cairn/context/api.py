@@ -20,7 +20,7 @@ class DefinitionEdits(BaseModel):
     description: Optional[str] = Field(default=None, max_length=2000)
 
 
-def build_router(store: ContextStore, current_principal, authorize, can_view, semantic=None) -> APIRouter:
+def build_router(store: ContextStore, current_principal, authorize, can_view, semantic=None, knowledge=None) -> APIRouter:
     router = APIRouter(prefix="/context", tags=["context"])
     layer = store.layer
 
@@ -108,6 +108,38 @@ def build_router(store: ContextStore, current_principal, authorize, can_view, se
         return _sem(lambda: semantic.query(p.urn, name, can_view(p), [str(d) for d in dims],
                                            [f for f in filters if isinstance(f, dict)], body.get("time_grain"),
                                            int(body.get("limit") or 200)))
+
+    # ---- knowledge sources: Confluence, Notion, Google Docs and SharePoint pages ----------------
+    def _kn():
+        if knowledge is None:
+            raise HTTPException(503, "knowledge sources are not configured")
+        return knowledge
+
+    @router.get("/knowledge")
+    def knowledge_sources(p: Principal = Depends(current_principal)):
+        """Each configured source with its page count and last sync."""
+        authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        return _kn().overview()
+
+    @router.post("/knowledge/sync")
+    def knowledge_sync(source: Optional[str] = None, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        return _kn().sync(source, p.urn)
+
+    @router.get("/knowledge/search")
+    def knowledge_search(q: str = Query(min_length=2, max_length=500), limit: int = Query(5, le=20),
+                         p: Principal = Depends(current_principal)):
+        """Pages that answer a question, by meaning, with an excerpt."""
+        admin = authorize(p, "MANAGE_GLOBAL_SETTINGS", None, raise_on_deny=False)
+        return _kn().search(q, bool(admin), limit)
+
+    @router.get("/knowledge/for")
+    def knowledge_for(urn: str, p: Principal = Depends(current_principal)):
+        """The pages that talk about an asset."""
+        if not can_view(p)(urn):
+            raise HTTPException(403, "you may not see this asset")
+        admin = authorize(p, "MANAGE_GLOBAL_SETTINGS", None, raise_on_deny=False)
+        return _kn().for_dataset(urn, bool(admin))
 
     @router.get("/findings")
     def findings(type: Optional[str] = Query(None), status: Optional[str] = Query("OPEN"),

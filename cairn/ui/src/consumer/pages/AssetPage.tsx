@@ -13,6 +13,7 @@ import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { ContractPanel } from '../components/Contract';
 import { UsedByAi } from '../components/AiUsage';
 import { SendDocsToDbt } from '../components/GitDocs';
+import { KnowledgeDocs } from '../components/Knowledge';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
@@ -252,6 +253,7 @@ export function AssetPage() {
                                         </p>
                                     )}
                                 </Surface>
+                                <KnowledgeDocs urn={urn} />
                                 <SimilarAssets urn={urn} />
                             </>
                         ),

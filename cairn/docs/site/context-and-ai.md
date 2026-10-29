@@ -213,3 +213,30 @@ Each metric becomes a metric finding in the **Context inbox**, mapped to the cat
 The query runs through data access, so your permissions, purpose and masking apply. The response includes the SQL that ran.
 
 Agents use the `list_metrics` and `query_metric` MCP tools, and the assistant uses them too. `query_metric` needs the agent's `query_data` scope.
+
+## Knowledge sources
+
+Teams explain their data in wikis and documents. Cairn reads those pages, links them to the assets they talk about, and uses them to ground the assistant and agents.
+
+**Sources** are reviewed YAML files in `config/knowledge/`, or set `CAIRN_KNOWLEDGE`. Start from `sources.yaml.example`:
+
+| Type | Reads | Needs |
+|---|---|---|
+| `confluence` | the pages of one space | a bot account's email and API token |
+| `notion` | the pages of one database | an internal integration token, with the database shared to it |
+| `gdocs` | the Google Docs in one Drive folder | the service's Google identity (or `token`), with read access to the folder |
+| `sharepoint` | the site pages of one site | an Entra ID app with `Sites.Read.All` |
+
+Sources sync every day; `POST /cairn/api/context/knowledge/sync` runs them now. `GET /cairn/api/context/knowledge` shows each source's pages and last sync.
+
+**Linking.** A page is linked to an asset when it names it:
+
+- a link to the asset in Cairn;
+- its full name (`schema.table` or longer);
+- for distinctive names (with an underscore, at least eight characters, mentioned twice), the table name alone.
+
+Linked pages show on the asset under **From your team's docs**, and as links in the catalog view. Links people added there are kept.
+
+**Grounding.** The `search_knowledge` tool (assistant and MCP) finds pages that answer a question by meaning, with an excerpt, the link and the datasets each page is about. Page text is screened like other catalog text before an AI sees it.
+
+**Who sees what.** Cairn can't read each page's own permissions. Pages from a source are shown to everyone in Cairn, so index only spaces, databases, folders and sites the whole organisation may read. Set `admins_only: true` on a source to keep its pages to administrators.

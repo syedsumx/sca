@@ -330,6 +330,16 @@ export class ConsumerClient extends CairnClient {
         return this.request<SourceTest>('GET', `/sources/test/${enc(id)}`, undefined, opts);
     }
 
+    /** Pages from the team's documentation linked to an asset. */
+    knowledgeFor(urn: string, opts?: RequestOptions) {
+        return this.request<{ title: string; url: string; source: string; updated_ms: number }[]>(
+            'GET',
+            '/context/knowledge/for',
+            undefined,
+            { ...opts, query: { urn } },
+        );
+    }
+
     // --- git ----------------------------------------------------------------------------------
 
     gitRepos(opts?: RequestOptions) {

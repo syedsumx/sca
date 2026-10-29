@@ -1331,3 +1331,11 @@ on('GET', '/integrations/git/repos', () => [{ id: 'analytics', provider: 'github
 on('GET', '/integrations/git/match', (_b, q) => (q.urn === FCT_ORDERS ? { repo: 'analytics', model: 'fct_orders' } : null));
 on('POST', '/integrations/git/writeback', () => ({ repo: 'analytics', model: 'fct_orders', file: 'models/marts/_marts.yml',
     pull_request: 'https://github.com/acme/analytics-dbt/pull/412' }));
+
+// ------------------------------------------------------------------------------- knowledge sources
+on('GET', '/context/knowledge/for', (_b, q) => (q.urn === ORDERS || q.urn === FCT_ORDERS ? [
+    { title: 'How we count net revenue', url: 'https://acme.atlassian.net/wiki/spaces/DATA/pages/101', source: 'confluence',
+      updated_ms: now - 6 * DAY },
+    { title: 'Refunds and chargebacks: data handling', url: 'https://www.notion.so/acme/refunds', source: 'notion',
+      updated_ms: now - 20 * DAY },
+] : []));

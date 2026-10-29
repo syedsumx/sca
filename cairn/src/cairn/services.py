@@ -98,6 +98,7 @@ class Services:
     openlineage: Optional[Any] = None
     git: Optional[Any] = None
     external_quality: Optional[Any] = None
+    knowledge: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -577,6 +578,22 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sources.service import SourceService
 
         s.sources = SourceService(s.engine, s.graph, s.gateway, s.audit, hub)
+        from cairn.context.knowledge import KnowledgeService
+        from cairn.context.knowledge import load_sources as load_knowledge
+
+        try:
+            knowledge_sources = load_knowledge()
+        except Exception:  # noqa: BLE001 - a bad file must not stop the API
+            logger.exception("could not load config/knowledge")
+            knowledge_sources = {}
+
+        def known_datasets() -> list[str]:
+            from cairn.quality.auto import Planner
+
+            return [u for u, _, _ in Planner(s.graph).datasets()]
+
+        s.knowledge = KnowledgeService(s.engine, knowledge_sources, lambda text: embedder.embed([text])[0],
+                                       known_datasets, s.graph, s.audit, cfg.public_url)
         from cairn.quality.external import ExternalResults
 
         s.external_quality = ExternalResults(s.engine, s.graph, hub, s.audit)
