@@ -41,7 +41,8 @@ EVENT_TYPES = [
     "context.drift", "subscription.update", "form.assigned", "form.due", "contract.broken", "contract.restored",
     "automation.applied", "asset.deprecation_proposed", "ai_system.review_requested", "ai_system.decided",
     "product.listing_outdated", "playbook.report", "source.failing", "source.stale", "source.recovered",
-    "access.provisioning_failed", "quality.external_failed",
+    "access.provisioning_failed", "quality.external_failed", "privacy.deletion_requested",
+    "privacy.request_completed", "privacy.retention_breach",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

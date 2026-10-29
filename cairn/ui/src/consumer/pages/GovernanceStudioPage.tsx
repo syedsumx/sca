@@ -4,6 +4,7 @@ import { TagSyncAdmin } from '../components/TagSync';
 import { AutomationsAdmin } from '../components/Automations';
 import { PlaybooksAdmin } from '../components/Playbooks';
 import { AISystemsAdmin } from '../components/AISystems';
+import { PrivacyAdmin } from '../components/Privacy';
 import { StewardReview } from '../components/Steward';
 import React, { useEffect, useState } from 'react';
 import styled from 'styled-components';
@@ -483,6 +484,7 @@ export function GovernanceStudioPage() {
                     { key: 'playbooks', label: 'Playbooks', children: <PlaybooksAdmin /> },
                     { key: 'tag-sync', label: 'Warehouse tags', children: <TagSyncAdmin /> },
                     { key: 'ai-systems', label: 'AI systems', children: <AISystemsAdmin /> },
+                    { key: 'privacy', label: 'Privacy', children: <PrivacyAdmin /> },
                     {
                         key: 'purposes',
                         label: 'Purposes',

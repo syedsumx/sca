@@ -63,6 +63,11 @@ import type {
     AIDatasetRead,
     AIReader,
     GitRepository,
+    PrivacyPart,
+    PrivacyRequest,
+    RetentionPolicy,
+    RetentionRow,
+    RopaEntry,
     IngestionSource,
     SourceConnector,
     SourceExecutor,
@@ -338,6 +343,70 @@ export class ConsumerClient extends CairnClient {
             undefined,
             { ...opts, query: { urn } },
         );
+    }
+
+    // --- privacy ------------------------------------------------------------------------------
+
+    privacyRequests(opts?: RequestOptions) {
+        return this.request<PrivacyRequest[]>('GET', '/governance/privacy/requests', undefined, opts);
+    }
+
+    openPrivacyRequest(body: { kind: string; identifier_kind: string; identifier: string; reference?: string; due_days?: number }) {
+        return this.request<PrivacyRequest>('POST', '/governance/privacy/requests', body);
+    }
+
+    privacyRequestCsv(id: string) {
+        return this.request<string>('GET', `/governance/privacy/requests/${enc(id)}`, undefined, { query: { format: 'csv' } });
+    }
+
+    myPrivacyParts(opts?: RequestOptions) {
+        return this.request<(PrivacyPart & { request: string; identifier: string; due_ms: number; overdue: boolean })[]>(
+            'GET',
+            '/governance/privacy/my-parts',
+            undefined,
+            opts,
+        );
+    }
+
+    markPrivacyPart(id: string, dataset: string, state: 'DONE' | 'NOT_APPLICABLE', note = '') {
+        return this.request<PrivacyRequest>('POST', `/governance/privacy/requests/${enc(id)}/parts`, { dataset, state, note });
+    }
+
+    retention(opts?: RequestOptions) {
+        return this.request<{ policies: RetentionPolicy[]; datasets: RetentionRow[] }>(
+            'GET',
+            '/governance/privacy/retention',
+            undefined,
+            opts,
+        );
+    }
+
+    putRetention(p: RetentionPolicy) {
+        return this.request<RetentionPolicy>('PUT', `/governance/privacy/retention/${enc(p.id)}`, p);
+    }
+
+    deleteRetention(id: string) {
+        return this.request<void>('DELETE', `/governance/privacy/retention/${enc(id)}`);
+    }
+
+    checkRetention() {
+        return this.request<{ checked: number; breaches: number; unchecked: number }>(
+            'POST',
+            '/governance/privacy/retention/check',
+        );
+    }
+
+    ropa(opts?: RequestOptions) {
+        return this.request<{ generated_ms: number; domains: { domain: string; datasets: RopaEntry[] }[] }>(
+            'GET',
+            '/governance/privacy/ropa',
+            undefined,
+            opts,
+        );
+    }
+
+    ropaCsv() {
+        return this.request<string>('GET', '/governance/privacy/ropa', undefined, { query: { format: 'csv' } });
     }
 
     // --- git ----------------------------------------------------------------------------------

@@ -1088,3 +1088,63 @@ export interface GitRepository {
     token_set: boolean;
     webhook_secret_set: boolean;
 }
+
+export interface PrivacyFinding {
+    dataset: string;
+    columns: string[];
+    owners: string[];
+    domains: string[];
+    rows: number;
+    searched: boolean;
+    reason: string | null;
+}
+
+export interface PrivacyPart {
+    dataset: string;
+    owners: string[];
+    state: 'PENDING' | 'DONE' | 'NOT_APPLICABLE';
+    statement: string;
+    note: string | null;
+    done_by: string | null;
+}
+
+export interface PrivacyRequest {
+    id: string;
+    kind: 'access' | 'deletion';
+    identifier_kind: string;
+    identifier: string;
+    state: 'OPEN' | 'COMPLETED' | 'CLOSED';
+    created_by: string;
+    created_ms: number;
+    due_ms: number;
+    overdue: boolean;
+    reference: string;
+    findings: PrivacyFinding[];
+    parts: PrivacyPart[];
+}
+
+export interface RetentionPolicy {
+    id: string;
+    label: string;
+    days: number;
+    time_column?: string | null;
+    description?: string;
+}
+
+export interface RetentionRow {
+    dataset: string;
+    policy: string;
+    state: 'ok' | 'breach' | 'unchecked';
+    oldest_ms: number | null;
+    detail: string;
+    checked_ms: number;
+}
+
+export interface RopaEntry {
+    dataset: string;
+    personal_data: string[];
+    owners: string[];
+    purposes: string[];
+    retention: string[];
+    ai_systems: string[];
+}

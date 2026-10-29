@@ -99,6 +99,7 @@ class Services:
     git: Optional[Any] = None
     external_quality: Optional[Any] = None
     knowledge: Optional[Any] = None
+    privacy: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -594,6 +595,14 @@ def _build_active_metadata(s: Services) -> None:
 
         s.knowledge = KnowledgeService(s.engine, knowledge_sources, lambda text: embedder.embed([text])[0],
                                        known_datasets, s.graph, s.audit, cfg.public_url)
+        from cairn.governance.privacy import PrivacyService
+
+        def scanned_datasets() -> list:
+            from cairn.quality.auto import Planner
+
+            return Planner(s.graph).datasets()
+
+        s.privacy = PrivacyService(s.engine, scanned_datasets, None, hub, s.audit, s.personas, s.ai_systems)
         from cairn.quality.external import ExternalResults
 
         s.external_quality = ExternalResults(s.engine, s.graph, hub, s.audit)
@@ -617,6 +626,7 @@ def _build_active_metadata(s: Services) -> None:
         s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
         _build_costs(s, hub, Event)
         _build_data_access(s)
+        s.privacy.data = s.data_access
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner

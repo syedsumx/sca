@@ -185,6 +185,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.common.licence_api import build_router as licence_router
 
         app.include_router(licence_router(services.licence, cp, authz))
+    if services.privacy is not None:
+        from cairn.governance.privacy_api import build_router as privacy_router
+
+        app.include_router(privacy_router(services.privacy, cp, authz))
     if services.sources is not None:
         from cairn.sources.api import build_router as sources_router
 

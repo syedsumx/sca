@@ -8,6 +8,7 @@ import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/t
 import { AiAgentsSettings } from '../components/AiAgents';
 import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
+import { MyPrivacyParts } from '../components/Privacy';
 import { SourcesSettings } from '../components/Sources';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
@@ -246,7 +247,16 @@ export function SettingsPage() {
             <Tabs
                 items={[
                     { key: 'notifications', label: 'Notifications', children: <NotificationSettings /> },
-                    { key: 'inbox', label: 'Inbox', children: <Inbox /> },
+                    {
+                        key: 'inbox',
+                        label: 'Inbox',
+                        children: (
+                            <>
+                                <MyPrivacyParts />
+                                <Inbox />
+                            </>
+                        ),
+                    },
                     { key: 'embeds', label: 'Embeds', children: <EmbedBuilder /> },
                     {
                         key: 'ai-agents',

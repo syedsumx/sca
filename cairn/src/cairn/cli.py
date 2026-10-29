@@ -143,6 +143,12 @@ def notifier_tick(s) -> dict:
             out["sources"] = s.sources.check_health(now_ms)
         except Exception as e:  # noqa: BLE001 - Cairn Core briefly away: try again next time
             out["sources"] = {"error": str(e)[:200]}
+    if s.privacy is not None and now_ms - _SWEEP_STATE["privacy_ms"] >= 86_400_000:
+        _SWEEP_STATE["privacy_ms"] = now_ms
+        try:
+            out["privacy"] = {"retention": s.privacy.check_retention(), "reminded": s.privacy.remind(now_ms)}
+        except Exception as e:  # noqa: BLE001 - warehouses may be briefly away
+            out["privacy"] = {"error": str(e)[:200]}
     if s.knowledge is not None and s.knowledge.sources and now_ms - _SWEEP_STATE["knowledge_ms"] >= 86_400_000:
         _SWEEP_STATE["knowledge_ms"] = now_ms
         out["knowledge"] = s.knowledge.sync()
@@ -162,7 +168,8 @@ def notifier_tick(s) -> dict:
 
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
 _SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0, "reports_ms": 0, "sources_ms": 0,
-                "ai_lineage_ms": 0, "knowledge_ms": 0}
+                "ai_lineage_ms": 0, "knowledge_ms": 0,
+                "privacy_ms": 0}
 
 
 _FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}

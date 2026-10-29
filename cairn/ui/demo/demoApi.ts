@@ -1339,3 +1339,40 @@ on('GET', '/context/knowledge/for', (_b, q) => (q.urn === ORDERS || q.urn === FC
     { title: 'Refunds and chargebacks: data handling', url: 'https://www.notion.so/acme/refunds', source: 'notion',
       updated_ms: now - 20 * DAY },
 ] : []));
+
+// ------------------------------------------------------------------------------- privacy
+const PRIV_FINDINGS = [
+    { dataset: CUSTOMERS, columns: ['email'], owners: ['urn:li:corpuser:mei'], domains: [], rows: 1, searched: true, reason: null },
+    { dataset: ORDERS, columns: ['buyer_email'], owners: ['urn:li:corpuser:raj'], domains: [], rows: 14, searched: true, reason: null },
+    { dataset: CAMPAIGNS, columns: ['contact_email'], owners: ['urn:li:corpuser:tom'], domains: [], rows: 0, searched: false,
+      reason: 'no connection serves this dataset; previews need a warehouse connection' },
+];
+const PRIV_REQUESTS = [
+    { id: 'psr_7a1c', kind: 'deletion', identifier_kind: 'email', identifier: 'j•••@example.com', state: 'OPEN', created_by: ME,
+      created_ms: now - 4 * DAY, due_ms: now + 26 * DAY, overdue: false, reference: 'DSAR-2026-118', findings: PRIV_FINDINGS,
+      parts: PRIV_FINDINGS.map((f, i) => ({ dataset: f.dataset, owners: f.owners, state: i === 0 ? 'DONE' : 'PENDING',
+          statement: `DELETE FROM ${f.dataset.split(',')[1]} WHERE ${f.columns[0]} = '<j•••@example.com>';`, note: null, done_by: null })) },
+    { id: 'psr_52be', kind: 'access', identifier_kind: 'customer_id', identifier: '48•••••91', state: 'COMPLETED', created_by: ME,
+      created_ms: now - 12 * DAY, due_ms: now + 18 * DAY, overdue: false, reference: 'DSAR-2026-104', findings: PRIV_FINDINGS.slice(0, 2), parts: [] },
+];
+on('GET', '/governance/privacy/requests', () => PRIV_REQUESTS);
+on('POST', '/governance/privacy/requests', (b: Json) => ({ ...PRIV_REQUESTS[0], id: 'psr_demo', kind: b.kind, created_ms: now,
+    parts: b.kind === 'deletion' ? PRIV_REQUESTS[0].parts.map((p) => ({ ...p, state: 'PENDING' })) : [] }));
+on('GET', '/governance/privacy/requests/:id', () => 'request,identifier,dataset\npsr_7a1c,j•••@example.com,analytics.core.orders\n');
+on('GET', '/governance/privacy/my-parts', () => [{ ...PRIV_REQUESTS[0].parts[1], request: 'psr_7a1c', identifier: 'j•••@example.com',
+    due_ms: now + 26 * DAY, overdue: false }]);
+on('POST', '/governance/privacy/requests/:id/parts', () => PRIV_REQUESTS[0]);
+on('GET', '/governance/privacy/retention', () => ({ policies: [{ id: 'pii-2y', label: 'Classification.PII*', days: 730 }],
+    datasets: [{ dataset: CUSTOMERS, policy: 'pii-2y', state: 'breach', oldest_ms: now - 1100 * DAY,
+                 detail: 'oldest created_at is 1100 days old; the limit is 730', checked_ms: now - 3 * HOUR },
+               { dataset: ORDERS, policy: 'pii-2y', state: 'ok', oldest_ms: now - 400 * DAY, detail: 'oldest created_at is 400 days old',
+                 checked_ms: now - 3 * HOUR }] }));
+on('PUT', '/governance/privacy/retention/:id', (b: Json) => b);
+on('DELETE', '/governance/privacy/retention/:id', () => undefined);
+on('POST', '/governance/privacy/retention/check', () => ({ checked: 2, breaches: 1, unchecked: 0 }));
+on('GET', '/governance/privacy/ropa', (_b, q) => (q.format === 'csv' ? 'domain,dataset\ncrm,analytics.core.customers\n' : {
+    generated_ms: now, domains: [{ domain: 'urn:li:domain:customer', datasets: [
+        { dataset: CUSTOMERS, personal_data: ['PII', 'PII.Email', 'PII.Phone'], owners: ['urn:li:corpuser:mei'],
+          purposes: ['Customer support'], retention: ['pii-2y (730 days)'], ai_systems: ['Churn prediction'] },
+        { dataset: ORDERS, personal_data: ['PII', 'PII.Email'], owners: ['urn:li:corpuser:raj'], purposes: ['Financial reporting'],
+          retention: ['pii-2y (730 days)'], ai_systems: [] }] }] }));

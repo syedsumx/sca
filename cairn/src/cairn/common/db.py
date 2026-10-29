@@ -90,6 +90,7 @@ def load_models() -> MetaData:
     from cairn.sources import service as _sources  # noqa: F401
     from cairn.quality import external as _external_quality  # noqa: F401
     from cairn.context import knowledge as _knowledge  # noqa: F401
+    from cairn.governance import privacy as _privacy  # noqa: F401
     from cairn.identity import agents as _agents  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401
     from cairn.marketplace import service as _marketplace  # noqa: F401
