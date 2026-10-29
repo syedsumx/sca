@@ -123,3 +123,103 @@ def test_targets_without_a_connection_only_plan(engine, tmp_path):
     assert [t.id for t in cfg.targets] == ["plan-only"]
     s = TagSyncService(engine, lambda: [(SF, {}, aspects())], Warehouse(), lambda: cfg)
     assert s.sweep() == {"plan-only": {"applied": 0, "failed": 0, "dry_run": True, "planned": 1}}
+
+
+# --------------------------------------------------------------------------- more warehouses and comments
+BQ = "urn:li:dataset:(urn:li:dataPlatform:bigquery,acme.sales.customers,PROD)"
+RS = "urn:li:dataset:(urn:li:dataPlatform:redshift,dev.public.customers,PROD)"
+GLUE = "urn:li:dataset:(urn:li:dataPlatform:glue,sales.customers,PROD)"
+POLICY_TAG = "projects/acme/locations/eu/taxonomies/1/policyTags/2"
+
+
+def docs(aspects_):
+    return {**aspects_, "editableDatasetProperties": {"description": "One row per customer."},
+            "editableSchemaMetadata": {"editableSchemaFieldInfo": [
+                *aspects_["editableSchemaMetadata"]["editableSchemaFieldInfo"],
+                {"fieldPath": "email", "description": "Primary contact, it's verified"}]}}
+
+
+def test_statements_for_bigquery_redshift_lakeformation_and_comments():
+    import json
+
+    bq = Target.model_validate({"id": "bq", "dialect": "bigquery", "connection": "bq", "platform": "bigquery",
+                                "descriptions": True, "mappings": [{"label": EMAIL, "tag": "pii", "value": POLICY_TAG}]})
+    set_col = statement(bq, {"op": "SET", "urn": BQ, "field": "email", "tag": "pii", "value": POLICY_TAG})
+    assert set_col.startswith("api:") and json.loads(set_col[4:]) == {
+        "api": "bigquery", "table": "acme.sales.customers", "field": "email", "tag": "pii", "value": POLICY_TAG, "op": "SET"}
+    assert statement(bq, {"op": "SET", "urn": BQ, "field": None, "tag": "__comment__", "value": "Rows: it's one"}) == \
+        "ALTER TABLE `acme.sales.customers` SET OPTIONS (description='Rows: it''s one')"
+    assert statement(bq, {"op": "UNSET", "urn": BQ, "field": "email", "tag": "__comment__", "value": None}) == \
+        "ALTER TABLE `acme.sales.customers` ALTER COLUMN `email` SET OPTIONS (description=NULL)"
+    rs = Target.model_validate({"id": "rs", "dialect": "redshift", "connection": "rs", "platform": "redshift",
+                                "mappings": [{"label": EMAIL, "tag": "mask_email", "value": "ROLE analysts"}]})
+    assert statement(rs, {"op": "SET", "urn": RS, "field": "email", "tag": "mask_email", "value": "ROLE analysts"}) == \
+        'ATTACH MASKING POLICY "mask_email" ON "public"."customers"("email") TO ROLE "analysts"'
+    assert statement(rs, {"op": "UNSET", "urn": RS, "field": "email", "tag": "mask_email", "value": "PUBLIC"}) == \
+        'DETACH MASKING POLICY "mask_email" ON "public"."customers"("email") FROM PUBLIC'
+    with pytest.raises(ValueError, match="columns"):
+        statement(rs, {"op": "SET", "urn": RS, "field": None, "tag": "mask_email", "value": "PUBLIC"})
+    pg = Target.model_validate({"id": "pg", "dialect": "postgres", "connection": "pg", "platform": "postgres",
+                                "descriptions": True})
+    assert statement(pg, {"op": "SET", "urn": PG, "field": "id", "tag": "__comment__", "value": "Key"}) == \
+        'COMMENT ON COLUMN "public"."orders"."id" IS \'Key\''
+    sf = Target.model_validate({**TARGET, "descriptions": True})
+    assert statement(sf, {"op": "SET", "urn": SF, "field": None, "tag": "__comment__", "value": "x"}) == \
+        'COMMENT ON TABLE "ANALYTICS"."PUBLIC"."CUSTOMERS" IS \'x\''
+    with pytest.raises(ValueError, match="descriptions only"):
+        Target.model_validate({"id": "p", "dialect": "postgres", "platform": "postgres", "mappings": TARGET["mappings"]})
+    with pytest.raises(ValueError, match="region"):
+        Target.model_validate({"id": "lf", "dialect": "lakeformation", "platform": "glue", "mappings": TARGET["mappings"]})
+    with pytest.raises(ValueError, match="needs mappings"):
+        Target.model_validate({"id": "x", "dialect": "snowflake", "platform": "snowflake"})
+
+
+def test_comments_sync_once_and_only_change_when_the_text_does(engine):
+    rows = [(SF, {}, docs(aspects()))]
+    wh = Warehouse()
+    svc = TagSyncService(engine, lambda: rows, wh, lambda: TagSyncConfig.model_validate(
+        {"targets": [{**TARGET, "descriptions": True}]}))
+    out = svc.sync("sf", "admin")
+    comments = [s for s in wh.statements if s.startswith("COMMENT")]
+    assert comments == ['COMMENT ON TABLE "ANALYTICS"."PUBLIC"."CUSTOMERS" IS \'One row per customer.\'',
+                        'COMMENT ON COLUMN "ANALYTICS"."PUBLIC"."CUSTOMERS"."EMAIL" IS \'Primary contact, it\'\'s verified\'']
+    assert out["failed"] == 0 and svc.plan(svc.target("sf"))["operations"] == []          # in sync, by hash
+    rows[0][2]["editableDatasetProperties"]["description"] = "One row per customer, deduplicated."
+    ops = svc.plan(svc.target("sf"))["operations"]
+    assert [(o["op"], o["tag"]) for o in ops] == [("SET", "__comment__")]
+    rows[0][2].pop("editableDatasetProperties")
+    svc.sync("sf", "admin")
+    assert wh.statements[-1] == 'COMMENT ON TABLE "ANALYTICS"."PUBLIC"."CUSTOMERS" IS NULL'
+
+
+def test_api_dialects_run_through_their_clients(engine):
+    from cairn.governance.tag_sync import run_api
+
+    class LF:
+        def __init__(self):
+            self.calls = []
+
+        def add_lf_tags_to_resource(self, **kw):
+            self.calls.append(("add", kw))
+            return {"Failures": []}
+
+        def remove_lf_tags_from_resource(self, **kw):
+            self.calls.append(("remove", kw))
+            return {"Failures": [{"Error": {"ErrorMessage": "tag not found"}}]}
+
+    lf = LF()
+    target = Target.model_validate({"id": "lf", "dialect": "lakeformation", "platform": "glue", "region": "eu-west-1",
+                                    "mappings": [{"label": EMAIL, "tag": "classification", "value": "pii"}]})
+    rows = [(GLUE, {}, aspects())]
+    svc = TagSyncService(engine, lambda: rows, lambda conn, stmts: [
+        run_api(__import__("json").loads(s[4:]), clients={"lakeformation": lf}) for s in stmts],
+        lambda: TagSyncConfig(targets=[target]))
+    out = svc.sync("lf", "admin")
+    assert not out["dry_run"] and out["applied"] == 1                   # no connection needed for the AWS API
+    kind, kw = lf.calls[0]
+    assert kind == "add" and kw == {"Resource": {"TableWithColumns": {"DatabaseName": "sales", "Name": "customers",
+                                                                      "ColumnNames": ["email"]}},
+                                    "LFTags": [{"TagKey": "classification", "TagValues": ["pii"]}]}
+    with pytest.raises(RuntimeError, match="tag not found"):
+        run_api({"api": "lakeformation", "region": "x", "database": "d", "table": "t", "field": None, "tag": "a",
+                 "value": "b", "op": "UNSET"}, clients={"lakeformation": lf})

@@ -46,7 +46,8 @@ AUTO_PREFIX = "auto-"
 CREATED_BY = "auto-monitors"
 DETACHED = "auto_detached"        # config flag set when someone edits an auto monitor
 _SCROLL_ASPECTS = ["domains", "globalTags", "glossaryTerms", "structuredProperties", "editableSchemaMetadata",
-                   "schemaMetadata", "ownership", "container", "dataPlatformInstance", "status"]
+                   "schemaMetadata", "ownership", "container", "dataPlatformInstance", "status",
+                   "editableDatasetProperties"]
 
 
 class FieldSelector(BaseModel):

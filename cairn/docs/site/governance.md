@@ -108,19 +108,30 @@ API: `GET /cairn/api/bulk/export?query=…` (or `urns=…`), `POST /cairn/api/bu
 
 ## Warehouse tags
 
-Classifications protect data only when queries go through Cairn, unless the warehouse knows about them too. Tag sync copies catalog labels to warehouse tags, so Snowflake and Databricks tag-based masking and row policies cover direct queries as well.
+Classifications protect data only when queries go through Cairn, unless the warehouse knows about them too. Tag sync copies catalog labels to the warehouse's own controls, so its masking and access policies cover direct queries as well. It can also write the descriptions people edit in Cairn back as table and column comments.
 
 A target is a reviewed YAML file in `config/tag-sync/` (or `CAIRN_TAG_SYNC`); see `snowflake.yaml.example`. It sets:
 
-- **dialect:** `snowflake` or `databricks` (Unity Catalog).
-- **connection:** a named warehouse connection. Use a role that may only apply tags.
+- **dialect:** what a mapping's tag and value become there:
+
+  | Dialect | Tables | Columns |
+  |---|---|---|
+  | `snowflake` | tag objects (`SET TAG`) | tag objects |
+  | `databricks` | Unity Catalog tags | Unity Catalog tags |
+  | `bigquery` | labels | the policy tag named by `value` (`projects/…/policyTags/…`), through the BigQuery API |
+  | `redshift` | — | the masking policy named by `tag`, attached `TO PUBLIC` or `value: ROLE name` |
+  | `lakeformation` | LF-Tags | LF-Tags, through the AWS API in `region` (the tags must exist) |
+  | `postgres` | descriptions only | descriptions only |
+
+- **connection:** a named warehouse connection. Use a role that may only apply tags and comments. Lake Formation uses the AWS credentials of the Cairn API instead.
+- **descriptions:** `true` to write Cairn-edited table and column descriptions as comments (`COMMENT ON`, or BigQuery's `description` option). Cairn changes a comment only when the description changes, and clears it when the description is removed in Cairn.
 - **platform:** the platform whose datasets are synced.
 - **mappings:** from a tag or glossary term urn (a trailing `*` matches a prefix) to a warehouse tag and value. For each warehouse tag on a table or column, the first matching mapping wins. Two exact mappings that ask for different values are reported as a conflict.
 
 Dataset-level labels become table tags, and column labels (ingested or edited in the catalog) become column tags. Cairn records every tag it sets, so:
 
-- it unsets a tag only when Cairn applied it and the label has since gone from the catalog,
-- tags people set in the warehouse are never touched,
+- it unsets a tag (or clears a comment) only when Cairn applied it and the label has since gone from the catalog,
+- tags and comments people set in the warehouse are never touched,
 - a statement that fails is retried on the next sweep.
 
 Targets sync every 15 minutes (`CAIRN_TAG_SYNC_EVERY_SECONDS`). A target without a connection, or with `dry_run: true`, only plans.

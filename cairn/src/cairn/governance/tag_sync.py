@@ -14,13 +14,32 @@ Targets are reviewed YAML files (``CAIRN_TAG_SYNC``, default ``/etc/cairn/config
           - {label: "urn:li:glossaryTerm:Classification.PII.*", tag: PII, value: other}
           - {label: "urn:li:tag:Confidential", tag: CONFIDENTIALITY, value: high}
 
-Cairn only ever sets and unsets the tags it applied itself (kept in ``cairn_tag_sync_state``);
-tags set by people in the warehouse are left alone. Run it on a role that may only apply tags.
+Dialects and what a mapping's ``tag`` and ``value`` mean there:
+
+* ``snowflake``: tag objects (``SET TAG schema.tag = 'value'``) on tables and columns;
+* ``databricks``: Unity Catalog tags (``SET TAGS ('tag' = 'value')``);
+* ``bigquery``: on columns, the policy tag whose resource name is ``value``
+  (``projects/p/locations/l/taxonomies/t/policyTags/x``; ``tag`` names the taxonomy for bookkeeping);
+  on tables, labels (``tag = value``). Written through the BigQuery API with the connection's credentials;
+* ``redshift``: on columns, dynamic data masking: ``tag`` is a masking policy, attached ``TO PUBLIC``
+  (or ``value: ROLE name``);
+* ``lakeformation``: LF-Tags (``tag = value``) on Glue tables and columns, through the AWS API in
+  ``region`` (the tags must exist in Lake Formation);
+* ``postgres``: descriptions only.
+
+``descriptions: true`` also writes the descriptions people edited in Cairn as the warehouse's table and
+column comments (BigQuery: ``description`` options; Lake Formation targets skip it).
+
+Cairn only ever sets and unsets the tags and comments it applied itself (kept in
+``cairn_tag_sync_state``); what people set in the warehouse is left alone. Run it on a role that may
+only apply tags and comments.
 """
 
 from __future__ import annotations
 
 import fnmatch
+import hashlib
+import json
 import logging
 import os
 import re
@@ -28,7 +47,7 @@ import time
 import uuid
 from typing import Any, Callable, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import BigInteger, Column, String, Table, and_, delete, select
 from sqlalchemy.engine import Engine
 
@@ -81,15 +100,31 @@ class Mapping(BaseModel):
         return fnmatch.fnmatchcase(urn, self.label) if "*" in self.label else urn == self.label
 
 
+COMMENT = "__comment__"                       # a description, kept in the state as a hash
+
+
 class Target(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9\-]{0,62}$")
-    dialect: Literal["snowflake", "databricks"]
+    dialect: Literal["snowflake", "databricks", "bigquery", "redshift", "lakeformation", "postgres"]
     connection: Optional[str] = None         # no connection: plans only
     platform: str
     tag_schema: Optional[str] = None         # Snowflake: DB.SCHEMA holding the tag objects
-    mappings: list[Mapping] = Field(min_length=1)
+    mappings: list[Mapping] = Field(default_factory=list)
     tables: bool = True                      # dataset-level labels become table tags
+    descriptions: bool = False               # Cairn-edited descriptions become table and column comments
+    region: Optional[str] = None             # lakeformation: the AWS region
+    catalog_id: Optional[str] = None         # lakeformation: the AWS account, when not the caller's
     dry_run: bool = False                    # plan on every sweep, never write
+
+    @model_validator(mode="after")
+    def _something(self) -> "Target":
+        if not self.mappings and not self.descriptions:
+            raise ValueError("a target needs mappings, descriptions: true, or both")
+        if self.dialect == "postgres" and self.mappings:
+            raise ValueError("postgres has no tags: use descriptions only")
+        if self.dialect == "lakeformation" and not self.region:
+            raise ValueError("a lakeformation target needs its region")
+        return self
 
     @field_validator("tag_schema")
     @classmethod
@@ -148,6 +183,13 @@ def desired_tags(target: Target, urn: str, aspects: dict) -> tuple[dict[tuple[st
             labels.setdefault(f"{urn}|{f['fieldPath']}", []).extend(_labels(f))
     out: dict[tuple[str, str], str] = {}
     conflicts: list[str] = []
+    if target.descriptions and target.dialect != "lakeformation":
+        table_doc = (aspects.get("editableDatasetProperties") or {}).get("description")
+        if table_doc:
+            out[(urn, COMMENT)] = table_doc
+        for f in (aspects.get("editableSchemaMetadata") or {}).get("editableSchemaFieldInfo") or []:
+            if f.get("fieldPath") and f.get("description"):
+                out[(f"{urn}|{f['fieldPath']}", COMMENT)] = f["description"]
     for key, found in labels.items():
         for m in target.mappings:                      # mapping order is priority
             hit = next((label for label in found if m.matches(label)), None)
@@ -159,6 +201,11 @@ def desired_tags(target: Target, urn: str, aspects: dict) -> tuple[dict[tuple[st
                 continue
             out[(key, m.tag)] = m.value
     return out, conflicts
+
+
+def stored(tag: str, value: str) -> str:
+    """What the state keeps: a description's hash (it may be long), a tag's value."""
+    return "sha1:" + hashlib.sha1(value.encode()).hexdigest() if tag == COMMENT else value
 
 
 # --------------------------------------------------------------------------- SQL
@@ -181,20 +228,66 @@ def table_ref(name: str, dialect: str) -> str:
     return ".".join(_quote(p, dialect) for p in parts)
 
 
+def _field(target: Target, field: str) -> str:
+    """The warehouse column for a schema field path (the last part of a nested ``[version=2.0]…`` path)."""
+    name = field.split(".")[-1] if field.startswith("[") else field
+    return name.upper() if target.dialect == "snowflake" and name == name.lower() else name
+
+
 def statement(target: Target, op: dict) -> str:
-    """One ALTER for a SET or UNSET of one tag on a table or column."""
+    """One statement (or, for API dialects, one ``api:{json}`` instruction) for one operation."""
     _, name = dataset_name(op["urn"])
+    field = _field(target, op["field"]) if op.get("field") else None
+    tag, value, kind = op["tag"], op.get("value"), op["op"]
+    if tag == COMMENT:
+        return _comment(target, name, field, value if kind == "SET" else None)
+    if target.dialect == "bigquery":
+        return "api:" + json.dumps({"api": "bigquery", "table": name, "field": field, "tag": tag, "value": value,
+                                    "op": kind}, sort_keys=True)
+    if target.dialect == "lakeformation":
+        db, _, table = name.rpartition(".")
+        return "api:" + json.dumps({"api": "lakeformation", "region": target.region, "catalog_id": target.catalog_id,
+                                    "database": db.split(".")[-1], "table": table, "field": field, "tag": tag,
+                                    "value": value, "op": kind}, sort_keys=True)
+    if target.dialect == "redshift":
+        if not field:
+            raise ValueError("Redshift masking policies attach to columns")
+        to = value if (value or "").upper().startswith("ROLE ") else "PUBLIC"
+        if to != "PUBLIC":
+            role = to[5:].strip()
+            if not _IDENT.match(role):
+                raise ValueError(f"role {role!r} must be a plain identifier")
+            to = f"ROLE {_quote(role, 'redshift')}"
+        table = ".".join(_quote(p, "redshift") for p in name.split(".")[-2:])
+        return (f"ATTACH MASKING POLICY {_quote(tag, 'redshift')} ON {table}({_quote(field, 'redshift')}) TO {to}"
+                if kind == "SET" else
+                f"DETACH MASKING POLICY {_quote(tag, 'redshift')} ON {table}({_quote(field, 'redshift')}) FROM {to}")
     table = table_ref(name, target.dialect)
-    field = op.get("field")
-    tag, value = op["tag"], op.get("value")
     if target.dialect == "snowflake":
         tag_ref = f"{target.tag_schema}.{tag}" if target.tag_schema else tag
-        col = field.upper() if field and field == field.lower() else field
-        head = f"ALTER TABLE {table} MODIFY COLUMN {_quote(col, 'snowflake')}" if field else f"ALTER TABLE {table}"
-        return f"{head} SET TAG {tag_ref} = {_literal(value)}" if op["op"] == "SET" else f"{head} UNSET TAG {tag_ref}"
+        head = f"ALTER TABLE {table} MODIFY COLUMN {_quote(field, 'snowflake')}" if field else f"ALTER TABLE {table}"
+        return f"{head} SET TAG {tag_ref} = {_literal(value)}" if kind == "SET" else f"{head} UNSET TAG {tag_ref}"
     head = f"ALTER TABLE {table} ALTER COLUMN {_quote(field, 'databricks')}" if field else f"ALTER TABLE {table}"
-    return (f"{head} SET TAGS ({_literal(tag)} = {_literal(value)})" if op["op"] == "SET"
+    return (f"{head} SET TAGS ({_literal(tag)} = {_literal(value)})" if kind == "SET"
             else f"{head} UNSET TAGS ({_literal(tag)})")
+
+
+def _comment(target: Target, name: str, field: Optional[str], text: Optional[str]) -> str:
+    d = target.dialect
+    if d == "bigquery":
+        table = "`" + name.replace("`", "") + "`"
+        opt = f"description={_literal(text) if text is not None else 'NULL'}"
+        return (f"ALTER TABLE {table} ALTER COLUMN {_quote(field, 'databricks')} SET OPTIONS ({opt})" if field
+                else f"ALTER TABLE {table} SET OPTIONS ({opt})")
+    if d in ("postgres", "redshift"):
+        table = ".".join(_quote(p, d) for p in name.split(".")[-2:])
+        obj = f"COLUMN {table}.{_quote(field, d)}" if field else f"TABLE {table}"
+        return f"COMMENT ON {obj} IS {_literal(text) if text is not None else 'NULL'}"
+    table = table_ref(name, d)
+    if d == "databricks" and field:
+        return f"ALTER TABLE {table} ALTER COLUMN {_quote(field, d)} COMMENT {_literal(text or '')}"
+    obj = f"COLUMN {table}.{_quote(field, d)}" if field else f"TABLE {table}"
+    return f"COMMENT ON {obj} IS {_literal(text) if text is not None else 'NULL'}"
 
 
 # --------------------------------------------------------------------------- service
@@ -249,7 +342,7 @@ class TagSyncService:
             state = {k: v for k, v in state.items() if k[0].split("|", 1)[0] in seen}
         ops = []
         for (key, tag), value in sorted(desired.items()):
-            if state.get((key, tag)) != value:
+            if state.get((key, tag)) != stored(tag, value):
                 ops.append({"op": "SET", "key": key, "tag": tag, "value": value})
         for (key, tag), value in sorted(state.items()):
             if (key, tag) not in desired:
@@ -257,14 +350,20 @@ class TagSyncService:
         for op in ops:
             urn, _, field = op["key"].partition("|")
             op.update(urn=urn, field=field or None)
-            op["sql"] = statement(target, op)
+            try:
+                op["sql"] = statement(target, op)
+            except ValueError as e:                       # e.g. a table-level Redshift label: not possible
+                op["sql"], op["skip"] = None, str(e)
+        skipped = [op for op in ops if op.get("skip")]
+        ops = [op for op in ops if not op.get("skip")]
+        conflicts += [f"{op['key']}: {op['skip']}" for op in skipped]
         return {"target": target.id, "datasets": len(seen), "tagged_objects": len({k for k, _ in desired}),
                 "operations": ops, "conflicts": conflicts}
 
     def sync(self, target_id: str, actor: str, dry_run: bool = False, urns: Optional[list[str]] = None) -> dict:
         target = self.target(target_id)
         out = self.plan(target, urns)
-        dry_run = dry_run or target.dry_run or not target.connection
+        dry_run = dry_run or target.dry_run or (not target.connection and target.dialect != "lakeformation")
         out["dry_run"] = dry_run
         if not dry_run and out["operations"]:
             errors = self.execute(target.connection, [op["sql"] for op in out["operations"]])
@@ -279,7 +378,8 @@ class TagSyncService:
                     conn.execute(delete(tag_sync_state).where(where))
                     if op["op"] == "SET":
                         conn.execute(tag_sync_state.insert().values(
-                            target_id=target.id, object_key=op["key"], tag=op["tag"], value=op["value"], synced_ms=now))
+                            target_id=target.id, object_key=op["key"], tag=op["tag"],
+                            value=stored(op["tag"], op["value"]), synced_ms=now))
         failed = sum(1 for op in out["operations"] if op.get("error"))
         out["applied"] = 0 if dry_run else len(out["operations"]) - failed
         out["failed"] = failed
@@ -313,7 +413,8 @@ class TagSyncService:
                 last = conn.execute(select(tag_sync_runs).where(tag_sync_runs.c.target_id == t.id)
                                     .order_by(tag_sync_runs.c.started_ms.desc()).limit(1)).first()
             out.append({"id": t.id, "dialect": t.dialect, "platform": t.platform, "connection": t.connection,
-                        "dry_run": t.dry_run or not t.connection, "mappings": [m.model_dump() for m in t.mappings],
+                        "descriptions": t.descriptions,
+                        "dry_run": t.dry_run or (not t.connection and t.dialect != "lakeformation"), "mappings": [m.model_dump() for m in t.mappings],
                         "managed_tags": len(self._state(t.id)),
                         "last_run": None if last is None else {"at_ms": last.started_ms, "actor": last.actor,
                                                                "dry_run": last.dry_run == "true", **last.summary}})
@@ -326,15 +427,69 @@ def sqlalchemy_executor(registry) -> Callable[[str, list[str]], list[Optional[st
     from sqlalchemy import text
 
     def run(connection: str, statements: list[str]) -> list[Optional[str]]:
-        engine = registry.engine(connection)
+        engine = registry.engine(connection) if connection else None
         errors: list[Optional[str]] = []
         for sql in statements:
             try:
-                with engine.begin() as conn:
-                    conn.execute(text(sql))
+                if sql.startswith("api:"):
+                    run_api(json.loads(sql[4:]), engine)
+                else:
+                    with engine.begin() as conn:
+                        conn.execute(text(sql))
                 errors.append(None)
             except Exception as e:  # noqa: BLE001 - reported per statement
                 errors.append(str(e).splitlines()[0][:500])
         return errors
 
     return run
+
+
+def run_api(op: dict, engine=None, clients: Optional[dict] = None) -> None:
+    """One tag operation through a warehouse API (``clients`` replaces the real client in tests)."""
+    clients = clients or {}
+    if op["api"] == "bigquery":
+        client = clients.get("bigquery") or engine.raw_connection().connection._client   # google.cloud.bigquery
+        from google.cloud import bigquery
+
+        table = client.get_table(op["table"])
+        if op["field"] is None:
+            labels = dict(table.labels or {})
+            if op["op"] == "SET":
+                labels[op["tag"].lower()] = (op["value"] or "").lower()
+            else:
+                labels[op["tag"].lower()] = None                 # the API removes a label set to None
+            table.labels = labels
+            client.update_table(table, ["labels"])
+            return
+        schema = []
+        for f in table.schema:
+            if f.name == op["field"]:
+                names = [n for n in ((f.policy_tags.names if f.policy_tags else []) or []) if n != op["value"]]
+                if op["op"] == "SET":
+                    names.append(op["value"])
+                f = bigquery.SchemaField(f.name, f.field_type, mode=f.mode, description=f.description,
+                                         fields=f.fields, policy_tags=bigquery.PolicyTagList(names))
+            schema.append(f)
+        table.schema = schema
+        client.update_table(table, ["schema"])
+        return
+    if op["api"] == "lakeformation":
+        lf = clients.get("lakeformation")
+        if lf is None:
+            import boto3
+
+            lf = boto3.client("lakeformation", region_name=op["region"])
+        table: dict[str, Any] = {"DatabaseName": op["database"], "Name": op["table"]}
+        if op.get("catalog_id"):
+            table["CatalogId"] = op["catalog_id"]
+        resource = ({"TableWithColumns": {**table, "ColumnNames": [op["field"]]}} if op["field"]
+                    else {"Table": table})
+        pair = {"TagKey": op["tag"], "TagValues": [op["value"]]}
+        if op.get("catalog_id"):
+            pair["CatalogId"] = op["catalog_id"]
+        call = lf.add_lf_tags_to_resource if op["op"] == "SET" else lf.remove_lf_tags_from_resource
+        out = call(Resource=resource, LFTags=[pair])
+        if out.get("Failures"):
+            raise RuntimeError(str(out["Failures"][0].get("Error") or out["Failures"][0])[:300])
+        return
+    raise ValueError(f"unknown API {op['api']}")
