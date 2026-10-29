@@ -21,8 +21,10 @@ import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { actorName, entityTypeLabel, platformName, relativeTime } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
+import { useT } from '../i18n';
 
 export function MarketplacePage() {
+    const t = useT();
     const location = useLocation();
     const history = useHistory();
     const params = new URLSearchParams(location.search);
@@ -53,9 +55,9 @@ export function MarketplacePage() {
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Data Marketplace
+                {t('page.marketplace')}
             </SectionTitle>
-            <Muted>Curated, owned and quality-checked data products. Request access in seconds — no tickets.</Muted>
+            <Muted>{t('page.marketplaceIntro')}</Muted>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '16px 0', alignItems: 'center' }}>
                 <Input.Search
                     aria-label="Search data products"
@@ -260,6 +262,7 @@ const STATE_COLOR: Record<string, string> = {
 };
 
 export function RequestsPage() {
+    const t = useT();
     const { client, cache } = useConsumerApi();
     const mine = useDheQuery<AccessRequest[]>('/marketplace/access-requests?scope=mine', (c, signal) =>
         c.listAccessRequests({ scope: 'mine' }, { signal }),
@@ -351,7 +354,7 @@ export function RequestsPage() {
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Requests
+                {t('page.requests')}
             </SectionTitle>
             <Tabs
                 items={[

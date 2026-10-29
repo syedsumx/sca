@@ -31,7 +31,7 @@ credentials your administrator gave you. The first administrator account is `adm
 
 An asset page has tabs for **Summary** (description, owners, business terms, downstream use),
 **Columns** (types, classifications and whether a column is masked for you), **Discussion**,
-**Quality**, **Lineage** and **Access**.
+**Quality**, **Lineage**, **Access** and **History**.
 
 ## Collaborate
 
@@ -39,3 +39,10 @@ An asset page has tabs for **Summary** (description, owners, business terms, dow
   quality incidents, schema changes and new comments.
 * **Discuss** an asset or a single column. Mention colleagues with `@name`; replies and reactions
   are threaded.
+
+## Language
+
+Choose the interface language at the top right, next to **Ask**. The choice applies to this browser. Without a
+choice, Cairn uses your browser's language when it is available: English, German, French, Spanish or Japanese.
+These docs are also available in German, French, Spanish and Japanese; use the language links at the top of
+each page. Pages that aren't translated yet appear in English.

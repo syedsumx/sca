@@ -1,4 +1,4 @@
-import { Badge, Button } from 'antd';
+import { Badge, Button, Select } from 'antd';
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
@@ -7,6 +7,7 @@ import { useDheQuery } from '../api/hooks';
 import type { InboxItem } from '../api/types';
 import { useDheSession } from '../context/CairnProvider';
 import { isHosted, navigateHost } from '../hostNav';
+import { LOCALES, Locale, MessageKey, useI18n, useT } from '../i18n';
 import { useHotkeys } from '../utils/useHotkeys';
 import { AssistantSlideOver } from './Assistant';
 import { useExtensionSections } from './Extensions';
@@ -43,19 +44,36 @@ const Tab = styled(NavLink)`
     }
 `;
 
-export const NAV = [
-    { to: '/discover', label: 'Discover' },
-    { to: '/search', label: 'Search' },
-    { to: '/marketplace', label: 'Marketplace' },
-    { to: '/requests', label: 'Requests', badge: true },
-    { to: '/context', label: 'Context', feature: 'context' },
-    { to: '/governance', label: 'Governance', feature: 'governance' },
-    { to: '/reports', label: 'Reports', feature: 'governance' },
-    { to: '/settings', label: 'Settings' },
+export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: string }[] = [
+    { to: '/discover', label: 'nav.discover' },
+    { to: '/search', label: 'nav.search' },
+    { to: '/marketplace', label: 'nav.marketplace' },
+    { to: '/requests', label: 'nav.requests', badge: true },
+    { to: '/context', label: 'nav.context', feature: 'context' },
+    { to: '/governance', label: 'nav.governance', feature: 'governance' },
+    { to: '/reports', label: 'nav.reports', feature: 'governance' },
+    { to: '/settings', label: 'nav.settings' },
 ];
+
+/** The UI language; the choice is kept in this browser. */
+export function LanguagePicker() {
+    const { locale, setLocale, t } = useI18n();
+    return (
+        <Select
+            size="small"
+            bordered={false}
+            aria-label={t('nav.language')}
+            value={locale}
+            onChange={(v) => setLocale(v as Locale)}
+            options={LOCALES.map((l) => ({ value: l.code, label: l.label }))}
+            style={{ width: 110 }}
+        />
+    );
+}
 
 export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     const session = useDheSession();
+    const t = useT();
     const inbox = useDheQuery<InboxItem[]>('/notify/inbox?unread=true', (c, signal) => c.inbox(true, { signal }), {
         pollMs: 30_000,
     });
@@ -63,7 +81,7 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     const unread = inbox.data?.length ?? 0;
     const hasExtensions = useExtensionSections('workspace').length > 0;
     const nav = hasExtensions
-        ? [...NAV.slice(0, -1), { to: '/extensions', label: 'Extensions' }, NAV[NAV.length - 1]]
+        ? [...NAV.slice(0, -1), { to: '/extensions', label: 'nav.extensions' as MessageKey }, NAV[NAV.length - 1]]
         : NAV;
     useLocation(); // re-render on navigation (hosted mode reads window.location)
     const hosted = typeof window !== 'undefined' && isHosted(window.location.pathname);
@@ -74,16 +92,16 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     return (
         <div style={{ minHeight: '100%', background: tokens.color.surfaceAlt }}>
             <Bar>
-                <strong style={{ marginRight: 16, color: tokens.color.primary }}>Workspace</strong>
-                <nav aria-label="Workspace sections" style={{ display: 'flex', gap: 4, flex: 1 }}>
+                <strong style={{ marginRight: 16, color: tokens.color.primary }}>{t('nav.workspace')}</strong>
+                <nav aria-label={t('nav.sections')} style={{ display: 'flex', gap: 4, flex: 1 }}>
                     {nav.filter((n) => !('feature' in n && n.feature) || session.feature(n.feature)).map((n) => (
                         <Tab key={n.to} to={n.to} onClick={onTab(n.to)}>
                             {n.badge ? (
                                 <Badge count={unread} size="small" offset={[8, -2]}>
-                                    {n.label}
+                                    {t(n.label)}
                                 </Badge>
                             ) : (
-                                n.label
+                                t(n.label)
                             )}
                         </Tab>
                     ))}
@@ -93,10 +111,11 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                     ghost
                     onClick={() => session.setAssistantOpen(true)}
                     aria-keyshortcuts="Control+J Meta+J"
-                    title="Open assistant (⌘J)"
+                    title={t('nav.askTitle')}
                 >
-                    ✨ Ask
+                    {t('nav.ask')}
                 </Button>
+                <LanguagePicker />
             </Bar>
             <LicenceBanner />
             <main>{children}</main>

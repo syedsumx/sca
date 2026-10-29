@@ -8,6 +8,7 @@ import { ConsumerLayout } from './components/Layout';
 import { CatalogUrlContext } from './context/NativeLinks';
 import { tokens } from './components/tokens';
 import { CairnProvider } from './context/CairnProvider';
+import { I18nProvider, useT } from './i18n';
 
 // Route-level code splitting keeps the initial MFE payload small (spec Part 9: ≤ 250 kB gz).
 const DiscoverPage = React.lazy(() => import('./pages/DiscoverPage').then((m) => ({ default: m.DiscoverPage })));
@@ -40,6 +41,23 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/extensions', component: ExtensionsPage, exact: true },
 ];
 
+function ErrorView({ error }: { error: Error }) {
+    const t = useT();
+    return (
+        <Result
+            status="error"
+            title={t('error.title')}
+            subTitle={error.message}
+            extra={<a href={window.location.pathname}>{t('error.reload')}</a>}
+        />
+    );
+}
+
+function NotFound() {
+    const t = useT();
+    return <Result status="404" title={t('page.notFound')} extra={<a href="./discover">{t('page.goDiscover')}</a>} />;
+}
+
 class ErrorBoundary extends React.Component<{ children?: React.ReactNode }, { error: Error | null }> {
     state = { error: null as Error | null };
 
@@ -49,14 +67,7 @@ class ErrorBoundary extends React.Component<{ children?: React.ReactNode }, { er
 
     render() {
         if (this.state.error) {
-            return (
-                <Result
-                    status="error"
-                    title="Something went wrong"
-                    subTitle={this.state.error.message}
-                    extra={<a href={window.location.pathname}>Reload</a>}
-                />
-            );
+            return <ErrorView error={this.state.error} />;
         }
         return this.props.children;
     }
@@ -79,7 +90,7 @@ export function ConsumerRoutes() {
                             <Route key={r.path} path={r.path} exact={r.exact} component={r.component} />
                         ))}
                         <Redirect exact from="/" to="/discover" />
-                        <Route render={() => <Result status="404" title="Page not found" extra={<a href="./discover">Go to Discover</a>} />} />
+                        <Route render={() => <NotFound />} />
                     </Switch>
                 </Suspense>
             </ErrorBoundary>
@@ -121,15 +132,17 @@ export function ConsumerApp({
     );
     return (
         <ConfigProvider componentSize="middle">
-            <CatalogUrlContext.Provider value={catalogUrl}>
-                <CairnProvider client={client} cache={cache} baseUrl={apiBaseUrl} graphqlUrl={graphqlUrl}>
-                    {routerMode === 'browser' ? (
-                        <BrowserRouter basename={basename}>{content}</BrowserRouter>
-                    ) : (
-                        <HashRouter>{content}</HashRouter>
-                    )}
-                </CairnProvider>
-            </CatalogUrlContext.Provider>
+            <I18nProvider>
+                <CatalogUrlContext.Provider value={catalogUrl}>
+                    <CairnProvider client={client} cache={cache} baseUrl={apiBaseUrl} graphqlUrl={graphqlUrl}>
+                        {routerMode === 'browser' ? (
+                            <BrowserRouter basename={basename}>{content}</BrowserRouter>
+                        ) : (
+                            <HashRouter>{content}</HashRouter>
+                        )}
+                    </CairnProvider>
+                </CatalogUrlContext.Provider>
+            </I18nProvider>
         </ConfigProvider>
     );
 }

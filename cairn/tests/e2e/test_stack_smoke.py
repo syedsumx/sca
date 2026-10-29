@@ -289,6 +289,13 @@ def test_product_docs_served():
         for href in set(re.findall(r'href="([a-z0-9-]+\.html)(?:#[^"]*)?"', body.text)):
             assert href in pages, f"{page} links to missing {href}"
     assert httpx.get(f"{EDGE}/cairn/api/docs", timeout=10).status_code == 200   # linked from the API page
+    # Translations: each language has every page, translated or in English with a note.
+    for lang, title in (("de", "Cairn-Dokumentation"), ("fr", "Documentation Cairn"), ("es", "Documentación de Cairn"),
+                        ("ja", "Cairn ドキュメント")):
+        home = httpx.get(f"{EDGE}/docs/{lang}/index.html", timeout=10)
+        assert home.status_code == 200 and title in home.text and f'<html lang="{lang}">' in home.text, lang
+        assert httpx.get(f"{EDGE}/docs/{lang}/governance.html", timeout=10).status_code == 200
+    assert f'hreflang="de" href="de/getting-started.html"' in httpx.get(f"{EDGE}/docs/getting-started.html", timeout=10).text
 
 
 def test_builtin_maintenance_sources_run_offline():

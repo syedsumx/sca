@@ -12,6 +12,7 @@ import { ConfidenceMeter } from '../components/TrustBadges';
 import { relativeTime, shortUrn } from '../utils/format';
 import { forceLayout } from '../utils/forceLayout';
 import { MarkdownView } from '../utils/markdown';
+import { useT } from '../i18n';
 
 export const FINDING_LABELS: Record<FindingType, { label: string; icon: string; color: string }> = {
     TERM_SUGGESTION: { label: 'New business term', icon: '📖', color: 'purple' },
@@ -192,6 +193,7 @@ export function OntologyView({ ontology }: { ontology: Ontology }) {
 }
 
 export function ContextInboxPage() {
+    const t = useT();
     const { client, cache } = useConsumerApi();
     const [status, setStatus] = useState<string>('OPEN');
     const [type, setType] = useState<string | undefined>(undefined);
@@ -222,7 +224,7 @@ export function ContextInboxPage() {
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Context inbox
+                {t('page.context')}
             </SectionTitle>
             <Muted>
                 Context Agents continuously mine queries, dbt, BI semantics and pipeline runs to suggest business definitions, detect

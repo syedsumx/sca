@@ -14,6 +14,7 @@ import { WorkspacesSettings } from '../components/Workspaces';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { relativeTime } from '../utils/format';
+import { useT } from '../i18n';
 
 export const EVENT_COPY: Record<string, string> = {
     'access.requested': 'Someone requests access to data I own',
@@ -240,17 +241,18 @@ export function RemoteAgentsSettings() {
 
 export function SettingsPage() {
     const session = useDheSession();
+    const t = useT();
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Settings
+                {t('settings.title')}
             </SectionTitle>
             <Tabs
                 items={[
-                    { key: 'notifications', label: 'Notifications', children: <NotificationSettings /> },
+                    { key: 'notifications', label: t('settings.notifications'), children: <NotificationSettings /> },
                     {
                         key: 'inbox',
-                        label: 'Inbox',
+                        label: t('settings.inbox'),
                         children: (
                             <>
                                 <MyPrivacyParts />
@@ -258,31 +260,31 @@ export function SettingsPage() {
                             </>
                         ),
                     },
-                    { key: 'embeds', label: 'Embeds', children: <EmbedBuilder /> },
+                    { key: 'embeds', label: t('settings.embeds'), children: <EmbedBuilder /> },
                     {
                         key: 'ai-agents',
-                        label: 'AI agents',
+                        label: t('settings.aiAgents'),
                         children: <AiAgentsSettings isAdmin={!!session.config?.is_admin} />,
                     },
                     ...(session.config?.is_admin || session.config?.workspaces?.length
                         ? [
                               {
                                   key: 'workspaces',
-                                  label: 'Workspaces',
+                                  label: t('settings.workspaces'),
                                   children: <WorkspacesSettings isAdmin={!!session.config?.is_admin} />,
                               },
                           ]
                         : []),
                     ...(session.config?.can_manage_sources
-                        ? [{ key: 'sources', label: 'Sources', children: <SourcesSettings /> }]
+                        ? [{ key: 'sources', label: t('settings.sources'), children: <SourcesSettings /> }]
                         : []),
                     ...(session.config?.can_manage_agents
-                        ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
+                        ? [{ key: 'agents', label: t('settings.remoteAgents'), children: <RemoteAgentsSettings /> }]
                         : []),
                     ...(session.config?.is_admin
                         ? [
-                              { key: 'extensions', label: 'Extensions', children: <ExtensionsAdmin /> },
-                              { key: 'licence', label: 'Licence', children: <LicenceSettings /> },
+                              { key: 'extensions', label: t('settings.extensions'), children: <ExtensionsAdmin /> },
+                              { key: 'licence', label: t('settings.licence'), children: <LicenceSettings /> },
                           ]
                         : []),
                 ]}

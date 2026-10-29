@@ -20,6 +20,7 @@ import { TrustBadges } from '../components/TrustBadges';
 import { AssetHistory } from '../components/History';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
+import { useT } from '../i18n';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 
@@ -120,6 +121,7 @@ export function AssetPage() {
     const extensionTabs = useExtensionSections('asset');
     const { client } = useConsumerApi();
     const session = useDheSession();
+    const t = useT();
     const me = session.config?.user.urn;
     const [tab, setTab] = useState('summary');
     const details = useDheQuery<AssetDetails | null>(`gql:asset:${urn}`, async (c, signal) => {
@@ -220,7 +222,7 @@ export function AssetPage() {
                 items={[
                     {
                         key: 'summary',
-                        label: 'Summary',
+                        label: t('asset.summary'),
                         children: (
                             <>
                                 <Surface style={{ padding: 18 }}>
@@ -261,17 +263,19 @@ export function AssetPage() {
                     },
                     {
                         key: 'data',
-                        label: 'Data',
+                        label: t('asset.data'),
                         children: <DataPreview urn={urn} tableName={tableNameOf(urn)} />,
                     },
                     {
                         key: 'contract',
-                        label: e?.contract ? `Contract (${e.contract === 'MET' ? 'met' : e.contract.toLowerCase()})` : 'Contract',
+                        label: e?.contract
+                            ? `${t('asset.contract')} (${e.contract === 'MET' ? 'met' : e.contract.toLowerCase()})`
+                            : t('asset.contract'),
                         children: <ContractPanel urn={urn} />,
                     },
                     {
                         key: 'columns',
-                        label: `Columns${columns.length ? ` (${columns.length})` : ''}`,
+                        label: `${t('asset.columns')}${columns.length ? ` (${columns.length})` : ''}`,
                         children: (
                             <Table
                                 size="small"
@@ -299,12 +303,12 @@ export function AssetPage() {
                     },
                     {
                         key: 'discussion',
-                        label: `Discussion${e?.threads_open ? ` (${e.threads_open})` : ''}`,
+                        label: `${t('asset.discussion')}${e?.threads_open ? ` (${e.threads_open})` : ''}`,
                         children: <DiscussionPanel entityUrn={urn} me={me} />,
                     },
                     {
                         key: 'quality',
-                        label: 'Quality',
+                        label: t('asset.quality'),
                         children: (
                             <Surface style={{ padding: 18 }}>
                                 {health.loading && <Skeleton h={60} />}
@@ -345,7 +349,7 @@ export function AssetPage() {
                     },
                     {
                         key: 'lineage',
-                        label: 'Lineage',
+                        label: t('asset.lineage'),
                         children: (
                             <Surface style={{ padding: 18 }}>
                                 <p>
@@ -391,7 +395,7 @@ export function AssetPage() {
                     },
                     {
                         key: 'access',
-                        label: 'Access',
+                        label: t('asset.access'),
                         children: (
                             <Surface style={{ padding: 18 }}>
                                 {sensitive ? (
@@ -411,9 +415,9 @@ export function AssetPage() {
                         ),
                     },
                     ...(urn.startsWith('urn:li:dataset:')
-                        ? [{ key: 'ai', label: 'AI usage', children: <UsedByAi urn={urn} /> }]
+                        ? [{ key: 'ai', label: t('asset.aiUsage'), children: <UsedByAi urn={urn} /> }]
                         : []),
-                    { key: 'history', label: 'History', children: <AssetHistory urn={urn} /> },
+                    { key: 'history', label: t('asset.history'), children: <AssetHistory urn={urn} /> },
                     ...extensionAssetTabs(extensionTabs, urn),
                 ]}
             />
