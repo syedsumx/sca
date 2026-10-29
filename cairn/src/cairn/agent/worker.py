@@ -69,15 +69,26 @@ def default_pipeline_runner(recipe: dict) -> dict:
     return {"source": pipeline.source.get_report().as_obj(), "sink": pipeline.sink.get_report().as_obj()}
 
 
+def default_connection_tester(recipe: dict) -> dict:
+    """Check that the source can be reached with its credentials; nothing is ingested."""
+    import json as _json
+
+    from datahub.ingestion.run.connection import ConnectionManager
+
+    report = ConnectionManager().test_source_connection(recipe)
+    return {"test_connection": _json.loads(report.as_json()) if hasattr(report, "as_json") else report}
+
+
 class AgentWorker:
     def __init__(self, config: AgentConfig, runner: PipelineRunner = default_pipeline_runner,
-                 client: Optional[GatewayClient] = None):
+                 client: Optional[GatewayClient] = None, tester: PipelineRunner = default_connection_tester):
         self.config = config
         self.state = AgentState(config.state_dir)
         self.client = client or GatewayClient(config.gateway_url, self.state,
                                               verify=config.tls_ca_bundle or True)
         self.secrets = SecretResolver.from_config(config.secrets)
         self.runner = runner
+        self.tester = tester
         self.pool = ThreadPoolExecutor(max_workers=config.max_parallel_tasks, thread_name_prefix="cairn-task")
         self.running: dict[str, Future] = {}
         self.cancels: dict[str, threading.Event] = {}
@@ -117,7 +128,7 @@ class AgentWorker:
             shipper.line(f"run {run_id} started on the agent ({recipe.get('source', {}).get('type', '?')} source)")
             if cancelled.is_set():
                 raise RunCancelled(f"run {run_id} was cancelled")
-            report = self.runner(recipe) or {}
+            report = (self.tester if task.get("kind") == "test" else self.runner)(recipe) or {}
             channel.flush()
         except SecretNotFound as e:
             status, report = "FAILURE", {"error": f"secret {e.args[0]!r} not found in any configured backend"}

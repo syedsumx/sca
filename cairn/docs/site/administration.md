@@ -129,6 +129,54 @@ it. To make an agent depend on the AI system register, link it to an AI system
   down-voted questions as `cairn ai eval` cases. Fill in what a right answer must contain and add
   them to the eval suite, so mistakes people saw stay fixed.
 
+## Sources
+
+**Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
+
+**Add a source** from the gallery, which covers:
+
+- warehouses: Snowflake, BigQuery, Redshift;
+- lakes: Databricks Unity Catalog, S3, Glue;
+- databases: PostgreSQL, MySQL, SQL Server, Trino, MongoDB;
+- dbt Core and dbt Cloud;
+- BI tools: Looker, Tableau, Power BI;
+- Kafka.
+
+For anything else, **Another connector** takes a recipe.
+
+Each form asks for the connection details:
+
+- **Secrets by name only.** A password field takes the *name* of a secret, never its value. The recipe holds a `${NAME}` reference, resolved by whatever runs the source: Cairn's secret store, or the secrets backend of an in-VPC agent pool. A recipe with an inline credential is refused.
+- **Runs on.** Choose Cairn's executor, or an agent pool for sources only reachable inside your network. See [Remote agents](remote-agents.html).
+- **Schedule.** A cron expression and time zone, or manual runs only.
+- **Tell about failures.** The people to notify; by default, whoever set up the source.
+- **Advanced options.** JSON merged into the connector's config, for options the form doesn't show.
+
+**Test connection** checks the details on the executor that will run the source, so a pool source is tested by that pool's agents. Nothing is ingested. The result says whether Cairn could connect, and which capabilities (lineage, usage, profiling) the credentials allow.
+
+**Runs and logs.** The list shows each source's last run. **Runs** lists the last 20 runs with their duration, the metadata changes they sent and any failures. **Log** shows a run's output; for pool runs, these are the lines the agent shipped, with secrets removed.
+
+**Health.** Every source is one of:
+
+| State | Meaning |
+|---|---|
+| healthy | the last run succeeded |
+| running | a run is in progress |
+| failing | the last run failed, or none has succeeded |
+| stale | scheduled, but no successful run for more than twice its interval (at least a day for daily sources) |
+| never run | no run yet |
+
+The notifier checks health every five minutes. When a source becomes failing or stale, its owners get a `source.failing` or `source.stale` notification; when it recovers, they get `source.recovered`. Route these to a channel under notification routes. Prometheus gets `cairn_ingestion_sources{state}`, and the alert `CairnSourceFailing` fires after 30 minutes.
+
+The API is `/cairn/api/sources`:
+
+- `GET /connectors` and `GET /executors`;
+- `GET` or `POST` on the collection;
+- `GET`, `PUT` or `DELETE` on `/{urn}/detail`;
+- `POST /{urn}/run`;
+- `POST /test`, then poll `GET /test/{id}`;
+- `GET /runs/{run urn}`.
+
 ## Main settings
 
 | Setting | Purpose |

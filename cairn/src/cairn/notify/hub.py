@@ -39,7 +39,7 @@ EVENT_TYPES = [
     "quality.incident.raised", "quality.incident.resolved", "discussion.mention", "discussion.reply",
     "context.drift", "subscription.update", "form.assigned", "form.due", "contract.broken", "contract.restored",
     "automation.applied", "asset.deprecation_proposed", "ai_system.review_requested", "ai_system.decided",
-    "product.listing_outdated", "playbook.report",
+    "product.listing_outdated", "playbook.report", "source.failing", "source.stale", "source.recovered",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

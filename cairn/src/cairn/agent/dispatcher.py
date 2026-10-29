@@ -15,7 +15,7 @@ from cairn.agent.gateway import EnqueueRequest, GatewayError, GatewayService
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_TASKS = {"RUN_INGEST"}
+SUPPORTED_TASKS = {"RUN_INGEST": "ingest", "TEST_CONNECTION": "test"}
 DISPATCHER_ACTOR = "urn:li:corpuser:cairn-agent-dispatcher"
 
 
@@ -44,7 +44,9 @@ class ExecutionRequestDispatcher:
         # The central Cairn Core sink config is replaced by the agent's encrypted sink.
         recipe.pop("sink", None)
         try:
-            out = self.gateway.enqueue(EnqueueRequest(pool=executor_id, recipe=recipe, execution_request_urn=urn),
+            out = self.gateway.enqueue(EnqueueRequest(pool=executor_id, recipe=recipe, execution_request_urn=urn,
+                                                      kind=SUPPORTED_TASKS[task],
+                                                      max_attempts=1 if task == "TEST_CONNECTION" else 3),
                                        DISPATCHER_ACTOR)
             return out["task_id"]
         except GatewayError as e:

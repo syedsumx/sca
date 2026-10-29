@@ -135,6 +135,12 @@ def notifier_tick(s) -> dict:
         out["contracts"] = s.contracts.refresh_all()
         if s.publisher is not None:
             out["outdated_publications"] = s.publisher.sweep()
+    if s.sources is not None and now_ms - _SWEEP_STATE["sources_ms"] >= 300_000:
+        _SWEEP_STATE["sources_ms"] = now_ms
+        try:
+            out["sources"] = s.sources.check_health(now_ms)
+        except Exception as e:  # noqa: BLE001 - Cairn Core briefly away: try again next time
+            out["sources"] = {"error": str(e)[:200]}
     if s.tag_sync is not None and now_ms - _SWEEP_STATE["synced_ms"] >= TAG_SYNC_EVERY_MS:
         _SWEEP_STATE["synced_ms"] = now_ms
         out["tag_sync"] = s.tag_sync.sweep()
@@ -142,7 +148,7 @@ def notifier_tick(s) -> dict:
 
 
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
-_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0, "reports_ms": 0}
+_SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0, "reports_ms": 0, "sources_ms": 0}
 
 
 _FORMS_STATE = {"assigned_ms": 0, "reminded_ms": 0}

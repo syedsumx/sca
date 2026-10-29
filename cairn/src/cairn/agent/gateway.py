@@ -15,7 +15,7 @@ import secrets
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, delete, func, or_, select, update
@@ -120,6 +120,7 @@ class EnqueueRequest(BaseModel):
     recipe: dict[str, Any]
     execution_request_urn: Optional[str] = None
     max_attempts: int = Field(default=3, ge=1, le=10)
+    kind: Literal["ingest", "test"] = "ingest"       # test: check the connection only, no metadata sent
 
 
 def _iso(ms: Optional[int]) -> Optional[str]:
@@ -256,14 +257,23 @@ class GatewayService:
         try:
             with self.engine.begin() as conn:
                 conn.execute(tasks.insert().values(
-                    task_id=task_id, pool=req.pool, kind="ingest", recipe=req.recipe,
+                    task_id=task_id, pool=req.pool, kind=req.kind, recipe=req.recipe,
                     execution_request_urn=req.execution_request_urn, status="QUEUED", attempts=0,
                     max_attempts=req.max_attempts, created_at_ms=_now(), last_seq=-1,
                     mcps_forwarded=0, mcps_rejected=0, logs=[]))
         except IntegrityError:
             raise GatewayError("execution request already enqueued", 409)
-        self._audit("task.enqueued", actor, task_id, {"pool": req.pool, "er": req.execution_request_urn})
+        self._audit("task.enqueued", actor, task_id, {"pool": req.pool, "er": req.execution_request_urn,
+                                                       "kind": req.kind})
         return {"task_id": task_id, "status": "QUEUED"}
+
+    def get_task(self, task_id: str) -> dict:
+        with self.engine.connect() as conn:
+            r = conn.execute(select(tasks).where(tasks.c.task_id == task_id)).first()
+        if r is None:
+            raise GatewayError("task not found", 404)
+        return {"task_id": r.task_id, "pool": r.pool, "kind": r.kind, "status": r.status, "report": r.report or {},
+                "started_at_ms": r.started_at_ms, "finished_at_ms": r.finished_at_ms}
 
     def list_runs(self, limit: int = 200) -> list[dict]:
         with self.engine.connect() as conn:
@@ -527,7 +537,7 @@ class GatewayService:
                 lease_expires_ms=None, **({"agent_id": None, "run_id": None} if new_status == "QUEUED" else {})))
         if task.execution_request_urn and new_status != "QUEUED":
             self._update_execution_request(task.execution_request_urn, status, req.report, task.started_at_ms,
-                                           now - (task.started_at_ms or now))
+                                           now - (task.started_at_ms or now), test=task.kind == "test")
         self._audit("run.completed", agent["agent_id"], run_id,
                     {"status": status, "forwarded": task.mcps_forwarded, "retrying": new_status == "QUEUED"})
         return {"status": new_status}
@@ -555,7 +565,7 @@ class GatewayService:
 
     # ---- helpers ---------------------------------------------------------------------
     def _update_execution_request(self, urn: str, status: str, report: Optional[dict], start_ms: Optional[int],
-                                  duration_ms: Optional[int]) -> None:
+                                  duration_ms: Optional[int], test: bool = False) -> None:
         if self.graph is None:
             return
         result: dict[str, Any] = {"status": status}
@@ -565,8 +575,10 @@ class GatewayService:
             result["durationMs"] = duration_ms
         if report:
             result["report"] = json.dumps(report)[:100_000]
-            result["structuredReport"] = {"type": "CLI_INGEST", "serializedValue": json.dumps(report),
-                                          "contentType": "application/json"}
+            result["structuredReport"] = {
+                "type": "TEST_CONNECTION" if test else "CLI_INGEST",
+                "serializedValue": json.dumps(report.get("test_connection", report) if test else report),
+                "contentType": "application/json"}
         try:
             self.graph.emit([make_mcp(urn, "dataHubExecutionRequestResult", result)])
         except Exception as e:

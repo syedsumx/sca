@@ -1844,3 +1844,43 @@ def test_45_ai_usage_lineage_shows_which_agent_read_a_dataset(users):
         assert bob.get("/ai/lineage/readers", params={"urn": "urn:li:corpuser:x"}).status_code == 422
     finally:
         root.delete(f"/admin/agents/{made['id']}")
+
+
+def test_46_a_source_set_up_in_the_product_tests_runs_and_reports_health(users):
+    """A Postgres source from the gallery, on the finance agent pool: its connection is tested on the
+    agent (nothing ingested), a run brings in its tables, and the run's numbers, log and health show."""
+    root = users["root"]
+    if not any(e["id"] == "finance" and e["online"] for e in root.get("/sources/executors").json()):
+        pytest.skip("no online agent in pool finance")
+    values = {"host_port": "finance-db:5432", "database": "finance", "username": "catalog_reader",
+              "password": "FINANCE_PG_PASSWORD"}
+    assert users["bob"].get("/sources").status_code == 403
+    t = root.post("/sources/test", json={"connector": "postgres", "values": values, "executor": "finance"})
+    assert t.status_code == 200, t.text
+
+    def tested():
+        r = root.get(f"/sources/test/{t.json()['id']}").json()
+        return r if r["status"] in ("SUCCESS", "FAILURE") else None
+    result = eventually(tested, timeout=180, interval=3)
+    assert result["status"] == "SUCCESS" and result["connected"] is True, result
+    bad = root.post("/sources", json={"name": "x", "connector": "postgres", "values": {**values, "password": "hunter2!"}})
+    assert bad.status_code == 422 and "name of a secret" in bad.text
+    made = root.post("/sources", json={"name": f"e2e finance {RUN}", "connector": "postgres", "values": values,
+                                       "executor": "finance", "schedule": {"interval": "0 3 * * *", "timezone": "UTC"}})
+    assert made.status_code == 201, made.text
+    urn = made.json()["urn"]
+    try:
+        assert made.json()["health"]["state"] == "never_run" and made.json()["secrets"] == ["FINANCE_PG_PASSWORD"]
+        run_urn = root.post(f"/sources/{urn}/run").json()["run"]
+
+        def finished():
+            d = root.get(f"/sources/{urn}/detail").json()
+            return d if d["runs"] and d["runs"][0]["status"] in ("SUCCESS", "FAILURE") else None
+        detail = eventually(finished, timeout=300, interval=5)
+        assert detail["runs"][0]["status"] == "SUCCESS", detail["runs"][0]
+        assert detail["health"]["state"] == "healthy" and detail["runs"][0]["events"] > 0, detail
+        log = root.get(f"/sources/runs/{run_urn}").json()
+        assert "finished: SUCCESS" in log["log"], log["log"][-2000:]
+        assert "reader-demo-only" not in log["log"]                         # the agent's secret never shows
+    finally:
+        assert root.delete(f"/sources/{urn}/detail").status_code == 204

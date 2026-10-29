@@ -68,7 +68,7 @@ READ_POSTS = {
     "/collab/enrich", "/ai/search/semantic", "/ai/ask", "/ai/chat", "/ai/explain/lineage",
     "/governance/v1/authorize", "/governance/simulate", "/governance/policies/validate",
     "/governance/pii/propagation/plan", "/data/query", "/data/ask", "/context/metrics/{name}/query",
-    "/marketplace/access-requests/preview",
+    "/marketplace/access-requests/preview", "/sources/test",
     "/quality/contracts/check", "/notify/inbox/read", "/governance/automations/preview",
 }
 ALWAYS = ("/admin/licence", "/me", "/scim/")

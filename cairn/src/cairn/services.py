@@ -94,6 +94,7 @@ class Services:
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
     playbooks: Optional[Any] = None
+    sources: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -552,6 +553,9 @@ def _build_active_metadata(s: Services) -> None:
         observed=lambda sid: s.traces.datasets_read(agents=[a["id"] for a in s.agents.list() if a["ai_system"] == sid])
         if s.traces is not None and s.agents is not None else [])
     if s.graph is not None:
+        from cairn.sources.service import SourceService
+
+        s.sources = SourceService(s.engine, s.graph, s.gateway, s.audit, hub)
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
         _build_contracts(s, hub, Event)

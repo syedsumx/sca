@@ -8,6 +8,7 @@ import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/t
 import { AiAgentsSettings } from '../components/AiAgents';
 import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
+import { SourcesSettings } from '../components/Sources';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { relativeTime } from '../utils/format';
@@ -252,6 +253,9 @@ export function SettingsPage() {
                         label: 'AI agents',
                         children: <AiAgentsSettings isAdmin={!!session.config?.is_admin} />,
                     },
+                    ...(session.config?.can_manage_sources
+                        ? [{ key: 'sources', label: 'Sources', children: <SourcesSettings /> }]
+                        : []),
                     ...(session.config?.can_manage_agents
                         ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
                         : []),

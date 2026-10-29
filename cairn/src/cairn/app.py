@@ -185,6 +185,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.common.licence_api import build_router as licence_router
 
         app.include_router(licence_router(services.licence, cp, authz))
+    if services.sources is not None:
+        from cairn.sources.api import build_router as sources_router
+
+        app.include_router(sources_router(services.sources, cp, authz))
     if services.playbooks is not None:
         from cairn.ai.playbooks_api import build_router as playbooks_router
 
@@ -312,6 +316,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             "embed_allowed_origins": cfg.embed_allowed_origins,
             "is_admin": services.is_admin(p.urn),
             "can_manage_agents": services.gateway is not None and _allowed(p, "MANAGE_INGESTION"),
+            "can_manage_sources": services.sources is not None and _allowed(p, "MANAGE_INGESTION"),
             "gateway_url": services.settings.gateway.public_url,
             "public_url": cfg.public_url,
             "features": {

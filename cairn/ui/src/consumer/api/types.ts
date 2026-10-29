@@ -335,6 +335,8 @@ export interface UiConfig {
     is_admin?: boolean;
     /** The caller holds MANAGE_INGESTION and the remote-agent gateway is configured. */
     can_manage_agents?: boolean;
+    /** The caller holds MANAGE_INGESTION and source management is available. */
+    can_manage_sources?: boolean;
     /** URL agents use to reach the gateway (shown in the enrolment command). */
     gateway_url?: string;
 }
@@ -981,4 +983,85 @@ export interface PublishPlan {
     in_sync: boolean;
     applied?: boolean;
     failed?: { sql: string; error: string }[];
+}
+
+export interface SourceFormField {
+    key: string;
+    label: string;
+    kind: 'text' | 'secret' | 'number' | 'bool' | 'select' | 'list';
+    path: string;
+    required: boolean;
+    default: unknown;
+    help: string;
+    options: string[];
+}
+
+export interface SourceConnector {
+    id: string;
+    name: string;
+    source_type: string;
+    category: 'warehouse' | 'database' | 'lake' | 'bi' | 'transformation' | 'streaming' | 'other';
+    description: string;
+    fields: SourceFormField[];
+}
+
+export interface SourceExecutor {
+    id: string;
+    name: string;
+    online: number | null;
+}
+
+export type SourceHealthState = 'healthy' | 'running' | 'failing' | 'stale' | 'never_run';
+
+export interface SourceRun {
+    urn: string;
+    id: string | null;
+    status: string;
+    requested_ms: number | null;
+    executor: string | null;
+    started_ms: number | null;
+    duration_ms: number | null;
+    events: number;
+    failures: number;
+    warnings: number;
+}
+
+export interface IngestionSource {
+    urn: string;
+    name: string;
+    type: string;
+    connector: string;
+    values: Record<string, unknown>;
+    advanced: Record<string, unknown>;
+    recipe: Record<string, unknown>;
+    secrets: string[];
+    executor: string;
+    schedule: { interval: string; timezone: string } | null;
+    owners: string[];
+    created_by: string | null;
+    last_run: SourceRun | null;
+    health: { state: SourceHealthState; reason: string };
+    runs?: SourceRun[];
+}
+
+export interface SourceInput {
+    name: string;
+    connector: string;
+    values: Record<string, unknown>;
+    advanced: Record<string, unknown>;
+    recipe?: Record<string, unknown> | null;
+    schedule: { interval: string; timezone: string } | null;
+    executor: string;
+    owners: string[];
+}
+
+export interface SourceTest {
+    id: string;
+    status: string;
+    connected: boolean | null;
+    report: {
+        basic_connectivity?: { capable: boolean; failure_reason?: string | null; mitigation_message?: string | null };
+        capability_report?: Record<string, { capable: boolean; failure_reason?: string | null }>;
+    } | null;
+    error: string | null;
 }

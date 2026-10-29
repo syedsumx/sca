@@ -62,6 +62,12 @@ import type {
     AgentCall,
     AIDatasetRead,
     AIReader,
+    IngestionSource,
+    SourceConnector,
+    SourceExecutor,
+    SourceInput,
+    SourceRun,
+    SourceTest,
     AiAgent,
     FeedbackIn,
     Playbook,
@@ -275,6 +281,52 @@ export class ConsumerClient extends CairnClient {
             undefined,
             { ...opts, query: { urn } },
         );
+    }
+
+    // --- sources ---------------------------------------------------------------------------
+
+    sourceConnectors(opts?: RequestOptions) {
+        return this.request<SourceConnector[]>('GET', '/sources/connectors', undefined, opts);
+    }
+
+    sourceExecutors(opts?: RequestOptions) {
+        return this.request<SourceExecutor[]>('GET', '/sources/executors', undefined, opts);
+    }
+
+    sources(opts?: RequestOptions) {
+        return this.request<IngestionSource[]>('GET', '/sources', undefined, opts);
+    }
+
+    source(urn: string, opts?: RequestOptions) {
+        return this.request<IngestionSource>('GET', `/sources/${enc(urn)}/detail`, undefined, opts);
+    }
+
+    createSource(body: SourceInput) {
+        return this.request<IngestionSource>('POST', '/sources', body);
+    }
+
+    updateSource(urn: string, body: SourceInput) {
+        return this.request<IngestionSource>('PUT', `/sources/${enc(urn)}/detail`, body);
+    }
+
+    deleteSource(urn: string) {
+        return this.request<void>('DELETE', `/sources/${enc(urn)}/detail`);
+    }
+
+    runSource(urn: string) {
+        return this.request<{ run: string }>('POST', `/sources/${enc(urn)}/run`);
+    }
+
+    sourceRun(runUrn: string, opts?: RequestOptions) {
+        return this.request<SourceRun & { log: string }>('GET', `/sources/runs/${enc(runUrn)}`, undefined, opts);
+    }
+
+    testSource(body: Omit<SourceInput, 'name' | 'schedule' | 'owners'>) {
+        return this.request<SourceTest>('POST', '/sources/test', body);
+    }
+
+    sourceTest(id: string, opts?: RequestOptions) {
+        return this.request<SourceTest>('GET', `/sources/test/${enc(id)}`, undefined, opts);
     }
 
     playbooks(opts?: RequestOptions) {

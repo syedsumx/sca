@@ -517,7 +517,7 @@ const on = (method: string, pattern: string, h: Handler) =>
 
 on('GET', '/ui/config', () => ({
     actor: ME, user: { urn: ME, display_name: PEOPLE[ME] },
-    personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true, can_manage_agents: true,
+    personas: [{ id: 'finance-analysts', name: 'Finance analysts' }], is_admin: true, can_manage_agents: true, can_manage_sources: true,
     gateway_url: 'https://cairn-gateway.northwind.example',
     features: { assistant: true, assistant_llm: true, marketplace: true, context: true, semantic_search: true, slack: true, teams: false, email: false, embeds: true, masking_proxy: true },
     slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
@@ -1243,3 +1243,69 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
     console.warn(`DEMO-MISSING ${method} ${path}`);
     return json({ detail: `Not available in the demo: ${method} ${path}` }, 404);
 }
+
+// ------------------------------------------------------------------------------- sources
+const F = (key: string, label: string, kind = 'text', required = false, extra: Json = {}) =>
+    ({ key, label, kind, path: key, required, default: null, help: '', options: [], ...extra });
+const SQL_FIELDS = [F('host_port', 'Host and port', 'text', true), F('database', 'Database'), F('username', 'User', 'text', true),
+    F('password', 'Password secret', 'secret', true), F('include_views', 'Include views', 'bool', false, { default: true })];
+const CONNECTORS = [
+    { id: 'snowflake', name: 'Snowflake', source_type: 'snowflake', category: 'warehouse', description: 'Databases, schemas, tables, views, lineage and usage from Snowflake.',
+      fields: [F('account_id', 'Account identifier', 'text', true), F('warehouse', 'Warehouse', 'text', true), F('username', 'User', 'text', true),
+          F('password', 'Password secret', 'secret', true), F('role', 'Role'), F('databases', 'Databases to include', 'list')] },
+    { id: 'bigquery', name: 'BigQuery', source_type: 'bigquery', category: 'warehouse', description: 'Projects, datasets, tables, lineage and usage from Google BigQuery.',
+      fields: [F('project_ids', 'Projects', 'list', true), F('client_email', 'Service account email', 'text', true), F('private_key', 'Private key secret', 'secret', true)] },
+    { id: 'databricks', name: 'Databricks', source_type: 'unity-catalog', category: 'lake', description: 'Unity Catalog metastores, catalogs, tables, column lineage and notebooks.',
+      fields: [F('workspace_url', 'Workspace URL', 'text', true), F('token', 'Access token secret', 'secret', true)] },
+    { id: 'postgres', name: 'PostgreSQL', source_type: 'postgres', category: 'database', description: 'Schemas, tables and views from PostgreSQL.', fields: SQL_FIELDS },
+    { id: 'mysql', name: 'MySQL', source_type: 'mysql', category: 'database', description: 'Databases, tables and views from MySQL or MariaDB.', fields: SQL_FIELDS },
+    { id: 'dbt-cloud', name: 'dbt Cloud', source_type: 'dbt-cloud', category: 'transformation', description: 'Models, tests and lineage from a dbt Cloud job’s latest run.',
+      fields: [F('account_id', 'Account id', 'number', true), F('job_id', 'Job id', 'number', true), F('token', 'API token secret', 'secret', true),
+          F('target_platform', 'Warehouse', 'select', true, { options: ['snowflake', 'bigquery', 'databricks'] })] },
+    { id: 'looker', name: 'Looker', source_type: 'looker', category: 'bi', description: 'Dashboards, looks, explores and their lineage to tables.',
+      fields: [F('base_url', 'Base URL', 'text', true), F('client_id', 'Client id', 'text', true), F('client_secret', 'Client secret', 'secret', true)] },
+    { id: 'tableau', name: 'Tableau', source_type: 'tableau', category: 'bi', description: 'Workbooks, dashboards, data sources and their lineage.',
+      fields: [F('connect_uri', 'Server URL', 'text', true), F('token_name', 'Personal access token name', 'text', true), F('token_value', 'Token secret', 'secret', true)] },
+    { id: 'kafka', name: 'Kafka', source_type: 'kafka', category: 'streaming', description: 'Topics and their schemas from Kafka and a schema registry.',
+      fields: [F('bootstrap', 'Bootstrap servers', 'text', true), F('schema_registry_url', 'Schema registry URL')] },
+];
+const srun = (i: number, status: string, events: number, ago: number) => ({ urn: `urn:li:dataHubExecutionRequest:demo-${i}`, id: `demo-${i}`, status,
+    requested_ms: now - ago, executor: null, started_ms: now - ago, duration_ms: 95_000 + i * 7000, events, failures: status === 'FAILURE' ? 1 : 0, warnings: 0 });
+const SOURCES = [
+    { urn: 'urn:li:dataHubIngestionSource:snowflake-prod', name: 'Snowflake production', type: 'snowflake', connector: 'snowflake',
+      values: { account_id: 'acme.eu-west-1', warehouse: 'CATALOG_WH', username: 'CAIRN', password: 'SNOWFLAKE_PASSWORD', databases: ['ANALYTICS'] },
+      advanced: {}, recipe: {}, secrets: ['SNOWFLAKE_PASSWORD'], executor: 'default', schedule: { interval: '0 2 * * *', timezone: 'Europe/London' },
+      owners: [ME], created_by: ME, health: { state: 'healthy', reason: 'last succeeded today' },
+      runs: [srun(1, 'SUCCESS', 18_412, 5 * HOUR), srun(2, 'SUCCESS', 18_380, 29 * HOUR), srun(3, 'SUCCESS', 18_211, 53 * HOUR)] },
+    { urn: 'urn:li:dataHubIngestionSource:finance-pg', name: 'Finance database', type: 'postgres', connector: 'postgres',
+      values: { host_port: 'finance-db.internal:5432', database: 'finance', username: 'catalog_reader', password: 'FINANCE_PG_PASSWORD' },
+      advanced: {}, recipe: {}, secrets: ['FINANCE_PG_PASSWORD'], executor: 'finance', schedule: { interval: '0 */6 * * *', timezone: 'UTC' },
+      owners: [ME], created_by: ME, health: { state: 'failing', reason: 'the last 2 run(s) failed' },
+      runs: [srun(4, 'FAILURE', 0, 2 * HOUR), srun(5, 'FAILURE', 0, 8 * HOUR), srun(6, 'SUCCESS', 412, 14 * HOUR)] },
+    { urn: 'urn:li:dataHubIngestionSource:looker', name: 'Looker', type: 'looker', connector: 'looker',
+      values: { base_url: 'https://acme.looker.com', client_id: 'cairn', client_secret: 'LOOKER_SECRET' }, advanced: {}, recipe: {},
+      secrets: ['LOOKER_SECRET'], executor: 'default', schedule: { interval: '30 3 * * *', timezone: 'UTC' }, owners: [ME], created_by: ME,
+      health: { state: 'stale', reason: 'no successful run for 75 hours' }, runs: [srun(7, 'SUCCESS', 2_310, 75 * HOUR)] },
+];
+const LOG = `run started on the agent (postgres source)
+connecting to finance-db.internal:5432 as catalog_reader
+ERROR psycopg2.OperationalError: connection to server at "finance-db.internal" (10.20.0.14), port 5432 failed: FATAL: password authentication failed for user "catalog_reader"
+run finished: FAILURE (0 metadata changes sent)`;
+on('GET', '/sources/connectors', () => CONNECTORS);
+on('GET', '/sources/executors', () => [{ id: 'default', name: 'Cairn (central executor)', online: null }, { id: 'finance', name: 'Agent pool finance', online: 2 }]);
+on('GET', '/sources', () => SOURCES.map(({ runs, ...s }) => ({ ...s, last_run: runs[0] })));
+on('GET', '/sources/:urn/detail', (_b, _q, [urn]) => {
+    const s = SOURCES.find((x) => x.urn === urn) ?? SOURCES[0];
+    return { ...s, last_run: s.runs[0] };
+});
+on('GET', '/sources/runs/:urn', (_b, _q, [urn]) => {
+    const r = SOURCES.flatMap((s) => s.runs).find((x) => x.urn === urn) ?? SOURCES[1].runs[0];
+    return { ...r, log: r.status === 'FAILURE' ? LOG : `run started\n${r.events} metadata changes sent\nrun finished: SUCCESS` };
+});
+on('POST', '/sources/:urn/run', () => ({ run: 'urn:li:dataHubExecutionRequest:demo-new' }));
+on('POST', '/sources/test', () => ({ id: 'task:demo', status: 'SUCCESS', connected: true, error: null,
+    report: { basic_connectivity: { capable: true }, capability_report: { 'Table lineage': { capable: false, failure_reason: 'the user cannot read pg_stat_statements' } } } }));
+on('GET', '/sources/test/:id', () => ({ id: 'task:demo', status: 'SUCCESS', connected: true, error: null, report: { basic_connectivity: { capable: true } } }));
+on('POST', '/sources', (b: Json) => ({ ...SOURCES[0], ...b, urn: 'urn:li:dataHubIngestionSource:demo-new', health: { state: 'never_run', reason: 'no run yet' }, last_run: null }));
+on('PUT', '/sources/:urn/detail', (b: Json, _q, [urn]) => ({ ...SOURCES.find((x) => x.urn === urn), ...b }));
+on('DELETE', '/sources/:urn/detail', () => undefined);

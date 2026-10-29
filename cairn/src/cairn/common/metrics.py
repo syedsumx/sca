@@ -55,12 +55,13 @@ try:
                                    buckets=(0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30))
     AI_INJECTIONS = Counter("cairn_ai_injection_flagged_total",
                             "Catalog strings flagged as instructions to an AI in tool results", ["channel"])
+    INGESTION_SOURCES = Gauge("cairn_ingestion_sources", "Ingestion sources by health", ["state"])
     ENABLED = True
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
     NOTIFICATIONS_PENDING = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = _Noop()
     WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
-    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = _Noop()
+    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = _Noop()
     ENABLED = False
 
 
