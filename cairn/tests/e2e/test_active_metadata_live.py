@@ -1925,3 +1925,26 @@ def test_47_openlineage_events_with_an_api_key_become_jobs_lineage_and_runs(user
         assert refused.status_code == 401
     finally:
         root.delete(f"/admin/agents/{made['id']}")
+
+
+def test_48_results_from_other_quality_tools_show_with_the_dataset(users):
+    """A generic (Monte Carlo-style) failing result for a catalogued table: it counts in the dataset's
+    health, becomes an external assertion in Cairn Core, and the owners are told."""
+    root, carol = users["root"], users["carol"]
+    body = {"results": [{"dataset": DS, "check": f"freshness_{RUN} < 2h", "status": "fail",
+                         "message": "last load 5h ago", "url": "https://example.com/alerts/1"}]}
+    assert users["bob"].post("/quality/external/monte_carlo", json=body).status_code == 403
+    r = root.post("/quality/external/monte_carlo", json=body)
+    assert r.status_code == 200 and r.json()["failing"] == 1, r.text
+    health = carol.get(f"/quality/datasets/{DS}/health").json()
+    mine = [x for x in health["external"] if x["name"] == f"freshness_{RUN} < 2h"]
+    assert mine and mine[0]["status"] == "FAIL" and health["status"] in ("FAIL", "ERROR"), health
+    q = ("query($u:String!){ dataset(urn:$u){ assertions(start:0, count:50){ assertions { urn "
+         "info { type source { type } } } } } }")
+
+    def landed():
+        items = ((gql(q, {"u": DS}).get("dataset") or {}).get("assertions") or {}).get("assertions") or []
+        return [a for a in items if (a.get("info") or {}).get("source", {}).get("type") == "EXTERNAL"] or None
+    assert eventually(landed, timeout=60)
+    ok = root.post("/quality/external/monte_carlo", json={"results": [{**body["results"][0], "status": "pass"}]})
+    assert ok.json()["failing"] == 0
