@@ -312,10 +312,11 @@ def build_mcp_server(services: Services):
         import inspect
         import time as _time
 
-        from cairn.ai.traces import outcome
+        from cairn.ai.traces import ai_channel, outcome
 
         started, flagged = _time.monotonic(), []
         result: Any = {"error": "error"}
+        channel = ai_channel.set("mcp")                 # data read inside counts as AI usage
         try:
             result = _screened(fn(*args, **kwargs), fn.__name__, p, flagged)
             return result
@@ -329,13 +330,20 @@ def build_mcp_server(services: Services):
             result = {"error": "unauthenticated", "message": str(e)}
             return result
         finally:
+            ai_channel.reset(channel)
             if p is not None and services.traces is not None:
+                from cairn.ai.traces import datasets_in
+                from cairn.identity.agents import tool_scope
+
                 try:
                     bound = dict(inspect.signature(fn).bind_partial(*args, **kwargs).arguments)
                 except TypeError:
                     bound = dict(kwargs)
-                services.traces.record(p.urn, p.agent, "mcp", fn.__name__, bound, outcome(result),
+                status = outcome(result)
+                services.traces.record(p.urn, p.agent, "mcp", fn.__name__, bound, status,
                                        int((_time.monotonic() - started) * 1000), len(flagged))
+                if status == "ok" and tool_scope(fn.__name__) == "read" and (read := datasets_in(bound)):
+                    services.traces.record_reads(p.urn, p.agent, "mcp", read, "metadata")
 
     def _safe(fn):
         from cairn.identity.agents import tool_scope

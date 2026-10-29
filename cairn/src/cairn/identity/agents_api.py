@@ -271,6 +271,40 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
         _admin(p)
         return services.traces.stats() if services.traces else {"by_agent": {}, "by_tool": {}}
 
+    @router.get("/admin/agents/{agent_id}/datasets")
+    def agent_datasets(agent_id: str, days: int = 30, p: Principal = Depends(current_principal)):
+        """The datasets the agent read (data and metadata), most read first (AI usage lineage)."""
+        _admin(p)
+        _wrap(lambda: svc.get(agent_id))
+        return services.traces.datasets_read(agent=agent_id, days=days) if services.traces else []
+
+    @router.get("/ai/lineage/readers")
+    def ai_usage(urn: str, days: int = 30, p: Principal = Depends(current_principal)):
+        """Which AI used this dataset: agents (with their AI system) and people's MCP and assistant use."""
+        if not urn.startswith("urn:li:dataset:"):
+            raise HTTPException(422, "urn is a dataset urn")
+        if not services.can_view(p)(urn):
+            raise HTTPException(403, "you may not see this dataset")
+        if services.traces is None:
+            return {"urn": urn, "readers": []}
+        admin = authorize(p, MANAGE, None, raise_on_deny=False)
+        agents = {a["id"]: a for a in svc.list()}
+        systems: dict[str, dict] = {}
+        out = []
+        for r in services.traces.readers(urn, days):
+            a = agents.get(r["agent"]) if r["agent"] else None
+            sid = (a or {}).get("ai_system")
+            if sid and sid not in systems and services.ai_systems is not None:
+                try:
+                    got = services.ai_systems.get(sid)
+                    systems[sid] = {"id": sid, "name": got["name"], "state": got["state"], "tier": got["tier"]}
+                except Exception:  # noqa: BLE001 - a deleted register entry
+                    systems[sid] = {"id": sid, "name": None, "state": None, "tier": None}
+            out.append({**r, "actor": r["actor"] if admin or r["actor"] == p.urn else None,
+                        "agent_name": (a or {}).get("name"), "agent_owner": (a or {}).get("owner"),
+                        "ai_system": systems.get(sid) if sid else None})
+        return {"urn": urn, "days": days, "readers": out}
+
     # ---- a person's own connections ------------------------------------------------------------------
     @router.get("/me/agents")
     def my_agents(p: Principal = Depends(current_principal)):
@@ -280,6 +314,11 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
     def my_agent_activity(agent_id: str, limit: int = 100, p: Principal = Depends(current_principal)):
         """What an agent did for me (only my own calls)."""
         return services.traces.activity(agent=agent_id, actor=p.urn, limit=limit) if services.traces else []
+
+    @router.get("/me/agents/{agent_id}/datasets")
+    def my_agent_datasets(agent_id: str, days: int = 30, p: Principal = Depends(current_principal)):
+        """The datasets an agent read for me."""
+        return services.traces.datasets_read(agent=agent_id, actor=p.urn, days=days) if services.traces else []
 
     @router.delete("/me/agents/{agent_id}")
     def disconnect(agent_id: str, p: Principal = Depends(current_principal)):

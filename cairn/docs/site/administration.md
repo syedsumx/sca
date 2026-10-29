@@ -117,6 +117,7 @@ it. To make an agent depend on the AI system register, link it to an AI system
 
 - Each agent's **Activity** lists its recent tool calls: tool, arguments (personal data redacted),
   outcome, time taken, and whether catalog text in the result was flagged.
+- **Datasets read**, next to an agent's activity, lists the datasets the agent read (data and metadata) over the last 30 days (`GET /cairn/api/admin/agents/{id}/datasets`). People see the same for the agents connected to them.
 - Administrators see every agent's activity. People see what agents did for them, in Settings →
   AI agents.
 - `/admin/agents/stats` sums calls, errors, refusals and flagged text per agent and per tool over a

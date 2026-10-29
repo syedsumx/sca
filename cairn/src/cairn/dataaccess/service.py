@@ -117,10 +117,13 @@ def output_sources(tree: exp.Expression) -> list[Optional[set[str]]]:
 class DataAccessService:
     def __init__(self, registry, plan_for: Callable[[str, str], DatasetPlan],
                  can_read: Callable[[str, str], bool], audit=None, max_rows: int = MAX_ROWS,
-                 timeout_ms: int = TIMEOUT_MS, known: Callable[[str], bool] = lambda urn: True):
+                 timeout_ms: int = TIMEOUT_MS, known: Callable[[str], bool] = lambda urn: True,
+                 on_read: Optional[Callable[[str, list[str]], None]] = None):
         """``plan_for(actor, urn)``: the caller's masking plan. ``can_read(actor, urn)``: may they see
-        data. ``known(urn)``: is the dataset in the catalog (uncatalogued tables are never served)."""
+        data. ``known(urn)``: is the dataset in the catalog (uncatalogued tables are never served).
+        ``on_read(actor, urns)``: told after every served read (AI usage lineage)."""
         self.known = known
+        self.on_read = on_read
         self.registry = registry
         self.plan_for = plan_for
         self.can_read = can_read
@@ -210,6 +213,7 @@ class DataAccessService:
         out = QueryResult(columns, self._jsonable(rows), masked, truncated, int((time.monotonic() - started) * 1000),
                           [urn])
         self._audit(actor, "data.previewed", urn, {"rows": len(rows), "masked": masked})
+        self._read(actor, [urn])
         return out.as_dict()
 
     def query(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
@@ -247,7 +251,15 @@ class DataAccessService:
                           sorted(set(urns)))
         self._audit(actor, "data.queried", source.connection,
                     {"sql": mask_sql(sql), "tables": out.tables, "rows": len(rows), "masked": masked})
+        self._read(actor, out.tables)
         return out.as_dict()
+
+    def _read(self, actor: str, urns: list[str]) -> None:
+        if self.on_read is not None:
+            try:
+                self.on_read(actor, urns)
+            except Exception:  # noqa: BLE001 - usage records never fail a read
+                logger.exception("could not record a data read")
 
     def _audit(self, actor: str, action: str, subject: str, details: dict) -> None:
         if self.audit is not None:

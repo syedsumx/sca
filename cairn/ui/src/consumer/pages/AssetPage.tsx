@@ -11,6 +11,7 @@ import { BookmarkToggle, FollowButton } from '../components/Engagement';
 import { SimilarAssets } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, tokens } from '../components/tokens';
 import { ContractPanel } from '../components/Contract';
+import { UsedByAi } from '../components/AiUsage';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
@@ -386,6 +387,9 @@ export function AssetPage() {
                             </Surface>
                         ),
                     },
+                    ...(urn.startsWith('urn:li:dataset:')
+                        ? [{ key: 'ai', label: 'AI usage', children: <UsedByAi urn={urn} /> }]
+                        : []),
                     ...extensionAssetTabs(extensionTabs, urn),
                 ]}
             />

@@ -194,6 +194,19 @@ function Report() {
                     ))}
                 />
             )}
+            {(r.undeclared_use ?? []).length > 0 && (
+                <Alert
+                    type="warning"
+                    showIcon
+                    style={{ marginTop: 12 }}
+                    message="AI systems reading datasets they did not declare"
+                    description={(r.undeclared_use ?? []).map((u) => (
+                        <div key={u.system}>
+                            {u.name}: {u.datasets.join(', ')}
+                        </div>
+                    ))}
+                />
+            )}
         </Surface>
     );
 }
@@ -298,6 +311,12 @@ export function AISystemsAdmin() {
                                     {s.name} <Tag color={TIER_COLOR[s.tier]}>{s.tier} risk</Tag>
                                     <Tag color={STATE_COLOR[s.state]}>{s.state.replace('_', ' ').toLowerCase()}</Tag>
                                     {s.violations.length > 0 && <Tag color="red">restricted data without purpose</Tag>}
+                                    {(s.undeclared_datasets ?? []).length > 0 && (
+                                        <Tag color="orange" title={(s.undeclared_datasets ?? []).join('\n')}>
+                                            reads {(s.undeclared_datasets ?? []).length} undeclared dataset
+                                            {(s.undeclared_datasets ?? []).length > 1 ? 's' : ''}
+                                        </Tag>
+                                    )}
                                     {s.missing.length > 0 && <Tag>assessment incomplete</Tag>}
                                 </span>
                             }

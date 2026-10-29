@@ -1826,3 +1826,21 @@ def test_44_semantic_layer_metrics_import_approve_and_query_routing(users):
     assert bad.status_code == 422 and "no dimension" in bad.text, bad.text
     nowh = bob.post(f"/context/metrics/{name}/query", json={"dimensions": ["region"]})
     assert nowh.status_code == 404 and "connection" in nowh.text, nowh.text   # no warehouse serves this dataset
+
+
+def test_45_ai_usage_lineage_shows_which_agent_read_a_dataset(users):
+    """An agent reads a dataset's metadata over MCP; the dataset's AI usage then names that agent,
+    and the agent's datasets list the dataset. A refused call records nothing."""
+    root, bob = users["root"], users["bob"]
+    made = root.post("/admin/agents", json={"name": f"e2e reader {RUN}", "scopes": ["read"], "owner": BOB}).json()
+    try:
+        out = _mcp_call(made["key"], "get_asset", {"urn": DS})
+        assert out.get("urn") == DS or out.get("name"), out
+        readers = bob.get("/ai/lineage/readers", params={"urn": DS})
+        assert readers.status_code == 200, readers.text
+        mine = [r for r in readers.json()["readers"] if r["agent"] == made["id"]]
+        assert mine and mine[0]["metadata_reads"] >= 1 and mine[0]["agent_name"] == f"e2e reader {RUN}", readers.json()
+        assert DS in [d["dataset"] for d in root.get(f"/admin/agents/{made['id']}/datasets").json()]
+        assert bob.get("/ai/lineage/readers", params={"urn": "urn:li:corpuser:x"}).status_code == 422
+    finally:
+        root.delete(f"/admin/agents/{made['id']}")

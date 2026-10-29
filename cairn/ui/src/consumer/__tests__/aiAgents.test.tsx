@@ -125,9 +125,20 @@ it("shows what an agent did for me, with each call's outcome", async () => {
                 created_ms: 1,
             },
         ],
+        'GET /me/agents/agt_desktop/datasets': [
+            {
+                dataset: 'urn:li:dataset:(urn:li:dataPlatform:snowflake,sales.orders,PROD)',
+                data_reads: 4,
+                metadata_reads: 2,
+                days: 2,
+                last_ms: 1,
+            },
+        ],
     });
     fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
     expect(await screen.findByText('suggest_tags')).toBeTruthy();
     expect(screen.getByText('flagged text')).toBeTruthy();
     expect(screen.getByText('31 ms')).toBeTruthy();
+    fireEvent.click(screen.getByRole('tab', { name: 'Datasets read' }));
+    expect(await screen.findByText('sales.orders')).toBeTruthy();
 });

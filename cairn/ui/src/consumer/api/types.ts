@@ -915,6 +915,9 @@ export interface AISystem extends AISystemInput {
     tier: AITier;
     missing: string[];
     violations: { dataset: string; labels: string[]; reason: string }[];
+    /** Datasets the system's agents read in the last 30 days (AI usage lineage). */
+    observed_datasets?: AIDatasetRead[];
+    undeclared_datasets?: string[];
     decided_by: string | null;
     decided_ms: number | null;
     decision_note: string | null;
@@ -928,6 +931,31 @@ export interface AISystemsReport {
     by_state: Record<string, number>;
     high_risk_not_approved: string[];
     violations: { system: string; name: string; state: AIState; dataset: string; labels: string[]; reason: string }[];
+    undeclared_use?: { system: string; name: string; datasets: string[] }[];
+}
+
+/** One dataset an agent (or a person's AI use) read: data through data access, metadata through tools. */
+export interface AIDatasetRead {
+    dataset: string;
+    data_reads: number;
+    metadata_reads: number;
+    days: number;
+    last_ms: number;
+}
+
+/** Who read a dataset through AI. ``actor`` is shown for an administrator or the caller only. */
+export interface AIReader {
+    agent: string | null;
+    actor: string | null;
+    channel: 'mcp' | 'assistant' | 'api';
+    people: number;
+    data_reads: number;
+    metadata_reads: number;
+    days: number;
+    last_ms: number;
+    agent_name: string | null;
+    agent_owner: string | null;
+    ai_system: { id: string; name: string | null; state: AIState | null; tier: AITier | null } | null;
 }
 
 export type PublishTarget = 'snowflake' | 'databricks';

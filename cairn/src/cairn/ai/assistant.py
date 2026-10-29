@@ -173,15 +173,22 @@ class Assistant:
             raise ValueError(f"unknown tool {name}")
         params = inspect.signature(fn).parameters
         allowed = {k: v for k, v in args.items() if k in params}
+        from cairn.ai.traces import ai_channel, datasets_in
+        from cairn.identity.agents import tool_scope
+
         started, flagged, status = time.monotonic(), [], "error"
+        channel = ai_channel.set("assistant")
         try:
             out = screen(fn(**allowed), flagged)
             status = "refused" if isinstance(out, dict) and out.get("refused") and not out.get("queued") else "ok"
         finally:
+            ai_channel.reset(channel)
             traces = getattr(getattr(tools, "s", None), "traces", None)
             if traces is not None:
                 traces.record(principal.urn, principal.agent, "assistant", name, allowed, status,
                               int((time.monotonic() - started) * 1000), len(flagged))
+                if status == "ok" and tool_scope(name) == "read" and (read := datasets_in(allowed)):
+                    traces.record_reads(principal.urn, principal.agent, "assistant", read, "metadata")
         return out, f"{name.replace('_', ' ')}({', '.join(f'{k}={str(v)[:40]}' for k, v in allowed.items())})"
 
     # ---- main entry ---------------------------------------------------------------------

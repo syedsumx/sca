@@ -548,7 +548,9 @@ def _build_active_metadata(s: Services) -> None:
     s.ai_systems = AISystemService(
         s.engine, s.attributes, s.personas, s.audit, hub,
         can_approve=lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_POLICIES", None,
-                                              raise_on_deny=False))
+                                              raise_on_deny=False),
+        observed=lambda sid: s.traces.datasets_read(agents=[a["id"] for a in s.agents.list() if a["ai_system"] == sid])
+        if s.traces is not None and s.agents is not None else [])
     if s.graph is not None:
         from cairn.governance.bulk import BulkService
         s.bulk = BulkService(s.engine, s.graph, s.audit)
@@ -750,7 +752,16 @@ def _build_data_access(s: Services) -> None:
     def known(urn: str) -> bool:
         return s.graph is not None and any(s.graph.get_aspect(urn, a) for a in ("schemaMetadata", "datasetProperties"))
 
-    s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known)
+    def on_read(actor: str, urns: list[str]) -> None:
+        """Reads by AI (an MCP or assistant tool, or an agent's key) feed AI usage lineage."""
+        from cairn.ai.traces import ai_channel
+        from cairn.identity.agents import current_agent
+
+        channel, agent = ai_channel.get(), current_agent.get()
+        if s.traces is not None and (channel or agent):
+            s.traces.record_reads(actor, agent, channel or "api", urns, "data")
+
+    s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known, on_read=on_read)
 
     from cairn.dataaccess.ask import AskService
 

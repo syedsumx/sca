@@ -15,6 +15,10 @@ person's decision (MANAGE_POLICIES, never the owner) and is refused when:
 
 The last rule is checked again on every read against the datasets' current classification, so a
 dataset classified as restricted after approval shows up as a violation in the inventory report.
+
+**Observed use.** Agents linked to a system (their ``ai_system``) have their reads recorded (AI usage
+lineage). A system shows the datasets it actually read in the last 30 days, and the ones among them it
+never declared; the purpose rule applies to those too.
 """
 
 from __future__ import annotations
@@ -150,8 +154,11 @@ def _covers(pattern: str, label: str) -> bool:
 
 class AISystemService:
     def __init__(self, engine, attributes, personas=None, audit=None, notify=None, template: Optional[Template] = None,
-                 can_approve: Optional[Callable[[str], bool]] = None):
+                 can_approve: Optional[Callable[[str], bool]] = None,
+                 observed: Optional[Callable[[str], list[dict]]] = None):
+        """``observed(id)``: datasets the system's agents read lately (``{"dataset", "data_reads", ...}``)."""
         self.engine = engine
+        self.observed = observed or (lambda sid: [])
         self.attributes = attributes
         self.personas = personas
         self.audit = audit
@@ -170,11 +177,18 @@ class AISystemService:
     def _public(self, r: dict) -> dict:
         doc = r["doc"]
         tier = self.template.tier(doc.get("answers") or {})
+        try:
+            observed = self.observed(r["id"])
+        except Exception:  # noqa: BLE001 - usage is informative; never fail reading the register
+            observed = []
+        declared = doc.get("datasets", [])
+        undeclared = [o["dataset"] for o in observed if o["dataset"] not in declared]
         return {"id": r["id"], "name": r["name"], "owner": r["owner"], "state": r["state"], "tier": tier,
                 "purpose": doc.get("purpose"), "models": doc.get("models", []), "datasets": doc.get("datasets", []),
                 "vendor": doc.get("vendor"), "data_purpose_id": doc.get("data_purpose_id"),
                 "answers": doc.get("answers", {}), "missing": self.template.missing(doc.get("answers") or {}, tier),
-                "violations": self.violations(doc, tier), "decided_by": r["decided_by"],
+                "violations": self.violations({**doc, "datasets": declared + undeclared}, tier),
+                "observed_datasets": observed, "undeclared_datasets": undeclared, "decided_by": r["decided_by"],
                 "decided_ms": r["decided_ms"], "decision_note": doc.get("decision_note"), "updated_ms": r["updated_ms"]}
 
     def get(self, sid: str) -> dict:
@@ -321,16 +335,19 @@ class AISystemService:
                                        and s["state"] != "APPROVED"],
             "violations": [{"system": s["id"], "name": s["name"], "state": s["state"], **v}
                            for s in systems for v in s["violations"]],
+            "undeclared_use": [{"system": s["id"], "name": s["name"], "datasets": s["undeclared_datasets"]}
+                               for s in systems if s["undeclared_datasets"]],
             "systems": [{k: s[k] for k in ("id", "name", "owner", "tier", "state", "purpose", "vendor")}
                         | {"datasets": len(s["datasets"]), "models": len(s["models"]),
-                           "violations": len(s["violations"])} for s in systems],
+                           "violations": len(s["violations"]), "undeclared": len(s["undeclared_datasets"])}
+                        for s in systems],
         }
 
     def report_csv(self) -> str:
         rows = self.report()["systems"]
         buf = io.StringIO()
         w = csv.DictWriter(buf, fieldnames=["id", "name", "owner", "tier", "state", "purpose", "vendor", "models",
-                                            "datasets", "violations"])
+                                            "datasets", "violations", "undeclared"])
         w.writeheader()
         w.writerows(rows)
         return buf.getvalue()

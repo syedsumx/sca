@@ -60,6 +60,8 @@ import type {
     CoverageFacet,
     CostTotal,
     AgentCall,
+    AIDatasetRead,
+    AIReader,
     AiAgent,
     FeedbackIn,
     Playbook,
@@ -257,6 +259,22 @@ export class ConsumerClient extends CairnClient {
     aiAgentActivity(id: string, all: boolean, opts?: RequestOptions) {
         const path = all ? `/admin/agents/${enc(id)}/activity` : `/me/agents/${enc(id)}/activity`;
         return this.request<AgentCall[]>('GET', path, undefined, opts);
+    }
+
+    /** The datasets an agent read: for every person (admins) or only for the caller. */
+    aiAgentDatasets(id: string, all: boolean, opts?: RequestOptions) {
+        const path = all ? `/admin/agents/${enc(id)}/datasets` : `/me/agents/${enc(id)}/datasets`;
+        return this.request<AIDatasetRead[]>('GET', path, undefined, opts);
+    }
+
+    /** Which AI used a dataset lately (agents with their AI system, and MCP or assistant use). */
+    aiReaders(urn: string, opts?: RequestOptions) {
+        return this.request<{ urn: string; days: number; readers: AIReader[] }>(
+            'GET',
+            '/ai/lineage/readers',
+            undefined,
+            { ...opts, query: { urn } },
+        );
     }
 
     playbooks(opts?: RequestOptions) {

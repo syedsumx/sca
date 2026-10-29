@@ -1008,7 +1008,7 @@ const AGENT_DESKTOP = { id: 'agt_7f2c1a9e04bd', name: 'Claude Desktop', kind: 'o
     granted_scopes: ['read', 'query_data', 'propose'], redirect_uris: ['http://127.0.0.1:33418/callback'], ai_system: null, enabled: true,
     created_by: 'dynamic-registration', created_ms: now - 6 * DAY, since_ms: now - 6 * DAY, last_used_ms: now - 2 * HOUR };
 const AGENT_BOT = { id: 'agt_3b91d0c27e5a', name: 'Nightly documentation bot', kind: 'key', owner: 'urn:li:corpuser:raj', scopes: ['read', 'propose'],
-    redirect_uris: [], ai_system: 'ai_docbot', enabled: true, created_by: ME, created_ms: now - 20 * DAY, last_used_ms: now - 9 * HOUR,
+    redirect_uris: [], ai_system: 'ais_support_bot', enabled: true, created_by: ME, created_ms: now - 20 * DAY, last_used_ms: now - 9 * HOUR,
     description: 'Drafts descriptions for undocumented tables every night.' };
 on('GET', '/me/agents', () => [AGENT_DESKTOP]);
 on('DELETE', '/me/agents/:id', () => ({ revoked: 2 }));
@@ -1025,6 +1025,21 @@ const CALLS = [
 ].map((c, i) => ({ id: `call_${i}`, agent: AGENT_DESKTOP.id, actor: ME, channel: 'mcp', created_ms: now - i * 7 * 60_000, ...c }));
 on('GET', '/admin/agents/:id/activity', () => CALLS);
 on('GET', '/me/agents/:id/activity', () => CALLS);
+const READS = [
+    { dataset: ORDERS, data_reads: 41, metadata_reads: 12, days: 9, last_ms: now - 2 * HOUR },
+    { dataset: REV_DAILY, data_reads: 17, metadata_reads: 5, days: 6, last_ms: now - 5 * HOUR },
+    { dataset: CUSTOMERS, data_reads: 0, metadata_reads: 8, days: 3, last_ms: now - DAY },
+];
+on('GET', '/admin/agents/:id/datasets', () => READS);
+on('GET', '/me/agents/:id/datasets', () => READS);
+on('GET', '/ai/lineage/readers', (_b, q) => ({ urn: q.urn, days: 30, readers: [
+    { agent: AGENT_DESKTOP.id, actor: null, channel: 'mcp', people: 4, data_reads: 41, metadata_reads: 12, days: 9, last_ms: now - 2 * HOUR,
+      agent_name: AGENT_DESKTOP.name, agent_owner: null, ai_system: null },
+    { agent: AGENT_BOT.id, actor: null, channel: 'api', people: 1, data_reads: 0, metadata_reads: 22, days: 14, last_ms: now - 9 * HOUR,
+      agent_name: AGENT_BOT.name, agent_owner: AGENT_BOT.owner, ai_system: { id: 'ais_support_bot', name: 'Support chatbot', state: 'APPROVED', tier: 'limited' } },
+    { agent: null, actor: ME, channel: 'assistant', people: 1, data_reads: 3, metadata_reads: 6, days: 2, last_ms: now - DAY,
+      agent_name: null, agent_owner: null, ai_system: null },
+] }));
 on('POST', '/ai/feedback', () => ({ id: 'fb_demo' }));
 on('POST', '/admin/agents/pause', (b: { paused: boolean }) => ({ paused: !!b.paused }));
 on('POST', '/admin/agents', (b: { name: string; scopes: string[] }) => ({ ...AGENT_BOT, id: 'agt_demo', name: b.name, scopes: b.scopes,
@@ -1086,7 +1101,10 @@ const aiPublic = (s: Json) => {
         : [];
     const missing = ASSESSMENT.questions.filter((q) => (q.type === 'text' ? q.required_for.includes(tier) && !String(s.answers?.[q.id] ?? '').trim()
         : s.answers?.[q.id] === undefined)).map((q) => q.id);
-    return { ...s, tier, violations, missing, updated_ms: now - DAY };
+    const undeclared = s.id === 'ais_support_bot' ? [INVOICES].filter((u) => !s.datasets.includes(u)) : [];
+    const observed = s.id === 'ais_support_bot' ? [{ dataset: ORDERS, data_reads: 0, metadata_reads: 22, days: 14, last_ms: now - 9 * HOUR },
+        ...undeclared.map((u) => ({ dataset: u, data_reads: 0, metadata_reads: 4, days: 2, last_ms: now - DAY }))] : [];
+    return { ...s, tier, violations, missing, observed_datasets: observed, undeclared_datasets: undeclared, updated_ms: now - DAY };
 };
 on('GET', '/governance/ai-systems/assessment', () => ASSESSMENT);
 on('GET', '/governance/ai-systems/report', () => {
@@ -1096,7 +1114,9 @@ on('GET', '/governance/ai-systems/report', () => {
     for (const s of list) { by_tier[s.tier] += 1; by_state[s.state] = (by_state[s.state] ?? 0) + 1; }
     return { assessment: ASSESSMENT.name, total: list.length, by_tier, by_state,
         high_risk_not_approved: list.filter((s) => ['high', 'unacceptable'].includes(s.tier) && s.state !== 'APPROVED').map((s) => s.id),
-        violations: list.flatMap((s) => s.violations.map((v: Json) => ({ system: s.id, name: s.name, state: s.state, ...v }))), systems: [] };
+        violations: list.flatMap((s) => s.violations.map((v: Json) => ({ system: s.id, name: s.name, state: s.state, ...v }))),
+        undeclared_use: list.filter((s) => s.undeclared_datasets.length).map((s) => ({ system: s.id, name: s.name, datasets: s.undeclared_datasets })),
+        systems: [] };
 });
 on('GET', '/governance/ai-systems', () => aiSystems.map(aiPublic));
 on('POST', '/governance/ai-systems', (b) => {

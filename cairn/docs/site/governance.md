@@ -255,3 +255,12 @@ The default is a starting point, not legal advice. Edit its questions, options a
 **Restricted data needs an approved purpose.** A high-risk system that uses a dataset classified as restricted (PII, Confidential or Restricted by default; set `restricted_labels`) can only be approved if its purpose covers those classifications. Link a purpose from [Personas and purposes](#personas-and-purposes). The check runs again whenever the inventory is read: a dataset classified as restricted after approval shows up as a violation straight away.
 
 **The inventory report** (`GET /cairn/api/governance/ai-systems/report`, or **Download inventory** for CSV) counts systems by tier and state. It also lists high-risk systems that aren't approved and every use of restricted data without a purpose.
+
+**What AI actually reads (AI usage lineage).** Cairn records, per day, the datasets AI reads:
+
+- data read through data access (queries, previews, ask-your-data, governed metrics) by an MCP tool, the assistant, or an agent's key;
+- metadata read through MCP and assistant tools (an asset, its lineage, its quality).
+
+People's own use of the SQL editor is not counted. A dataset's **AI usage** tab lists the agents and AI tools that read it in the last 30 days, with each agent's AI system (`GET /cairn/api/ai/lineage/readers?urn=`). Other people's names are shown to administrators only.
+
+An agent linked to an AI system makes that system's reads visible on its entry: the datasets it used lately, and the ones it never declared. Undeclared datasets count for the restricted-data rule, and the inventory report lists them under `undeclared_use`. Records are kept for 400 days.
