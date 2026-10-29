@@ -273,7 +273,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
 
             app.include_router(publish_router(services.publisher, services.marketplace, cp, authz))
     if "context" in modules and services.context is not None:
-        app.include_router(context_router(services.context, cp, authz, services.can_view))
+        app.include_router(context_router(services.context, cp, authz, services.can_view, services.semantic_layer))
     if "notify" in modules and services.notify is not None:
         app.include_router(notify_router(services.notify, services.slack, cp, authz,
                                          services.slack_events, services.teams_bot))

@@ -40,7 +40,8 @@ metrics, ownership, quality, access and lineage using the tools. Rules:
 - Ground every factual claim in tool results; cite assets by urn in square brackets, e.g. [urn:li:dataset:(...)].
 - Prefer certified, healthy assets when recommending data. Mention masking or access limits plainly.
 - For "why did X change/break" questions call explain_lineage first.
-- For questions about the data itself (how many, how much, trends) call ask_data and show its SQL.
+- For a known business metric call list_metrics and query_metric (governed); for other questions about the
+  data itself (how many, how much, trends) call ask_data. Show the SQL either way.
 - Only suggest changes or request access when the user asks; suggestions are queued for review, so say so.
 - Be concise: short paragraphs or bullets, markdown allowed. If tools return nothing, say so.
 {UNTRUSTED_NOTICE}"""
@@ -74,6 +75,14 @@ TOOL_SPECS: list[dict] = [
                                         "governed read-only SQL query; returns the SQL, an explanation and rows.",
      "input_schema": {"type": "object", "properties": {"question": {"type": "string"},
                       "dataset_urns": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}},
+    {"name": "list_metrics", "description": "Governed metrics (approved definitions) with their dimensions.",
+     "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}}},
+    {"name": "query_metric", "description": "Compute a governed metric by name, by its dimensions, with filters on "
+                                           "them and a time grain (day, week, month, quarter, year).",
+     "input_schema": {"type": "object", "properties": {"metric": {"type": "string"},
+                      "dimensions": {"type": "array", "items": {"type": "string"}},
+                      "filters": {"type": "array", "items": {"type": "object"}},
+                      "time_grain": {"type": "string"}}, "required": ["metric"]}},
     {"name": "suggest_description", "description": "Suggest a description for a dataset or column. It waits for a "
                                                    "person's review; tell the user it was queued, not applied.",
      "input_schema": {"type": "object", "properties": {"urn": {"type": "string"}, "description": {"type": "string"},

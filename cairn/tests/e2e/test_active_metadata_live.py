@@ -1800,3 +1800,29 @@ def test_43_the_assistant_answers_a_slack_dm_in_its_thread(users):
         return posts or None
     post = eventually(answered, timeout=90, interval=3)[0]["body"]
     assert post["thread_ts"] == ts and post["text"].strip()
+
+
+def test_44_semantic_layer_metrics_import_approve_and_query_routing(users):
+    """An admin imports a Cube file; its metrics wait in the context inbox until approved; an approved
+    metric is listed with its dimensions, and querying it validates dimensions before any warehouse."""
+    root, bob = users["root"], users["bob"]
+    cube = (f"cubes:\n  - name: e2e_{RUN}\n    sql_table: am_{RUN}.public.customers\n    measures:\n"
+            "      - {name: customers, type: count, description: Customers on file}\n"
+            "    dimensions:\n      - {name: region, sql: region, type: string}\n")
+    body = {"format": "cube", "content": cube, "ref": f"cube/e2e_{RUN}.yml"}
+    assert bob.post("/context/semantic/import", json=body).status_code == 403
+    r = root.post("/context/semantic/import", json=body)
+    assert r.status_code == 200 and r.json()["metrics"] == 1, r.text
+    name = f"e2e_{RUN}.customers"
+    assert name not in [m["name"] for m in bob.get("/context/metrics").json()]       # not governed yet
+    found = eventually(lambda: [f for f in root.get("/context/findings", params={"type": "METRIC_DEFINITION"}).json()
+                                if name in f["title"]] or None, timeout=30)[0]
+    assert found["entities"] == [DS], found
+    done = root.post(f"/context/findings/{found['id']}/accept")
+    assert done.status_code == 200 and done.json()["definition"]["doc"]["dimensions"] == ["region"], done.text
+    listed = [m for m in bob.get("/context/metrics").json() if m["name"] == name]
+    assert listed and listed[0]["description"] == "Customers on file" and listed[0]["dataset"] == DS
+    bad = bob.post(f"/context/metrics/{name}/query", json={"dimensions": ["email"]})
+    assert bad.status_code == 422 and "no dimension" in bad.text, bad.text
+    nowh = bob.post(f"/context/metrics/{name}/query", json={"dimensions": ["region"]})
+    assert nowh.status_code == 404 and "connection" in nowh.text, nowh.text   # no warehouse serves this dataset

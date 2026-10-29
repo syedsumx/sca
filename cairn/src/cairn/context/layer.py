@@ -145,8 +145,14 @@ class ContextLayer:
             expression = edits.get("expression") or data.get("canonical") or (change or {}).get("value", {}).get("expression")
             if not name or not expression:
                 return None
-            kind, doc = "metric", {"expression": expression, "description": edits.get("description") or "",
+            kind, doc = "metric", {"expression": expression,
+                                   "description": edits.get("description") or data.get("description") or "",
                                    "datasets": [e for e in finding.get("entities") or [] if e.startswith("urn:li:dataset:")]}
+            if data.get("semantic"):        # imported from a semantic layer: queryable by name (context.semantic)
+                sem = data["semantic"]
+                doc.update({"dimensions": list(edits.get("dimensions") or sem.get("dimensions") or []),
+                            "time_dimension": edits.get("time_dimension") or sem.get("time_dimension"),
+                            "filter": sem.get("filter"), "source": sem.get("source"), "ref": sem.get("ref")})
         elif finding["type"] == "JOIN_RELATIONSHIP":
             change = next((c for c in finding.get("proposed_changes") or [] if c["kind"] == "create_relationship"), None)
             if change is None:

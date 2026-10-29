@@ -20,7 +20,7 @@ class DefinitionEdits(BaseModel):
     description: Optional[str] = Field(default=None, max_length=2000)
 
 
-def build_router(store: ContextStore, current_principal, authorize, can_view) -> APIRouter:
+def build_router(store: ContextStore, current_principal, authorize, can_view, semantic=None) -> APIRouter:
     router = APIRouter(prefix="/context", tags=["context"])
     layer = store.layer
 
@@ -71,6 +71,43 @@ def build_router(store: ContextStore, current_principal, authorize, can_view) ->
         check = can_view(p)
         # A finding is visible when the caller can view every dataset/term it references.
         return [i for i in items if all(check(e) for e in i["entities"] if e.startswith("urn:li:"))]
+
+    # ---- semantic layer: governed metrics, imported and queryable by name -----------------------
+    def _sem(fn):
+        from cairn.context.semantic import SemanticError
+
+        if semantic is None:
+            raise HTTPException(503, "the semantic layer is not configured")
+        try:
+            return fn()
+        except SemanticError as e:
+            raise HTTPException(e.status, str(e))
+
+    @router.post("/semantic/import")
+    def semantic_import(body: dict, p: Principal = Depends(current_principal)):
+        """``{"format": "metricflow"|"cube"|"lookml", "content": "<file>", "ref": "<path>"}``: each metric
+        becomes a finding to review in the context inbox."""
+        authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        content = body.get("content")
+        if not isinstance(content, str) or not content.strip() or len(content) > 2_000_000:
+            raise HTTPException(422, "content is the file's text (up to 2 MB)")
+        return _sem(lambda: semantic.import_definitions(str(body.get("format", "")), content,
+                                                        str(body.get("ref") or "import")[:300], p.urn))
+
+    @router.get("/metrics")
+    def metrics(q: str = "", p: Principal = Depends(current_principal)):
+        """Approved metrics over datasets the caller may see, with their dimensions."""
+        return _sem(lambda: semantic.metrics(can_view(p), q))
+
+    @router.post("/metrics/{name}/query")
+    def query_metric(name: str, body: dict, p: Principal = Depends(current_principal)):
+        """``{"dimensions": [...], "filters": [{"dimension", "op", "value"}], "time_grain": "month", "limit": 200}``."""
+        dims, filters = body.get("dimensions") or [], body.get("filters") or []
+        if not isinstance(dims, list) or not isinstance(filters, list):
+            raise HTTPException(422, "dimensions and filters are lists")
+        return _sem(lambda: semantic.query(p.urn, name, can_view(p), [str(d) for d in dims],
+                                           [f for f in filters if isinstance(f, dict)], body.get("time_grain"),
+                                           int(body.get("limit") or 200)))
 
     @router.get("/findings")
     def findings(type: Optional[str] = Query(None), status: Optional[str] = Query("OPEN"),

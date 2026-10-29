@@ -85,6 +85,7 @@ class Services:
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     ask: Optional[Any] = None
+    semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
@@ -764,6 +765,15 @@ def _build_data_access(s: Services) -> None:
 
     s.ask = AskService(s.data_access, s.graph, s.llm, s.context_layer, search,
                        s.settings.ai.model_nlq or s.settings.ai.model, s.audit)
+    if s.context is not None:
+        from cairn.context.semantic import SemanticService
+
+        def catalog_datasets() -> list[str]:
+            from cairn.quality.auto import Planner
+
+            return [u for u, _, _ in Planner(s.graph).datasets()] if s.graph is not None else []
+
+        s.semantic_layer = SemanticService(s.context, s.data_access, catalog_datasets, s.audit)
 
 
 def _build_costs(s: Services, hub, Event) -> None:

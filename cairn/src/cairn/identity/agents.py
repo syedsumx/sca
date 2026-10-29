@@ -526,7 +526,7 @@ class AgentService:
 
 
 # ---- what a scope allows over HTTP ---------------------------------------------------------------
-QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask")
+QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metrics/{name}/query")
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
@@ -557,7 +557,7 @@ def tool_scope(tool: str) -> str:
     """The scope an agent needs for an MCP tool."""
     if tool.startswith("suggest_") or tool in ("generate_documentation", "request_access", "start_discussion"):
         return "propose"
-    return {"ask_data": "query_data"}.get(tool, "read")
+    return {"ask_data": "query_data", "query_metric": "query_data"}.get(tool, "read")
 
 
 def describe(scopes: list[str]) -> list[dict[str, Any]]:

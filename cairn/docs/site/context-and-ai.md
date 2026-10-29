@@ -191,3 +191,25 @@ Text-to-SQL agents fail mostly on business meaning, not syntax: which revenue, w
 Review the SQL before running it. Primary keys come from approved join targets. The API is `GET /cairn/api/context/definitions/export?format=snowflake|databricks&name=&source=&datasets=`.
 
 **Measuring it.** `cairn ai eval` includes `text2sql` cases. Each one asks the question twice, first with the schema only and then with Cairn's context (approved definitions and similar past queries). It runs both answers against a small warehouse, compares them with the expected result, and reports accuracy both ways. Offline, the model output is scripted. With `--live` it asks your configured model, so you can see what the context layer is worth on your own questions: add cases to `config/ai-evals/`. The generator refuses anything but a single read-only `SELECT`.
+
+## Governed metrics (semantic layer)
+
+Where teams already define metrics in a semantic layer, Cairn imports them so people and agents query a metric by name instead of writing SQL for it.
+
+**Import.** An administrator posts the file to `POST /cairn/api/context/semantic/import` with `{"format": "metricflow" | "cube" | "lookml", "content": "<file text>", "ref": "<path>"}`. Supported:
+
+- **dbt Semantic Layer (MetricFlow):** simple, ratio and derived metrics over semantic models' measures, with their dimensions and default time dimension.
+- **Cube:** each cube's measures (`count`, `sum`, `avg`, `min`, `max`, `count_distinct`, `number`) over its `sql_table`.
+- **LookML:** each view's measures over its `sql_table_name`. Measures that reference other fields (`${total}`) are skipped.
+
+Each metric becomes a metric finding in the **Context inbox**, mapped to the catalog dataset for its table. Approving it makes it a governed, versioned definition that keeps its dimensions and time dimension. Nothing is queryable before it is approved.
+
+**Query.** `GET /cairn/api/context/metrics` lists the approved metrics over datasets you may see. `POST /cairn/api/context/metrics/{name}/query` takes `{"dimensions": [...], "filters": [{"dimension", "op", "value"}], "time_grain": "day|week|month|quarter|year", "limit": 200}`. The SQL is compiled from the definition:
+
+- dimensions and filters must be the metric's own;
+- filter values are always literals, and the operators are `=`, `!=`, `<`, `<=`, `>`, `>=` and `in`;
+- an expression with a subquery is refused.
+
+The query runs through data access, so your permissions, purpose and masking apply. The response includes the SQL that ran.
+
+Agents use the `list_metrics` and `query_metric` MCP tools, and the assistant uses them too. `query_metric` needs the agent's `query_data` scope.
