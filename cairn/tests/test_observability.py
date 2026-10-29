@@ -35,7 +35,7 @@ def test_alerts_and_dashboard_only_use_real_metrics():
     known = _known()
     alerts = open(os.path.join(OBS, "cairn-alerts.yaml")).read()
     rules = [r for g in yaml.safe_load(alerts)["groups"] for r in g["rules"]]
-    assert len(rules) == 14 and all(r["labels"]["severity"] in ("critical", "warning", "info") for r in rules)
+    assert len(rules) == 16 and all(r["labels"]["severity"] in ("critical", "warning", "info") for r in rules)
     dash = json.load(open(os.path.join(OBS, "cairn-overview.json")))
     exprs = " ".join(t["expr"] for p in dash["panels"] for t in p["targets"])
     missing = (_referenced(alerts) | _referenced(exprs)) - known

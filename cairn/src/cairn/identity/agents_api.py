@@ -258,10 +258,28 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
         _admin(p)
         _wrap(lambda: svc.delete(agent_id, p.urn))
 
+    @router.get("/admin/agents/{agent_id}/activity")
+    def agent_activity(agent_id: str, limit: int = 100, p: Principal = Depends(current_principal)):
+        """The agent's recent tool calls (MCP and assistant), newest first."""
+        _admin(p)
+        _wrap(lambda: svc.get(agent_id))
+        return services.traces.activity(agent=agent_id, limit=limit) if services.traces else []
+
+    @router.get("/admin/agents/stats")
+    def agent_stats(p: Principal = Depends(current_principal)):
+        """Calls, errors, refusals, flagged text and time per agent and per tool, over the last day."""
+        _admin(p)
+        return services.traces.stats() if services.traces else {"by_agent": {}, "by_tool": {}}
+
     # ---- a person's own connections ------------------------------------------------------------------
     @router.get("/me/agents")
     def my_agents(p: Principal = Depends(current_principal)):
         return svc.connected(p.urn)
+
+    @router.get("/me/agents/{agent_id}/activity")
+    def my_agent_activity(agent_id: str, limit: int = 100, p: Principal = Depends(current_principal)):
+        """What an agent did for me (only my own calls)."""
+        return services.traces.activity(agent=agent_id, actor=p.urn, limit=limit) if services.traces else []
 
     @router.delete("/me/agents/{agent_id}")
     def disconnect(agent_id: str, p: Principal = Depends(current_principal)):

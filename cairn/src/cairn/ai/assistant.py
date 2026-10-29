@@ -164,7 +164,15 @@ class Assistant:
             raise ValueError(f"unknown tool {name}")
         params = inspect.signature(fn).parameters
         allowed = {k: v for k, v in args.items() if k in params}
-        out = screen(fn(**allowed))
+        started, flagged, status = time.monotonic(), [], "error"
+        try:
+            out = screen(fn(**allowed), flagged)
+            status = "refused" if isinstance(out, dict) and out.get("refused") and not out.get("queued") else "ok"
+        finally:
+            traces = getattr(getattr(tools, "s", None), "traces", None)
+            if traces is not None:
+                traces.record(principal.urn, principal.agent, "assistant", name, allowed, status,
+                              int((time.monotonic() - started) * 1000), len(flagged))
         return out, f"{name.replace('_', ' ')}({', '.join(f'{k}={str(v)[:40]}' for k, v in allowed.items())})"
 
     # ---- main entry ---------------------------------------------------------------------

@@ -65,7 +65,7 @@ Each criterion below is summarised. **Cairn** lists what the product or its tool
 ### CC4 Monitoring activities
 
 - **Cairn:**
-  - Prometheus metrics, 14 alert rules and a Grafana dashboard (`deploy/observability`);
+  - Prometheus metrics, 16 alert rules and a Grafana dashboard (`deploy/observability`);
   - `cairn audit verify`;
   - the evidence script, run on a schedule.
 - **Company:**

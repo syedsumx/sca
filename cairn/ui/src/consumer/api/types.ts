@@ -674,6 +674,28 @@ export interface DataResult {
     tables: string[];
 }
 
+export interface AgentCall {
+    id: string;
+    agent: string | null;
+    actor: string;
+    channel: 'mcp' | 'assistant';
+    tool: string;
+    args: string;
+    status: 'ok' | 'error' | 'refused' | 'forbidden';
+    duration_ms: number;
+    flagged: number;
+    created_ms: number;
+}
+
+export interface FeedbackIn {
+    kind: 'chat' | 'ask';
+    rating: 'up' | 'down';
+    question: string;
+    answer?: string;
+    comment?: string;
+    context?: Record<string, unknown>;
+}
+
 export interface PlaybookStep {
     name: string;
     status: 'ok' | 'skipped' | 'failed';

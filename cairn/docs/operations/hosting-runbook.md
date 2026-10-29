@@ -110,6 +110,8 @@ Each alert has a severity: **critical** pages the on-call engineer; **warning** 
 | CairnLicenceExpiring | `licence.json` for the tenant | issue and install the renewal (account management) |
 | CairnLicenceReadOnly (critical) | Settings → Licence: missing, invalid or expired | install the licence; a key error after a rotation means the image's keys lack the signing key |
 | CairnLicenceSeatsFull | seats used vs limit | tell account management; the newest users can still read |
+| CairnAgentErrorsHigh | Settings → AI agents → stats by agent and tool (`/admin/agents/stats`) | a broken tool after an upgrade; an agent calling with bad arguments (tell its owner, lower its quota or disable it) |
+| CairnInjectionFlagged (info) | `ai.injection_flagged` in the audit log: which tool, which text | someone wrote instructions to AIs into catalog text: fix the description, talk to its author |
 
 ## Incidents
 

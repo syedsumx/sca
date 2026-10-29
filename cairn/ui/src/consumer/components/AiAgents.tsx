@@ -5,17 +5,19 @@ import {
     Input,
     InputNumber,
     List,
+    Modal,
     Popconfirm,
     Select,
     Space,
     Switch,
+    Table,
     Tag,
     Typography,
 } from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { AgentScope, AiAgent } from '../api/types';
+import type { AgentCall, AgentScope, AiAgent } from '../api/types';
 import { Muted, SectionTitle } from './tokens';
 
 const SCOPES: { value: AgentScope; label: string }[] = [
@@ -26,6 +28,61 @@ const SCOPES: { value: AgentScope; label: string }[] = [
 ];
 
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : 'never');
+const STATUS_COLOR = { ok: 'green', error: 'red', refused: 'orange', forbidden: 'orange' } as const;
+
+/** An agent's recent tool calls: all of them for administrators, the caller's own otherwise. */
+function ActivityButton({ agent, all }: { agent: AiAgent; all: boolean }) {
+    const [open, setOpen] = useState(false);
+    const { client } = useConsumerApi();
+    const [calls, setCalls] = useState<AgentCall[] | null>(null);
+    return (
+        <>
+            <Button
+                size="small"
+                onClick={async () => {
+                    setOpen(true);
+                    setCalls(await client.aiAgentActivity(agent.id, all));
+                }}
+            >
+                Activity
+            </Button>
+            <Modal
+                open={open}
+                title={`What ${agent.name} did`}
+                footer={null}
+                width={860}
+                onCancel={() => setOpen(false)}
+            >
+                <Table
+                    size="small"
+                    rowKey="id"
+                    loading={calls === null}
+                    dataSource={calls ?? []}
+                    pagination={{ pageSize: 15, hideOnSinglePage: true }}
+                    locale={{ emptyText: 'No tool calls yet.' }}
+                    columns={[
+                        { title: 'When', render: (_, c) => new Date(c.created_ms).toLocaleString() },
+                        { title: 'Tool', dataIndex: 'tool' },
+                        ...(all
+                            ? [{ title: 'For', render: (_: unknown, c: AgentCall) => c.actor.split(':').pop() }]
+                            : []),
+                        {
+                            title: 'Outcome',
+                            render: (_, c) => (
+                                <>
+                                    <Tag color={STATUS_COLOR[c.status]}>{c.status}</Tag>
+                                    {c.flagged > 0 && <Tag color="volcano">flagged text</Tag>}
+                                </>
+                            ),
+                        },
+                        { title: 'Time', render: (_, c) => `${c.duration_ms} ms` },
+                        { title: 'Arguments', render: (_, c) => <Muted style={{ fontSize: 12 }}>{c.args}</Muted> },
+                    ]}
+                />
+            </Modal>
+        </>
+    );
+}
 
 function ScopeTags({ scopes }: { scopes: AgentScope[] }) {
     return (
@@ -53,6 +110,7 @@ function MyAgents() {
                 renderItem={(a) => (
                     <List.Item
                         actions={[
+                            <ActivityButton key="act" agent={a} all={false} />,
                             <Popconfirm
                                 key="off"
                                 title={`Disconnect ${a.name}? It must sign in again to act for you.`}
@@ -161,6 +219,7 @@ function AllAgents() {
                                       </Button>,
                                   ]
                                 : []),
+                            <ActivityButton key="act" agent={a} all />,
                             <Popconfirm
                                 key="rm"
                                 title={`Delete ${a.name}? Its credentials stop working.`}

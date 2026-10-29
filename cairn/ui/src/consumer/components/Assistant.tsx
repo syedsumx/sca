@@ -9,6 +9,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 import { assetPath } from './Assets';
+import { Feedback } from './Feedback';
 import { tokens } from './tokens';
 
 export interface ChatTurn {
@@ -118,6 +119,12 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
                                     </div>
                                 )}
                                 <MarkdownView source={t.text} />
+                                <Feedback
+                                    kind="chat"
+                                    question={turns[i - 1]?.text ?? ''}
+                                    answer={t.text}
+                                    context={{ conversation_id: conversationId }}
+                                />
                                 {(t.response?.citations ?? []).length > 0 && (
                                     <div aria-label="Sources">
                                         {(t.response?.citations ?? []).map((u) => (

@@ -59,7 +59,9 @@ import type {
     PastAnswer,
     CoverageFacet,
     CostTotal,
+    AgentCall,
     AiAgent,
+    FeedbackIn,
     Playbook,
     PlaybookRun,
     AgentScope,
@@ -244,6 +246,17 @@ export class ConsumerClient extends CairnClient {
 
     extensionSections(opts?: RequestOptions) {
         return this.request<ExtensionSection[]>('GET', '/extensions/ui', undefined, opts);
+    }
+
+    /** A thumbs up or down on an assistant answer or an ask-your-data result. */
+    rateAnswer(body: FeedbackIn) {
+        return this.request<{ id: string }>('POST', '/ai/feedback', body);
+    }
+
+    /** An agent's recent tool calls: every call (admins) or only the caller's own. */
+    aiAgentActivity(id: string, all: boolean, opts?: RequestOptions) {
+        const path = all ? `/admin/agents/${enc(id)}/activity` : `/me/agents/${enc(id)}/activity`;
+        return this.request<AgentCall[]>('GET', path, undefined, opts);
     }
 
     playbooks(opts?: RequestOptions) {

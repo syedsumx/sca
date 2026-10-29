@@ -113,6 +113,21 @@ it. To make an agent depend on the AI system register, link it to an AI system
     Auto-applied suggestions show as *auto accepted* in the AI steward history and can be undone
     there.
 
+**Seeing what agents do:**
+
+- Each agent's **Activity** lists its recent tool calls: tool, arguments (personal data redacted),
+  outcome, time taken, and whether catalog text in the result was flagged.
+- Administrators see every agent's activity. People see what agents did for them, in Settings →
+  AI agents.
+- `/admin/agents/stats` sums calls, errors, refusals and flagged text per agent and per tool over a
+  day. Prometheus gets `cairn_agent_tool_calls_total`, `cairn_agent_tool_seconds` and
+  `cairn_ai_injection_flagged_total`; the alerts `CairnAgentErrorsHigh` and `CairnInjectionFlagged`
+  watch them.
+- **Feedback:** people rate answers from the assistant and from *Ask your data* with a thumbs up or
+  down. `GET /ai/feedback` summarises the ratings, and `GET /ai/feedback/eval-cases` exports the
+  down-voted questions as `cairn ai eval` cases. Fill in what a right answer must contain and add
+  them to the eval suite, so mistakes people saw stay fixed.
+
 ## Main settings
 
 | Setting | Purpose |

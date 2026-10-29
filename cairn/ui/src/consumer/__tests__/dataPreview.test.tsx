@@ -102,3 +102,29 @@ it('says when asking is not set up', async () => {
     fireEvent.click(screen.getByRole('button', { name: /Ask/ }));
     expect(await screen.findByText(/needs an AI provider/)).toBeTruthy();
 });
+
+it('rates an answer; a down vote asks what was wrong', async () => {
+    const calls: MockCall[] = [];
+    wrap(
+        {
+            'GET /data/preview': ROWS,
+            'POST /data/ask': {
+                question: 'orders per day', connection: 'wh', dialect: 'postgres', tables: [DS], definitions: [],
+                examples: [], attempts: 1, sql: 'SELECT 1', explanation: 'Counts orders.', result: null, error: null,
+            },
+            'POST /ai/feedback': { id: 'fb_1' },
+        },
+        calls,
+    );
+    await screen.findByText('🔒 email');
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'orders per day' } });
+    fireEvent.click(screen.getByRole('button', { name: /Ask/ }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Bad answer' }));
+    fireEvent.change(screen.getByLabelText('What was wrong'), { target: { value: 'counted refunds' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    expect(await screen.findByText('Thanks for the feedback.')).toBeTruthy();
+    expect(calls.find((c) => c.path === '/ai/feedback')?.body).toEqual({
+        kind: 'ask', rating: 'down', question: 'orders per day', answer: 'Counts orders.', comment: 'counted refunds',
+        context: { sql: 'SELECT 1', tables: [DS] },
+    });
+});

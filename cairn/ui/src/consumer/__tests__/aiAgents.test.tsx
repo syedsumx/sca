@@ -107,3 +107,27 @@ it('pauses every agent and sets an agent to apply confident suggestions', async 
     fireEvent.click(await screen.findByText('Apply confident suggestions'));
     await waitFor(() => expect(calls.find((c) => c.method === 'PATCH')?.body).toEqual({ autonomy: 'auto' }));
 });
+
+it("shows what an agent did for me, with each call's outcome", async () => {
+    wrap(false, {
+        'GET /me/agents': [DESKTOP],
+        'GET /me/agents/agt_desktop/activity': [
+            {
+                id: 'c1',
+                agent: 'agt_desktop',
+                actor: 'urn:li:corpuser:ana',
+                channel: 'mcp',
+                tool: 'suggest_tags',
+                args: '{"tags": ["Gold"]}',
+                status: 'ok',
+                duration_ms: 31,
+                flagged: 1,
+                created_ms: 1,
+            },
+        ],
+    });
+    fireEvent.click(await screen.findByRole('button', { name: 'Activity' }));
+    expect(await screen.findByText('suggest_tags')).toBeTruthy();
+    expect(screen.getByText('flagged text')).toBeTruthy();
+    expect(screen.getByText('31 ms')).toBeTruthy();
+});

@@ -143,6 +143,34 @@ def build_router(services, current_principal) -> APIRouter:
             return services.semantic.index_many(req.urns)
         return services.semantic.rebuild(req.entity_types)
 
+    @router.post("/feedback", status_code=201)
+    def feedback(body: dict, p: Principal = Depends(current_principal)):
+        """A thumbs up or down on an assistant answer (kind chat) or an ask-your-data result (kind ask)."""
+        from cairn.ai.traces import FeedbackIn
+
+        if services.traces is None:
+            raise HTTPException(503, "feedback is not configured")
+        try:
+            fb = FeedbackIn.model_validate(body)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
+        return services.traces.feedback(p.urn, fb)
+
+    @router.get("/feedback")
+    def list_feedback(rating: Optional[str] = Query(None, pattern="^(up|down)$"),
+                      kind: Optional[str] = Query(None, pattern="^(chat|ask)$"),
+                      p: Principal = Depends(current_principal)):
+        services.authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        return {"summary": services.traces.feedback_summary(), "items": services.traces.feedback_list(rating, kind)}
+
+    @router.get("/feedback/eval-cases")
+    def feedback_eval_cases(p: Principal = Depends(current_principal)):
+        """Down-voted questions as ``cairn ai eval`` cases (YAML) to complete and add to the eval suite."""
+        from fastapi.responses import PlainTextResponse
+
+        services.authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        return PlainTextResponse(services.traces.eval_cases(), media_type="application/yaml")
+
     @router.get("/usage")
     def usage(group_by: str = "task", days: int = Query(30, ge=1, le=366), mine: bool = False,
               p: Principal = Depends(current_principal)):

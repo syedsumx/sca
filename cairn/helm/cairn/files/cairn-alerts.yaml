@@ -96,3 +96,19 @@ groups:
         labels: {severity: warning}
         annotations:
           summary: "More people use Cairn than the licence allows: the newest can only read"
+  - name: cairn.agents
+    rules:
+      - alert: CairnAgentErrorsHigh
+        expr: |
+          sum(rate(cairn_agent_tool_calls_total{status="error"}[15m]))
+            / clamp_min(sum(rate(cairn_agent_tool_calls_total[15m])), 0.001) > 0.2
+          and sum(increase(cairn_agent_tool_calls_total[15m])) > 20
+        for: 15m
+        labels: {severity: warning}
+        annotations:
+          summary: "More than 20% of AI agent tool calls fail: see Settings → AI agents for which agent and tool"
+      - alert: CairnInjectionFlagged
+        expr: sum(increase(cairn_ai_injection_flagged_total[1h])) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "Catalog text that reads like instructions to an AI was flagged: review ai.injection_flagged in the audit log"

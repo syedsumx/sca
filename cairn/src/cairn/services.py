@@ -93,6 +93,7 @@ class Services:
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
     playbooks: Optional[Any] = None
+    traces: Optional[Any] = None
     publisher: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
@@ -453,6 +454,9 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     services.agents = AgentService(engine, audit, ai_system_state,
                                    registration if registration in ("open", "admin", "off") else "open")
     identity.agent_lookup = services.agents.resolve
+    from cairn.ai.traces import TraceService
+
+    services.traces = TraceService(engine, audit)
     from cairn.common.metrics import watch_licence
 
     watch_licence(services.licence)

@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { CairnApiError } from '../../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { AskResult, DataResult } from '../api/types';
+import { Feedback } from './Feedback';
 import { Muted } from './tokens';
 
 function ResultTable({ result }: { result: DataResult }) {
@@ -98,6 +99,14 @@ function AskBox({ urn, onUseSql }: { urn: string; onUseSql: (sql: string) => voi
                     )}
                     {answer.error && <Alert type="warning" message={answer.error} />}
                     {answer.result && <ResultTable result={answer.result} />}
+                    {answer.sql && (
+                        <Feedback
+                            kind="ask"
+                            question={answer.question}
+                            answer={answer.explanation ?? ''}
+                            context={{ sql: answer.sql, tables: answer.tables }}
+                        />
+                    )}
                 </Space>
             )}
         </section>

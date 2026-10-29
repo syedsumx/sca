@@ -1015,6 +1015,17 @@ on('DELETE', '/me/agents/:id', () => ({ revoked: 2 }));
 on('GET', '/admin/agents', () => [{ ...AGENT_DESKTOP, autonomy: 'suggest', auto_accept_at: 0.9, per_minute: 120, daily_requests: 20000, requests_today: 214 },
     { ...AGENT_BOT, autonomy: 'auto', auto_accept_at: 0.9, per_minute: 60, daily_requests: 5000, requests_today: 1380 }]);
 on('GET', '/admin/agents/settings', () => ({ paused: false }));
+const CALLS = [
+    { tool: 'semantic_search', args: '{"query": "net revenue by region"}', status: 'ok', duration_ms: 182, flagged: 0 },
+    { tool: 'get_definitions', args: '{"dataset_urn": "…core.orders…"}', status: 'ok', duration_ms: 41, flagged: 0 },
+    { tool: 'ask_data', args: '{"question": "net revenue by region last quarter"}', status: 'ok', duration_ms: 2310, flagged: 0 },
+    { tool: 'get_asset', args: '{"urn": "…marketing.leads_raw…"}', status: 'ok', duration_ms: 95, flagged: 1 },
+    { tool: 'suggest_description', args: '{"urn": "…core.customers…", "rationale": "from dbt docs"}', status: 'ok', duration_ms: 64, flagged: 0 },
+    { tool: 'get_asset', args: '{"urn": "…hr.salaries…"}', status: 'forbidden', duration_ms: 12, flagged: 0 },
+].map((c, i) => ({ id: `call_${i}`, agent: AGENT_DESKTOP.id, actor: ME, channel: 'mcp', created_ms: now - i * 7 * 60_000, ...c }));
+on('GET', '/admin/agents/:id/activity', () => CALLS);
+on('GET', '/me/agents/:id/activity', () => CALLS);
+on('POST', '/ai/feedback', () => ({ id: 'fb_demo' }));
 on('POST', '/admin/agents/pause', (b: { paused: boolean }) => ({ paused: !!b.paused }));
 on('POST', '/admin/agents', (b: { name: string; scopes: string[] }) => ({ ...AGENT_BOT, id: 'agt_demo', name: b.name, scopes: b.scopes,
     key: 'ca_agt_demo.demo-key-shown-once' }));

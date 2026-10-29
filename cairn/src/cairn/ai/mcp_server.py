@@ -278,16 +278,45 @@ def build_mcp_server(services: Services):
     read_only = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
     proposes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 
-    def _screened(result, tool: str, p):
+    def _screened(result, tool: str, p, flagged: list[str]):
         """Strip invisible characters and flag instruction-like catalog text before it leaves."""
         from cairn.ai.guardrails import screen
 
-        flagged: list[str] = []
         out = screen(result, flagged)
         if flagged and services.audit is not None:
             services.audit.record("ai", "ai.injection_flagged", p.urn if p else "unknown", tool,
                                   {"tool": tool, "samples": flagged[:3], **({"agent": p.agent} if p and p.agent else {})})
         return out
+
+    def _traced(fn, args: tuple, kwargs: dict, p) -> Any:
+        """Run the tool and record the call (who, what, outcome, time) for agent observability."""
+        import inspect
+        import time as _time
+
+        from cairn.ai.traces import outcome
+
+        started, flagged = _time.monotonic(), []
+        result: Any = {"error": "error"}
+        try:
+            result = _screened(fn(*args, **kwargs), fn.__name__, p, flagged)
+            return result
+        except ValueError as e:
+            result = {"error": "refused", "message": str(e)}
+            return result
+        except Forbidden as e:
+            result = {"error": "forbidden", "message": str(e)}
+            return result
+        except AuthenticationError as e:
+            result = {"error": "unauthenticated", "message": str(e)}
+            return result
+        finally:
+            if p is not None and services.traces is not None:
+                try:
+                    bound = dict(inspect.signature(fn).bind_partial(*args, **kwargs).arguments)
+                except TypeError:
+                    bound = dict(kwargs)
+                services.traces.record(p.urn, p.agent, "mcp", fn.__name__, bound, outcome(result),
+                                       int((_time.monotonic() - started) * 1000), len(flagged))
 
     def _safe(fn):
         from cairn.identity.agents import tool_scope
@@ -298,14 +327,7 @@ def build_mcp_server(services: Services):
             if p is not None and p.via == "agent" and tool_scope(fn.__name__) not in p.scopes:
                 return {"error": "forbidden",
                         "message": f"this agent's scopes do not include {tool_scope(fn.__name__)}"}
-            try:
-                return _screened(fn(*args, **kwargs), fn.__name__, p)
-            except ValueError as e:
-                return {"error": "refused", "message": str(e)}
-            except Forbidden as e:
-                return {"error": "forbidden", "message": str(e)}
-            except AuthenticationError as e:
-                return {"error": "unauthenticated", "message": str(e)}
+            return _traced(fn, args, kwargs, p)
         return wrapper
 
     @server.tool(annotations=read_only, structured_output=True, title="Search assets")
