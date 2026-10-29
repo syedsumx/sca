@@ -18,6 +18,41 @@ quality status and the number of consumers.
    granted immediately as a persona grant; time-boxed grants are revoked automatically when they
    expire.
 
+## Granting real access
+
+By default, approval gives the requester Cairn access: a persona, seen by masking and data preview. With provisioning set up, approval also grants access in the warehouse or identity provider, and takes it away when the access ends, whether it expires or is revoked.
+
+**Targets** are reviewed YAML files in `config/provisioning`, or set `CAIRN_PROVISIONING`. Start from `targets.yaml.example`. Each target names a type and how people are named there (`user`: `{username}`, `{username_upper}`, `{email}`):
+
+| Type | Grants | Revokes |
+|---|---|---|
+| `snowflake` | `GRANT ROLE r TO USER u` | `REVOKE ROLE …` |
+| `postgres`, `redshift` | `GRANT "r" TO "u"` | `REVOKE …` |
+| `databricks` | a read privilege (`SELECT`, `USE SCHEMA`…) on a table, schema or catalog | `REVOKE` of the same |
+| `bigquery` | a `roles/bigquery.*` role on a dataset | `REVOKE` of the same |
+| `okta` | adds the person to a group | removes them |
+| `entra` | adds the person to a Microsoft Entra ID group | removes them |
+
+Warehouse targets use a connection from `config/connections` whose role may grant those roles. Okta takes an API token, and Entra ID an app registration with `GroupMember.ReadWrite.All`. Keep both as `${ENV}` values.
+
+**A product's policy** lists what approval grants (`PUT /cairn/api/marketplace/products/{urn}/policy`):
+
+```
+"provision": [{"target": "snowflake_prod", "role": "ORDERS_READ"},
+              {"target": "okta", "group": "00g1abcd2EFGH3ijk4x7"},
+              {"target": "databricks", "grant": {"privilege": "SELECT", "on": "TABLE main.sales.orders"}}]
+```
+
+Only plain names are accepted, so nothing else reaches the SQL. The product's **Access policy** tab tells requesters what approval grants.
+
+**Outcomes** show on each request (granted, revoked, or failed with the reason) and in the audit log. A failed step doesn't undo the approval. Instead:
+
+- the approvers are told once (`access.provisioning_failed`);
+- the notifier retries the step up to five times;
+- after that, a person has to grant it by hand.
+
+Ending access only revokes what was actually granted.
+
 ## Publishing a product
 
 Product owners set the request policy (`PUT /cairn/api/marketplace/products/{urn}/policy`): who may

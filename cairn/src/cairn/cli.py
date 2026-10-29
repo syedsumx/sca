@@ -112,6 +112,8 @@ def notifier_tick(s) -> dict:
     out: dict = {"delivery": s.notify.dispatch_pending()}
     if s.marketplace is not None:
         out["access"] = s.marketplace.sweep(now_ms)
+        if s.marketplace.provisioner is not None:
+            out["provisioning"] = s.marketplace.retry_provisioning()
     expired = s.personas.expired_grants(now_ms)
     for g in expired:
         s.personas.revoke_grant(g["id"], "urn:li:corpuser:cairn-notifier")

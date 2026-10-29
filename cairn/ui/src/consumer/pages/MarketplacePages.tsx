@@ -224,6 +224,12 @@ export function ProductPage() {
                                 </p>
                                 <p>Approved purposes: {p.request_policy.purposes.join(', ') || 'any (with justification)'}</p>
                                 <p>Maximum duration: {p.request_policy.max_duration_days} days — access ends automatically.</p>
+                                {(p.request_policy.grants ?? []).length > 0 && (
+                                    <p>
+                                        Approval grants: {p.request_policy.grants?.join(', ')}. It is taken away when access
+                                        ends.
+                                    </p>
+                                )}
                             </Surface>
                         ),
                     },
@@ -297,6 +303,13 @@ export function RequestsPage() {
                     <Tag color={STATE_COLOR[v]}>{v}</Tag>
                     {r.auto_approved && <Muted>auto</Muted>}
                     {r.expires_at && v === 'APPROVED' && <Muted> until {new Date(r.expires_at).toLocaleDateString()}</Muted>}
+                    {(r.provisioning ?? []).map((p) => (
+                        <div key={`${p.target}${p.what}`} style={{ fontSize: 12 }}>
+                            <Tag color={p.status === 'failed' ? 'red' : p.status === 'granted' ? 'green' : 'default'} title={p.error}>
+                                {p.what} on {p.target}: {p.status === 'failed' ? `${p.action ?? 'grant'} failed` : p.status}
+                            </Tag>
+                        </div>
+                    ))}
                 </span>
             ),
         },

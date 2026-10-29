@@ -545,6 +545,19 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
+        from cairn.marketplace.provisioning import Provisioner, load_targets
+
+        try:
+            targets = load_targets()
+        except Exception:  # noqa: BLE001 - a bad file must not stop the API
+            logger.exception("could not load config/provisioning")
+            targets = {}
+        if targets:
+            def person(urn: str) -> dict:
+                info = (s.graph.get_aspect(urn, "corpUserInfo") or {}) if s.graph is not None else {}
+                return {"username": urn.split(":")[-1], "email": info.get("email")}
+
+            s.marketplace.provisioner = Provisioner(targets, s.connections, person, s.audit)
     _build_forms(s, hub, Event)
     from cairn.governance.ai_systems import AISystemService
 

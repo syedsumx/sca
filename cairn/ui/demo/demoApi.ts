@@ -189,7 +189,8 @@ const PRODUCTS = [
         owners: ['urn:li:corpuser:tom'], tags: [], certification: null, quality_status: 'HEALTHY',
         assets: [SHIPMENTS, INVENTORY], consumers: 6,
         sla: { freshness: 'every 15 min', availability: '99%' },
-        policy: { auto_approve: true, max_duration_days: 180, purposes: [], approvers: ['urn:li:corpuser:tom'] },
+        policy: { auto_approve: true, max_duration_days: 180, purposes: [], approvers: ['urn:li:corpuser:tom'],
+            grants: ['role SUPPLY_KPIS_READ on snowflake_prod', 'group 00g4supplyviewers on okta'] },
         readme: '## Supply Chain KPIs\n\nOn-time delivery is measured against the promised date at order time.',
     },
 ];
@@ -224,6 +225,8 @@ const state = {
             justification: 'Inventory cover feeds the Q4 demand forecast.', duration_days: 90, state: 'APPROVED', auto_approved: true,
             approvers: ['urn:li:corpuser:tom'], decided_by: 'urn:li:corpuser:cairn-marketplace', decided_at: iso(20 * DAY), expires_at: iso(-70 * DAY), created_at: iso(20 * DAY),
             history: [{ at: iso(20 * DAY), actor: ME, from_state: null, to_state: 'PENDING', comment: null }, { at: iso(20 * DAY), actor: 'urn:li:corpuser:cairn-marketplace', from_state: 'PENDING', to_state: 'APPROVED', comment: 'auto-approved by product policy' }],
+            provisioning: [{ target: 'snowflake_prod', what: 'role SUPPLY_KPIS_READ', action: 'grant', status: 'granted', attempts: 1 },
+                { target: 'okta', what: 'group 00g4supplyviewers', action: 'grant', status: 'granted', attempts: 1 }],
         },
         {
             id: 'ar_102', product_urn: 'urn:li:dataProduct:orders', product_name: 'Orders & Revenue', requester: 'urn:li:corpuser:mei', purpose: 'Marketing attribution',

@@ -89,6 +89,8 @@ export interface RequestPolicy {
     max_duration_days: number;
     purposes: string[];
     approvers: string[];
+    /** What approval grants for real (warehouse roles, groups), when provisioning is set up. */
+    grants?: string[];
 }
 
 export interface ProductCard {
@@ -147,6 +149,14 @@ export interface AccessRequest {
     expires_at: string | null;
     created_at: string;
     history: AccessRequestHistory[];
+    provisioning?: {
+        target: string;
+        what: string;
+        action?: 'grant' | 'revoke';
+        status: 'granted' | 'revoked' | 'failed' | 'skipped';
+        error?: string;
+        attempts?: number;
+    }[];
 }
 
 export interface AccessRequestCreate {

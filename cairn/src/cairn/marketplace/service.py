@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, delete, func, select, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
@@ -71,6 +71,15 @@ class RequestPolicy(BaseModel):
     grant_permissions: list[str] = Field(default_factory=lambda: ["view", "view_samples", "view_queries",
                                                                   "data_access"])
     requires_justification: bool = True
+    provision: list[dict[str, Any]] = Field(default_factory=list,
+                                            description="what approval grants for real: {target, role|group|grant}")
+
+    @field_validator("provision")
+    @classmethod
+    def _steps(cls, v: list[dict]) -> list[dict]:
+        from cairn.marketplace.provisioning import ProvisionStep
+
+        return [ProvisionStep.model_validate(s).model_dump(exclude_none=True) for s in v]
 
 
 class AccessRequestIn(BaseModel):
@@ -126,6 +135,12 @@ def _iso(ms: Optional[int]) -> Optional[str]:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat() if ms else None
 
 
+def _grant_label(step: dict) -> str:
+    from cairn.marketplace.provisioning import ProvisionStep
+
+    return f"{ProvisionStep.model_validate(step).label()} on {step['target']}"
+
+
 def _custom(props: dict) -> dict[str, str]:
     return {c["key"]: c["value"] for c in (props.get("customProperties") or [])}
 
@@ -142,6 +157,7 @@ class MarketplaceService:
         self.attributes = attributes
         self.trust = trust or (lambda urns: {})
         self.is_admin = is_admin or (lambda actor: False)
+        self.provisioner = None            # marketplace.provisioning.Provisioner, when targets are configured
 
     # ---- policies ----------------------------------------------------------------------
     def get_policy(self, product_urn: str) -> RequestPolicy:
@@ -161,6 +177,15 @@ class MarketplaceService:
 
     def put_policy(self, product_urn: str, policy: RequestPolicy, actor: str) -> RequestPolicy:
         self._require_owner_or_admin(actor, product_urn)
+        if policy.provision:
+            from cairn.marketplace.provisioning import ProvisionError, ProvisionStep
+
+            if self.provisioner is None:
+                raise MarketplaceError("no provisioning targets are configured (config/provisioning)", 422)
+            try:
+                self.provisioner.check([ProvisionStep.model_validate(s) for s in policy.provision])
+            except ProvisionError as e:
+                raise MarketplaceError(str(e), 422)
         doc = policy.model_dump(mode="json")
         with self.engine.begin() as conn:
             conn.execute(delete(product_policies).where(product_policies.c.product_urn == product_urn))
@@ -194,7 +219,8 @@ class MarketplaceService:
             "access": access.get(p["urn"], {"status": "NONE", "request_id": None, "expires_at": None}),
             "request_policy": {"auto_approve": policy.auto_approve.enabled,
                                "max_duration_days": policy.max_duration_days, "purposes": policy.purposes,
-                               "approvers": policy.approvers or owners},
+                               "approvers": policy.approvers or owners,
+                               "grants": [_grant_label(st) for st in policy.provision]},
         }
 
     def _access_states(self, actor: str) -> dict[str, dict]:
@@ -381,6 +407,7 @@ class MarketplaceService:
             out = self._transition(rid, "APPROVED", "REVOKED", actor, comment)
             if r.get("grant_id"):
                 self.personas.revoke_grant(r["grant_id"], actor)
+            out = self._provision(out, r.get("provision_steps") or [], grant=False)
             self._publish("access.revoked", out, f"Access to {r['product_name']} was revoked",
                           comment or "Your access has ended.", [r["requester"]], actor)
             return out
@@ -437,10 +464,55 @@ class MarketplaceService:
         grant_id = self.personas.grant(persona_id, r["requester"], f"access_request:{rid}", expires, actor)
         out = self._transition(rid, "PENDING", "APPROVED", actor, comment, decided_by=actor, decided_at=_iso(_now()),
                                grant_id=grant_id, persona_id=persona_id, auto_approved=auto, expires_at_ms=expires)
+        if policy.provision:
+            out = self._provision(out, policy.provision, grant=True)
         self._publish("access.granted", out, f"Access to {r['product_name']} granted",
                       f"{'Auto-approved' if auto else 'Approved'} for {r['duration_days']} days "
                       f"(until {out['expires_at'][:10]}). Purpose: {r['purpose']}.", [r["requester"]], actor)
         return out
+
+    # ---- provisioning ------------------------------------------------------------------------
+    def _provision(self, r: dict, steps: list[dict], grant: bool) -> dict:
+        """Grant (or take away) the request's real access; outcomes are kept on the request."""
+        if self.provisioner is None or not steps:
+            return r
+        before = r.get("provisioning") or []
+        results = self.provisioner.run(steps, r["requester"], grant, before)
+        with self.engine.begin() as conn:
+            row = conn.execute(select(access_requests).where(access_requests.c.id == r["id"])).first()
+            doc = {**dict(row.doc), "provisioning": results, "provision_steps": steps}
+            conn.execute(update(access_requests).where(access_requests.c.id == r["id"]).values(doc=doc))
+        failed = [x for x in results if x.get("status") == "failed"]
+        newly = [x for x in failed if not any(b.get("status") == "failed" and b.get("action") == x["action"]
+                                              and b.get("what") == x["what"] for b in before)]
+        if newly:
+            self._publish("access.provisioning_failed", r,
+                          f"Could not {'grant' if grant else 'take away'} access to {r['product_name']}",
+                          "; ".join(f"{x['what']} on {x['target']}: {x.get('error')}" for x in newly)
+                          + ". Cairn retries a few times; after that, a person has to do it.",
+                          r.get("approvers") or [], "urn:li:corpuser:cairn-marketplace")
+        return self.get_request(r["id"])
+
+    def retry_provisioning(self) -> dict[str, int]:
+        """Retry failed grants on approved requests, and failed revocations on ended ones."""
+        from cairn.marketplace.provisioning import MAX_ATTEMPTS
+
+        stats = {"granted": 0, "revoked": 0}
+        if self.provisioner is None:
+            return stats
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(access_requests).where(
+                access_requests.c.state.in_(["APPROVED", "EXPIRED", "REVOKED"]))).fetchall()
+        for row in rows:
+            r = self._row_to_request(row)
+            grant = r["state"] == "APPROVED"
+            todo = [x for x in r.get("provisioning") or [] if x.get("status") == "failed"
+                    and x.get("action") == ("grant" if grant else "revoke") and int(x.get("attempts") or 0) < MAX_ATTEMPTS]
+            if todo:
+                after = self._provision(r, r.get("provision_steps") or [], grant)
+                stats["granted" if grant else "revoked"] += sum(
+                    1 for x in after.get("provisioning") or [] if x.get("status") == ("granted" if grant else "revoked"))
+        return stats
 
     def _notify_requested(self, rid: str) -> None:
         if self.notify is None:
@@ -488,7 +560,9 @@ class MarketplaceService:
         for row in rows:
             r = self._row_to_request(row)
             if row.expires_at_ms <= now:
-                self._transition(r["id"], "APPROVED", "EXPIRED", "urn:li:corpuser:cairn-marketplace", "access period ended")
+                ended = self._transition(r["id"], "APPROVED", "EXPIRED", "urn:li:corpuser:cairn-marketplace",
+                                         "access period ended")
+                self._provision(ended, r.get("provision_steps") or [], grant=False)
                 self._publish("access.revoked", r, f"Access to {r['product_name']} expired",
                               "Request again from the marketplace if you still need it.", [r["requester"]],
                               "urn:li:corpuser:cairn-marketplace")
