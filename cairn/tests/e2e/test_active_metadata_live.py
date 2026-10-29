@@ -1601,3 +1601,12 @@ def test_36_data_product_published_as_a_listing_and_kept_in_sync(users):
     assert eventually(told, timeout=120, interval=5)[0]["entity_urn"] == PRODUCT
     again = carol.post(url, json={"options": opts}).json()
     assert again["in_sync"] and again["statements"][-1].startswith(f'ALTER LISTING "AM_{RUN.upper()}" AS $$')
+
+
+def test_37_ask_your_data_is_routed_and_says_when_no_model_is_set_up(users):
+    """The stack runs without an AI provider: asking is authorized and answers 503 "not configured";
+    the question never reaches a warehouse and is not mistaken for a server error."""
+    bob = users["bob"]
+    r = bob.post("/data/ask", json={"question": "how many orders per customer", "urns": [DS]})
+    assert r.status_code == 503 and "not configured" in r.json()["detail"], r.text
+    assert bob.post("/data/ask", json={"question": "x"}).status_code == 422

@@ -964,6 +964,16 @@ const SAMPLE = {
 };
 on('GET', '/data/preview', () => SAMPLE);
 on('POST', '/data/query', () => ({ ...SAMPLE, elapsed_ms: 655 }));
+on('POST', '/data/ask', (body: { question?: string }) => ({
+    question: body?.question ?? '', connection: 'warehouse', dialect: 'snowflake', tables: [ORDERS], attempts: 1,
+    definitions: [{ name: 'net_revenue', kind: 'metric', version: 3 }], examples: ['Net revenue by region, last quarter'],
+    sql: "select date_trunc('day', order_ts) as day, sum(amount) - sum(refunds) as net_revenue\nfrom analytics.core.orders\nwhere order_ts >= dateadd(day, -7, current_date)\ngroup by 1 order by 1",
+    explanation: 'Net revenue per day for the last 7 days, using the approved net_revenue definition.',
+    result: { columns: ['day', 'net_revenue'], rows: [['2026-10-21', 48210.4], ['2026-10-22', 51877.15], ['2026-10-23', 49902.8],
+              ['2026-10-24', 61344.0], ['2026-10-25', 38120.55], ['2026-10-26', 35870.1], ['2026-10-27', 52411.9]],
+              masked_columns: [], truncated: false, elapsed_ms: 820, tables: [ORDERS] },
+    error: null,
+}));
 on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' }]);
 
 // ------------------------------------------------------------------------------- AI systems

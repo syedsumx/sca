@@ -59,6 +59,7 @@ import type {
     PastAnswer,
     CoverageFacet,
     CostTotal,
+    AskResult,
     DataResult,
     StewardProposal,
     StewardRun,
@@ -525,6 +526,11 @@ export class ConsumerClient extends CairnClient {
 
     runQuery(sql: string, urn: string, limit = 200) {
         return this.request<DataResult>('POST', '/data/query', { sql, urn, limit });
+    }
+
+    /** A question about the data answered with governed SQL over the given datasets (run as the caller). */
+    askData(question: string, urns: string[] = [], run = true) {
+        return this.request<AskResult>('POST', '/data/ask', { question, urns, run });
     }
 
     runSteward(limit = 100) {

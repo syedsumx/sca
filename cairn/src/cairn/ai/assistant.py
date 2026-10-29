@@ -40,6 +40,7 @@ metrics, ownership, quality, access and lineage using the tools. Rules:
 - Ground every factual claim in tool results; cite assets by urn in square brackets, e.g. [urn:li:dataset:(...)].
 - Prefer certified, healthy assets when recommending data. Mention masking or access limits plainly.
 - For "why did X change/break" questions call explain_lineage first.
+- For questions about the data itself (how many, how much, trends) call ask_data and show its SQL.
 - Be concise: short paragraphs or bullets, markdown allowed. If tools return nothing, say so.
 {UNTRUSTED_NOTICE}"""
 
@@ -68,6 +69,10 @@ TOOL_SPECS: list[dict] = [
     {"name": "check_access", "description": "Whether the user holds a privilege (e.g. VIEW_DATASET_PROFILE) on an asset.",
      "input_schema": {"type": "object", "properties": {"privilege": {"type": "string"},
                       "resource_urn": {"type": "string"}}, "required": ["privilege"]}},
+    {"name": "ask_data", "description": "Answer a question about the data itself (totals, counts, trends) with one "
+                                        "governed read-only SQL query; returns the SQL, an explanation and rows.",
+     "input_schema": {"type": "object", "properties": {"question": {"type": "string"},
+                      "dataset_urns": {"type": "array", "items": {"type": "string"}}}, "required": ["question"]}},
     {"name": "list_data_products", "description": "Marketplace data products matching a query, with access status.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
 ]

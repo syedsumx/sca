@@ -84,6 +84,7 @@ class Services:
     reports: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    ask: Optional[Any] = None
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
@@ -697,6 +698,20 @@ def _build_data_access(s: Services) -> None:
         return s.graph is not None and any(s.graph.get_aspect(urn, a) for a in ("schemaMetadata", "datasetProperties"))
 
     s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known)
+
+    from cairn.dataaccess.ask import AskService
+
+    def search(question: str, can_view, k: int) -> list[str]:
+        if s.semantic is not None:
+            hits = s.semantic.search(question, k, ["dataset"], can_view)
+        elif s.catalog is not None:
+            hits = [h for h in s.catalog.search(question, ["dataset"], count=k) if can_view(h["urn"])]
+        else:
+            return []
+        return [h["urn"] for h in hits]
+
+    s.ask = AskService(s.data_access, s.graph, s.llm, s.context_layer, search,
+                       s.settings.ai.model_nlq or s.settings.ai.model, s.audit)
 
 
 def _build_costs(s: Services, hub, Event) -> None:

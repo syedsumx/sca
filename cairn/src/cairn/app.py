@@ -194,7 +194,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "quality" in modules and services.data_access is not None:
         from cairn.dataaccess.api import build_router as data_router
 
-        app.include_router(data_router(services.data_access, cp))
+        app.include_router(data_router(services.data_access, cp, services.ask, services.can_view, services.ai_actor))
     if "governance" in modules and services.reports is not None:
         from cairn.reports.api import build_router as reports_router
 

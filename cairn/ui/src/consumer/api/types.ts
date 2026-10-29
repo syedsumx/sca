@@ -672,6 +672,20 @@ export interface DataResult {
     tables: string[];
 }
 
+export interface AskResult {
+    question: string;
+    connection: string;
+    dialect: string;
+    tables: string[];
+    definitions: { name: string; kind: string; version: number }[];
+    examples: string[];
+    attempts: number;
+    sql: string | null;
+    explanation: string | null;
+    result: DataResult | null;
+    error: string | null;
+}
+
 export interface StewardProposal {
     id: string;
     urn: string;

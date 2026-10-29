@@ -1,9 +1,9 @@
-import { Alert, Button, Empty, Input, Space, Table, Tooltip } from 'antd';
+import { Alert, Button, Empty, Input, Space, Table, Tag, Tooltip } from 'antd';
 import React, { useState } from 'react';
 
 import { CairnApiError } from '../../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { DataResult } from '../api/types';
+import type { AskResult, DataResult } from '../api/types';
 import { Muted } from './tokens';
 
 function ResultTable({ result }: { result: DataResult }) {
@@ -36,7 +36,75 @@ function ResultTable({ result }: { result: DataResult }) {
     );
 }
 
-/** First rows of the table, and a read-only SQL editor over the same connection. */
+/** A question in plain words, answered with governed SQL that the caller can read and reuse. */
+function AskBox({ urn, onUseSql }: { urn: string; onUseSql: (sql: string) => void }) {
+    const { client } = useConsumerApi();
+    const [question, setQuestion] = useState('');
+    const [answer, setAnswer] = useState<AskResult | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [busy, setBusy] = useState(false);
+
+    const ask = async () => {
+        setBusy(true);
+        setError(null);
+        setAnswer(null);
+        try {
+            setAnswer(await client.askData(question, [urn]));
+        } catch (e) {
+            setError(
+                e instanceof CairnApiError && e.status === 503
+                    ? 'Asking questions needs an AI provider; an administrator can set one up.'
+                    : (e as Error).message,
+            );
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <section aria-label="Ask">
+            <Input.Search
+                aria-label="Question"
+                placeholder="Ask a question about this data, e.g. revenue by month this year"
+                enterButton="Ask"
+                value={question}
+                loading={busy}
+                onChange={(e) => setQuestion(e.target.value)}
+                onSearch={() => question.trim().length >= 3 && void ask()}
+            />
+            {error && <Alert style={{ marginTop: 8 }} type="error" message={error} />}
+            {answer && (
+                <Space direction="vertical" style={{ width: '100%', marginTop: 8 }}>
+                    {answer.explanation && <span>{answer.explanation}</span>}
+                    {answer.definitions.length > 0 && (
+                        <span>
+                            <Muted>Uses approved definitions: </Muted>
+                            {answer.definitions.map((d) => (
+                                <Tag key={d.name} color="green">
+                                    {d.name} v{d.version}
+                                </Tag>
+                            ))}
+                        </span>
+                    )}
+                    {answer.sql && (
+                        <pre aria-label="Generated SQL" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
+                            {answer.sql}
+                        </pre>
+                    )}
+                    {answer.sql && (
+                        <Button size="small" onClick={() => onUseSql(answer.sql as string)}>
+                            Edit in the SQL editor
+                        </Button>
+                    )}
+                    {answer.error && <Alert type="warning" message={answer.error} />}
+                    {answer.result && <ResultTable result={answer.result} />}
+                </Space>
+            )}
+        </section>
+    );
+}
+
+/** First rows of the table, a question box, and a read-only SQL editor over the same connection. */
 export function DataPreview({ urn, tableName }: { urn: string; tableName: string }) {
     const { client } = useConsumerApi();
     const preview = useDheQuery<DataResult>(`/data/preview?${urn}`, (c, signal) => c.previewData(urn, { signal }));
@@ -75,6 +143,7 @@ export function DataPreview({ urn, tableName }: { urn: string; tableName: string
                 {err && <Alert type="error" message={err.message} />}
                 {preview.data && <ResultTable result={preview.data} />}
             </section>
+            <AskBox urn={urn} onUseSql={setSql} />
             <section aria-label="Query">
                 <Input.TextArea
                     aria-label="SQL"

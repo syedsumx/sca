@@ -28,6 +28,25 @@ metadata you are allowed to see, redacts personal data before anything reaches a
 assets it used, and can explain lineage anomalies. It runs on Claude or on a local model for
 air-gapped installs; without a model it falls back to search-based answers.
 
+## Ask your data
+
+On a table's **Data** tab, type a question such as *net revenue by day this month* and press
+**Ask**. Cairn writes one read-only SQL query and runs it for you. It shows the query, a one-line
+explanation, the approved definitions it used, and the rows. **Edit in the SQL editor** copies the
+query so you can adjust it.
+
+- **Grounded:** the model sees the table's columns, the approved metric and join definitions for it,
+  and the queries that answered similar questions before. It uses those definitions exactly.
+- **Governed:** the query runs as you. Your table permissions, purposes and column masking apply, as
+  for SQL you write yourself. Every question is in the audit log (`data.asked`).
+- **Self-correcting:** if the warehouse rejects the query, the model gets the error and one more try.
+  A permission refusal is final.
+
+The assistant and MCP clients have the same ability through the `ask_data` tool. Without an AI
+provider the box says so, and the SQL editor still works. Over the API: `POST /data/ask` with
+`{"question": …, "urns": [...]}`. Leave `urns` empty and Cairn picks the best-matching datasets
+you may see; send `"run": false` to get the SQL without running it.
+
 ## Search by meaning
 
 Search results add a **Related by meaning** section: assets whose descriptions, columns, tags and

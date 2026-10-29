@@ -59,3 +59,46 @@ it('explains a missing connection and a policy refusal', async () => {
     wrap({ 'GET /data/preview': () => new Response(JSON.stringify({ detail: 'no' }), { status: 403 }) });
     expect(await screen.findByText(/A data policy keeps this table's rows from you/)).toBeTruthy();
 });
+
+it('answers a question with governed SQL that can be edited', async () => {
+    const calls: MockCall[] = [];
+    wrap(
+        {
+            'GET /data/preview': ROWS,
+            'POST /data/ask': {
+                question: 'orders per day',
+                connection: 'wh',
+                dialect: 'postgres',
+                tables: [DS],
+                definitions: [{ name: 'revenue', kind: 'metric', version: 2 }],
+                examples: [],
+                attempts: 1,
+                sql: 'SELECT day, count(*) FROM public.orders GROUP BY day',
+                explanation: 'Counts orders per day.',
+                result: { ...ROWS, columns: ['day', 'count'], rows: [['2026-10-01', 42]], masked_columns: [] },
+                error: null,
+            },
+        },
+        calls,
+    );
+    await screen.findByText('🔒 email');
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'orders per day' } });
+    fireEvent.click(screen.getByRole('button', { name: /Ask/ }));
+    expect(await screen.findByText('Counts orders per day.')).toBeTruthy();
+    expect(screen.getByText('revenue v2')).toBeTruthy();
+    expect(screen.getByText('42')).toBeTruthy();
+    expect(calls.find((c) => c.path === '/data/ask')?.body).toEqual({ question: 'orders per day', urns: [DS], run: true });
+    fireEvent.click(screen.getByRole('button', { name: 'Edit in the SQL editor' }));
+    expect((screen.getByLabelText('SQL') as HTMLTextAreaElement).value).toContain('GROUP BY day');
+});
+
+it('says when asking is not set up', async () => {
+    wrap({
+        'GET /data/preview': ROWS,
+        'POST /data/ask': () => new Response(JSON.stringify({ detail: 'not configured' }), { status: 503 }),
+    });
+    await screen.findByText('🔒 email');
+    fireEvent.change(screen.getByLabelText('Question'), { target: { value: 'how many orders' } });
+    fireEvent.click(screen.getByRole('button', { name: /Ask/ }));
+    expect(await screen.findByText(/needs an AI provider/)).toBeTruthy();
+});

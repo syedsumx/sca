@@ -18,7 +18,14 @@ class QueryIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=1000)
 
 
-def build_router(svc: DataAccessService, current_principal) -> APIRouter:
+class AskIn(BaseModel):
+    question: str = Field(min_length=3, max_length=2000)
+    urns: list[str] = Field(default_factory=list, max_length=6)   # empty: Cairn picks the datasets
+    run: bool = True                                               # false: write the SQL, do not run it
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+def build_router(svc: DataAccessService, current_principal, ask=None, can_view=None, ai_actor=None) -> APIRouter:
     router = APIRouter(prefix="/data", tags=["data"])
 
     def _wrap(fn):
@@ -41,5 +48,19 @@ def build_router(svc: DataAccessService, current_principal) -> APIRouter:
         if not body.connection and not body.urn:
             raise HTTPException(422, "give a connection or a dataset urn")
         return _wrap(lambda: svc.query(p.urn, body.sql, body.connection, body.urn, body.limit))
+
+    @router.post("/ask")
+    def ask_data(body: AskIn, p: Principal = Depends(current_principal)):
+        """Answer a question with read-only SQL over the caller's datasets, run under their permissions."""
+        from cairn.dataaccess.ask import AskError
+
+        if ask is None or not ask.configured:
+            raise HTTPException(503, "asking questions of data is not configured (no LLM provider)")
+        if ai_actor is not None:
+            ai_actor(p)
+        try:
+            return ask.ask(p.urn, body.question, can_view(p), body.urns, body.run, body.limit)
+        except AskError as e:
+            raise HTTPException(e.status, str(e))
 
     return router
