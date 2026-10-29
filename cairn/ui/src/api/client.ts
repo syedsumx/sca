@@ -71,7 +71,7 @@ export interface RequestOptions {
     contentType?: string;
 }
 
-type Method = 'GET' | 'POST' | 'PUT' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 
 /** Extracts a human-readable message from FastAPI-style error bodies ({detail: ...}). */
 export function errorMessageFromBody(body: unknown, fallback: string): string {

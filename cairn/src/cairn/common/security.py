@@ -6,6 +6,8 @@ Three credential types are accepted, in order:
    plugin, schedulers). Compared in constant time.
 2. ``Authorization: Bearer <Cairn Core PAT>``: validated by asking Cairn Core ``me`` *with that
    token*, so Cairn Core remains the source of truth for token validity and revocation.
+   Agent credentials (``ca_`` keys, ``cat_`` OAuth access tokens) resolve to the person the agent
+   acts for, with ``via="agent"``, the agent's id and its scopes (see :mod:`cairn.identity.agents`).
 3. Cairn Core UI session cookies (``PLAY_SESSION``/``actor``) when Cairn is served
    same-origin behind the edge proxy: validated by forwarding the cookies to the
    frontend's GraphQL ``me`` query.
@@ -32,8 +34,10 @@ _ME_QUERY = "query { me { corpUser { urn username } } }"
 @dataclass(frozen=True)
 class Principal:
     urn: str
-    via: str  # service | token | session | dev | extension
+    via: str  # service | token | session | dev | extension | agent
     groups: tuple[str, ...] = field(default_factory=tuple)
+    agent: Optional[str] = None                 # via=agent: the agent acting for ``urn``
+    scopes: tuple[str, ...] = ()                # via=agent: what it may do (read, query_data, …)
 
     @property
     def is_service(self) -> bool:
@@ -66,6 +70,8 @@ class IdentityResolver:
         self._lock = threading.Lock()
         # Extension tokens (cx_…): token -> the extension's actor, or None (set by the services).
         self.extension_lookup: Optional[Callable[[str], Optional[str]]] = None
+        # Agent credentials (ca_…, cat_…): token -> AgentGrant(actor, agent, scopes), or None.
+        self.agent_lookup: Optional[Callable[[str], Optional[object]]] = None
 
     def resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
@@ -78,6 +84,11 @@ class IdentityResolver:
                 if actor is None:
                     raise AuthenticationError("unknown or disabled extension token")
                 return Principal(actor, "extension")
+            if token.startswith(("ca_", "cat_")) and self.agent_lookup is not None:
+                grant = self.agent_lookup(token)
+                if grant is None:
+                    raise AuthenticationError("unknown, expired or revoked agent credential")
+                return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes))
             return self._cached(
                 "t:" + token,
                 lambda: self._lookup_or_fail(

@@ -672,6 +672,27 @@ export interface DataResult {
     tables: string[];
 }
 
+export type AgentScope = 'read' | 'query_data' | 'propose' | 'write';
+
+export interface AiAgent {
+    id: string;
+    name: string;
+    kind: 'key' | 'oauth';
+    owner: string | null;
+    scopes: AgentScope[];
+    redirect_uris: string[];
+    ai_system: string | null;
+    enabled: boolean;
+    created_by: string;
+    created_ms: number;
+    last_used_ms: number | null;
+    client_uri?: string | null;
+    description?: string;
+    key?: string;
+    granted_scopes?: AgentScope[];
+    since_ms?: number;
+}
+
 export interface AskResult {
     question: string;
     connection: string;

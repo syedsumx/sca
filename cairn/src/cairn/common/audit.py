@@ -62,6 +62,11 @@ class AuditLog:
         subject: Optional[str] = None,
         details: Optional[dict[str, Any]] = None,
     ) -> str:
+        from cairn.identity.agents import current_agent
+
+        agent = current_agent.get()
+        if agent and "agent" not in (details or {}):
+            details = {**(details or {}), "agent": agent}     # made through an AI agent: say which
         body = {
             "id": str(uuid.uuid4()),
             "ts": datetime.now(timezone.utc).isoformat(),

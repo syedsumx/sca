@@ -59,6 +59,8 @@ import type {
     PastAnswer,
     CoverageFacet,
     CostTotal,
+    AiAgent,
+    AgentScope,
     AskResult,
     DataResult,
     StewardProposal,
@@ -240,6 +242,36 @@ export class ConsumerClient extends CairnClient {
 
     extensionSections(opts?: RequestOptions) {
         return this.request<ExtensionSection[]>('GET', '/extensions/ui', undefined, opts);
+    }
+
+    /** Agents acting for the caller (OAuth clients they connected, key agents they own). */
+    myAiAgents(opts?: RequestOptions) {
+        return this.request<AiAgent[]>('GET', '/me/agents', undefined, opts);
+    }
+
+    disconnectAiAgent(id: string) {
+        return this.request<{ revoked: number }>('DELETE', `/me/agents/${enc(id)}`);
+    }
+
+    listAiAgents(opts?: RequestOptions) {
+        return this.request<AiAgent[]>('GET', '/admin/agents', undefined, opts);
+    }
+
+    /** An agent for an automation; the answer's key is shown once. */
+    createAiAgent(name: string, scopes: AgentScope[], owner?: string) {
+        return this.request<AiAgent>('POST', '/admin/agents', { name, scopes, owner: owner || undefined });
+    }
+
+    updateAiAgent(id: string, patch: { scopes?: AgentScope[]; enabled?: boolean; ai_system?: string }) {
+        return this.request<AiAgent>('PATCH', `/admin/agents/${enc(id)}`, patch);
+    }
+
+    rotateAiAgentKey(id: string) {
+        return this.request<AiAgent>('POST', `/admin/agents/${enc(id)}/rotate`);
+    }
+
+    deleteAiAgent(id: string) {
+        return this.request<void>('DELETE', `/admin/agents/${enc(id)}`);
     }
 
     listExtensions(opts?: RequestOptions) {

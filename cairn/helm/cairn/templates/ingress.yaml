@@ -83,6 +83,11 @@ spec:
             pathType: ImplementationSpecific
             backend:
               service: { name: {{ $full }}-api, port: { name: http } }
+          # OAuth discovery for MCP clients, passed through unchanged (/$2 is the whole path).
+          - path: /()(\.well-known/oauth-.*)
+            pathType: ImplementationSpecific
+            backend:
+              service: { name: {{ $full }}-api, port: { name: http } }
           {{- end }}
           {{- if .Values.cairn.mcp.enabled }}
           - path: /cairn/mcp(/|$)(.*)

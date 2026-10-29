@@ -15,6 +15,7 @@ const PEOPLE: Record<string, string> = {
     'urn:li:corpuser:cairn-context-agent': 'Context Agent',
 };
 const DAY = 86_400_000;
+const HOUR = 3_600_000;
 const now = Date.now();
 const iso = (msAgo: number) => new Date(now - msAgo).toISOString();
 const ds = (platform: string, name: string) => `urn:li:dataset:(urn:li:dataPlatform:${platform},${name},PROD)`;
@@ -975,6 +976,22 @@ on('POST', '/data/ask', (body: { question?: string }) => ({
     error: null,
 }));
 on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' }]);
+
+// ------------------------------------------------------------------------------- AI agents
+const AGENT_DESKTOP = { id: 'agt_7f2c1a9e04bd', name: 'Claude Desktop', kind: 'oauth', owner: null, scopes: ['read', 'query_data', 'propose'],
+    granted_scopes: ['read', 'query_data', 'propose'], redirect_uris: ['http://127.0.0.1:33418/callback'], ai_system: null, enabled: true,
+    created_by: 'dynamic-registration', created_ms: now - 6 * DAY, since_ms: now - 6 * DAY, last_used_ms: now - 2 * HOUR };
+const AGENT_BOT = { id: 'agt_3b91d0c27e5a', name: 'Nightly documentation bot', kind: 'key', owner: 'urn:li:corpuser:raj', scopes: ['read', 'propose'],
+    redirect_uris: [], ai_system: 'ai_docbot', enabled: true, created_by: ME, created_ms: now - 20 * DAY, last_used_ms: now - 9 * HOUR,
+    description: 'Drafts descriptions for undocumented tables every night.' };
+on('GET', '/me/agents', () => [AGENT_DESKTOP]);
+on('DELETE', '/me/agents/:id', () => ({ revoked: 2 }));
+on('GET', '/admin/agents', () => [AGENT_DESKTOP, AGENT_BOT]);
+on('POST', '/admin/agents', (b: { name: string; scopes: string[] }) => ({ ...AGENT_BOT, id: 'agt_demo', name: b.name, scopes: b.scopes,
+    key: 'ca_agt_demo.demo-key-shown-once' }));
+on('PATCH', '/admin/agents/:id', (b: Json, _q, [id]) => ({ ...(id === AGENT_BOT.id ? AGENT_BOT : AGENT_DESKTOP), ...b }));
+on('POST', '/admin/agents/:id/rotate', () => ({ ...AGENT_BOT, key: 'ca_agt_3b91d0c27e5a.new-demo-key' }));
+on('DELETE', '/admin/agents/:id', () => null);
 
 // ------------------------------------------------------------------------------- AI systems
 const ASSESSMENT = {

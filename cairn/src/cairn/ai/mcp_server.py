@@ -198,8 +198,14 @@ def build_mcp_server(services: Services):
     proposes = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False)
 
     def _safe(fn):
+        from cairn.identity.agents import tool_scope
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
+            p = _principal.get()
+            if p is not None and p.via == "agent" and tool_scope(fn.__name__) not in p.scopes:
+                return {"error": "forbidden",
+                        "message": f"this agent's scopes do not include {tool_scope(fn.__name__)}"}
             try:
                 return fn(*args, **kwargs)
             except Forbidden as e:
@@ -391,12 +397,18 @@ class _BearerAuthMiddleware:
         try:
             principal = self.services.identity.resolve(headers, {})
         except AuthenticationError as e:
-            await _json(send, 401, {"error": str(e)}, {"www-authenticate": "Bearer"})
+            # Tell MCP clients where to sign in (RFC 9728 protected resource metadata).
+            public = self.services.settings.active.public_url.rstrip("/")
+            challenge = f'Bearer resource_metadata="{public}/.well-known/oauth-protected-resource/cairn/mcp/mcp"'
+            await _json(send, 401, {"error": str(e)}, {"www-authenticate": challenge})
             return
-        token = _principal.set(principal)
+        from cairn.identity.agents import current_agent
+
+        token, agent = _principal.set(principal), current_agent.set(principal.agent)
         try:
             await self.app(scope, receive, send)
         finally:
+            current_agent.reset(agent)
             _principal.reset(token)
 
 

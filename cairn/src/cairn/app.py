@@ -38,6 +38,15 @@ def _principal_dependency(services: Services):
             principal = services.identity.resolve(dict(request.headers), dict(request.cookies))
         except AuthenticationError as e:
             raise HTTPException(401, str(e), headers={"WWW-Authenticate": "Bearer"})
+        if principal.via == "agent":
+            from cairn.common.licence import READ_POSTS
+            from cairn.identity.agents import required_scope
+
+            route = getattr(request.scope.get("route"), "path", request.url.path)
+            need = required_scope(request.method, route, READ_POSTS)
+            if need is None or need not in principal.scopes:
+                why = "not allowed for agents" if need is None else f"needs scope {need}"
+                raise HTTPException(403, f"this agent may not do this ({why})")
         if services.licence is not None:
             route = getattr(request.scope.get("route"), "path", request.url.path)
             try:
@@ -58,12 +67,40 @@ def _authorize(services: Services):
     return authorize
 
 
+class _AgentAttribution:
+    """Pure ASGI: name the agent behind an agent credential for everything the request records
+    (audit entries), before routing, so the endpoint's worker thread sees it too."""
+
+    def __init__(self, app, services: Services):
+        self.app = app
+        self.services = services
+
+    async def __call__(self, scope, receive, send):
+        agent = None
+        if scope["type"] == "http" and self.services.agents is not None:
+            auth = next((v.decode() for k, v in scope.get("headers", []) if k == b"authorization"), "")
+            if auth[:7].lower() == "bearer " and auth[7:].strip().startswith(("ca_", "cat_")):
+                grant = self.services.agents.resolve(auth[7:].strip())
+                agent = grant.agent if grant else None
+        if agent is None:
+            await self.app(scope, receive, send)
+            return
+        from cairn.identity.agents import current_agent
+
+        token = current_agent.set(agent)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_agent.reset(token)
+
+
 def _base_app(name: str, services: Services) -> FastAPI:
     from cairn.common.tracing import setup_tracing
 
     app = FastAPI(title=f"Cairn — {name}", version=__version__)
     app.state.services = services
     setup_tracing(app, name, getattr(services, "engine", None))
+    app.add_middleware(_AgentAttribution, services=services)
 
     @app.middleware("http")
     async def metrics(request: Request, call_next):
@@ -139,6 +176,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.common.licence_api import build_router as licence_router
 
         app.include_router(licence_router(services.licence, cp, authz))
+    if services.agents is not None:
+        from cairn.identity.agents_api import build_router as agents_iam_router
+
+        app.include_router(agents_iam_router(services.agents, services, cp, authz))
     _include_active_metadata(app, services, modules, cp, authz)
     return app
 

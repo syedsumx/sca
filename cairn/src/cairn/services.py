@@ -91,6 +91,7 @@ class Services:
     licence: Optional[Any] = None
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
+    agents: Optional[Any] = None
     publisher: Optional[Any] = None
     invalidator: Any = None
     _threads: list = field(default_factory=list)
@@ -439,6 +440,18 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
 
     services.extensions = ExtensionService(engine, attributes, audit)
     identity.extension_lookup = services.extensions.actor_for_token
+    from cairn.identity.agents import AgentService
+
+    def ai_system_state(sid: str) -> Optional[str]:
+        try:
+            return services.ai_systems.get(sid)["state"] if services.ai_systems is not None else None
+        except Exception:  # noqa: BLE001 - a missing register entry means not approved
+            return None
+
+    registration = os.environ.get("CAIRN_OAUTH_REGISTRATION", "open")
+    services.agents = AgentService(engine, audit, ai_system_state,
+                                   registration if registration in ("open", "admin", "off") else "open")
+    identity.agent_lookup = services.agents.resolve
     from cairn.common.metrics import watch_licence
 
     watch_licence(services.licence)

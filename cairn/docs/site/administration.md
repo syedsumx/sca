@@ -63,6 +63,42 @@ A SCIM user's `userName` is the Cairn user name, so it must match what single si
 membership changes take effect on policy decisions within seconds. When groups come from SCIM, set
 `CAIRN_SSO_EXTRACT_GROUPS=false` so sign-in does not also rewrite them.
 
+## AI agents
+
+AI agents act on behalf of a person, never with permissions of their own. What an agent may do is
+that person's access, narrowed by the agent's scopes:
+
+| Scope | Allows |
+|---|---|
+| `read` | Reading the catalog: every read, and requests that change nothing |
+| `query_data` | Previewing tables, running read-only SQL, asking questions of data (masked as for the person) |
+| `propose` | Creating things that wait for review: documentation drafts, workflows, access requests, discussions |
+| `write` | Changing metadata directly |
+
+Administration (`/admin`, licences, policies, other agents) is never reachable with an agent
+credential. Every audit entry made through an agent records it as `details.agent`.
+
+**AI tools people connect** (Claude Desktop, Claude Code, IDEs) sign in with OAuth 2.1, as the MCP
+specification defines:
+
+1. The tool registers itself.
+2. The person signs in as usual and sees a consent page listing the scopes; they can untick any.
+3. The tool receives a one-hour access token and a refresh token, which rotates on each use.
+
+A refresh token or sign-in code used twice ends the whole grant. People see and disconnect their
+agents in **Settings → AI agents**.
+
+`CAIRN_OAUTH_REGISTRATION` controls registration:
+
+- `open` (default): new tools can connect straight away.
+- `admin`: new tools wait until an administrator enables them.
+- `off`: only agents an administrator created.
+
+**Automations** get an agent key instead. In **Settings → AI agents → New automation key**, choose
+a name, the person it acts as, and its scopes. The key (`ca_…`) is shown once; **New key** rotates
+it. To make an agent depend on the AI system register, link it to an AI system
+(`PATCH /admin/agents/{id}` with `ai_system`): it stops working whenever that system is not approved.
+
 ## Main settings
 
 | Setting | Purpose |

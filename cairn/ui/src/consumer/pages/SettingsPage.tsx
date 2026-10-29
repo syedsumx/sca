@@ -5,6 +5,7 @@ import { AgentFleet } from '../../agents/AgentFleet';
 import { CairnClientProvider } from '../../api/hooks';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
+import { AiAgentsSettings } from '../components/AiAgents';
 import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
@@ -246,6 +247,11 @@ export function SettingsPage() {
                     { key: 'notifications', label: 'Notifications', children: <NotificationSettings /> },
                     { key: 'inbox', label: 'Inbox', children: <Inbox /> },
                     { key: 'embeds', label: 'Embeds', children: <EmbedBuilder /> },
+                    {
+                        key: 'ai-agents',
+                        label: 'AI agents',
+                        children: <AiAgentsSettings isAdmin={!!session.config?.is_admin} />,
+                    },
                     ...(session.config?.can_manage_agents
                         ? [{ key: 'agents', label: 'Remote agents', children: <RemoteAgentsSettings /> }]
                         : []),

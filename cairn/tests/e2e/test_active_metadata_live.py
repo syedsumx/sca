@@ -1610,3 +1610,42 @@ def test_37_ask_your_data_is_routed_and_says_when_no_model_is_set_up(users):
     r = bob.post("/data/ask", json={"question": "how many orders per customer", "urns": [DS]})
     assert r.status_code == 503 and "not configured" in r.json()["detail"], r.text
     assert bob.post("/data/ask", json={"question": "x"}).status_code == 422
+
+
+def test_38_agents_sign_in_discovery_and_scoped_keys(users):
+    """MCP clients discover sign-in through the edge; an automation key acts as its person, only within
+    its scopes, and stops working when disabled."""
+    root, bob = users["root"], users["bob"]
+    pr = httpx.get(f"{EDGE}/.well-known/oauth-protected-resource/cairn/mcp/mcp", timeout=30)
+    assert pr.status_code == 200, pr.text
+    issuer = pr.json()["authorization_servers"][0]
+    assert issuer.endswith("/cairn/api/oauth")
+    md = httpx.get(f"{EDGE}/.well-known/oauth-authorization-server/cairn/api/oauth", timeout=30).json()
+    assert md["code_challenge_methods_supported"] == ["S256"]
+    unauth = httpx.post(f"{EDGE}/cairn/mcp/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping"}, timeout=30)
+    assert unauth.status_code == 401 and "resource_metadata=" in unauth.headers["www-authenticate"]
+
+    reg = httpx.post(f"{EDGE}/cairn/api/oauth/register", timeout=30,
+                     json={"client_name": f"e2e tool {RUN}", "redirect_uris": ["http://127.0.0.1:41999/cb"]})
+    assert reg.status_code == 201, reg.text
+    login = httpx.get(f"{EDGE}/cairn/api/oauth/authorize", timeout=30, params={
+        "response_type": "code", "client_id": reg.json()["client_id"], "redirect_uri": "http://127.0.0.1:41999/cb",
+        "code_challenge": "x" * 43, "code_challenge_method": "S256"})
+    assert login.status_code == 302 and login.headers["location"].startswith("/login?redirect_uri=")
+
+    made = root.post("/admin/agents", json={"name": f"e2e bot {RUN}", "scopes": ["read"], "owner": BOB})
+    assert made.status_code == 201, made.text
+    agent, key = made.json()["id"], made.json()["key"]
+    try:
+        with client(key) as bot:
+            assert bot.get("/me").json()["urn"] == BOB
+            assert bot.get("/quality/monitors").status_code == 200
+            refused = bot.put(f"/collab/bookmarks/{DS}")
+            assert refused.status_code == 403 and "needs scope write" in refused.text
+            assert bot.get("/admin/agents").status_code == 403
+            assert bob.get("/me/agents").json()[0]["id"] == agent
+            root.patch(f"/admin/agents/{agent}", json={"enabled": False})
+            assert bot.get("/me").status_code == 401
+    finally:
+        root.delete(f"/admin/agents/{agent}")
+        root.delete(f"/admin/agents/{reg.json()['client_id']}")

@@ -112,9 +112,13 @@ Cairn exposes the catalog to AI coding tools over the Model Context Protocol at 
 Each request carries the user's own access token, so tools see exactly what the user can see.
 
 ```bash
-claude mcp add --transport http cairn https://<cairn-host>/cairn/mcp/mcp \
-  --header "Authorization: Bearer <your access token>"
+claude mcp add --transport http cairn https://<cairn-host>/cairn/mcp/mcp
 ```
+
+The first time, the tool opens Cairn in your browser. You sign in and choose what it may do (see
+**AI agents** in Administration), and it connects with a short-lived token that acts as you. Tools
+without OAuth support can still send a personal access token:
+`--header "Authorization: Bearer <token>"`.
 
 What a client gets:
 
