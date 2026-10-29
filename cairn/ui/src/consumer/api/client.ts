@@ -64,6 +64,7 @@ import type {
     AIReader,
     GitRepository,
     PrivacyPart,
+    ProductSlo,
     PrivacyRequest,
     RetentionPolicy,
     RetentionRow,
@@ -343,6 +344,24 @@ export class ConsumerClient extends CairnClient {
             undefined,
             { ...opts, query: { urn } },
         );
+    }
+
+    // --- product SLOs ---------------------------------------------------------------------------
+
+    productSlos(product: string, opts?: RequestOptions) {
+        return this.request<ProductSlo[]>('GET', '/marketplace/slos', undefined, { ...opts, query: { product } });
+    }
+
+    allSlos(opts?: RequestOptions) {
+        return this.request<ProductSlo[]>('GET', '/marketplace/slos', undefined, opts);
+    }
+
+    putSlo(body: { id: string; product_urn: string; name: string; kind: string; objective: number; window_days: number }) {
+        return this.request<ProductSlo>('PUT', `/marketplace/slos/${enc(body.id)}`, body);
+    }
+
+    deleteSlo(id: string) {
+        return this.request<void>('DELETE', `/marketplace/slos/${enc(id)}`);
     }
 
     // --- privacy ------------------------------------------------------------------------------

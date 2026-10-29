@@ -1148,3 +1148,21 @@ export interface RopaEntry {
     retention: string[];
     ai_systems: string[];
 }
+
+export interface ProductSlo {
+    id: string;
+    product_urn: string;
+    name: string;
+    kind: 'freshness' | 'volume' | 'quality' | 'all';
+    objective: number;
+    window_days: number;
+    description: string;
+    datasets: string[];
+    monitors: number;
+    good: number;
+    total: number;
+    sli: number | null;
+    budget_remaining: number | null;
+    burn_rate: number | null;
+    state: 'met' | 'at_risk' | 'breached' | 'no_data';
+}

@@ -42,7 +42,7 @@ EVENT_TYPES = [
     "automation.applied", "asset.deprecation_proposed", "ai_system.review_requested", "ai_system.decided",
     "product.listing_outdated", "playbook.report", "source.failing", "source.stale", "source.recovered",
     "access.provisioning_failed", "quality.external_failed", "privacy.deletion_requested",
-    "privacy.request_completed", "privacy.retention_breach",
+    "privacy.request_completed", "privacy.retention_breach", "product.slo_changed",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

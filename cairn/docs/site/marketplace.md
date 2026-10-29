@@ -53,6 +53,36 @@ Only plain names are accepted, so nothing else reaches the SQL. The product's **
 
 Ending access only revokes what was actually granted.
 
+## Service level objectives
+
+A product's owners set objectives on the share of the product's quality checks that pass, on the product's **SLOs** tab or with `PUT /cairn/api/marketplace/slos/{id}`. An example: "99% of freshness checks pass over 28 days".
+
+| Kind | Counts the evaluations of |
+|---|---|
+| `freshness` | freshness monitors |
+| `volume` | volume monitors |
+| `quality` | field, distribution, custom SQL and schema monitors |
+| `all` | every monitor on the product's datasets |
+
+How each SLO is measured:
+
+- **The SLI** is the share of evaluations in the window that passed (`PASS` or `WARN`). Learning-phase evaluations don't count.
+- **The error budget** is what the objective allows to fail. **Budget left** is the share of it not used yet.
+- **The burn rate** is how fast the last day used the budget: 1 is exactly on budget, and above 1 the budget will run out early.
+
+**States:**
+
+| State | When |
+|---|---|
+| met | the SLI meets the objective, with budget to spare |
+| at risk | less than a quarter of the budget is left, or the last day burned it more than twice as fast as it should |
+| breached | the SLI is below the objective |
+| no data | the product has no matching checks yet |
+
+The notifier checks hourly. The product's owners and followers get `product.slo_changed` when an SLO becomes at risk or breached, and when it recovers.
+
+**Reports → Data product SLOs** lists every SLO you may see, worst first. The API is `GET /cairn/api/marketplace/slos` (`?product=` for one product).
+
 ## Publishing a product
 
 Product owners set the request policy (`PUT /cairn/api/marketplace/products/{urn}/policy`): who may

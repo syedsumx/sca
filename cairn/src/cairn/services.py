@@ -100,6 +100,7 @@ class Services:
     external_quality: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
+    slos: Optional[Any] = None
     traces: Optional[Any] = None
     slack_events: Optional[Any] = None
     teams_bot: Optional[Any] = None
@@ -595,6 +596,13 @@ def _build_active_metadata(s: Services) -> None:
 
         s.knowledge = KnowledgeService(s.engine, knowledge_sources, lambda text: embedder.embed([text])[0],
                                        known_datasets, s.graph, s.audit, cfg.public_url)
+        from cairn.marketplace.slos import SLOService
+
+        def product_owners(urn: str) -> list[str]:
+            own = s.graph.get_aspect(urn, "ownership") or {}
+            return [o["owner"] for o in own.get("owners") or [] if o.get("owner")]
+
+        s.slos = SLOService(s.engine, s.quality.store, s._product_assets, product_owners, hub, s.audit)
         from cairn.governance.privacy import PrivacyService
 
         def scanned_datasets() -> list:

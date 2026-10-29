@@ -7,6 +7,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { CostTotal, CoverageFacet, CoverageRow, ReportAsset, ReportSnapshot } from '../api/types';
 import { assetPath } from '../components/Assets';
 import { download } from '../components/BulkEdit';
+import { SloDashboard } from '../components/Slos';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 
 const FACETS: { key: CoverageFacet; label: string }[] = [
@@ -288,6 +289,8 @@ export function ReportsPage() {
                             hint={`${s.quality.resolved_30d} resolved in 30 days`}
                         />
                     </Grid>
+                    <SectionTitle>Data product SLOs</SectionTitle>
+                    <SloDashboard />
                     <SectionTitle>Cost</SectionTitle>
                     <Tabs
                         items={[

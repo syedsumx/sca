@@ -1376,3 +1376,20 @@ on('GET', '/governance/privacy/ropa', (_b, q) => (q.format === 'csv' ? 'domain,d
           purposes: ['Customer support'], retention: ['pii-2y (730 days)'], ai_systems: ['Churn prediction'] },
         { dataset: ORDERS, personal_data: ['PII', 'PII.Email'], owners: ['urn:li:corpuser:raj'], purposes: ['Financial reporting'],
           retention: ['pii-2y (730 days)'], ai_systems: [] }] }] }));
+
+// ------------------------------------------------------------------------------- product SLOs
+const SLOS = [
+    { id: 'supply-kpis-freshness', product_urn: 'urn:li:dataProduct:supply-kpis', name: 'Supply KPIs land by 06:00',
+      kind: 'freshness', objective: 99, window_days: 28, description: '', datasets: [SHIPMENTS, INVENTORY], monitors: 2,
+      good: 1612, total: 1640, sli: 98.293, budget_remaining: 0, burn_rate: 4.2, state: 'breached' },
+    { id: 'finance-rev-quality', product_urn: 'urn:li:dataProduct:finance-revenue', name: 'Revenue checks pass',
+      kind: 'quality', objective: 99.5, window_days: 28, description: '', datasets: [REV_DAILY], monitors: 6,
+      good: 3352, total: 3360, sli: 99.762, budget_remaining: 52.4, burn_rate: 2.6, state: 'at_risk' },
+    { id: 'finance-rev-volume', product_urn: 'urn:li:dataProduct:finance-revenue', name: 'Daily revenue rows arrive',
+      kind: 'volume', objective: 99, window_days: 28, description: '', datasets: [REV_DAILY], monitors: 1,
+      good: 28, total: 28, sli: 100, budget_remaining: 100, burn_rate: 0, state: 'met' },
+];
+on('GET', '/marketplace/slos', (_b, q) => (q.product ? SLOS.filter((s) => s.product_urn === q.product) : SLOS));
+on('PUT', '/marketplace/slos/:id', (b: Json) => ({ ...SLOS[2], ...b, state: 'no_data', sli: null, budget_remaining: null,
+    burn_rate: null, good: 0, total: 0 }));
+on('DELETE', '/marketplace/slos/:id', () => undefined);

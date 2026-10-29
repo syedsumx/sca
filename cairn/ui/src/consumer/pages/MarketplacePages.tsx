@@ -15,6 +15,7 @@ import { assetPath } from '../components/Assets';
 import { ProductCard, RequestAccessDrawer, accessLabel } from '../components/Marketplace';
 import { CardGrid, Muted, Page, SectionTitle, Skeleton, Surface, tokens } from '../components/tokens';
 import { FormTasksList } from '../components/Forms';
+import { ProductSlos } from '../components/Slos';
 import { ProductPublish } from '../components/ProductPublish';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
@@ -233,6 +234,7 @@ export function ProductPage() {
                             </Surface>
                         ),
                     },
+                    { key: 'slos', label: 'SLOs', children: <ProductSlos urn={urn} canEdit={canPublish} /> },
                     ...(canPublish
                         ? [{ key: 'publish', label: 'Share outside', children: <ProductPublish urn={urn} /> }]
                         : []),
