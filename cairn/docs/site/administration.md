@@ -253,7 +253,18 @@ Daily figures per table come from warehouse collectors, which run once a day for
   The connection's role needs access to the `SNOWFLAKE` database.
 - **BigQuery** (`platform: bigquery`, `region: region-us`) reads `INFORMATION_SCHEMA`:
   - `TABLE_STORAGE` logical bytes, at `storage_usd_per_gib_month`,
-  - `JOBS` bytes billed, at `usd_per_tib`, split across the referenced tables.
+  - `JOBS` bytes billed, at `usd_per_tib`, split across the referenced tables. With editions pricing (`pricing: editions`), it uses slot-hours (`total_slot_ms`) at `usd_per_slot_hour` (default 0.06) instead.
+- **Databricks** (`platform: databricks`) reads the system tables:
+  - list-price dollars per SQL warehouse and per job for the day (`system.billing.usage` with `system.billing.list_prices`);
+  - a warehouse's cost is split across its statements by duration (`system.query.history`), and a job's across its runs;
+  - each statement or job then splits its share across the tables it read (`system.access.table_lineage`).
+
+  The system tables have no per-table storage figure, so Databricks rows carry compute only. The connection needs `SELECT` on those system schemas.
+- **Redshift** (`platform: redshift`) splits the day's compute across queries by elapsed time (`SYS_QUERY_HISTORY`), then across the tables each query scanned (`SYS_QUERY_DETAIL`):
+  - the day's compute is the cluster's cost per day (`daily_compute_usd`);
+  - for Serverless (`serverless: true`), it's RPU-seconds from `SYS_SERVERLESS_USAGE`, at `usd_per_rpu_hour` (default 0.375).
+
+  Storage is the `SVV_TABLE_INFO` size, at `storage_usd_per_gb_month` (default 0.024). The connection's user needs to see every user's queries (`SYSLOG ACCESS UNRESTRICTED`).
 
 For other sources, post daily rows to `POST /cairn/api/reports/costs` (`{"rows": [{urn, day, storage_bytes, storage_usd, compute_usd, reads}]}`). Posting a dataset and day again replaces that row.
 

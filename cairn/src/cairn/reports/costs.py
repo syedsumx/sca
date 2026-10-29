@@ -11,6 +11,19 @@ Collectors are configured in ``CAIRN_COST_SOURCES`` (YAML)::
       - {platform: snowflake, connection: snowflake_usage, credit_usd: 3.0, storage_usd_per_tb_month: 23}
       - {platform: bigquery, connection: bq_usage, region: region-us, usd_per_tib: 6.25,
          storage_usd_per_gib_month: 0.02}
+      - {platform: bigquery, connection: bq_usage, region: region-eu, pricing: editions,
+         usd_per_slot_hour: 0.06}                  # BigQuery editions: slot-hours, not bytes
+      - {platform: databricks, connection: dbx_system}   # system.billing + system.query + lineage
+      - {platform: redshift, connection: rs_admin, daily_compute_usd: 260, storage_usd_per_gb_month: 0.024}
+      - {platform: redshift, connection: rs_serverless, serverless: true, usd_per_rpu_hour: 0.375}
+
+* **Databricks** compute is the day's list-price dollars from ``system.billing.usage``: a SQL
+  warehouse's cost is split across its statements by duration, a job's across its runs; each statement
+  or job splits its share evenly across the tables it read (``system.access.table_lineage``). There is
+  no per-table storage figure in the system tables, so Databricks rows carry compute only.
+* **Redshift** compute is the cluster's daily cost (``daily_compute_usd``), or Serverless RPU-seconds
+  (``SYS_SERVERLESS_USAGE``) at ``usd_per_rpu_hour``, split across the day's queries by elapsed time and
+  then across the tables each one scanned; storage is ``SVV_TABLE_INFO`` size at ``storage_usd_per_gb_month``.
 """
 
 from __future__ import annotations
@@ -62,7 +75,7 @@ class CostRow(BaseModel):
 
 
 class CostSource(BaseModel):
-    platform: Literal["snowflake", "bigquery"]
+    platform: Literal["snowflake", "bigquery", "databricks", "redshift"]
     connection: str
     env: str = "PROD"
     credit_usd: float = 3.0
@@ -70,6 +83,12 @@ class CostSource(BaseModel):
     region: str = "region-us"
     usd_per_tib: float = 6.25
     storage_usd_per_gib_month: float = 0.02
+    pricing: Literal["on_demand", "editions"] = "on_demand"     # BigQuery
+    usd_per_slot_hour: float = 0.06                              # BigQuery editions (Enterprise list price)
+    daily_compute_usd: float = 0.0                               # Redshift provisioned: the cluster per day
+    serverless: bool = False                                     # Redshift Serverless
+    usd_per_rpu_hour: float = 0.375
+    storage_usd_per_gb_month: float = 0.024                      # Redshift managed storage
 
 
 def load_sources(path: Optional[str] = None) -> list[CostSource]:
@@ -115,10 +134,74 @@ FROM `{region}`.INFORMATION_SCHEMA.TABLE_STORAGE WHERE deleted = FALSE
 BIGQUERY_COMPUTE = """
 SELECT CONCAT(t.project_id, '.', t.dataset_id, '.', t.table_id) AS name,
        SUM(j.total_bytes_billed / ARRAY_LENGTH(j.referenced_tables)) AS bytes_billed,
+       SUM(j.total_slot_ms / ARRAY_LENGTH(j.referenced_tables)) AS slot_ms,
        COUNT(DISTINCT j.job_id) AS reads
 FROM `{region}`.INFORMATION_SCHEMA.JOBS j, UNNEST(j.referenced_tables) t
 WHERE j.creation_time >= @start AND j.creation_time < @end AND j.job_type = 'QUERY' AND j.state = 'DONE'
 GROUP BY name
+"""
+
+
+# Databricks: list-price dollars per SQL warehouse and per job for the day, split by statement duration
+# (warehouses) or evenly per run (jobs), then evenly across the tables each statement or job read.
+DATABRICKS_COMPUTE = """
+WITH usage AS (
+  SELECT u.usage_metadata.warehouse_id AS warehouse_id, u.usage_metadata.job_id AS job_id,
+         SUM(u.usage_quantity * p.pricing.default) AS usd
+  FROM system.billing.usage u
+  JOIN system.billing.list_prices p ON u.sku_name = p.sku_name AND u.cloud = p.cloud
+       AND u.usage_start_time >= p.price_start_time AND (p.price_end_time IS NULL OR u.usage_end_time <= p.price_end_time)
+  WHERE u.usage_date = :day AND (u.usage_metadata.warehouse_id IS NOT NULL OR u.usage_metadata.job_id IS NOT NULL)
+  GROUP BY 1, 2
+), stmts AS (
+  SELECT q.statement_id, q.compute.warehouse_id AS warehouse_id, q.total_duration_ms AS ms,
+         SUM(q.total_duration_ms) OVER (PARTITION BY q.compute.warehouse_id) AS warehouse_ms
+  FROM system.query.history q
+  WHERE q.start_time >= :start AND q.start_time < :end AND q.compute.warehouse_id IS NOT NULL
+), reads AS (
+  SELECT DISTINCT l.statement_id, l.entity_type, l.entity_id, LOWER(l.source_table_full_name) AS name
+  FROM system.access.table_lineage l
+  WHERE l.event_date = :day AND l.source_table_full_name IS NOT NULL
+), per_read AS (
+  SELECT r.name, r.statement_id AS unit,
+         w.usd * s.ms / NULLIF(s.warehouse_ms, 0) / COUNT(*) OVER (PARTITION BY r.statement_id) AS usd
+  FROM reads r JOIN stmts s ON s.statement_id = r.statement_id
+  JOIN usage w ON w.warehouse_id = s.warehouse_id
+  UNION ALL
+  SELECT r.name, r.entity_id AS unit, j.usd / COUNT(*) OVER (PARTITION BY r.entity_id) AS usd
+  FROM (SELECT DISTINCT entity_id, name FROM reads WHERE entity_type = 'JOB') r
+  JOIN usage j ON j.job_id = r.entity_id
+)
+SELECT name, SUM(usd) AS usd, COUNT(DISTINCT unit) AS reads FROM per_read GROUP BY name
+"""
+
+REDSHIFT_STORAGE = """
+SELECT "database" || '.' || "schema" || '.' || "table" AS name, size AS mb FROM svv_table_info
+"""
+
+# Each query's share of the day (elapsed time), split evenly across the tables it scanned.
+REDSHIFT_COMPUTE = """
+WITH q AS (
+  SELECT query_id, elapsed_time FROM sys_query_history
+  WHERE start_time >= :start AND start_time < :end AND status = 'success' AND query_type = 'SELECT'
+), scans AS (
+  SELECT DISTINCT d.query_id, d.table_id FROM sys_query_detail d JOIN q ON q.query_id = d.query_id
+  WHERE d.step_name = 'scan' AND d.table_id > 0
+), shares AS (
+  SELECT s.query_id, s.table_id,
+         q.elapsed_time::float / NULLIF(SUM(q.elapsed_time) OVER (), 0)
+           / COUNT(*) OVER (PARTITION BY s.query_id) AS share
+  FROM scans s JOIN q ON q.query_id = s.query_id
+)
+SELECT t."database" || '.' || t."schema" || '.' || t."table" AS name, SUM(sh.share) AS share,
+       COUNT(DISTINCT sh.query_id) AS reads
+FROM shares sh JOIN svv_table_info t ON t.table_id = sh.table_id
+GROUP BY 1
+"""
+
+REDSHIFT_SERVERLESS_USAGE = """
+SELECT COALESCE(SUM(charged_seconds), 0) AS rpu_seconds FROM sys_serverless_usage
+WHERE start_time >= :start AND start_time < :end
 """
 
 
@@ -147,7 +230,35 @@ def bigquery_rows(source: CostSource, day: str, storage: Iterable[dict], compute
         out[u]["storage_usd"] = round(int(r["bytes"] or 0) * per_day, 6)
     for r in compute:
         u = dataset_urn("bigquery", r["name"], source.env)
-        out.setdefault(u, {})["compute_usd"] = round(float(r["bytes_billed"] or 0) / 2**40 * source.usd_per_tib, 6)
+        if source.pricing == "editions":
+            usd = float(r.get("slot_ms") or 0) / 3_600_000 * source.usd_per_slot_hour
+        else:
+            usd = float(r["bytes_billed"] or 0) / 2**40 * source.usd_per_tib
+        out.setdefault(u, {})["compute_usd"] = round(usd, 6)
+        out[u]["reads"] = int(r["reads"] or 0)
+    return [CostRow(urn=u, day=day, **v) for u, v in out.items()]
+
+
+def databricks_rows(source: CostSource, day: str, compute: Iterable[dict]) -> list[CostRow]:
+    return [CostRow(urn=dataset_urn("databricks", r["name"], source.env), day=day,
+                    compute_usd=round(float(r["usd"] or 0), 6), reads=int(r["reads"] or 0)) for r in compute]
+
+
+def redshift_rows(source: CostSource, day: str, storage: Iterable[dict], compute: Iterable[dict],
+                  rpu_seconds: float = 0.0) -> list[CostRow]:
+    """Storage at ``storage_usd_per_gb_month`` pro rata; the day's compute (the cluster's daily cost, or
+    Serverless RPU-seconds) split by each table's share of query time."""
+    day_usd = rpu_seconds / 3600 * source.usd_per_rpu_hour if source.serverless else source.daily_compute_usd
+    per_day = source.storage_usd_per_gb_month / 30 / 1024              # SVV_TABLE_INFO.size is in MB
+    out: dict[str, dict[str, Any]] = {}
+    for r in storage:
+        u = dataset_urn("redshift", r["name"], source.env)
+        mb = int(r["mb"] or 0)
+        out.setdefault(u, {})["storage_bytes"] = mb * 2**20
+        out[u]["storage_usd"] = round(mb * per_day, 6)
+    for r in compute:
+        u = dataset_urn("redshift", r["name"], source.env)
+        out.setdefault(u, {})["compute_usd"] = round(float(r["share"] or 0) * day_usd, 6)
         out[u]["reads"] = int(r["reads"] or 0)
     return [CostRow(urn=u, day=day, **v) for u, v in out.items()]
 
@@ -163,6 +274,14 @@ def collect(source: CostSource, registry, day: str) -> list[CostRow]:
             storage = [dict(r._mapping) for r in conn.execute(text(SNOWFLAKE_STORAGE))]
             compute = [dict(r._mapping) for r in conn.execute(text(SNOWFLAKE_COMPUTE), params)]
             return snowflake_rows(source, day, storage, compute)
+        if source.platform == "databricks":
+            compute = [dict(r._mapping) for r in conn.execute(text(DATABRICKS_COMPUTE), {**params, "day": day})]
+            return databricks_rows(source, day, compute)
+        if source.platform == "redshift":
+            storage = [dict(r._mapping) for r in conn.execute(text(REDSHIFT_STORAGE))]
+            compute = [dict(r._mapping) for r in conn.execute(text(REDSHIFT_COMPUTE), params)]
+            rpu = float(conn.execute(text(REDSHIFT_SERVERLESS_USAGE), params).scalar() or 0) if source.serverless else 0.0
+            return redshift_rows(source, day, storage, compute, rpu)
         storage = [dict(r._mapping) for r in conn.execute(text(BIGQUERY_STORAGE.format(region=source.region)))]
         compute = [dict(r._mapping) for r in conn.execute(text(BIGQUERY_COMPUTE.format(region=source.region)
                                                                .replace("@start", ":start").replace("@end", ":end")),
