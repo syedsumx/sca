@@ -2,13 +2,19 @@
 
 Resolution order is configurable; secrets never leave the agent process. Supported
 backends: environment variables, a mounted directory (Kubernetes secrets / CSI),
-HashiCorp Vault KV v2, and AWS Secrets Manager.
+HashiCorp Vault KV v2, AWS Secrets Manager, Google Cloud Secret Manager and Azure Key Vault.
+
+The cloud backends use the agent's own identity: on GCP, workload identity or the VM's service
+account (the metadata server), or a token file; on Azure, a managed identity, workload identity
+federation (``AZURE_FEDERATED_TOKEN_FILE``), or a client secret.
 """
 
 from __future__ import annotations
 
+import base64
 import os
 import re
+import time
 from typing import Any, Optional, Protocol
 
 import httpx
@@ -83,6 +89,94 @@ class AwsSecretsManagerBackend:
             return None
 
 
+class GcpSecretManagerBackend:
+    """``NAME`` is read from ``projects/<project>/secrets/<prefix>NAME/versions/latest``."""
+
+    METADATA = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"
+
+    def __init__(self, project: str, prefix: str = "", token_file: Optional[str] = None, timeout: float = 10.0,
+                 http: Optional[httpx.Client] = None):
+        self.project = project
+        self.prefix = prefix
+        self.token_file = token_file
+        self._http = http or httpx.Client(timeout=timeout)
+        self._token: tuple[float, str] = (0.0, "")
+
+    def _bearer(self) -> str:
+        if self.token_file and os.path.exists(self.token_file):
+            with open(self.token_file) as fh:
+                return fh.read().strip()
+        if os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN"):
+            return os.environ["GOOGLE_OAUTH_ACCESS_TOKEN"]
+        if self._token[0] > time.time() + 60:
+            return self._token[1]
+        resp = self._http.get(self.METADATA, headers={"Metadata-Flavor": "Google"})
+        resp.raise_for_status()
+        body = resp.json()
+        self._token = (time.time() + int(body.get("expires_in", 300)), body["access_token"])
+        return self._token[1]
+
+    def get(self, name: str) -> Optional[str]:
+        url = (f"https://secretmanager.googleapis.com/v1/projects/{self.project}/secrets/"
+               f"{self.prefix}{name}/versions/latest:access")
+        resp = self._http.get(url, headers={"Authorization": f"Bearer {self._bearer()}"})
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return base64.b64decode(resp.json()["payload"]["data"]).decode()
+
+
+class AzureKeyVaultBackend:
+    """``NAME`` is read from ``<vault_url>/secrets/<prefix><name>``; Key Vault names allow only letters,
+    digits and dashes, so ``_`` becomes ``-`` (``FINANCE_PG_PASSWORD`` → ``FINANCE-PG-PASSWORD``)."""
+
+    IMDS = "http://169.254.169.254/metadata/identity/oauth2/token"
+    SCOPE = "https://vault.azure.net"
+
+    def __init__(self, vault_url: str, prefix: str = "", tenant_id: Optional[str] = None,
+                 client_id: Optional[str] = None, client_secret: Optional[str] = None, timeout: float = 10.0,
+                 http: Optional[httpx.Client] = None):
+        self.vault_url = vault_url.rstrip("/")
+        self.prefix = prefix
+        self.tenant_id = tenant_id or os.environ.get("AZURE_TENANT_ID")
+        self.client_id = client_id or os.environ.get("AZURE_CLIENT_ID")
+        self.client_secret = client_secret or os.environ.get("AZURE_CLIENT_SECRET")
+        self._http = http or httpx.Client(timeout=timeout)
+        self._token: tuple[float, str] = (0.0, "")
+
+    def _bearer(self) -> str:
+        if self._token[0] > time.time() + 60:
+            return self._token[1]
+        federated = os.environ.get("AZURE_FEDERATED_TOKEN_FILE")
+        if self.tenant_id and self.client_id and (self.client_secret or federated):
+            data = {"grant_type": "client_credentials", "client_id": self.client_id, "scope": f"{self.SCOPE}/.default"}
+            if self.client_secret:
+                data["client_secret"] = self.client_secret
+            else:
+                with open(federated) as fh:                  # workload identity federation (AKS)
+                    data["client_assertion"] = fh.read().strip()
+                data["client_assertion_type"] = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+            resp = self._http.post(f"https://login.microsoftonline.com/{self.tenant_id}/oauth2/v2.0/token", data=data)
+        else:                                                # a managed identity
+            params = {"api-version": "2018-02-01", "resource": self.SCOPE}
+            if self.client_id:
+                params["client_id"] = self.client_id
+            resp = self._http.get(self.IMDS, params=params, headers={"Metadata": "true"})
+        resp.raise_for_status()
+        body = resp.json()
+        self._token = (time.time() + int(body.get("expires_in", 300)), body["access_token"])
+        return self._token[1]
+
+    def get(self, name: str) -> Optional[str]:
+        key = (self.prefix + name).replace("_", "-")
+        resp = self._http.get(f"{self.vault_url}/secrets/{key}", params={"api-version": "7.4"},
+                              headers={"Authorization": f"Bearer {self._bearer()}"})
+        if resp.status_code == 404:
+            return None
+        resp.raise_for_status()
+        return resp.json().get("value")
+
+
 class SecretResolver:
     def __init__(self, backends: list[SecretBackend]):
         self.backends = backends
@@ -101,6 +195,11 @@ class SecretResolver:
                                              b.get("token_file")))
             elif t == "aws_secrets_manager":
                 backends.append(AwsSecretsManagerBackend(b.get("prefix", "cairn/"), b.get("region")))
+            elif t == "gcp_secret_manager":
+                backends.append(GcpSecretManagerBackend(b["project"], b.get("prefix", ""), b.get("token_file")))
+            elif t == "azure_key_vault":
+                backends.append(AzureKeyVaultBackend(b["vault_url"], b.get("prefix", ""), b.get("tenant_id"),
+                                                     b.get("client_id"), b.get("client_secret")))
             else:
                 raise ValueError(f"unknown secret backend {t!r}")
         return cls(backends)

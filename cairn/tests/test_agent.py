@@ -210,3 +210,47 @@ def test_gateway_keys_persist(tmp_path):
     import os
     import stat
     assert stat.S_IMODE(os.stat(a.path).st_mode) == 0o600
+
+
+def test_cloud_secret_backends(tmp_path, monkeypatch):
+    import base64 as b64
+
+    import httpx
+
+    from cairn.agent.secrets import AzureKeyVaultBackend, EnvBackend, GcpSecretManagerBackend
+
+    seen = []
+
+    def gcp(req: httpx.Request) -> httpx.Response:
+        seen.append(str(req.url))
+        if req.url.host == "metadata.google.internal":
+            assert req.headers["metadata-flavor"] == "Google"
+            return httpx.Response(200, json={"access_token": "gtok", "expires_in": 3600})
+        assert req.headers["authorization"] == "Bearer gtok"
+        if req.url.path.endswith("/secrets/cairn-PG/versions/latest:access"):
+            return httpx.Response(200, json={"payload": {"data": b64.b64encode(b"s3cret").decode()}})
+        return httpx.Response(404)
+    g = GcpSecretManagerBackend("acme", "cairn-", http=httpx.Client(transport=httpx.MockTransport(gcp)))
+    assert g.get("PG") == "s3cret" and g.get("NOPE") is None
+    assert sum("metadata" in u for u in seen) == 1                  # the token is cached
+
+    def azure(req: httpx.Request) -> httpx.Response:
+        if req.url.host == "169.254.169.254":
+            assert req.headers["metadata"] == "true" and req.url.params["resource"] == "https://vault.azure.net"
+            return httpx.Response(200, json={"access_token": "atok", "expires_in": "3600"})
+        if req.url.host == "login.microsoftonline.com":
+            assert b"client_secret=cs" in req.content
+            return httpx.Response(200, json={"access_token": "atok", "expires_in": 3600})
+        assert req.headers["authorization"] == "Bearer atok" and req.url.params["api-version"] == "7.4"
+        if req.url.path == "/secrets/FINANCE-PG-PASSWORD":
+            return httpx.Response(200, json={"value": "kv-secret"})
+        return httpx.Response(404)
+    for var in ("AZURE_TENANT_ID", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_FEDERATED_TOKEN_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    mi = AzureKeyVaultBackend("https://acme.vault.azure.net", http=httpx.Client(transport=httpx.MockTransport(azure)))
+    assert mi.get("FINANCE_PG_PASSWORD") == "kv-secret" and mi.get("OTHER") is None
+    sp = AzureKeyVaultBackend("https://acme.vault.azure.net", tenant_id="t", client_id="c", client_secret="cs",
+                              http=httpx.Client(transport=httpx.MockTransport(azure)))
+    assert sp.get("FINANCE_PG_PASSWORD") == "kv-secret"
+    resolver = SecretResolver([EnvBackend("NOPE_"), mi])
+    assert resolver.resolve({"password": "${FINANCE_PG_PASSWORD}"}) == {"password": "kv-secret"}

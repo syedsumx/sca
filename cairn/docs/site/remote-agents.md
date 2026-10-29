@@ -27,8 +27,29 @@ Manage Ingestion privilege), or through the API.
    the `docker run` and Helm commands to start an agent with it.
 3. Install the agent in the private network with that token (Helm chart `cairn-remote-agent`, or
    the `cairn/remote-agent` container).
-4. In **Data Sources**, create an ingestion source and set its executor to the pool name. Runs are
-   picked up by the agents in that pool; their status and reports appear in Data Sources as usual.
+4. In **Settings → Sources**, add a source and choose the pool under **Runs on**. **Test connection**
+   runs on the pool's agents. Runs are picked up by the agents in that pool, and their status,
+   numbers and logs appear with the source.
+
+## Secrets on the agent
+
+Recipes refer to secrets by name (`${FINANCE_PG_PASSWORD}`). The agent resolves them itself, so the values never leave your network. List the backends in the agent's `secrets` setting (`agent.yml`); they are tried in order:
+
+```
+secrets:
+  - {type: env}                                      # FINANCE_PG_PASSWORD from the environment
+  - {type: directory, path: /var/run/secrets/cairn}  # one file per secret (Kubernetes, CSI)
+  - {type: vault, addr: https://vault:8200, mount: secret, path: cairn, token_file: /vault/token}
+  - {type: aws_secrets_manager, prefix: cairn/, region: eu-west-1}
+  - {type: gcp_secret_manager, project: acme-data, prefix: cairn-}
+  - {type: azure_key_vault, vault_url: https://acme.vault.azure.net, prefix: cairn-}
+```
+
+Each cloud backend uses the agent's own identity:
+
+- **Google Cloud Secret Manager** reads `projects/<project>/secrets/<prefix>NAME/versions/latest`. It authenticates with workload identity or the VM's service account through the metadata server, or with `token_file`.
+- **Azure Key Vault** reads `<vault_url>/secrets/<prefix>NAME`. Key Vault names allow only letters, digits and dashes, so `_` becomes `-`: `FINANCE_PG_PASSWORD` is read as `FINANCE-PG-PASSWORD`. It authenticates with a managed identity, with workload identity federation (`AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_FEDERATED_TOKEN_FILE`), or with a client secret.
+- **AWS Secrets Manager** uses the AWS SDK's credential chain.
 
 ## Watch, follow and cancel runs
 
