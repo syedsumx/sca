@@ -16,6 +16,9 @@ generic webhooks receive the same events as JSON.
 | Microsoft Teams | add a Workflows webhook and set `CAIRN_TEAMS_WEBHOOK_URL` or a per-domain route |
 | Email | set `CAIRN_SMTP_URL` |
 | Webhook | add a route with a URL |
+| Kafka | add a route with a topic; set `CAIRN_EVENTS_KAFKA_BOOTSTRAP` (and `CAIRN_EVENTS_KAFKA_SECURITY_PROTOCOL`, `…_SASL_MECHANISM`, `…_SASL_USERNAME`, `…_SASL_PASSWORD` if needed) |
+| Amazon EventBridge | add a route with an event bus name or ARN; the notifier uses the AWS credential chain (`AWS_REGION`) |
+| Google Cloud Pub/Sub | add a route with `projects/<project>/topics/<topic>`; the notifier uses its Google identity |
 
 What the notifier will and will not call:
 
@@ -33,6 +36,20 @@ What the notifier will and will not call:
 * **Webhooks** never reach loopback, link-local (including cloud metadata at 169.254.169.254) or
   unspecified addresses, and do not follow redirects. Private networks are allowed for on-premises
   receivers; `CAIRN_WEBHOOK_ALLOW_PRIVATE=false` limits webhooks to public addresses.
+
+**Events out to your pipelines.** Kafka, EventBridge and Pub/Sub routes send every matching Cairn event (or only the `event_types` and `domains` the route names) as one JSON object:
+
+```
+{"id": "ntf_…", "type": "quality.incident.raised", "title": "…", "body": "…",
+ "entity_urn": "urn:li:dataset:(…)", "url": "https://cairn/…", "actor": "urn:li:corpuser:…",
+ "details": {…}, "time": "2026-10-30T02:00:00+00:00", "source": "cairn"}
+```
+
+- **Kafka** messages are keyed by the entity, so one asset's events stay in order, and carry a `cairn-event-type` header.
+- **EventBridge** entries have `Source: cairn`, the event type as `DetailType`, and the entity as a resource. Match them with an event pattern such as `{"source": ["cairn"], "detail-type": ["quality.incident.raised"]}`.
+- **Pub/Sub** messages carry `type` and `entity_urn` attributes, for subscription filters.
+
+A delivery that fails is retried on the next rounds, up to five times. The API is `PUT /cairn/api/notify/routes` with routes like `{"id": "to-kafka", "channel": "kafka", "target": "cairn.events", "event_types": [], "domains": []}`.
 
 ## Actions in chat
 

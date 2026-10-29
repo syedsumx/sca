@@ -519,6 +519,11 @@ def _build_active_metadata(s: Services) -> None:
     if s.extensions is not None:
         hub.route_providers.append(s.extensions.routes)
     hub.channels["teams"] = TeamsSender()
+    from cairn.notify.streams import EventBridgeSender, KafkaSender, PubSubSender
+
+    hub.channels["kafka"] = KafkaSender()
+    hub.channels["eventbridge"] = EventBridgeSender()
+    hub.channels["pubsub"] = PubSubSender()
     from cairn.notify.ticketing import TicketingService
     s.ticketing = TicketingService(s.engine, hub, lambda email: actor_for_email(s.graph, email), audit=s.audit)
     hub.channels["ticket"] = s.ticketing.sender

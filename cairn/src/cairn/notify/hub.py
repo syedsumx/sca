@@ -17,6 +17,7 @@ import hashlib
 import hmac
 import json
 import logging
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -98,8 +99,9 @@ class Route(BaseModel):
     id: str = Field(pattern=r"^[a-z0-9][a-z0-9\-]{1,62}$")
     event_types: list[str] = Field(default_factory=list, description="empty = all")
     domains: list[str] = Field(default_factory=list, description="empty = all domains")
-    channel: str = Field(pattern=r"^(slack|teams|webhook|ticket)$")
-    target: str = Field(description="Slack channel id/name, Teams or generic webhook URL, or a ticketing system id")
+    channel: str = Field(pattern=r"^(slack|teams|webhook|ticket|kafka|eventbridge|pubsub)$")
+    target: str = Field(description="Slack channel id/name, Teams or generic webhook URL, a ticketing system id, "
+                                    "a Kafka topic, an EventBridge bus, or a Pub/Sub topic (projects/p/topics/t)")
 
 
 @dataclass
@@ -202,6 +204,14 @@ class NotificationHub:
         for r in routes:
             if r.channel == "teams" and not teams_webhook_allowed(r.target):
                 raise ValueError(f"route {r.id}: Teams target must be an https Microsoft webhook URL")
+            if r.channel == "kafka" and not re.match(r"^[A-Za-z0-9._-]{1,249}$", r.target):
+                raise ValueError(f"route {r.id}: a Kafka topic name has letters, digits, '.', '_' and '-' only")
+            if r.channel == "pubsub" and not re.match(r"^projects/[a-z][a-z0-9-]{4,29}/topics/[A-Za-z][\w.~+%-]{2,254}$",
+                                                      r.target):
+                raise ValueError(f"route {r.id}: a Pub/Sub topic is projects/<project>/topics/<topic>")
+            if r.channel == "eventbridge" and not re.match(r"^(arn:aws[\w-]*:events:[\w-]+:\d{12}:event-bus/)?[\w.\-/]{1,256}$",
+                                                           r.target):
+                raise ValueError(f"route {r.id}: an EventBridge target is an event bus name or ARN")
         with self.engine.begin() as conn:
             conn.execute(notify_routes.delete())
             for r in routes:
