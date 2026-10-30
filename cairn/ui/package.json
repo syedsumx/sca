@@ -14,7 +14,8 @@
     "build:embed": "node scripts/build-embed.mjs",
     "build": "npm run build:mfe && npm run build:embed && npm run build:docs",
     "build:demo": "node scripts/build-demo.mjs",
-    "build:docs": "node scripts/build-docs.mjs"
+    "build:docs": "node scripts/build-docs.mjs",
+    "build:site": "node scripts/build-demo.mjs && node scripts/build-docs.mjs ../docs/site dist/site/docs && cp dist/demo/index.html dist/site/index.html"
   },
   "peerDependencies": {
     "antd": "4.24.7",
