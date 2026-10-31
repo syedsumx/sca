@@ -257,11 +257,11 @@ fn versioning_keeps_old_versions_and_delete_markers() {
         ]
     );
     // Removing the delete marker brings back the newest version.
-    e.delete_version("b", "k", d.version_id.as_ref().unwrap()).unwrap();
+    e.delete_version("b", "k", d.version_id.as_ref().unwrap(), false).unwrap();
     assert_eq!(read(&e, "b", "k"), b"two");
     // Permanently deleting the current version promotes the previous one, and frees its blobs.
     let before = blob_count(dir.path());
-    e.delete_version("b", "k", &v2.version_id).unwrap();
+    e.delete_version("b", "k", &v2.version_id, false).unwrap();
     assert_eq!(read(&e, "b", "k"), b"one");
     assert_eq!(blob_count(dir.path()), before - 1);
     // Pagination over versions.
@@ -270,12 +270,12 @@ fn versioning_keeps_old_versions_and_delete_markers() {
     let p2 = e.list_versions("b", "", "", &p1.next_key, &p1.next_version, 10).unwrap();
     assert_eq!(p2.entries.iter().map(|x| x.obj.version().to_string()).collect::<Vec<_>>(), vec!["null".to_string()]);
     // A bucket with versions is not empty; recovery keeps version blobs.
-    e.delete_version("b", "k", &v1.version_id).unwrap();
+    e.delete_version("b", "k", &v1.version_id, false).unwrap();
     assert!(matches!(e.delete_bucket("b"), Err(Error::BucketNotEmpty)));
     let rep = e.recover().unwrap();
     assert_eq!((rep.unreferenced_blobs_removed, rep.objects_with_missing_blobs), (0, 0));
     assert_eq!(read(&e, "b", "k"), b"zero");
-    e.delete_version("b", "k", "null").unwrap();
+    e.delete_version("b", "k", "null", false).unwrap();
     e.delete_bucket("b").unwrap();
 }
 
@@ -299,4 +299,41 @@ fn suspended_versioning_replaces_the_null_version() {
     assert_eq!(vs.entries.len(), 2);
     assert!(vs.entries[0].obj.delete_marker && vs.entries[0].latest);
     assert_eq!(e.recover().unwrap().unreferenced_blobs_removed, 0);
+}
+
+#[test]
+fn object_lock_is_enforced_by_the_engine() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.create_bucket_with("b", "Enabled", &[("object-lock", b"{}")]).unwrap();
+    let mut w = e.new_blob().unwrap();
+    w.write(b"x").unwrap();
+    let seg = w.seal().unwrap();
+    let far = now_ms() + 3_600_000;
+    let o = Object {
+        key: "k".into(),
+        size: 1,
+        segments: vec![seg],
+        lock: Lock { mode: "COMPLIANCE".into(), until: far, legal_hold: false },
+        ..Default::default()
+    };
+    let v = e.put_object("b", o, &Condition::default()).unwrap();
+    assert!(matches!(e.delete_version("b", "k", &v.version_id, true), Err(Error::ObjectLocked)));
+    // A plain delete only adds a delete marker; the locked version stays.
+    e.delete_object("b", "k", None).unwrap();
+    assert!(e.get_version("b", "k", Some(&v.version_id)).is_ok());
+    // Governance gives way with bypass; legal hold never does.
+    e.update_object("b", "k", Some(&v.version_id), |o| {
+        o.lock = Lock { mode: "GOVERNANCE".into(), until: far, legal_hold: true };
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(e.delete_version("b", "k", &v.version_id, true), Err(Error::ObjectLocked)));
+    e.update_object("b", "k", Some(&v.version_id), |o| {
+        o.lock.legal_hold = false;
+        Ok(())
+    })
+    .unwrap();
+    assert!(matches!(e.delete_version("b", "k", &v.version_id, false), Err(Error::ObjectLocked)));
+    e.delete_version("b", "k", &v.version_id, true).unwrap();
 }

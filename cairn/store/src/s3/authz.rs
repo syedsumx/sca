@@ -42,6 +42,12 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "GetBucketLocation" => "s3:GetBucketLocation",
         "GetBucketVersioning" => "s3:GetBucketVersioning",
         "PutBucketVersioning" => "s3:PutBucketVersioning",
+        "PutObjectLockConfiguration" => "s3:PutBucketObjectLockConfiguration",
+        "GetObjectLockConfiguration" => "s3:GetBucketObjectLockConfiguration",
+        "PutObjectRetention" => "s3:PutObjectRetention",
+        "GetObjectRetention" => "s3:GetObjectRetention",
+        "PutObjectLegalHold" => "s3:PutObjectLegalHold",
+        "GetObjectLegalHold" => "s3:GetObjectLegalHold",
         "ListObjectVersions" => "s3:ListBucketVersions",
         "GetBucketAcl" => "s3:GetBucketAcl",
         "PutBucketAcl" => "s3:PutBucketAcl",
@@ -255,6 +261,9 @@ impl Server {
             ("x-amz-acl", "s3:x-amz-acl"),
             ("x-amz-content-sha256", "s3:x-amz-content-sha256"),
             ("x-amz-server-side-encryption", "s3:x-amz-server-side-encryption"),
+            ("x-amz-object-lock-mode", "s3:object-lock-mode"),
+            ("x-amz-object-lock-retain-until-date", "s3:object-lock-retain-until-date"),
+            ("x-amz-object-lock-legal-hold", "s3:object-lock-legal-hold"),
         ] {
             let v = c.header(h);
             if !v.is_empty() {

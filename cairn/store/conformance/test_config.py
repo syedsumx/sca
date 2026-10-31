@@ -148,13 +148,10 @@ def test_unsupported_config_is_refused_not_ignored(s3, bucket, call):
     assert code(ei) == "NotImplemented"
 
 
-def test_unsupported_object_lock_is_refused(s3, bucket):
-    s3.put_object(Bucket=bucket, Key="l", Body=b"x")
+def test_lock_headers_need_an_object_lock_bucket(s3, bucket):
     with pytest.raises(ClientError) as ei:
         s3.put_object_legal_hold(Bucket=bucket, Key="l", LegalHold={"Status": "ON"})
-    assert code(ei) == "NotImplemented"
+    assert code(ei) == "InvalidRequest"
     with pytest.raises(ClientError) as ei:
-        s3.create_bucket(Bucket="lock-me", ObjectLockEnabledForBucket=True)
-    assert code(ei) == "NotImplemented"
-    with pytest.raises(ClientError):
-        s3.head_bucket(Bucket="lock-me")
+        s3.put_object(Bucket=bucket, Key="l", Body=b"x", ObjectLockLegalHoldStatus="ON")
+    assert code(ei) == "InvalidRequest"

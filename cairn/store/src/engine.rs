@@ -54,6 +54,8 @@ pub enum Error {
     NoSuchKey,
     NoSuchUpload,
     NoSuchVersion,
+    /// Object lock protects the version.
+    ObjectLocked,
     /// The version is a delete marker (GET/HEAD by version, tagging).
     MethodNotAllowed,
     PreconditionFailed,
@@ -135,6 +137,28 @@ pub struct Object {
     /// When this version stopped being current (ms), for lifecycle rules on noncurrent versions.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub noncurrent_since: u64,
+    #[serde(flatten)]
+    pub lock: Lock,
+}
+
+/// Object lock state of one version: retention (mode and date) and legal hold.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Lock {
+    /// "", "GOVERNANCE" or "COMPLIANCE".
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "lock_mode")]
+    pub mode: String,
+    /// Retain until (ms since the epoch).
+    #[serde(default, skip_serializing_if = "is_zero", rename = "retain_until")]
+    pub until: u64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legal_hold: bool,
+}
+
+impl Lock {
+    /// Would deleting this version now be refused? `bypass`: the caller may bypass governance retention.
+    pub fn protects(&self, now: u64, bypass: bool) -> bool {
+        self.legal_hold || (self.until > now && (self.mode == "COMPLIANCE" || (self.mode == "GOVERNANCE" && !bypass)))
+    }
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -197,6 +221,8 @@ pub struct Upload {
     pub checksum_type: String,
     #[serde(default)]
     pub tags: BTreeMap<String, String>,
+    #[serde(flatten)]
+    pub lock: Lock,
 }
 
 /// An uploaded part.
@@ -546,14 +572,23 @@ impl Engine {
     // ------------------------------------------------------------------------------------- buckets
 
     pub fn create_bucket(&self, name: &str) -> Result<()> {
+        self.create_bucket_with(name, "", &[])
+    }
+
+    /// Creates a bucket with its versioning state and configuration documents, in one transaction.
+    pub fn create_bucket_with(&self, name: &str, versioning: &str, configs: &[(&str, &[u8])]) -> Result<()> {
         let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(BUCKETS)?;
             if t.get(name)?.is_some() {
                 return Err(Error::BucketExists);
             }
-            let v = serde_json::to_vec(&BucketInfo { name: name.into(), created: now_ms(), versioning: String::new() })?;
+            let v = serde_json::to_vec(&BucketInfo { name: name.into(), created: now_ms(), versioning: versioning.into() })?;
             t.insert(name, v.as_slice())?;
+            let mut cfg = tx.open_table(CONFIG)?;
+            for (kind, doc) in configs {
+                cfg.insert((name, *kind), *doc)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -927,7 +962,10 @@ impl Engine {
 
     /// Permanently deletes one version (or delete marker). If it was the current version, the newest
     /// remaining version becomes current again, unless that is a delete marker. A missing version succeeds.
-    pub fn delete_version(&self, bucket: &str, key: &str, version: &str) -> Result<Deleted> {
+    /// Object lock is enforced here: a version under legal hold or unexpired retention is not removed
+    /// (governance retention gives way only with `bypass_governance`).
+    pub fn delete_version(&self, bucket: &str, key: &str, version: &str, bypass_governance: bool) -> Result<Deleted> {
+        let now = now_ms();
         let want = if version == "null" { "" } else { version };
         let tx = self.begin_write()?;
         let (out, garbage) = {
@@ -938,11 +976,17 @@ impl Engine {
             let mut garbage = vec![];
             match Self::current_in(&t, bucket, key)? {
                 Some(c) if c.version_id == want => {
+                    if c.lock.protects(now, bypass_governance) {
+                        return Err(Error::ObjectLocked);
+                    }
                     t.remove((bucket, key))?;
                     garbage = c.segments;
                 }
                 cur => {
                     if let Some((order, o)) = Self::versions_in(&vt, bucket, key)?.into_iter().find(|(_, o)| o.version_id == want) {
+                        if o.lock.protects(now, bypass_governance) {
+                            return Err(Error::ObjectLocked);
+                        }
                         vt.remove((bucket, key, order.as_str()))?;
                         out.delete_marker = o.delete_marker;
                         garbage = o.segments;
@@ -1354,6 +1398,7 @@ impl Engine {
                 segments: parts.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size }).collect(),
                 part_count: parts.len() as u32,
                 tags: u.tags.clone(),
+                lock: u.lock.clone(),
                 ..Default::default()
             };
             let (obj, mut garbage) = Self::install(&tx, &info.versioning, bucket, obj, cur)?;

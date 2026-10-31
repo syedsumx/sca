@@ -428,7 +428,7 @@ impl Server {
                             newer += 1;
                         }
                         let since = if o.noncurrent_since > 0 { o.noncurrent_since } else { o.modified };
-                        if applies && !kept && now >= since + d * day && self.eng.delete_version(bucket, &key, o.version()).is_ok() {
+                        if applies && !kept && now >= since + d * day && self.eng.delete_version(bucket, &key, o.version(), false).is_ok() {
                             pass.noncurrent_expired += 1;
                         }
                     }
@@ -439,7 +439,7 @@ impl Server {
                         let mine: Vec<_> = list.entries.iter().filter(|v| v.obj.key == key).collect();
                         if mine.len() == 1
                             && mine[0].obj.delete_marker
-                            && self.eng.delete_version(bucket, &key, mine[0].obj.version()).is_ok()
+                            && self.eng.delete_version(bucket, &key, mine[0].obj.version(), false).is_ok()
                         {
                             pass.delete_markers_removed += 1;
                         }

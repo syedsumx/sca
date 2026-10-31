@@ -9,6 +9,7 @@ mod cors;
 pub mod errors;
 mod handlers;
 pub mod lifecycle;
+mod objectlock;
 pub mod policy;
 mod versioning;
 pub mod xml;

@@ -425,7 +425,16 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Lifecycle rules.** Each bucket can have lifecycle rules (`PutBucketLifecycleConfiguration`). Rules can expire current objects a number of days after they were written, or on a date. They can also remove delete markers that are the last thing left of an object, expire noncurrent versions (optionally keeping the newest few), and abort multipart uploads left unfinished. A rule can select objects by prefix, tags and size. The store applies the rules in the background, every `CAIRN_STORE_LIFECYCLE_INTERVAL` seconds (default 3600). It only expires the version it checked, so an object rewritten in the meantime is kept. Responses for objects that will expire carry `x-amz-expiration`. Metrics: `cairn_store_lifecycle_*_total`. Transitions to other storage classes are refused for now.
 
-**Not supported yet.** Object lock and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
+**Object lock.** Buckets created with object lock (`x-amz-bucket-object-lock-enabled: true`), or versioned buckets that get an object lock configuration, keep versions write-once:
+
+- **Retention.** A version can carry retention until a date, in `GOVERNANCE` or `COMPLIANCE` mode, set per object or from the bucket's default retention.
+- **Compliance mode.** The version cannot be deleted, and its retention cannot be shortened, by anyone, including admin keys, until the date passes.
+- **Governance mode.** The same, unless a request with `x-amz-bypass-governance-retention: true` comes from a key allowed `s3:BypassGovernanceRetention`.
+- **Legal hold.** A legal hold blocks deletion until it is removed.
+- **Where it is enforced.** The engine enforces protection, so client deletes, batch deletes and lifecycle rules all respect it. Overwrites and plain deletes keep the locked version, as a noncurrent version under a delete marker.
+- **Versioning.** Versioning cannot be suspended on such a bucket.
+
+**Not supported yet.** Encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

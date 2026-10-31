@@ -89,6 +89,18 @@ errors! {
     LIFECYCLE_INVALID_DAYS = "InvalidArgument", 400, "Days, NoncurrentDays and DaysAfterInitiation must be positive integers.";
     LIFECYCLE_INVALID_DATE = "InvalidArgument", 400, "Date must be in ISO 8601 format and at midnight UTC.";
     LIFECYCLE_NO_ACTION = "InvalidRequest", 400, "At least one action needs to be specified in a rule.";
+    OBJECT_LOCKED = "AccessDenied", 403, "Access Denied because object protected by object lock.";
+    LOCK_NOT_CONFIGURED = "InvalidRequest", 400, "Bucket is missing Object Lock Configuration";
+    LOCK_HEADERS = "InvalidArgument", 400, "x-amz-object-lock-mode and x-amz-object-lock-retain-until-date must both be supplied, with mode GOVERNANCE or COMPLIANCE.";
+    LOCK_INVALID_DATE = "InvalidArgument", 400, "The retain until date must be an ISO 8601 date and time.";
+    LOCK_PAST_DATE = "InvalidArgument", 400, "The retain until date must be in the future!";
+    LOCK_INVALID_PERIOD = "InvalidArgument", 400, "Default retention period must be a positive integer value.";
+    LOCK_NEEDS_CHECKSUM = "InvalidRequest", 400, "Content-MD5 or a checksum header is required for Put Object requests with Object Lock parameters";
+    LOCK_COMPLIANCE = "AccessDenied", 403, "Access Denied: COMPLIANCE mode retention cannot be shortened, removed or changed to GOVERNANCE.";
+    LOCK_GOVERNANCE = "AccessDenied", 403, "Access Denied: shortening or removing GOVERNANCE retention needs x-amz-bypass-governance-retention and s3:BypassGovernanceRetention.";
+    LOCK_NEEDS_VERSIONING_ENABLED = "InvalidBucketState", 409, "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration";
+    NO_SUCH_LOCK_CONFIG = "ObjectLockConfigurationNotFoundError", 404, "Object Lock configuration does not exist for this bucket";
+    NO_SUCH_OBJECT_LOCK = "NoSuchObjectLockConfiguration", 404, "The specified object does not have a ObjectLock configuration";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
@@ -106,6 +118,7 @@ impl From<crate::engine::Error> for ApiError {
             E::NoSuchKey => NO_SUCH_KEY.clone(),
             E::NoSuchUpload => NO_SUCH_UPLOAD.clone(),
             E::NoSuchVersion => NO_SUCH_VERSION.clone(),
+            E::ObjectLocked => OBJECT_LOCKED.clone(),
             E::MethodNotAllowed => METHOD_NOT_ALLOWED.clone(),
             E::PreconditionFailed => PRECONDITION.clone(),
             E::InvalidPart => INVALID_PART.clone(),

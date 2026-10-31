@@ -31,17 +31,8 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 9] = [
-    "object-lock",
-    "encryption",
-    "notification",
-    "replication",
-    "logging",
-    "website",
-    "requestPayment",
-    "accelerate",
-    "intelligent-tiering",
-];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 8] =
+    ["encryption", "notification", "replication", "logging", "website", "requestPayment", "accelerate", "intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 5] = ["content-encoding", "content-disposition", "content-language", "cache-control", "expires"];
@@ -148,6 +139,12 @@ impl Server {
                 Ok(xml_resp(StatusCode::OK, w.finish()))
             }
             "PutBucketVersioning" => self.put_versioning(c, body).await,
+            "PutObjectLockConfiguration" => self.put_lock_config(c, body).await,
+            "GetObjectLockConfiguration" => self.get_lock_config(c),
+            "PutObjectRetention" => self.put_retention(c, body).await,
+            "GetObjectRetention" => self.get_retention(c),
+            "PutObjectLegalHold" => self.put_legal_hold(c, body).await,
+            "GetObjectLegalHold" => self.get_legal_hold(c),
             "ListObjectVersions" => self.list_versions(c),
             "GetBucketAcl" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
@@ -184,9 +181,10 @@ impl Server {
             "HeadObject" => self.get_object(c, true),
             "DeleteObject" => {
                 let if_match = c.header("if-match");
+                let bypass = self.bypass_governance(c, &c.key).await?;
                 let d = blocking(|| match c.q("versionId") {
                     "" => self.eng.delete_object(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match)),
-                    v => self.eng.delete_version(&c.bucket, &c.key, v),
+                    v => self.eng.delete_version(&c.bucket, &c.key, v, bypass),
                 })?;
                 let mut r = empty(StatusCode::NO_CONTENT);
                 if let Some(v) = &d.version_id {
@@ -339,15 +337,18 @@ impl Server {
             return Err(e::INVALID_BUCKET_NAME.clone());
         }
         check_acl_headers(c)?;
-        if c.header("x-amz-bucket-object-lock-enabled").eq_ignore_ascii_case("true") {
-            return Err(e::NOT_IMPLEMENTED.clone());
-        }
+        let lock = c.header("x-amz-bucket-object-lock-enabled").eq_ignore_ascii_case("true");
         let doc = self.read_small(c, body, 64 << 10).await?;
         let doc = String::from_utf8_lossy(&doc);
         if !doc.trim().is_empty() && xml::parse(&doc).is_none() {
             return Err(e::MALFORMED_XML.clone());
         }
-        blocking(|| self.eng.create_bucket(&c.bucket))?;
+        if lock {
+            // Object lock needs versioning: the bucket starts with it enabled, in the same transaction.
+            blocking(|| self.eng.create_bucket_with(&c.bucket, "Enabled", &[("object-lock", b"{}")]))?;
+        } else {
+            blocking(|| self.eng.create_bucket(&c.bucket))?;
+        }
         let mut r = empty(StatusCode::OK);
         set_header(&mut r, "location", &format!("/{}", c.bucket));
         Ok(r)
@@ -373,11 +374,18 @@ impl Server {
                 w.open("Error").el("Key", &k).opt("VersionId", &vid).el("Code", err.code).el("Message", err.message).close();
                 continue;
             }
+            let bypass = match self.bypass_governance(c, &k).await {
+                Ok(b) => b,
+                Err(err) => {
+                    w.open("Error").el("Key", &k).opt("VersionId", &vid).el("Code", err.code).el("Message", err.message).close();
+                    continue;
+                }
+            };
             let res = blocking(|| {
                 if vid.is_empty() {
                     self.eng.delete_object(&c.bucket, &k, None)
                 } else {
-                    self.eng.delete_version(&c.bucket, &k, &vid)
+                    self.eng.delete_version(&c.bucket, &k, &vid, bypass)
                 }
             });
             match res {
@@ -535,6 +543,7 @@ impl Server {
         check_acl_headers(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
+        let lock = self.lock_for_write(c, &c.bucket)?;
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         let compute: Vec<&str> = [algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
         let (seg, md5, checksums) = self.receive(c, body, self.max_obj, &compute).await?;
@@ -551,6 +560,7 @@ impl Server {
             segments: vec![seg],
             part_count: 0,
             tags,
+            lock,
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
@@ -655,6 +665,7 @@ impl Server {
         if !obj.tags.is_empty() {
             set_header(&mut r, "x-amz-tagging-count", &obj.tags.len().to_string());
         }
+        Self::lock_headers(&mut r, &obj);
         if version.is_empty() {
             if let Some(x) = self.expiration_header(&c.bucket, &obj) {
                 set_header(&mut r, "x-amz-expiration", &x);
@@ -753,6 +764,7 @@ impl Server {
             Ok((info, self.copy_bytes(c, &src, "", &algos)?))
         })?;
         let tags = if tag_directive == "REPLACE" { new_tags } else { src_obj.tags.clone() };
+        let lock = self.lock_for_write(c, &c.bucket)?;
         let (ct, hs, um) = if directive == "REPLACE" {
             object_headers(c)
         } else {
@@ -771,6 +783,7 @@ impl Server {
             segments: vec![seg],
             part_count: 0,
             tags,
+            lock,
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
@@ -794,6 +807,7 @@ impl Server {
         }
         check_acl_headers(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
+        let lock = self.lock_for_write(c, &c.bucket)?;
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         if !algo.is_empty() && !checksum::valid(&algo) {
             return Err(e::INVALID_ARGUMENT.clone());
@@ -818,6 +832,7 @@ impl Server {
                 checksum_algo: algo.clone(),
                 checksum_type: ctype.clone(),
                 tags,
+                lock,
                 ..Default::default()
             })
         })?;
@@ -1031,6 +1046,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("publicAccessBlock") => "PutPublicAccessBlock",
             Method::PUT if c.has("versioning") => "PutBucketVersioning",
             Method::PUT if c.has("lifecycle") => "PutBucketLifecycle",
+            Method::PUT if c.has("object-lock") => "PutObjectLockConfiguration",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
             Method::PUT => "CreateBucket",
             Method::DELETE if c.has("tagging") => "DeleteBucketTagging",
@@ -1058,9 +1074,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("publicAccessBlock") => "GetPublicAccessBlock",
             Method::GET if c.has("lifecycle") => "GetBucketLifecycle",
             Method::GET if c.has("versions") => "ListObjectVersions",
-            Method::GET if any(&["object-lock", "replication", "encryption", "website", "logging", "notification", "requestPayment"]) => {
-                "Unsupported"
-            }
+            Method::GET if c.has("object-lock") => "GetObjectLockConfiguration",
+            Method::GET if any(&["replication", "encryption", "website", "logging", "notification", "requestPayment"]) => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",
@@ -1077,13 +1092,16 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
         }
         Method::PUT if c.has("tagging") => "PutObjectTagging",
         Method::PUT if c.has("acl") => "PutObjectAcl",
-        Method::PUT if any(&["retention", "legal-hold"]) => "Unsupported",
+        Method::PUT if c.has("retention") => "PutObjectRetention",
+        Method::PUT if c.has("legal-hold") => "PutObjectLegalHold",
         Method::PUT if copy => "CopyObject",
         Method::PUT => "PutObject",
         Method::GET if c.has("uploadId") => "ListParts",
         Method::GET if c.has("acl") => "GetObjectAcl",
         Method::GET if c.has("tagging") => "GetObjectTagging",
-        Method::GET if any(&["attributes", "torrent", "retention", "legal-hold"]) => "Unsupported",
+        Method::GET if c.has("retention") => "GetObjectRetention",
+        Method::GET if c.has("legal-hold") => "GetObjectLegalHold",
+        Method::GET if any(&["attributes", "torrent"]) => "Unsupported",
         Method::GET => "GetObject",
         Method::HEAD => "HeadObject",
         Method::DELETE if c.has("uploadId") => "AbortMultipartUpload",
