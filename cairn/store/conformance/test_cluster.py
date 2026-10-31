@@ -362,3 +362,106 @@ def test_a_single_store_joins_a_cluster(binary, tmp_path):
         assert not os.listdir(os.path.join(data, "packs")) if os.path.isdir(os.path.join(data, "packs")) else True
     finally:
         c.stop()
+
+
+def zones_of(c, blob):
+    return [c[h].extra_env.get("CAIRN_STORE_CLUSTER_ZONE", "") for h in holders(blob)]
+
+
+def zoned(binary, tmp_path, layout, **env):
+    """A cluster whose nodes sit in the given zones: {"n0": "a", ...}."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    c = Cluster(binary, tmp_path, new_database(), **env)
+    for name, zone in layout.items():
+        c.add(name, CAIRN_STORE_CLUSTER_ZONE=zone, CAIRN_STORE_CLUSTER_RACK=f"rack-{name}")
+    return c
+
+
+def test_copies_are_spread_across_zones(binary, tmp_path):
+    c = zoned(binary, tmp_path / "z", {"n0": "a", "n1": "a", "n2": "b", "n3": "b"}, CAIRN_STORE_CLUSTER_SPREAD="zone")
+    try:
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="zoned")
+        for i in range(20):
+            c[f"n{i % 4}"].client().put_object(Bucket="zoned", Key=f"k{i}", Body=os.urandom(3000))
+        for (blob,) in blob_ids(c.meta, "zoned").values():
+            assert sorted(zones_of(c, blob)) == ["a", "b"], blob
+        st = status(c["n0"])
+        assert st["spread"] == "zone" and {n["name"]: n["zone"] for n in st["nodes"]} == {"n0": "a", "n1": "a", "n2": "b", "n3": "b"}
+        # A whole zone down: reads go on from the other zone; writes are refused rather than kept in one zone.
+        kill(c["n2"])
+        kill(c["n3"])
+        for i in range(20):
+            assert s0.get_object(Bucket="zoned", Key=f"k{i}")["Body"].read()
+        wait_for(lambda: sum(n["alive"] for n in status(c["n0"])["nodes"]) == 2, what="zone b down")
+        with pytest.raises(ClientError) as ei:
+            s0.put_object(Bucket="zoned", Key="one-zone", Body=b"x")
+        assert ei.value.response["ResponseMetadata"]["HTTPStatusCode"] == 503
+    finally:
+        c.stop()
+
+
+def test_default_spread_prefers_other_zones(binary, tmp_path):
+    c = zoned(binary, tmp_path / "d", {"n0": "a", "n1": "a", "n2": "b"})
+    try:
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="prefer")
+        for i in range(10):
+            s0.put_object(Bucket="prefer", Key=f"k{i}", Body=b"y" * 2000)
+        # Written on n0 (zone a): the second copy goes to zone b, not to n1 next to it.
+        for (blob,) in blob_ids(c.meta, "prefer").values():
+            assert holders(blob)[0] == "n0" and sorted(zones_of(c, blob)) == ["a", "b"], blob
+    finally:
+        c.stop()
+
+
+def test_erasure_coded_shards_spread_across_zones(binary, tmp_path):
+    layout = {"n0": "a", "n1": "a", "n2": "b", "n3": "b", "n4": "c", "n5": "c"}
+    c = zoned(binary, tmp_path / "e", layout, CAIRN_STORE_CLUSTER_SPREAD="zone", CAIRN_STORE_CLUSTER_EC="2+1",
+              CAIRN_STORE_CLUSTER_EC_ABOVE="10000")
+    try:
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="ec-zones")
+        big = os.urandom(300_000)
+        for i in range(6):
+            s0.put_object(Bucket="ec-zones", Key=f"b{i}", Body=big)
+        for (blob,) in blob_ids(c.meta, "ec-zones").values():
+            assert blob.startswith("e:2+1:") and sorted(zones_of(c, blob)) == ["a", "b", "c"], blob
+        # Losing a whole zone loses at most one shard: everything still reads.
+        kill(c["n4"])
+        kill(c["n5"])
+        for i in range(6):
+            assert c["n1"].client().get_object(Bucket="ec-zones", Key=f"b{i}")["Body"].read() == big
+    finally:
+        c.stop()
+
+
+def test_repair_moves_copies_that_share_a_zone(binary, tmp_path):
+    c = zoned(binary, tmp_path / "m", {"n0": "a", "n1": "a"}, CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    try:
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="moved")
+        for i in range(10):
+            s0.put_object(Bucket="moved", Key=f"k{i}", Body=os.urandom(2500))
+        assert all(zones_of(c, b[0]) == ["a", "a"] for b in blob_ids(c.meta, "moved").values())
+        # The operator adds zone b and makes zone spread the rule.
+        for n in ("n0", "n1"):
+            c[n].stop()
+            c[n].extra_env["CAIRN_STORE_CLUSTER_SPREAD"] = "zone"
+            c[n].start()
+        for n in ("n2", "n3"):
+            c.add(n, CAIRN_STORE_CLUSTER_ZONE="b", CAIRN_STORE_CLUSTER_RACK=f"rack-{n}", CAIRN_STORE_CLUSTER_SPREAD="zone")
+        wait_for(lambda: sum(n["alive"] for n in status(c["n0"])["nodes"]) == 4, what="zone b up")
+        assert status(c["n0"])["blobs"]["degraded"] == 10  # misplaced until repaired
+        code, rep = admin(c["n0"], "POST", "cluster/repair")
+        assert code == 200 and rep["repaired"] == 10 and rep["lost"] == 0, rep
+        assert all(sorted(zones_of(c, b[0])) == ["a", "b"] for b in blob_ids(c.meta, "moved").values())
+        for i in range(10):
+            assert c["n3"].client().get_object(Bucket="moved", Key=f"k{i}")["Body"].read()
+        # A node in a cluster with zone spread must say where it is.
+        bad = Store(binary, str(tmp_path / "nozone"), _free_port(), env={**c["n0"].extra_env, "CAIRN_STORE_CLUSTER_NODE": "n9",
+                                                                       "CAIRN_STORE_CLUSTER_ZONE": ""})
+        with pytest.raises(RuntimeError):
+            bad.start()
+    finally:
+        c.stop()

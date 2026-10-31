@@ -546,6 +546,10 @@ cairn:
       clusterSecretKey: cluster-secret
       deadAfterSeconds: 60
       repairIntervalSeconds: 300
+      # Failure domains. Each node's rack is the Kubernetes node it runs on; its zone is `zone` (one per
+      # release; run a release per zone for multi-zone clusters). spread: node, rack (hosts) or zone.
+      zone: ""
+      spread: node   # rack once the nodes run on at least `copies` Kubernetes nodes
     # SFTP for file-transfer clients: the user name is an access key, signing in with its secret key or an
     # SSH public key (ssh_keys in the credentials file).
     sftp:

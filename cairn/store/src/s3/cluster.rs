@@ -58,6 +58,11 @@ pub struct ClusterConfig {
     pub heartbeat: Duration,
     pub dead_after: Duration,
     pub repair_every: Duration,
+    /// Where this node is: its zone (a data center or availability zone) and rack (or host).
+    pub zone: String,
+    pub rack: String,
+    /// The failure domain copies must not share: "node" (default), "rack" or "zone".
+    pub spread: String,
 }
 
 impl ClusterConfig {
@@ -81,6 +86,23 @@ impl ClusterConfig {
             if k < 2 || m < 1 || k + m > 32 {
                 return Err("CAIRN_STORE_CLUSTER_EC: k+m with k >= 2, m >= 1 and k+m <= 32 (e.g. 4+2)".into());
             }
+        }
+        let label_ok = |v: &str| v.len() <= 63 && v.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c));
+        if !label_ok(&self.zone) || !label_ok(&self.rack) {
+            return Err("CAIRN_STORE_CLUSTER_ZONE / _RACK: up to 63 letters, digits, '-', '_' and '.'".into());
+        }
+        match self.spread.as_str() {
+            "node" => {}
+            "rack" if !self.rack.is_empty() => {}
+            "zone" if !self.zone.is_empty() => {}
+            "rack" | "zone" => {
+                return Err(format!(
+                    "CAIRN_STORE_CLUSTER_SPREAD={}: set this node's CAIRN_STORE_CLUSTER_{}",
+                    self.spread,
+                    self.spread.to_uppercase()
+                ))
+            }
+            _ => return Err("CAIRN_STORE_CLUSTER_SPREAD: node, rack or zone".into()),
         }
         if self.dead_after <= self.heartbeat * 2 {
             return Err("CAIRN_STORE_CLUSTER_DEAD_AFTER must be more than twice the heartbeat".into());
@@ -107,6 +129,10 @@ pub struct NodeRec {
     pub started: u64,
     #[serde(default)]
     pub version: String,
+    #[serde(default)]
+    pub zone: String,
+    #[serde(default)]
+    pub rack: String,
 }
 
 #[derive(Default)]
@@ -218,7 +244,15 @@ impl Cluster {
                         return None;
                     }
                     let state = prev.map(|p| p.state).unwrap_or_else(|| "active".into());
-                    let rec = NodeRec { url, state, heartbeat: now, started: now, version: crate::VERSION.into() };
+                    let rec = NodeRec {
+                        url,
+                        state,
+                        heartbeat: now,
+                        started: now,
+                        version: crate::VERSION.into(),
+                        zone: self.cfg.zone.clone(),
+                        rack: self.cfg.rack.clone(),
+                    };
                     Some(serde_json::to_vec(&rec).unwrap())
                 },
                 None,
@@ -249,6 +283,8 @@ impl Cluster {
                         heartbeat: now,
                         started: now,
                         version: crate::VERSION.into(),
+                        zone: String::new(),
+                        rack: String::new(),
                     });
                     if rec.state == "removed" {
                         removed = true;
@@ -256,6 +292,8 @@ impl Cluster {
                     }
                     rec.url = url;
                     rec.heartbeat = now;
+                    rec.zone = self.cfg.zone.clone();
+                    rec.rack = self.cfg.rack.clone();
                     Some(serde_json::to_vec(&rec).unwrap())
                 },
                 None,
@@ -296,6 +334,67 @@ impl Cluster {
 
     fn node(&self, name: &str) -> Option<NodeRec> {
         self.all_nodes().into_iter().find(|(n, _)| n == name).map(|(_, r)| r)
+    }
+
+    // ------------------------------------------------------------------------------- topology
+
+    /// A node's failure domain at the configured spread level.
+    fn domain(&self, name: &str) -> String {
+        let r = self.node(name);
+        let (zone, rack) = r.map(|r| (r.zone, r.rack)).unwrap_or_default();
+        match self.cfg.spread.as_str() {
+            "zone" => format!("z:{zone}"),
+            "rack" => format!("r:{zone}/{rack}"),
+            _ => format!("n:{name}"),
+        }
+    }
+
+    fn strict(&self) -> bool {
+        self.cfg.spread != "node"
+    }
+
+    /// Orders candidate nodes so that each next one shares as few zones, then racks, as possible with
+    /// the nodes already `taken` and those picked before it (ties keep the given order: this node
+    /// first, then shuffled).
+    fn diverse(&self, cands: Vec<String>, taken: &[String]) -> Vec<String> {
+        let all: HashMap<String, NodeRec> = self.all_nodes().into_iter().collect();
+        let loc = |n: &str| all.get(n).map(|r| (r.zone.clone(), format!("{}/{}", r.zone, r.rack))).unwrap_or_default();
+        let mut zones: HashMap<String, usize> = HashMap::new();
+        let mut racks: HashMap<String, usize> = HashMap::new();
+        for t in taken {
+            let (z, r) = loc(t);
+            *zones.entry(z).or_default() += 1;
+            *racks.entry(r).or_default() += 1;
+        }
+        let mut left = cands;
+        let mut out = vec![];
+        while !left.is_empty() {
+            let (i, _) = left
+                .iter()
+                .enumerate()
+                .min_by_key(|(i, n)| {
+                    let (z, r) = loc(n);
+                    (zones.get(&z).copied().unwrap_or(0), racks.get(&r).copied().unwrap_or(0), *i)
+                })
+                .unwrap();
+            let n = left.remove(i);
+            let (z, r) = loc(&n);
+            *zones.entry(z).or_default() += 1;
+            *racks.entry(r).or_default() += 1;
+            out.push(n);
+        }
+        out
+    }
+
+    /// Whether holders respect the spread rule: copies in distinct domains; erasure-coded shards at
+    /// most `m` per domain (so losing one domain loses no data). Always true at the "node" level.
+    fn spread_ok(&self, holders: &[String], ec_m: Option<usize>) -> bool {
+        let mut n: HashMap<String, usize> = HashMap::new();
+        for h in holders {
+            *n.entry(self.domain(h)).or_default() += 1;
+        }
+        let max = ec_m.unwrap_or(1);
+        n.values().all(|c| *c <= max)
     }
 
     /// Holds (or takes) the cluster-wide lease for `task`. Cached: renewed every third of its lifetime.
@@ -428,9 +527,13 @@ impl Cluster {
     fn place_replicas(&self, local: &Segment, len: u64, avoid: &HashSet<String>) -> engine::Result<Vec<Copy>> {
         let mut copies: Vec<Copy> = vec![];
         let mut errors = vec![];
-        for (name, _) in self.targets().into_iter().filter(|(n, _)| !avoid.contains(n)) {
+        let cands: Vec<String> = self.targets().into_iter().map(|(n, _)| n).filter(|n| !avoid.contains(n)).collect();
+        for name in self.diverse(cands, &[]) {
             if copies.len() >= self.cfg.copies {
                 break;
+            }
+            if self.strict() && copies.iter().any(|c| self.domain(&c.node) == self.domain(&name)) {
+                continue; // that failure domain already has a copy
             }
             if name == self.name() && !local.blob.is_empty() {
                 copies.push(Copy { node: name, local: local.blob.clone() });
@@ -451,8 +554,9 @@ impl Cluster {
                 let _ = self.delete_copy(c);
             }
             return Err(engine::Error::Unavailable(format!(
-                "{} copies wanted, {} nodes could take one{}",
+                "{} copies wanted in distinct {}s, {} could take one{}",
                 self.cfg.copies,
+                self.cfg.spread,
                 copies.len(),
                 if errors.is_empty() { String::new() } else { format!(" ({})", errors.join("; ")) }
             )));
@@ -560,7 +664,24 @@ impl Cluster {
             return Err(engine::Error::Unavailable(format!("erasure coding {k}+{m} needs {} live nodes, {} are up", k + m, targets.len())));
         }
         let unit = Self::unit_for(len, k);
-        let which: Vec<(usize, String)> = targets.iter().take(k + m).enumerate().map(|(i, (n, _))| (i, n.clone())).collect();
+        let mut chosen: Vec<String> = vec![];
+        for n in self.diverse(targets.into_iter().map(|(n, _)| n).collect(), &[]) {
+            if chosen.len() == k + m {
+                break;
+            }
+            let mut with = chosen.clone();
+            with.push(n.clone());
+            if !self.strict() || self.spread_ok(&with, Some(m)) {
+                chosen = with;
+            }
+        }
+        if chosen.len() < k + m {
+            return Err(engine::Error::Unavailable(format!(
+                "erasure coding {k}+{m} with at most {m} shards per {} needs more {}s than are up",
+                self.cfg.spread, self.cfg.spread
+            )));
+        }
+        let which: Vec<(usize, String)> = chosen.into_iter().enumerate().collect();
         let reader = self.eng.open_local(&local.blob, 0).map_err(|e| engine::Error::Index(e.to_string()))?;
         let shards = self.encode_to(reader, len, (k, m), unit, &which).map_err(|e| engine::Error::Unavailable(e.to_string()))?;
         let shards: Vec<Copy> = (0..k + m).map(|i| shards[&i].clone()).collect();
@@ -872,7 +993,14 @@ impl Cluster {
         rep: &mut RepairReport,
     ) -> io::Result<()> {
         let mut keep: Vec<Copy> = copies.iter().filter(|c| good.contains(&c.node)).cloned().collect();
-        let dropped: Vec<Copy> = copies.iter().filter(|c| !good.contains(&c.node)).cloned().collect();
+        let mut dropped: Vec<Copy> = copies.iter().filter(|c| !good.contains(&c.node)).cloned().collect();
+        if self.strict() {
+            // Copies sharing a failure domain: one stays, the others move once a better home exists.
+            let mut seen = HashSet::new();
+            let (ok, extra): (Vec<Copy>, Vec<Copy>) = keep.into_iter().partition(|c| seen.insert(self.domain(&c.node)));
+            keep = ok;
+            dropped.extend(extra);
+        }
         if dropped.is_empty() && keep.len() >= self.cfg.copies {
             rep.healthy += 1;
             return Ok(());
@@ -890,9 +1018,13 @@ impl Cluster {
         let mut added = vec![];
         let mut targets: Vec<String> = self.targets().into_iter().map(|(n, _)| n).filter(|n| !holding.contains(n)).collect();
         targets.retain(|n| good.contains(n));
-        for t in targets {
+        let taken: Vec<String> = keep.iter().map(|c| c.node.clone()).collect();
+        for t in self.diverse(targets, &taken) {
             if keep.len() >= self.cfg.copies {
                 break;
+            }
+            if self.strict() && keep.iter().any(|c| self.domain(&c.node) == self.domain(&t)) {
+                continue;
             }
             for s in &sources {
                 let res = self.open_copy(s, 0).and_then(|r| self.put_copy(&t, r));
@@ -947,7 +1079,21 @@ impl Cluster {
         dry: bool,
         rep: &mut RepairReport,
     ) -> io::Result<()> {
-        let bad: Vec<usize> = (0..shards.len()).filter(|i| !good.contains(&shards[*i].node)).collect();
+        let mut bad: Vec<usize> = (0..shards.len()).filter(|i| !good.contains(&shards[*i].node)).collect();
+        if self.strict() {
+            // Shards beyond m in one failure domain are misplaced: they move too.
+            let mut per: HashMap<String, usize> = HashMap::new();
+            for (i, s) in shards.iter().enumerate() {
+                if bad.contains(&i) {
+                    continue;
+                }
+                let c = per.entry(self.domain(&s.node)).or_default();
+                *c += 1;
+                if *c > km.1 {
+                    bad.push(i);
+                }
+            }
+        }
         if bad.is_empty() {
             rep.healthy += 1;
             return Ok(());
@@ -961,15 +1107,28 @@ impl Cluster {
             rep.degraded += 1;
             return Ok(());
         }
-        // New homes: good nodes holding no shard of this blob.
+        // New homes: good nodes holding no shard of this blob, spread across failure domains.
         let holding: HashSet<&str> = shards.iter().filter(|c| good.contains(&c.node)).map(|c| c.node.as_str()).collect();
         let free: Vec<String> =
             self.targets().into_iter().map(|(n, _)| n).filter(|n| good.contains(n) && !holding.contains(n.as_str())).collect();
-        if free.len() < bad.len() {
+        let mut staying: Vec<String> = shards.iter().enumerate().filter(|(i, _)| !bad.contains(i)).map(|(_, s)| s.node.clone()).collect();
+        let mut homes = vec![];
+        for n in self.diverse(free, &staying) {
+            if homes.len() == bad.len() {
+                break;
+            }
+            let mut with = staying.clone();
+            with.push(n.clone());
+            if !self.strict() || self.spread_ok(&with, Some(km.1)) {
+                staying = with;
+                homes.push(n);
+            }
+        }
+        if homes.len() < bad.len() {
             rep.degraded += 1;
             return Ok(());
         }
-        let which: Vec<(usize, String)> = bad.iter().copied().zip(free).collect();
+        let which: Vec<(usize, String)> = bad.iter().copied().zip(homes).collect();
         let reader = self.open(id, 0)?;
         let written = self.encode_to(reader, len, km, unit, &which)?;
         let mut next = shards.to_vec();
@@ -1098,6 +1257,15 @@ impl Cluster {
             }
             let Some(i) = p.holders().iter().position(|c| c.node == max_n) else { continue };
             let src = p.holders()[i].clone();
+            let mut after: Vec<String> = p.holders().iter().map(|c| c.node.clone()).collect();
+            after[i] = min_n.clone();
+            let ec_m = match &p {
+                Placement::Erasure { m, .. } => Some(*m),
+                _ => None,
+            };
+            if self.strict() && !self.spread_ok(&after, ec_m) {
+                continue; // the move would put too much of this blob in one failure domain
+            }
             let Ok((lid, n)) = self.open_copy(&src, 0).and_then(|r| self.put_copy(&min_n, r)) else { continue };
             let new_copy = Copy { node: min_n.clone(), local: lid };
             if n != per {
@@ -1133,7 +1301,7 @@ impl Cluster {
             .map(|(n, r)| {
                 let (blobs, bytes) = usage.get(&n).copied().unwrap_or_default();
                 json!({
-                    "name": n, "url": r.url, "state": r.state, "alive": self.alive(&r),
+                    "name": n, "url": r.url, "state": r.state, "alive": self.alive(&r), "zone": r.zone, "rack": r.rack,
                     "heartbeat_age_ms": now.saturating_sub(r.heartbeat), "version": r.version,
                     "copies": blobs, "bytes": bytes, "this_node": n == self.name(),
                 })
@@ -1143,6 +1311,7 @@ impl Cluster {
         json!({
             "node": self.name(),
             "copies": self.cfg.copies,
+            "spread": self.cfg.spread,
             "erasure_coding": self.cfg.ec.map(|(k, m)| json!({"data": k, "parity": m, "above_bytes": self.cfg.ec_above})),
             "nodes": nodes,
             "blobs": {"total": check.blobs, "healthy": check.healthy, "degraded": check.degraded, "lost": check.lost},

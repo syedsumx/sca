@@ -65,6 +65,8 @@
 //! CAIRN_STORE_CLUSTER_COPIES copies of each blob, on distinct nodes (2)
 //! CAIRN_STORE_CLUSTER_EC     erasure-code large blobs as k data + m parity shards, e.g. 4+2 (off)
 //! CAIRN_STORE_CLUSTER_EC_ABOVE  ... blobs of at least this many bytes (1048576)
+//! CAIRN_STORE_CLUSTER_ZONE / _RACK  where this node is (labels; copies are spread across zones, then racks)
+//! CAIRN_STORE_CLUSTER_SPREAD  the failure domain copies must not share: node (default), rack or zone
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
 //! CAIRN_STORE_COMPRESSION    compress new object data: off or zstd (off; in 1 MiB chunks, ranges stay cheap)
 //! CAIRN_STORE_QUEUE_RETENTION_INTERVAL  seconds between retention passes over message queue topics (60)
@@ -190,6 +192,9 @@ fn cluster_config() -> Option<s3::cluster::ClusterConfig> {
         heartbeat: secs("CAIRN_STORE_CLUSTER_HEARTBEAT", "5"),
         dead_after: secs("CAIRN_STORE_CLUSTER_DEAD_AFTER", "60"),
         repair_every: secs("CAIRN_STORE_CLUSTER_REPAIR_INTERVAL", "300"),
+        zone: env("CAIRN_STORE_CLUSTER_ZONE", ""),
+        rack: env("CAIRN_STORE_CLUSTER_RACK", ""),
+        spread: env("CAIRN_STORE_CLUSTER_SPREAD", "node"),
     };
     cfg.validate().unwrap_or_else(|e| fail("cluster", e));
     if meta().is_none() {

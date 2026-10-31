@@ -5,6 +5,7 @@
 {{- if $cl.enabled }}
 {{- if not $u.metadata.secretName }}{{ fail "cairn.store.cluster needs cairn.store.metadata.secretName (the nodes share PostgreSQL metadata)" }}{{ end }}
 {{- if or $u.backups.enabled $u.backupSinks.secretName }}{{ fail "cairn.store.backups and backupSinks are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
+{{- if and (eq (toString $cl.spread) "zone") (not $cl.zone) }}{{ fail "cairn.store.cluster.spread=zone needs cairn.store.cluster.zone" }}{{ end }}
 {{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
 {{- if $cl.erasureCoding }}
 {{- $p := splitList "+" (toString $cl.erasureCoding) }}
@@ -67,6 +68,13 @@ spec:
             - name: CAIRN_STORE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $cl.clusterSecretKey }} }
+            - name: CAIRN_STORE_CLUSTER_RACK
+              valueFrom:
+                fieldRef: { fieldPath: spec.nodeName }
+            - name: CAIRN_STORE_CLUSTER_ZONE
+              value: {{ $cl.zone | quote }}
+            - name: CAIRN_STORE_CLUSTER_SPREAD
+              value: {{ $cl.spread | default "node" | quote }}
             - name: CAIRN_STORE_CLUSTER_COPIES
               value: {{ $cl.copies | quote }}
             {{- if $cl.erasureCoding }}
