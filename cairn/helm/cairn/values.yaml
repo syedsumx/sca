@@ -485,6 +485,10 @@ cairn:
       name: cairn-store
       accessKeyKey: access-key
       secretKeyKey: secret-key
+      # Optional: a base64 32-byte key in the same Secret turns on encryption at rest.
+      masterKeyKey: ""
+      # Optional: a Secret with a "keyring.json" ({"keys": {...}, "sse_s3_key": ...}) instead, for key rotation.
+      keyringSecret: ""
     # Further keys (read-only, bucket-scoped): a Secret with a "credentials.json" list, or empty.
     extraCredentialsSecret: ""
     buckets: [lakehouse]      # created at start-up if missing

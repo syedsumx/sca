@@ -8,6 +8,7 @@ description = "Cairn Store: Cairn's S3-compatible object store (single node)"
 publish = false
 
 [dependencies]
+aes-gcm = "0.10"
 base64 = "0.22"
 bytes = "1"
 crc32fast = "1"

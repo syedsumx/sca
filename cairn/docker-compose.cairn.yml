@@ -541,6 +541,8 @@ services:
       CAIRN_STORE_BUCKETS: ${CAIRN_STORE_BUCKETS:-lakehouse}
       CAIRN_STORE_REGION: ${CAIRN_STORE_REGION:-us-east-1}
       CAIRN_STORE_BLOCK_PUBLIC_ACCESS: ${CAIRN_STORE_BLOCK_PUBLIC_ACCESS:-true}
+      # Encryption at rest (SSE-S3 for every new object) when set: a base64 32-byte key.
+      CAIRN_STORE_MASTER_KEY: ${CAIRN_STORE_MASTER_KEY:-}
       # Optional: ask Cairn's PDP (http://cairn-pdp:8810, with CAIRN_SERVICE_TOKEN) about every allowed request.
       CAIRN_STORE_PDP_URL: ${CAIRN_STORE_PDP_URL:-}
       CAIRN_STORE_PDP_TOKEN: ${CAIRN_STORE_PDP_TOKEN:-}

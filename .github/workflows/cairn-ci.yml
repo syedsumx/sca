@@ -270,6 +270,7 @@ jobs:
                      CAIRN_CATALOG_TOKEN; do
               echo "${k}=$(openssl rand -hex 32)"
             done
+            echo "CAIRN_STORE_MASTER_KEY=$(openssl rand -base64 32)"
           } > .env
           # Embed origins the e2e suite exercises (test_11, test_20: localhost:8099 is the partner page).
           echo "CAIRN_EMBED_ALLOWED_ORIGINS=https://*.tableau.example.com,http://localhost:9000,http://localhost:8099" >> .env
@@ -280,7 +281,7 @@ jobs:
             echo "CAIRN_SLACK_RESPONSE_HOSTS=http://cairn-e2e-sink:8099"
             echo "CAIRN_TEAMS_WEBHOOK_HOSTS=.webhook.office.com,.logic.azure.com,http://cairn-e2e-sink:8099"
           } >> .env
-          grep -vE '^(CAIRN_SLACK_BOT_TOKEN|CAIRN_SLACK_API_URL|CAIRN_SLACK_RESPONSE_HOSTS|CAIRN_TEAMS_WEBHOOK_HOSTS|CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET|CAIRN_SCIM_TOKEN|CAIRN_STORE_SECRET_KEY|CAIRN_CATALOG_TOKEN)=' \
+          grep -vE '^(CAIRN_SLACK_BOT_TOKEN|CAIRN_SLACK_API_URL|CAIRN_SLACK_RESPONSE_HOSTS|CAIRN_TEAMS_WEBHOOK_HOSTS|CAIRN_EMBED_ALLOWED_ORIGINS|CAIRN_ADMIN_PASSWORD|CAIRN_SYSTEM_CLIENT_SECRET|CAIRN_SESSION_SIGNING_KEY|CAIRN_TOKEN_SALT|CAIRN_WEB_SECRET|CAIRN_DB_PASSWORD|CAIRN_DB_ROOT_PASSWORD|CAIRN_SERVICE_TOKEN|CAIRN_ACTION_LINK_SECRET|CAIRN_EMBED_SIGNING_SECRET|CAIRN_SLACK_SIGNING_SECRET|CAIRN_SCIM_TOKEN|CAIRN_STORE_SECRET_KEY|CAIRN_CATALOG_TOKEN|CAIRN_STORE_MASTER_KEY)=' \
             .env.example >> .env
           docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900 \
             || docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 600

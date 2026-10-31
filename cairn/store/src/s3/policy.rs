@@ -97,7 +97,8 @@ const OPS: [&str; 22] = [
 ];
 
 /// Condition keys the store fills in. Tag keys are prefixes (`s3:ExistingObjectTag/<key>`).
-const KEYS: [&str; 20] = [
+const KEYS: [&str; 21] = [
+    "s3:x-amz-server-side-encryption-aws-kms-key-id",
     "s3:object-lock-mode",
     "s3:object-lock-retain-until-date",
     "s3:object-lock-legal-hold",

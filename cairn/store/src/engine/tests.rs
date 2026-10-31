@@ -23,7 +23,7 @@ fn put_v(e: &Engine, bucket: &str, key: &str, data: &[u8], cond: &Condition) -> 
 fn read(e: &Engine, bucket: &str, key: &str) -> Vec<u8> {
     let o = e.get_object(bucket, key).unwrap();
     let mut out = vec![];
-    e.reader(&o, 0, o.size).unwrap().read_to_end(&mut out).unwrap();
+    e.reader(&o, 0, o.size, None).unwrap().read_to_end(&mut out).unwrap();
     out
 }
 
@@ -183,7 +183,7 @@ fn multipart_assembles_parts_without_copying() {
     assert!(obj.etag.ends_with("-2"));
     assert_eq!(blob_count(dir.path()), 2, "unused parts collected");
     let mut out = vec![];
-    e.reader(&obj, MIN_PART_SIZE - 2, 5).unwrap().read_to_end(&mut out).unwrap(); // a range spanning both parts
+    e.reader(&obj, MIN_PART_SIZE - 2, 5, None).unwrap().read_to_end(&mut out).unwrap(); // a range spanning both parts
     assert_eq!(out, b"aatai");
     assert!(matches!(e.get_upload("b", "big", &u.id), Err(Error::NoSuchUpload)));
 }
@@ -206,7 +206,7 @@ fn reads_survive_concurrent_replace() {
         })
     };
     for _ in 0..300 {
-        let (obj, mut r) = match e.get_fresh("b", "k", None, |o: &Object| Ok::<_, ()>((0, o.size))) {
+        let (obj, mut r) = match e.get_fresh("b", "k", None, |o: &Object| Ok::<_, ()>((0, o.size, None))) {
             Ok(v) => v,
             Err(_) => panic!("read failed"),
         };
@@ -222,7 +222,7 @@ fn reads_survive_concurrent_replace() {
 fn read_v(e: &Engine, bucket: &str, key: &str, v: &str) -> Vec<u8> {
     let o = e.get_version(bucket, key, Some(v)).unwrap();
     let mut out = vec![];
-    e.reader(&o, 0, o.size).unwrap().read_to_end(&mut out).unwrap();
+    e.reader(&o, 0, o.size, None).unwrap().read_to_end(&mut out).unwrap();
     out
 }
 
@@ -336,4 +336,37 @@ fn object_lock_is_enforced_by_the_engine() {
     .unwrap();
     assert!(matches!(e.delete_version("b", "k", &v.version_id, false), Err(Error::ObjectLocked)));
     e.delete_version("b", "k", &v.version_id, true).unwrap();
+}
+
+#[test]
+fn encrypted_blobs_round_trip_and_read_any_range() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.create_bucket("b").unwrap();
+    let key = crypt::random_key();
+    let data: Vec<u8> = (0..(crypt::CHUNK * 3 + 777)).map(|i| (i % 251) as u8).collect();
+    let mut w = e.new_blob_with(Some(&key)).unwrap();
+    for piece in data.chunks(10_000) {
+        w.write(piece).unwrap();
+    }
+    let seg = w.seal().unwrap();
+    assert!(!seg.nonce.is_empty() && seg.size == data.len() as u64);
+    let on_disk = fs::read(e.blob_path(&seg.blob)).unwrap();
+    assert_eq!(on_disk.len() as u64, crypt::sealed_len(data.len() as u64));
+    assert!(!on_disk.windows(64).any(|w| w == &data[1000..1064])); // no plaintext on disk
+    let o = Object { key: "k".into(), size: seg.size, segments: vec![seg], ..Default::default() };
+    for (off, n) in [(0u64, data.len() as u64), (crypt::CHUNK as u64 - 5, 10), (1, 1), (crypt::CHUNK as u64 * 3, 777), (12345, 70000)] {
+        let mut out = vec![];
+        e.reader(&o, off, n, Some(&key)).unwrap().read_to_end(&mut out).unwrap();
+        assert_eq!(out, &data[off as usize..(off + n) as usize], "range {off}+{n}");
+    }
+    assert!(e.reader(&o, 0, 10, None).is_err());
+    let mut out = vec![];
+    assert!(e.reader(&o, 0, 10, Some(&crypt::random_key())).unwrap().read_to_end(&mut out).is_err());
+    // Tampering with the stored bytes is detected.
+    let mut bad = on_disk.clone();
+    bad[crypt::CHUNK + crypt::TAG + 3] ^= 0xff;
+    fs::write(e.blob_path(&o.segments[0].blob), &bad).unwrap();
+    let mut out = vec![];
+    assert!(e.reader(&o, 0, o.size, Some(&key)).unwrap().read_to_end(&mut out).is_err());
 }

@@ -59,6 +59,15 @@ spec:
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $u.secret.masterKeyKey }}
+            - name: CAIRN_STORE_MASTER_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.masterKeyKey }} }
+            {{- end }}
+            {{- if $u.secret.keyringSecret }}
+            - name: CAIRN_STORE_KEYRING_FILE
+              value: /etc/cairn-store-keyring/keyring.json
+            {{- end }}
             {{- if $u.extraCredentialsSecret }}
             - name: CAIRN_STORE_CREDENTIALS_FILE
               value: /etc/cairn-store/credentials.json
@@ -86,11 +95,23 @@ spec:
               mountPath: /etc/cairn-store
               readOnly: true
             {{- end }}
-      {{- if $u.extraCredentialsSecret }}
+            {{- if $u.secret.keyringSecret }}
+            - name: keyring
+              mountPath: /etc/cairn-store-keyring
+              readOnly: true
+            {{- end }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret }}
       volumes:
+        {{- if $u.extraCredentialsSecret }}
         - name: credentials
           secret:
             secretName: {{ $u.extraCredentialsSecret }}
+        {{- end }}
+        {{- if $u.secret.keyringSecret }}
+        - name: keyring
+          secret:
+            secretName: {{ $u.secret.keyringSecret }}
+        {{- end }}
       {{- end }}
       {{- with $u.nodeSelector }}
       nodeSelector:

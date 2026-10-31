@@ -23,6 +23,10 @@
 //! CAIRN_STORE_PDP_TOKEN         a Cairn service token for it (or CAIRN_STORE_PDP_TOKEN_FILE)
 //! CAIRN_STORE_LIFECYCLE_INTERVAL  seconds between lifecycle passes (3600; 0 turns lifecycle processing off)
 //! CAIRN_STORE_LIFECYCLE_DAY_SECONDS  length of a lifecycle "day" (86400; shorter only for tests)
+//! CAIRN_STORE_KEYRING_FILE      keys for encryption at rest: {"keys": {"<id>": "<base64 32 bytes>"}, "sse_s3_key": "<id>"}
+//! CAIRN_STORE_MASTER_KEY        ... or one base64 key (or CAIRN_STORE_MASTER_KEY_FILE)
+//! CAIRN_STORE_ENCRYPT_BY_DEFAULT  with a keyring, encrypt new objects with SSE-S3 by default (true)
+//! CAIRN_STORE_SSE_C_ALLOW_HTTP  accept customer keys over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -30,6 +34,7 @@
 // Errors are cold paths here; boxing them would only add allocations to the code that matters.
 #![allow(clippy::result_large_err)]
 
+mod crypt;
 mod engine;
 mod s3;
 
@@ -70,6 +75,19 @@ fn secret(k: &str) -> Result<String, String> {
     match std::env::var(format!("{k}_FILE")) {
         Ok(f) if !f.is_empty() => Ok(std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?.trim().to_string()),
         _ => Ok(env(k, "")),
+    }
+}
+
+/// Keys for encryption at rest: a keyring file, or one master key. None configured: no SSE-S3/SSE-KMS.
+fn keyring() -> Result<s3::sse::Keyring, String> {
+    let file = env("CAIRN_STORE_KEYRING_FILE", "");
+    if !file.is_empty() {
+        let text = std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?;
+        return s3::sse::Keyring::from_json(&text).map_err(|e| format!("{file}: {e}"));
+    }
+    match secret("CAIRN_STORE_MASTER_KEY")? {
+        k if k.is_empty() => Ok(s3::sse::Keyring::default()),
+        k => s3::sse::Keyring::single(&k).map_err(|e| format!("CAIRN_STORE_MASTER_KEY: {e}")),
     }
 }
 
@@ -177,6 +195,9 @@ async fn serve(addr: String, data: String) {
                 credentials: creds,
                 max_object: 0,
                 block_public: env("CAIRN_STORE_BLOCK_PUBLIC_ACCESS", "true") != "false",
+                keyring: keyring().unwrap_or_else(|e| fail("keyring", e)),
+                encrypt_by_default: env("CAIRN_STORE_ENCRYPT_BY_DEFAULT", "true") != "false",
+                sse_c_over_http: env("CAIRN_STORE_SSE_C_ALLOW_HTTP", "false") == "true",
                 lifecycle_day_secs: env("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", "86400")
                     .parse()
                     .unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", e)),

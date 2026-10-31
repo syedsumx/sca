@@ -31,8 +31,8 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 8] =
-    ["encryption", "notification", "replication", "logging", "website", "requestPayment", "accelerate", "intelligent-tiering"];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 7] =
+    ["notification", "replication", "logging", "website", "requestPayment", "accelerate", "intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 5] = ["content-encoding", "content-disposition", "content-language", "cache-control", "expires"];
@@ -169,7 +169,10 @@ impl Server {
             "GetBucketLifecycle" => self.get_lifecycle(c),
             "PutBucketLifecycle" => self.put_lifecycle(c, body).await,
             "DeleteBucketLifecycle" => self.delete_config(c, "lifecycle"),
-            "DeleteBucketEncryption" | "DeleteBucketWebsite" | "DeleteBucketReplication" => {
+            "GetBucketEncryption" => self.get_bucket_encryption(c),
+            "PutBucketEncryption" => self.put_bucket_encryption(c, body).await,
+            "DeleteBucketEncryption" => self.delete_config(c, "encryption"),
+            "DeleteBucketWebsite" | "DeleteBucketReplication" => {
                 // None of these can be set yet, so there is nothing to delete.
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -271,6 +274,7 @@ impl Server {
         body: B,
         limit: u64,
         compute: &[&str],
+        key: Option<&crate::crypt::Key>,
     ) -> Result<(Segment, Vec<u8>, BTreeMap<String, String>), ApiError>
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
@@ -284,7 +288,7 @@ impl Server {
         if check.expected_len().is_some_and(|n| n > limit) {
             return Err(e::ENTITY_TOO_LARGE.clone());
         }
-        let mut blob = self.eng.new_blob()?;
+        let mut blob = self.eng.new_blob_with(key)?;
         let mut out = Vec::with_capacity(256 << 10);
         let mut body = body;
         while let Some(frame) = body.frame().await {
@@ -544,9 +548,10 @@ impl Server {
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
+        let (sse, dek) = self.sse_for_write(c, &c.bucket, &c.key)?.unzip();
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         let compute: Vec<&str> = [algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
-        let (seg, md5, checksums) = self.receive(c, body, self.max_obj, &compute).await?;
+        let (seg, md5, checksums) = self.receive(c, body, self.max_obj, &compute, dek.as_ref()).await?;
         let obj = Object {
             key: c.key.clone(),
             size: seg.size,
@@ -561,10 +566,12 @@ impl Server {
             part_count: 0,
             tags,
             lock,
+            sse,
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
         let mut r = empty(StatusCode::OK);
+        Self::sse_headers(&mut r, &stored.sse);
         set_header(&mut r, "etag", &format!("\"{}\"", stored.etag));
         version_header(&mut r, &info.versioning, &stored);
         if let Some(x) = self.expiration_header(&c.bucket, &stored) {
@@ -583,8 +590,9 @@ impl Server {
         let mut picked = (0u64, 0u64, false);
         let version = c.q("versionId");
         let res = blocking(|| {
-            self.eng.get_fresh(&c.bucket, &c.key, Some(version), |o| -> Result<(u64, u64), ReadErr> {
+            self.eng.get_fresh(&c.bucket, &c.key, Some(version), |o| -> Result<(u64, u64, Option<crate::crypt::Key>), ReadErr> {
                 check_read_conditions(c, o)?;
+                let key = self.data_key(c, &c.bucket, &c.key, &o.sse, false).map_err(ReadErr::Api)?;
                 let (off, n, ranged) = if part_number > 0 {
                     if part_number as usize > o.segments.len() {
                         return Err(ReadErr::Api(e::INVALID_PART_NUMBER.clone()));
@@ -600,7 +608,7 @@ impl Server {
                     (0, o.size, false)
                 };
                 picked = (off, n, ranged);
-                Ok((off, if head { 0 } else { n }))
+                Ok((off, if head { 0 } else { n }, key))
             })
         });
         let (obj, reader) = match res {
@@ -666,6 +674,7 @@ impl Server {
             set_header(&mut r, "x-amz-tagging-count", &obj.tags.len().to_string());
         }
         Self::lock_headers(&mut r, &obj);
+        Self::sse_headers(&mut r, &obj.sse);
         if version.is_empty() {
             if let Some(x) = self.expiration_header(&c.bucket, &obj) {
                 set_header(&mut r, "x-amz-expiration", &x);
@@ -685,20 +694,33 @@ impl Server {
     }
 
     /// Copies `[range]` of a source object into a new sealed blob, computing `algos` checksums.
-    fn copy_bytes(&self, c: &Ctx, src: &CopySource, range: &str, algos: &[String]) -> Result<Copied, ApiError> {
+    fn copy_bytes(
+        &self,
+        c: &Ctx,
+        src: &CopySource,
+        range: &str,
+        algos: &[String],
+        dest_key: Option<&crate::crypt::Key>,
+    ) -> Result<Copied, ApiError> {
         let (src_bucket, src_key) = (src.bucket.as_str(), src.key.as_str());
-        let res = self.eng.get_fresh(src_bucket, src_key, src.version.as_deref(), |o| -> Result<(u64, u64), ApiError> {
-            check_copy_conditions(c, o)?;
-            if range.is_empty() {
-                return Ok((0, o.size));
-            }
-            let spec = range.strip_prefix("bytes=").unwrap_or("");
-            let (a, b) = spec.split_once('-').ok_or_else(|| e::INVALID_RANGE.clone())?;
-            match (a.parse::<u64>(), b.parse::<u64>()) {
-                (Ok(start), Ok(end)) if start <= end && end < o.size => Ok((start, end - start + 1)),
-                _ => Err(e::INVALID_RANGE.clone()),
-            }
-        });
+        let res = self.eng.get_fresh(
+            src_bucket,
+            src_key,
+            src.version.as_deref(),
+            |o| -> Result<(u64, u64, Option<crate::crypt::Key>), ApiError> {
+                check_copy_conditions(c, o)?;
+                let key = self.data_key(c, src_bucket, src_key, &o.sse, true)?;
+                if range.is_empty() {
+                    return Ok((0, o.size, key));
+                }
+                let spec = range.strip_prefix("bytes=").unwrap_or("");
+                let (a, b) = spec.split_once('-').ok_or_else(|| e::INVALID_RANGE.clone())?;
+                match (a.parse::<u64>(), b.parse::<u64>()) {
+                    (Ok(start), Ok(end)) if start <= end && end < o.size => Ok((start, end - start + 1, key)),
+                    _ => Err(e::INVALID_RANGE.clone()),
+                }
+            },
+        );
         let (src, mut reader) = match res {
             Ok(v) => v,
             Err(FreshError::Engine(engine::Error::MethodNotAllowed)) => return Err(e::INVALID_REQUEST_DELETE_MARKER.clone()),
@@ -706,7 +728,7 @@ impl Server {
             Err(FreshError::Range(_, err)) => return Err(err),
         };
         let mut hashers: Vec<(String, Hasher)> = algos.iter().filter_map(|a| Hasher::new(a).map(|h| (a.clone(), h))).collect();
-        let mut blob = self.eng.new_blob()?;
+        let mut blob = self.eng.new_blob_with(dest_key)?;
         let mut buf = vec![0u8; 256 << 10];
         loop {
             let n = reader.read(&mut buf).map_err(engine::Error::Io)?;
@@ -747,9 +769,12 @@ impl Server {
             && directive == "COPY"
             && tag_directive == "COPY"
             && new_algo.is_empty()
+            && c.header("x-amz-server-side-encryption").is_empty()
+            && c.header("x-amz-server-side-encryption-customer-algorithm").is_empty()
         {
             return Err(e::COPY_TO_ITSELF.clone());
         }
+        let (sse, dek) = self.sse_for_write(c, &c.bucket, &c.key)?.unzip();
         let (info, (src_obj, seg, md5, checksums)) = blocking(|| -> Result<_, ApiError> {
             let info = self.eng.head_bucket(&c.bucket)?;
             let meta = self.eng.get_version(&src_bucket, &src_key, src.version.as_deref())?;
@@ -761,7 +786,7 @@ impl Server {
             } else {
                 vec![new_algo.clone()]
             };
-            Ok((info, self.copy_bytes(c, &src, "", &algos)?))
+            Ok((info, self.copy_bytes(c, &src, "", &algos, dek.as_ref())?))
         })?;
         let tags = if tag_directive == "REPLACE" { new_tags } else { src_obj.tags.clone() };
         let lock = self.lock_for_write(c, &c.bucket)?;
@@ -784,6 +809,7 @@ impl Server {
             part_count: 0,
             tags,
             lock,
+            sse,
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
@@ -791,6 +817,7 @@ impl Server {
         w.el("LastModified", iso_time(stored.modified)).el("ETag", format!("\"{}\"", stored.etag));
         let mut r = xml_resp(StatusCode::OK, w.finish());
         version_header(&mut r, &info.versioning, &stored);
+        Self::sse_headers(&mut r, &stored.sse);
         if src.version.is_some() || !src_obj.version_id.is_empty() {
             set_header(&mut r, "x-amz-copy-source-version-id", src_obj.version());
         }
@@ -808,6 +835,8 @@ impl Server {
         check_acl_headers(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
+        // The upload's data key is chosen now; every part is encrypted with it.
+        let sse = self.sse_for_write(c, &c.bucket, &c.key)?.map(|(sse, _)| sse);
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         if !algo.is_empty() && !checksum::valid(&algo) {
             return Err(e::INVALID_ARGUMENT.clone());
@@ -833,12 +862,14 @@ impl Server {
                 checksum_type: ctype.clone(),
                 tags,
                 lock,
+                sse,
                 ..Default::default()
             })
         })?;
         let mut w = Writer::new("InitiateMultipartUploadResult");
         w.el("Bucket", &c.bucket).el("Key", &c.key).el("UploadId", &u.id);
         let mut r = xml_resp(StatusCode::OK, w.finish());
+        Self::sse_headers(&mut r, &u.sse);
         if !algo.is_empty() {
             set_header(&mut r, "x-amz-checksum-algorithm", &algo.to_ascii_uppercase());
             set_header(&mut r, "x-amz-checksum-type", &ctype);
@@ -858,11 +889,13 @@ impl Server {
         let n = self.part_number(c)?;
         let u = blocking(|| self.eng.get_upload(&c.bucket, &c.key, c.q("uploadId")))?;
         let compute: Vec<&str> = [u.checksum_algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
-        let (seg, md5, checksums) = self.receive(c, body, 5 << 30, &compute).await?;
+        let dek = self.data_key(c, &c.bucket, &c.key, &u.sse, false)?;
+        let (seg, md5, checksums) = self.receive(c, body, 5 << 30, &compute, dek.as_ref()).await?;
         let p = Part {
             number: n,
             blob: seg.blob,
             size: seg.size,
+            nonce: seg.nonce,
             etag: hex::encode(&md5),
             md5,
             checksums: checksums.clone(),
@@ -871,6 +904,7 @@ impl Server {
         let etag = p.etag.clone();
         blocking(|| self.eng.put_part(&c.bucket, &c.key, &u.id, p))?;
         let mut r = empty(StatusCode::OK);
+        Self::sse_headers(&mut r, &u.sse);
         set_header(&mut r, "etag", &format!("\"{etag}\""));
         if u.checksum_algo.is_empty() {
             write_checksums(&mut r, &checksums, "");
@@ -888,8 +922,18 @@ impl Server {
         let (etag, modified) = blocking(|| -> Result<_, ApiError> {
             let u = self.eng.get_upload(&c.bucket, &c.key, c.q("uploadId"))?;
             let algos: Vec<String> = [u.checksum_algo.clone()].into_iter().filter(|a| !a.is_empty()).collect();
-            let (_, seg, md5, checksums) = self.copy_bytes(c, &src, c.header("x-amz-copy-source-range"), &algos)?;
-            let p = Part { number: n, blob: seg.blob, size: seg.size, etag: hex::encode(&md5), md5, checksums, modified: engine::now_ms() };
+            let dek = self.data_key(c, &c.bucket, &c.key, &u.sse, false)?;
+            let (_, seg, md5, checksums) = self.copy_bytes(c, &src, c.header("x-amz-copy-source-range"), &algos, dek.as_ref())?;
+            let p = Part {
+                number: n,
+                blob: seg.blob,
+                size: seg.size,
+                nonce: seg.nonce,
+                etag: hex::encode(&md5),
+                md5,
+                checksums,
+                modified: engine::now_ms(),
+            };
             let out = (p.etag.clone(), p.modified);
             self.eng.put_part(&c.bucket, &c.key, &u.id, p)?;
             Ok(out)
@@ -987,9 +1031,11 @@ impl Server {
                     }
                     checksums.insert(a.to_string(), format!("{}-{}", h.base64(), chosen.len()));
                 } else {
-                    let segs: Vec<Segment> = chosen.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size }).collect();
+                    let segs: Vec<Segment> =
+                        chosen.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() }).collect();
                     let size = segs.iter().map(|s| s.size).sum();
-                    let mut reader = self.eng.reader(&Object { segments: segs, ..Default::default() }, 0, size)?;
+                    let dek = self.data_key(c, &c.bucket, &c.key, &u.sse, false)?;
+                    let mut reader = self.eng.reader(&Object { segments: segs, ..Default::default() }, 0, size, dek.as_ref())?;
                     let mut buf = vec![0u8; 256 << 10];
                     loop {
                         let n = reader.read(&mut buf).map_err(engine::Error::Io)?;
@@ -1026,6 +1072,7 @@ impl Server {
         }
         let mut r = xml_resp(StatusCode::OK, w.finish());
         version_header(&mut r, &versioning, &obj);
+        Self::sse_headers(&mut r, &obj.sse);
         Ok(r)
     }
 }
@@ -1047,6 +1094,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("versioning") => "PutBucketVersioning",
             Method::PUT if c.has("lifecycle") => "PutBucketLifecycle",
             Method::PUT if c.has("object-lock") => "PutObjectLockConfiguration",
+            Method::PUT if c.has("encryption") => "PutBucketEncryption",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
             Method::PUT => "CreateBucket",
             Method::DELETE if c.has("tagging") => "DeleteBucketTagging",
@@ -1075,7 +1123,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("lifecycle") => "GetBucketLifecycle",
             Method::GET if c.has("versions") => "ListObjectVersions",
             Method::GET if c.has("object-lock") => "GetObjectLockConfiguration",
-            Method::GET if any(&["replication", "encryption", "website", "logging", "notification", "requestPayment"]) => "Unsupported",
+            Method::GET if c.has("encryption") => "GetBucketEncryption",
+            Method::GET if any(&["replication", "website", "logging", "notification", "requestPayment"]) => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",

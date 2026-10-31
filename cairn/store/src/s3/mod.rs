@@ -11,6 +11,7 @@ mod handlers;
 pub mod lifecycle;
 mod objectlock;
 pub mod policy;
+pub mod sse;
 mod versioning;
 pub mod xml;
 
@@ -48,6 +49,12 @@ pub struct Config {
     pub pdp: Option<(String, String)>,
     /// Length of a lifecycle day in seconds (0 = 86 400).
     pub lifecycle_day_secs: u64,
+    /// Keys for encryption at rest.
+    pub keyring: sse::Keyring,
+    /// Encrypt new objects with SSE-S3 when no other encryption applies (needs a keyring).
+    pub encrypt_by_default: bool,
+    /// Accept SSE-C over plain HTTP (TLS terminated in front of the store).
+    pub sse_c_over_http: bool,
 }
 
 pub struct Server {
@@ -66,6 +73,9 @@ pub struct Server {
     /// A lifecycle "day" in ms (86 400 000; shorter only in tests).
     lifecycle_day_ms: u64,
     lifecycle_metrics: lifecycle::LifecycleMetrics,
+    keyring: sse::Keyring,
+    encrypt_by_default: bool,
+    sse_c_over_http: bool,
 }
 
 /// One request, after routing and authentication.
@@ -133,6 +143,9 @@ impl Server {
             tls: false,
             lifecycle_day_ms: if cfg.lifecycle_day_secs == 0 { 86_400_000 } else { cfg.lifecycle_day_secs * 1000 },
             lifecycle_metrics: Default::default(),
+            keyring: cfg.keyring,
+            encrypt_by_default: cfg.encrypt_by_default,
+            sse_c_over_http: cfg.sse_c_over_http,
         })
     }
 

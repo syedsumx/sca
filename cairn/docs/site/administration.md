@@ -434,7 +434,15 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 - **Where it is enforced.** The engine enforces protection, so client deletes, batch deletes and lifecycle rules all respect it. Overwrites and plain deletes keep the locked version, as a noncurrent version under a delete marker.
 - **Versioning.** Versioning cannot be suspended on such a bucket.
 
-**Not supported yet.** Encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
+**Encryption at rest.** Give the store a key and it encrypts every new object (SSE-S3): set `CAIRN_STORE_MASTER_KEY` (a base64 32-byte key, `openssl rand -base64 32`), or `CAIRN_STORE_KEYRING_FILE` for several keys. Each object gets its own data key; its bytes are encrypted with AES-256-GCM in 64 KiB chunks, so ranged reads stay fast and any tampering is detected. The data key is stored only wrapped by a keyring key.
+
+- **SSE-KMS.** Clients and bucket defaults can name a keyring key (`aws:kms` with a key id), for example one key per team.
+- **SSE-C.** Customer-provided keys are supported; the store never stores them. They need TLS, or `CAIRN_STORE_SSE_C_ALLOW_HTTP=true` when TLS ends at a proxy in front of the store.
+- **Bucket defaults.** `PutBucketEncryption` sets a bucket's default encryption.
+- **Key rotation.** Add a key to the keyring and point `sse_s3_key` at it. Existing objects keep the key they were written with, so keep old keys until those objects are rewritten or deleted. An object whose key has been removed can no longer be read.
+- **Back up the keyring.** Without it, encrypted objects cannot be recovered.
+
+Objects written before a key was set stay unencrypted. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

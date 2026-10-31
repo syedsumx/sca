@@ -32,6 +32,9 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             block_public: true,
             pdp: None,
             lifecycle_day_secs: 0,
+            keyring: Default::default(),
+            encrypt_by_default: false,
+            sse_c_over_http: false,
         },
     )
     .unwrap();
@@ -74,7 +77,7 @@ async fn aws_streaming_example_verifies() {
     assert_eq!(obj.size, 66560);
     assert!(!obj.headers.contains_key("content-encoding"), "aws-chunked is not stored as the object's encoding");
     let mut out = vec![];
-    std::io::Read::read_to_end(&mut eng.reader(&obj, 0, obj.size).unwrap(), &mut out).unwrap();
+    std::io::Read::read_to_end(&mut eng.reader(&obj, 0, obj.size, None).unwrap(), &mut out).unwrap();
     assert!(out.iter().all(|&b| b == b'a'));
 }
 

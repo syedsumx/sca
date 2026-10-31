@@ -135,8 +135,8 @@ def test_ownership_is_bucket_owner_enforced(s3, bucket):
 
 
 UNSUPPORTED = [
-    lambda s3, b: s3.put_bucket_encryption(Bucket=b, ServerSideEncryptionConfiguration={"Rules": [
-        {"ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}}]}),
+    lambda s3, b: s3.put_bucket_website(Bucket=b, WebsiteConfiguration={"IndexDocument": {"Suffix": "index.html"}}),
+    lambda s3, b: s3.put_bucket_request_payment(Bucket=b, RequestPaymentConfiguration={"Payer": "Requester"}),
 ]
 
 

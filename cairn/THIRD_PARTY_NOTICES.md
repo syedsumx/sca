@@ -214,7 +214,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 | PostgreSQL, pgvector | control-plane database (container) | PostgreSQL License |
 | nginx | edge proxy and static hosting (container) | BSD-2-Clause |
 | Ollama (optional profile) | local LLM runtime (container) | MIT |
-| Rust crates (see `store/Cargo.lock`, `catalog/Cargo.lock`: iceberg-rust, redb, tokio, hyper, reqwest, rustls, serde, RustCrypto hashes, ...) | compiled into Cairn Store and Cairn Catalog | per crate (Apache-2.0, MIT, ISC, BSD) |
+| Rust crates (see `store/Cargo.lock`, `catalog/Cargo.lock`: iceberg-rust, redb, tokio, hyper, reqwest, rustls, serde, RustCrypto hashes and AES-GCM, ...) | compiled into Cairn Store and Cairn Catalog | per crate (Apache-2.0, MIT, ISC, BSD) |
 | Alpine Linux | Cairn Store runtime image | per package (MIT, GPL-2.0 for BusyBox) |
 | Python packages (see `pyproject.toml`) | control plane, remote agent | per package (Apache-2.0, BSD, MIT, MPL-2.0) |
 | JavaScript packages (see `ui/package.json`, `ui/package-lock.json`) | consumer UI, embed SDK | per package (MIT, Apache-2.0, ISC, BSD) |

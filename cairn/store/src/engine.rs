@@ -28,6 +28,8 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use md5::{Digest, Md5};
+
+use crate::crypt::{self, ChunkCipher, Key};
 use redb::{Database, Durability, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
 
@@ -101,8 +103,30 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub struct Segment {
     #[serde(rename = "b")]
     pub blob: String,
+    /// Plaintext size.
     #[serde(rename = "s")]
     pub size: u64,
+    /// Encrypted blobs: the chunk nonce prefix (hex). Empty: stored in the clear.
+    #[serde(rename = "n", default, skip_serializing_if = "String::is_empty")]
+    pub nonce: String,
+}
+
+/// How a version is encrypted at rest. The data key is stored only wrapped by a keyring key
+/// (SSE-S3, SSE-KMS); for customer keys (SSE-C) only a salted HMAC of the key is kept, to check it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Sse {
+    /// "AES256" (SSE-S3), "aws:kms" (SSE-KMS) or "SSE-C".
+    pub alg: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub wrapped: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_md5: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_hmac: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub salt: String,
 }
 
 /// The index entry for a key.
@@ -139,6 +163,8 @@ pub struct Object {
     pub noncurrent_since: u64,
     #[serde(flatten)]
     pub lock: Lock,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse: Option<Sse>,
 }
 
 /// Object lock state of one version: retention (mode and date) and legal hold.
@@ -223,6 +249,8 @@ pub struct Upload {
     pub tags: BTreeMap<String, String>,
     #[serde(flatten)]
     pub lock: Lock,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse: Option<Sse>,
 }
 
 /// An uploaded part.
@@ -231,6 +259,8 @@ pub struct Part {
     pub number: u32,
     pub blob: String,
     pub size: u64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nonce: String,
     pub etag: String,
     pub md5: Vec<u8>,
     #[serde(default)]
@@ -319,14 +349,35 @@ pub struct BlobWriter<'a> {
     file: Option<File>,
     size: u64,
     md5: Md5,
+    enc: Option<Encrypting>,
+}
+
+struct Encrypting {
+    cipher: ChunkCipher,
+    base: [u8; 8],
+    idx: u32,
+    buf: Vec<u8>,
 }
 
 impl BlobWriter<'_> {
+    /// Appends plaintext (encrypted on the way to disk when the blob has a key).
     pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
-        self.file.as_mut().expect("blob already sealed").write_all(data)?;
         self.size += data.len() as u64;
         self.md5.update(data);
-        Ok(())
+        let file = self.file.as_mut().expect("blob already sealed");
+        match &mut self.enc {
+            None => file.write_all(data),
+            Some(e) => {
+                e.buf.extend_from_slice(data);
+                while e.buf.len() >= crypt::CHUNK {
+                    let rest = e.buf.split_off(crypt::CHUNK);
+                    file.write_all(&e.cipher.seal(e.idx, &e.buf))?;
+                    e.idx += 1;
+                    e.buf = rest;
+                }
+                Ok(())
+            }
+        }
     }
 
     pub fn size(&self) -> u64 {
@@ -340,7 +391,14 @@ impl BlobWriter<'_> {
     /// fsyncs the blob and moves it into the blob tree. It is not visible to readers until an index
     /// transaction refers to it.
     pub fn seal(mut self) -> Result<Segment> {
-        let file = self.file.take().expect("blob already sealed");
+        let mut file = self.file.take().expect("blob already sealed");
+        let mut nonce = String::new();
+        if let Some(e) = self.enc.take() {
+            if !e.buf.is_empty() {
+                file.write_all(&e.cipher.seal(e.idx, &e.buf))?;
+            }
+            nonce = hex::encode(e.base);
+        }
         if self.engine.fsync {
             file.sync_all()?;
         }
@@ -351,7 +409,7 @@ impl BlobWriter<'_> {
         if self.engine.fsync {
             File::open(dst.parent().unwrap())?.sync_all()?;
         }
-        Ok(Segment { blob: self.id.clone(), size: self.size })
+        Ok(Segment { blob: self.id.clone(), size: self.size, nonce })
     }
 }
 
@@ -366,23 +424,56 @@ impl Drop for BlobWriter<'_> {
 /// A reader over a byte range of an object, following its segments. The segment files are opened up
 /// front, so a concurrent replace or delete cannot cut the read short.
 pub struct ObjectReader {
-    parts: Vec<(File, u64)>, // file positioned at its start offset, bytes left
+    parts: Vec<Piece>,
+}
+
+/// One segment's share of a read.
+enum Piece {
+    /// A file positioned at its start offset, and the bytes left.
+    Plain(File, u64),
+    /// An encrypted blob: decrypts chunk by chunk.
+    Sealed { file: File, cipher: Box<ChunkCipher>, chunk: u32, seg_size: u64, skip: usize, left: u64, buf: Vec<u8>, pos: usize },
 }
 
 impl Read for ObjectReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        while let Some((f, left)) = self.parts.first_mut() {
-            if *left == 0 {
-                self.parts.remove(0);
-                continue;
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        while let Some(p) = self.parts.first_mut() {
+            match p {
+                Piece::Plain(f, left) => {
+                    if *left == 0 {
+                        self.parts.remove(0);
+                        continue;
+                    }
+                    let want = out.len().min(*left as usize);
+                    let n = f.read(&mut out[..want])?;
+                    if n == 0 {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "blob shorter than its index entry"));
+                    }
+                    *left -= n as u64;
+                    return Ok(n);
+                }
+                Piece::Sealed { file, cipher, chunk, seg_size, skip, left, buf, pos } => {
+                    if *left == 0 {
+                        self.parts.remove(0);
+                        continue;
+                    }
+                    if *pos >= buf.len() {
+                        let start = *chunk as u64 * crypt::CHUNK as u64;
+                        let plain = (*seg_size - start).min(crypt::CHUNK as u64) as usize;
+                        let mut sealed = vec![0u8; plain + crypt::TAG];
+                        file.read_exact(&mut sealed)
+                            .map_err(|_| io::Error::new(io::ErrorKind::UnexpectedEof, "encrypted blob shorter than its index entry"))?;
+                        *buf = cipher.open(*chunk, &sealed)?;
+                        *chunk += 1;
+                        *pos = std::mem::take(skip);
+                    }
+                    let n = out.len().min(buf.len() - *pos).min(*left as usize);
+                    out[..n].copy_from_slice(&buf[*pos..*pos + n]);
+                    *pos += n;
+                    *left -= n as u64;
+                    return Ok(n);
+                }
             }
-            let want = buf.len().min(*left as usize);
-            let n = f.read(&mut buf[..want])?;
-            if n == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "blob shorter than its index entry"));
-            }
-            *left -= n as u64;
-            return Ok(n);
         }
         Ok(0)
     }
@@ -467,7 +558,17 @@ impl Engine {
         let id = new_id();
         let tmp = self.dir.join("tmp").join(format!("{id}.{}", new_id()));
         let file = File::create(&tmp)?;
-        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new() })
+        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None })
+    }
+
+    /// Starts a blob that is encrypted with `key` (None: in the clear).
+    pub fn new_blob_with(&self, key: Option<&Key>) -> Result<BlobWriter<'_>> {
+        let mut w = self.new_blob()?;
+        if let Some(k) = key {
+            let base = crypt::random_nonce_base();
+            w.enc = Some(Encrypting { cipher: ChunkCipher::new(k, base), base, idx: 0, buf: Vec::with_capacity(crypt::CHUNK) });
+        }
+        Ok(w)
     }
 
     /// Removes sealed blobs that were never committed.
@@ -1113,8 +1214,8 @@ impl Engine {
         Ok(res)
     }
 
-    /// Opens `[off, off+n)` of an object.
-    pub fn reader(&self, obj: &Object, off: u64, n: u64) -> Result<ObjectReader> {
+    /// Opens `[off, off+n)` of an object; `key` decrypts encrypted segments.
+    pub fn reader(&self, obj: &Object, off: u64, n: u64, key: Option<&Key>) -> Result<ObjectReader> {
         let mut parts = vec![];
         let end = off + n;
         let mut pos = 0u64;
@@ -1127,8 +1228,28 @@ impl Engine {
             let mut f = File::open(self.blob_path(&s.blob))?;
             let from = off.max(start) - start;
             let to = end.min(stop) - start;
-            f.seek(SeekFrom::Start(from))?;
-            parts.push((f, to - from));
+            if s.nonce.is_empty() {
+                f.seek(SeekFrom::Start(from))?;
+                parts.push(Piece::Plain(f, to - from));
+                continue;
+            }
+            let k = key.ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "encrypted object read without its key")))?;
+            let base: [u8; 8] = hex::decode(&s.nonce)
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| Error::Index(format!("segment {}: bad nonce", s.blob)))?;
+            let chunk = (from / crypt::CHUNK as u64) as u32;
+            f.seek(SeekFrom::Start(chunk as u64 * (crypt::CHUNK + crypt::TAG) as u64))?;
+            parts.push(Piece::Sealed {
+                file: f,
+                cipher: Box::new(ChunkCipher::new(k, base)),
+                chunk,
+                seg_size: s.size,
+                skip: (from % crypt::CHUNK as u64) as usize,
+                left: to - from,
+                buf: vec![],
+                pos: 0,
+            });
         }
         Ok(ObjectReader { parts })
     }
@@ -1140,15 +1261,15 @@ impl Engine {
         bucket: &str,
         key: &str,
         version: Option<&str>,
-        mut rng: impl FnMut(&Object) -> std::result::Result<(u64, u64), E>,
+        mut rng: impl FnMut(&Object) -> std::result::Result<(u64, u64, Option<Key>), E>,
     ) -> std::result::Result<(Object, ObjectReader), FreshError<E>> {
         for attempt in 0.. {
             let obj = self.get_version(bucket, key, version).map_err(FreshError::Engine)?;
             if obj.delete_marker {
                 return Err(FreshError::Engine(Error::MethodNotAllowed));
             }
-            let (off, n) = rng(&obj).map_err(|e| FreshError::Range(Box::new(obj.clone()), e))?;
-            match self.reader(&obj, off, n) {
+            let (off, n, key) = rng(&obj).map_err(|e| FreshError::Range(Box::new(obj.clone()), e))?;
+            match self.reader(&obj, off, n, key.as_ref()) {
                 Ok(r) => return Ok((obj, r)),
                 Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound && attempt < 4 => continue,
                 Err(e) => return Err(FreshError::Engine(e)),
@@ -1247,7 +1368,7 @@ impl Engine {
 
     /// Records a sealed part, replacing an earlier upload of the same part number.
     pub fn put_part(&self, bucket: &str, key: &str, id: &str, p: Part) -> Result<()> {
-        let new_seg = Segment { blob: p.blob.clone(), size: p.size };
+        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() };
         let res = (|| -> Result<Vec<Segment>> {
             let tx = self.begin_write()?;
             let old = {
@@ -1256,7 +1377,7 @@ impl Engine {
                 let old = match t.get((id, p.number))? {
                     Some(v) => {
                         let op: Part = serde_json::from_slice(v.value())?;
-                        vec![Segment { blob: op.blob, size: op.size }]
+                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce }]
                     }
                     None => vec![],
                 };
@@ -1332,7 +1453,7 @@ impl Engine {
         let tx = self.begin_write()?;
         Self::upload_in(&tx.open_table(UPLOADS)?, bucket, key, id)?;
         let parts = Self::drop_upload(&tx, id)?;
-        let segs: Vec<Segment> = parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size }).collect();
+        let segs: Vec<Segment> = parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce }).collect();
         Self::queue_gc(&tx, &segs)?;
         tx.commit()?;
         self.collect();
@@ -1395,14 +1516,19 @@ impl Engine {
                 user_meta: u.user_meta.clone(),
                 checksums,
                 checksum_type: ctype,
-                segments: parts.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size }).collect(),
+                segments: parts.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() }).collect(),
                 part_count: parts.len() as u32,
                 tags: u.tags.clone(),
                 lock: u.lock.clone(),
+                sse: u.sse.clone(),
                 ..Default::default()
             };
             let (obj, mut garbage) = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
-            garbage.extend(have.values().filter(|p| !chosen.contains(&p.number)).map(|p| Segment { blob: p.blob.clone(), size: p.size }));
+            garbage.extend(have.values().filter(|p| !chosen.contains(&p.number)).map(|p| Segment {
+                blob: p.blob.clone(),
+                size: p.size,
+                nonce: p.nonce.clone(),
+            }));
             Self::drop_upload(&tx, id)?;
             (obj, garbage)
         };
