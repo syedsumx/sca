@@ -169,6 +169,9 @@ errors! {
     REMOTE_IN_USE = "Conflict", 409, "This remote is mounted in another bucket.";
     NOT_MOUNTED = "NotFound", 404, "This bucket has no remote mounted.";
     REMOTE_FAILED = "BadGateway", 502, "The remote bucket could not be reached or refused a request; see the store's log.";
+    IMAGE_UNSUPPORTED = "InvalidArgument", 400, "Only JPEG, PNG, GIF and WebP images can be resized, without a Range.";
+    IMAGE_INVALID = "InvalidArgument", 400, "The object is not a readable image.";
+    IMAGE_TOO_LARGE = "InvalidArgument", 400, "The image is too large to resize (64 MiB, 50 megapixels at most).";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";

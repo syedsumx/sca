@@ -14,6 +14,7 @@ pub mod errors;
 pub mod events;
 mod files;
 mod handlers;
+pub mod images;
 pub mod keys;
 pub mod lifecycle;
 pub mod mounts;

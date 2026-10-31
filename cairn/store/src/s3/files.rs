@@ -2,6 +2,7 @@
 //!
 //! - `GET`/`HEAD` a file reads it (ranges and conditional requests as for GetObject); `PUT` writes one;
 //!   `DELETE` removes one. `versionId` selects a version.
+//! - `GET` an image with `width`, `height` and `fit` (contain, cover, fill) returns it resized (see `images`).
 //! - `GET` a directory (a path ending in `/`, or a bucket, or `/-/files/` for the bucket list) lists it:
 //!   JSON by default, an HTML page for browsers (`Accept: text/html`). `limit` and `after` page through it.
 //!
@@ -34,6 +35,40 @@ const PREFIX: &str = "/-/files";
 
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
+}
+
+/// Replaces an image response's body with the resized image (same format), with an ETag of its own.
+async fn resized(r: Resp, rs: super::images::Resize) -> Result<Resp, ApiError> {
+    use http_body_util::BodyExt;
+    let ct = r.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let format = super::images::format_of(&ct).ok_or_else(|| e::IMAGE_UNSUPPORTED.clone())?;
+    let len: u64 = r.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
+    if len > super::images::MAX_SOURCE_BYTES as u64 {
+        return Err(e::IMAGE_TOO_LARGE.clone());
+    }
+    let (mut parts, body) = r.into_parts();
+    let src = body.collect().await.map_err(|_| e::INTERNAL.clone())?.to_bytes();
+    let out = tokio::task::block_in_place(|| super::images::resize(&src, format, rs))?;
+    let etag = parts.headers.get("etag").and_then(|v| v.to_str().ok()).unwrap_or("\"\"").trim_matches('"').to_string();
+    for h in [
+        "content-length",
+        "content-md5",
+        "x-amz-checksum-crc32",
+        "x-amz-checksum-crc32c",
+        "x-amz-checksum-crc64nvme",
+        "x-amz-checksum-sha1",
+        "x-amz-checksum-sha256",
+        "x-amz-checksum-type",
+        "accept-ranges",
+    ] {
+        parts.headers.remove(h);
+    }
+    parts.headers.insert("etag", HeaderValue::from_str(&format!("\"{etag}-{}\"", rs.tag())).map_err(|_| e::INTERNAL.clone())?);
+    parts.headers.insert("content-length", HeaderValue::from(out.len()));
+    Ok(hyper::Response::from_parts(
+        parts,
+        http_body_util::BodyExt::boxed(http_body_util::Full::new(Bytes::from(out)).map_err(|never| match never {})),
+    ))
 }
 
 /// Query parameters of a presigned URL (SigV4 and SigV2); they stay for the signature check.
@@ -193,6 +228,7 @@ impl Server {
         info.principal = auth.cred.access_key.clone();
         let mut query: BTreeMap<String, String> = BTreeMap::new();
         let (mut after, mut limit) = (String::new(), 1000usize);
+        let (mut width, mut height, mut fit) = (None, None, None);
         for pair in raw_query.split('&').filter(|p| !p.is_empty()) {
             let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
             let (k, v) = (auth::query_decode(k), auth::query_decode(v));
@@ -205,6 +241,9 @@ impl Server {
                 "versionId" => {
                     query.insert(k, v);
                 }
+                "width" => width = Some(v),
+                "height" => height = Some(v),
+                "fit" => fit = Some(v),
                 k if presign_param(k) => {
                     query.insert(k.to_string(), v);
                 }
@@ -212,7 +251,14 @@ impl Server {
                 _ => return fail("route", e::FILES_PARAMETER.clone(), anonymous, info),
             }
         }
+        let resize = match super::images::Resize::parse(width.as_deref(), height.as_deref(), fit.as_deref()) {
+            Ok(r) => r,
+            Err(err) => return fail("route", err, anonymous, info),
+        };
         let is_dir = (parts.method == Method::GET || head) && (key.is_empty() || key.ends_with('/'));
+        if resize.is_some() && (parts.method != Method::GET || is_dir || parts.headers.contains_key("range")) {
+            return fail("route", e::IMAGE_UNSUPPORTED.clone(), anonymous, info);
+        }
         if is_dir && query.contains_key("versionId") {
             return fail("route", e::FILES_PARAMETER.clone(), anonymous, info);
         }
@@ -235,7 +281,12 @@ impl Server {
         } else if is_dir {
             self.files_dir(&mut ctx, &key, &after, limit, browser).await
         } else {
-            self.route(&mut ctx, body).await.map(|mut r| {
+            let routed = self.route(&mut ctx, body).await;
+            let routed = match (routed, resize) {
+                (Ok(r), Some(rs)) if r.status() == StatusCode::OK => resized(r, rs).await,
+                (other, _) => other,
+            };
+            routed.map(|mut r| {
                 if ctx.method == Method::GET || head {
                     let h = r.headers_mut();
                     h.insert("content-security-policy", HeaderValue::from_static("sandbox"));

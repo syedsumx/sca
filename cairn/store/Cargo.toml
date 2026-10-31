@@ -30,6 +30,7 @@ postgres = "0.19"
 tokio-postgres-rustls = "0.13"
 reed-solomon-erasure = "6"
 zstd = { version = "0.13", default-features = false }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 redb = "2"
 rskafka = { version = "0.6", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
