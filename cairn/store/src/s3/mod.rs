@@ -13,6 +13,7 @@ pub mod errors;
 pub mod events;
 mod files;
 mod handlers;
+pub mod keys;
 pub mod lifecycle;
 mod objectlock;
 pub mod policy;
@@ -89,13 +90,12 @@ pub struct Config {
 
 pub struct Server {
     eng: Arc<Engine>,
-    creds: BTreeMap<String, Credential>,
+    pub(crate) keys: std::sync::RwLock<Arc<keys::KeySet>>,
     region: String,
     domain: String,
     max_obj: u64,
     metrics: Metrics,
     clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
-    key_policies: BTreeMap<String, policy::Policy>,
     block_public: bool,
     pdp: Option<authz::Pdp>,
     /// Requests arrive over TLS (aws:SecureTransport).
@@ -165,32 +165,23 @@ impl Server {
         if cfg.credentials.is_empty() {
             return Err("at least one credential is required".into());
         }
-        let mut creds = BTreeMap::new();
-        let mut key_policies = BTreeMap::new();
+        let mut keyset = keys::KeySet::default();
         for c in cfg.credentials {
-            if c.access_key.is_empty() || c.secret_key.len() < 8 {
-                return Err(format!("credential {:?}: an access key and a secret of at least 8 characters are required", c.access_key));
-            }
-            if let Some(p) = &c.policy {
-                let parsed = policy::Policy::parse(p.to_string().as_bytes(), None)
-                    .map_err(|err| format!("credential {:?}: policy: {}", c.access_key, err.message))?;
-                key_policies.insert(c.access_key.clone(), parsed);
-            }
-            creds.insert(c.access_key.clone(), c);
+            keyset.fixed.insert(c.access_key.clone());
+            keyset.insert(c)?;
         }
         let pdp = match cfg.pdp {
             Some((url, token)) => Some(authz::Pdp::new(&url, &token)?),
             None => None,
         };
-        Ok(Server {
+        let srv = Server {
             eng,
-            creds,
+            keys: std::sync::RwLock::new(Arc::new(keyset)),
             region: if cfg.region.is_empty() { "us-east-1".into() } else { cfg.region },
             domain: cfg.domain.to_ascii_lowercase(),
             max_obj: if cfg.max_object == 0 { 5 << 30 } else { cfg.max_object },
             metrics: Metrics::default(),
             clock: Box::new(OffsetDateTime::now_utc),
-            key_policies,
             block_public: cfg.block_public,
             pdp,
             tls: cfg.tls,
@@ -218,7 +209,9 @@ impl Server {
             files_basic: cfg.files_basic,
             files_basic_http: cfg.files_basic_http,
             sftp_metrics: Default::default(),
-        })
+        };
+        srv.reload_keys()?; // keys created through the admin API
+        Ok(srv)
     }
 
     /// Replaces the clock (tests).
@@ -406,7 +399,7 @@ impl Server {
         let auth = if auth::is_anonymous(&parts.headers, &raw_query) {
             auth::Auth::anonymous()
         } else {
-            match auth::verify(&self.creds, &request) {
+            match auth::verify(&self.keyset().creds, &request) {
                 Ok(a) => a,
                 Err(err) => return ("auth", Err(err), cors, info),
             }

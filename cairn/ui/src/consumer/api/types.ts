@@ -1251,6 +1251,32 @@ export interface StoreAuditEntry {
     hash: string;
 }
 
+export interface StoreKey {
+    access_key: string;
+    source: 'configuration' | 'api';
+    admin: boolean;
+    read_only: boolean;
+    buckets: string[];
+    policy?: Record<string, unknown> | null;
+    actor?: string;
+    ssh_keys?: number;
+    description?: string;
+    created?: string | null;
+    created_by?: string | null;
+    rotated?: string | null;
+    secret_protected?: boolean | null;
+    /** Only in the answer to a create or a rotation. */
+    secret_key?: string;
+}
+
+export interface StoreKeySpec {
+    access_key?: string;
+    buckets?: string[];
+    read_only?: boolean;
+    admin?: boolean;
+    description?: string;
+}
+
 export interface StoreAuditVerify {
     valid: boolean;
     entries_checked?: number;

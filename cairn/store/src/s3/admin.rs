@@ -8,6 +8,13 @@
 //! GET    /-/admin/v1/buckets/{bucket}          one bucket
 //! PUT    /-/admin/v1/buckets/{bucket}/quota    {"max_bytes": n, "max_objects": n} (either or both)
 //! DELETE /-/admin/v1/buckets/{bucket}/quota
+//! GET    /-/admin/v1/keys                      access keys (never their secrets)
+//! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
+//!                                              -> the new key with its secret (shown once)
+//! GET    /-/admin/v1/keys/{key}
+//! PATCH  /-/admin/v1/keys/{key}                change its scope (not its secret)
+//! POST   /-/admin/v1/keys/{key}/rotate         a new secret (shown once); the old one stops working
+//! DELETE /-/admin/v1/keys/{key}
 //! ```
 
 use bytes::Bytes;
@@ -92,7 +99,7 @@ impl Server {
         if auth::is_anonymous(&parts.headers, &raw_query) {
             return Err(e::ACCESS_DENIED.clone());
         }
-        let a = auth::verify(&self.creds, &request)?;
+        let a = auth::verify(&self.keyset().creds, &request)?;
         if !a.cred.admin {
             return Err(e::ACCESS_DENIED.clone());
         }
@@ -221,6 +228,10 @@ impl Server {
                 self.eng.put_config_audited(b, "quota", None, Some(&audit))?;
                 tracing::info!(bucket = %b, admin = %a.cred.access_key, "bucket quota removed");
                 Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (m, ["keys", rest @ ..]) => {
+                let (status, v) = self.keys_api(m, rest, &body, &a.cred.access_key)?;
+                Ok(if v.is_null() { full(status, Bytes::new()) } else { json_resp(status, v) })
             }
             _ => Err(e::ADMIN_NOT_FOUND.clone()),
         })

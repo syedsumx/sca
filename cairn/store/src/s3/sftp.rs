@@ -104,7 +104,7 @@ fn ssh_keys(creds: &std::collections::BTreeMap<String, Credential>) -> Result<Ha
 pub async fn serve(srv: Arc<Server>, cfg: SftpConfig) -> Result<(), String> {
     let key = host_key(&cfg.host_key)?;
     let fingerprint = key.public_key().fingerprint(Default::default()).to_string();
-    let keys = Arc::new(ssh_keys(&srv.creds)?);
+    ssh_keys(&srv.keyset().creds)?; // a bad key in the configuration stops start-up
     let config = Arc::new(russh::server::Config {
         auth_rejection_time: Duration::from_secs(2),
         auth_rejection_time_initial: Some(Duration::from_secs(0)),
@@ -115,14 +115,13 @@ pub async fn serve(srv: Arc<Server>, cfg: SftpConfig) -> Result<(), String> {
     });
     let listener = tokio::net::TcpListener::bind(crate::listen_addr(&cfg.addr)).await.map_err(|e| format!("SFTP listen: {e}"))?;
     tracing::info!(addr = %cfg.addr, host_key = %fingerprint, "SFTP listening");
-    let mut server = SshServer { srv, keys, password_auth: cfg.password_auth };
+    let mut server = SshServer { srv, password_auth: cfg.password_auth };
     use russh::server::Server as _;
     server.run_on_socket(config, &listener).await.map_err(|e| format!("SFTP: {e}"))
 }
 
 struct SshServer {
     srv: Arc<Server>,
-    keys: Arc<HashMap<String, Vec<PublicKey>>>,
     password_auth: bool,
 }
 
@@ -130,20 +129,12 @@ impl russh::server::Server for SshServer {
     type Handler = SshConn;
 
     fn new_client(&mut self, peer: Option<SocketAddr>) -> SshConn {
-        SshConn {
-            srv: self.srv.clone(),
-            keys: self.keys.clone(),
-            password_auth: self.password_auth,
-            peer,
-            cred: None,
-            channels: HashMap::new(),
-        }
+        SshConn { srv: self.srv.clone(), password_auth: self.password_auth, peer, cred: None, channels: HashMap::new() }
     }
 }
 
 struct SshConn {
     srv: Arc<Server>,
-    keys: Arc<HashMap<String, Vec<PublicKey>>>,
     password_auth: bool,
     peer: Option<SocketAddr>,
     cred: Option<Credential>,
@@ -151,6 +142,13 @@ struct SshConn {
 }
 
 impl SshConn {
+    /// Is `key` one of `user`'s SSH keys? (Read from the current key set, so key changes apply at once.)
+    fn knows(&self, user: &str, key: &PublicKey) -> bool {
+        self.srv.keyset().creds.get(user).is_some_and(|c| {
+            c.ssh_keys.iter().filter_map(|k| PublicKey::from_openssh(k.trim()).ok()).any(|k| k.key_data() == key.key_data())
+        })
+    }
+
     fn rejected(&self, user: &str, method: &str) -> SshAuth {
         self.srv.sftp_metrics.auth_failures.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(user, method, peer = ?self.peer, "SFTP sign-in refused");
@@ -158,7 +156,7 @@ impl SshConn {
     }
 
     fn accepted(&mut self, user: &str, method: &str) -> SshAuth {
-        self.cred = self.srv.creds.get(user).cloned();
+        self.cred = self.srv.keyset().creds.get(user).cloned();
         self.srv.sftp_metrics.sessions.fetch_add(1, Ordering::Relaxed);
         tracing::info!(user, method, peer = ?self.peer, "SFTP session");
         SshAuth::Accept
@@ -169,17 +167,18 @@ impl russh::server::Handler for SshConn {
     type Error = russh::Error;
 
     async fn auth_password(&mut self, user: &str, password: &str) -> Result<SshAuth, Self::Error> {
-        let ok = self.password_auth && self.srv.creds.get(user).is_some_and(|c| ct_eq(c.secret_key.as_bytes(), password.as_bytes()));
+        let ok =
+            self.password_auth && self.srv.keyset().creds.get(user).is_some_and(|c| ct_eq(c.secret_key.as_bytes(), password.as_bytes()));
         Ok(if ok { self.accepted(user, "password") } else { self.rejected(user, "password") })
     }
 
     async fn auth_publickey_offered(&mut self, user: &str, offer: russh::server::PublicKeyOffer<'_>) -> Result<SshAuth, Self::Error> {
-        let known = self.keys.get(user).is_some_and(|ks| ks.iter().any(|k| k.key_data() == offer.public_key.key_data()));
+        let known = self.knows(user, offer.public_key);
         Ok(if known { SshAuth::Accept } else { SshAuth::reject() })
     }
 
     async fn auth_publickey(&mut self, user: &str, key: VerifiedPublicKey<'_>) -> Result<SshAuth, Self::Error> {
-        let known = self.keys.get(user).is_some_and(|ks| ks.iter().any(|k| k.key_data() == key.public_key.key_data()));
+        let known = self.knows(user, key.public_key);
         Ok(if known { self.accepted(user, "publickey") } else { self.rejected(user, "publickey") })
     }
 

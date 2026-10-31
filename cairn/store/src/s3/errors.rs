@@ -86,6 +86,13 @@ errors! {
     MALFORMED_POLICY_CONDITION = "MalformedPolicy", 400, "Policy has an invalid condition operator or key";
     PUBLIC_POLICY_BLOCKED = "AccessDenied", 403, "Public policies are blocked by the public access block for this bucket or store.";
     LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Only one Transition and one NoncurrentVersionTransition per rule are supported, without NewerNoncurrentVersions.";
+    KEY_NOT_FOUND = "NoSuchAccessKey", 404, "No such access key.";
+    KEY_EXISTS = "AccessKeyExists", 409, "An access key with this name exists.";
+    KEY_FIXED = "AccessKeyFixed", 409, "This key comes from the store's configuration (environment or credentials file) and is changed there.";
+    KEY_SELF = "InvalidRequest", 409, "A key cannot delete itself.";
+    KEY_NAME = "InvalidArgument", 400, "Access keys are 3 to 64 letters, digits, '.', '_' or '-'.";
+    KEY_POLICY = "MalformedPolicy", 400, "The key policy is not valid.";
+    KEY_SSH = "InvalidArgument", 400, "An SSH public key is not in OpenSSH format.";
     FILES_BASIC_OFF = "InvalidRequest", 400, "HTTP Basic authentication is off (CAIRN_STORE_FILES_BASIC_AUTH); sign requests with SigV4 or use a presigned URL.";
     FILES_BASIC_NEEDS_TLS = "InsecureTransport", 400, "HTTP Basic authentication needs TLS: the secret key would cross the network in the clear.";
     DAV_TREE_TOO_LARGE = "InvalidRequest", 403, "This collection holds more than 10,000 keys: copy, move or delete it with the S3 API.";

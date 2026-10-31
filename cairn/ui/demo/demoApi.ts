@@ -560,6 +560,29 @@ on('DELETE', '/storage/v1/buckets/:id/quota', (_b, _q, [name]) => {
     bk.quota = null;
     return bk;
 });
+const storeKeys: Json[] = [
+    { access_key: 'cairn-admin', source: 'configuration', admin: true, read_only: false, buckets: [] },
+    { access_key: 'cairn-catalog', source: 'configuration', admin: false, read_only: false, buckets: ['lakehouse'] },
+    { access_key: 'trino-reader', source: 'api', admin: false, read_only: true, buckets: ['lakehouse'], description: 'Trino (read only)',
+      created: iso(40 * DAY), created_by: 'cairn-admin', secret_protected: true },
+    { access_key: 'ingest-nightly', source: 'api', admin: false, read_only: false, buckets: ['raw-landing'], description: 'Nightly ingest job',
+      created: iso(20 * DAY), created_by: 'cairn-admin', secret_protected: true },
+];
+const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+const demoSecret = () => Array.from(crypto.getRandomValues(new Uint8Array(43)), (b) => ALPHABET[b % 64]).join('');
+on('GET', '/storage/v1/keys', () => storeKeys);
+on('POST', '/storage/v1/keys', (b) => {
+    const k = {
+        access_key: b.access_key || `CK${demoSecret().slice(0, 18).toUpperCase().replace(/[^A-Z0-9]/g, 'X')}`, source: 'api',
+        admin: !!b.admin, read_only: !!b.read_only, buckets: b.buckets ?? [], description: b.description ?? '',
+        created: new Date().toISOString(), created_by: 'cairn-admin', secret_protected: true,
+    };
+    storeKeys.push(k);
+    return { ...k, secret_key: demoSecret() };
+});
+on('POST', '/storage/v1/keys/:id/rotate', (_b, _q, [ak]) =>
+    ({ ...storeKeys.find((k) => k.access_key === ak), rotated: new Date().toISOString(), secret_key: demoSecret() }));
+on('DELETE', '/storage/v1/keys/:id', (_b, _q, [ak]) => { storeKeys.splice(storeKeys.findIndex((k) => k.access_key === ak), 1); });
 on('GET', '/storage/v1/audit', () => storeAudit);
 on('GET', '/storage/v1/audit/verify', () => ({ valid: true, entries_checked: storeAudit.length, head: storeAudit[0].hash }));
 on('GET', '/collab/trending', (_b, q) => {

@@ -9,6 +9,12 @@
 //! cairn-store admin audit [--after SEQ] [--jsonl]
 //! cairn-store admin backup <name>         (an online backup under CAIRN_STORE_BACKUP_DIR)
 //! cairn-store admin backups
+//! cairn-store admin keys | key <ak>
+//! cairn-store admin key-create [--name AK] [--admin] [--read-only] [--buckets a,b*] [--policy-file F]
+//!                              [--actor URN] [--ssh-key-file F] [--description TEXT]
+//! cairn-store admin key-update <ak> [the same options]
+//! cairn-store admin key-rotate <ak>
+//! cairn-store admin key-delete <ak>
 //! ```
 //!
 //! Endpoint: `CAIRN_STORE_ENDPOINT` (default: this store's listen address, http or https as configured);
@@ -91,7 +97,7 @@ pub fn sign_full(
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups");
+    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak>");
     std::process::exit(2)
 }
 
@@ -116,6 +122,65 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             ("POST", "backups".to_string(), Some(serde_json::json!({"name": rest.first().map(|s| s.as_str()).unwrap_or_else(|| usage())})))
         }
         "backups" => ("GET", "backups".to_string(), None),
+        "keys" => ("GET", "keys".to_string(), None),
+        "key" => ("GET", format!("keys/{}", name()), None),
+        "key-rotate" => ("POST", format!("keys/{}/rotate", name()), None),
+        "key-delete" => ("DELETE", format!("keys/{}", name()), None),
+        "key-create" | "key-update" => {
+            let has = |f: &str| rest.iter().any(|a| a.as_str() == f);
+            let read = |f: &str| {
+                flag(f).map(|p| {
+                    std::fs::read_to_string(&p).unwrap_or_else(|e| {
+                        eprintln!("{p}: {e}");
+                        std::process::exit(2)
+                    })
+                })
+            };
+            let mut b = serde_json::Map::new();
+            if cmd == "key-create" {
+                if let Some(n) = flag("--name") {
+                    b.insert("access_key".into(), n.into());
+                }
+            }
+            if has("--admin") {
+                b.insert("admin".into(), true.into());
+            }
+            if has("--not-admin") {
+                b.insert("admin".into(), false.into());
+            }
+            if has("--read-only") {
+                b.insert("read_only".into(), true.into());
+            }
+            if has("--read-write") {
+                b.insert("read_only".into(), false.into());
+            }
+            if let Some(v) = flag("--buckets") {
+                b.insert("buckets".into(), v.split(',').filter(|x| !x.is_empty()).collect::<Vec<_>>().into());
+            }
+            if let Some(v) = read("--policy-file") {
+                b.insert(
+                    "policy".into(),
+                    serde_json::from_str(&v).unwrap_or_else(|e| {
+                        eprintln!("--policy-file: {e}");
+                        std::process::exit(2)
+                    }),
+                );
+            }
+            if let Some(v) = flag("--actor") {
+                b.insert("actor".into(), v.into());
+            }
+            if let Some(v) = read("--ssh-key-file") {
+                b.insert("ssh_keys".into(), v.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().into());
+            }
+            if let Some(v) = flag("--description") {
+                b.insert("description".into(), v.into());
+            }
+            if cmd == "key-create" {
+                ("POST", "keys".to_string(), Some(serde_json::Value::Object(b)))
+            } else {
+                ("PATCH", format!("keys/{}", name()), Some(serde_json::Value::Object(b)))
+            }
+        }
         "audit" => {
             let after = flag("--after").unwrap_or_else(|| "0".into());
             let fmt = if rest.iter().any(|a| a.as_str() == "--jsonl") { "&format=jsonl" } else { "" };

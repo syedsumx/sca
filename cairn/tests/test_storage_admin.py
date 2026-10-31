@@ -103,3 +103,38 @@ def test_storage_api_is_for_admins(store):
     who["urn"] = "urn:li:corpuser:analyst"
     assert c.get("/storage/v1/buckets").status_code == 403
     assert json.loads(c.get("/storage/v1/stats").text)["detail"].startswith("storage administration")
+
+
+def test_access_keys_through_the_control_plane(store):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.storage.store_api import build_router
+
+    recorded = []
+
+    class Audit:
+        def record(self, *a):
+            recorded.append(a)
+
+    app = FastAPI()
+    app.include_router(build_router(store, lambda: Principal(urn="urn:li:corpuser:admin", via="dev"), lambda urn: True, Audit()))
+    c = TestClient(app)
+    r = c.post("/storage/v1/keys", json={"access_key": "cp-made", "buckets": ["lake"], "description": "from Cairn"})
+    assert r.status_code == 201 and len(r.json()["secret_key"]) >= 40
+    secret = r.json()["secret_key"]
+    with pytest.raises(StoreAdminError) as ei:  # a valid key (not an admin one): refused as such, not as unknown
+        StoreAdmin(store.url, "cp-made", secret).stats()
+    assert "Access Denied" in str(ei.value)
+    listed = c.get("/storage/v1/keys").json()
+    assert any(k["access_key"] == "cp-made" and k["description"] == "from Cairn" for k in listed)
+    assert secret not in json.dumps(listed)
+    assert c.patch("/storage/v1/keys/cp-made", json={"read_only": True}).json()["read_only"] is True
+    rotated = c.post("/storage/v1/keys/cp-made/rotate").json()["secret_key"]
+    assert rotated != secret
+    assert c.post("/storage/v1/keys", json={"secret_key": "x"}).status_code == 422  # secrets are generated
+    assert c.delete("/storage/v1/keys/cp-made").status_code == 204
+    assert c.delete("/storage/v1/keys/cp-made").status_code == 404
+    assert [a[1] for a in recorded] == ["key.create", "key.update", "key.rotate", "key.delete"]
+    assert all(secret not in json.dumps(a) and rotated not in json.dumps(a) for a in recorded)

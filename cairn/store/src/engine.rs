@@ -57,6 +57,8 @@ const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
 /// The hash-chained audit trail: sequence -> audit::Entry. Entries are appended in the same transaction
 /// as the change they record and never modified.
 const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("audit");
+/// Access keys created through the admin API (access key -> JSON; the secret is wrapped when a keyring exists).
+const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 
 #[derive(Debug)]
 pub enum Error {
@@ -731,6 +733,7 @@ impl Engine {
         tx.open_table(USAGE)?;
         tx.open_table(OUTBOX)?;
         tx.open_table(AUDIT)?;
+        tx.open_table(KEYS)?;
         tx.commit()?;
         e.recover()?;
         Ok(e)
@@ -937,6 +940,40 @@ impl Engine {
     pub fn append_audit(&self, a: &Audit) -> Result<()> {
         let tx = self.begin_write()?;
         Self::audit_in(&tx, a)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Stored access keys (access key, record).
+    pub fn keys(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(KEYS)?.iter()? {
+            let (k, v) = row?;
+            out.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Stores (Some) or removes (None) an access key, with its audit entry, in one transaction.
+    pub fn put_key(&self, access_key: &str, record: Option<&[u8]>, audit: Option<&Audit>) -> Result<()> {
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(KEYS)?;
+            match record {
+                Some(r) => {
+                    t.insert(access_key, r)?;
+                }
+                None => {
+                    if t.remove(access_key)?.is_none() {
+                        return Err(Error::NoSuchKey);
+                    }
+                }
+            }
+        }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -2251,6 +2288,7 @@ impl Engine {
                 rep.audit_entries += 1;
                 Ok(())
             });
+            copy!(KEYS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> { Ok(()) });
             w.open_table(GC)?;
             w.open_table(OUTBOX)?;
             w.commit()?;

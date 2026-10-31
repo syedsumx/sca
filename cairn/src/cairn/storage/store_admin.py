@@ -72,6 +72,8 @@ class StoreAdmin:
             except ValueError:
                 msg = r.text
             raise StoreAdminError(r.status_code, msg)
+        if r.status_code == 204 or not r.content:
+            return None
         if "ndjson" in r.headers.get("content-type", ""):
             return [json.loads(line) for line in r.text.splitlines() if line.strip()]
         return r.json()
@@ -91,6 +93,22 @@ class StoreAdmin:
 
     def delete_quota(self, name: str) -> dict:
         return self._call("DELETE", f"buckets/{quote(name, safe='')}/quota")
+
+    # --- access keys (secrets are returned only by create and rotate) ---------------------------------
+    def keys(self) -> list[dict]:
+        return self._call("GET", "keys")["keys"]
+
+    def create_key(self, spec: dict) -> dict:
+        return self._call("POST", "keys", spec)
+
+    def update_key(self, access_key: str, spec: dict) -> dict:
+        return self._call("PATCH", f"keys/{quote(access_key, safe='')}", spec)
+
+    def rotate_key(self, access_key: str) -> dict:
+        return self._call("POST", f"keys/{quote(access_key, safe='')}/rotate")
+
+    def delete_key(self, access_key: str) -> None:
+        self._call("DELETE", f"keys/{quote(access_key, safe='')}")
 
     def audit(self, after: int = 0, limit: int = 1000) -> list[dict]:
         return self._call("GET", "audit", query=f"after={after}&limit={limit}&format=jsonl")

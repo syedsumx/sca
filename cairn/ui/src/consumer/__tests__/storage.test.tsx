@@ -56,12 +56,34 @@ const AUDIT = [
     },
 ];
 
+const KEYS = [
+    { access_key: 'cairnadmin', source: 'configuration', admin: true, read_only: false, buckets: [] },
+    {
+        access_key: 'ingest',
+        source: 'api',
+        admin: false,
+        read_only: false,
+        buckets: ['lake-*'],
+        description: 'nightly load',
+        created: '2026-10-31T10:00:00.000Z',
+    },
+];
+
 function wrap(calls: MockCall[]) {
     const { client } = makeClient(
         {
             'GET /ui/config': { ...UI_CONFIG, is_admin: true, storage_enabled: true },
             'GET /storage/v1/buckets': [LAKE, RAW],
             'GET /storage/v1/audit': AUDIT,
+            'GET /storage/v1/keys': KEYS,
+            'POST /storage/v1/keys': (body: unknown) => ({
+                ...KEYS[1],
+                ...(body as object),
+                access_key: 'CKNEW',
+                secret_key: 'the-new-secret-shown-once',
+            }),
+            'POST /storage/v1/keys/ingest/rotate': { ...KEYS[1], secret_key: 'rotated-secret' },
+            'DELETE /storage/v1/keys/ingest': null,
             'GET /storage/v1/audit/verify': {
                 valid: true,
                 entries_checked: 2,
@@ -118,4 +140,31 @@ it('lists buckets with usage, quota and settings, sets a quota and verifies the 
     expect(await screen.findByText('quota.put')).toBeTruthy();
     fireEvent.click(screen.getByText('Verify chain'));
     expect(await screen.findByText('The chain is intact: 2 entries checked.')).toBeTruthy();
+});
+
+it('lists access keys, creates one and shows its secret once, rotates and deletes', async () => {
+    const calls: MockCall[] = [];
+    wrap(calls);
+    const row = (await screen.findByText('ingest')).closest('tr') as HTMLElement;
+    expect(within(row).getByText('Created here')).toBeTruthy();
+    expect(within(row).getByText('lake-*')).toBeTruthy();
+    const fixed = screen.getByText('cairnadmin').closest('tr') as HTMLElement;
+    expect(within(fixed).getByText('Configuration')).toBeTruthy();
+    expect(within(fixed).queryByText('Rotate secret')).toBeNull(); // configuration keys are changed there
+    fireEvent.click(screen.getByText('Create key'));
+    fireEvent.change(await screen.findByLabelText('Buckets (comma-separated; * allowed; empty for all)'), {
+        target: { value: 'lake-a, lake-b' },
+    });
+    fireEvent.click(screen.getByText('Read only'));
+    fireEvent.click(screen.getByText('Create'));
+    expect(await screen.findByText('the-new-secret-shown-once')).toBeTruthy();
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/storage/v1/keys')?.body).toEqual({
+        buckets: ['lake-a', 'lake-b'],
+        read_only: true,
+        admin: false,
+    });
+    fireEvent.click(screen.getByText('Close'));
+    fireEvent.click(within(row).getByText('Rotate secret'));
+    fireEvent.click(await screen.findByText('OK'));
+    expect(await screen.findByText('rotated-secret')).toBeTruthy();
 });

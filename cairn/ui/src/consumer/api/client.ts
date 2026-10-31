@@ -3,6 +3,8 @@ import type { CompiledPolicy } from './types';
 import type {
     StoreAuditEntry,
     StoreAuditVerify,
+    StoreKey,
+    StoreKeySpec,
     StoreBucket,
 } from './types';
 import type {
@@ -396,6 +398,22 @@ export class ConsumerClient extends CairnClient {
 
     deleteStorageQuota(bucket: string) {
         return this.request<StoreBucket>('DELETE', `/storage/v1/buckets/${enc(bucket)}/quota`);
+    }
+
+    storageKeys(opts?: RequestOptions) {
+        return this.request<StoreKey[]>('GET', '/storage/v1/keys', undefined, opts);
+    }
+
+    createStorageKey(spec: StoreKeySpec) {
+        return this.request<StoreKey>('POST', '/storage/v1/keys', spec);
+    }
+
+    rotateStorageKey(accessKey: string) {
+        return this.request<StoreKey>('POST', `/storage/v1/keys/${enc(accessKey)}/rotate`);
+    }
+
+    deleteStorageKey(accessKey: string) {
+        return this.request<void>('DELETE', `/storage/v1/keys/${enc(accessKey)}`);
     }
 
     storageAudit(opts?: RequestOptions) {

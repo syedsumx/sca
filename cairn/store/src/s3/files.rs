@@ -103,7 +103,7 @@ impl Server {
         let raw = base64::engine::general_purpose::STANDARD.decode(header.trim()).map_err(|_| e::INVALID_ARGUMENT.clone())?;
         let s = String::from_utf8(raw).map_err(|_| e::INVALID_ARGUMENT.clone())?;
         let (ak, sk) = s.split_once(':').ok_or_else(|| e::INVALID_ARGUMENT.clone())?;
-        let cred = self.creds.get(ak).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+        let cred = self.keyset().creds.get(ak).cloned().ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
         if !ct_eq(cred.secret_key.as_bytes(), sk.as_bytes()) {
             return Err(e::SIGNATURE_MISMATCH.clone());
         }
@@ -137,7 +137,7 @@ impl Server {
             now: (self.clock)(),
             vhost_bucket: None,
         };
-        auth::verify(&self.creds, &request)
+        auth::verify(&self.keyset().creds, &request)
     }
 
     #[allow(clippy::too_many_arguments)]

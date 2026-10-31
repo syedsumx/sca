@@ -323,7 +323,8 @@ impl Server {
             return Err(e::ACCESS_DENIED.clone());
         }
         let bucket_policy = self.bucket_policy(bucket)?;
-        let key_policy = self.key_policies.get(&cred.access_key);
+        let keyset = self.keyset();
+        let key_policy = keyset.policies.get(&cred.access_key);
         let ctx = if bucket_policy.is_some() || key_policy.is_some() {
             self.context(c, bucket, key, !matches!(action, "s3:PutObject" | "s3:AbortMultipartUpload"))
         } else {

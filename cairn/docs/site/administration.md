@@ -556,6 +556,14 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 
 A write that would take a bucket over its quota is refused with `QuotaExceeded`, inside the same transaction, so concurrent uploads cannot slip past the limit. Deletes and overwrites that shrink a bucket always work. Usage is updated with every write, and recounted from what is stored each time the store starts.
 
+**Access keys while the store runs.** Admin keys can create, change, rotate and delete access keys without a restart: in **Settings → Storage → Access keys**, through `cairn-store admin keys | key <name> | key-create | key-update | key-rotate | key-delete`, or through `/-/admin/v1/keys`.
+
+- **Secrets.** The store generates every secret, a 256-bit random value, and shows it once, when the key is created or rotated. It is never listed again. With encryption at rest configured (`CAIRN_STORE_MASTER_KEY` or a keyring), stored secrets are wrapped with AES-256-GCM. If the keyring key that wrapped them is later removed, the store refuses to start rather than silently dropping those keys.
+- **Scope.** A key can be limited to buckets (`lake-*`), made read-only or admin, or given its own IAM-style policy. It can also carry a Cairn identity (`actor`) and SSH public keys for SFTP. Policies and SSH keys are checked when they are saved.
+- **Effect.** Every change applies to the next request, on S3, the file API, WebDAV, SFTP and the admin API. A rotated secret stops working at once. A deleted key is refused at once.
+- **Audit.** Each change is written to the audit trail in the same transaction (`key.create`, `key.update`, `key.rotate`, `key.delete`), never with the secret. Changes made from Cairn are also recorded in Cairn's own audit log.
+- **Rules.** Keys from the environment and `CAIRN_STORE_CREDENTIALS_FILE` are listed, but are changed only in that configuration. A key cannot delete itself. Stored keys are included in backups.
+
 **Storage in the Cairn UI.** Cairn admins see **Settings → Storage**, which lists:
 
 - every bucket, with its usage, its quota, and whether it has versioning, object lock, default encryption, lifecycle rules or a bucket policy;
