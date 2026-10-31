@@ -68,6 +68,10 @@ spec:
             - name: CAIRN_STORE_KEYRING_FILE
               value: /etc/cairn-store-keyring/keyring.json
             {{- end }}
+            {{- if $u.eventTargetsSecret }}
+            - name: CAIRN_STORE_EVENT_TARGETS_FILE
+              value: /etc/cairn-store-events/targets.json
+            {{- end }}
             {{- if $u.extraCredentialsSecret }}
             - name: CAIRN_STORE_CREDENTIALS_FILE
               value: /etc/cairn-store/credentials.json
@@ -100,7 +104,12 @@ spec:
               mountPath: /etc/cairn-store-keyring
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret }}
+            {{- if $u.eventTargetsSecret }}
+            - name: events
+              mountPath: /etc/cairn-store-events
+              readOnly: true
+            {{- end }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret }}
       volumes:
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
@@ -111,6 +120,11 @@ spec:
         - name: keyring
           secret:
             secretName: {{ $u.secret.keyringSecret }}
+        {{- end }}
+        {{- if $u.eventTargetsSecret }}
+        - name: events
+          secret:
+            secretName: {{ $u.eventTargetsSecret }}
         {{- end }}
       {{- end }}
       {{- with $u.nodeSelector }}

@@ -36,6 +36,8 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             encrypt_by_default: false,
             sse_c_over_http: false,
             website_domain: String::new(),
+            event_targets: vec![],
+            event_max_age_hours: 168,
         },
     )
     .unwrap();

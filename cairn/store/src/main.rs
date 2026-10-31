@@ -28,6 +28,8 @@
 //! CAIRN_STORE_ENCRYPT_BY_DEFAULT  with a keyring, encrypt new objects with SSE-S3 by default (true)
 //! CAIRN_STORE_SSE_C_ALLOW_HTTP  accept customer keys over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_WEBSITE_DOMAIN    serve bucket websites at <bucket>.<domain> (public buckets only; off when empty)
+//! CAIRN_STORE_EVENT_TARGETS_FILE  event notification targets: [{"type": "webhook"|"kafka", "id": ..., ...}]
+//! CAIRN_STORE_EVENT_MAX_AGE_HOURS  drop events still undeliverable after this long (168)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -200,6 +202,14 @@ async fn serve(addr: String, data: String) {
                 encrypt_by_default: env("CAIRN_STORE_ENCRYPT_BY_DEFAULT", "true") != "false",
                 sse_c_over_http: env("CAIRN_STORE_SSE_C_ALLOW_HTTP", "false") == "true",
                 website_domain: env("CAIRN_STORE_WEBSITE_DOMAIN", ""),
+                event_targets: match env("CAIRN_STORE_EVENT_TARGETS_FILE", "") {
+                    f if f.is_empty() => vec![],
+                    f => s3::events::load_targets(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)))
+                        .unwrap_or_else(|e| fail(&f, e)),
+                },
+                event_max_age_hours: env("CAIRN_STORE_EVENT_MAX_AGE_HOURS", "168")
+                    .parse()
+                    .unwrap_or_else(|e| fail("CAIRN_STORE_EVENT_MAX_AGE_HOURS", e)),
                 lifecycle_day_secs: env("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", "86400")
                     .parse()
                     .unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", e)),
@@ -213,6 +223,7 @@ async fn serve(addr: String, data: String) {
     );
     let lifecycle_every: u64 =
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
+    tokio::spawn(server.clone().run_events());
     if lifecycle_every > 0 {
         tokio::spawn(server.clone().run_lifecycle(Duration::from_secs(lifecycle_every)));
     }

@@ -389,7 +389,7 @@ impl Server {
             sse,
             ..Default::default()
         };
-        let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &Default::default()))?;
+        let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &Default::default(), &self.ev(&fc, "Post")))?;
         let etag = format!("\"{}\"", stored.etag);
         let location = format!("/{}/{}", c.bucket, super::auth::aws_encode(key.as_bytes(), true));
         let redirect = fields.get("success_action_redirect").or(fields.get("redirect")).filter(|u| !u.is_empty());

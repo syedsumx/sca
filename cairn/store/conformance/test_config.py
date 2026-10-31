@@ -138,7 +138,6 @@ UNSUPPORTED = [
     lambda s3, b: s3.put_bucket_request_payment(Bucket=b, RequestPaymentConfiguration={"Payer": "Requester"}),
     lambda s3, b: s3.put_bucket_accelerate_configuration(Bucket=b, AccelerateConfiguration={"Status": "Enabled"}),
     lambda s3, b: s3.put_bucket_logging(Bucket=b, BucketLoggingStatus={"LoggingEnabled": {"TargetBucket": b, "TargetPrefix": "l/"}}),
-    lambda s3, b: s3.put_bucket_notification_configuration(Bucket=b, NotificationConfiguration={"QueueConfigurations": []}),
 ]
 
 

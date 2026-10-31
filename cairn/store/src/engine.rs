@@ -50,6 +50,9 @@ const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
 /// Per-bucket usage: (stored bytes incl. versions and upload parts, object versions). Kept in the same
 /// transactions as the writes, and recomputed by recovery at start-up.
 const USAGE: TableDefinition<&str, (u64, u64)> = TableDefinition::new("usage");
+/// Event notifications waiting for delivery: sequence -> OutboxEntry. Written in the same transaction as
+/// the change they describe, removed once delivered, so no event is lost to a crash.
+const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
 
 #[derive(Debug)]
 pub enum Error {
@@ -218,6 +221,76 @@ pub struct Deleted {
     pub version_id: Option<String>,
     /// A delete marker was created, or the version removed was one.
     pub delete_marker: bool,
+}
+
+/// Who and what caused a change, for event notifications.
+#[derive(Clone, Debug, Default)]
+pub struct Ev {
+    /// For writes: Put, Copy, Post, CompleteMultipartUpload (default Put). For metadata changes: the
+    /// whole event name, e.g. "ObjectTagging:Put" (empty: no event).
+    pub kind: &'static str,
+    pub principal: String,
+    pub source_ip: String,
+    pub request_id: String,
+    /// The change is a lifecycle expiration.
+    pub lifecycle: bool,
+}
+
+/// A bucket's notification rule (configuration kind "notification").
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct NotifyRule {
+    pub id: String,
+    pub target: String,
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub suffix: String,
+    /// The destination ARN and its kind (Queue, Topic, CloudFunction), as configured.
+    #[serde(default)]
+    pub arn: String,
+    #[serde(default)]
+    pub kind: String,
+}
+
+impl NotifyRule {
+    pub fn matches(&self, event: &str, key: &str) -> bool {
+        key.starts_with(&self.prefix)
+            && key.ends_with(&self.suffix)
+            && self.events.iter().any(|p| match p.strip_suffix('*') {
+                Some(pre) => event.starts_with(pre),
+                None => p == event,
+            })
+    }
+}
+
+/// An event waiting in the outbox.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct OutboxEntry {
+    pub target: String,
+    pub rule: String,
+    /// e.g. "s3:ObjectCreated:Put".
+    pub event: String,
+    pub bucket: String,
+    pub key: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub etag: String,
+    #[serde(default)]
+    pub version: String,
+    pub time: u64,
+    #[serde(default)]
+    pub principal: String,
+    #[serde(default)]
+    pub source_ip: String,
+    #[serde(default)]
+    pub request_id: String,
+    #[serde(default)]
+    pub attempts: u32,
+    /// Do not retry before (ms).
+    #[serde(default)]
+    pub next_at: u64,
 }
 
 /// A bucket's quota (configuration kind "quota").
@@ -556,6 +629,7 @@ impl Engine {
         tx.open_table(VERSIONS)?;
         tx.open_table(META)?;
         tx.open_table(USAGE)?;
+        tx.open_table(OUTBOX)?;
         tx.commit()?;
         e.recover()?;
         Ok(e)
@@ -639,6 +713,70 @@ impl Engine {
         {
             return Err(Error::QuotaExceeded);
         }
+        Ok(())
+    }
+
+    /// Records the event for every notification rule of the bucket that matches it.
+    fn emit(tx: &redb::WriteTransaction, bucket: &str, event: &str, o: &Object, ev: &Ev) -> Result<()> {
+        let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "notification"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
+        let rules: Vec<NotifyRule> = serde_json::from_slice(&doc)?;
+        let name = format!("s3:{event}");
+        for r in rules.iter().filter(|r| r.matches(&name, &o.key)) {
+            let mut meta = tx.open_table(META)?;
+            let seq = meta.get("outbox_seq")?.map(|v| v.value()).unwrap_or(0) + 1;
+            meta.insert("outbox_seq", seq)?;
+            drop(meta);
+            let entry = OutboxEntry {
+                target: r.target.clone(),
+                rule: r.id.clone(),
+                event: name.clone(),
+                bucket: bucket.into(),
+                key: o.key.clone(),
+                size: o.size,
+                etag: o.etag.clone(),
+                version: if o.version_id.is_empty() { String::new() } else { o.version_id.clone() },
+                time: now_ms(),
+                principal: ev.principal.clone(),
+                source_ip: ev.source_ip.clone(),
+                request_id: ev.request_id.clone(),
+                attempts: 0,
+                next_at: 0,
+            };
+            let v = serde_json::to_vec(&entry)?;
+            tx.open_table(OUTBOX)?.insert(seq, v.as_slice())?;
+        }
+        Ok(())
+    }
+
+    /// The oldest events waiting for delivery.
+    pub fn outbox(&self, limit: usize) -> Result<Vec<(u64, OutboxEntry)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(OUTBOX)?.iter()?.take(limit) {
+            let (k, v) = row?;
+            out.push((k.value(), serde_json::from_slice(v.value())?));
+        }
+        Ok(out)
+    }
+
+    pub fn outbox_len(&self) -> Result<u64> {
+        Ok(self.db.begin_read()?.open_table(OUTBOX)?.len()?)
+    }
+
+    /// Removes delivered (or abandoned) events, and records attempts for the rest.
+    pub fn outbox_done(&self, done: &[u64], retry: &[(u64, OutboxEntry)]) -> Result<()> {
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(OUTBOX)?;
+            for s in done {
+                t.remove(*s)?;
+            }
+            for (s, e) in retry {
+                let v = serde_json::to_vec(e)?;
+                t.insert(*s, v.as_slice())?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -888,7 +1026,12 @@ impl Engine {
     /// Commits `obj` (whose segments are sealed) under its key if `cond` holds, as a new version in a
     /// versioned bucket. Returns the stored object (with its version ID). On any error the new segments
     /// are discarded.
+    #[cfg(test)]
     pub fn put_object(&self, bucket: &str, obj: Object, cond: &Condition) -> Result<Object> {
+        self.put_object_ev(bucket, obj, cond, &Ev::default())
+    }
+
+    pub fn put_object_ev(&self, bucket: &str, obj: Object, cond: &Condition, ev: &Ev) -> Result<Object> {
         let segs = obj.segments.clone();
         let res = (|| -> Result<(Object, Vec<Segment>)> {
             let tx = self.begin_write()?;
@@ -900,6 +1043,7 @@ impl Engine {
                 let out = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
                 Self::queue_gc(&tx, bucket, &out.1)?;
                 Self::quota_guard(&tx, bucket, before)?;
+                Self::emit(&tx, bucket, &format!("ObjectCreated:{}", if ev.kind.is_empty() { "Put" } else { ev.kind }), &out.0, ev)?;
                 out
             };
             tx.commit()?;
@@ -1084,6 +1228,17 @@ impl Engine {
         version: Option<&str>,
         f: impl FnOnce(&mut Object) -> Result<()>,
     ) -> Result<Object> {
+        self.update_object_ev(bucket, key, version, f, &Ev::default())
+    }
+
+    pub fn update_object_ev(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        f: impl FnOnce(&mut Object) -> Result<()>,
+        ev: &Ev,
+    ) -> Result<Object> {
         let tx = self.begin_write()?;
         let obj = {
             Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
@@ -1113,13 +1268,23 @@ impl Engine {
                 }
             }
         };
+        if !ev.kind.is_empty() {
+            Self::emit(&tx, bucket, ev.kind, &obj, ev)?;
+        }
         tx.commit()?;
         Ok(obj)
     }
 
     /// Deletes a key: removes it (unversioned bucket) or puts a delete marker on top (versioned).
     /// Deleting a missing key succeeds (S3 semantics).
+    #[cfg(test)]
     pub fn delete_object(&self, bucket: &str, key: &str, if_match: Option<&str>) -> Result<Deleted> {
+        self.delete_object_ev(bucket, key, if_match, &Ev::default())
+    }
+
+    pub fn delete_object_ev(&self, bucket: &str, key: &str, if_match: Option<&str>, ev: &Ev) -> Result<Deleted> {
+        let removed = if ev.lifecycle { "LifecycleExpiration:Delete" } else { "ObjectRemoved:Delete" };
+        let marked = if ev.lifecycle { "LifecycleExpiration:DeleteMarkerCreated" } else { "ObjectRemoved:DeleteMarkerCreated" };
         let tx = self.begin_write()?;
         let (out, garbage) = {
             let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
@@ -1136,6 +1301,7 @@ impl Engine {
                 "" => {
                     if let Some(o) = cur {
                         t.remove((bucket, key))?;
+                        Self::emit(&tx, bucket, removed, &o, ev)?;
                         garbage = o.segments;
                         Self::adjust(&tx, bucket, 0, -1)?;
                     }
@@ -1159,6 +1325,7 @@ impl Engine {
                     let order = Self::next_order(&tx)?;
                     let v = serde_json::to_vec(&marker)?;
                     tx.open_table(VERSIONS)?.insert((bucket, key, order.as_str()), v.as_slice())?;
+                    Self::emit(&tx, bucket, marked, &marker, ev)?;
                     Deleted { version_id: Some(marker.version().to_string()), delete_marker: true }
                 }
             };
@@ -1176,7 +1343,13 @@ impl Engine {
     /// remaining version becomes current again, unless that is a delete marker. A missing version succeeds.
     /// Object lock is enforced here: a version under legal hold or unexpired retention is not removed
     /// (governance retention gives way only with `bypass_governance`).
+    #[cfg(test)]
     pub fn delete_version(&self, bucket: &str, key: &str, version: &str, bypass_governance: bool) -> Result<Deleted> {
+        self.delete_version_ev(bucket, key, version, bypass_governance, &Ev::default())
+    }
+
+    pub fn delete_version_ev(&self, bucket: &str, key: &str, version: &str, bypass_governance: bool, ev: &Ev) -> Result<Deleted> {
+        let removed = if ev.lifecycle { "LifecycleExpiration:Delete" } else { "ObjectRemoved:Delete" };
         let now = now_ms();
         let want = if version == "null" { "" } else { version };
         let tx = self.begin_write()?;
@@ -1192,6 +1365,7 @@ impl Engine {
                         return Err(Error::ObjectLocked);
                     }
                     t.remove((bucket, key))?;
+                    Self::emit(&tx, bucket, removed, &c, ev)?;
                     garbage = c.segments;
                     Self::adjust(&tx, bucket, 0, -1)?;
                 }
@@ -1201,6 +1375,7 @@ impl Engine {
                             return Err(Error::ObjectLocked);
                         }
                         vt.remove((bucket, key, order.as_str()))?;
+                        Self::emit(&tx, bucket, removed, &o, ev)?;
                         out.delete_marker = o.delete_marker;
                         if !o.delete_marker {
                             Self::adjust(&tx, bucket, 0, -1)?;
@@ -1580,6 +1755,7 @@ impl Engine {
 
     /// Assembles the listed parts into the object. No bytes are copied: the object refers to the part
     /// blobs. `finish` computes the object's checksums from the chosen parts; it may fail the completion.
+    #[cfg(test)]
     pub fn complete_upload(
         &self,
         bucket: &str,
@@ -1588,6 +1764,20 @@ impl Engine {
         want: &[CompletePart],
         cond: &Condition,
         finish: impl FnOnce(&Upload, &[Part]) -> Result<(BTreeMap<String, String>, String)>,
+    ) -> Result<Object> {
+        self.complete_upload_ev(bucket, key, id, want, cond, finish, &Ev::default())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_upload_ev(
+        &self,
+        bucket: &str,
+        key: &str,
+        id: &str,
+        want: &[CompletePart],
+        cond: &Condition,
+        finish: impl FnOnce(&Upload, &[Part]) -> Result<(BTreeMap<String, String>, String)>,
+        ev: &Ev,
     ) -> Result<Object> {
         let tx = self.begin_write()?;
         let (obj, garbage) = {
@@ -1658,6 +1848,7 @@ impl Engine {
             Self::drop_upload(&tx, id)?;
             Self::queue_gc(&tx, bucket, &garbage)?;
             Self::quota_guard(&tx, bucket, before)?;
+            Self::emit(&tx, bucket, "ObjectCreated:CompleteMultipartUpload", &obj, ev)?;
             (obj, garbage)
         };
         tx.commit()?;

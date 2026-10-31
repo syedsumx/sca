@@ -8,6 +8,7 @@ pub mod checksum;
 mod config;
 mod cors;
 pub mod errors;
+pub mod events;
 mod handlers;
 pub mod lifecycle;
 mod objectlock;
@@ -60,6 +61,9 @@ pub struct Config {
     pub sse_c_over_http: bool,
     /// Serve bucket websites at `<bucket>.<website_domain>` (empty: off).
     pub website_domain: String,
+    /// Event notification targets, and how long an undeliverable event is kept.
+    pub event_targets: Vec<events::Target>,
+    pub event_max_age_hours: u64,
 }
 
 pub struct Server {
@@ -82,6 +86,8 @@ pub struct Server {
     encrypt_by_default: bool,
     sse_c_over_http: bool,
     website_domain: String,
+    pub(crate) delivery: Option<events::Delivery>,
+    pub(crate) event_metrics: events::EventMetrics,
 }
 
 /// One request, after routing and authentication.
@@ -98,6 +104,7 @@ pub(crate) struct Ctx {
     pub op: &'static str,
     /// The client's address (aws:SourceIp).
     pub peer: Option<std::net::IpAddr>,
+    pub request_id: String,
 }
 
 impl Ctx {
@@ -154,6 +161,8 @@ impl Server {
             encrypt_by_default: cfg.encrypt_by_default,
             sse_c_over_http: cfg.sse_c_over_http,
             website_domain: cfg.website_domain.to_ascii_lowercase(),
+            delivery: (!cfg.event_targets.is_empty()).then(|| events::Delivery::new(cfg.event_targets, cfg.event_max_age_hours)),
+            event_metrics: Default::default(),
         })
     }
 
@@ -188,7 +197,7 @@ impl Server {
         } else if path.starts_with("/-/") {
             ("admin", Ok(self.admin(&path)), None)
         } else {
-            self.dispatch(req, peer).await
+            self.dispatch(req, peer, &request_id).await
         };
         let mut resp = match result {
             Ok(r) => r,
@@ -209,7 +218,12 @@ impl Server {
 
     /// Routes and authenticates a request. The third value is set for cross-origin requests (bucket,
     /// method, request headers), so their responses get CORS headers.
-    async fn dispatch<B>(&self, req: Request<B>, peer: Option<std::net::IpAddr>) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
+    async fn dispatch<B>(
+        &self,
+        req: Request<B>,
+        peer: Option<std::net::IpAddr>,
+        request_id: &str,
+    ) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -217,7 +231,7 @@ impl Server {
         let (parts, mut body) = req.into_parts();
         let expect_continue =
             parts.headers.get("expect").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-        let (op, mut res, cors) = self.dispatch_parts(parts, &mut body, peer).await;
+        let (op, mut res, cors) = self.dispatch_parts(parts, &mut body, peer, request_id).await;
         // A request refused before its body was read leaves that body on the connection. Read and drop
         // what is left (up to 1 MiB) so the connection stays usable; otherwise ask the client to close it,
         // instead of reading a large refused upload to the end.
@@ -242,6 +256,7 @@ impl Server {
         parts: hyper::http::request::Parts,
         body: &mut B,
         peer: Option<std::net::IpAddr>,
+        request_id: &str,
     ) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
@@ -318,6 +333,7 @@ impl Server {
             content_length,
             op: "unknown",
             peer,
+            request_id: request_id.to_string(),
         };
         let res = if ctx.key.len() > 1024 { Err(e::KEY_TOO_LONG.clone()) } else { self.route(&mut ctx, body).await };
         (ctx.op, res, cors)
@@ -355,6 +371,16 @@ impl Server {
                             ));
                         }
                     }
+                }
+                let em = &self.event_metrics;
+                for (name, v) in [("delivered", &em.delivered), ("failed", &em.failed), ("dropped", &em.dropped)] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_events_{name}_total counter\ncairn_store_events_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
+                }
+                if let Ok(n) = tokio::task::block_in_place(|| self.eng.outbox_len()) {
+                    body.push_str(&format!("# TYPE cairn_store_events_pending gauge\ncairn_store_events_pending {n}\n"));
                 }
                 let mut r = text(StatusCode::OK, body);
                 r.headers_mut().insert("content-type", HeaderValue::from_static("text/plain; version=0.0.4"));

@@ -75,6 +75,8 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "GetBucketAccelerateConfiguration" => "s3:GetAccelerateConfiguration",
         "PutBucketAccelerateConfiguration" => "s3:PutAccelerateConfiguration",
         "GetObjectAttributes" => "s3:GetObjectAttributes",
+        "PutBucketNotification" => "s3:PutBucketNotification",
+        "GetBucketNotification" => "s3:GetBucketNotification",
         "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
         "GetObject" | "HeadObject" => "s3:GetObject",
         "PutObject" | "CopyObject" | "CreateMultipartUpload" | "UploadPart" | "UploadPartCopy" | "CompleteMultipartUpload" => {

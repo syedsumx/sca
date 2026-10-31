@@ -122,10 +122,16 @@ impl Server {
         let doc = self.read_small(c, body, 64 << 10).await?;
         let tags = parse_tagging(&doc, MAX_OBJECT_TAGS)?;
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
-                o.tags = tags;
-                Ok(())
-            })
+            self.eng.update_object_ev(
+                &c.bucket,
+                &c.key,
+                Some(c.q("versionId")),
+                |o| {
+                    o.tags = tags;
+                    Ok(())
+                },
+                &self.ev(c, "ObjectTagging:Put"),
+            )
         })?;
         Ok(empty(StatusCode::OK))
     }
@@ -144,10 +150,16 @@ impl Server {
 
     pub(crate) fn delete_object_tagging(&self, c: &Ctx) -> R {
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
-                o.tags.clear();
-                Ok(())
-            })
+            self.eng.update_object_ev(
+                &c.bucket,
+                &c.key,
+                Some(c.q("versionId")),
+                |o| {
+                    o.tags.clear();
+                    Ok(())
+                },
+                &self.ev(c, "ObjectTagging:Delete"),
+            )
         })?;
         Ok(empty(StatusCode::NO_CONTENT))
     }

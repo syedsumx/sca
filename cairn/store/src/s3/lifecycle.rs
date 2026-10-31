@@ -24,6 +24,10 @@ type R = Result<Resp, ApiError>;
 
 const MAX_RULES: usize = 1000;
 
+/// The event context of lifecycle actions.
+static LIFECYCLE: engine::Ev =
+    engine::Ev { kind: "", principal: String::new(), source_ip: String::new(), request_id: String::new(), lifecycle: true };
+
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
 }
@@ -384,7 +388,7 @@ impl Server {
                                 || r.expiration_date.is_some_and(|t| now >= t))
                     });
                     if due {
-                        match self.eng.delete_object(bucket, &o.key, Some(&o.etag)) {
+                        match self.eng.delete_object_ev(bucket, &o.key, Some(&o.etag), &LIFECYCLE) {
                             Ok(_) => pass.expired += 1,
                             Err(engine::Error::PreconditionFailed) => {} // rewritten meanwhile
                             Err(err) => tracing::warn!(bucket, key = %o.key, error = %err, "lifecycle expiration"),
@@ -428,7 +432,11 @@ impl Server {
                             newer += 1;
                         }
                         let since = if o.noncurrent_since > 0 { o.noncurrent_since } else { o.modified };
-                        if applies && !kept && now >= since + d * day && self.eng.delete_version(bucket, &key, o.version(), false).is_ok() {
+                        if applies
+                            && !kept
+                            && now >= since + d * day
+                            && self.eng.delete_version_ev(bucket, &key, o.version(), false, &LIFECYCLE).is_ok()
+                        {
                             pass.noncurrent_expired += 1;
                         }
                     }
@@ -439,7 +447,7 @@ impl Server {
                         let mine: Vec<_> = list.entries.iter().filter(|v| v.obj.key == key).collect();
                         if mine.len() == 1
                             && mine[0].obj.delete_marker
-                            && self.eng.delete_version(bucket, &key, mine[0].obj.version(), false).is_ok()
+                            && self.eng.delete_version_ev(bucket, &key, mine[0].obj.version(), false, &LIFECYCLE).is_ok()
                         {
                             pass.delete_markers_removed += 1;
                         }

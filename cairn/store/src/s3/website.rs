@@ -313,6 +313,7 @@ impl Server {
             content_length: None,
             op: "GetObject",
             peer,
+            request_id: String::new(),
         };
         if self.authorize(&c, "s3:GetObject", bucket, key).await.is_err() {
             return Err(StatusCode::FORBIDDEN);

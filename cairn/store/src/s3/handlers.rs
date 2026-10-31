@@ -31,7 +31,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 4] = ["notification", "replication", "logging", "intelligent-tiering"];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 3] = ["replication", "logging", "intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 6] =
@@ -174,6 +174,8 @@ impl Server {
             "PutBucketEncryption" => self.put_bucket_encryption(c, body).await,
             "DeleteBucketEncryption" => self.delete_config(c, "encryption"),
             "GetBucketWebsite" => self.get_website(c),
+            "GetBucketNotification" => self.get_notification(c),
+            "PutBucketNotification" => self.put_notification(c, body).await,
             "PutBucketWebsite" => self.put_website(c, body).await,
             "GetBucketRequestPayment" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
@@ -229,8 +231,8 @@ impl Server {
                 let if_match = c.header("if-match");
                 let bypass = self.bypass_governance(c, &c.key).await?;
                 let d = blocking(|| match c.q("versionId") {
-                    "" => self.eng.delete_object(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match)),
-                    v => self.eng.delete_version(&c.bucket, &c.key, v, bypass),
+                    "" => self.eng.delete_object_ev(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match), &self.ev(c, "")),
+                    v => self.eng.delete_version_ev(&c.bucket, &c.key, v, bypass, &self.ev(c, "")),
                 })?;
                 let mut r = empty(StatusCode::NO_CONTENT);
                 if let Some(v) = &d.version_id {
@@ -430,9 +432,9 @@ impl Server {
             };
             let res = blocking(|| {
                 if vid.is_empty() {
-                    self.eng.delete_object(&c.bucket, &k, None)
+                    self.eng.delete_object_ev(&c.bucket, &k, None, &self.ev(c, ""))
                 } else {
-                    self.eng.delete_version(&c.bucket, &k, &vid, bypass)
+                    self.eng.delete_version_ev(&c.bucket, &k, &vid, bypass, &self.ev(c, ""))
                 }
             });
             match res {
@@ -618,7 +620,7 @@ impl Server {
             sse,
             ..Default::default()
         };
-        let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
+        let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &cond_of(c), &self.ev(c, "Put")))?;
         let mut r = empty(StatusCode::OK);
         Self::sse_headers(&mut r, &stored.sse);
         set_header(&mut r, "etag", &format!("\"{}\"", stored.etag));
@@ -861,7 +863,7 @@ impl Server {
             sse,
             ..Default::default()
         };
-        let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
+        let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &cond_of(c), &self.ev(c, "Copy")))?;
         let mut w = Writer::new("CopyObjectResult");
         w.el("LastModified", iso_time(stored.modified)).el("ETag", format!("\"{}\"", stored.etag));
         let mut r = xml_resp(StatusCode::OK, w.finish());
@@ -1102,12 +1104,21 @@ impl Server {
             }
             let want: Vec<CompletePart> = requested.iter().map(|(n, etag, _)| CompletePart { number: *n, etag: etag.clone() }).collect();
             let ctype = u.checksum_type.clone();
-            Ok(self.eng.complete_upload(&c.bucket, &c.key, &id, &want, &cond_of(c), |_, parts| {
-                if parts.len() != chosen.len() || parts.iter().zip(&chosen).any(|(a, b)| a.blob != b.blob) {
-                    return Err(engine::Error::Conflict); // a part was re-uploaded while completing
-                }
-                Ok((checksums, ctype))
-            })?)
+            let ev = self.ev(c, "CompleteMultipartUpload");
+            Ok(self.eng.complete_upload_ev(
+                &c.bucket,
+                &c.key,
+                &id,
+                &want,
+                &cond_of(c),
+                |_, parts| {
+                    if parts.len() != chosen.len() || parts.iter().zip(&chosen).any(|(a, b)| a.blob != b.blob) {
+                        return Err(engine::Error::Conflict); // a part was re-uploaded while completing
+                    }
+                    Ok((checksums, ctype))
+                },
+                &ev,
+            )?)
         })?;
         let versioning = blocking(|| self.eng.head_bucket(&c.bucket)).map(|b| b.versioning).unwrap_or_default();
         let mut w = Writer::new("CompleteMultipartUploadResult");
@@ -1145,6 +1156,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("object-lock") => "PutObjectLockConfiguration",
             Method::PUT if c.has("encryption") => "PutBucketEncryption",
             Method::PUT if c.has("website") => "PutBucketWebsite",
+            Method::PUT if c.has("notification") => "PutBucketNotification",
             Method::PUT if c.has("requestPayment") => "PutBucketRequestPayment",
             Method::PUT if c.has("accelerate") => "PutBucketAccelerateConfiguration",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
@@ -1180,7 +1192,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("website") => "GetBucketWebsite",
             Method::GET if c.has("requestPayment") => "GetBucketRequestPayment",
             Method::GET if c.has("accelerate") => "GetBucketAccelerateConfiguration",
-            Method::GET if any(&["replication", "logging", "notification", "intelligent-tiering"]) => "Unsupported",
+            Method::GET if c.has("notification") => "GetBucketNotification",
+            Method::GET if any(&["replication", "logging", "intelligent-tiering"]) => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",

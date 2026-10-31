@@ -129,6 +129,9 @@ errors! {
     REQUESTER_PAYS_UNSUPPORTED = "NotImplemented", 501, "Requester Pays is not supported: the bucket owner pays.";
     ACCELERATE_UNSUPPORTED = "NotImplemented", 501, "Transfer Acceleration is not supported.";
     ATTRIBUTES_REQUIRED = "InvalidArgument", 400, "x-amz-object-attributes must list one or more of ETag, Checksum, ObjectParts, StorageClass, ObjectSize.";
+    EVENTBRIDGE_UNSUPPORTED = "NotImplemented", 501, "EventBridge notifications are not supported; use a Cairn Store event target.";
+    EVENT_TARGET_UNKNOWN = "InvalidArgument", 400, "Unable to validate the following destination configurations: the target is not one of this store's event targets.";
+    EVENT_NAME_UNSUPPORTED = "InvalidArgument", 400, "The notification configuration names an event type this store does not emit.";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
