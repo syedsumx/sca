@@ -1,0 +1,30 @@
+// Hadoop's S3A file system (hadoop-aws) against Cairn Store: the check the conformance suite runs
+// (store/conformance/test_hadoop.py). Uses Hadoop's shaded client and the AWS SDK modules S3A needs,
+// not the full AWS SDK bundle.
+plugins {
+  id 'application'
+}
+
+def hadoopVersion = '3.4.1'
+def awsSdkVersion = '2.24.6'
+
+repositories { mavenCentral() }
+
+dependencies {
+  implementation "org.apache.hadoop:hadoop-client-api:${hadoopVersion}"
+  runtimeOnly "org.apache.hadoop:hadoop-client-runtime:${hadoopVersion}"
+  implementation("org.apache.hadoop:hadoop-aws:${hadoopVersion}") { transitive = false }
+  implementation platform("software.amazon.awssdk:bom:${awsSdkVersion}")
+  implementation 'software.amazon.awssdk:s3'
+  implementation 'software.amazon.awssdk:s3-transfer-manager'
+  implementation 'software.amazon.awssdk:sts'
+  implementation 'software.amazon.awssdk:apache-client'
+  // hadoop-aws uses these unshaded (a Hadoop distribution ships them in share/hadoop/common/lib).
+  runtimeOnly 'org.apache.commons:commons-lang3:3.12.0'
+  runtimeOnly 'org.apache.hadoop.thirdparty:hadoop-shaded-guava:1.3.0'
+  runtimeOnly 'org.slf4j:slf4j-nop:1.7.36'
+}
+
+java { toolchain { languageVersion = JavaLanguageVersion.of(21) } }
+tasks.withType(JavaCompile).configureEach { options.release = 17; options.encoding = 'UTF-8' }
+application { mainClass = 'io.cairn.store.HadoopCheck' }

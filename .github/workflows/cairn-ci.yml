@@ -77,7 +77,16 @@ jobs:
         run: cargo test --locked
       - name: Build
         run: cargo build --release --locked
-      - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, crash safety)
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+          cache-dependency-path: cairn/store/hadoop-check/build.gradle
+      - name: Hadoop S3A check (hadoop-aws 3.4)
+        working-directory: cairn/store/hadoop-check
+        run: ./gradlew --no-daemon -q installDist
+      - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, Hadoop S3A, crash safety)
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |

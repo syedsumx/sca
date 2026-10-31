@@ -503,6 +503,18 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
 - **Directories** are key prefixes. `mkdir` writes an empty `name/` marker object, as S3 consoles do. `rmdir` works only on empty directories.
 - **Refused rather than faked** (`Operation not supported`): appending, changing part of a file, writing out of order, changing modes (setting the mode a file already shows is allowed, so `cp` works), owners or times, links, and extended attributes. Renaming a directory returns `EXDEV`, so `mv` copies and deletes instead. Renaming a file is a copy followed by a delete.
 
+**Hadoop, Spark and Hive.** Hadoop's S3A file system (`hadoop-aws`, with Hadoop 3.4) works with Cairn Store as it is. The conformance suite runs Hadoop's own client against the store: directories, small and multipart writes, positioned reads, listings, file and directory renames and recursive deletes. The settings:
+
+```properties
+fs.s3a.endpoint=https://store.example.com
+fs.s3a.endpoint.region=us-east-1
+fs.s3a.path.style.access=true
+fs.s3a.access.key=...           # an access key scoped to the buckets the job uses
+fs.s3a.secret.key=...
+```
+
+Use `s3a://<bucket>/<path>` paths. In Spark, prefix each setting with `spark.hadoop.`. S3A renames are copies followed by deletes, as on any S3 store, so write job output with an S3A committer (`fs.s3a.committer.name=magic` or `directory`). Hadoop sees the key's permissions: a key limited to some buckets cannot open others.
+
 **Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
 
 - **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.
