@@ -511,6 +511,8 @@ cairn:
       schedule: ""            # a sink id: back up there every intervalSeconds, keeping the newest `keep`
       intervalSeconds: 86400
       keep: 7
+    # Compress new object data at rest: off or zstd (1 MiB chunks, so ranged reads stay cheap).
+    compression: "off"
     # Remote buckets that can be mounted into local buckets: a Secret with a "remotes.json" ([{"id",
     # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
     remotesSecret: ""

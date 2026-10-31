@@ -135,6 +135,8 @@ impl Server {
                 let st = self.eng.stats()?;
                 let mut v = serde_json::to_value(st).map_err(|_| e::INTERNAL.clone())?;
                 v["packs"] = serde_json::to_value(self.eng.compact(2.0, true)?).map_err(|_| e::INTERNAL.clone())?;
+                let (on, zin, zout) = self.eng.compression_stats();
+                v["compression"] = json!({"algorithm": if on { "zstd" } else { "off" }, "bytes_in": zin, "stored_bytes": zout});
                 Ok(json_resp(StatusCode::OK, v))
             }
             (&Method::POST, ["compact"]) => {

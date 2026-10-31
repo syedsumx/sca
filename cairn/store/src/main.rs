@@ -66,6 +66,7 @@
 //! CAIRN_STORE_CLUSTER_EC     erasure-code large blobs as k data + m parity shards, e.g. 4+2 (off)
 //! CAIRN_STORE_CLUSTER_EC_ABOVE  ... blobs of at least this many bytes (1048576)
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
+//! CAIRN_STORE_COMPRESSION    compress new object data: off or zstd (off; in 1 MiB chunks, ranges stay cheap)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -352,6 +353,11 @@ async fn serve(addr: String, data: String) {
     let num = |k: &str, d: &str| -> u64 { env(k, d).parse().unwrap_or_else(|e| fail(k, e)) };
     let pack_default = if cluster.is_some() { "0" } else { "65536" };
     eng.set_packing(num("CAIRN_STORE_PACK_BELOW", pack_default), num("CAIRN_STORE_PACK_FILE_BYTES", "1073741824"));
+    match env("CAIRN_STORE_COMPRESSION", "off").as_str() {
+        "off" => {}
+        "zstd" => eng.set_compression(true),
+        other => fail("CAIRN_STORE_COMPRESSION", format!("{other:?}: use off or zstd")),
+    }
     if !fsync {
         tracing::warn!("fsync is off: a crash or power loss can lose writes that were acknowledged");
     }

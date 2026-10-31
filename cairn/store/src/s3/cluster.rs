@@ -1010,7 +1010,7 @@ impl Cluster {
                 } else {
                     id.clone()
                 };
-                let seg = self.place(&self.eng, &Segment { blob: plain, size: 0, nonce: String::new(), tier: String::new() })?;
+                let seg = self.place(&self.eng, &Segment { blob: plain, ..Default::default() })?;
                 Ok(seg.blob)
             })();
             match res {

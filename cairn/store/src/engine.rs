@@ -36,6 +36,7 @@ use redb::TableDefinition;
 pub mod cid;
 pub mod kv;
 pub mod pack;
+pub mod zchunk;
 use kv::{Db, ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
 
@@ -126,7 +127,7 @@ from_redb!(
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// One stored piece of an object: a whole small object, or one part of a multipart one.
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Segment {
     #[serde(rename = "b")]
     pub blob: String,
@@ -139,6 +140,9 @@ pub struct Segment {
     /// The storage tier (a storage class) holding the blob; empty: this store's disk.
     #[serde(rename = "t", default, skip_serializing_if = "String::is_empty")]
     pub tier: String,
+    /// Compressed blobs: the chunk table (see `zchunk`). Empty: stored as written.
+    #[serde(rename = "z", default, skip_serializing_if = "String::is_empty")]
+    pub z: String,
 }
 
 /// The cluster: where blobs are placed (copies on several nodes, or erasure-coded shards) and read
@@ -461,6 +465,9 @@ pub struct Part {
     pub size: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nonce: String,
+    /// Compressed parts: the chunk table.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub z: String,
     pub etag: String,
     pub md5: Vec<u8>,
     #[serde(default)]
@@ -552,6 +559,10 @@ pub struct Engine {
     /// The pack small blobs are appended to (see `pack`), and the packing thresholds.
     pack: Mutex<Option<pack::ActivePack>>,
     pack_below: std::sync::atomic::AtomicU64,
+    /// Compress new object data (zstd chunks), and what it did since start: bytes in, bytes stored.
+    compress: std::sync::atomic::AtomicBool,
+    z_in: std::sync::atomic::AtomicU64,
+    z_out: std::sync::atomic::AtomicU64,
     pack_max: std::sync::atomic::AtomicU64,
     compacting: Mutex<()>,
     /// Cluster mode: this node's name, and the cluster.
@@ -598,6 +609,10 @@ pub struct BlobWriter<'a> {
     enc: Option<Encrypting>,
     /// Kept on this node only (not placed on the cluster).
     local: bool,
+    /// Compressing: plaintext waiting for a full chunk, and the chunk table so far.
+    z: Option<(Vec<u8>, zchunk::Table)>,
+    /// Bytes written to the file (after compression and encryption).
+    stored: u64,
 }
 
 struct Encrypting {
@@ -608,18 +623,62 @@ struct Encrypting {
 }
 
 impl BlobWriter<'_> {
-    /// Appends plaintext (encrypted on the way to disk when the blob has a key).
+    /// Appends plaintext (compressed, then encrypted, on the way to disk when the blob is set up so).
     pub fn write(&mut self, data: &[u8]) -> io::Result<()> {
         self.size += data.len() as u64;
         self.md5.update(data);
+        if let Some((buf, _)) = &mut self.z {
+            buf.extend_from_slice(data);
+            while self.z.as_ref().is_some_and(|(b, _)| b.len() >= zchunk::CHUNK) {
+                self.compress_chunk(false)?;
+            }
+            return Ok(());
+        }
+        self.emit(data)
+    }
+
+    /// Stores no compressed chunks (for data known not to compress).
+    pub fn no_compress(&mut self) {
+        if let Some((buf, table)) = self.z.take() {
+            debug_assert!(buf.is_empty() && table.0.is_empty(), "no_compress after writing");
+        }
+    }
+
+    /// Compresses the next chunk (`last`: whatever is left). A first chunk that does not compress turns
+    /// compression off for the blob (its bytes are then stored as written).
+    fn compress_chunk(&mut self, last: bool) -> io::Result<()> {
+        let Some((buf, table)) = self.z.as_mut() else { return Ok(()) };
+        let n = if last { buf.len() } else { zchunk::CHUNK };
+        if n == 0 {
+            return Ok(());
+        }
+        let rest = buf.split_off(n);
+        let chunk = std::mem::replace(buf, rest);
+        let first = table.0.is_empty();
+        let stored = zchunk::pack(table, &chunk)?;
+        if first && table.0[0] >= 1 << 63 {
+            let (rest, _) = self.z.take().unwrap();
+            self.emit(&chunk)?;
+            return self.emit(&rest);
+        }
+        self.emit(&stored)
+    }
+
+    /// Writes stored bytes (encrypting them when the blob has a key).
+    fn emit(&mut self, data: &[u8]) -> io::Result<()> {
         let file = self.file.as_mut().expect("blob already sealed");
         match &mut self.enc {
-            None => file.write_all(data),
+            None => {
+                self.stored += data.len() as u64;
+                file.write_all(data)
+            }
             Some(e) => {
                 e.buf.extend_from_slice(data);
                 while e.buf.len() >= crypt::CHUNK {
                     let rest = e.buf.split_off(crypt::CHUNK);
-                    file.write_all(&e.cipher.seal(e.idx, &e.buf))?;
+                    let sealed = e.cipher.seal(e.idx, &e.buf);
+                    self.stored += sealed.len() as u64;
+                    file.write_all(&sealed)?;
                     e.idx += 1;
                     e.buf = rest;
                 }
@@ -639,13 +698,23 @@ impl BlobWriter<'_> {
     /// fsyncs the blob and moves it into the blob tree. It is not visible to readers until an index
     /// transaction refers to it.
     pub fn seal(mut self) -> Result<Segment> {
+        let compressing = self.z.is_some();
+        self.compress_chunk(true)?;
+        let z = self.z.take().map(|(_, t)| t.encode()).unwrap_or_default();
         let mut file = self.file.take().expect("blob already sealed");
         let mut nonce = String::new();
         if let Some(e) = self.enc.take() {
             if !e.buf.is_empty() {
-                file.write_all(&e.cipher.seal(e.idx, &e.buf))?;
+                let sealed = e.cipher.seal(e.idx, &e.buf);
+                self.stored += sealed.len() as u64;
+                file.write_all(&sealed)?;
             }
             nonce = hex::encode(e.base);
+        }
+        if compressing {
+            use std::sync::atomic::Ordering;
+            self.engine.z_in.fetch_add(self.size, Ordering::Relaxed);
+            self.engine.z_out.fetch_add(self.stored, Ordering::Relaxed);
         }
         if self.engine.packs_small(self.size) {
             // Small: appended to a pack (see `pack`) instead of a file of its own.
@@ -654,7 +723,7 @@ impl BlobWriter<'_> {
             let data = fs::read(&self.tmp)?;
             let _ = fs::remove_file(&self.tmp);
             let id = self.engine.append_packed(&data)?;
-            return Ok(Segment { blob: id, size: self.size, nonce, tier: String::new() });
+            return Ok(Segment { blob: id, size: self.size, nonce, tier: String::new(), z });
         }
         if self.engine.fsync {
             file.sync_all()?;
@@ -666,7 +735,7 @@ impl BlobWriter<'_> {
         if self.engine.fsync {
             File::open(dst.parent().unwrap())?.sync_all()?;
         }
-        let seg = Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new() };
+        let seg = Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new(), z };
         if self.local {
             return Ok(seg);
         }
@@ -850,6 +919,9 @@ impl Engine {
             tiers: Default::default(),
             pack: Mutex::new(None),
             pack_below: std::sync::atomic::AtomicU64::new(0),
+            compress: Default::default(),
+            z_in: Default::default(),
+            z_out: Default::default(),
             pack_max: std::sync::atomic::AtomicU64::new(1 << 30),
             compacting: Mutex::new(()),
             node: node.map(str::to_string),
@@ -901,7 +973,7 @@ impl Engine {
         let id = new_id();
         let tmp = self.dir.join("tmp").join(format!("{id}.{}", new_id()));
         let file = File::create(&tmp)?;
-        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None, local: false })
+        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None, local: false, z: None, stored: 0 })
     }
 
     /// Starts a blob kept on this node only (a copy or shard another node placed here).
@@ -975,9 +1047,24 @@ impl Engine {
         gone.len()
     }
 
-    /// Starts a blob that is encrypted with `key` (None: in the clear).
+    /// Compresses new object data (zstd, in chunks) from now on.
+    pub fn set_compression(&self, on: bool) {
+        self.compress.store(on, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Compression: whether it is on, and plaintext bytes in / bytes stored by compressing writes since start.
+    pub fn compression_stats(&self) -> (bool, u64, u64) {
+        use std::sync::atomic::Ordering;
+        (self.compress.load(Ordering::SeqCst), self.z_in.load(Ordering::Relaxed), self.z_out.load(Ordering::Relaxed))
+    }
+
+    /// Starts a blob of object data, encrypted with `key` (None: in the clear) and compressed when
+    /// compression is on.
     pub fn new_blob_with(&self, key: Option<&Key>) -> Result<BlobWriter<'_>> {
         let mut w = self.new_blob()?;
+        if self.compress.load(std::sync::atomic::Ordering::SeqCst) {
+            w.z = Some((Vec::new(), zchunk::Table::default()));
+        }
         if let Some(k) = key {
             let base = crypt::random_nonce_base();
             w.enc = Some(Encrypting { cipher: ChunkCipher::new(k, base), base, idx: 0, buf: Vec::with_capacity(crypt::CHUNK) });
@@ -2382,6 +2469,10 @@ impl Engine {
             }
             let from = off.max(start) - start;
             let to = end.min(stop) - start;
+            if !s.z.is_empty() {
+                parts.push(Piece::Plain(Box::new(self.compressed_reader(s, from, key)?), to - from));
+                continue;
+            }
             if s.nonce.is_empty() {
                 parts.push(Piece::Plain(self.open_blob(s, from)?, to - from));
                 continue;
@@ -2405,6 +2496,40 @@ impl Engine {
             });
         }
         Ok(ObjectReader { parts })
+    }
+
+    /// Reads a compressed segment's plaintext from `from` on: opens its stored stream at the start of the
+    /// chunk holding `from` (decrypting it when encrypted) and decompresses chunk by chunk.
+    fn compressed_reader(&self, s: &Segment, from: u64, key: Option<&Key>) -> Result<zchunk::Reader> {
+        let table = zchunk::Table::decode(&s.z).ok_or_else(|| Error::Index(format!("segment {}: bad chunk table", s.blob)))?;
+        let first = (from / zchunk::CHUNK as u64) as usize;
+        let skip = (from % zchunk::CHUNK as u64) as usize;
+        let coff = table.offset_of(first);
+        let clen = table.stored_len();
+        let inner: Box<dyn Read + Send> = if s.nonce.is_empty() {
+            Box::new(self.open_blob(s, coff)?.take(clen - coff))
+        } else {
+            let k = key.ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "encrypted object read without its key")))?;
+            let base: [u8; 8] = hex::decode(&s.nonce)
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or_else(|| Error::Index(format!("segment {}: bad nonce", s.blob)))?;
+            let chunk = (coff / crypt::CHUNK as u64) as u32;
+            let f = self.open_blob(s, chunk as u64 * (crypt::CHUNK + crypt::TAG) as u64)?;
+            Box::new(ObjectReader {
+                parts: vec![Piece::Sealed {
+                    file: f,
+                    cipher: Box::new(ChunkCipher::new(k, base)),
+                    chunk,
+                    seg_size: clen,
+                    skip: (coff % crypt::CHUNK as u64) as usize,
+                    left: clen - coff,
+                    buf: vec![],
+                    pos: 0,
+                }],
+            })
+        };
+        Ok(zchunk::Reader::new(inner, table, first, skip))
     }
 
     /// Looks an object up and opens the range `rng` picks, retrying if a concurrent writer replaced it
@@ -2522,7 +2647,7 @@ impl Engine {
 
     /// Records a sealed part, replacing an earlier upload of the same part number.
     pub fn put_part(&self, bucket: &str, key: &str, id: &str, p: Part) -> Result<()> {
-        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() };
+        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new(), z: p.z.clone() };
         let res = (|| -> Result<Vec<Segment>> {
             let tx = self.begin_write()?;
             let old = {
@@ -2531,7 +2656,7 @@ impl Engine {
                 let old = match t.get((id, p.number))? {
                     Some(v) => {
                         let op: Part = serde_json::from_slice(v.value())?;
-                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce, tier: String::new() }]
+                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce, tier: String::new(), z: op.z }]
                     }
                     None => vec![],
                 };
@@ -2611,7 +2736,7 @@ impl Engine {
         Self::upload_in(&tx.open_table(UPLOADS)?, bucket, key, id)?;
         let parts = Self::drop_upload(&tx, id)?;
         let segs: Vec<Segment> =
-            parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce, tier: String::new() }).collect();
+            parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce, tier: String::new(), z: p.z }).collect();
         Self::queue_gc(&tx, bucket, &segs)?;
         tx.commit()?;
         self.collect();
@@ -2691,7 +2816,7 @@ impl Engine {
                 checksum_type: ctype,
                 segments: parts
                     .iter()
-                    .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() })
+                    .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new(), z: p.z.clone() })
                     .collect(),
                 part_count: parts.len() as u32,
                 tags: u.tags.clone(),
@@ -2721,6 +2846,7 @@ impl Engine {
                 size: p.size,
                 nonce: p.nonce.clone(),
                 tier: String::new(),
+                z: p.z.clone(),
             }));
             Self::drop_upload(&tx, id)?;
             Self::queue_gc(&tx, bucket, &garbage)?;

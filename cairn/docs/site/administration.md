@@ -573,6 +573,13 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **On demand.** `cairn-store admin compact [--min-dead 0.3]` (or `POST /-/admin/v1/compact`) compacts now; it is recorded in the audit trail. `cairn-store admin stats` reports packs, their bytes and the live bytes in them.
 - **Backups** copy pack files whole, and hard-link closed packs that are unchanged since the previous backup.
 
+**Compression.** Set `CAIRN_STORE_COMPRESSION=zstd` to compress new object data at rest. CSV, JSON, logs and similar text often take a third or less of the space.
+
+- **Ranged reads stay cheap.** Data is compressed in independent 1 MiB chunks, and each object records where its chunks start, so a read at any offset decompresses only the chunks it touches.
+- **Only what pays.** An object whose first chunk does not compress by at least an eighth is stored as written (media, archives, Parquet), and already-compressed content types (images, video, audio, zip, gzip, Parquet, PDF) are not even tried.
+- **Transparent.** Sizes, ETags, checksums, ranges, multipart, copies, versions, replication, tiering, clusters and backups all see the object, not the compressed bytes. With encryption at rest, data is compressed first and then encrypted.
+- **Turning it off** affects only new writes: compressed objects stay readable. `cairn-store admin stats` reports the bytes written and stored since start. In Helm, set `cairn.store.compression: zstd`.
+
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 
 **Backups.** With `CAIRN_STORE_BACKUP_DIR` set, `cairn-store admin backup <name>` (or `POST /-/admin/v1/backups`) writes an online backup while the store keeps serving.

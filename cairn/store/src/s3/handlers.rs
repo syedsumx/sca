@@ -345,6 +345,9 @@ impl Server {
             return Err(e::ENTITY_TOO_LARGE.clone());
         }
         let mut blob = self.eng.new_blob_with(key)?;
+        if engine::zchunk::incompressible(c.header("content-type")) {
+            blob.no_compress(); // already compressed: not worth a trial
+        }
         let mut out = Vec::with_capacity(256 << 10);
         let mut body = body;
         while let Some(frame) = body.frame().await {
@@ -992,6 +995,7 @@ impl Server {
             blob: seg.blob,
             size: seg.size,
             nonce: seg.nonce,
+            z: seg.z,
             etag: hex::encode(&md5),
             md5,
             checksums: checksums.clone(),
@@ -1025,6 +1029,7 @@ impl Server {
                 blob: seg.blob,
                 size: seg.size,
                 nonce: seg.nonce,
+                z: seg.z,
                 etag: hex::encode(&md5),
                 md5,
                 checksums,
@@ -1130,7 +1135,13 @@ impl Server {
                 } else {
                     let segs: Vec<Segment> = chosen
                         .iter()
-                        .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() })
+                        .map(|p| Segment {
+                            blob: p.blob.clone(),
+                            size: p.size,
+                            nonce: p.nonce.clone(),
+                            tier: String::new(),
+                            z: p.z.clone(),
+                        })
                         .collect();
                     let size = segs.iter().map(|s| s.size).sum();
                     let dek = self.data_key(c, &c.bucket, &c.key, &u.sse, false)?;

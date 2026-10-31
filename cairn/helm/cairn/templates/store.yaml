@@ -84,6 +84,8 @@ spec:
             - name: CAIRN_STORE_BACKUP_DIR
               value: /backups
             {{- end }}
+            - name: CAIRN_STORE_COMPRESSION
+              value: {{ $u.compression | default "off" | quote }}
             - name: CAIRN_STORE_BLOCK_PUBLIC_ACCESS
               value: {{ $u.blockPublicAccess | toString | quote }}
             {{- if $u.pdp.enabled }}

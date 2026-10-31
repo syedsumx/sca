@@ -173,7 +173,7 @@ impl Server {
                 modified: l.modified.max(1),
                 content_type: head.content_type,
                 user_meta: head.meta,
-                segments: vec![Segment { blob: l.key.clone(), size: head.len, nonce: String::new(), tier: tier.clone() }],
+                segments: vec![Segment { blob: l.key.clone(), size: head.len, tier: tier.clone(), ..Default::default() }],
                 remote_etag: head.etag,
                 ..Default::default()
             };
@@ -266,7 +266,7 @@ impl Server {
             if r.head_info(&o.key).map_err(sink_err)?.is_none_or(|h| h.etag != o.remote_etag || h.len != o.size) {
                 continue; // the remote no longer has these bytes: keep ours
             }
-            let seg = Segment { blob: o.key.clone(), size: o.size, nonce: String::new(), tier: tier.clone() };
+            let seg = Segment { blob: o.key.clone(), size: o.size, tier: tier.clone(), ..Default::default() };
             if self.eng.transition_with(bucket, &o.key, &o.version_id, &o.segments, vec![seg], Some(None))? {
                 dropped += 1;
             }
