@@ -5,6 +5,13 @@
 {{- with .Values.cairn.scim.tokenSecret }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SCIM_TOKEN_FILE" "value" "/run/cairn-scim/token") }}
 {{- end }}
+{{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
+{{- if .Values.cairn.store.enabled }}
+{{- $s := .Values.cairn.store.secret }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STORE_URL" "value" (printf "http%s://%s-store:%v" (ternary "s" "" (not (empty .Values.cairn.store.tlsSecret))) (include "cairn.fullname" .) .Values.cairn.store.port)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STORE_ADMIN_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" $s.name "key" $s.accessKeyKey))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STORE_ADMIN_SECRET_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" $s.name "key" $s.secretKeyKey))) }}
+{{- end }}
 {{- $mounts := list (dict "name" "provisioner-token" "mountPath" "/run/cairn-provisioner" "readOnly" true) }}
 {{- $vols := list (dict "name" "provisioner-token" "secret" (dict "secretName" (include "cairn.provisionerTokenSecret" .) "optional" true "items" (list (dict "key" "provisioner_token" "path" "provisioner_token")))) }}
 {{- with .Values.cairn.scim.tokenSecret }}

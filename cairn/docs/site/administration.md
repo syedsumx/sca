@@ -491,6 +491,16 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 
 A write that would take a bucket over its quota is refused with `QuotaExceeded`, inside the same transaction, so concurrent uploads cannot slip past the limit. Deletes and overwrites that shrink a bucket always work. Usage is updated with every write, and recounted from what is stored each time the store starts.
 
+**Storage in the Cairn UI.** Cairn admins see **Settings → Storage**, which lists:
+
+- every bucket, with its usage, its quota, and whether it has versioning, object lock, default encryption, lifecycle rules or a bucket policy;
+- quotas, which can be set and removed from the page;
+- the store's audit trail, with a button that verifies the hash chain from the beginning.
+
+The control plane calls the store's admin API with the store's admin key (`CAIRN_STORE_URL`, `CAIRN_STORE_ADMIN_ACCESS_KEY`, `CAIRN_STORE_ADMIN_SECRET_KEY`; set automatically in Compose and Helm), and records quota changes in Cairn's own audit log too. Users never see the key.
+
+**On the command line.** `cairn-store admin stats | buckets | bucket <name> | quota <name> --max-bytes N --max-objects N | quota-remove <name> | audit [--after SEQ] [--jsonl]` calls the same API. It is signed with `CAIRN_STORE_ACCESS_KEY` and `CAIRN_STORE_SECRET_KEY` (an admin key), against `CAIRN_STORE_ENDPOINT` or the local listener.
+
 **Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes, open uploads and noncurrent versions, per-bucket bytes and objects (`cairn_store_bucket_bytes`, `cairn_store_bucket_objects`), and lifecycle actions.
 
 ## Cairn Catalog

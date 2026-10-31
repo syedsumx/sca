@@ -88,3 +88,30 @@ def test_usage_survives_restart(fresh_store):
     st.stop(kill=True)
     st.start()
     assert admin(st, "GET", "buckets/usage")[1]["usage"] == {"bytes": 77, "objects": 1}
+
+
+def test_admin_command_line(store, s3, bucket):
+    import os
+    import subprocess
+
+    if not getattr(store, "binary", None):
+        pytest.skip("external store")
+    env = {**os.environ, "CAIRN_STORE_ENDPOINT": store.endpoint, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1]}
+
+    def cli(*args):
+        r = subprocess.run([store.binary, "admin", *args], env=env, capture_output=True, text=True, timeout=20)
+        return r.returncode, r.stdout
+
+    code, out = cli("quota", bucket, "--max-objects", "7")
+    assert code == 0 and json.loads(out)["quota"] == {"max_objects": 7}
+    code, out = cli("bucket", bucket)
+    assert code == 0 and json.loads(out)["name"] == bucket
+    assert bucket in [b["name"] for b in json.loads(cli("buckets")[1])["buckets"]]
+    assert json.loads(cli("stats")[1])["buckets"] >= 1
+    code, out = cli("quota-remove", bucket)
+    assert code == 0 and json.loads(out)["quota"] is None
+    code, out = cli("audit", "--jsonl")
+    assert code == 0 and any(json.loads(line)["action"] == "quota.delete" for line in out.splitlines() if line.strip())
+    env["CAIRN_STORE_ACCESS_KEY"], env["CAIRN_STORE_SECRET_KEY"] = SCOPED
+    code, out = cli("stats")
+    assert code == 1 and json.loads(out)["error"] == "AccessDenied"

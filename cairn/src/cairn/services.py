@@ -102,6 +102,7 @@ class Services:
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
     workspaces: Optional[Any] = None
+    store_admin: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -505,6 +506,14 @@ def _build_active_metadata(s: Services) -> None:
     from cairn.governance.workspaces import WorkspaceService
 
     s.workspaces = WorkspaceService(s.engine, s.pdp, s.graph, s.audit, s.attributes)
+    # Cairn Store administration: on when the control plane is given the store's admin key.
+    store_key = os.environ.get("CAIRN_STORE_ADMIN_ACCESS_KEY", "")
+    store_secret = os.environ.get("CAIRN_STORE_ADMIN_SECRET_KEY", "")  # or CAIRN_STORE_ADMIN_SECRET_KEY_FILE
+    if store_key and store_secret:
+        from cairn.storage.store_admin import StoreAdmin
+
+        s.store_admin = StoreAdmin(os.environ.get("CAIRN_STORE_URL", "http://cairn-store:8333"), store_key, store_secret,
+                                   os.environ.get("CAIRN_STORE_REGION", "us-east-1"))
     from cairn.governance.history import ChangeHistory
 
     s.history = ChangeHistory(s.engine, s.graph, s.audit)

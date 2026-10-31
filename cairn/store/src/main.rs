@@ -44,6 +44,7 @@
 // Errors are cold paths here; boxing them would only add allocations to the code that matters.
 #![allow(clippy::result_large_err)]
 
+mod admin_cli;
 mod audit;
 mod crypt;
 mod engine;
@@ -129,6 +130,8 @@ fn main() {
     let cmd = if args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0) } else { "serve".to_string() };
     let mut addr = env("CAIRN_STORE_ADDR", ":8333");
     let mut data = env("CAIRN_STORE_DATA", "/data");
+    // `admin` takes its own arguments.
+    let rest: Vec<String> = if cmd == "admin" { std::mem::take(&mut args) } else { vec![] };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.trim_start_matches('-') {
@@ -156,6 +159,14 @@ fn main() {
             if rep.objects_with_missing_blobs > 0 {
                 std::process::exit(2);
             }
+        }
+        "admin" => {
+            let tls = !env("CAIRN_STORE_TLS_CERT", "").is_empty();
+            let default = format!("{}://{}", if tls { "https" } else { "http" }, listen_addr(&addr).replace("0.0.0.0", "127.0.0.1"));
+            let endpoint = env("CAIRN_STORE_ENDPOINT", &default);
+            let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
+            let code = admin_cli::run(&rest, &endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1"));
+            std::process::exit(code);
         }
         "audit-verify" => {
             // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
@@ -200,7 +211,7 @@ fn main() {
             rt.block_on(serve(addr, data));
         }
         other => {
-            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, healthcheck, version)");
+            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, healthcheck, version)");
             std::process::exit(2);
         }
     }

@@ -10,6 +10,7 @@ import { ExtensionsAdmin } from '../components/Extensions';
 import { LicenceSettings } from '../components/Licence';
 import { MyPrivacyParts } from '../components/Privacy';
 import { SourcesSettings } from '../components/Sources';
+import { StorageSettings } from '../components/Storage';
 import { WorkspacesSettings } from '../components/Workspaces';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
@@ -286,6 +287,9 @@ export function SettingsPage() {
                               { key: 'extensions', label: t('settings.extensions'), children: <ExtensionsAdmin /> },
                               { key: 'licence', label: t('settings.licence'), children: <LicenceSettings /> },
                           ]
+                        : []),
+                    ...(session.config?.is_admin && session.config?.storage_enabled
+                        ? [{ key: 'storage', label: t('settings.storage'), children: <StorageSettings /> }]
                         : []),
                 ]}
             />

@@ -1,6 +1,11 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
 import type { CompiledPolicy } from './types';
 import type {
+    StoreAuditEntry,
+    StoreAuditVerify,
+    StoreBucket,
+} from './types';
+import type {
     AIAssessment,
     AISystem,
     AISystemInput,
@@ -377,6 +382,28 @@ export class ConsumerClient extends CairnClient {
 
     revertChange(id: string, force = false) {
         return this.request<MetadataChange>('POST', `/history/${enc(id)}/revert`, { force });
+    }
+
+    // --- Cairn Store ----------------------------------------------------------------------------
+
+    storageBuckets(opts?: RequestOptions) {
+        return this.request<StoreBucket[]>('GET', '/storage/v1/buckets', undefined, opts);
+    }
+
+    setStorageQuota(bucket: string, body: { max_bytes?: number; max_objects?: number }) {
+        return this.request<StoreBucket>('PUT', `/storage/v1/buckets/${enc(bucket)}/quota`, body);
+    }
+
+    deleteStorageQuota(bucket: string) {
+        return this.request<StoreBucket>('DELETE', `/storage/v1/buckets/${enc(bucket)}/quota`);
+    }
+
+    storageAudit(opts?: RequestOptions) {
+        return this.request<StoreAuditEntry[]>('GET', '/storage/v1/audit', undefined, { ...opts, query: { limit: 1000 } });
+    }
+
+    verifyStorageAudit() {
+        return this.request<StoreAuditVerify>('GET', '/storage/v1/audit/verify');
     }
 
     // --- workspaces ---------------------------------------------------------------------------

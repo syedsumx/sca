@@ -347,6 +347,8 @@ export interface UiConfig {
     can_manage_agents?: boolean;
     /** The caller holds MANAGE_INGESTION and source management is available. */
     can_manage_sources?: boolean;
+    /** Cairn Store administration is available (the control plane has the store's admin key). */
+    storage_enabled?: boolean;
     workspaces?: WorkspaceRef[];
     /** URL agents use to reach the gateway (shown in the enrolment command). */
     gateway_url?: string;
@@ -1220,4 +1222,38 @@ export interface MetadataChange {
     revert_of: string | null;
     reverted_by: string | null;
     revertible: boolean;
+}
+
+// --- Cairn Store administration ----------------------------------------------------------------
+
+export interface StoreBucket {
+    name: string;
+    created: string;
+    versioning: 'Off' | 'Enabled' | 'Suspended';
+    usage: { bytes: number; objects: number };
+    quota: { max_bytes?: number; max_objects?: number } | null;
+    object_lock: boolean;
+    encryption_default: boolean;
+    lifecycle: boolean;
+    policy: boolean;
+}
+
+export interface StoreAuditEntry {
+    seq: number;
+    id: string;
+    ts: string;
+    category: string;
+    action: string;
+    actor: string;
+    subject: string | null;
+    details: Record<string, unknown>;
+    prev_hash: string;
+    hash: string;
+}
+
+export interface StoreAuditVerify {
+    valid: boolean;
+    entries_checked?: number;
+    head?: string | null;
+    reason?: string;
 }

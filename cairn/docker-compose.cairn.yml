@@ -374,6 +374,10 @@ services:
       <<: *cairn-env
       # SCIM provisioning (Administration → User provisioning). Empty = SCIM answers 503.
       CAIRN_SCIM_TOKEN: ${CAIRN_SCIM_TOKEN:-}
+      # Cairn Store administration (Settings → Storage), with the store's admin key.
+      CAIRN_STORE_URL: http://cairn-store:8333
+      CAIRN_STORE_ADMIN_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
+      CAIRN_STORE_ADMIN_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
       CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
