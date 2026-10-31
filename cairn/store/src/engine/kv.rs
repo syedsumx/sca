@@ -76,6 +76,12 @@ impl OrdKey for (&'static str, u32) {
         out.extend_from_slice(&v.1.to_be_bytes());
     }
 }
+impl OrdKey for (&'static str, u64) {
+    fn ord(v: &(&str, u64), out: &mut Vec<u8>) {
+        ord_str(v.0, out);
+        out.extend_from_slice(&v.1.to_be_bytes());
+    }
+}
 
 fn ord_of<K: OrdKey>(k: &K::SelfType<'_>) -> Vec<u8> {
     let mut out = Vec::with_capacity(32);

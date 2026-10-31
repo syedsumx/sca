@@ -67,6 +67,7 @@
 //! CAIRN_STORE_CLUSTER_EC_ABOVE  ... blobs of at least this many bytes (1048576)
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
 //! CAIRN_STORE_COMPRESSION    compress new object data: off or zstd (off; in 1 MiB chunks, ranges stay cheap)
+//! CAIRN_STORE_QUEUE_RETENTION_INTERVAL  seconds between retention passes over message queue topics (60)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -432,6 +433,7 @@ async fn serve(addr: String, data: String) {
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
     tokio::spawn(server.clone().run_events());
     tokio::spawn(server.clone().run_cluster());
+    tokio::spawn(server.clone().run_queue_retention(Duration::from_secs(num("CAIRN_STORE_QUEUE_RETENTION_INTERVAL", "60").max(1))));
     tokio::spawn(server.clone().run_remote_sync(Duration::from_secs(num("CAIRN_STORE_REMOTE_SYNC_INTERVAL", "60").max(1))));
     let sink_auto = env("CAIRN_STORE_BACKUP_SINK_SCHEDULE", "");
     if !sink_auto.is_empty() {

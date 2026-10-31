@@ -21,6 +21,7 @@ pub mod mounts;
 mod objectlock;
 pub mod policy;
 mod post;
+pub mod queues;
 pub mod remote;
 pub mod replication;
 pub mod sftp;
@@ -133,6 +134,8 @@ pub struct Server {
     pub(crate) cluster: Option<Arc<cluster::Cluster>>,
     pub(crate) sinks: Option<sinks::Sinks>,
     pub(crate) remotes: Arc<BTreeMap<String, remote::Remote>>,
+    pub(crate) queue_notify: tokio::sync::Notify,
+    pub(crate) queue_metrics: queues::QueueMetrics,
 }
 
 /// One request, after routing and authentication.
@@ -233,6 +236,8 @@ impl Server {
             sftp_metrics: Default::default(),
             cluster,
             remotes,
+            queue_notify: tokio::sync::Notify::new(),
+            queue_metrics: Default::default(),
             sinks: match cfg.backup_sinks.is_empty() {
                 true => None,
                 false => Some(sinks::Sinks::new(cfg.backup_sinks)?),
@@ -268,7 +273,9 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result, cors, mut info) = if path.starts_with("/-/cluster/") {
+        let (op, result, cors, mut info) = if path.starts_with("/-/queues/") {
+            ("QueueApi", Ok(self.queue_api(req).await), None, Default::default())
+        } else if path.starts_with("/-/cluster/") {
             ("ClusterApi", Ok(self.cluster_api(req).await), None, Default::default())
         } else if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
@@ -533,6 +540,16 @@ impl Server {
                 }
                 if let Some(c) = &self.cluster {
                     tokio::task::block_in_place(|| c.metrics_text(&mut body));
+                }
+                for (name, v) in [
+                    ("published", &self.queue_metrics.published),
+                    ("delivered", &self.queue_metrics.delivered),
+                    ("trimmed", &self.queue_metrics.trimmed),
+                ] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_queue_{name}_total counter\ncairn_store_queue_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
                 }
                 if let Ok(n) = tokio::task::block_in_place(|| self.eng.outbox_len()) {
                     body.push_str(&format!("# TYPE cairn_store_events_pending gauge\ncairn_store_events_pending {n}\n"));

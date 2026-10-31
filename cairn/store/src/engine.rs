@@ -67,6 +67,11 @@ const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("audit");
 const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
 /// Cluster nodes (name -> JSON: address, state, last heartbeat).
 const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+/// Message queues: topics (name -> configuration), messages ((topic, sequence) -> message) and consumer
+/// groups ((topic, group) -> last committed sequence). A topic's last sequence number is in META ("q:<topic>").
+const QTOPICS: TableDefinition<&str, &[u8]> = TableDefinition::new("queue_topics");
+const QMSGS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("queue_messages");
+const QGROUPS: TableDefinition<(&str, &str), u64> = TableDefinition::new("queue_groups");
 /// Leases on cluster-wide background work (name -> JSON: holder, expiry), so one node runs each task.
 const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
 
@@ -942,6 +947,9 @@ impl Engine {
         tx.open_table(KEYS)?;
         tx.open_table(NODES)?;
         tx.open_table(LEASES)?;
+        tx.open_table(QTOPICS)?;
+        tx.open_table(QMSGS)?;
+        tx.open_table(QGROUPS)?;
         tx.commit()?;
         e.check_membership()?;
         e.recover()?;
@@ -1374,7 +1382,10 @@ impl Engine {
                     }
                 })*};
             }
-            copy!(BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES);
+            copy!(
+                BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES, QTOPICS, QMSGS,
+                QGROUPS
+            );
             w.commit()?;
         }
         kv::bind(&pg, &self.dir, false)?;
@@ -2932,6 +2943,9 @@ impl Engine {
                 Ok(())
             });
             copy!(KEYS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> { Ok(()) });
+            copy!(QTOPICS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> { Ok(()) });
+            copy!(QMSGS, (&str, u64), &[u8], |_: &(&str, u64), _: &&[u8]| -> Result<()> { Ok(()) });
+            copy!(QGROUPS, (&str, &str), u64, |_: &(&str, &str), _: &u64| -> Result<()> { Ok(()) });
             w.open_table(GC)?;
             w.open_table(OUTBOX)?;
             w.commit()?;
@@ -3022,6 +3036,160 @@ impl Engine {
         drop(_running);
         self.collect(); // what was kept for the backup can go now
         Ok(rep)
+    }
+
+    // ------------------------------------------------------------------------------------- queues
+
+    /// Topics (name -> configuration document).
+    pub fn queue_topics(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(QTOPICS)?.iter()? {
+            let (k, v) = row?;
+            out.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    pub fn queue_topic(&self, name: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.db.begin_read()?.open_table(QTOPICS)?.get(name)?.map(|v| v.value().to_vec()))
+    }
+
+    /// Creates or changes a topic (None: deletes it with its messages and groups), audited.
+    pub fn queue_put_topic(&self, name: &str, cfg: Option<&[u8]>, audit: Option<&Audit>) -> Result<()> {
+        let tx = self.begin_write()?;
+        match cfg {
+            Some(c) => {
+                tx.open_table(QTOPICS)?.insert(name, c)?;
+            }
+            None => {
+                tx.open_table(QTOPICS)?.remove(name)?;
+                let mut m = tx.open_table(QMSGS)?;
+                let seqs: Vec<u64> = m.range((name, 0u64)..=(name, u64::MAX))?.filter_map(|r| r.ok().map(|(k, _)| k.value().1)).collect();
+                for s in seqs {
+                    m.remove((name, s))?;
+                }
+                drop(m);
+                let mut g = tx.open_table(QGROUPS)?;
+                let groups: Vec<String> =
+                    g.range((name, "")..=(name, "~"))?.filter_map(|r| r.ok().map(|(k, _)| k.value().1.to_string())).collect();
+                for gr in groups {
+                    g.remove((name, gr.as_str()))?;
+                }
+                drop(g);
+                tx.open_table(META)?.remove(format!("q:{name}").as_str())?;
+            }
+        }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Appends messages to a topic in one transaction; returns the first and last sequence numbers
+    /// (sequence numbers start at 1 and have no gaps).
+    pub fn queue_publish(&self, topic: &str, msgs: &[Vec<u8>]) -> Result<(u64, u64)> {
+        let tx = self.begin_write()?;
+        if tx.open_table(QTOPICS)?.get(topic)?.is_none() {
+            return Err(Error::NoSuchKey);
+        }
+        let key = format!("q:{topic}");
+        let mut meta = tx.open_table(META)?;
+        let last = meta.get(key.as_str())?.map(|v| v.value()).unwrap_or(0);
+        meta.insert(key.as_str(), last + msgs.len() as u64)?;
+        drop(meta);
+        let mut t = tx.open_table(QMSGS)?;
+        for (i, m) in msgs.iter().enumerate() {
+            t.insert((topic, last + 1 + i as u64), m.as_slice())?;
+        }
+        drop(t);
+        tx.commit()?;
+        Ok((last + 1, last + msgs.len() as u64))
+    }
+
+    /// The oldest message's sequence number and the next one to be written (first == next: empty).
+    pub fn queue_bounds(&self, topic: &str) -> Result<(u64, u64)> {
+        let r = self.db.begin_read()?;
+        let next = r.open_table(META)?.get(format!("q:{topic}").as_str())?.map(|v| v.value()).unwrap_or(0) + 1;
+        let first =
+            r.open_table(QMSGS)?.range((topic, 0u64)..=(topic, u64::MAX))?.next().transpose()?.map(|(k, _)| k.value().1).unwrap_or(next);
+        Ok((first, next))
+    }
+
+    /// Up to `max` messages after sequence number `after`.
+    pub fn queue_read(&self, topic: &str, after: u64, max: usize) -> Result<Vec<(u64, Vec<u8>)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        if after == u64::MAX {
+            return Ok(out);
+        }
+        for row in r.open_table(QMSGS)?.range((topic, after + 1)..=(topic, u64::MAX))? {
+            let (k, v) = row?;
+            out.push((k.value().1, v.value().to_vec()));
+            if out.len() >= max {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Consumer groups of a topic and the last sequence number each has committed.
+    pub fn queue_groups(&self, topic: &str) -> Result<Vec<(String, u64)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(QGROUPS)?.range((topic, "")..=(topic, "~"))? {
+            let (k, v) = row?;
+            out.push((k.value().1.to_string(), v.value()));
+        }
+        Ok(out)
+    }
+
+    /// Commits a group's offset: it has processed every message up to `seq` (never moves back, never
+    /// past the last message). Returns the offset.
+    pub fn queue_commit(&self, topic: &str, group: &str, seq: u64) -> Result<u64> {
+        let tx = self.begin_write()?;
+        if tx.open_table(QTOPICS)?.get(topic)?.is_none() {
+            return Err(Error::NoSuchKey);
+        }
+        let last = tx.open_table(META)?.get(format!("q:{topic}").as_str())?.map(|v| v.value()).unwrap_or(0);
+        if seq > last {
+            return Err(Error::InvalidPart);
+        }
+        let mut g = tx.open_table(QGROUPS)?;
+        let cur = g.get((topic, group))?.map(|v| v.value()).unwrap_or(0);
+        let off = cur.max(seq);
+        g.insert((topic, group), off)?;
+        drop(g);
+        tx.commit()?;
+        Ok(off)
+    }
+
+    /// Removes a topic's oldest messages while there are more than `keep`, or while `old` says so.
+    pub fn queue_trim(&self, topic: &str, keep: Option<u64>, old: &dyn Fn(&[u8]) -> bool) -> Result<u64> {
+        let (first, next) = self.queue_bounds(topic)?;
+        let count = next - first;
+        let over = keep.map(|k| count.saturating_sub(k)).unwrap_or(0);
+        let tx = self.begin_write()?;
+        let mut t = tx.open_table(QMSGS)?;
+        let mut drop_seqs = vec![];
+        for row in t.range((topic, 0u64)..=(topic, u64::MAX))? {
+            let (k, v) = row?;
+            if (drop_seqs.len() as u64) < over || old(v.value()) {
+                drop_seqs.push(k.value().1);
+            } else {
+                break;
+            }
+            if drop_seqs.len() >= 100_000 {
+                break;
+            }
+        }
+        for s in &drop_seqs {
+            t.remove((topic, *s))?;
+        }
+        drop(t);
+        tx.commit()?;
+        Ok(drop_seqs.len() as u64)
     }
 
     /// Counts buckets, objects, stored bytes and open uploads.
