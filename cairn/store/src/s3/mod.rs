@@ -1,5 +1,6 @@
 //! The S3 API over a Cairn Store engine.
 
+mod admin;
 pub mod auth;
 pub mod authz;
 pub mod body;
@@ -177,8 +178,13 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result, cors) =
-            if path.starts_with("/-/") { ("admin", Ok(self.admin(&path)), None) } else { self.dispatch(req, peer).await };
+        let (op, result, cors) = if path.starts_with("/-/admin/") {
+            ("AdminApi", Ok(self.admin_api(req).await), None)
+        } else if path.starts_with("/-/") {
+            ("admin", Ok(self.admin(&path)), None)
+        } else {
+            self.dispatch(req, peer).await
+        };
         let mut resp = match result {
             Ok(r) => r,
             Err(err) => error_response(&err, &path, &request_id, head),
@@ -296,6 +302,17 @@ impl Server {
                         "# TYPE cairn_store_lifecycle_{name}_total counter\ncairn_store_lifecycle_{name}_total {}\n",
                         v.load(Ordering::Relaxed)
                     ));
+                }
+                if let Ok(buckets) = tokio::task::block_in_place(|| self.eng.list_buckets()) {
+                    body.push_str("# TYPE cairn_store_bucket_bytes gauge\n# TYPE cairn_store_bucket_objects gauge\n");
+                    for b in buckets {
+                        if let Ok((bytes, objects)) = tokio::task::block_in_place(|| self.eng.usage(&b.name)) {
+                            body.push_str(&format!(
+                                "cairn_store_bucket_bytes{{bucket=\"{0}\"}} {bytes}\ncairn_store_bucket_objects{{bucket=\"{0}\"}} {objects}\n",
+                                b.name
+                            ));
+                        }
+                    }
                 }
                 let mut r = text(StatusCode::OK, body);
                 r.headers_mut().insert("content-type", HeaderValue::from_static("text/plain; version=0.0.4"));

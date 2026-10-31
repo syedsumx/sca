@@ -450,7 +450,15 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 
 **Limits.** This release runs on one node: there is no replication, so the volume is the only copy. Put it on reliable storage and back it up: stop the store and copy `/data`, or take a volume snapshot. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
 
-**Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes and open uploads.
+**Quotas and the admin API.** Cairn's admin API for the store lives under `/-/admin/v1/`. Requests are signed with SigV4 by an admin key, so any AWS SDK signer works; bodies and responses are JSON.
+
+- **Statistics:** `GET stats`.
+- **Buckets:** `GET buckets` and `GET buckets/<name>` report each bucket's usage (stored bytes, including old versions and unfinished uploads, and the number of object versions) and its settings.
+- **Quotas:** `PUT buckets/<name>/quota` with `{"max_bytes": ..., "max_objects": ...}` sets a quota, and `DELETE` removes it.
+
+A write that would take a bucket over its quota is refused with `QuotaExceeded`, inside the same transaction, so concurrent uploads cannot slip past the limit. Deletes and overwrites that shrink a bucket always work. Usage is updated with every write, and recounted from what is stored each time the store starts.
+
+**Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes, open uploads and noncurrent versions, per-bucket bytes and objects (`cairn_store_bucket_bytes`, `cairn_store_bucket_objects`), and lifecycle actions.
 
 ## Cairn Catalog
 

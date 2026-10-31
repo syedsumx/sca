@@ -120,6 +120,9 @@ errors! {
     POST_CONDITION = "AccessDenied", 403, "Invalid according to Policy: Policy Condition failed (or a form field is not covered by a condition).";
     POST_NO_FILE = "InvalidArgument", 400, "POST requires exactly one file upload per request.";
     POST_NO_KEY = "InvalidArgument", 400, "Bucket POST must contain a field named 'key'.";
+    QUOTA_EXCEEDED = "QuotaExceeded", 403, "The bucket's quota does not allow this write.";
+    MALFORMED_JSON = "MalformedJSON", 400, "The request body must be a JSON document of the documented shape.";
+    ADMIN_NOT_FOUND = "NotFound", 404, "No such admin API endpoint.";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
@@ -137,6 +140,7 @@ impl From<crate::engine::Error> for ApiError {
             E::NoSuchKey => NO_SUCH_KEY.clone(),
             E::NoSuchUpload => NO_SUCH_UPLOAD.clone(),
             E::NoSuchVersion => NO_SUCH_VERSION.clone(),
+            E::QuotaExceeded => QUOTA_EXCEEDED.clone(),
             E::ObjectLocked => OBJECT_LOCKED.clone(),
             E::MethodNotAllowed => METHOD_NOT_ALLOWED.clone(),
             E::PreconditionFailed => PRECONDITION.clone(),

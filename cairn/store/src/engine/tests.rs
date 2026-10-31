@@ -370,3 +370,54 @@ fn encrypted_blobs_round_trip_and_read_any_range() {
     let mut out = vec![];
     assert!(e.reader(&o, 0, o.size, Some(&key)).unwrap().read_to_end(&mut out).is_err());
 }
+
+#[test]
+fn usage_counters_match_a_full_recount_and_quotas_hold() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.create_bucket("b").unwrap();
+    let c = Condition::default();
+    put(&e, "b", "a", b"12345", &c).unwrap();
+    put(&e, "b", "a", b"123", &c).unwrap(); // overwrite, unversioned
+    put(&e, "b", "x", b"x", &c).unwrap();
+    e.delete_object("b", "x", None).unwrap();
+    assert_eq!(e.usage("b").unwrap(), (3, 1));
+    e.set_versioning("b", "Enabled").unwrap();
+    put(&e, "b", "a", b"1234567", &c).unwrap(); // the null version is kept
+    let marker = e.delete_object("b", "a", None).unwrap();
+    assert_eq!(e.usage("b").unwrap(), (10, 2));
+    e.delete_version("b", "a", marker.version_id.as_deref().unwrap(), false).unwrap();
+    e.set_versioning("b", "Suspended").unwrap();
+    put(&e, "b", "a", b"zz", &c).unwrap(); // replaces the null version
+    // A multipart upload: parts count while in progress, then become the object.
+    let u = e.create_upload(Upload { bucket: "b".into(), key: "m".into(), ..Default::default() }).unwrap();
+    for n in 1..=2u32 {
+        let mut w = e.new_blob().unwrap();
+        w.write(&vec![b'p'; if n == 1 { MIN_PART_SIZE as usize } else { 10 }]).unwrap();
+        let md5 = w.md5();
+        let seg = w.seal().unwrap();
+        e.put_part("b", "m", &u.id, Part { number: n, blob: seg.blob, size: seg.size, etag: hex::encode(&md5), md5, ..Default::default() }).unwrap();
+    }
+    let live = e.usage("b").unwrap();
+    assert_eq!(live, (7 + 2 + MIN_PART_SIZE + 10, 2));
+    let want: Vec<CompletePart> = (1..=2).map(|n| CompletePart { number: n, etag: String::new() }).collect();
+    e.complete_upload("b", "m", &u.id, &want, &c, |_, _| Ok((BTreeMap::new(), String::new()))).unwrap();
+    let live = e.usage("b").unwrap();
+    assert_eq!(live, (7 + 2 + MIN_PART_SIZE + 10, 3));
+    e.recover().unwrap();
+    assert_eq!(e.usage("b").unwrap(), live, "recount after recovery");
+
+    // Quota: growth past the limit is refused; deletes and shrinking overwrites still work.
+    let q = serde_json::to_vec(&Quota { max_bytes: Some(live.0 + 5), max_objects: None }).unwrap();
+    e.put_config("b", "quota", Some(&q)).unwrap();
+    assert!(matches!(put(&e, "b", "big", &[0u8; 6], &c), Err(Error::QuotaExceeded)));
+    put(&e, "b", "small", &[0u8; 5], &c).unwrap();
+    assert!(matches!(put(&e, "b", "one-more", b"1", &c), Err(Error::QuotaExceeded)));
+    put(&e, "b", "small", &[0u8; 2], &c).unwrap(); // shrinking is fine (suspended: replaces the null version)
+    e.delete_object("b", "small", None).unwrap();
+    let q = serde_json::to_vec(&Quota { max_bytes: None, max_objects: Some(3) }).unwrap();
+    e.put_config("b", "quota", Some(&q)).unwrap();
+    assert!(matches!(put(&e, "b", "n", b"1", &c), Err(Error::QuotaExceeded)));
+    let rep = e.recover().unwrap();
+    assert_eq!((rep.unreferenced_blobs_removed, rep.objects_with_missing_blobs), (0, 0));
+}

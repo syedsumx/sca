@@ -47,6 +47,9 @@ const CONFIG: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("bucke
 const VERSIONS: TableDefinition<(&str, &str, &str), &[u8]> = TableDefinition::new("versions");
 /// Counters (version order).
 const META: TableDefinition<&str, u64> = TableDefinition::new("meta");
+/// Per-bucket usage: (stored bytes incl. versions and upload parts, object versions). Kept in the same
+/// transactions as the writes, and recomputed by recovery at start-up.
+const USAGE: TableDefinition<&str, (u64, u64)> = TableDefinition::new("usage");
 
 #[derive(Debug)]
 pub enum Error {
@@ -56,6 +59,8 @@ pub enum Error {
     NoSuchKey,
     NoSuchUpload,
     NoSuchVersion,
+    /// The write would take the bucket over its quota.
+    QuotaExceeded,
     /// Object lock protects the version.
     ObjectLocked,
     /// The version is a delete marker (GET/HEAD by version, tagging).
@@ -210,6 +215,15 @@ pub struct Deleted {
     pub version_id: Option<String>,
     /// A delete marker was created, or the version removed was one.
     pub delete_marker: bool,
+}
+
+/// A bucket's quota (configuration kind "quota").
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Quota {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_objects: Option<u64>,
 }
 
 /// One entry of a version listing.
@@ -538,6 +552,7 @@ impl Engine {
         tx.open_table(CONFIG)?;
         tx.open_table(VERSIONS)?;
         tx.open_table(META)?;
+        tx.open_table(USAGE)?;
         tx.commit()?;
         e.recover()?;
         Ok(e)
@@ -578,13 +593,57 @@ impl Engine {
         }
     }
 
-    fn queue_gc(tx: &redb::WriteTransaction, segs: &[Segment]) -> Result<()> {
+    /// Queues blobs for collection; their bytes no longer count towards the bucket's usage.
+    fn queue_gc(tx: &redb::WriteTransaction, bucket: &str, segs: &[Segment]) -> Result<()> {
         let mut gc = tx.open_table(GC)?;
         let now = now_ms();
         for s in segs {
             gc.insert(s.blob.as_str(), now)?;
         }
+        drop(gc);
+        let bytes: u64 = segs.iter().map(|s| s.size).sum();
+        if bytes > 0 {
+            Self::adjust(tx, bucket, -(bytes as i64), 0)?;
+        }
         Ok(())
+    }
+
+    fn usage_in<T: ReadableTable<&'static str, (u64, u64)>>(t: &T, bucket: &str) -> Result<(u64, u64)> {
+        Ok(t.get(bucket)?.map(|v| v.value()).unwrap_or((0, 0)))
+    }
+
+    /// Adds to a bucket's usage counters.
+    fn adjust(tx: &redb::WriteTransaction, bucket: &str, bytes: i64, objects: i64) -> Result<()> {
+        let mut t = tx.open_table(USAGE)?;
+        let (b, o) = Self::usage_in(&t, bucket)?;
+        let v = ((b as i64 + bytes).max(0) as u64, (o as i64 + objects).max(0) as u64);
+        t.insert(bucket, v)?;
+        Ok(())
+    }
+
+    fn usage_tx(tx: &redb::WriteTransaction, bucket: &str) -> Result<(u64, u64)> {
+        Self::usage_in(&tx.open_table(USAGE)?, bucket)
+    }
+
+    /// Refuses a write that took usage past the bucket's quota (only growth is refused, so deletes and
+    /// overwrites that shrink usage always succeed).
+    fn quota_guard(tx: &redb::WriteTransaction, bucket: &str, before: (u64, u64)) -> Result<()> {
+        let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "quota"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
+        let q: Quota = serde_json::from_slice(&doc)?;
+        let after = Self::usage_tx(tx, bucket)?;
+        if q.max_bytes.is_some_and(|m| after.0 > m && after.0 > before.0)
+            || q.max_objects.is_some_and(|m| after.1 > m && after.1 > before.1)
+        {
+            return Err(Error::QuotaExceeded);
+        }
+        Ok(())
+    }
+
+    /// A bucket's usage: (stored bytes, object versions).
+    pub fn usage(&self, bucket: &str) -> Result<(u64, u64)> {
+        let r = self.db.begin_read()?;
+        Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
+        Self::usage_in(&r.open_table(USAGE)?, bucket)
     }
 
     /// Deletes blobs queued for collection.
@@ -629,23 +688,60 @@ impl Engine {
         rep.blobs_collected = self.db.begin_read()?.open_table(GC)?.len()? as usize;
         self.collect();
         let mut refs = HashSet::new();
+        // Usage is recomputed from what is stored, so the counters cannot drift across restarts.
+        let mut usage: HashMap<String, (u64, u64)> = HashMap::new();
         {
             let r = self.db.begin_read()?;
+            for row in r.open_table(BUCKETS)?.iter()? {
+                usage.insert(row?.0.value().to_string(), (0, 0));
+            }
+            let mut count = |bucket: &str, bytes: u64, objects: u64| {
+                let e = usage.entry(bucket.to_string()).or_default();
+                e.0 += bytes;
+                e.1 += objects;
+            };
             for row in r.open_table(OBJECTS)?.iter()? {
-                let (_, v) = row?;
+                let (k, v) = row?;
                 let o: Object = serde_json::from_slice(v.value())?;
+                count(k.value().0, o.size, 1);
                 refs.extend(o.segments.into_iter().map(|s| s.blob));
             }
+            let mut upload_bucket: HashMap<String, String> = HashMap::new();
+            for row in r.open_table(UPLOADS)?.iter()? {
+                let (k, v) = row?;
+                let u: Upload = serde_json::from_slice(v.value())?;
+                upload_bucket.insert(k.value().to_string(), u.bucket);
+            }
             for row in r.open_table(PARTS)?.iter()? {
-                let (_, v) = row?;
+                let (k, v) = row?;
                 let p: Part = serde_json::from_slice(v.value())?;
+                if let Some(b) = upload_bucket.get(k.value().0) {
+                    count(b, p.size, 0);
+                }
                 refs.insert(p.blob);
             }
             for row in r.open_table(VERSIONS)?.iter()? {
-                let (_, v) = row?;
+                let (k, v) = row?;
                 let o: Object = serde_json::from_slice(v.value())?;
+                if !o.delete_marker {
+                    count(k.value().0, o.size, 1);
+                }
                 refs.extend(o.segments.into_iter().map(|s| s.blob));
             }
+        }
+        {
+            let tx = self.begin_write()?;
+            {
+                let mut t = tx.open_table(USAGE)?;
+                let stale: Vec<String> = t.iter()?.filter_map(|r| r.ok().map(|(k, _)| k.value().to_string())).collect();
+                for b in stale {
+                    t.remove(b.as_str())?;
+                }
+                for (b, u) in &usage {
+                    t.insert(b.as_str(), *u)?;
+                }
+            }
+            tx.commit()?;
         }
         rep.blobs_referenced = refs.len();
         let mut seen = HashSet::new();
@@ -726,6 +822,7 @@ impl Engine {
             for k in kinds {
                 cfg.remove((name, k.as_str()))?;
             }
+            tx.open_table(USAGE)?.remove(name)?;
         }
         tx.commit()?;
         Ok(())
@@ -796,9 +893,12 @@ impl Engine {
                 let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
                 let cur = Self::current_in(&tx.open_table(OBJECTS)?, bucket, &obj.key)?;
                 check_condition(cur.as_ref(), cond)?;
-                Self::install(&tx, &info.versioning, bucket, obj, cur)?
+                let before = Self::usage_tx(&tx, bucket)?;
+                let out = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
+                Self::queue_gc(&tx, bucket, &out.1)?;
+                Self::quota_guard(&tx, bucket, before)?;
+                out
             };
-            Self::queue_gc(&tx, &garbage)?;
             tx.commit()?;
             Ok((stored, garbage))
         })();
@@ -866,6 +966,9 @@ impl Engine {
         for (order, o) in Self::versions_in(&t, bucket, key)? {
             if o.version_id.is_empty() {
                 t.remove((bucket, key, order.as_str()))?;
+                if !o.delete_marker {
+                    Self::adjust(tx, bucket, 0, -1)?;
+                }
                 garbage.extend(o.segments);
             }
         }
@@ -896,6 +999,7 @@ impl Engine {
                 if let Some(c) = cur {
                     if c.version_id.is_empty() {
                         garbage.extend(c.segments);
+                        Self::adjust(tx, bucket, 0, -1)?;
                     } else {
                         Self::archive(tx, bucket, c)?;
                     }
@@ -906,9 +1010,11 @@ impl Engine {
                 obj.version_id = String::new();
                 if let Some(c) = cur {
                     garbage.extend(c.segments);
+                    Self::adjust(tx, bucket, 0, -1)?;
                 }
             }
         }
+        Self::adjust(tx, bucket, obj.size as i64, 1)?;
         let v = serde_json::to_vec(&obj)?;
         tx.open_table(OBJECTS)?.insert((bucket, obj.key.as_str()), v.as_slice())?;
         Ok((obj, garbage))
@@ -1028,6 +1134,7 @@ impl Engine {
                     if let Some(o) = cur {
                         t.remove((bucket, key))?;
                         garbage = o.segments;
+                        Self::adjust(&tx, bucket, 0, -1)?;
                     }
                     Deleted::default()
                 }
@@ -1036,6 +1143,7 @@ impl Engine {
                         t.remove((bucket, key))?;
                         if mode == "Suspended" && o.version_id.is_empty() {
                             garbage = o.segments;
+                            Self::adjust(&tx, bucket, 0, -1)?;
                         } else {
                             Self::archive(&tx, bucket, o)?;
                         }
@@ -1053,7 +1161,7 @@ impl Engine {
             };
             (out, garbage)
         };
-        Self::queue_gc(&tx, &garbage)?;
+        Self::queue_gc(&tx, bucket, &garbage)?;
         tx.commit()?;
         if !garbage.is_empty() {
             self.collect();
@@ -1082,6 +1190,7 @@ impl Engine {
                     }
                     t.remove((bucket, key))?;
                     garbage = c.segments;
+                    Self::adjust(&tx, bucket, 0, -1)?;
                 }
                 cur => {
                     if let Some((order, o)) = Self::versions_in(&vt, bucket, key)?.into_iter().find(|(_, o)| o.version_id == want) {
@@ -1090,11 +1199,14 @@ impl Engine {
                         }
                         vt.remove((bucket, key, order.as_str()))?;
                         out.delete_marker = o.delete_marker;
+                        if !o.delete_marker {
+                            Self::adjust(&tx, bucket, 0, -1)?;
+                        }
                         garbage = o.segments;
                     }
                     if cur.is_some() {
                         drop((t, vt));
-                        return Self::finish_delete(self, tx, out, garbage);
+                        return Self::finish_delete(self, tx, bucket, out, garbage);
                     }
                 }
             }
@@ -1110,11 +1222,11 @@ impl Engine {
             }
             (out, garbage)
         };
-        Self::finish_delete(self, tx, out, garbage)
+        Self::finish_delete(self, tx, bucket, out, garbage)
     }
 
-    fn finish_delete(&self, tx: redb::WriteTransaction, out: Deleted, garbage: Vec<Segment>) -> Result<Deleted> {
-        Self::queue_gc(&tx, &garbage)?;
+    fn finish_delete(&self, tx: redb::WriteTransaction, bucket: &str, out: Deleted, garbage: Vec<Segment>) -> Result<Deleted> {
+        Self::queue_gc(&tx, bucket, &garbage)?;
         tx.commit()?;
         if !garbage.is_empty() {
             self.collect();
@@ -1385,7 +1497,10 @@ impl Engine {
                 t.insert((id, p.number), v.as_slice())?;
                 old
             };
-            Self::queue_gc(&tx, &old)?;
+            let before = Self::usage_tx(&tx, bucket)?;
+            Self::adjust(&tx, bucket, p.size as i64, 0)?;
+            Self::queue_gc(&tx, bucket, &old)?;
+            Self::quota_guard(&tx, bucket, before)?;
             tx.commit()?;
             Ok(old)
         })();
@@ -1454,7 +1569,7 @@ impl Engine {
         Self::upload_in(&tx.open_table(UPLOADS)?, bucket, key, id)?;
         let parts = Self::drop_upload(&tx, id)?;
         let segs: Vec<Segment> = parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce }).collect();
-        Self::queue_gc(&tx, &segs)?;
+        Self::queue_gc(&tx, bucket, &segs)?;
         tx.commit()?;
         self.collect();
         Ok(())
@@ -1523,16 +1638,20 @@ impl Engine {
                 sse: u.sse.clone(),
                 ..Default::default()
             };
+            let before = Self::usage_tx(&tx, bucket)?;
             let (obj, mut garbage) = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
+            // The chosen parts' bytes were counted when they were uploaded; they are now the object's.
+            Self::adjust(&tx, bucket, -(obj.size as i64), 0)?;
             garbage.extend(have.values().filter(|p| !chosen.contains(&p.number)).map(|p| Segment {
                 blob: p.blob.clone(),
                 size: p.size,
                 nonce: p.nonce.clone(),
             }));
             Self::drop_upload(&tx, id)?;
+            Self::queue_gc(&tx, bucket, &garbage)?;
+            Self::quota_guard(&tx, bucket, before)?;
             (obj, garbage)
         };
-        Self::queue_gc(&tx, &garbage)?;
         tx.commit()?;
         if !garbage.is_empty() {
             self.collect();
