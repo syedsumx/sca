@@ -75,4 +75,5 @@ def test_cors_headers_on_signed_requests(store, s3, bucket):
     # Errors carry CORS headers too, so the browser can read them; anonymous requests stay refused.
     r = requests.get(f"{store.endpoint}/{bucket}/k", headers={"Origin": UI}, timeout=5)
     assert r.status_code == 403 and r.headers["Access-Control-Allow-Origin"] == UI
-    assert requests.get(url, headers={"Origin": "https://evil.example.org"}, timeout=5).headers["Access-Control-Allow-Origin"] == "*"  # public-read rule
+    other = requests.get(url, headers={"Origin": "https://evil.example.org"}, timeout=5)
+    assert other.headers["Access-Control-Allow-Origin"] == "*"  # the public-read rule

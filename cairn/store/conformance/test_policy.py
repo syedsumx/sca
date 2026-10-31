@@ -67,8 +67,8 @@ def test_bucket_policy_grants_a_key(store, s3, bucket):
     s3.put_object(Bucket=bucket, Key="private/b.csv", Body=b"b")
     analyst = store.client(key=ANALYST)
     denied(lambda: analyst.get_object(Bucket=bucket, Key="shared/a.csv"))
-    s3.put_bucket_policy(Bucket=bucket, Policy=policy(bucket, grant(bucket, "s3:GetObject", "/shared/*"),
-                                                      grant(bucket, "s3:ListBucket", "", Condition={"StringLike": {"s3:prefix": "shared/*"}})))
+    list_shared = grant(bucket, "s3:ListBucket", "", Condition={"StringLike": {"s3:prefix": "shared/*"}})
+    s3.put_bucket_policy(Bucket=bucket, Policy=policy(bucket, grant(bucket, "s3:GetObject", "/shared/*"), list_shared))
     assert analyst.get_object(Bucket=bucket, Key="shared/a.csv")["Body"].read() == b"a"
     denied(lambda: analyst.get_object(Bucket=bucket, Key="private/b.csv"))
     denied(lambda: analyst.put_object(Bucket=bucket, Key="shared/c.csv", Body=b"c"))
@@ -139,7 +139,8 @@ def test_bucket_administration_needs_an_admin_key(store, s3):
     for call in (
         lambda: scoped.put_bucket_tagging(Bucket=lake, Tagging={"TagSet": [{"Key": "a", "Value": "b"}]}),
         lambda: scoped.put_bucket_policy(Bucket=lake, Policy=policy(lake, grant(lake, "s3:GetObject"))),
-        lambda: scoped.put_bucket_cors(Bucket=lake, CORSConfiguration={"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}),
+        lambda: scoped.put_bucket_cors(Bucket=lake, CORSConfiguration={
+            "CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}),
         lambda: scoped.delete_bucket(Bucket=lake),
     ):
         denied(call)
