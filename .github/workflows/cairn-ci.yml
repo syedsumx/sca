@@ -60,24 +60,26 @@ jobs:
         working-directory: cairn/store
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          go-version-file: cairn/store/go.mod
-          cache-dependency-path: cairn/store/go.sum
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cairn/store
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Format and vet
+      - name: Format and lint
         run: |
-          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-          go vet ./...
-      - name: Unit tests (race detector)
-        run: go test -race -count=1 ./...
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
       - name: Build
-        run: CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/cairn-store" ./cmd/cairn-store
+        run: cargo build --release --locked
       - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, crash safety)
         env:
-          CAIRN_STORE_BIN: ${{ runner.temp }}/cairn-store
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
           pip install "boto3>=1.36" "botocore[crt]" requests pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
           cd conformance && pytest -q -p no:cacheprovider

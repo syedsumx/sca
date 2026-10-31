@@ -10,7 +10,7 @@
 #   BASE_IMAGE      Python base image (default python:3.12-slim; e.g. mirror.gcr.io/library/python:3.12-slim
 #                   when Docker Hub rate-limits you)
 #   BUSYBOX_IMAGE   runtime for the plugin image (default busybox:1.37)
-#   GO_IMAGE        Go build image for Cairn Store (default golang:1.25-alpine)
+#   RUST_IMAGE      Rust build image for Cairn Store (default rust:1-alpine)
 #   ALPINE_IMAGE    runtime for Cairn Store (default alpine:3.20)
 #   INGEST_EXTRAS   ingestion source extras baked into the agent (default "postgres")
 #   ONLY            space-separated subset to build, e.g. ONLY="core web"
@@ -50,8 +50,7 @@ build() {  # build <tag> <dockerfile> [extra args...]
 want platform && build "${PREFIX}/platform:${VERSION}" docker/Dockerfile
 want consumer-ui && build "${PREFIX}/consumer-ui:${VERSION}" docker/consumer-ui.Dockerfile
 want store && build "${PREFIX}/store:${VERSION}" docker/store.Dockerfile \
-  --build-arg "GO_IMAGE=${GO_IMAGE:-golang:1.25-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}" \
-  --build-arg "VERSION=${VERSION}"
+  --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
 want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
   --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
 

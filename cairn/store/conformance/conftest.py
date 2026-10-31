@@ -2,7 +2,7 @@
 
     CAIRN_STORE_BIN=/path/to/cairn-store pytest store/conformance
 
-Without CAIRN_STORE_BIN the binary is built with `go build`. With CAIRN_STORE_ENDPOINT the suite runs
+Without CAIRN_STORE_BIN the binary is built with `cargo build --release`. With CAIRN_STORE_ENDPOINT the suite runs
 against a store that is already running (a container, say), which must know the keys below
 (credentials file: `python conftest.py` prints it); the crash tests, which restart the store, are skipped."""
 
@@ -36,9 +36,9 @@ def _free_port() -> int:
 def binary(tmp_path_factory) -> str:
     if os.environ.get("CAIRN_STORE_BIN"):
         return os.environ["CAIRN_STORE_BIN"]
-    out = tmp_path_factory.mktemp("bin") / "cairn-store"
-    subprocess.run(["go", "build", "-o", str(out), "./cmd/cairn-store"], cwd=ROOT, check=True)
-    return str(out)
+    subprocess.run(["cargo", "build", "--release", "--locked"], cwd=ROOT, check=True)
+    target = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target"))
+    return str(target / "release" / "cairn-store")
 
 
 class Store:
