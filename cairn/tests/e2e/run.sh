@@ -20,6 +20,11 @@ for f in "${compose_files[@]}"; do compose+=(-f "$f"); done
 export CAIRN_E2E_COMPOSE="${CAIRN_E2E_COMPOSE:-docker-compose.cairn.yml}"
 PY="${PYTHON:-python3}"
 env_val() { grep -E "^$1=" .env | cut -d= -f2-; }
+# The store and catalog credentials the stack runs with (test_store_live, test_catalog_live).
+for k in CAIRN_STORE_ACCESS_KEY CAIRN_STORE_SECRET_KEY CAIRN_CATALOG_TOKEN; do
+  v="$(env_val "$k" || true)"
+  if [ -z "${!k:-}" ] && [ -n "$v" ]; then export "$k=$v"; fi
+done
 
 # Root actions in the tests use a one-hour admin token; the control plane runs as cairn-service.
 token="$(CAIRN_ADMIN_PASSWORD="$(env_val CAIRN_ADMIN_PASSWORD)" "$PY" deploy/bootstrap/mint_core_token.py \
