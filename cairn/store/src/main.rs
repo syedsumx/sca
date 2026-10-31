@@ -32,6 +32,11 @@
 //! CAIRN_STORE_EVENT_MAX_AGE_HOURS  drop events still undeliverable after this long (168)
 //! CAIRN_STORE_LOG_REQUESTS      one JSON log line per request (false)
 //! CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS  how often server access logs are written to their target buckets (60)
+//! CAIRN_STORE_TLS_CERT          serve HTTPS with this PEM certificate chain ...
+//! CAIRN_STORE_TLS_KEY           ... and PEM private key (both re-read when they change)
+//! CAIRN_STORE_TLS_CLIENT_CA     require client certificates signed by this CA (mutual TLS)
+//! CAIRN_STORE_TLS_PROBE_CERT/KEY  client certificate for the healthcheck command under mutual TLS
+//! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -43,6 +48,7 @@ mod audit;
 mod crypt;
 mod engine;
 mod s3;
+mod tls;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -163,6 +169,7 @@ fn main() {
             }
         }
         "healthcheck" => {
+            let tls = !env("CAIRN_STORE_TLS_CERT", "").is_empty();
             let ok = std::net::TcpStream::connect_timeout(
                 &listen_addr(&addr).replace("0.0.0.0", "127.0.0.1").parse::<SocketAddr>().unwrap_or_else(|e| fail("address", e)),
                 Duration::from_secs(3),
@@ -170,9 +177,19 @@ fn main() {
             .and_then(|mut s| {
                 use std::io::{Read, Write};
                 s.set_read_timeout(Some(Duration::from_secs(3)))?;
-                s.write_all(b"GET /-/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+                let req = b"GET /-/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
                 let mut buf = [0u8; 16];
-                let n = s.read(&mut buf)?;
+                let n = if tls {
+                    let cfg = tls::probe_config().map_err(std::io::Error::other)?;
+                    let mut conn = rustls::ClientConnection::new(cfg, "localhost".try_into().map_err(std::io::Error::other)?)
+                        .map_err(std::io::Error::other)?;
+                    let mut t = rustls::Stream::new(&mut conn, &mut s);
+                    t.write_all(req)?;
+                    t.read(&mut buf)?
+                } else {
+                    s.write_all(req)?;
+                    s.read(&mut buf)?
+                };
                 Ok(buf[..n].starts_with(b"HTTP/1.1 200"))
             })
             .unwrap_or(false);
@@ -222,6 +239,7 @@ async fn serve(addr: String, data: String) {
                         .unwrap_or_else(|e| fail(&f, e)),
                 },
                 log_requests: env("CAIRN_STORE_LOG_REQUESTS", "false") == "true",
+                tls: !env("CAIRN_STORE_TLS_CERT", "").is_empty(),
                 event_max_age_hours: env("CAIRN_STORE_EVENT_MAX_AGE_HOURS", "168")
                     .parse()
                     .unwrap_or_else(|e| fail("CAIRN_STORE_EVENT_MAX_AGE_HOURS", e)),
@@ -245,8 +263,22 @@ async fn serve(addr: String, data: String) {
     if lifecycle_every > 0 {
         tokio::spawn(server.clone().run_lifecycle(Duration::from_secs(lifecycle_every)));
     }
+    let tls = match (env("CAIRN_STORE_TLS_CERT", ""), env("CAIRN_STORE_TLS_KEY", "")) {
+        (c, _) if c.is_empty() => None,
+        (_, k) if k.is_empty() => fail("TLS", "CAIRN_STORE_TLS_KEY is required with CAIRN_STORE_TLS_CERT"),
+        (c, k) => {
+            let files = tls::TlsFiles {
+                cert: c.into(),
+                key: k.into(),
+                client_ca: Some(env("CAIRN_STORE_TLS_CLIENT_CA", "")).filter(|v| !v.is_empty()).map(Into::into),
+            };
+            let r = tls::Reloading::new(files).unwrap_or_else(|e| fail("TLS", e));
+            tokio::spawn(r.clone().watch());
+            Some(r)
+        }
+    };
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
-    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, "cairn-store listening");
+    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), "cairn-store listening");
     let mut shutdown = Box::pin(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
@@ -258,15 +290,32 @@ async fn serve(addr: String, data: String) {
                 let Ok((stream, peer)) = accepted else { continue };
                 let server = server.clone();
                 let svc = service_fn(move |req| server.clone().handle_from(req, Some(peer.ip())));
-                let conn = http1::Builder::new().timer(hyper_util::rt::TokioTimer::new())
-                    .header_read_timeout(Duration::from_secs(30)).keep_alive(true)
-                    .serve_connection(TokioIo::new(stream), svc);
-                let conn = graceful.watch(conn);
-                tokio::spawn(async move {
-                    if let Err(e) = conn.await {
-                        tracing::debug!(error = %e, "connection");
+                let mut builder = http1::Builder::new();
+                builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(30)).keep_alive(true);
+                match &tls {
+                    None => {
+                        let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), svc));
+                        tokio::spawn(async move {
+                            if let Err(e) = conn.await {
+                                tracing::debug!(error = %e, "connection");
+                            }
+                        });
                     }
-                });
+                    Some(t) => {
+                        let (acceptor, watcher) = (t.acceptor(), graceful.watcher());
+                        tokio::spawn(async move {
+                            match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await {
+                                Ok(Ok(s)) => {
+                                    if let Err(e) = watcher.watch(builder.serve_connection(TokioIo::new(s), svc)).await {
+                                        tracing::debug!(error = %e, "connection");
+                                    }
+                                }
+                                Ok(Err(e)) => tracing::debug!(error = %e, peer = %peer, "TLS handshake"),
+                                Err(_) => tracing::debug!(peer = %peer, "TLS handshake timed out"),
+                            }
+                        });
+                    }
+                }
             }
             _ = &mut shutdown => break,
         }

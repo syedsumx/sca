@@ -89,8 +89,8 @@ pub fn load_targets(text: &str) -> Result<Vec<Target>, String> {
         }
         match t {
             Target::Webhook { url, secret, secret_file, id } => {
-                if !url.starts_with("http://") {
-                    return Err(format!("target {id}: webhook URLs must be http:// (inside the deployment) for now"));
+                if !url.starts_with("http://") && !url.starts_with("https://") {
+                    return Err(format!("target {id}: webhook URLs must be http:// or https://"));
                 }
                 if !secret_file.is_empty() {
                     *secret = std::fs::read_to_string(&*secret_file).map_err(|e| format!("{secret_file}: {e}"))?.trim().to_string();
@@ -149,21 +149,20 @@ fn record(region: &str, seq: u64, e: &OutboxEntry) -> serde_json::Value {
 
 pub struct Delivery {
     targets: HashMap<String, Target>,
-    http: Client<HttpConnector, Full<Bytes>>,
+    http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
     kafka: Mutex<HashMap<String, Arc<rskafka::client::partition::PartitionClient>>>,
     max_age_ms: u64,
 }
 
 impl Delivery {
-    pub fn new(targets: Vec<Target>, max_age_hours: u64) -> Delivery {
-        let mut conn = HttpConnector::new();
-        conn.set_connect_timeout(Some(Duration::from_secs(5)));
-        Delivery {
+    pub fn new(targets: Vec<Target>, max_age_hours: u64) -> Result<Delivery, String> {
+        let conn = crate::tls::https_connector()?;
+        Ok(Delivery {
             targets: targets.into_iter().map(|t| (t.id().to_string(), t)).collect(),
             http: Client::builder(TokioExecutor::new()).build(conn),
             kafka: Mutex::new(HashMap::new()),
             max_age_ms: max_age_hours.max(1) * 3_600_000,
-        }
+        })
     }
 
     pub fn has(&self, id: &str) -> bool {

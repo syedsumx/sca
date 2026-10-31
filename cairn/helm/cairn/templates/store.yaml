@@ -68,6 +68,16 @@ spec:
             - name: CAIRN_STORE_KEYRING_FILE
               value: /etc/cairn-store-keyring/keyring.json
             {{- end }}
+            {{- if $u.tlsSecret }}
+            - name: CAIRN_STORE_TLS_CERT
+              value: /etc/cairn-store-tls/tls.crt
+            - name: CAIRN_STORE_TLS_KEY
+              value: /etc/cairn-store-tls/tls.key
+            {{- end }}
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            - name: CAIRN_STORE_TLS_CLIENT_CA
+              value: /etc/cairn-store-client-ca/ca.crt
+            {{- end }}
             {{- if $u.eventTargetsSecret }}
             - name: CAIRN_STORE_EVENT_TARGETS_FILE
               value: /etc/cairn-store-events/targets.json
@@ -80,11 +90,20 @@ spec:
             - name: http
               containerPort: {{ $u.port }}
               protocol: TCP
+          {{- /* Under mutual TLS the kubelet has no client certificate: probe the port only. */}}
           readinessProbe:
-            httpGet: { path: /-/ready, port: http }
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            tcpSocket: { port: http }
+            {{- else }}
+            httpGet: { path: /-/ready, port: http{{ if $u.tlsSecret }}, scheme: HTTPS{{ end }} }
+            {{- end }}
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /-/healthy, port: http }
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            tcpSocket: { port: http }
+            {{- else }}
+            httpGet: { path: /-/healthy, port: http{{ if $u.tlsSecret }}, scheme: HTTPS{{ end }} }
+            {{- end }}
             initialDelaySeconds: 10
             periodSeconds: 20
           resources:
@@ -109,7 +128,17 @@ spec:
               mountPath: /etc/cairn-store-events
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret }}
+            {{- if $u.tlsSecret }}
+            - name: tls
+              mountPath: /etc/cairn-store-tls
+              readOnly: true
+            {{- end }}
+            {{- if and $u.tlsSecret $u.clientCaSecret }}
+            - name: client-ca
+              mountPath: /etc/cairn-store-client-ca
+              readOnly: true
+            {{- end }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.tlsSecret }}
       volumes:
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
@@ -125,6 +154,16 @@ spec:
         - name: events
           secret:
             secretName: {{ $u.eventTargetsSecret }}
+        {{- end }}
+        {{- if $u.tlsSecret }}
+        - name: tls
+          secret:
+            secretName: {{ $u.tlsSecret }}
+        {{- end }}
+        {{- if and $u.tlsSecret $u.clientCaSecret }}
+        - name: client-ca
+          secret:
+            secretName: {{ $u.clientCaSecret }}
         {{- end }}
       {{- end }}
       {{- with $u.nodeSelector }}

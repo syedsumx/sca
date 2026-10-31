@@ -39,6 +39,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             event_targets: vec![],
             event_max_age_hours: 168,
             log_requests: false,
+            tls: false,
         },
     )
     .unwrap();

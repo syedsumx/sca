@@ -69,6 +69,8 @@ pub struct Config {
     pub event_max_age_hours: u64,
     /// One JSON log line per request.
     pub log_requests: bool,
+    /// The listener serves HTTPS (aws:SecureTransport, SSE-C).
+    pub tls: bool,
 }
 
 pub struct Server {
@@ -161,14 +163,17 @@ impl Server {
             key_policies,
             block_public: cfg.block_public,
             pdp,
-            tls: false,
+            tls: cfg.tls,
             lifecycle_day_ms: if cfg.lifecycle_day_secs == 0 { 86_400_000 } else { cfg.lifecycle_day_secs * 1000 },
             lifecycle_metrics: Default::default(),
             keyring: cfg.keyring,
             encrypt_by_default: cfg.encrypt_by_default,
             sse_c_over_http: cfg.sse_c_over_http,
             website_domain: cfg.website_domain.to_ascii_lowercase(),
-            delivery: (!cfg.event_targets.is_empty()).then(|| events::Delivery::new(cfg.event_targets, cfg.event_max_age_hours)),
+            delivery: match cfg.event_targets.is_empty() {
+                true => None,
+                false => Some(events::Delivery::new(cfg.event_targets, cfg.event_max_age_hours)?),
+            },
             event_metrics: Default::default(),
             access_logs: Default::default(),
             log_requests: cfg.log_requests,

@@ -494,6 +494,11 @@ cairn:
     buckets: [lakehouse]      # created at start-up if missing
     region: us-east-1
     domain: ""                # set to enable virtual-hosted-style requests (<bucket>.<domain>)
+    # Serve HTTPS: a kubernetes.io/tls Secret (cert-manager works; renewals are picked up without a restart).
+    tlsSecret: ""
+    # With tlsSecret: also require client certificates signed by the CA in this Secret's "ca.crt"
+    # (the kubelet has no client certificate, so probes then only check that the port is open).
+    clientCaSecret: ""
     # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka", "id": ...}]).
     eventTargetsSecret: ""
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.

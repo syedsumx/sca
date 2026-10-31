@@ -436,6 +436,14 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Browser uploads.** HTML forms can upload straight to a bucket with a signed POST policy, as produced by any AWS SDK's `generate_presigned_post` (SigV4 or SigV2). The store checks the signature and the expiration. It also checks every condition (exact values, `starts-with`, `content-length-range`), and that every form field is covered by one, so a browser cannot add fields the policy did not allow. The upload is authorized as a PUT for the key that signed the policy. Supported form fields: object metadata, content type, tags, encryption, object lock, `success_action_status` and `success_action_redirect`. The file is streamed to disk and its size limits are enforced as it arrives. Allow the web app's origin with CORS rules.
 
+**TLS.** Set `CAIRN_STORE_TLS_CERT` and `CAIRN_STORE_TLS_KEY` (PEM files) to serve HTTPS. The files are re-read when they change, so renewed certificates take effect without a restart, and a broken renewal is refused while the current certificate stays in use.
+
+- **Mutual TLS.** `CAIRN_STORE_TLS_CLIENT_CA` requires client certificates signed by that CA. Requests are still signed with the client's key; mutual TLS adds proof of which machine is connecting.
+- **What TLS turns on.** With TLS, `aws:SecureTransport` is true in policies, and SSE-C is accepted.
+- **Outbound HTTPS.** Webhooks and Cairn's policy decision point can be `https://`. They trust the public roots plus `CAIRN_STORE_CA_FILE`.
+- **Helm.** `cairn.store.tlsSecret`, a `kubernetes.io/tls` Secret (cert-manager works), and optionally `cairn.store.clientCaSecret`.
+- **Kafka.** Event delivery to Kafka is plaintext for now; keep the broker inside the deployment's network.
+
 **Audit trail.** The store keeps an append-only, hash-chained audit trail in Cairn's audit format: each entry's hash is `sha256(prev_hash ‖ canonical JSON)`, so any change to a past entry, or a missing entry, is detected. An entry is written in the same transaction as the change it records. Recorded:
 
 - bucket creation and deletion;

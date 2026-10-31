@@ -14,6 +14,7 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
 use hyper_util::client::legacy::{connect::HttpConnector, Client};
+type Https = hyper_rustls::HttpsConnector<HttpConnector>;
 use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
 
@@ -140,7 +141,7 @@ pub struct PublicAccessBlock {
 pub struct Pdp {
     url: String,
     token: String,
-    http: Client<HttpConnector, Full<Bytes>>,
+    http: Client<Https, Full<Bytes>>,
     cache: Mutex<HashMap<String, (Instant, bool)>>,
 }
 
@@ -151,14 +152,13 @@ struct PdpDecision {
 
 impl Pdp {
     pub fn new(url: &str, token: &str) -> Result<Pdp, String> {
-        if !url.starts_with("http://") {
-            return Err("CAIRN_STORE_PDP_URL must be an http:// URL inside the deployment".into());
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Err("CAIRN_STORE_PDP_URL must be an http:// or https:// URL".into());
         }
         if token.is_empty() {
             return Err("CAIRN_STORE_PDP_TOKEN (a Cairn service token) is required with CAIRN_STORE_PDP_URL".into());
         }
-        let mut conn = HttpConnector::new();
-        conn.set_connect_timeout(Some(Duration::from_secs(2)));
+        let conn = crate::tls::https_connector()?;
         Ok(Pdp {
             url: format!("{}/governance/v1/authorize", url.trim_end_matches('/')),
             token: token.into(),
