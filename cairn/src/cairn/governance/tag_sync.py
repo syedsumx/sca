@@ -48,7 +48,7 @@ import uuid
 from typing import Any, Callable, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from sqlalchemy import BigInteger, Column, String, Table, and_, delete, select
+from sqlalchemy import BigInteger, Column, String, Table, and_, delete, func, select
 from sqlalchemy.engine import Engine
 
 from cairn.common.db import JSONText, metadata
@@ -387,6 +387,10 @@ class TagSyncService:
         summary.update(planned=len(out["operations"]), conflicts=len(out["conflicts"]))
         now = int(time.time() * 1000)
         with self.engine.begin() as conn:
+            # Runs are ordered by started_ms: keep it strictly increasing per target, so two runs in the same
+            # millisecond still have a well-defined latest one.
+            prev = conn.execute(select(func.max(tag_sync_runs.c.started_ms)).where(tag_sync_runs.c.target_id == target.id)).scalar()
+            now = max(now, (prev or 0) + 1)
             conn.execute(tag_sync_runs.insert().values(id=f"tsr_{uuid.uuid4().hex[:16]}", target_id=target.id,
                                                        actor=actor, dry_run=str(dry_run).lower(), summary=summary,
                                                        started_ms=now))
