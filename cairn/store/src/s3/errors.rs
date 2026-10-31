@@ -85,6 +85,10 @@ errors! {
     MALFORMED_POLICY_ACTION = "MalformedPolicy", 400, "Policy has invalid action";
     MALFORMED_POLICY_CONDITION = "MalformedPolicy", 400, "Policy has an invalid condition operator or key";
     PUBLIC_POLICY_BLOCKED = "AccessDenied", 403, "Public policies are blocked by the public access block for this bucket or store.";
+    LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Lifecycle transitions to other storage classes are not supported yet.";
+    LIFECYCLE_INVALID_DAYS = "InvalidArgument", 400, "Days, NoncurrentDays and DaysAfterInitiation must be positive integers.";
+    LIFECYCLE_INVALID_DATE = "InvalidArgument", 400, "Date must be in ISO 8601 format and at midnight UTC.";
+    LIFECYCLE_NO_ACTION = "InvalidRequest", 400, "At least one action needs to be specified in a rule.";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";

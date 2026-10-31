@@ -8,6 +8,7 @@ mod config;
 mod cors;
 pub mod errors;
 mod handlers;
+pub mod lifecycle;
 pub mod policy;
 mod versioning;
 pub mod xml;
@@ -44,6 +45,8 @@ pub struct Config {
     pub block_public: bool,
     /// Cairn's policy decision point (base URL, service token).
     pub pdp: Option<(String, String)>,
+    /// Length of a lifecycle day in seconds (0 = 86 400).
+    pub lifecycle_day_secs: u64,
 }
 
 pub struct Server {
@@ -59,6 +62,9 @@ pub struct Server {
     pdp: Option<authz::Pdp>,
     /// Requests arrive over TLS (aws:SecureTransport).
     tls: bool,
+    /// A lifecycle "day" in ms (86 400 000; shorter only in tests).
+    lifecycle_day_ms: u64,
+    lifecycle_metrics: lifecycle::LifecycleMetrics,
 }
 
 /// One request, after routing and authentication.
@@ -124,6 +130,8 @@ impl Server {
             block_public: cfg.block_public,
             pdp,
             tls: false,
+            lifecycle_day_ms: if cfg.lifecycle_day_secs == 0 { 86_400_000 } else { cfg.lifecycle_day_secs * 1000 },
+            lifecycle_metrics: Default::default(),
         })
     }
 
@@ -259,7 +267,21 @@ impl Server {
                 Err(_) => text(StatusCode::SERVICE_UNAVAILABLE, "not ready\n"),
             },
             "/-/metrics" => {
-                let mut r = text(StatusCode::OK, self.metrics.render(&self.eng));
+                let mut body = self.metrics.render(&self.eng);
+                let lm = &self.lifecycle_metrics;
+                for (name, v) in [
+                    ("expired", &lm.expired),
+                    ("delete_markers_removed", &lm.delete_markers_removed),
+                    ("noncurrent_expired", &lm.noncurrent_expired),
+                    ("uploads_aborted", &lm.uploads_aborted),
+                    ("runs", &lm.runs),
+                ] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_lifecycle_{name}_total counter\ncairn_store_lifecycle_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
+                }
+                let mut r = text(StatusCode::OK, body);
                 r.headers_mut().insert("content-type", HeaderValue::from_static("text/plain; version=0.0.4"));
                 r
             }
@@ -357,9 +379,13 @@ impl Metrics {
             }
         }
         if let Some((_, st)) = cached.as_ref() {
-            for (name, v) in
-                [("buckets", st.buckets), ("objects", st.objects), ("stored_bytes", st.bytes), ("multipart_uploads", st.uploads)]
-            {
+            for (name, v) in [
+                ("buckets", st.buckets),
+                ("objects", st.objects),
+                ("stored_bytes", st.bytes),
+                ("multipart_uploads", st.uploads),
+                ("noncurrent_versions", st.noncurrent_versions),
+            ] {
                 out.push_str(&format!("# TYPE cairn_store_{name} gauge\ncairn_store_{name} {v}\n"));
             }
         }

@@ -21,6 +21,8 @@
 //! CAIRN_STORE_BLOCK_PUBLIC_ACCESS  false allows public bucket policies and anonymous reads they grant (default true)
 //! CAIRN_STORE_PDP_URL           Cairn's policy decision point, e.g. http://cairn-pdp:8810 (optional; deny-only layer)
 //! CAIRN_STORE_PDP_TOKEN         a Cairn service token for it (or CAIRN_STORE_PDP_TOKEN_FILE)
+//! CAIRN_STORE_LIFECYCLE_INTERVAL  seconds between lifecycle passes (3600; 0 turns lifecycle processing off)
+//! CAIRN_STORE_LIFECYCLE_DAY_SECONDS  length of a lifecycle "day" (86400; shorter only for tests)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -175,6 +177,9 @@ async fn serve(addr: String, data: String) {
                 credentials: creds,
                 max_object: 0,
                 block_public: env("CAIRN_STORE_BLOCK_PUBLIC_ACCESS", "true") != "false",
+                lifecycle_day_secs: env("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", "86400")
+                    .parse()
+                    .unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", e)),
                 pdp: match env("CAIRN_STORE_PDP_URL", "") {
                     u if u.is_empty() => None,
                     u => Some((u, secret("CAIRN_STORE_PDP_TOKEN").unwrap_or_else(|e| fail("CAIRN_STORE_PDP_TOKEN", e)))),
@@ -183,6 +188,11 @@ async fn serve(addr: String, data: String) {
         )
         .unwrap_or_else(|e| fail("configure", e)),
     );
+    let lifecycle_every: u64 =
+        env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
+    if lifecycle_every > 0 {
+        tokio::spawn(server.clone().run_lifecycle(Duration::from_secs(lifecycle_every)));
+    }
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
     tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, "cairn-store listening");
     let mut shutdown = Box::pin(async {

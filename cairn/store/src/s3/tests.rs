@@ -24,7 +24,15 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
     let creds = vec![Credential { access_key: AK.into(), secret_key: SK.into(), admin: true, ..Default::default() }];
     let mut srv = Server::new(
         eng.clone(),
-        Config { region: String::new(), domain: String::new(), credentials: creds, max_object: 0, block_public: true, pdp: None },
+        Config {
+            region: String::new(),
+            domain: String::new(),
+            credentials: creds,
+            max_object: 0,
+            block_public: true,
+            pdp: None,
+            lifecycle_day_secs: 0,
+        },
     )
     .unwrap();
     srv.set_clock(|| datetime!(2013-05-24 00:00:30 UTC));

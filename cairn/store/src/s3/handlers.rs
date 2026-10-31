@@ -31,8 +31,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 10] = [
-    "lifecycle",
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 9] = [
     "object-lock",
     "encryption",
     "notification",
@@ -170,11 +169,10 @@ impl Server {
             "GetPublicAccessBlock" => self.get_public_access_block(c),
             "PutPublicAccessBlock" => self.put_public_access_block(c, body).await,
             "DeletePublicAccessBlock" => self.delete_config(c, "publicAccessBlock"),
-            "GetBucketLifecycle" => {
-                blocking(|| self.eng.head_bucket(&c.bucket))?;
-                Err(e::NO_SUCH_LIFECYCLE.clone())
-            }
-            "DeleteBucketLifecycle" | "DeleteBucketEncryption" | "DeleteBucketWebsite" | "DeleteBucketReplication" => {
+            "GetBucketLifecycle" => self.get_lifecycle(c),
+            "PutBucketLifecycle" => self.put_lifecycle(c, body).await,
+            "DeleteBucketLifecycle" => self.delete_config(c, "lifecycle"),
+            "DeleteBucketEncryption" | "DeleteBucketWebsite" | "DeleteBucketReplication" => {
                 // None of these can be set yet, so there is nothing to delete.
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -559,6 +557,9 @@ impl Server {
         let mut r = empty(StatusCode::OK);
         set_header(&mut r, "etag", &format!("\"{}\"", stored.etag));
         version_header(&mut r, &info.versioning, &stored);
+        if let Some(x) = self.expiration_header(&c.bucket, &stored) {
+            set_header(&mut r, "x-amz-expiration", &x);
+        }
         write_checksums(&mut r, &checksums, "FULL_OBJECT");
         Ok(r)
     }
@@ -653,6 +654,11 @@ impl Server {
         }
         if !obj.tags.is_empty() {
             set_header(&mut r, "x-amz-tagging-count", &obj.tags.len().to_string());
+        }
+        if version.is_empty() {
+            if let Some(x) = self.expiration_header(&c.bucket, &obj) {
+                set_header(&mut r, "x-amz-expiration", &x);
+            }
         }
         if part_number > 0 && obj.part_count > 0 {
             set_header(&mut r, "x-amz-mp-parts-count", &obj.part_count.to_string());
@@ -1024,6 +1030,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("policy") => "PutBucketPolicy",
             Method::PUT if c.has("publicAccessBlock") => "PutPublicAccessBlock",
             Method::PUT if c.has("versioning") => "PutBucketVersioning",
+            Method::PUT if c.has("lifecycle") => "PutBucketLifecycle",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
             Method::PUT => "CreateBucket",
             Method::DELETE if c.has("tagging") => "DeleteBucketTagging",

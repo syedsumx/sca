@@ -58,7 +58,7 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "GetPublicAccessBlock" => "s3:GetBucketPublicAccessBlock",
         "PutPublicAccessBlock" | "DeletePublicAccessBlock" => "s3:PutBucketPublicAccessBlock",
         "GetBucketLifecycle" => "s3:GetLifecycleConfiguration",
-        "DeleteBucketLifecycle" => "s3:PutLifecycleConfiguration",
+        "PutBucketLifecycle" | "DeleteBucketLifecycle" => "s3:PutLifecycleConfiguration",
         "DeleteBucketEncryption" => "s3:PutEncryptionConfiguration",
         "DeleteBucketWebsite" => "s3:DeleteBucketWebsite",
         "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
