@@ -41,6 +41,8 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "ListMultipartUploads" => "s3:ListBucketMultipartUploads",
         "GetBucketLocation" => "s3:GetBucketLocation",
         "GetBucketVersioning" => "s3:GetBucketVersioning",
+        "PutBucketVersioning" => "s3:PutBucketVersioning",
+        "ListObjectVersions" => "s3:ListBucketVersions",
         "GetBucketAcl" => "s3:GetBucketAcl",
         "PutBucketAcl" => "s3:PutBucketAcl",
         "GetBucketTagging" => "s3:GetBucketTagging",
@@ -74,6 +76,23 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "PutObjectAcl" => "s3:PutObjectAcl",
         _ => return None,
     })
+}
+
+/// The action for a request that names a version (`?versionId=`), e.g. s3:GetObjectVersion.
+pub fn versioned_action(action: &'static str, versioned: bool) -> &'static str {
+    if !versioned {
+        return action;
+    }
+    match action {
+        "s3:GetObject" => "s3:GetObjectVersion",
+        "s3:DeleteObject" => "s3:DeleteObjectVersion",
+        "s3:GetObjectTagging" => "s3:GetObjectVersionTagging",
+        "s3:PutObjectTagging" => "s3:PutObjectVersionTagging",
+        "s3:DeleteObjectTagging" => "s3:DeleteObjectVersionTagging",
+        "s3:GetObjectAcl" => "s3:GetObjectVersionAcl",
+        "s3:PutObjectAcl" => "s3:PutObjectVersionAcl",
+        a => a,
+    }
 }
 
 fn is_read(action: &str) -> bool {
@@ -323,7 +342,7 @@ impl Server {
         match c.op {
             "DeleteObjects" => Ok(()),
             op => match action_of(op) {
-                Some(action) => self.authorize(c, action, &c.bucket, &c.key).await,
+                Some(action) => self.authorize(c, versioned_action(action, c.has("versionId")), &c.bucket, &c.key).await,
                 // Unsupported or not allowed: still only for signed requests.
                 None if c.auth.cred.access_key.is_empty() => Err(e::ACCESS_DENIED.clone()),
                 None => Ok(()),

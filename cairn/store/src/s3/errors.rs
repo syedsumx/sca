@@ -85,6 +85,10 @@ errors! {
     MALFORMED_POLICY_ACTION = "MalformedPolicy", 400, "Policy has invalid action";
     MALFORMED_POLICY_CONDITION = "MalformedPolicy", 400, "Policy has an invalid condition operator or key";
     PUBLIC_POLICY_BLOCKED = "AccessDenied", 403, "Public policies are blocked by the public access block for this bucket or store.";
+    NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
+    INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
+    LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
+    MFA_DELETE_UNSUPPORTED = "NotImplemented", 501, "MFA Delete is not supported.";
     NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }
 
@@ -97,6 +101,8 @@ impl From<crate::engine::Error> for ApiError {
             E::BucketNotEmpty => BUCKET_NOT_EMPTY.clone(),
             E::NoSuchKey => NO_SUCH_KEY.clone(),
             E::NoSuchUpload => NO_SUCH_UPLOAD.clone(),
+            E::NoSuchVersion => NO_SUCH_VERSION.clone(),
+            E::MethodNotAllowed => METHOD_NOT_ALLOWED.clone(),
             E::PreconditionFailed => PRECONDITION.clone(),
             E::InvalidPart => INVALID_PART.clone(),
             E::InvalidPartOrder => INVALID_PART_ORDER.clone(),

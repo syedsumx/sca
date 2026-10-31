@@ -421,7 +421,9 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **CORS.** Each bucket can have CORS rules (`PutBucketCors`), so browser apps such as the Cairn UI can upload and download with presigned URLs. Browser preflight requests are answered from the bucket's rules without a signature. Responses to allowed origins carry the CORS headers, error responses included. A bucket without rules refuses every cross-origin request.
 
-**Not supported yet.** Versioning, object lock, lifecycle rules and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
+**Versioning.** Turn it on per bucket (`PutBucketVersioning`, `Enabled` or `Suspended`). Overwrites and deletes then keep the previous version. A delete adds a delete marker, and deleting the marker brings the object back. Any version can be read, copied, tagged or permanently deleted by its version ID; `ListObjectVersions` lists them all. Old versions count towards stored bytes until they are permanently deleted (or expired by a lifecycle rule, once those are supported). Reading or deleting a specific version needs the version permissions (`s3:GetObjectVersion`, `s3:DeleteObjectVersion`). MFA delete is not supported.
+
+**Not supported yet.** Object lock, lifecycle rules and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

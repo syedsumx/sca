@@ -5,6 +5,10 @@ use std::sync::Arc;
 use super::*;
 
 fn put(e: &Engine, bucket: &str, key: &str, data: &[u8], cond: &Condition) -> Result<()> {
+    put_v(e, bucket, key, data, cond).map(|_| ())
+}
+
+fn put_v(e: &Engine, bucket: &str, key: &str, data: &[u8], cond: &Condition) -> Result<Object> {
     let mut w = e.new_blob()?;
     w.write(data)?;
     let etag = hex::encode(w.md5());
@@ -202,7 +206,7 @@ fn reads_survive_concurrent_replace() {
         })
     };
     for _ in 0..300 {
-        let (obj, mut r) = match e.get_fresh("b", "k", |o| Ok::<_, ()>((0, o.size))) {
+        let (obj, mut r) = match e.get_fresh("b", "k", None, |o: &Object| Ok::<_, ()>((0, o.size))) {
             Ok(v) => v,
             Err(_) => panic!("read failed"),
         };
@@ -213,4 +217,86 @@ fn reads_survive_concurrent_replace() {
     }
     stop.store(true, Ordering::SeqCst);
     writer.join().unwrap();
+}
+
+fn read_v(e: &Engine, bucket: &str, key: &str, v: &str) -> Vec<u8> {
+    let o = e.get_version(bucket, key, Some(v)).unwrap();
+    let mut out = vec![];
+    e.reader(&o, 0, o.size).unwrap().read_to_end(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn versioning_keeps_old_versions_and_delete_markers() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.create_bucket("b").unwrap();
+    let null = put_v(&e, "b", "k", b"zero", &Condition::default()).unwrap();
+    assert_eq!(null.version(), "null");
+    e.set_versioning("b", "Enabled").unwrap();
+    let v1 = put_v(&e, "b", "k", b"one", &Condition::default()).unwrap();
+    let v2 = put_v(&e, "b", "k", b"two", &Condition::default()).unwrap();
+    assert!(!v1.version_id.is_empty() && v1.version_id != v2.version_id);
+    assert_eq!(read(&e, "b", "k"), b"two");
+    assert_eq!(read_v(&e, "b", "k", &v1.version_id), b"one");
+    assert_eq!(read_v(&e, "b", "k", "null"), b"zero");
+    let d = e.delete_object("b", "k", None).unwrap();
+    assert!(d.delete_marker);
+    assert!(matches!(e.get_object("b", "k"), Err(Error::NoSuchKey)));
+    assert_eq!(e.latest_delete_marker("b", "k").unwrap(), d.version_id);
+    let list = e.list_versions("b", "", "", "", "", 100).unwrap();
+    let got: Vec<(String, bool, bool)> =
+        list.entries.iter().map(|x| (x.obj.version().to_string(), x.latest, x.obj.delete_marker)).collect();
+    assert_eq!(
+        got,
+        vec![
+            (d.version_id.clone().unwrap(), true, true),
+            (v2.version_id.clone(), false, false),
+            (v1.version_id.clone(), false, false),
+            ("null".into(), false, false)
+        ]
+    );
+    // Removing the delete marker brings back the newest version.
+    e.delete_version("b", "k", d.version_id.as_ref().unwrap()).unwrap();
+    assert_eq!(read(&e, "b", "k"), b"two");
+    // Permanently deleting the current version promotes the previous one, and frees its blobs.
+    let before = blob_count(dir.path());
+    e.delete_version("b", "k", &v2.version_id).unwrap();
+    assert_eq!(read(&e, "b", "k"), b"one");
+    assert_eq!(blob_count(dir.path()), before - 1);
+    // Pagination over versions.
+    let p1 = e.list_versions("b", "", "", "", "", 1).unwrap();
+    assert!(p1.truncated);
+    let p2 = e.list_versions("b", "", "", &p1.next_key, &p1.next_version, 10).unwrap();
+    assert_eq!(p2.entries.iter().map(|x| x.obj.version().to_string()).collect::<Vec<_>>(), vec!["null".to_string()]);
+    // A bucket with versions is not empty; recovery keeps version blobs.
+    e.delete_version("b", "k", &v1.version_id).unwrap();
+    assert!(matches!(e.delete_bucket("b"), Err(Error::BucketNotEmpty)));
+    let rep = e.recover().unwrap();
+    assert_eq!((rep.unreferenced_blobs_removed, rep.objects_with_missing_blobs), (0, 0));
+    assert_eq!(read(&e, "b", "k"), b"zero");
+    e.delete_version("b", "k", "null").unwrap();
+    e.delete_bucket("b").unwrap();
+}
+
+#[test]
+fn suspended_versioning_replaces_the_null_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.create_bucket("b").unwrap();
+    e.set_versioning("b", "Enabled").unwrap();
+    let v1 = put_v(&e, "b", "k", b"one", &Condition::default()).unwrap();
+    e.set_versioning("b", "Suspended").unwrap();
+    assert_eq!(put_v(&e, "b", "k", b"n1", &Condition::default()).unwrap().version(), "null");
+    put_v(&e, "b", "k", b"n2", &Condition::default()).unwrap();
+    let vs: Vec<String> = e.list_versions("b", "", "", "", "", 100).unwrap().entries.iter().map(|x| x.obj.version().to_string()).collect();
+    assert_eq!(vs, vec!["null".to_string(), v1.version_id.clone()]);
+    assert_eq!(read(&e, "b", "k"), b"n2");
+    // A delete in a suspended bucket replaces the null version with a null delete marker.
+    let d = e.delete_object("b", "k", None).unwrap();
+    assert_eq!(d.version_id.as_deref(), Some("null"));
+    let vs = e.list_versions("b", "", "", "", "", 100).unwrap();
+    assert_eq!(vs.entries.len(), 2);
+    assert!(vs.entries[0].obj.delete_marker && vs.entries[0].latest);
+    assert_eq!(e.recover().unwrap().unreferenced_blobs_removed, 0);
 }

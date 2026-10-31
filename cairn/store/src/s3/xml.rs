@@ -91,6 +91,11 @@ impl Element {
     pub fn text_of(&self, name: &str) -> String {
         self.child(name).map(|c| c.text.trim().to_string()).unwrap_or_default()
     }
+
+    /// The child's text exactly (object keys may begin or end with spaces).
+    pub fn text_of_raw(&self, name: &str) -> String {
+        self.child(name).map(|c| c.text.clone()).unwrap_or_default()
+    }
 }
 
 fn unescape(s: &str) -> Option<String> {

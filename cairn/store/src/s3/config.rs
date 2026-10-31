@@ -122,7 +122,7 @@ impl Server {
         let doc = self.read_small(c, body, 64 << 10).await?;
         let tags = parse_tagging(&doc, MAX_OBJECT_TAGS)?;
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, |o| {
+            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
                 o.tags = tags;
                 Ok(())
             })
@@ -131,13 +131,20 @@ impl Server {
     }
 
     pub(crate) fn get_object_tagging(&self, c: &Ctx) -> R {
-        let o = blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
-        Ok(xml_resp(StatusCode::OK, tagging_xml(&o.tags)))
+        let o = blocking(|| self.eng.get_version(&c.bucket, &c.key, Some(c.q("versionId"))))?;
+        if o.delete_marker {
+            return Err(e::METHOD_NOT_ALLOWED.clone());
+        }
+        let mut r = xml_resp(StatusCode::OK, tagging_xml(&o.tags));
+        if !o.version_id.is_empty() {
+            super::set_header(&mut r, "x-amz-version-id", o.version());
+        }
+        Ok(r)
     }
 
     pub(crate) fn delete_object_tagging(&self, c: &Ctx) -> R {
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, |o| {
+            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
                 o.tags.clear();
                 Ok(())
             })
@@ -180,7 +187,13 @@ impl Server {
         let doc = self.read_small(c, body, 64 << 10).await?;
         check_acl_headers(c)?;
         check_acl_body(c, &doc)?;
-        blocking(|| if object { self.eng.get_object(&c.bucket, &c.key).map(|_| ()) } else { self.eng.head_bucket(&c.bucket).map(|_| ()) })?;
+        blocking(|| {
+            if object {
+                self.eng.get_version(&c.bucket, &c.key, Some(c.q("versionId"))).map(|_| ())
+            } else {
+                self.eng.head_bucket(&c.bucket).map(|_| ())
+            }
+        })?;
         Ok(empty(StatusCode::OK))
     }
 

@@ -31,8 +31,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 11] = [
-    "versioning",
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 10] = [
     "lifecycle",
     "object-lock",
     "encryption",
@@ -144,9 +143,13 @@ impl Server {
                 ))
             }
             "GetBucketVersioning" => {
-                blocking(|| self.eng.head_bucket(&c.bucket))?;
-                Ok(xml_resp(StatusCode::OK, Writer::new("VersioningConfiguration").finish()))
+                let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
+                let mut w = Writer::new("VersioningConfiguration");
+                w.opt("Status", &info.versioning);
+                Ok(xml_resp(StatusCode::OK, w.finish()))
             }
+            "PutBucketVersioning" => self.put_versioning(c, body).await,
+            "ListObjectVersions" => self.list_versions(c),
             "GetBucketAcl" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(self.acl(c))
@@ -183,14 +186,24 @@ impl Server {
             "HeadObject" => self.get_object(c, true),
             "DeleteObject" => {
                 let if_match = c.header("if-match");
-                blocking(|| self.eng.delete_object(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match)))?;
-                Ok(empty(StatusCode::NO_CONTENT))
+                let d = blocking(|| match c.q("versionId") {
+                    "" => self.eng.delete_object(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match)),
+                    v => self.eng.delete_version(&c.bucket, &c.key, v),
+                })?;
+                let mut r = empty(StatusCode::NO_CONTENT);
+                if let Some(v) = &d.version_id {
+                    set_header(&mut r, "x-amz-version-id", v);
+                }
+                if d.delete_marker {
+                    set_header(&mut r, "x-amz-delete-marker", "true");
+                }
+                Ok(r)
             }
             "GetObjectTagging" => self.get_object_tagging(c),
             "PutObjectTagging" => self.put_object_tagging(c, body).await,
             "DeleteObjectTagging" => self.delete_object_tagging(c),
             "GetObjectAcl" => {
-                blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
+                blocking(|| self.eng.get_version(&c.bucket, &c.key, Some(c.q("versionId"))))?;
                 Ok(self.acl(c))
             }
             "PutObjectAcl" => self.put_acl(c, body, true).await,
@@ -349,26 +362,41 @@ impl Server {
     {
         let doc = self.read_small(c, body, 2 << 20).await?;
         let root = xml::parse(&String::from_utf8_lossy(&doc)).filter(|r| r.name == "Delete").ok_or_else(|| e::MALFORMED_XML.clone())?;
-        let keys: Vec<String> = root.all("Object").map(|o| o.child("Key").map(|k| k.text.clone()).unwrap_or_default()).collect();
+        let keys: Vec<(String, String)> = root.all("Object").map(|o| (o.text_of_raw("Key"), o.text_of("VersionId"))).collect();
         if keys.is_empty() || keys.len() > 1000 {
             return Err(e::MALFORMED_XML.clone());
         }
         let quiet = root.text_of("Quiet").eq_ignore_ascii_case("true");
         blocking(|| self.eng.head_bucket(&c.bucket))?;
         let mut w = Writer::new("DeleteResult");
-        for k in keys {
-            if let Err(err) = self.authorize(c, "s3:DeleteObject", &c.bucket, &k).await {
-                w.open("Error").el("Key", &k).el("Code", err.code).el("Message", err.message).close();
+        for (k, vid) in keys {
+            let action = if vid.is_empty() { "s3:DeleteObject" } else { "s3:DeleteObjectVersion" };
+            if let Err(err) = self.authorize(c, action, &c.bucket, &k).await {
+                w.open("Error").el("Key", &k).opt("VersionId", &vid).el("Code", err.code).el("Message", err.message).close();
                 continue;
             }
-            match blocking(|| self.eng.delete_object(&c.bucket, &k, None)) {
-                Ok(()) if !quiet => {
-                    w.open("Deleted").el("Key", &k).close();
+            let res = blocking(|| {
+                if vid.is_empty() {
+                    self.eng.delete_object(&c.bucket, &k, None)
+                } else {
+                    self.eng.delete_version(&c.bucket, &k, &vid)
                 }
-                Ok(()) => {}
+            });
+            match res {
+                Ok(d) if !quiet => {
+                    w.open("Deleted").el("Key", &k).opt("VersionId", &vid);
+                    if d.delete_marker {
+                        w.el("DeleteMarker", "true");
+                        if vid.is_empty() {
+                            w.opt("DeleteMarkerVersionId", d.version_id.unwrap_or_default());
+                        }
+                    }
+                    w.close();
+                }
+                Ok(_) => {}
                 Err(err) => {
                     let ae = ApiError::from(err);
-                    w.open("Error").el("Key", &k).el("Code", ae.code).el("Message", ae.message).close();
+                    w.open("Error").el("Key", &k).opt("VersionId", &vid).el("Code", ae.code).el("Message", ae.message).close();
                 }
             }
         }
@@ -508,7 +536,7 @@ impl Server {
         }
         check_acl_headers(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
-        blocking(|| self.eng.head_bucket(&c.bucket))?;
+        let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         let compute: Vec<&str> = [algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
         let (seg, md5, checksums) = self.receive(c, body, self.max_obj, &compute).await?;
@@ -525,11 +553,12 @@ impl Server {
             segments: vec![seg],
             part_count: 0,
             tags,
+            ..Default::default()
         };
-        let etag = obj.etag.clone();
-        blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
+        let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
         let mut r = empty(StatusCode::OK);
-        set_header(&mut r, "etag", &format!("\"{etag}\""));
+        set_header(&mut r, "etag", &format!("\"{}\"", stored.etag));
+        version_header(&mut r, &info.versioning, &stored);
         write_checksums(&mut r, &checksums, "FULL_OBJECT");
         Ok(r)
     }
@@ -541,8 +570,9 @@ impl Server {
         };
         let range_header = c.header("range").to_string();
         let mut picked = (0u64, 0u64, false);
+        let version = c.q("versionId");
         let res = blocking(|| {
-            self.eng.get_fresh(&c.bucket, &c.key, |o| -> Result<(u64, u64), ReadErr> {
+            self.eng.get_fresh(&c.bucket, &c.key, Some(version), |o| -> Result<(u64, u64), ReadErr> {
                 check_read_conditions(c, o)?;
                 let (off, n, ranged) = if part_number > 0 {
                     if part_number as usize > o.segments.len() {
@@ -564,6 +594,22 @@ impl Server {
         });
         let (obj, reader) = match res {
             Ok(v) => v,
+            Err(FreshError::Engine(engine::Error::MethodNotAllowed)) => {
+                // GET/HEAD of a delete marker by version ID.
+                let mut r = super::error_response(&e::METHOD_NOT_ALLOWED, &c.path, "", head);
+                set_header(&mut r, "x-amz-delete-marker", "true");
+                set_header(&mut r, "x-amz-version-id", version);
+                set_header(&mut r, "allow", "DELETE");
+                return Ok(r);
+            }
+            Err(FreshError::Engine(engine::Error::NoSuchKey)) if version.is_empty() => {
+                let mut r = super::error_response(&e::NO_SUCH_KEY, &c.path, "", head);
+                if let Ok(Some(v)) = blocking(|| self.eng.latest_delete_marker(&c.bucket, &c.key)) {
+                    set_header(&mut r, "x-amz-delete-marker", "true");
+                    set_header(&mut r, "x-amz-version-id", &v);
+                }
+                return Ok(r);
+            }
             Err(FreshError::Engine(err)) => return Err(err.into()),
             Err(FreshError::Range(o, ReadErr::NotModified)) => {
                 let mut r = empty(StatusCode::NOT_MODIFIED);
@@ -599,6 +645,12 @@ impl Server {
         set_header(&mut r, "etag", &format!("\"{}\"", obj.etag));
         set_header(&mut r, "last-modified", &http_time(obj.modified));
         set_header(&mut r, "accept-ranges", "bytes");
+        if !obj.version_id.is_empty()
+            || !version.is_empty()
+            || blocking(|| self.eng.head_bucket(&c.bucket)).is_ok_and(|b| !b.versioning.is_empty())
+        {
+            set_header(&mut r, "x-amz-version-id", obj.version());
+        }
         if !obj.tags.is_empty() {
             set_header(&mut r, "x-amz-tagging-count", &obj.tags.len().to_string());
         }
@@ -616,8 +668,9 @@ impl Server {
     }
 
     /// Copies `[range]` of a source object into a new sealed blob, computing `algos` checksums.
-    fn copy_bytes(&self, c: &Ctx, src_bucket: &str, src_key: &str, range: &str, algos: &[String]) -> Result<Copied, ApiError> {
-        let res = self.eng.get_fresh(src_bucket, src_key, |o| -> Result<(u64, u64), ApiError> {
+    fn copy_bytes(&self, c: &Ctx, src: &CopySource, range: &str, algos: &[String]) -> Result<Copied, ApiError> {
+        let (src_bucket, src_key) = (src.bucket.as_str(), src.key.as_str());
+        let res = self.eng.get_fresh(src_bucket, src_key, src.version.as_deref(), |o| -> Result<(u64, u64), ApiError> {
             check_copy_conditions(c, o)?;
             if range.is_empty() {
                 return Ok((0, o.size));
@@ -631,6 +684,7 @@ impl Server {
         });
         let (src, mut reader) = match res {
             Ok(v) => v,
+            Err(FreshError::Engine(engine::Error::MethodNotAllowed)) => return Err(e::INVALID_REQUEST_DELETE_MARKER.clone()),
             Err(FreshError::Engine(err)) => return Err(err.into()),
             Err(FreshError::Range(_, err)) => return Err(err),
         };
@@ -653,8 +707,10 @@ impl Server {
     }
 
     async fn copy_object(&self, c: &Ctx) -> R {
-        let (src_bucket, src_key) = copy_source(c.header("x-amz-copy-source"))?;
-        self.authorize(c, "s3:GetObject", &src_bucket, &src_key).await?;
+        let src = copy_source(c.header("x-amz-copy-source"))?;
+        let read_action = if src.version.is_some() { "s3:GetObjectVersion" } else { "s3:GetObject" };
+        self.authorize(c, read_action, &src.bucket, &src.key).await?;
+        let (src_bucket, src_key) = (src.bucket.clone(), src.key.clone());
         let directive = match c.header("x-amz-metadata-directive").to_ascii_uppercase().as_str() {
             "" | "COPY" => "COPY",
             "REPLACE" => "REPLACE",
@@ -668,21 +724,34 @@ impl Server {
         check_acl_headers(c)?;
         let new_tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let new_algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
-        if src_bucket == c.bucket && src_key == c.key && directive == "COPY" && tag_directive == "COPY" && new_algo.is_empty() {
+        if src_bucket == c.bucket
+            && src_key == c.key
+            && src.version.is_none()
+            && directive == "COPY"
+            && tag_directive == "COPY"
+            && new_algo.is_empty()
+        {
             return Err(e::COPY_TO_ITSELF.clone());
         }
-        let (src, seg, md5, checksums) = blocking(|| -> Result<_, ApiError> {
-            self.eng.head_bucket(&c.bucket)?;
-            let meta = self.eng.get_object(&src_bucket, &src_key)?;
+        let (info, (src_obj, seg, md5, checksums)) = blocking(|| -> Result<_, ApiError> {
+            let info = self.eng.head_bucket(&c.bucket)?;
+            let meta = self.eng.get_version(&src_bucket, &src_key, src.version.as_deref())?;
+            if meta.delete_marker {
+                return Err(e::INVALID_REQUEST_DELETE_MARKER.clone());
+            }
             let algos: Vec<String> = if new_algo.is_empty() {
                 meta.checksums.iter().filter(|(_, v)| !v.contains('-')).map(|(a, _)| a.clone()).collect()
             } else {
                 vec![new_algo.clone()]
             };
-            self.copy_bytes(c, &src_bucket, &src_key, "", &algos)
+            Ok((info, self.copy_bytes(c, &src, "", &algos)?))
         })?;
-        let tags = if tag_directive == "REPLACE" { new_tags } else { src.tags.clone() };
-        let (ct, hs, um) = if directive == "REPLACE" { object_headers(c) } else { (src.content_type, src.headers, src.user_meta) };
+        let tags = if tag_directive == "REPLACE" { new_tags } else { src_obj.tags.clone() };
+        let (ct, hs, um) = if directive == "REPLACE" {
+            object_headers(c)
+        } else {
+            (src_obj.content_type.clone(), src_obj.headers.clone(), src_obj.user_meta.clone())
+        };
         let obj = Object {
             key: c.key.clone(),
             size: seg.size,
@@ -696,12 +765,16 @@ impl Server {
             segments: vec![seg],
             part_count: 0,
             tags,
+            ..Default::default()
         };
-        let (etag, modified) = (obj.etag.clone(), obj.modified);
-        blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
+        let stored = blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
         let mut w = Writer::new("CopyObjectResult");
-        w.el("LastModified", iso_time(modified)).el("ETag", format!("\"{etag}\""));
+        w.el("LastModified", iso_time(stored.modified)).el("ETag", format!("\"{}\"", stored.etag));
         let mut r = xml_resp(StatusCode::OK, w.finish());
+        version_header(&mut r, &info.versioning, &stored);
+        if src.version.is_some() || !src_obj.version_id.is_empty() {
+            set_header(&mut r, "x-amz-copy-source-version-id", src_obj.version());
+        }
         write_checksums(&mut r, &checksums, "FULL_OBJECT");
         Ok(r)
     }
@@ -788,12 +861,13 @@ impl Server {
 
     async fn upload_part_copy(&self, c: &Ctx) -> R {
         let n = self.part_number(c)?;
-        let (src_bucket, src_key) = copy_source(c.header("x-amz-copy-source"))?;
-        self.authorize(c, "s3:GetObject", &src_bucket, &src_key).await?;
+        let src = copy_source(c.header("x-amz-copy-source"))?;
+        let read_action = if src.version.is_some() { "s3:GetObjectVersion" } else { "s3:GetObject" };
+        self.authorize(c, read_action, &src.bucket, &src.key).await?;
         let (etag, modified) = blocking(|| -> Result<_, ApiError> {
             let u = self.eng.get_upload(&c.bucket, &c.key, c.q("uploadId"))?;
             let algos: Vec<String> = [u.checksum_algo.clone()].into_iter().filter(|a| !a.is_empty()).collect();
-            let (_, seg, md5, checksums) = self.copy_bytes(c, &src_bucket, &src_key, c.header("x-amz-copy-source-range"), &algos)?;
+            let (_, seg, md5, checksums) = self.copy_bytes(c, &src, c.header("x-amz-copy-source-range"), &algos)?;
             let p = Part { number: n, blob: seg.blob, size: seg.size, etag: hex::encode(&md5), md5, checksums, modified: engine::now_ms() };
             let out = (p.etag.clone(), p.modified);
             self.eng.put_part(&c.bucket, &c.key, &u.id, p)?;
@@ -919,6 +993,7 @@ impl Server {
                 Ok((checksums, ctype))
             })?)
         })?;
+        let versioning = blocking(|| self.eng.head_bucket(&c.bucket)).map(|b| b.versioning).unwrap_or_default();
         let mut w = Writer::new("CompleteMultipartUploadResult");
         w.el("Location", format!("/{}/{}", c.bucket, c.key))
             .el("Bucket", &c.bucket)
@@ -928,7 +1003,9 @@ impl Server {
         if !obj.checksums.is_empty() {
             w.el("ChecksumType", &obj.checksum_type);
         }
-        Ok(xml_resp(StatusCode::OK, w.finish()))
+        let mut r = xml_resp(StatusCode::OK, w.finish());
+        version_header(&mut r, &versioning, &obj);
+        Ok(r)
     }
 }
 
@@ -946,6 +1023,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("ownershipControls") => "PutBucketOwnershipControls",
             Method::PUT if c.has("policy") => "PutBucketPolicy",
             Method::PUT if c.has("publicAccessBlock") => "PutPublicAccessBlock",
+            Method::PUT if c.has("versioning") => "PutBucketVersioning",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
             Method::PUT => "CreateBucket",
             Method::DELETE if c.has("tagging") => "DeleteBucketTagging",
@@ -972,18 +1050,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("policy") => "GetBucketPolicy",
             Method::GET if c.has("publicAccessBlock") => "GetPublicAccessBlock",
             Method::GET if c.has("lifecycle") => "GetBucketLifecycle",
-            Method::GET
-                if any(&[
-                    "versions",
-                    "object-lock",
-                    "replication",
-                    "encryption",
-                    "website",
-                    "logging",
-                    "notification",
-                    "requestPayment",
-                ]) =>
-            {
+            Method::GET if c.has("versions") => "ListObjectVersions",
+            Method::GET if any(&["object-lock", "replication", "encryption", "website", "logging", "notification", "requestPayment"]) => {
                 "Unsupported"
             }
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
@@ -1044,14 +1112,29 @@ fn write_checksums(r: &mut Resp, cs: &BTreeMap<String, String>, ctype: &str) {
     }
 }
 
-/// Parses x-amz-copy-source ("/bucket/key", URL-encoded, optional ?versionId).
-fn copy_source(v: &str) -> Result<(String, String), ApiError> {
-    let v = v.split('?').next().unwrap_or("");
-    let dec = String::from_utf8(super::auth::percent_decode(v)).map_err(|_| e::INVALID_COPY_SOURCE.clone())?;
+/// A copy source: bucket, key and (optionally) version.
+pub(crate) struct CopySource {
+    pub bucket: String,
+    pub key: String,
+    pub version: Option<String>,
+}
+
+/// Parses x-amz-copy-source ("/bucket/key", URL-encoded, optional ?versionId=).
+fn copy_source(v: &str) -> Result<CopySource, ApiError> {
+    let (path, query) = v.split_once('?').unwrap_or((v, ""));
+    let dec = String::from_utf8(super::auth::percent_decode(path)).map_err(|_| e::INVALID_COPY_SOURCE.clone())?;
     let dec = dec.trim_start_matches('/');
+    let version = query.split('&').find_map(|p| p.strip_prefix("versionId=")).map(super::auth::query_decode).filter(|v| !v.is_empty());
     match dec.split_once('/') {
-        Some((b, k)) if !b.is_empty() && !k.is_empty() => Ok((b.to_string(), k.to_string())),
+        Some((b, k)) if !b.is_empty() && !k.is_empty() => Ok(CopySource { bucket: b.to_string(), key: k.to_string(), version }),
         _ => Err(e::INVALID_COPY_SOURCE.clone()),
+    }
+}
+
+/// x-amz-version-id on writes to buckets that have (had) versioning.
+fn version_header(r: &mut Resp, versioning: &str, obj: &Object) {
+    if !versioning.is_empty() || !obj.version_id.is_empty() {
+        set_header(r, "x-amz-version-id", obj.version());
     }
 }
 

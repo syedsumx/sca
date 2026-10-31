@@ -9,6 +9,7 @@ mod cors;
 pub mod errors;
 mod handlers;
 pub mod policy;
+mod versioning;
 pub mod xml;
 
 use std::collections::BTreeMap;
