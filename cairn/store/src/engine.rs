@@ -33,6 +33,8 @@ const OBJECTS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("obje
 const UPLOADS: TableDefinition<&str, &[u8]> = TableDefinition::new("uploads");
 const PARTS: TableDefinition<(&str, u32), &[u8]> = TableDefinition::new("parts");
 const GC: TableDefinition<&str, u64> = TableDefinition::new("gc");
+/// Per-bucket configuration documents: (bucket, kind) -> document (tagging, cors, policy, ...).
+const CONFIG: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("bucket_config");
 
 #[derive(Debug)]
 pub enum Error {
@@ -110,6 +112,8 @@ pub struct Object {
     pub segments: Vec<Segment>,
     #[serde(default)]
     pub part_count: u32,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// An in-progress multipart upload.
@@ -129,6 +133,8 @@ pub struct Upload {
     pub checksum_algo: String,
     #[serde(default)]
     pub checksum_type: String,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
 }
 
 /// An uploaded part.
@@ -346,6 +352,7 @@ impl Engine {
         tx.open_table(UPLOADS)?;
         tx.open_table(PARTS)?;
         tx.open_table(GC)?;
+        tx.open_table(CONFIG)?;
         tx.commit()?;
         e.recover()?;
         Ok(e)
@@ -498,6 +505,42 @@ impl Engine {
                 }
             }
             t.remove(name)?;
+            let mut cfg = tx.open_table(CONFIG)?;
+            let kinds: Vec<String> = cfg
+                .range((name, "")..)?
+                .map_while(|row| row.ok().filter(|(k, _)| k.value().0 == name).map(|(k, _)| k.value().1.to_string()))
+                .collect();
+            for k in kinds {
+                cfg.remove((name, k.as_str()))?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// A bucket's configuration document of one kind (None: not set).
+    pub fn get_config(&self, bucket: &str, kind: &str) -> Result<Option<Vec<u8>>> {
+        let r = self.db.begin_read()?;
+        Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
+        let t = r.open_table(CONFIG)?;
+        let v = t.get((bucket, kind))?.map(|v| v.value().to_vec());
+        Ok(v)
+    }
+
+    /// Sets (Some) or removes (None) a bucket's configuration document of one kind.
+    pub fn put_config(&self, bucket: &str, kind: &str, doc: Option<&[u8]>) -> Result<()> {
+        let tx = self.begin_write()?;
+        {
+            Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
+            let mut t = tx.open_table(CONFIG)?;
+            match doc {
+                Some(d) => {
+                    t.insert((bucket, kind), d)?;
+                }
+                None => {
+                    t.remove((bucket, kind))?;
+                }
+            }
         }
         tx.commit()?;
         Ok(())
@@ -572,6 +615,25 @@ impl Engine {
         Ok(serde_json::from_slice(v.value())?)
     }
 
+    /// Changes an object's metadata in place (no new bytes), atomically. `f` may refuse the change.
+    pub fn update_object(&self, bucket: &str, key: &str, f: impl FnOnce(&mut Object) -> Result<()>) -> Result<Object> {
+        let tx = self.begin_write()?;
+        let obj = {
+            Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
+            let mut t = tx.open_table(OBJECTS)?;
+            let mut o: Object = match t.get((bucket, key))? {
+                Some(v) => serde_json::from_slice(v.value())?,
+                None => return Err(Error::NoSuchKey),
+            };
+            f(&mut o)?;
+            let v = serde_json::to_vec(&o)?;
+            t.insert((bucket, key), v.as_slice())?;
+            o
+        };
+        tx.commit()?;
+        Ok(obj)
+    }
+
     /// Removes a key; deleting a missing key succeeds (S3 semantics).
     pub fn delete_object(&self, bucket: &str, key: &str, if_match: Option<&str>) -> Result<()> {
         let tx = self.begin_write()?;
@@ -632,7 +694,7 @@ impl Engine {
     ) -> std::result::Result<(Object, ObjectReader), FreshError<E>> {
         for attempt in 0.. {
             let obj = self.get_object(bucket, key).map_err(FreshError::Engine)?;
-            let (off, n) = rng(&obj).map_err(|e| FreshError::Range(obj.clone(), e))?;
+            let (off, n) = rng(&obj).map_err(|e| FreshError::Range(Box::new(obj.clone()), e))?;
             match self.reader(&obj, off, n) {
                 Ok(r) => return Ok((obj, r)),
                 Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotFound && attempt < 4 => continue,
@@ -884,6 +946,7 @@ impl Engine {
                 checksum_type: ctype,
                 segments: parts.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size }).collect(),
                 part_count: parts.len() as u32,
+                tags: u.tags.clone(),
             };
             let v = serde_json::to_vec(&obj)?;
             tx.open_table(OBJECTS)?.insert((bucket, key), v.as_slice())?;
@@ -917,7 +980,7 @@ impl Engine {
 /// Why `get_fresh` failed: the engine, or the range picker (with the object it saw).
 pub enum FreshError<E> {
     Engine(Error),
-    Range(Object, E),
+    Range(Box<Object>, E),
 }
 
 #[cfg(test)]

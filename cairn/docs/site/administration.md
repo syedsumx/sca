@@ -409,7 +409,11 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Keys.** The access key from the environment is an admin key: it may also create and delete buckets. `CAIRN_STORE_CREDENTIALS_FILE` adds more keys, as a JSON list. Each key may be limited to certain buckets (`"buckets": ["lake-*"]`) or to reading (`"read_only": true`). Requests are signed with AWS Signature Version 4, or Version 2 for older tools. Anonymous requests are refused.
 
-**What it supports.** Buckets; objects with metadata; ranged reads; conditional reads and writes (`If-Match`, `If-None-Match: *`); listing (versions 1 and 2); batch deletes; copies; multipart uploads, including copying parts; checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, composite and full-object); and presigned URLs. Versioning, object lock, lifecycle rules, bucket policies and encryption at rest are not supported yet.
+**What it supports.** Buckets; objects with metadata; ranged reads; conditional reads and writes (`If-Match`, `If-None-Match: *`); listing (versions 1 and 2); batch deletes; copies; multipart uploads, including copying parts; checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, composite and full-object); presigned URLs; and object and bucket tags (up to 10 per object, set with the object, by copy or later, and 50 per bucket).
+
+**Ownership and ACLs.** The bucket owner owns every object (S3's `BucketOwnerEnforced`). Access comes from keys, never from ACLs: ACL requests that only grant the owner full control succeed, and any other grant is refused with `AccessControlListNotSupported`.
+
+**Not supported yet.** Versioning, object lock, lifecycle rules, bucket policies, CORS and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

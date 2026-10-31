@@ -12,6 +12,7 @@ use hyper::{Method, Response, StatusCode};
 
 use super::body::BodyCheck;
 use super::checksum::{self, Hasher};
+use super::config::{check_acl_headers, parse_tag_header};
 use super::errors::{self as e, ApiError};
 use super::xml::{self, Writer};
 use super::{empty, http_time, iso_time, set_header, xml_resp, Ctx, Resp, Server};
@@ -28,6 +29,24 @@ const B64URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
 }
+
+/// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 14] = [
+    "versioning",
+    "cors",
+    "policy",
+    "lifecycle",
+    "publicAccessBlock",
+    "object-lock",
+    "encryption",
+    "notification",
+    "replication",
+    "logging",
+    "website",
+    "requestPayment",
+    "accelerate",
+    "intelligent-tiering",
+];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 5] = ["content-encoding", "content-disposition", "content-language", "cache-control", "expires"];
@@ -111,19 +130,43 @@ impl Server {
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
     {
-        let config = ["acl", "versioning", "tagging", "cors", "policy", "lifecycle", "ownershipControls", "publicAccessBlock"];
         match c.method {
-            Method::PUT if config.iter().any(|k| c.has(k)) => {
-                c.op = "PutBucketConfig";
-                blocking(|| self.eng.head_bucket(&c.bucket))?;
-                Ok(empty(StatusCode::OK))
+            Method::PUT if c.has("tagging") => {
+                c.op = "PutBucketTagging";
+                self.put_bucket_tagging(c, body).await
+            }
+            Method::PUT if c.has("acl") => {
+                c.op = "PutBucketAcl";
+                self.put_acl(c, body, false).await
+            }
+            Method::PUT if c.has("ownershipControls") => {
+                c.op = "PutBucketOwnershipControls";
+                self.put_ownership(c, body).await
+            }
+            Method::PUT if UNSUPPORTED_BUCKET_CONFIG.iter().any(|k| c.has(k)) => {
+                c.op = "Unsupported";
+                Err(e::NOT_IMPLEMENTED.clone())
             }
             Method::PUT => {
                 c.op = "CreateBucket";
                 self.create_bucket(c, body).await
             }
-            Method::DELETE if ["policy", "tagging", "cors", "lifecycle"].iter().any(|k| c.has(k)) => {
+            Method::DELETE if c.has("tagging") => {
+                c.op = "DeleteBucketTagging";
+                self.delete_config(c, "tagging")
+            }
+            Method::DELETE if c.has("ownershipControls") => {
+                c.op = "Unsupported";
+                Err(e::NOT_IMPLEMENTED.clone())
+            }
+            Method::DELETE
+                if ["policy", "cors", "lifecycle", "publicAccessBlock", "encryption", "website", "replication"]
+                    .iter()
+                    .any(|k| c.has(k)) =>
+            {
+                // None of these can be set yet, so there is nothing to delete.
                 c.op = "DeleteBucketConfig";
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
             Method::DELETE => {
@@ -171,11 +214,19 @@ impl Server {
                     c.op = "ListMultipartUploads";
                     return self.list_uploads(c);
                 }
+                if c.has("tagging") {
+                    c.op = "GetBucketTagging";
+                    return self.get_bucket_tagging(c);
+                }
+                if c.has("ownershipControls") {
+                    c.op = "GetBucketOwnershipControls";
+                    return self.get_ownership(c);
+                }
                 for (k, err) in [
                     ("policy", &e::NO_SUCH_BUCKET_POLICY),
                     ("lifecycle", &e::NO_SUCH_LIFECYCLE),
                     ("cors", &e::NO_SUCH_CORS),
-                    ("tagging", &e::NO_SUCH_TAG_SET),
+                    ("publicAccessBlock", &e::NO_SUCH_PUBLIC_ACCESS_BLOCK),
                 ] {
                     if c.has(k) {
                         return Err(err.clone());
@@ -216,10 +267,17 @@ impl Server {
                     self.upload_part(c, body).await
                 }
             }
-            Method::PUT if ["acl", "tagging", "retention", "legal-hold"].iter().any(|k| c.has(k)) => {
-                c.op = "PutObjectConfig";
-                blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
-                Ok(empty(StatusCode::OK))
+            Method::PUT if c.has("tagging") => {
+                c.op = "PutObjectTagging";
+                self.put_object_tagging(c, body).await
+            }
+            Method::PUT if c.has("acl") => {
+                c.op = "PutObjectAcl";
+                self.put_acl(c, body, true).await
+            }
+            Method::PUT if ["retention", "legal-hold"].iter().any(|k| c.has(k)) => {
+                c.op = "Unsupported";
+                Err(e::NOT_IMPLEMENTED.clone())
             }
             Method::PUT if copy => {
                 c.op = "CopyObject";
@@ -240,10 +298,7 @@ impl Server {
             }
             Method::GET if c.has("tagging") => {
                 c.op = "GetObjectTagging";
-                blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
-                let mut w = Writer::new("Tagging");
-                w.open("TagSet").close();
-                Ok(xml_resp(StatusCode::OK, w.finish()))
+                self.get_object_tagging(c)
             }
             Method::GET if ["attributes", "torrent", "retention", "legal-hold"].iter().any(|k| c.has(k)) => Err(e::NOT_IMPLEMENTED.clone()),
             Method::GET => {
@@ -259,7 +314,10 @@ impl Server {
                 blocking(|| self.eng.abort_upload(&c.bucket, &c.key, c.q("uploadId")))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Method::DELETE if c.has("tagging") => Ok(empty(StatusCode::NO_CONTENT)),
+            Method::DELETE if c.has("tagging") => {
+                c.op = "DeleteObjectTagging";
+                self.delete_object_tagging(c)
+            }
             Method::DELETE => {
                 c.op = "DeleteObject";
                 let if_match = c.header("if-match");
@@ -298,7 +356,7 @@ impl Server {
     // --------------------------------------------------------------------------------- request bodies
 
     /// Reads a small request body (XML documents), verifying it.
-    async fn read_small<B>(&self, c: &Ctx, body: B, limit: usize) -> Result<Vec<u8>, ApiError>
+    pub(crate) async fn read_small<B>(&self, c: &Ctx, body: B, limit: usize) -> Result<Vec<u8>, ApiError>
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -400,6 +458,10 @@ impl Server {
         }
         if !valid_bucket_name(&c.bucket) {
             return Err(e::INVALID_BUCKET_NAME.clone());
+        }
+        check_acl_headers(c)?;
+        if c.header("x-amz-bucket-object-lock-enabled").eq_ignore_ascii_case("true") {
+            return Err(e::NOT_IMPLEMENTED.clone());
         }
         let doc = self.read_small(c, body, 64 << 10).await?;
         let doc = String::from_utf8_lossy(&doc);
@@ -572,6 +634,8 @@ impl Server {
         if meta_too_large(&um) {
             return Err(e::METADATA_TOO_LARGE.clone());
         }
+        check_acl_headers(c)?;
+        let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         blocking(|| self.eng.head_bucket(&c.bucket))?;
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         let compute: Vec<&str> = [algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
@@ -588,6 +652,7 @@ impl Server {
             checksum_type: "FULL_OBJECT".into(),
             segments: vec![seg],
             part_count: 0,
+            tags,
         };
         let etag = obj.etag.clone();
         blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
@@ -662,6 +727,9 @@ impl Server {
         set_header(&mut r, "etag", &format!("\"{}\"", obj.etag));
         set_header(&mut r, "last-modified", &http_time(obj.modified));
         set_header(&mut r, "accept-ranges", "bytes");
+        if !obj.tags.is_empty() {
+            set_header(&mut r, "x-amz-tagging-count", &obj.tags.len().to_string());
+        }
         if part_number > 0 && obj.part_count > 0 {
             set_header(&mut r, "x-amz-mp-parts-count", &obj.part_count.to_string());
         }
@@ -722,8 +790,15 @@ impl Server {
             "REPLACE" => "REPLACE",
             _ => return Err(e::INVALID_ARGUMENT.clone()),
         };
+        let tag_directive = match c.header("x-amz-tagging-directive").to_ascii_uppercase().as_str() {
+            "" | "COPY" => "COPY",
+            "REPLACE" => "REPLACE",
+            _ => return Err(e::INVALID_ARGUMENT.clone()),
+        };
+        check_acl_headers(c)?;
+        let new_tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let new_algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
-        if src_bucket == c.bucket && src_key == c.key && directive == "COPY" && new_algo.is_empty() {
+        if src_bucket == c.bucket && src_key == c.key && directive == "COPY" && tag_directive == "COPY" && new_algo.is_empty() {
             return Err(e::COPY_TO_ITSELF.clone());
         }
         let (src, seg, md5, checksums) = blocking(|| -> Result<_, ApiError> {
@@ -736,6 +811,7 @@ impl Server {
             };
             self.copy_bytes(c, &src_bucket, &src_key, "", &algos)
         })?;
+        let tags = if tag_directive == "REPLACE" { new_tags } else { src.tags.clone() };
         let (ct, hs, um) = if directive == "REPLACE" { object_headers(c) } else { (src.content_type, src.headers, src.user_meta) };
         let obj = Object {
             key: c.key.clone(),
@@ -749,6 +825,7 @@ impl Server {
             checksum_type: "FULL_OBJECT".into(),
             segments: vec![seg],
             part_count: 0,
+            tags,
         };
         let (etag, modified) = (obj.etag.clone(), obj.modified);
         blocking(|| self.eng.put_object(&c.bucket, obj, &cond_of(c)))?;
@@ -766,6 +843,8 @@ impl Server {
         if meta_too_large(&um) {
             return Err(e::METADATA_TOO_LARGE.clone());
         }
+        check_acl_headers(c)?;
+        let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         if !algo.is_empty() && !checksum::valid(&algo) {
             return Err(e::INVALID_ARGUMENT.clone());
@@ -789,6 +868,7 @@ impl Server {
                 user_meta: um,
                 checksum_algo: algo.clone(),
                 checksum_type: ctype.clone(),
+                tags,
                 ..Default::default()
             })
         })?;

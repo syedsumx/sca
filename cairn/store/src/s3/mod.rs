@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod body;
 pub mod checksum;
+mod config;
 pub mod errors;
 mod handlers;
 pub mod xml;

@@ -69,6 +69,12 @@ errors! {
     NO_SUCH_LIFECYCLE = "NoSuchLifecycleConfiguration", 404, "The lifecycle configuration does not exist";
     NO_SUCH_CORS = "NoSuchCORSConfiguration", 404, "The CORS configuration does not exist";
     NO_SUCH_TAG_SET = "NoSuchTagSet", 404, "The TagSet does not exist";
+    INVALID_TAG = "InvalidTag", 400, "The tag provided was not a valid tag.";
+    DUPLICATE_TAG = "InvalidTag", 400, "Cannot provide multiple Tags with the same key";
+    TOO_MANY_OBJECT_TAGS = "BadRequest", 400, "Object tags cannot be greater than 10";
+    TOO_MANY_BUCKET_TAGS = "BadRequest", 400, "Bucket tags cannot be greater than 50";
+    ACL_NOT_SUPPORTED = "AccessControlListNotSupported", 400, "The bucket does not allow ACLs";
+    NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }
 
 impl From<crate::engine::Error> for ApiError {
