@@ -71,6 +71,8 @@ pub struct Config {
     pub log_requests: bool,
     /// The listener serves HTTPS (aws:SecureTransport, SSE-C).
     pub tls: bool,
+    /// Where online backups are written (None: backups are off).
+    pub backup_root: Option<std::path::PathBuf>,
 }
 
 pub struct Server {
@@ -97,6 +99,7 @@ pub struct Server {
     pub(crate) event_metrics: events::EventMetrics,
     access_logs: accesslog::AccessLogs,
     log_requests: bool,
+    backup_root: Option<std::path::PathBuf>,
 }
 
 /// One request, after routing and authentication.
@@ -177,6 +180,7 @@ impl Server {
             event_metrics: Default::default(),
             access_logs: Default::default(),
             log_requests: cfg.log_requests,
+            backup_root: cfg.backup_root,
         })
     }
 

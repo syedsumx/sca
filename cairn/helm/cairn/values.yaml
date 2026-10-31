@@ -499,6 +499,11 @@ cairn:
     # With tlsSecret: also require client certificates signed by the CA in this Secret's "ca.crt"
     # (the kubelet has no client certificate, so probes then only check that the port is open).
     clientCaSecret: ""
+    # Online backups (cairn-store admin backup <name>) on a second volume.
+    backups:
+      enabled: false
+      size: 100Gi
+      storageClassName: ""
     # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka", "id": ...}]).
     eventTargetsSecret: ""
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.

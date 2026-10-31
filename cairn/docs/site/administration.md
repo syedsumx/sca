@@ -481,7 +481,14 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 
-**Limits.** This release runs on one node: there is no replication, so the volume is the only copy. Put it on reliable storage and back it up: stop the store and copy `/data`, or take a volume snapshot. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
+**Backups.** With `CAIRN_STORE_BACKUP_DIR` set, `cairn-store admin backup <name>` (or `POST /-/admin/v1/backups`) writes an online backup while the store keeps serving.
+
+- **Consistent.** A backup holds the index as of one moment and every blob it refers to. Writers are not paused; deleted blobs are kept until the backup has copied them.
+- **Incremental.** Blobs already in the newest earlier backup are hard-linked, so repeated backups take little extra space. The backup directory can be on its own volume; copy backups elsewhere with a tool that preserves hard links (`rsync -H`).
+- **Restoring.** A backup is a complete data directory: check it with `cairn-store fsck -data <backup>`, and restore by starting the store on a copy of it. Event deliveries that were pending are not part of a backup, so they are not sent again. Backups are recorded in the audit trail.
+- **Helm.** Set `cairn.store.backups.enabled` for a second volume.
+
+**Limits.** This release runs on one node: there is no replication, so the volume and its backups are the only copies. Keep backups on other storage, or take volume snapshots. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
 
 **Quotas and the admin API.** Cairn's admin API for the store lives under `/-/admin/v1/`. Requests are signed with SigV4 by an admin key, so any AWS SDK signer works; bodies and responses are JSON.
 

@@ -435,6 +435,23 @@ pub struct Engine {
     db: Database,
     fsync: bool,
     gc_lock: Mutex<()>,
+    /// Backups in progress: while any runs, blobs are not deleted (their snapshot may still need them).
+    backups: std::sync::atomic::AtomicUsize,
+}
+
+/// What a backup did.
+#[derive(Debug, Default, Serialize)]
+pub struct BackupReport {
+    pub path: String,
+    pub buckets: u64,
+    pub objects: u64,
+    pub versions: u64,
+    pub blobs: u64,
+    pub bytes: u64,
+    /// Blobs hard-linked from the previous backup instead of copied.
+    pub blobs_linked: u64,
+    pub audit_entries: u64,
+    pub millis: u64,
 }
 
 /// Writes the bytes of one segment. `seal` makes them durable; dropping an unsealed writer discards them.
@@ -624,7 +641,7 @@ impl Engine {
             fs::create_dir_all(&d)?;
         }
         let db = Database::create(dir.join("index.redb"))?;
-        let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()) };
+        let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()), backups: Default::default() };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
         tx.open_table(OBJECTS)?;
@@ -830,6 +847,9 @@ impl Engine {
 
     /// Deletes blobs queued for collection.
     fn collect(&self) {
+        if self.backups.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return; // a backup may still copy these; they are collected after it
+        }
         let _guard = self.gc_lock.lock().unwrap();
         let ids: Vec<String> = (|| -> Result<Vec<String>> {
             let r = self.db.begin_read()?;
@@ -1932,6 +1952,112 @@ impl Engine {
             self.collect();
         }
         Ok(obj)
+    }
+
+    /// Writes a consistent backup of the store to `dest` (a new directory): the index as of one read
+    /// snapshot and every blob that snapshot refers to. Blobs found in `link_from` (an earlier backup) are
+    /// hard-linked instead of copied, as blobs never change. The backup is itself a data directory: a
+    /// store started on it (or on a copy) has everything up to the snapshot. Writers are not blocked;
+    /// deleted blobs are kept until the backup is done. Event deliveries pending at the snapshot are not
+    /// included, so a restored store does not send them again.
+    pub fn backup(&self, dest: &Path, link_from: Option<&Path>) -> Result<BackupReport> {
+        use std::sync::atomic::Ordering;
+        struct Running<'a>(&'a std::sync::atomic::AtomicUsize);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        let started = std::time::Instant::now();
+        if dest.exists() {
+            return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", dest.display()))));
+        }
+        self.backups.fetch_add(1, Ordering::SeqCst);
+        let _running = Running(&self.backups);
+        let mut rep = BackupReport { path: dest.display().to_string(), ..Default::default() };
+        let work = dest.with_extension("partial");
+        let _ = fs::remove_dir_all(&work);
+        for d in [work.clone(), work.join("blobs"), work.join("tmp")] {
+            fs::create_dir_all(&d)?;
+        }
+        let out = Database::create(work.join("index.redb"))?;
+        let mut blobs: HashSet<String> = HashSet::new();
+        {
+            let r = self.db.begin_read()?;
+            let w = out.begin_write()?;
+            macro_rules! copy {
+                ($t:expr, $kty:ty, $vty:ty, $on:expr) => {{
+                    let src = r.open_table($t)?;
+                    let mut dst = w.open_table($t)?;
+                    for row in src.iter()? {
+                        let (k, v) = row?;
+                        let (k, v): ($kty, $vty) = (k.value(), v.value());
+                        #[allow(clippy::redundant_closure_call)]
+                        ($on)(&k, &v)?;
+                        dst.insert(k, v)?;
+                    }
+                }};
+            }
+            let mut on_object = |o: &[u8]| -> Result<()> {
+                let o: Object = serde_json::from_slice(o)?;
+                blobs.extend(o.segments.into_iter().map(|s| s.blob));
+                Ok(())
+            };
+            copy!(BUCKETS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> {
+                rep.buckets += 1;
+                Ok(())
+            });
+            copy!(OBJECTS, (&str, &str), &[u8], |_: &(&str, &str), v: &&[u8]| -> Result<()> {
+                rep.objects += 1;
+                on_object(v)
+            });
+            copy!(VERSIONS, (&str, &str, &str), &[u8], |_: &(&str, &str, &str), v: &&[u8]| -> Result<()> {
+                rep.versions += 1;
+                on_object(v)
+            });
+            copy!(PARTS, (&str, u32), &[u8], |_: &(&str, u32), v: &&[u8]| -> Result<()> {
+                let p: Part = serde_json::from_slice(v)?;
+                blobs.insert(p.blob);
+                Ok(())
+            });
+            copy!(UPLOADS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> { Ok(()) });
+            copy!(CONFIG, (&str, &str), &[u8], |_: &(&str, &str), _: &&[u8]| -> Result<()> { Ok(()) });
+            copy!(META, &str, u64, |_: &&str, _: &u64| -> Result<()> { Ok(()) });
+            copy!(USAGE, &str, (u64, u64), |_: &&str, _: &(u64, u64)| -> Result<()> { Ok(()) });
+            copy!(AUDIT, u64, &[u8], |_: &u64, _: &&[u8]| -> Result<()> {
+                rep.audit_entries += 1;
+                Ok(())
+            });
+            w.open_table(GC)?;
+            w.open_table(OUTBOX)?;
+            w.commit()?;
+        }
+        drop(out);
+        for id in &blobs {
+            let src = self.blob_path(id);
+            let rel = src.strip_prefix(&self.dir).map_err(|e| Error::Index(e.to_string()))?.to_path_buf();
+            let dst = work.join(&rel);
+            fs::create_dir_all(dst.parent().unwrap())?;
+            let linked = link_from.map(|p| p.join(&rel)).filter(|p| p.exists()).is_some_and(|p| fs::hard_link(&p, &dst).is_ok());
+            if linked {
+                rep.blobs_linked += 1;
+            } else {
+                fs::copy(&src, &dst)?;
+                if self.fsync {
+                    File::open(&dst)?.sync_all()?;
+                }
+            }
+            rep.blobs += 1;
+            rep.bytes += fs::metadata(&dst)?.len();
+        }
+        if self.fsync {
+            File::open(&work)?.sync_all()?;
+        }
+        fs::rename(&work, dest)?;
+        rep.millis = started.elapsed().as_millis() as u64;
+        drop(_running);
+        self.collect(); // what was kept for the backup can go now
+        Ok(rep)
     }
 
     /// Counts buckets, objects, stored bytes and open uploads.

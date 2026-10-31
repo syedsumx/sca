@@ -44,6 +44,10 @@ spec:
               value: {{ $u.domain | quote }}
             - name: CAIRN_STORE_BUCKETS
               value: {{ join "," $u.buckets | quote }}
+            {{- if $u.backups.enabled }}
+            - name: CAIRN_STORE_BACKUP_DIR
+              value: /backups
+            {{- end }}
             - name: CAIRN_STORE_BLOCK_PUBLIC_ACCESS
               value: {{ $u.blockPublicAccess | toString | quote }}
             {{- if $u.pdp.enabled }}
@@ -113,6 +117,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- if $u.backups.enabled }}
+            - name: backups
+              mountPath: /backups
+            {{- end }}
             {{- if $u.extraCredentialsSecret }}
             - name: credentials
               mountPath: /etc/cairn-store
@@ -189,6 +197,18 @@ spec:
         resources:
           requests:
             storage: {{ $u.persistence.size }}
+    {{- if $u.backups.enabled }}
+    - metadata:
+        name: backups
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with $u.backups.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.backups.size }}
+    {{- end }}
 ---
 {{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
 {{- end }}

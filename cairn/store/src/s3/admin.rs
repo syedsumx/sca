@@ -134,6 +134,57 @@ impl Server {
                 }
                 Ok(json_resp(StatusCode::OK, json!({"entries": entries, "head": entries.last().map(|en| en.hash.clone())})))
             }
+            (&Method::GET, ["backups"]) => {
+                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
+                let mut names: Vec<String> = std::fs::read_dir(root)
+                    .map_err(|_| e::INTERNAL.clone())?
+                    .filter_map(|d| d.ok())
+                    .filter(|d| d.path().is_dir() && d.path().extension().is_none_or(|x| x != "partial"))
+                    .map(|d| d.file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                Ok(json_resp(StatusCode::OK, json!({"root": root.display().to_string(), "backups": names})))
+            }
+            (&Method::POST, ["backups"]) => {
+                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
+                let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
+                let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+                let ok = !name.is_empty()
+                    && name.len() <= 64
+                    && !name.starts_with('.')
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c));
+                if !ok {
+                    return Err(e::BACKUP_NAME.clone());
+                }
+                // The newest earlier backup: unchanged blobs are hard-linked from it.
+                let previous = std::fs::read_dir(root)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|d| d.ok())
+                    .filter(|d| d.path().is_dir() && d.path().extension().is_none_or(|x| x != "partial"))
+                    .filter_map(|d| d.metadata().and_then(|m| m.modified()).ok().map(|t| (t, d.path())))
+                    .max()
+                    .map(|(_, p)| p);
+                let report = self.eng.backup(&root.join(name), previous.as_deref())?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "backup.create".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: name.to_string(),
+                    details: json!({"objects": report.objects, "versions": report.versions, "bytes": report.bytes, "blobs_linked": report.blobs_linked}),
+                };
+                self.eng.append_audit(&audit)?;
+                tracing::info!(
+                    name,
+                    objects = report.objects,
+                    bytes = report.bytes,
+                    linked = report.blobs_linked,
+                    ms = report.millis,
+                    "backup written"
+                );
+                Ok(json_resp(StatusCode::CREATED, serde_json::to_value(report).map_err(|_| e::INTERNAL.clone())?))
+            }
             (&Method::GET, ["buckets"]) => {
                 let mut out = vec![];
                 for b in self.eng.list_buckets()? {

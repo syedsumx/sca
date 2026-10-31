@@ -422,3 +422,39 @@ fn usage_counters_match_a_full_recount_and_quotas_hold() {
     let rep = e.recover().unwrap();
     assert_eq!((rep.unreferenced_blobs_removed, rep.objects_with_missing_blobs), (0, 0));
 }
+
+#[test]
+fn backups_are_complete_incremental_and_safe_against_concurrent_deletes() {
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path().join("live"), false).unwrap();
+    e.create_bucket("b").unwrap();
+    e.set_versioning("b", "Enabled").unwrap();
+    let v1 = put_v(&e, "b", "k", b"one", &Condition::default()).unwrap();
+    put(&e, "b", "k", b"two", &Condition::default()).unwrap();
+    put(&e, "b", "other", b"x", &Condition::default()).unwrap();
+    let r1 = e.backup(&dir.path().join("b1"), None).unwrap();
+    assert_eq!((r1.buckets, r1.objects, r1.versions, r1.blobs, r1.blobs_linked), (1, 2, 1, 3, 0));
+    // A second backup links what it shares with the first.
+    put(&e, "b", "new", b"new", &Condition::default()).unwrap();
+    let r2 = e.backup(&dir.path().join("b2"), Some(&dir.path().join("b1"))).unwrap();
+    assert_eq!((r2.blobs, r2.blobs_linked), (4, 3));
+    // Blobs are not deleted while a backup runs (its snapshot may still need them).
+    e.backups.fetch_add(1, Ordering::SeqCst);
+    let before = blob_count(&dir.path().join("live"));
+    e.delete_version("b", "k", &v1.version_id, false).unwrap();
+    assert_eq!(blob_count(&dir.path().join("live")), before);
+    e.backups.fetch_sub(1, Ordering::SeqCst);
+    e.collect();
+    assert_eq!(blob_count(&dir.path().join("live")), before - 1);
+    // A backup is a data directory: a store opened on it has everything.
+    drop(e);
+    let restored = Engine::open(dir.path().join("b1"), false).unwrap();
+    assert_eq!(read(&restored, "b", "k"), b"two");
+    assert_eq!(read_v(&restored, "b", "k", &v1.version_id), b"one");
+    let rep = restored.recover().unwrap();
+    assert_eq!((rep.objects_with_missing_blobs, rep.unreferenced_blobs_removed), (0, 0));
+    assert_eq!(restored.usage("b").unwrap(), (3 + 3 + 1, 3));
+    assert!(Engine::open(dir.path().join("live"), false).unwrap().backup(&dir.path().join("b1"), None).is_err());
+    // exists
+}

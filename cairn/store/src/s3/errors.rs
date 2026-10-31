@@ -133,6 +133,8 @@ errors! {
     EVENT_TARGET_UNKNOWN = "InvalidArgument", 400, "Unable to validate the following destination configurations: the target is not one of this store's event targets.";
     EVENT_NAME_UNSUPPORTED = "InvalidArgument", 400, "The notification configuration names an event type this store does not emit.";
     LOGGING_TARGET = "InvalidTargetBucketForLogging", 400, "The target bucket for logging does not exist.";
+    BACKUPS_OFF = "NotImplemented", 501, "Backups are off: set CAIRN_STORE_BACKUP_DIR.";
+    BACKUP_NAME = "InvalidArgument", 400, "A backup name is 1-64 letters, digits, '.', '_' or '-' (not starting with '.').";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";

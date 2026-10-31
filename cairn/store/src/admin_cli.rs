@@ -7,6 +7,8 @@
 //! cairn-store admin quota <name> [--max-bytes N] [--max-objects N]
 //! cairn-store admin quota-remove <name>
 //! cairn-store admin audit [--after SEQ] [--jsonl]
+//! cairn-store admin backup <name>         (an online backup under CAIRN_STORE_BACKUP_DIR)
+//! cairn-store admin backups
 //! ```
 //!
 //! Endpoint: `CAIRN_STORE_ENDPOINT` (default: this store's listen address, http or https as configured);
@@ -60,7 +62,7 @@ pub fn sign(method: &str, url: &str, body: &[u8], ak: &str, sk: &str, region: &s
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl]");
+    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups");
     std::process::exit(2)
 }
 
@@ -81,6 +83,10 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             ("PUT", format!("buckets/{}/quota", name()), Some(body))
         }
         "quota-remove" => ("DELETE", format!("buckets/{}/quota", name()), None),
+        "backup" => {
+            ("POST", "backups".to_string(), Some(serde_json::json!({"name": rest.first().map(|s| s.as_str()).unwrap_or_else(|| usage())})))
+        }
+        "backups" => ("GET", "backups".to_string(), None),
         "audit" => {
             let after = flag("--after").unwrap_or_else(|| "0".into());
             let fmt = if rest.iter().any(|a| a.as_str() == "--jsonl") { "&format=jsonl" } else { "" };
