@@ -92,6 +92,8 @@ pub enum Error {
     Index(String),
     /// Not enough cluster nodes to place a blob (retryable).
     Unavailable(String),
+    /// A replica older than what is already here (two-way sync): dropped.
+    Stale,
 }
 
 impl std::fmt::Display for Error {
@@ -287,6 +289,9 @@ pub struct Ev {
     pub lifecycle: bool,
     /// Record this in the audit trail, in the same transaction as the change.
     pub audit: Option<Audit>,
+    /// A replica from another site (two-way sync), with the source's modification time: it is stored as
+    /// a REPLICA, is not replicated again, and gives way to a newer version already here.
+    pub replica: Option<u64>,
 }
 
 /// A bucket's notification rule (configuration kind "notification").
@@ -385,6 +390,9 @@ pub struct OutboxEntry {
     pub request_id: String,
     #[serde(default)]
     pub attempts: u32,
+    /// The version's (or delete marker's) modification time.
+    #[serde(default)]
+    pub modified: u64,
     /// Do not retry before (ms).
     #[serde(default)]
     pub next_at: u64,
@@ -544,6 +552,16 @@ pub struct Engine {
     /// Cluster mode: this node's name, and the cluster.
     node: Option<String>,
     cluster: std::sync::RwLock<Option<std::sync::Arc<dyn ClusterStore>>>,
+}
+
+/// Keeps deleted blobs on disk while it lives (see `Engine::hold_collection`).
+pub struct CollectionHold<'a>(&'a Engine);
+
+impl Drop for CollectionHold<'_> {
+    fn drop(&mut self) {
+        self.0.backups.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.0.collect();
+    }
 }
 
 /// What a backup did.
@@ -1042,23 +1060,9 @@ impl Engine {
     fn emit(tx: &WriteTransaction<'_>, bucket: &str, event: &str, o: &Object, ev: &Ev) -> Result<()> {
         let name = format!("s3:{event}");
         // Bucket replication: new versions and (when enabled) delete markers go to the rule's destination.
-        if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle {
-            if let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "replication"))?.map(|v| v.value().to_vec()) {
-                let cfg: ReplConfig = serde_json::from_slice(&doc)?;
-                if let Some(rule) = cfg.rule_for(o) {
-                    let target = format!("{REPLICATE}{}:{}", cfg.target, rule.dest_bucket);
-                    Self::outbox_in(tx, bucket, &target, &rule.id, &name, o, ev)?;
-                    if !o.delete_marker {
-                        let mut t = tx.open_table(OBJECTS)?;
-                        let cur = Self::current_in(&t, bucket, &o.key)?;
-                        if let Some(mut c) = cur.filter(|c| c.version_id == o.version_id) {
-                            c.replication_status = "PENDING".into();
-                            let v = serde_json::to_vec(&c)?;
-                            t.insert((bucket, o.key.as_str()), v.as_slice())?;
-                        }
-                    }
-                }
-            }
+        // Replicas from another site are not replicated again (two-way sync without ping-pong).
+        if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle && ev.replica.is_none() {
+            Self::queue_replication(tx, bucket, &name, o, ev)?;
         }
         let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "notification"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
         let rules: Vec<NotifyRule> = serde_json::from_slice(&doc)?;
@@ -1066,6 +1070,74 @@ impl Engine {
             Self::outbox_in(tx, bucket, &r.target, &r.id, &name, o, ev)?;
         }
         Ok(())
+    }
+
+    /// Queues a version (or delete marker) for the bucket's replication rule that matches it. Returns
+    /// whether one did.
+    fn queue_replication(tx: &WriteTransaction<'_>, bucket: &str, name: &str, o: &Object, ev: &Ev) -> Result<bool> {
+        let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "replication"))?.map(|v| v.value().to_vec()) else { return Ok(false) };
+        let cfg: ReplConfig = serde_json::from_slice(&doc)?;
+        let Some(rule) = cfg.rule_for(o) else { return Ok(false) };
+        let target = format!("{REPLICATE}{}:{}", cfg.target, rule.dest_bucket);
+        Self::outbox_in(tx, bucket, &target, &rule.id, name, o, ev)?;
+        if !o.delete_marker {
+            let mut t = tx.open_table(OBJECTS)?;
+            let cur = Self::current_in(&t, bucket, &o.key)?;
+            if let Some(mut c) = cur.filter(|c| c.version_id == o.version_id) {
+                c.replication_status = "PENDING".into();
+                let v = serde_json::to_vec(&c)?;
+                t.insert((bucket, o.key.as_str()), v.as_slice())?;
+            }
+        }
+        Ok(true)
+    }
+
+    /// Queues every current version of a bucket that is not itself a replica for replication (objects
+    /// written before replication was configured). Returns how many were queued.
+    pub fn resync_replication(&self, bucket: &str, audit: Option<&Audit>) -> Result<u64> {
+        let tx = self.begin_write()?;
+        Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
+        if tx.open_table(CONFIG)?.get((bucket, "replication"))?.is_none() {
+            return Err(Error::NoSuchKey);
+        }
+        let current: Vec<Object> = {
+            let t = tx.open_table(OBJECTS)?;
+            let mut out = vec![];
+            for row in t.range((bucket, "")..)? {
+                let (k, v) = row?;
+                if k.value().0 != bucket {
+                    break;
+                }
+                let o: Object = serde_json::from_slice(v.value())?;
+                if o.replication_status != "REPLICA" {
+                    out.push(o);
+                }
+            }
+            out
+        };
+        let mut n = 0;
+        for o in &current {
+            if Self::queue_replication(&tx, bucket, "s3:ObjectCreated:Put", o, &Ev::default())? {
+                n += 1;
+            }
+        }
+        if let Some(a) = audit {
+            let mut a = a.clone();
+            a.details["queued"] = n.into();
+            Self::audit_in(&tx, &a)?;
+        }
+        tx.commit()?;
+        Ok(n)
+    }
+
+    /// For a replica: is a version at least as new already here (the current one, or a newer delete
+    /// marker)? Ties go to the larger ETag, so both sites settle on the same version.
+    fn stale_in(tx: &WriteTransaction<'_>, bucket: &str, key: &str, cur: Option<&Object>, t: u64, etag: &str) -> Result<bool> {
+        if let Some(c) = cur {
+            return Ok((c.modified, c.etag.as_str()) >= (t, etag));
+        }
+        let newest = Self::versions_in(&tx.open_table(VERSIONS)?, bucket, key)?.into_iter().next();
+        Ok(newest.is_some_and(|(_, v)| v.delete_marker && v.modified >= t))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1089,6 +1161,7 @@ impl Engine {
                 source_ip: ev.source_ip.clone(),
                 request_id: ev.request_id.clone(),
                 attempts: 0,
+                modified: o.modified,
                 next_at: 0,
             };
             let v = serde_json::to_vec(&entry)?;
@@ -1628,7 +1701,11 @@ impl Engine {
         self.put_object_ev(bucket, obj, cond, &Ev::default())
     }
 
-    pub fn put_object_ev(&self, bucket: &str, obj: Object, cond: &Condition, ev: &Ev) -> Result<Object> {
+    pub fn put_object_ev(&self, bucket: &str, mut obj: Object, cond: &Condition, ev: &Ev) -> Result<Object> {
+        if let Some(t) = ev.replica {
+            obj.modified = t;
+            obj.replication_status = "REPLICA".into();
+        }
         let segs = obj.segments.clone();
         let res = (|| -> Result<(Object, Vec<Segment>)> {
             let tx = self.begin_write()?;
@@ -1636,6 +1713,9 @@ impl Engine {
                 let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
                 let cur = Self::current_in(&tx.open_table(OBJECTS)?, bucket, &obj.key)?;
                 check_condition(cur.as_ref(), cond)?;
+                if ev.replica.is_some() && Self::stale_in(&tx, bucket, &obj.key, cur.as_ref(), obj.modified, &obj.etag)? {
+                    return Err(Error::Stale);
+                }
                 let before = Self::usage_tx(&tx, bucket)?;
                 let out = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
                 Self::queue_gc(&tx, bucket, &out.1)?;
@@ -1899,6 +1979,12 @@ impl Engine {
                     _ => return Err(Error::PreconditionFailed),
                 }
             }
+            // A replicated delete gives way to a newer version written here.
+            if let Some(ts) = ev.replica {
+                if cur.as_ref().is_some_and(|o| o.modified > ts) {
+                    return Err(Error::Stale);
+                }
+            }
             let mut garbage = vec![];
             let out = match info.versioning.as_str() {
                 "" => {
@@ -1924,7 +2010,14 @@ impl Engine {
                     if mode == "Suspended" {
                         garbage.extend(Self::drop_null_version(&tx, bucket, key)?);
                     }
-                    let marker = Object { key: key.into(), modified: now_ms(), version_id: vid, delete_marker: true, ..Default::default() };
+                    let marker = Object {
+                        key: key.into(),
+                        modified: ev.replica.unwrap_or_else(now_ms),
+                        version_id: vid,
+                        delete_marker: true,
+                        replication_status: if ev.replica.is_some() { "REPLICA".into() } else { String::new() },
+                        ..Default::default()
+                    };
                     let order = Self::next_order(&tx)?;
                     let v = serde_json::to_vec(&marker)?;
                     tx.open_table(VERSIONS)?.insert((bucket, key, order.as_str()), v.as_slice())?;
@@ -2553,6 +2646,14 @@ impl Engine {
                 },
                 ..Default::default()
             };
+            let mut obj = obj;
+            if let Some(t) = ev.replica {
+                obj.modified = t;
+                obj.replication_status = "REPLICA".into();
+                if Self::stale_in(&tx, bucket, key, cur.as_ref(), t, &obj.etag)? {
+                    return Err(Error::Stale);
+                }
+            }
             let before = Self::usage_tx(&tx, bucket)?;
             let (obj, mut garbage) = Self::install(&tx, &info.versioning, bucket, obj, cur)?;
             // The chosen parts' bytes were counted when they were uploaded; they are now the object's.
@@ -2582,32 +2683,23 @@ impl Engine {
     /// store started on it (or on a copy) has everything up to the snapshot. Writers are not blocked;
     /// deleted blobs are kept until the backup is done. Event deliveries pending at the snapshot are not
     /// included, so a restored store does not send them again.
-    pub fn backup(&self, dest: &Path, link_from: Option<&Path>) -> Result<BackupReport> {
+    /// Holds blob collection (deleted blobs are kept) until the returned guard is dropped: for backups,
+    /// which read blobs after their index snapshot.
+    pub fn hold_collection(&self) -> CollectionHold<'_> {
+        self.backups.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        CollectionHold(self)
+    }
+
+    /// Writes a consistent copy of the index (as of one moment, without pending event deliveries) to an
+    /// embedded index file at `index`, and returns the blobs it refers to on this disk (blob files, and
+    /// packs with the length they had). Hold collection (`hold_collection`) until those are copied.
+    pub fn snapshot_index(&self, index: &Path, rep: &mut BackupReport) -> Result<(HashSet<String>, Vec<(String, u64)>)> {
         if self.node.is_some() {
             return Err(Error::Index(
                 "online backups cover one disk; in a cluster, back up the PostgreSQL metadata database and keep enough copies".into(),
             ));
         }
-        use std::sync::atomic::Ordering;
-        struct Running<'a>(&'a std::sync::atomic::AtomicUsize);
-        impl Drop for Running<'_> {
-            fn drop(&mut self) {
-                self.0.fetch_sub(1, Ordering::SeqCst);
-            }
-        }
-        let started = std::time::Instant::now();
-        if dest.exists() {
-            return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", dest.display()))));
-        }
-        self.backups.fetch_add(1, Ordering::SeqCst);
-        let _running = Running(&self.backups);
-        let mut rep = BackupReport { path: dest.display().to_string(), ..Default::default() };
-        let work = dest.with_extension("partial");
-        let _ = fs::remove_dir_all(&work);
-        for d in [work.clone(), work.join("blobs"), work.join("tmp")] {
-            fs::create_dir_all(&d)?;
-        }
-        let out = redb::Database::create(work.join("index.redb"))?;
+        let out = redb::Database::create(index)?;
         let mut blobs: HashSet<String> = HashSet::new();
         {
             let r = self.db.begin_read()?;
@@ -2661,15 +2753,51 @@ impl Engine {
             w.commit()?;
         }
         drop(out);
-        // Packed blobs: their packs are copied whole (or linked from the previous backup when unchanged).
         let packs: HashSet<String> = blobs.iter().filter_map(|b| pack::parse(b).map(|(p, _, _)| p.to_string())).collect();
         blobs.retain(|b| !pack::is_packed(b));
-        for p in &packs {
+        let mut sized = vec![];
+        for p in packs {
+            let len = fs::metadata(self.pack_path(&p))?.len();
+            sized.push((p, len));
+        }
+        Ok((blobs, sized))
+    }
+
+    /// A blob file's path relative to a data directory.
+    pub fn blob_rel(id: &str) -> PathBuf {
+        PathBuf::from("blobs").join(&id[0..2]).join(&id[2..4]).join(id)
+    }
+
+    /// A blob file on this disk.
+    pub(crate) fn blob_file(&self, id: &str) -> PathBuf {
+        self.blob_path(id)
+    }
+
+    /// A pack file on this disk.
+    pub(crate) fn pack_file(&self, pack: &str) -> PathBuf {
+        self.pack_path(pack)
+    }
+
+    pub fn backup(&self, dest: &Path, link_from: Option<&Path>) -> Result<BackupReport> {
+        let started = std::time::Instant::now();
+        if dest.exists() {
+            return Err(Error::Io(io::Error::new(io::ErrorKind::AlreadyExists, format!("{} exists", dest.display()))));
+        }
+        let _running = self.hold_collection();
+        let mut rep = BackupReport { path: dest.display().to_string(), ..Default::default() };
+        let work = dest.with_extension("partial");
+        let _ = fs::remove_dir_all(&work);
+        for d in [work.clone(), work.join("blobs"), work.join("tmp")] {
+            fs::create_dir_all(&d)?;
+        }
+        let (blobs, packs) = self.snapshot_index(&work.join("index.redb"), &mut rep)?;
+        // Packed blobs: their packs are copied whole (or linked from the previous backup when unchanged).
+        for (p, size) in &packs {
+            let size = *size;
             let src = self.pack_path(p);
             let rel = src.strip_prefix(&self.dir).map_err(|e| Error::Index(e.to_string()))?.to_path_buf();
             let dst = work.join(&rel);
             fs::create_dir_all(dst.parent().unwrap())?;
-            let size = fs::metadata(&src)?.len();
             let linked = link_from
                 .map(|l| l.join(&rel))
                 .filter(|l| fs::metadata(l).is_ok_and(|m| m.len() == size))

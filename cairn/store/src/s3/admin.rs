@@ -8,6 +8,7 @@
 //! GET    /-/admin/v1/buckets/{bucket}          one bucket
 //! PUT    /-/admin/v1/buckets/{bucket}/quota    {"max_bytes": n, "max_objects": n} (either or both)
 //! DELETE /-/admin/v1/buckets/{bucket}/quota
+//! POST   /-/admin/v1/buckets/{bucket}/replication/resync  queue the bucket's existing objects for replication
 //! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
 //! GET    /-/admin/v1/keys                      access keys (never their secrets)
 //! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
@@ -221,6 +222,21 @@ impl Server {
                 Ok(json_resp(StatusCode::OK, json!({"buckets": out})))
             }
             (&Method::GET, ["buckets", b]) => Ok(json_resp(StatusCode::OK, self.bucket_json(b)?)),
+            (&Method::POST, ["buckets", b, "replication", "resync"]) => {
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "replication.resync".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                let n = match self.eng.resync_replication(b, Some(&audit)) {
+                    Err(crate::engine::Error::NoSuchKey) => return Err(e::NO_SUCH_REPLICATION.clone()),
+                    other => other?,
+                };
+                tracing::info!(bucket = %b, queued = n, admin = %a.cred.access_key, "replication resync");
+                Ok(json_resp(StatusCode::OK, json!({"bucket": b, "queued": n})))
+            }
             (&Method::PUT, ["buckets", b, "quota"]) => {
                 let q: Quota = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
                 if q.max_bytes.is_none() && q.max_objects.is_none() {

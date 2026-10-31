@@ -192,6 +192,7 @@ impl From<crate::engine::Error> for ApiError {
                 tracing::error!(error = %e, "index");
                 INTERNAL.clone()
             }
+            E::Stale => PRECONDITION.clone(),
             E::Unavailable(e) => {
                 tracing::warn!(error = %e, "cluster");
                 UNAVAILABLE.clone()

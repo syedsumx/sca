@@ -253,6 +253,7 @@ impl Server {
             request_id: c.request_id.clone(),
             lifecycle: false,
             audit: None,
+            replica: None,
         }
     }
 

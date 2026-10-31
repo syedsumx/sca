@@ -231,15 +231,20 @@ impl Server {
             "DeleteObject" => {
                 let if_match = c.header("if-match");
                 let bypass = self.bypass_governance(c, &c.key).await?;
+                let replica = if c.q("versionId").is_empty() { self.replica_of(c, "s3:ReplicateDelete").await? } else { None };
                 let mut ev = self.ev(c, "");
+                ev.replica = replica;
                 if bypass {
                     ev.audit =
                         Some(self.audit_rec(c, "object.delete.bypass_governance", serde_json::json!({"version_id": c.q("versionId")})));
                 }
-                let d = blocking(|| match c.q("versionId") {
+                let d = match blocking(|| match c.q("versionId") {
                     "" => self.eng.delete_object_ev(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match), &ev),
                     v => self.eng.delete_version_ev(&c.bucket, &c.key, v, bypass, &ev),
-                })?;
+                }) {
+                    Err(engine::Error::Stale) => return Ok(replica_skipped()),
+                    other => other?,
+                };
                 let mut r = empty(StatusCode::NO_CONTENT);
                 if let Some(v) = &d.version_id {
                     set_header(&mut r, "x-amz-version-id", v);
@@ -588,11 +593,28 @@ impl Server {
 
     // --------------------------------------------------------------------------------- objects
 
+    /// A replica from another site (two-way sync): `x-cairn-replica: <source modification time, ms>`.
+    /// Writing one takes `action` (s3:ReplicateObject or s3:ReplicateDelete); a time more than five
+    /// minutes ahead is refused, so a skewed clock cannot win every conflict.
+    async fn replica_of(&self, c: &Ctx, action: &str) -> Result<Option<u64>, ApiError> {
+        let v = c.header("x-cairn-replica");
+        if v.is_empty() {
+            return Ok(None);
+        }
+        let t: u64 = v.parse().map_err(|_| e::INVALID_ARGUMENT.clone())?;
+        if t > engine::now_ms() + 300_000 {
+            return Err(e::INVALID_ARGUMENT.clone());
+        }
+        self.authorize(c, action, &c.bucket, &c.key).await?;
+        Ok(Some(t))
+    }
+
     async fn put_object<B>(&self, c: &Ctx, body: B) -> R
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
     {
+        let replica = self.replica_of(c, "s3:ReplicateObject").await?;
         let (ct, hs, um) = object_headers(c);
         if meta_too_large(&um) {
             return Err(e::METADATA_TOO_LARGE.clone());
@@ -629,7 +651,12 @@ impl Server {
             sse,
             ..Default::default()
         };
-        let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &cond_of(c), &self.ev(c, "Put")))?;
+        let mut ev = self.ev(c, "Put");
+        ev.replica = replica;
+        let stored = match blocking(|| self.eng.put_object_ev(&c.bucket, obj, &cond_of(c), &ev)) {
+            Err(engine::Error::Stale) => return Ok(replica_skipped()),
+            other => other?,
+        };
         let mut r = empty(StatusCode::OK);
         Self::sse_headers(&mut r, &stored.sse);
         set_header(&mut r, "etag", &format!("\"{}\"", stored.etag));
@@ -1048,6 +1075,7 @@ impl Server {
         B::Error: std::fmt::Display,
     {
         let id = c.q("uploadId").to_string();
+        let replica = self.replica_of(c, "s3:ReplicateObject").await?;
         let doc = self.read_small(c, body, 8 << 20).await?;
         let root = xml::parse(&String::from_utf8_lossy(&doc))
             .filter(|r| r.name == "CompleteMultipartUpload")
@@ -1071,7 +1099,7 @@ impl Server {
         if requested.is_empty() {
             return Err(e::MALFORMED_XML.clone());
         }
-        let obj = blocking(|| -> Result<Object, ApiError> {
+        let obj = blocking(|| -> Result<engine::Result<Object>, ApiError> {
             let u = self.eng.get_upload(&c.bucket, &c.key, &id)?;
             let (all, _) = self.eng.list_parts(&c.bucket, &c.key, &id, 0, engine::MAX_PARTS as usize)?;
             let have: BTreeMap<u32, &Part> = all.iter().map(|p| (p.number, p)).collect();
@@ -1124,7 +1152,8 @@ impl Server {
             }
             let want: Vec<CompletePart> = requested.iter().map(|(n, etag, _)| CompletePart { number: *n, etag: etag.clone() }).collect();
             let ctype = u.checksum_type.clone();
-            let ev = self.ev(c, "CompleteMultipartUpload");
+            let mut ev = self.ev(c, "CompleteMultipartUpload");
+            ev.replica = replica;
             Ok(self.eng.complete_upload_ev(
                 &c.bucket,
                 &c.key,
@@ -1138,8 +1167,16 @@ impl Server {
                     Ok((checksums, ctype))
                 },
                 &ev,
-            )?)
+            ))
         })?;
+        let obj = match obj {
+            Err(engine::Error::Stale) => {
+                // A newer version is already here: the replicated upload is dropped.
+                let _ = blocking(|| self.eng.abort_upload(&c.bucket, &c.key, &id));
+                return Ok(replica_skipped());
+            }
+            other => other?,
+        };
         let versioning = blocking(|| self.eng.head_bucket(&c.bucket)).map(|b| b.versioning).unwrap_or_default();
         let mut w = Writer::new("CompleteMultipartUploadResult");
         w.el("Location", format!("/{}/{}", c.bucket, c.key))
@@ -1452,6 +1489,13 @@ pub(crate) fn parse_range(h: &str, size: u64) -> Result<Option<(u64, u64)>, ApiE
         return Err(e::INVALID_RANGE.clone());
     }
     Ok(Some((start, end - start + 1)))
+}
+
+/// The answer to a replica that gave way to a newer version already here.
+fn replica_skipped() -> Resp {
+    let mut r = empty(StatusCode::OK);
+    set_header(&mut r, "x-cairn-replica", "skipped");
+    r
 }
 
 /// Streams an object's bytes from a blocking reader thread.

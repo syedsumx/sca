@@ -8,6 +8,10 @@
 //! once and in order, and retried until the destination takes them. Encrypted objects are decrypted and
 //! sent over the connection (use https endpoints); the destination applies its own encryption. Objects
 //! encrypted with customer keys (SSE-C) cannot be read by the store and are marked FAILED.
+//!
+//! Two-way sync: copies carry `x-cairn-replica: <the version's modification time>`. The destination stores
+//! them as REPLICA with that time, never replicates them again, and drops one that is older than the
+//! version it already has (the newer write wins on both sides). `resync` queues a bucket's existing objects.
 
 use std::collections::BTreeMap;
 use std::io::Read;
@@ -306,7 +310,8 @@ impl Server {
             rep.targets.get(target).ok_or_else(|| Failure::Permanent(format!("replication target {target} is no longer configured")))?;
         let path = object_path(dest_bucket, &ent.key);
         if ent.event.ends_with("DeleteMarkerCreated") {
-            rep.send(t, "DELETE", &path, &[], small(Bytes::new()), Some(b"")).await?;
+            let h = [("x-cairn-replica".to_string(), ent.modified.max(1).to_string())];
+            rep.send(t, "DELETE", &path, if ent.modified > 0 { &h[..] } else { &[] }, small(Bytes::new()), Some(b"")).await?;
             return Ok(());
         }
         let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
@@ -350,6 +355,9 @@ impl Server {
         }
         let key = self.unwrap_key(src_bucket, obj).map_err(|e| Failure::Retry(e.message.to_string()))?;
         let mut headers: Vec<(String, String)> = vec![("content-type".into(), obj.content_type.clone())];
+        // Marks the copy as a replica with this version's time: the destination does not replicate it
+        // again, and keeps a newer version of its own (two-way sync).
+        let replica = ("x-cairn-replica".to_string(), obj.modified.to_string());
         headers.extend(obj.headers.iter().map(|(k, v)| (k.clone(), v.clone())));
         headers.extend(obj.user_meta.iter().map(|(k, v)| (format!("x-amz-meta-{k}"), v.clone())));
         if !obj.tags.is_empty() {
@@ -374,6 +382,7 @@ impl Server {
         let locked = retained || obj.lock.legal_hold;
         if obj.size <= rep.multipart_above && (!locked || md5.is_some()) {
             let mut h = headers.clone();
+            h.push(replica.clone());
             h.push(("content-length".into(), obj.size.to_string()));
             if let (true, Some(m)) = (locked, md5) {
                 use base64::Engine as _;
@@ -433,7 +442,7 @@ impl Server {
             t,
             "POST",
             &format!("{path}?uploadId={}", super::auth::aws_encode(upload.as_bytes(), false)),
-            &[("content-type".into(), "application/xml".into())],
+            &[("content-type".into(), "application/xml".into()), replica],
             small(doc.clone()),
             Some(&doc),
         )

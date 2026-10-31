@@ -16,6 +16,7 @@
 //! cairn-store admin key-update <ak> [the same options]
 //! cairn-store admin key-rotate <ak>
 //! cairn-store admin key-delete <ak>
+//! cairn-store admin replication-resync <bucket>  (send objects written before replication was configured)
 //! cairn-store admin cluster                (nodes and blob health)
 //! cairn-store admin cluster-repair | cluster-rebalance [--limit N]
 //! cairn-store admin cluster-drain <node> | cluster-activate <node> | cluster-remove <node>
@@ -131,6 +132,7 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);
             ("POST", "compact".to_string(), Some(serde_json::json!({"min_dead": min})))
         }
+        "replication-resync" => ("POST", format!("buckets/{}/replication/resync", name()), None),
         "cluster" => ("GET", "cluster".to_string(), None),
         "cluster-repair" => ("POST", "cluster/repair".to_string(), None),
         "cluster-rebalance" => {

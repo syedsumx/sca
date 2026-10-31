@@ -26,8 +26,15 @@ type R = Result<Resp, ApiError>;
 const MAX_RULES: usize = 1000;
 
 /// The event context of lifecycle actions.
-static LIFECYCLE: engine::Ev =
-    engine::Ev { kind: "", principal: String::new(), source_ip: String::new(), request_id: String::new(), lifecycle: true, audit: None };
+static LIFECYCLE: engine::Ev = engine::Ev {
+    kind: "",
+    principal: String::new(),
+    source_ip: String::new(),
+    request_id: String::new(),
+    lifecycle: true,
+    audit: None,
+    replica: None,
+};
 
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
