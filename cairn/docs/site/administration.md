@@ -423,7 +423,7 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Versioning.** Turn it on per bucket (`PutBucketVersioning`, `Enabled` or `Suspended`). Overwrites and deletes then keep the previous version. A delete adds a delete marker, and deleting the marker brings the object back. Any version can be read, copied, tagged or permanently deleted by its version ID; `ListObjectVersions` lists them all. Old versions count towards stored bytes until they are permanently deleted (or expired by a lifecycle rule, once those are supported). Reading or deleting a specific version needs the version permissions (`s3:GetObjectVersion`, `s3:DeleteObjectVersion`). MFA delete is not supported.
 
-**Lifecycle rules.** Each bucket can have lifecycle rules (`PutBucketLifecycleConfiguration`). Rules can expire current objects a number of days after they were written, or on a date. They can also remove delete markers that are the last thing left of an object, expire noncurrent versions (optionally keeping the newest few), and abort multipart uploads left unfinished. A rule can select objects by prefix, tags and size. The store applies the rules in the background, every `CAIRN_STORE_LIFECYCLE_INTERVAL` seconds (default 3600). It only expires the version it checked, so an object rewritten in the meantime is kept. Responses for objects that will expire carry `x-amz-expiration`. Metrics: `cairn_store_lifecycle_*_total`. Transitions to other storage classes are refused for now.
+**Lifecycle rules.** Each bucket can have lifecycle rules (`PutBucketLifecycleConfiguration`). Rules can expire current objects a number of days after they were written, or on a date. They can also remove delete markers that are the last thing left of an object, expire noncurrent versions (optionally keeping the newest few), and abort multipart uploads left unfinished. A rule can select objects by prefix, tags and size. The store applies the rules in the background, every `CAIRN_STORE_LIFECYCLE_INTERVAL` seconds (default 3600). It only expires the version it checked, so an object rewritten in the meantime is kept. Responses for objects that will expire carry `x-amz-expiration`. Rules can also move objects, or noncurrent versions, to a storage tier (below). Metrics: `cairn_store_lifecycle_*_total`.
 
 **Object lock.** Buckets created with object lock (`x-amz-bucket-object-lock-enabled: true`), or versioned buckets that get an object lock configuration, keep versions write-once:
 
@@ -464,6 +464,17 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 - **Delivery that keeps failing.** Events still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS` (default 168) are dropped and counted.
 - **Metrics.** `cairn_store_events_{delivered,failed,dropped}_total` and `cairn_store_events_pending`.
 - **Helm.** Put the targets file in a Secret and set `cairn.store.eventTargetsSecret`.
+
+**Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
+
+- **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.
+- **Rules.** `Transition` (after `Days` or on a `Date`) and `NoncurrentVersionTransition` (after `NoncurrentDays`) name a tier by its storage class. A rule naming any other class is refused with `InvalidStorageClass`. Expiration wins over a transition due at the same time.
+- **How data moves.** Each blob is copied to the tier exactly as it is stored on disk, so with encryption at rest the tier only ever holds ciphertext. The version's index entry then points at the tier, in one transaction and only if the version was not rewritten meanwhile. The local copy is then deleted. A failed copy is retried on the next pass.
+- **Reads** are transparent: `GetObject`, ranges, copies and replication fetch the bytes from the tier. `HeadObject` and listings report the storage class. Copying an object onto itself with `StorageClass=STANDARD` brings it back to the store's disk.
+- **Deletes.** Deleting a tiered version deletes its blobs in the tier, from the lifecycle worker; a tier that is down is retried.
+- **Writes** are always `STANDARD` (`REDUCED_REDUNDANCY` is accepted and stored as `STANDARD`). Any other `x-amz-storage-class` is refused: objects reach a tier only through a transition.
+- **Backups** do not copy tiered data. Protect the tier bucket with its own versioning or replication.
+- **Metrics.** `cairn_store_tier_transitions_total`, `_transitioned_bytes_total`, `_transition_failures_total`, `_reads_total`, `_deletes_total`.
 
 **Replication.** A bucket can copy its new objects to a bucket on another S3 endpoint (another Cairn Store, or any S3), set with `PutBucketReplication`.
 

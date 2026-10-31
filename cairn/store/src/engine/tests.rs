@@ -458,3 +458,58 @@ fn backups_are_complete_incremental_and_safe_against_concurrent_deletes() {
     assert!(Engine::open(dir.path().join("live"), false).unwrap().backup(&dir.path().join("b1"), None).is_err());
     // exists
 }
+
+/// An in-memory tier.
+#[derive(Default)]
+struct MemTier(Mutex<HashMap<String, Vec<u8>>>);
+
+impl TierStore for MemTier {
+    fn open(&self, tier: &str, blob: &str, offset: u64) -> io::Result<Box<dyn Read + Send>> {
+        let m = self.0.lock().unwrap();
+        let b = m.get(&format!("{tier}/{blob}")).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no blob"))?;
+        Ok(Box::new(io::Cursor::new(b[offset as usize..].to_vec())))
+    }
+    fn delete(&self, tier: &str, blob: &str) -> io::Result<()> {
+        self.0.lock().unwrap().remove(&format!("{tier}/{blob}"));
+        Ok(())
+    }
+}
+
+#[test]
+fn transitions_move_blobs_to_a_tier() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    let tier = Arc::new(MemTier::default());
+    e.set_tiers(tier.clone());
+    e.create_bucket("b").unwrap();
+    let data: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let o = put_v(&e, "b", "k", &data, &Condition::default()).unwrap();
+    assert_eq!(o.storage_class(), "STANDARD");
+    // Copy the blob as the S3 layer does, then swap the segments.
+    let mut bytes = vec![];
+    e.blob_file(&o.segments[0].blob).unwrap().read_to_end(&mut bytes).unwrap();
+    tier.0.lock().unwrap().insert(format!("STANDARD_IA/{}", o.segments[0].blob), bytes);
+    let mut new = o.segments.clone();
+    new[0].tier = "STANDARD_IA".into();
+    // A stale expectation changes nothing.
+    let mut stale = o.segments.clone();
+    stale[0].size += 1;
+    assert!(!e.transition("b", "k", &o.version_id, &stale, new.clone()).unwrap());
+    assert!(e.transition("b", "k", &o.version_id, &o.segments, new).unwrap());
+    assert_eq!(blob_count(dir.path()), 0, "the local blob is collected");
+    let got = e.get_object("b", "k").unwrap();
+    assert_eq!(got.storage_class(), "STANDARD_IA");
+    assert_eq!(read(&e, "b", "k"), data);
+    let mut part = vec![];
+    e.reader(&got, 70_000, 1000, None).unwrap().read_to_end(&mut part).unwrap();
+    assert_eq!(part, data[70_000..71_000]);
+    assert_eq!(e.usage("b").unwrap(), (data.len() as u64, 1), "tiered bytes still count");
+    // Recovery neither removes nor misses tiered blobs.
+    let rep = e.recover().unwrap();
+    assert_eq!(rep.objects_with_missing_blobs, 0);
+    // Deleting the object deletes its blob in the tier.
+    e.delete_object("b", "k", None).unwrap();
+    assert_eq!(tier.0.lock().unwrap().len(), 1);
+    assert_eq!(e.collect_tiered(), 1);
+    assert!(tier.0.lock().unwrap().is_empty());
+}

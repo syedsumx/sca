@@ -85,7 +85,8 @@ errors! {
     MALFORMED_POLICY_ACTION = "MalformedPolicy", 400, "Policy has invalid action";
     MALFORMED_POLICY_CONDITION = "MalformedPolicy", 400, "Policy has an invalid condition operator or key";
     PUBLIC_POLICY_BLOCKED = "AccessDenied", 403, "Public policies are blocked by the public access block for this bucket or store.";
-    LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Lifecycle transitions to other storage classes are not supported yet.";
+    LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Only one Transition and one NoncurrentVersionTransition per rule are supported, without NewerNoncurrentVersions.";
+    INVALID_STORAGE_CLASS = "InvalidStorageClass", 400, "The storage class you specified is not valid: objects are written as STANDARD, and a lifecycle transition may only name a storage class this store has a tier for.";
     LIFECYCLE_INVALID_DAYS = "InvalidArgument", 400, "Days, NoncurrentDays and DaysAfterInitiation must be positive integers.";
     LIFECYCLE_INVALID_DATE = "InvalidArgument", 400, "Date must be in ISO 8601 format and at midnight UTC.";
     LIFECYCLE_NO_ACTION = "InvalidRequest", 400, "At least one action needs to be specified in a rule.";

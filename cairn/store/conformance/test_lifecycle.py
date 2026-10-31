@@ -55,7 +55,7 @@ def test_lifecycle_configuration_round_trip(s3, bucket):
 
 @pytest.mark.parametrize("rule,err", [
     ({"ID": "t", "Status": "Enabled", "Filter": {"Prefix": ""},
-      "Transitions": [{"Days": 30, "StorageClass": "GLACIER"}]}, "NotImplemented"),
+      "Transitions": [{"Days": 30, "StorageClass": "GLACIER"}]}, "InvalidStorageClass"),  # no such tier
     ({"ID": "z", "Status": "Enabled", "Filter": {"Prefix": ""}, "Expiration": {"Days": 0}}, "InvalidArgument"),
     ({"ID": "n", "Status": "Enabled", "Filter": {"Prefix": ""}}, "InvalidRequest"),
 ])

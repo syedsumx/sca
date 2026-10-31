@@ -96,7 +96,7 @@ impl Server {
                 .el("IsLatest", v.latest.to_string())
                 .el("LastModified", iso_time(o.modified));
             if !o.delete_marker {
-                w.el("ETag", format!("\"{}\"", o.etag)).el("Size", o.size.to_string()).el("StorageClass", "STANDARD");
+                w.el("ETag", format!("\"{}\"", o.etag)).el("Size", o.size.to_string()).el("StorageClass", o.storage_class());
             }
             w.open("Owner").el("ID", id).el("DisplayName", id).close();
             w.close();

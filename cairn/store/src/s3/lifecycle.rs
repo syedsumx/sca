@@ -4,7 +4,8 @@
 //! Safety: the worker deletes a current object only if it is still the version it looked at (If-Match on
 //! its ETag), and removes noncurrent versions by version ID, so a concurrent write is never lost. Object
 //! lock (when configured) is enforced by the engine, so a locked version is never expired.
-//! Transitions to other storage classes are refused until storage tiers exist.
+//! Transitions move versions to a storage tier the operator configured (see `tiering`); a rule naming any
+//! other storage class is refused when it is stored.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +58,20 @@ pub struct Rule {
     pub noncurrent_days: Option<u64>,
     pub newer_noncurrent: Option<u64>,
     pub abort_days: Option<u64>,
+    /// Move current versions to the tier `transition_class` this many days after they were written...
+    #[serde(default)]
+    pub transition_days: Option<u64>,
+    /// ... or on this date (ms).
+    #[serde(default)]
+    pub transition_date: Option<u64>,
+    #[serde(default)]
+    pub transition_class: String,
+    /// Move noncurrent versions to the tier `noncurrent_transition_class` this many days after they
+    /// stopped being current.
+    #[serde(default)]
+    pub noncurrent_transition_days: Option<u64>,
+    #[serde(default)]
+    pub noncurrent_transition_class: String,
     /// Whether the rule used <Filter> (vs the legacy top-level <Prefix>), to echo it back the same way.
     #[serde(default)]
     pub legacy_prefix: bool,
@@ -124,6 +139,24 @@ fn parse_filter(el: &Element) -> Result<Filter, ApiError> {
 }
 
 /// Parses and validates a LifecycleConfiguration document.
+/// A lifecycle date: midnight UTC, in ms.
+fn midnight(date: &str) -> Result<u64, ApiError> {
+    let t =
+        time::OffsetDateTime::parse(date, &time::format_description::well_known::Rfc3339).map_err(|_| e::LIFECYCLE_INVALID_DATE.clone())?;
+    if t.time() != time::Time::MIDNIGHT {
+        return Err(e::LIFECYCLE_INVALID_DATE.clone());
+    }
+    Ok((t.unix_timestamp_nanos() / 1_000_000) as u64)
+}
+
+/// Transitions may happen after 0 days (S3 allows `<Days>0</Days>` there).
+fn days_or_zero(el: &Element, name: &str) -> Result<Option<u64>, ApiError> {
+    match el.text_of(name).as_str() {
+        "" => Ok(None),
+        v => v.parse::<u64>().map(Some).map_err(|_| e::INVALID_ARGUMENT.clone()),
+    }
+}
+
 pub fn parse(doc: &[u8]) -> Result<Vec<Rule>, ApiError> {
     let root =
         xml::parse(&String::from_utf8_lossy(doc)).filter(|r| r.name == "LifecycleConfiguration").ok_or_else(|| e::MALFORMED_XML.clone())?;
@@ -133,7 +166,11 @@ pub fn parse(doc: &[u8]) -> Result<Vec<Rule>, ApiError> {
             match c.name.as_str() {
                 "ID" | "Status" | "Filter" | "Prefix" | "Expiration" | "NoncurrentVersionExpiration" | "AbortIncompleteMultipartUpload" => {
                 }
-                "Transition" | "NoncurrentVersionTransition" => return Err(e::LIFECYCLE_TRANSITIONS_UNSUPPORTED.clone()),
+                "Transition" | "NoncurrentVersionTransition" => {
+                    if r.all(&c.name).count() > 1 {
+                        return Err(e::LIFECYCLE_TRANSITIONS_UNSUPPORTED.clone());
+                    }
+                }
                 _ => return Err(e::MALFORMED_XML.clone()),
             }
         }
@@ -162,12 +199,7 @@ pub fn parse(doc: &[u8]) -> Result<Vec<Rule>, ApiError> {
             rule.expiration_days = days(x, "Days")?;
             let date = x.text_of("Date");
             if !date.is_empty() {
-                let t = time::OffsetDateTime::parse(&date, &time::format_description::well_known::Rfc3339)
-                    .map_err(|_| e::LIFECYCLE_INVALID_DATE.clone())?;
-                if t.time() != time::Time::MIDNIGHT {
-                    return Err(e::LIFECYCLE_INVALID_DATE.clone());
-                }
-                rule.expiration_date = Some((t.unix_timestamp_nanos() / 1_000_000) as u64);
+                rule.expiration_date = Some(midnight(&date)?);
             }
             rule.expired_delete_marker = x.text_of("ExpiredObjectDeleteMarker") == "true";
             let set =
@@ -189,6 +221,27 @@ pub fn parse(doc: &[u8]) -> Result<Vec<Rule>, ApiError> {
                 return Err(e::MALFORMED_XML.clone());
             }
         }
+        if let Some(x) = r.child("Transition") {
+            rule.transition_days = days_or_zero(x, "Days")?;
+            let date = x.text_of("Date");
+            if !date.is_empty() {
+                rule.transition_date = Some(midnight(&date)?);
+            }
+            rule.transition_class = x.text_of("StorageClass");
+            if rule.transition_days.is_some() == rule.transition_date.is_some() || rule.transition_class.is_empty() {
+                return Err(e::MALFORMED_XML.clone());
+            }
+        }
+        if let Some(x) = r.child("NoncurrentVersionTransition") {
+            if x.child("NewerNoncurrentVersions").is_some() {
+                return Err(e::LIFECYCLE_TRANSITIONS_UNSUPPORTED.clone());
+            }
+            rule.noncurrent_transition_days = days_or_zero(x, "NoncurrentDays")?;
+            rule.noncurrent_transition_class = x.text_of("StorageClass");
+            if rule.noncurrent_transition_days.is_none() || rule.noncurrent_transition_class.is_empty() {
+                return Err(e::MALFORMED_XML.clone());
+            }
+        }
         if let Some(x) = r.child("AbortIncompleteMultipartUpload") {
             rule.abort_days = days(x, "DaysAfterInitiation")?;
             if rule.abort_days.is_none() || !rule.filter.tags.is_empty() {
@@ -200,6 +253,8 @@ pub fn parse(doc: &[u8]) -> Result<Vec<Rule>, ApiError> {
             && !rule.expired_delete_marker
             && rule.noncurrent_days.is_none()
             && rule.abort_days.is_none()
+            && rule.transition_class.is_empty()
+            && rule.noncurrent_transition_class.is_empty()
         {
             return Err(e::LIFECYCLE_NO_ACTION.clone());
         }
@@ -258,6 +313,22 @@ pub fn to_xml(rules: &[Rule]) -> String {
             }
             w.close();
         }
+        if !r.transition_class.is_empty() {
+            w.open("Transition");
+            if let Some(d) = r.transition_days {
+                w.el("Days", d.to_string());
+            }
+            if let Some(d) = r.transition_date {
+                w.el("Date", iso_time(d));
+            }
+            w.el("StorageClass", &r.transition_class).close();
+        }
+        if !r.noncurrent_transition_class.is_empty() {
+            w.open("NoncurrentVersionTransition")
+                .el("NoncurrentDays", r.noncurrent_transition_days.unwrap_or(0).to_string())
+                .el("StorageClass", &r.noncurrent_transition_class)
+                .close();
+        }
         if let Some(d) = r.noncurrent_days {
             w.open("NoncurrentVersionExpiration").el("NoncurrentDays", d.to_string());
             if let Some(n) = r.newer_noncurrent {
@@ -280,6 +351,7 @@ pub struct Pass {
     pub delete_markers_removed: u64,
     pub noncurrent_expired: u64,
     pub uploads_aborted: u64,
+    pub transitioned: u64,
 }
 
 #[derive(Default)]
@@ -288,6 +360,7 @@ pub struct LifecycleMetrics {
     pub delete_markers_removed: AtomicU64,
     pub noncurrent_expired: AtomicU64,
     pub uploads_aborted: AtomicU64,
+    pub transitioned: AtomicU64,
     pub runs: AtomicU64,
 }
 
@@ -306,6 +379,13 @@ impl Server {
     {
         let doc = self.read_small(c, body, 1 << 20).await?;
         let rules = parse(&doc)?;
+        for r in &rules {
+            for class in [&r.transition_class, &r.noncurrent_transition_class] {
+                if !class.is_empty() && !self.tiers.as_ref().is_some_and(|t| t.has(class)) {
+                    return Err(e::INVALID_STORAGE_CLASS.clone());
+                }
+            }
+        }
         let v = serde_json::to_vec(&rules).map_err(|_| e::INTERNAL.clone())?;
         self.set_config(c, "lifecycle", Some(&v))?;
         Ok(empty(StatusCode::OK))
@@ -350,6 +430,7 @@ impl Server {
                     total.delete_markers_removed += p.delete_markers_removed;
                     total.noncurrent_expired += p.noncurrent_expired;
                     total.uploads_aborted += p.uploads_aborted;
+                    total.transitioned += p.transitioned;
                 }
                 Err(err) => tracing::warn!(bucket = %b.name, error = %err, "lifecycle pass"),
             }
@@ -359,6 +440,8 @@ impl Server {
         m.delete_markers_removed.fetch_add(total.delete_markers_removed, Ordering::Relaxed);
         m.noncurrent_expired.fetch_add(total.noncurrent_expired, Ordering::Relaxed);
         m.uploads_aborted.fetch_add(total.uploads_aborted, Ordering::Relaxed);
+        m.transitioned.fetch_add(total.transitioned, Ordering::Relaxed);
+        self.eng.collect_tiered();
         m.runs.fetch_add(1, Ordering::Relaxed);
         if total != Pass::default() {
             tracing::info!(
@@ -366,6 +449,7 @@ impl Server {
                 delete_markers_removed = total.delete_markers_removed,
                 noncurrent_expired = total.noncurrent_expired,
                 uploads_aborted = total.uploads_aborted,
+                transitioned = total.transitioned,
                 "lifecycle pass"
             );
         }
@@ -376,7 +460,8 @@ impl Server {
         let day = self.lifecycle_day_ms;
         let mut pass = Pass::default();
         // Current versions.
-        let current_rules: Vec<&Rule> = rules.iter().filter(|r| r.expiration_days.is_some() || r.expiration_date.is_some()).collect();
+        let current_rules: Vec<&Rule> =
+            rules.iter().filter(|r| r.expiration_days.is_some() || r.expiration_date.is_some() || !r.transition_class.is_empty()).collect();
         if !current_rules.is_empty() {
             let mut after = String::new();
             loop {
@@ -387,6 +472,20 @@ impl Server {
                             && (r.expiration_days.is_some_and(|d| now >= o.modified + d * day)
                                 || r.expiration_date.is_some_and(|t| now >= t))
                     });
+                    if !due {
+                        // Expiration wins over a transition due the same day.
+                        let to = current_rules.iter().find(|r| {
+                            !r.transition_class.is_empty()
+                                && r.filter.matches(o)
+                                && (r.transition_days.is_some_and(|d| now >= o.modified + d * day)
+                                    || r.transition_date.is_some_and(|t| now >= t))
+                        });
+                        if let Some(r) = to {
+                            if Self::movable(o) && self.move_to_tier(bucket, o, &r.transition_class) {
+                                pass.transitioned += 1;
+                            }
+                        }
+                    }
                     if due {
                         match self.eng.delete_object_ev(bucket, &o.key, Some(&o.etag), &LIFECYCLE) {
                             Ok(_) => pass.expired += 1,
@@ -402,7 +501,10 @@ impl Server {
             }
         }
         // Noncurrent versions and expired delete markers.
-        let version_rules: Vec<&Rule> = rules.iter().filter(|r| r.noncurrent_days.is_some() || r.expired_delete_marker).collect();
+        let version_rules: Vec<&Rule> = rules
+            .iter()
+            .filter(|r| r.noncurrent_days.is_some() || r.expired_delete_marker || !r.noncurrent_transition_class.is_empty())
+            .collect();
         if !version_rules.is_empty() {
             let (mut key_marker, mut vid_marker) = (String::new(), String::new());
             let mut per_key: BTreeMap<String, Vec<engine::VersionEntry>> = BTreeMap::new();
@@ -419,6 +521,22 @@ impl Server {
             }
             for (key, entries) in per_key {
                 let noncurrent: Vec<&engine::VersionEntry> = entries.iter().filter(|v| !v.latest).collect();
+                for v in &noncurrent {
+                    let o = &v.obj;
+                    let since = if o.noncurrent_since > 0 { o.noncurrent_since } else { o.modified };
+                    let to = version_rules.iter().find(|r| {
+                        !r.noncurrent_transition_class.is_empty()
+                            && r.filter.matches(o)
+                            && r.noncurrent_transition_days.is_some_and(|d| now >= since + d * day)
+                            && !r.noncurrent_days.is_some_and(|d| now >= since + d * day)
+                        // expiring now instead
+                    });
+                    if let Some(r) = to {
+                        if !o.delete_marker && Self::movable(o) && self.move_to_tier(bucket, o, &r.noncurrent_transition_class) {
+                            pass.transitioned += 1;
+                        }
+                    }
+                }
                 for r in &version_rules {
                     let Some(d) = r.noncurrent_days else { continue };
                     let keep = r.newer_noncurrent.unwrap_or(0);
@@ -467,6 +585,11 @@ impl Server {
         Ok(pass)
     }
 
+    /// Whether a version has bytes still on this store's disk (a transition moves only those).
+    fn movable(o: &Object) -> bool {
+        !o.delete_marker && o.segments.iter().any(|s| s.tier.is_empty() && s.size > 0)
+    }
+
     /// Runs lifecycle passes forever, every `interval`.
     pub async fn run_lifecycle(self: Arc<Self>, interval: Duration) {
         let mut tick = tokio::time::interval(interval);
@@ -507,7 +630,7 @@ mod tests {
             parse(format!("<LifecycleConfiguration><Rule><ID>x</ID>{rule}</Rule></LifecycleConfiguration>").as_bytes()).unwrap_err()
         };
         assert_eq!(
-            bad("<Filter><Prefix/></Filter><Status>Enabled</Status><Transition><Days>30</Days><StorageClass>GLACIER</StorageClass></Transition>"),
+            bad("<Filter><Prefix/></Filter><Status>Enabled</Status><Transition><Days>30</Days><StorageClass>GLACIER</StorageClass></Transition><Transition><Days>60</Days><StorageClass>GLACIER</StorageClass></Transition>"),
             e::LIFECYCLE_TRANSITIONS_UNSUPPORTED
         );
         assert_eq!(

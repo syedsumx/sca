@@ -509,6 +509,9 @@ cairn:
     # Replication destinations: a Secret with a "targets.json" ([{"id", "endpoint", "access_key",
     # "secret_key", "region"}]); bucket replication rules name one as arn:cairn:store:::<id>.
     replicationTargetsSecret: ""
+    # Storage tiers for lifecycle transitions: a Secret with a "tiers.json" ([{"storage_class",
+    # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
+    tiersSecret: ""
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.
     blockPublicAccess: true
     # Ask this release's policy decision point about every request the store's own rules allow

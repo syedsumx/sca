@@ -519,7 +519,7 @@ impl Server {
                 .el("LastModified", iso_time(o.modified))
                 .el("ETag", format!("\"{}\"", o.etag))
                 .el("Size", o.size.to_string())
-                .el("StorageClass", "STANDARD");
+                .el("StorageClass", o.storage_class());
             if with_owner {
                 self.owner_xml(c, &mut w, "Owner");
             }
@@ -604,6 +604,7 @@ impl Server {
             return Err(e::INVALID_REDIRECT.clone());
         }
         check_acl_headers(c)?;
+        self.check_storage_class(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
@@ -734,6 +735,9 @@ impl Server {
         }
         Self::lock_headers(&mut r, &obj);
         Self::sse_headers(&mut r, &obj.sse);
+        if obj.storage_class() != "STANDARD" {
+            set_header(&mut r, "x-amz-storage-class", obj.storage_class());
+        }
         if !obj.replication_status.is_empty() {
             set_header(&mut r, "x-amz-replication-status", &obj.replication_status);
         }
@@ -823,6 +827,7 @@ impl Server {
             _ => return Err(e::INVALID_ARGUMENT.clone()),
         };
         check_acl_headers(c)?;
+        self.check_storage_class(c)?;
         let new_tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let new_algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         if src_bucket == c.bucket
@@ -833,6 +838,7 @@ impl Server {
             && new_algo.is_empty()
             && c.header("x-amz-server-side-encryption").is_empty()
             && c.header("x-amz-server-side-encryption-customer-algorithm").is_empty()
+            && c.header("x-amz-storage-class").is_empty()
         {
             return Err(e::COPY_TO_ITSELF.clone());
         }
@@ -895,6 +901,7 @@ impl Server {
             return Err(e::METADATA_TOO_LARGE.clone());
         }
         check_acl_headers(c)?;
+        self.check_storage_class(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
         // The upload's data key is chosen now; every part is encrypted with it.
@@ -1093,8 +1100,10 @@ impl Server {
                     }
                     checksums.insert(a.to_string(), format!("{}-{}", h.base64(), chosen.len()));
                 } else {
-                    let segs: Vec<Segment> =
-                        chosen.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() }).collect();
+                    let segs: Vec<Segment> = chosen
+                        .iter()
+                        .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() })
+                        .collect();
                     let size = segs.iter().map(|s| s.size).sum();
                     let dek = self.data_key(c, &c.bucket, &c.key, &u.sse, false)?;
                     let mut reader = self.eng.reader(&Object { segments: segs, ..Default::default() }, 0, size, dek.as_ref())?;
@@ -1299,7 +1308,7 @@ impl Server {
             w.close();
         }
         if has("StorageClass") {
-            w.el("StorageClass", "STANDARD");
+            w.el("StorageClass", obj.storage_class());
         }
         if has("ObjectSize") {
             w.el("ObjectSize", obj.size.to_string());

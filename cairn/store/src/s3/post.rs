@@ -254,7 +254,8 @@ fn header_fields(fields: &BTreeMap<String, String>) -> HeaderMap {
             _ if k.starts_with("x-amz-meta-")
                 || k.starts_with("x-amz-server-side-encryption")
                 || k.starts_with("x-amz-object-lock-")
-                || k.starts_with("x-amz-checksum-") =>
+                || k.starts_with("x-amz-checksum-")
+                || k == "x-amz-storage-class" =>
             {
                 k.clone()
             }
@@ -335,6 +336,7 @@ impl Server {
         fc.op = "PostObject";
         self.authorize(&fc, "s3:PutObject", &c.bucket, &key).await?;
         check_acl_headers(&fc)?;
+        self.check_storage_class(&fc)?;
         let tags = match fields.get("tagging") {
             Some(doc) => parse_tagging(doc.as_bytes(), MAX_OBJECT_TAGS)?,
             None => BTreeMap::new(),

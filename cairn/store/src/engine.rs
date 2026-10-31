@@ -121,6 +121,18 @@ pub struct Segment {
     /// Encrypted blobs: the chunk nonce prefix (hex). Empty: stored in the clear.
     #[serde(rename = "n", default, skip_serializing_if = "String::is_empty")]
     pub nonce: String,
+    /// The storage tier (a storage class) holding the blob; empty: this store's disk.
+    #[serde(rename = "t", default, skip_serializing_if = "String::is_empty")]
+    pub tier: String,
+}
+
+/// Remote storage tiers: where lifecycle transitions move blobs (the bytes exactly as stored on disk, so
+/// encrypted blobs stay encrypted). Implemented by the S3 layer.
+pub trait TierStore: Send + Sync {
+    /// Reads a tiered blob from byte `offset` on.
+    fn open(&self, tier: &str, blob: &str, offset: u64) -> io::Result<Box<dyn Read + Send>>;
+    /// Deletes a tiered blob (deleting a missing one succeeds).
+    fn delete(&self, tier: &str, blob: &str) -> io::Result<()>;
 }
 
 /// How a version is encrypted at rest. The data key is stored only wrapped by a keyring key
@@ -183,6 +195,13 @@ pub struct Object {
     /// Bucket replication: PENDING, COMPLETED or FAILED (empty: not replicated).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub replication_status: String,
+}
+
+impl Object {
+    /// The storage class: the tier holding its bytes, else STANDARD.
+    pub fn storage_class(&self) -> &str {
+        self.segments.iter().find(|s| !s.tier.is_empty()).map(|s| s.tier.as_str()).unwrap_or("STANDARD")
+    }
 }
 
 /// Object lock state of one version: retention (mode and date) and legal hold.
@@ -484,6 +503,8 @@ pub struct Engine {
     gc_lock: Mutex<()>,
     /// Backups in progress: while any runs, blobs are not deleted (their snapshot may still need them).
     backups: std::sync::atomic::AtomicUsize,
+    /// Remote storage tiers, when configured.
+    tiers: std::sync::RwLock<Option<std::sync::Arc<dyn TierStore>>>,
 }
 
 /// What a backup did.
@@ -569,7 +590,7 @@ impl BlobWriter<'_> {
         if self.engine.fsync {
             File::open(dst.parent().unwrap())?.sync_all()?;
         }
-        Ok(Segment { blob: self.id.clone(), size: self.size, nonce })
+        Ok(Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new() })
     }
 }
 
@@ -589,10 +610,19 @@ pub struct ObjectReader {
 
 /// One segment's share of a read.
 enum Piece {
-    /// A file positioned at its start offset, and the bytes left.
-    Plain(File, u64),
+    /// A blob positioned at its start offset, and the bytes left.
+    Plain(Box<dyn Read + Send>, u64),
     /// An encrypted blob: decrypts chunk by chunk.
-    Sealed { file: File, cipher: Box<ChunkCipher>, chunk: u32, seg_size: u64, skip: usize, left: u64, buf: Vec<u8>, pos: usize },
+    Sealed {
+        file: Box<dyn Read + Send>,
+        cipher: Box<ChunkCipher>,
+        chunk: u32,
+        seg_size: u64,
+        skip: usize,
+        left: u64,
+        buf: Vec<u8>,
+        pos: usize,
+    },
 }
 
 impl Read for ObjectReader {
@@ -688,7 +718,7 @@ impl Engine {
             fs::create_dir_all(&d)?;
         }
         let db = Database::create(dir.join("index.redb"))?;
-        let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()), backups: Default::default() };
+        let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()), backups: Default::default(), tiers: Default::default() };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
         tx.open_table(OBJECTS)?;
@@ -736,7 +766,7 @@ impl Engine {
 
     /// Removes sealed blobs that were never committed.
     pub fn discard(&self, segs: &[Segment]) {
-        for s in segs {
+        for s in segs.iter().filter(|s| s.tier.is_empty()) {
             let _ = fs::remove_file(self.blob_path(&s.blob));
         }
     }
@@ -746,7 +776,9 @@ impl Engine {
         let mut gc = tx.open_table(GC)?;
         let now = now_ms();
         for s in segs {
-            gc.insert(s.blob.as_str(), now)?;
+            // Tiered blobs are queued as "<tier>:<blob>" and deleted by collect_tiered.
+            let id = if s.tier.is_empty() { s.blob.clone() } else { format!("{}:{}", s.tier, s.blob) };
+            gc.insert(id.as_str(), now)?;
         }
         drop(gc);
         let bytes: u64 = segs.iter().map(|s| s.size).sum();
@@ -935,6 +967,7 @@ impl Engine {
             Ok(ids)
         })()
         .unwrap_or_default();
+        let ids: Vec<String> = ids.into_iter().filter(|id| !id.contains(':')).collect();
         if ids.is_empty() {
             return;
         }
@@ -980,7 +1013,7 @@ impl Engine {
                 let (k, v) = row?;
                 let o: Object = serde_json::from_slice(v.value())?;
                 count(k.value().0, o.size, 1);
-                refs.extend(o.segments.into_iter().map(|s| s.blob));
+                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
             }
             let mut upload_bucket: HashMap<String, String> = HashMap::new();
             for row in r.open_table(UPLOADS)?.iter()? {
@@ -1002,7 +1035,7 @@ impl Engine {
                 if !o.delete_marker {
                     count(k.value().0, o.size, 1);
                 }
-                refs.extend(o.segments.into_iter().map(|s| s.blob));
+                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
             }
         }
         {
@@ -1674,6 +1707,112 @@ impl Engine {
         Ok(res)
     }
 
+    /// Opens a segment's blob (on disk or in its tier) at byte `offset` of the blob.
+    fn open_blob(&self, s: &Segment, offset: u64) -> Result<Box<dyn Read + Send>> {
+        if s.tier.is_empty() {
+            let mut f = File::open(self.blob_path(&s.blob))?;
+            f.seek(SeekFrom::Start(offset))?;
+            return Ok(Box::new(f));
+        }
+        let tiers = self.tiers.read().unwrap().clone();
+        let t = tiers.ok_or_else(|| Error::Io(io::Error::other(format!("storage tier {} is not configured", s.tier))))?;
+        Ok(t.open(&s.tier, &s.blob, offset)?)
+    }
+
+    /// Configures the remote storage tiers.
+    pub fn set_tiers(&self, t: std::sync::Arc<dyn TierStore>) {
+        *self.tiers.write().unwrap() = Some(t);
+    }
+
+    /// A blob on disk, for copying it to a tier.
+    pub fn blob_file(&self, id: &str) -> io::Result<File> {
+        File::open(self.blob_path(id))
+    }
+
+    /// Moves a version's blobs to a tier: `new` replaces the segments (the same blobs, now in a tier), if
+    /// the version still has the segments `expect` (it was not rewritten meanwhile). The local copies are
+    /// then collected. Returns whether the version was changed.
+    pub fn transition(&self, bucket: &str, key: &str, version: &str, expect: &[Segment], new: Vec<Segment>) -> Result<bool> {
+        let tx = self.begin_write()?;
+        let done = {
+            let mut t = tx.open_table(OBJECTS)?;
+            let cur = Self::current_in(&t, bucket, key)?;
+            match cur {
+                Some(mut o) if o.version_id == version => {
+                    if o.segments != expect {
+                        false
+                    } else {
+                        o.segments = new;
+                        t.insert((bucket, key), serde_json::to_vec(&o)?.as_slice())?;
+                        true
+                    }
+                }
+                _ => {
+                    drop(t);
+                    let mut vt = tx.open_table(VERSIONS)?;
+                    match Self::versions_in(&vt, bucket, key)?.into_iter().find(|(_, o)| o.version_id == version) {
+                        Some((order, mut o)) if !o.delete_marker && o.segments == expect => {
+                            o.segments = new;
+                            vt.insert((bucket, key, order.as_str()), serde_json::to_vec(&o)?.as_slice())?;
+                            true
+                        }
+                        _ => false,
+                    }
+                }
+            }
+        };
+        if !done {
+            return Ok(false);
+        }
+        {
+            // The bytes now live in the tier: the local blobs go without changing the bucket's usage.
+            let mut gc = tx.open_table(GC)?;
+            let now = now_ms();
+            for s in expect.iter().filter(|s| s.tier.is_empty()) {
+                gc.insert(s.blob.as_str(), now)?;
+            }
+        }
+        tx.commit()?;
+        self.collect();
+        Ok(true)
+    }
+
+    /// Deletes tiered blobs queued for collection (remote calls: run from a background task).
+    pub fn collect_tiered(&self) -> usize {
+        let Some(tiers) = self.tiers.read().unwrap().clone() else { return 0 };
+        let ids: Vec<String> = (|| -> Result<Vec<String>> {
+            let r = self.db.begin_read()?;
+            let mut ids = vec![];
+            for row in r.open_table(GC)?.iter()? {
+                let id = row?.0.value().to_string();
+                if id.contains(':') {
+                    ids.push(id);
+                }
+            }
+            Ok(ids)
+        })()
+        .unwrap_or_default();
+        let mut gone = vec![];
+        for id in ids {
+            let (tier, blob) = id.split_once(':').unwrap_or_default();
+            match tiers.delete(tier, blob) {
+                Ok(()) => gone.push(id),
+                Err(err) => tracing::warn!(tier, blob, error = %err, "tiered blob not deleted; will retry"),
+            }
+        }
+        if !gone.is_empty() {
+            if let Ok(tx) = self.begin_write() {
+                if let Ok(mut t) = tx.open_table(GC) {
+                    for id in &gone {
+                        let _ = t.remove(id.as_str());
+                    }
+                }
+                let _ = tx.commit();
+            }
+        }
+        gone.len()
+    }
+
     /// Opens `[off, off+n)` of an object; `key` decrypts encrypted segments.
     pub fn reader(&self, obj: &Object, off: u64, n: u64, key: Option<&Key>) -> Result<ObjectReader> {
         let mut parts = vec![];
@@ -1685,12 +1824,10 @@ impl Engine {
             if stop <= off || start >= end || s.size == 0 {
                 continue;
             }
-            let mut f = File::open(self.blob_path(&s.blob))?;
             let from = off.max(start) - start;
             let to = end.min(stop) - start;
             if s.nonce.is_empty() {
-                f.seek(SeekFrom::Start(from))?;
-                parts.push(Piece::Plain(f, to - from));
+                parts.push(Piece::Plain(self.open_blob(s, from)?, to - from));
                 continue;
             }
             let k = key.ok_or_else(|| Error::Io(io::Error::new(io::ErrorKind::InvalidInput, "encrypted object read without its key")))?;
@@ -1699,7 +1836,7 @@ impl Engine {
                 .and_then(|b| b.try_into().ok())
                 .ok_or_else(|| Error::Index(format!("segment {}: bad nonce", s.blob)))?;
             let chunk = (from / crypt::CHUNK as u64) as u32;
-            f.seek(SeekFrom::Start(chunk as u64 * (crypt::CHUNK + crypt::TAG) as u64))?;
+            let f = self.open_blob(s, chunk as u64 * (crypt::CHUNK + crypt::TAG) as u64)?;
             parts.push(Piece::Sealed {
                 file: f,
                 cipher: Box::new(ChunkCipher::new(k, base)),
@@ -1828,7 +1965,7 @@ impl Engine {
 
     /// Records a sealed part, replacing an earlier upload of the same part number.
     pub fn put_part(&self, bucket: &str, key: &str, id: &str, p: Part) -> Result<()> {
-        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() };
+        let new_seg = Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() };
         let res = (|| -> Result<Vec<Segment>> {
             let tx = self.begin_write()?;
             let old = {
@@ -1837,7 +1974,7 @@ impl Engine {
                 let old = match t.get((id, p.number))? {
                     Some(v) => {
                         let op: Part = serde_json::from_slice(v.value())?;
-                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce }]
+                        vec![Segment { blob: op.blob, size: op.size, nonce: op.nonce, tier: String::new() }]
                     }
                     None => vec![],
                 };
@@ -1916,7 +2053,8 @@ impl Engine {
         let tx = self.begin_write()?;
         Self::upload_in(&tx.open_table(UPLOADS)?, bucket, key, id)?;
         let parts = Self::drop_upload(&tx, id)?;
-        let segs: Vec<Segment> = parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce }).collect();
+        let segs: Vec<Segment> =
+            parts.into_iter().map(|p| Segment { blob: p.blob, size: p.size, nonce: p.nonce, tier: String::new() }).collect();
         Self::queue_gc(&tx, bucket, &segs)?;
         tx.commit()?;
         self.collect();
@@ -1994,7 +2132,10 @@ impl Engine {
                 user_meta: u.user_meta.clone(),
                 checksums,
                 checksum_type: ctype,
-                segments: parts.iter().map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone() }).collect(),
+                segments: parts
+                    .iter()
+                    .map(|p| Segment { blob: p.blob.clone(), size: p.size, nonce: p.nonce.clone(), tier: String::new() })
+                    .collect(),
                 part_count: parts.len() as u32,
                 tags: u.tags.clone(),
                 lock: u.lock.clone(),
@@ -2014,6 +2155,7 @@ impl Engine {
                 blob: p.blob.clone(),
                 size: p.size,
                 nonce: p.nonce.clone(),
+                tier: String::new(),
             }));
             Self::drop_upload(&tx, id)?;
             Self::queue_gc(&tx, bucket, &garbage)?;
@@ -2074,7 +2216,7 @@ impl Engine {
             }
             let mut on_object = |o: &[u8]| -> Result<()> {
                 let o: Object = serde_json::from_slice(o)?;
-                blobs.extend(o.segments.into_iter().map(|s| s.blob));
+                blobs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob)); // tiered blobs stay in their tier
                 Ok(())
             };
             copy!(BUCKETS, &str, &[u8], |_: &&str, _: &&[u8]| -> Result<()> {

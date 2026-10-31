@@ -17,6 +17,7 @@ pub mod policy;
 mod post;
 pub mod replication;
 pub mod sse;
+pub mod tiering;
 mod trail;
 mod versioning;
 mod website;
@@ -76,6 +77,8 @@ pub struct Config {
     pub backup_root: Option<std::path::PathBuf>,
     /// Bucket replication destinations.
     pub replication_targets: Vec<replication::ReplTarget>,
+    /// Storage tiers for lifecycle transitions.
+    pub tiers: Vec<tiering::Tier>,
 }
 
 pub struct Server {
@@ -106,6 +109,7 @@ pub struct Server {
     pub(crate) replicator: Option<replication::Replicator>,
     pub(crate) repl_metrics: events::EventMetrics,
     pub(crate) event_max_age_ms: u64,
+    pub(crate) tiers: Option<Arc<tiering::Tiers>>,
 }
 
 /// One request, after routing and authentication.
@@ -141,6 +145,14 @@ impl Ctx {
 
 impl Server {
     pub fn new(eng: Arc<Engine>, cfg: Config) -> Result<Server, String> {
+        let tiers = match cfg.tiers.is_empty() {
+            true => None,
+            false => {
+                let t = Arc::new(tiering::Tiers::new(cfg.tiers.clone())?);
+                eng.set_tiers(t.clone());
+                Some(t)
+            }
+        };
         if cfg.credentials.is_empty() {
             return Err("at least one credential is required".into());
         }
@@ -193,6 +205,7 @@ impl Server {
             },
             repl_metrics: Default::default(),
             event_max_age_ms: cfg.event_max_age_hours.max(1) * 3_600_000,
+            tiers,
         })
     }
 
@@ -429,6 +442,7 @@ impl Server {
                     ("delete_markers_removed", &lm.delete_markers_removed),
                     ("noncurrent_expired", &lm.noncurrent_expired),
                     ("uploads_aborted", &lm.uploads_aborted),
+                    ("transitioned", &lm.transitioned),
                     ("runs", &lm.runs),
                 ] {
                     body.push_str(&format!(
@@ -451,6 +465,21 @@ impl Server {
                     for (name, v) in [("delivered", &em.delivered), ("failed", &em.failed), ("dropped", &em.dropped)] {
                         body.push_str(&format!(
                             "# TYPE cairn_store_{kind}_{name}_total counter\ncairn_store_{kind}_{name}_total {}\n",
+                            v.load(Ordering::Relaxed)
+                        ));
+                    }
+                }
+                if let Some(t) = &self.tiers {
+                    let m = &t.metrics;
+                    for (name, v) in [
+                        ("transitions", &m.transitioned),
+                        ("transitioned_bytes", &m.transitioned_bytes),
+                        ("transition_failures", &m.failed),
+                        ("reads", &m.reads),
+                        ("deletes", &m.deleted),
+                    ] {
+                        body.push_str(&format!(
+                            "# TYPE cairn_store_tier_{name}_total counter\ncairn_store_tier_{name}_total {}\n",
                             v.load(Ordering::Relaxed)
                         ));
                     }
