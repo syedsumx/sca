@@ -474,6 +474,14 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 - **Browser safety.** Files are served with `Content-Security-Policy: sandbox` and `nosniff`, so an HTML file in a bucket cannot run script with the viewer's credentials. Listing pages allow no script. Writes take no form posts, so another site cannot write through the viewer's browser unless the bucket's CORS rules allow that site.
 - Errors are JSON: `{"error": "NoSuchKey", "message": "..."}`.
 
+**WebDAV.** `/-/dav/<bucket>/<path>` serves buckets over WebDAV (class 1), for rclone, davfs2, cadaver, WinSCP and other WebDAV clients. For example: `rclone config create cairn webdav url=https://store.example.com/-/dav/ vendor=other user=KEY pass=SECRET`.
+
+- **Methods.** PROPFIND (depth 0, 1 and infinity; infinity only for trees of up to 10,000 keys), GET, HEAD, PUT, DELETE, MKCOL, COPY, MOVE and PROPPATCH. Properties cannot be changed: PROPPATCH answers 403 for each one.
+- **No locking.** LOCK and UNLOCK are refused rather than faked, so clients that need locks (macOS Finder) mount read-only.
+- **Collections** are key prefixes. MKCOL writes an empty `name/` marker object, as S3 consoles do. MKCOL on `/-/dav/<bucket>` creates the bucket, for keys allowed to create buckets. Whole buckets cannot be deleted, copied or moved over WebDAV.
+- **Same rules as S3.** Each item is the S3 operation it stands for (ListObjectsV2, GetObject, PutObject, CopyObject, DeleteObject), with the same policies, quotas, encryption, events and audit trail. A collection DELETE, COPY or MOVE first checks every key it would touch and changes nothing if any is refused. These operations are limited to 10,000 keys; use the S3 API for larger trees. A MOVE is a copy followed by a delete, so it is not atomic.
+- **Signing in** works as for the file API. WebDAV clients use HTTP Basic, so turn on `CAIRN_STORE_FILES_BASIC_AUTH` and serve TLS.
+
 **Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
 
 - **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.

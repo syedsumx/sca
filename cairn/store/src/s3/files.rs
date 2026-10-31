@@ -37,7 +37,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Query parameters of a presigned URL (SigV4 and SigV2); they stay for the signature check.
-fn presign_param(k: &str) -> bool {
+pub(crate) fn presign_param(k: &str) -> bool {
     k.to_ascii_lowercase().starts_with("x-amz-") || matches!(k, "Signature" | "AWSAccessKeyId" | "Expires")
 }
 
@@ -112,6 +112,34 @@ impl Server {
         Ok(a)
     }
 
+    /// Authenticates a file API or WebDAV request: HTTP Basic (when allowed), SigV4/SigV2 (header or
+    /// presigned), or anonymous.
+    pub(crate) fn plain_auth(
+        &self,
+        parts: &hyper::http::request::Parts,
+        raw_path: &str,
+        raw_query: &str,
+        host: &str,
+    ) -> Result<Auth, ApiError> {
+        let authz = parts.headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("");
+        if let Some(b) = authz.strip_prefix("Basic ") {
+            return self.basic_auth(b);
+        }
+        if auth::is_anonymous(&parts.headers, raw_query) {
+            return Ok(Auth::anonymous());
+        }
+        let request = auth::Request {
+            method: parts.method.as_str(),
+            raw_path,
+            raw_query,
+            host,
+            headers: &parts.headers,
+            now: (self.clock)(),
+            vhost_bucket: None,
+        };
+        auth::verify(&self.creds, &request)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn dispatch_files<B>(
         &self,
@@ -157,25 +185,8 @@ impl Server {
         if !matches!(parts.method, Method::GET | Method::HEAD | Method::PUT | Method::DELETE) {
             return fail("MethodNotAllowed", e::METHOD_NOT_ALLOWED.clone(), false, info);
         }
-        let authz = hdr("authorization");
         let anonymous = auth::is_anonymous(&parts.headers, &raw_query);
-        let auth = if let Some(b) = authz.strip_prefix("Basic ") {
-            self.basic_auth(b)
-        } else if anonymous {
-            Ok(Auth::anonymous())
-        } else {
-            let request = auth::Request {
-                method: parts.method.as_str(),
-                raw_path: &raw_path,
-                raw_query: &raw_query,
-                host: &host,
-                headers: &parts.headers,
-                now: (self.clock)(),
-                vhost_bucket: None,
-            };
-            auth::verify(&self.creds, &request)
-        };
-        let auth = match auth {
+        let auth = match self.plain_auth(&parts, &raw_path, &raw_query, &host) {
             Ok(a) => a,
             Err(err) => return fail("auth", err, false, info),
         };
@@ -256,7 +267,7 @@ impl Server {
     }
 
     /// Errors as JSON (an anonymous refusal asks a browser to sign in when Basic authentication is on).
-    fn files_error(&self, err: &ApiError, head: bool, anonymous: bool) -> Resp {
+    pub(crate) fn files_error(&self, err: &ApiError, head: bool, anonymous: bool) -> Resp {
         let ask = anonymous && self.files_basic && err.status == 403;
         let status =
             if ask { StatusCode::UNAUTHORIZED } else { StatusCode::from_u16(err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR) };
@@ -271,7 +282,7 @@ impl Server {
     }
 
     /// Lists a directory (or the buckets), authorized as ListObjectsV2 with a `/` delimiter (ListBuckets).
-    async fn files_dir(&self, c: &mut Ctx, prefix: &str, after: &str, limit: usize, browser: bool) -> Result<Resp, ApiError> {
+    pub(crate) async fn files_dir(&self, c: &mut Ctx, prefix: &str, after: &str, limit: usize, browser: bool) -> Result<Resp, ApiError> {
         let mut entries = vec![];
         let mut next = None;
         c.key = String::new();

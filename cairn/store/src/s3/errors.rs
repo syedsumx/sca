@@ -88,6 +88,12 @@ errors! {
     LIFECYCLE_TRANSITIONS_UNSUPPORTED = "NotImplemented", 501, "Only one Transition and one NoncurrentVersionTransition per rule are supported, without NewerNoncurrentVersions.";
     FILES_BASIC_OFF = "InvalidRequest", 400, "HTTP Basic authentication is off (CAIRN_STORE_FILES_BASIC_AUTH); sign requests with SigV4 or use a presigned URL.";
     FILES_BASIC_NEEDS_TLS = "InsecureTransport", 400, "HTTP Basic authentication needs TLS: the secret key would cross the network in the clear.";
+    DAV_TREE_TOO_LARGE = "InvalidRequest", 403, "This collection holds more than 10,000 keys: copy, move or delete it with the S3 API.";
+    DAV_MKCOL_BODY = "InvalidRequest", 415, "MKCOL takes no request body.";
+    DAV_CONFLICT = "InvalidRequest", 409, "The parent collection does not exist, or a collection cannot be copied into itself.";
+    DAV_BUCKET_ROOT = "InvalidRequest", 403, "Whole buckets cannot be deleted, copied or moved over WebDAV: use the S3 API.";
+    DAV_BAD_GATEWAY = "InvalidRequest", 502, "The Destination is not on this server's WebDAV tree.";
+    DAV_SAME = "InvalidRequest", 403, "The source and destination are the same.";
     FILES_PARAMETER = "InvalidArgument", 400, "The file API takes only the parameters versionId (files), after and limit (directories); use the S3 API for anything else.";
     INVALID_STORAGE_CLASS = "InvalidStorageClass", 400, "The storage class you specified is not valid: objects are written as STANDARD, and a lifecycle transition may only name a storage class this store has a tier for.";
     LIFECYCLE_INVALID_DAYS = "InvalidArgument", 400, "Days, NoncurrentDays and DaysAfterInitiation must be positive integers.";

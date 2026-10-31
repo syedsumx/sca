@@ -8,6 +8,7 @@ pub mod body;
 pub mod checksum;
 mod config;
 mod cors;
+mod dav;
 pub mod errors;
 pub mod events;
 mod files;
@@ -245,7 +246,7 @@ impl Server {
         let path = req.uri().path().to_string();
         let (op, result, cors, mut info) = if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
-        } else if path.starts_with("/-/") && !path.starts_with("/-/files") {
+        } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
         } else {
             self.dispatch(req, peer, &request_id).await
@@ -358,6 +359,9 @@ impl Server {
                 }
             }
         };
+        if vhost.is_none() && Self::is_dav_path(&decoded) {
+            return self.dispatch_dav(parts, body, peer, request_id, &decoded, raw_path, raw_query, host).await;
+        }
         if vhost.is_none() && Self::is_files_path(&decoded) {
             return self.dispatch_files(parts, body, peer, request_id, &decoded, raw_path, raw_query, host).await;
         }
