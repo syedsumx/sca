@@ -19,8 +19,10 @@ pub mod lifecycle;
 mod objectlock;
 pub mod policy;
 mod post;
+pub mod remote;
 pub mod replication;
 pub mod sftp;
+pub mod sinks;
 pub mod sse;
 pub mod tiering;
 mod trail;
@@ -89,6 +91,8 @@ pub struct Config {
     pub files_basic_http: bool,
     /// Cluster mode (None: a single store).
     pub cluster: Option<cluster::ClusterConfig>,
+    /// S3-compatible buckets backups can be written to.
+    pub backup_sinks: Vec<remote::RemoteSpec>,
 }
 
 pub struct Server {
@@ -123,6 +127,7 @@ pub struct Server {
     files_basic_http: bool,
     pub(crate) sftp_metrics: sftp::SftpMetrics,
     pub(crate) cluster: Option<Arc<cluster::Cluster>>,
+    pub(crate) sinks: Option<sinks::Sinks>,
 }
 
 /// One request, after routing and authentication.
@@ -218,6 +223,10 @@ impl Server {
             files_basic_http: cfg.files_basic_http,
             sftp_metrics: Default::default(),
             cluster,
+            sinks: match cfg.backup_sinks.is_empty() {
+                true => None,
+                false => Some(sinks::Sinks::new(cfg.backup_sinks)?),
+            },
         };
         srv.reload_keys()?; // keys created through the admin API
         Ok(srv)

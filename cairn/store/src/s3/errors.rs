@@ -160,6 +160,11 @@ errors! {
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
     MFA_DELETE_UNSUPPORTED = "NotImplemented", 501, "MFA Delete is not supported.";
+    SINKS_OFF = "NotImplemented", 501, "No backup sinks are configured: set CAIRN_STORE_BACKUP_SINKS_FILE.";
+    NO_SUCH_SINK = "NotFound", 404, "No such backup sink.";
+    NO_SUCH_BACKUP = "NotFound", 404, "No such backup.";
+    BACKUP_EXISTS = "Conflict", 409, "A backup with this name exists.";
+    SINK_FAILED = "BadGateway", 502, "The backup sink could not be reached or refused a request; see the store's log.";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";

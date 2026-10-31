@@ -4,7 +4,7 @@
 {{- $cl := $u.cluster }}
 {{- if $cl.enabled }}
 {{- if not $u.metadata.secretName }}{{ fail "cairn.store.cluster needs cairn.store.metadata.secretName (the nodes share PostgreSQL metadata)" }}{{ end }}
-{{- if $u.backups.enabled }}{{ fail "cairn.store.backups are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
+{{- if or $u.backups.enabled $u.backupSinks.secretName }}{{ fail "cairn.store.backups and backupSinks are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
 {{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
 {{- if $cl.erasureCoding }}
 {{- $p := splitList "+" (toString $cl.erasureCoding) }}
@@ -140,6 +140,18 @@ spec:
             - name: CAIRN_STORE_FILES_BASIC_AUTH
               value: "true"
             {{- end }}
+            {{- if $u.backupSinks.secretName }}
+            - name: CAIRN_STORE_BACKUP_SINKS_FILE
+              value: /etc/cairn-store-sinks/sinks.json
+            {{- if $u.backupSinks.schedule }}
+            - name: CAIRN_STORE_BACKUP_SINK_SCHEDULE
+              value: {{ $u.backupSinks.schedule | quote }}
+            - name: CAIRN_STORE_BACKUP_SINK_INTERVAL
+              value: {{ $u.backupSinks.intervalSeconds | int64 | quote }}
+            - name: CAIRN_STORE_BACKUP_SINK_KEEP
+              value: {{ $u.backupSinks.keep | quote }}
+            {{- end }}
+            {{- end }}
             {{- if $u.tiersSecret }}
             - name: CAIRN_STORE_TIERS_FILE
               value: /etc/cairn-store-tiers/tiers.json
@@ -213,6 +225,11 @@ spec:
               mountPath: /etc/cairn-store-sftp
               readOnly: true
             {{- end }}
+            {{- if $u.backupSinks.secretName }}
+            - name: sinks
+              mountPath: /etc/cairn-store-sinks
+              readOnly: true
+            {{- end }}
             {{- if $u.tiersSecret }}
             - name: tiers
               mountPath: /etc/cairn-store-tiers
@@ -233,7 +250,7 @@ spec:
               mountPath: /etc/cairn-store-client-ca
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) $u.metadata.secretName }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) $u.metadata.secretName $u.backupSinks.secretName }}
       volumes:
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
@@ -260,6 +277,12 @@ spec:
         - name: sftp-host-key
           secret:
             secretName: {{ $u.sftp.hostKeySecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if $u.backupSinks.secretName }}
+        - name: sinks
+          secret:
+            secretName: {{ $u.backupSinks.secretName }}
             defaultMode: 0400
         {{- end }}
         {{- if $u.tiersSecret }}

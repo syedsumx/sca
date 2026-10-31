@@ -8,7 +8,9 @@
 //! cairn-store admin quota-remove <name>
 //! cairn-store admin audit [--after SEQ] [--jsonl]
 //! cairn-store admin backup <name>         (an online backup under CAIRN_STORE_BACKUP_DIR)
-//! cairn-store admin backups
+//! cairn-store admin backups [--sink ID]
+//! cairn-store admin backup <name> --sink ID    (to an S3-compatible sink from CAIRN_STORE_BACKUP_SINKS_FILE)
+//! cairn-store admin backup-delete <name> --sink ID
 //! cairn-store admin compact [--min-dead 0.3]   (compact packs of small objects now)
 //! cairn-store admin keys | key <ak>
 //! cairn-store admin key-create [--name AK] [--admin] [--read-only] [--buckets a,b*] [--policy-file F]
@@ -124,9 +126,20 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         }
         "quota-remove" => ("DELETE", format!("buckets/{}/quota", name()), None),
         "backup" => {
-            ("POST", "backups".to_string(), Some(serde_json::json!({"name": rest.first().map(|s| s.as_str()).unwrap_or_else(|| usage())})))
+            let mut b = serde_json::json!({"name": rest.first().map(|s| s.as_str()).unwrap_or_else(|| usage())});
+            if let Some(s) = flag("--sink") {
+                b["sink"] = s.into();
+            }
+            ("POST", "backups".to_string(), Some(b))
         }
-        "backups" => ("GET", "backups".to_string(), None),
+        "backups" => match flag("--sink") {
+            Some(s) => ("GET", format!("backups?sink={}", aws_encode(s.as_bytes(), false)), None),
+            None => ("GET", "backups".to_string(), None),
+        },
+        "backup-delete" => {
+            let s = flag("--sink").unwrap_or_else(|| usage());
+            ("DELETE", format!("backups/{}?sink={}", name(), aws_encode(s.as_bytes(), false)), None)
+        }
         "keys" => ("GET", "keys".to_string(), None),
         "compact" => {
             let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);

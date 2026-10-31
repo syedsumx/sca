@@ -6,6 +6,7 @@
 //! cairn-store healthcheck  exit 0 if the local server is ready (container health checks)
 //! cairn-store admin ...    the admin API (see admin_cli)
 //! cairn-store mount <bucket>[/prefix] <dir>  a bucket as a FUSE directory (see mount)
+//! cairn-store restore-backup <sink> <name> <dir>  download a backup from a sink into a new data directory
 //! cairn-store version      print the version
 //! ```
 //!
@@ -40,6 +41,9 @@
 //! CAIRN_STORE_TLS_PROBE_CERT/KEY  client certificate for the healthcheck command under mutual TLS
 //! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
+//! CAIRN_STORE_BACKUP_SINKS_FILE  S3-compatible backup sinks: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_BACKUP_SINK_SCHEDULE  back up to this sink on a schedule (off when empty) ...
+//! CAIRN_STORE_BACKUP_SINK_INTERVAL / _KEEP  ... every N seconds (86400), keeping the newest N scheduled ones (7)
 //! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
 //! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
@@ -187,12 +191,20 @@ fn cluster_config() -> Option<s3::cluster::ClusterConfig> {
     if meta().is_none() {
         fail("cluster", "a cluster keeps its metadata in PostgreSQL: set CAIRN_STORE_META");
     }
-    for k in ["CAIRN_STORE_PACK_BELOW", "CAIRN_STORE_BACKUP_DIR"] {
+    for k in ["CAIRN_STORE_PACK_BELOW", "CAIRN_STORE_BACKUP_DIR", "CAIRN_STORE_BACKUP_SINKS_FILE"] {
         if !env(k, "").is_empty() && env(k, "") != "0" {
             fail("cluster", format!("{k} is not available in a cluster (packs and backups cover one disk); unset it"));
         }
     }
     Some(cfg)
+}
+
+/// Backup sinks from CAIRN_STORE_BACKUP_SINKS_FILE (none when unset).
+fn backup_sinks() -> Result<Vec<s3::remote::RemoteSpec>, String> {
+    match env("CAIRN_STORE_BACKUP_SINKS_FILE", "") {
+        f if f.is_empty() => Ok(vec![]),
+        f => s3::remote::load_specs(&std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?, "backup sink"),
+    }
 }
 
 fn main() {
@@ -201,7 +213,7 @@ fn main() {
     let mut addr = env("CAIRN_STORE_ADDR", ":8333");
     let mut data = env("CAIRN_STORE_DATA", "/data");
     // `admin` takes its own arguments.
-    let rest: Vec<String> = if cmd == "admin" || cmd == "mount" { std::mem::take(&mut args) } else { vec![] };
+    let rest: Vec<String> = if cmd == "admin" || cmd == "mount" || cmd == "restore-backup" { std::mem::take(&mut args) } else { vec![] };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.trim_start_matches('-') {
@@ -259,6 +271,22 @@ fn main() {
             println!("{}", serde_json::json!({"rows": rows, "embedded_index_kept_as": kept.display().to_string()}));
             std::process::exit(0);
         }
+        "restore-backup" => {
+            // Downloads a backup from a sink into a new data directory: restore-backup <sink> <name> <dir>.
+            let (Some(sink), Some(name), Some(dir)) = (rest.first(), rest.get(1), rest.get(2)) else {
+                eprintln!("usage: cairn-store restore-backup <sink> <name> <dir>   (sinks: CAIRN_STORE_BACKUP_SINKS_FILE)");
+                std::process::exit(2);
+            };
+            let specs = backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e));
+            let spec =
+                specs.into_iter().find(|s| &s.id == sink).unwrap_or_else(|| fail("restore-backup", format!("no backup sink {sink}")));
+            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap_or_else(|e| fail("runtime", e));
+            let _enter = rt.enter();
+            let remote = s3::remote::Remote::new(spec).unwrap_or_else(|e| fail("restore-backup", e));
+            let out = s3::sinks::restore(&remote, name, std::path::Path::new(dir)).unwrap_or_else(|e| fail("restore-backup", e));
+            println!("{out}");
+            std::process::exit(0);
+        }
         "audit-verify" => {
             // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
             // writer and concurrent readers only within a process, so stop the store first).
@@ -302,7 +330,9 @@ fn main() {
             rt.block_on(serve(addr, data));
         }
         other => {
-            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, mount, migrate-meta, healthcheck, version)");
+            eprintln!(
+                "unknown command {other:?} (serve, fsck, audit-verify, admin, mount, migrate-meta, restore-backup, healthcheck, version)"
+            );
             std::process::exit(2);
         }
     }
@@ -380,6 +410,7 @@ async fn serve(addr: String, data: String) {
                     u => Some((u, secret("CAIRN_STORE_PDP_TOKEN").unwrap_or_else(|e| fail("CAIRN_STORE_PDP_TOKEN", e)))),
                 },
                 cluster: cluster.clone(),
+                backup_sinks: backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e)),
             },
         )
         .unwrap_or_else(|e| fail("configure", e)),
@@ -388,6 +419,15 @@ async fn serve(addr: String, data: String) {
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
     tokio::spawn(server.clone().run_events());
     tokio::spawn(server.clone().run_cluster());
+    let sink_auto = env("CAIRN_STORE_BACKUP_SINK_SCHEDULE", "");
+    if !sink_auto.is_empty() {
+        if !backup_sinks().unwrap_or_default().iter().any(|s| s.id == sink_auto) {
+            fail("CAIRN_STORE_BACKUP_SINK_SCHEDULE", format!("no backup sink {sink_auto} in CAIRN_STORE_BACKUP_SINKS_FILE"));
+        }
+        let every = num("CAIRN_STORE_BACKUP_SINK_INTERVAL", "86400").max(1);
+        let keep = num("CAIRN_STORE_BACKUP_SINK_KEEP", "7").max(1) as usize;
+        tokio::spawn(server.clone().run_sink_backups(sink_auto, Duration::from_secs(every), keep));
+    }
     let flush: u64 =
         env("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", "60").parse().unwrap_or_else(|e| fail("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", e));
     tokio::spawn(server.clone().run_access_logs(Duration::from_secs(flush.max(1))));

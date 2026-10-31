@@ -554,6 +554,9 @@ pub struct Engine {
     cluster: std::sync::RwLock<Option<std::sync::Arc<dyn ClusterStore>>>,
 }
 
+/// What an index snapshot refers to on this disk: blob files, and packs with the length they had.
+pub type Snapshot = (HashSet<String>, Vec<(String, u64)>);
+
 /// Keeps deleted blobs on disk while it lives (see `Engine::hold_collection`).
 pub struct CollectionHold<'a>(&'a Engine);
 
@@ -2693,7 +2696,7 @@ impl Engine {
     /// Writes a consistent copy of the index (as of one moment, without pending event deliveries) to an
     /// embedded index file at `index`, and returns the blobs it refers to on this disk (blob files, and
     /// packs with the length they had). Hold collection (`hold_collection`) until those are copied.
-    pub fn snapshot_index(&self, index: &Path, rep: &mut BackupReport) -> Result<(HashSet<String>, Vec<(String, u64)>)> {
+    pub fn snapshot_index(&self, index: &Path, rep: &mut BackupReport) -> Result<Snapshot> {
         if self.node.is_some() {
             return Err(Error::Index(
                 "online backups cover one disk; in a cluster, back up the PostgreSQL metadata database and keep enough copies".into(),

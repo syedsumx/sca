@@ -9,6 +9,9 @@
 //! PUT    /-/admin/v1/buckets/{bucket}/quota    {"max_bytes": n, "max_objects": n} (either or both)
 //! DELETE /-/admin/v1/buckets/{bucket}/quota
 //! POST   /-/admin/v1/buckets/{bucket}/replication/resync  queue the bucket's existing objects for replication
+//! POST   /-/admin/v1/backups                   {"name", "sink"?}: an online backup (to a local directory, or a sink)
+//! GET    /-/admin/v1/backups[?sink=<id>]       backups (local, or in a sink)
+//! DELETE /-/admin/v1/backups/{name}?sink=<id>  a backup in a sink, and the blobs no other backup needs
 //! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
 //! GET    /-/admin/v1/keys                      access keys (never their secrets)
 //! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
@@ -121,6 +124,8 @@ impl Server {
             path.split('/').filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(&auth::percent_decode(s)).into_owned()).collect();
         let segs: Vec<&str> = segs.iter().map(String::as_str).collect();
         let m = &parts.method;
+        let q: std::collections::BTreeMap<String, String> =
+            raw_query.split('&').filter_map(|p| p.split_once('=')).map(|(k, v)| (auth::query_decode(k), auth::query_decode(v))).collect();
         blocking(|| match (m, segs.as_slice()) {
             (&Method::GET, ["stats"]) => {
                 let st = self.eng.stats()?;
@@ -143,11 +148,6 @@ impl Server {
                 Ok(json_resp(StatusCode::OK, serde_json::to_value(report).map_err(|_| e::INTERNAL.clone())?))
             }
             (&Method::GET, ["audit"]) => {
-                let q: std::collections::BTreeMap<String, String> = raw_query
-                    .split('&')
-                    .filter_map(|p| p.split_once('='))
-                    .map(|(k, v)| (auth::query_decode(k), auth::query_decode(v)))
-                    .collect();
                 let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
                 let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000usize).min(10_000);
                 let entries = self.eng.audit_entries(after, limit)?;
@@ -163,6 +163,19 @@ impl Server {
                 }
                 Ok(json_resp(StatusCode::OK, json!({"entries": entries, "head": entries.last().map(|en| en.hash.clone())})))
             }
+            (&Method::GET, ["backups"]) if q.contains_key("sink") => Ok(json_resp(StatusCode::OK, self.sink_backups(&q["sink"])?)),
+            (&Method::DELETE, ["backups", name]) => {
+                let sink = q.get("sink").ok_or_else(|| e::MALFORMED_JSON.clone())?;
+                let out = self.delete_sink_backup(sink, name)?;
+                self.eng.append_audit(&crate::audit::Audit {
+                    category: "store",
+                    action: "backup.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: name.to_string(),
+                    details: json!({"sink": sink, "blobs_deleted": out["blobs_deleted"]}),
+                })?;
+                Ok(json_resp(StatusCode::OK, out))
+            }
             (&Method::GET, ["backups"]) => {
                 let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
                 let mut names: Vec<String> = std::fs::read_dir(root)
@@ -175,9 +188,20 @@ impl Server {
                 Ok(json_resp(StatusCode::OK, json!({"root": root.display().to_string(), "backups": names})))
             }
             (&Method::POST, ["backups"]) => {
-                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
                 let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
                 let name = v.get("name").and_then(Value::as_str).unwrap_or("");
+                if let Some(sink) = v.get("sink").and_then(Value::as_str) {
+                    let out = self.backup_to_sink(sink, name)?;
+                    self.eng.append_audit(&crate::audit::Audit {
+                        category: "store",
+                        action: "backup.create".into(),
+                        actor: a.cred.access_key.clone(),
+                        subject: name.to_string(),
+                        details: json!({"sink": sink, "objects": out["objects"], "bytes_uploaded": out["bytes_uploaded"]}),
+                    })?;
+                    return Ok(json_resp(StatusCode::CREATED, out));
+                }
+                let root = self.backup_root.as_ref().ok_or_else(|| e::BACKUPS_OFF.clone())?;
                 let ok = !name.is_empty()
                     && name.len() <= 64
                     && !name.starts_with('.')
