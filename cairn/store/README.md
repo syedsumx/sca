@@ -1,6 +1,6 @@
 # Cairn Store
 
-Cairn's S3-compatible object store (single node), written in Rust.
+Cairn's S3-compatible object store (one node, or a cluster of nodes sharing PostgreSQL metadata), written in Rust.
 
 ```
 src/engine.rs     storage engine: immutable blob files + one transactional index (redb)

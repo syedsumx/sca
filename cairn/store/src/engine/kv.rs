@@ -541,7 +541,9 @@ impl<'t, K: Key + 'static, V: Value + 'static> Iterator for RangeIter<'t, K, V> 
 /// Binds a data directory (its blobs) to its metadata database: both carry the same store id. A
 /// fresh pair gets a new id; a mismatch (another store's database, or a database restored without its
 /// blobs) refuses to open.
-pub fn bind(db: &Db, dir: &std::path::Path) -> Result<()> {
+/// In a cluster (`join`) every node's data directory carries the cluster's id: a node with an empty
+/// data directory joins the cluster it is pointed at.
+pub fn bind(db: &Db, dir: &std::path::Path, join: bool) -> Result<()> {
     let Db::Pg(pg) = db else { return Ok(()) };
     let file = dir.join("store-id");
     let local = std::fs::read_to_string(&file).ok().map(|s| s.trim().to_string());
@@ -556,6 +558,9 @@ pub fn bind(db: &Db, dir: &std::path::Path) -> Result<()> {
             return Err(Error::Index(format!(
                 "the metadata database belongs to store {r}, but this data directory is store {l}; refusing to mix them"
             )))
+        }
+        (None, Some(r)) if join => {
+            std::fs::write(&file, &r)?;
         }
         (None, Some(r)) => {
             return Err(Error::Index(format!(

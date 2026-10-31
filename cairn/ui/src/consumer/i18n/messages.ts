@@ -14,7 +14,8 @@ export type Locale = (typeof LOCALES)[number]['code'];
 
 const en = {
     'settings.storage': 'Storage',
-    'storage.intro': 'Buckets in Cairn Store with their usage, settings and quotas, and the store’s tamper-evident audit trail.',
+    'storage.intro':
+        'Buckets in Cairn Store with their usage, settings and quotas, and the store’s tamper-evident audit trail.',
     'storage.bucket': 'Bucket',
     'storage.usage': 'Usage',
     'storage.objects': '{n} objects',
@@ -40,7 +41,35 @@ const en = {
     'storage.chainValid': 'The chain is intact: {n} entries checked.',
     'storage.chainBroken': 'The chain is broken: {reason}',
     'storage.keys': 'Access keys',
-    'storage.keysIntro': 'Keys that sign requests to Cairn Store. Keys created here can be scoped, rotated and deleted at once; keys from the store’s configuration are listed but changed there.',
+    'storage.keysIntro':
+        'Keys that sign requests to Cairn Store. Keys created here can be scoped, rotated and deleted at once; keys from the store’s configuration are listed but changed there.',
+    'storage.cluster': 'Cluster',
+    'storage.clusterIntro':
+        'Cairn Store runs on several nodes. Each object is kept as {copies} copies on different nodes; when a node fails, reads move to another copy and repair re-creates what it held.',
+    'storage.clusterIntroEc':
+        'Cairn Store runs on several nodes. Small objects are kept as {copies} copies on different nodes; large ones as {data} data and {parity} parity shards, so any {data} shards rebuild them.',
+    'storage.clusterUnhealthy':
+        '{degraded} stored blobs have fewer copies than configured and {lost} cannot be read. Bring nodes back or add nodes, then run a repair.',
+    'storage.clusterBlobs': '{healthy} of {total} stored blobs have all their copies.',
+    'storage.node': 'Node',
+    'storage.thisNode': 'answering',
+    'storage.nodeState': 'State',
+    'storage.up': 'Up',
+    'storage.down': 'Down',
+    'storage.draining': 'Draining',
+    'storage.removed': 'Removed',
+    'storage.copies': 'Copies held',
+    'storage.stored': 'Stored',
+    'storage.drain': 'Drain',
+    'storage.drainConfirm': 'Move this node’s copies to other nodes and place nothing new on it?',
+    'storage.activate': 'Activate',
+    'storage.removeNode': 'Remove',
+    'storage.removeNodeConfirm': 'Remove this node for good? Its copies are re-created on other nodes, and it stops.',
+    'storage.nodeChanged': 'Node updated',
+    'storage.repair': 'Repair now',
+    'storage.repaired': 'Repair finished',
+    'storage.rebalance': 'Rebalance',
+    'storage.rebalanced': 'Rebalancing finished',
     'storage.key': 'Key',
     'storage.source': 'Source',
     'storage.sourceConfig': 'Configuration',
@@ -120,7 +149,8 @@ type Catalog = Partial<Record<MessageKey, string>>;
 
 const de: Catalog = {
     'settings.storage': 'Speicher',
-    'storage.intro': 'Buckets in Cairn Store mit Belegung, Einstellungen und Kontingenten sowie das manipulationssichere Prüfprotokoll des Speichers.',
+    'storage.intro':
+        'Buckets in Cairn Store mit Belegung, Einstellungen und Kontingenten sowie das manipulationssichere Prüfprotokoll des Speichers.',
     'storage.bucket': 'Bucket',
     'storage.usage': 'Belegung',
     'storage.objects': '{n} Objekte',
@@ -146,7 +176,37 @@ const de: Catalog = {
     'storage.chainValid': 'Die Kette ist intakt: {n} Einträge geprüft.',
     'storage.chainBroken': 'Die Kette ist unterbrochen: {reason}',
     'storage.keys': 'Zugriffsschlüssel',
-    'storage.keysIntro': 'Schlüssel, mit denen Anfragen an Cairn Store signiert werden. Hier erstellte Schlüssel lassen sich sofort einschränken, rotieren und löschen; Schlüssel aus der Konfiguration des Speichers werden angezeigt, aber dort geändert.',
+    'storage.keysIntro':
+        'Schlüssel, mit denen Anfragen an Cairn Store signiert werden. Hier erstellte Schlüssel lassen sich sofort einschränken, rotieren und löschen; Schlüssel aus der Konfiguration des Speichers werden angezeigt, aber dort geändert.',
+    'storage.cluster': 'Cluster',
+    'storage.clusterIntro':
+        'Cairn Store läuft auf mehreren Knoten. Jedes Objekt wird als {copies} Kopien auf verschiedenen Knoten gespeichert; fällt ein Knoten aus, wird von einer anderen Kopie gelesen, und die Reparatur stellt seine Daten wieder her.',
+    'storage.clusterIntroEc':
+        'Cairn Store läuft auf mehreren Knoten. Kleine Objekte werden als {copies} Kopien auf verschiedenen Knoten gespeichert, große als {data} Daten- und {parity} Paritätsteile; beliebige {data} Teile stellen sie wieder her.',
+    'storage.clusterUnhealthy':
+        '{degraded} gespeicherte Blobs haben weniger Kopien als eingestellt, {lost} sind nicht lesbar. Bringen Sie Knoten zurück oder fügen Sie welche hinzu und starten Sie dann eine Reparatur.',
+    'storage.clusterBlobs': '{healthy} von {total} gespeicherten Blobs haben alle Kopien.',
+    'storage.node': 'Knoten',
+    'storage.thisNode': 'antwortet',
+    'storage.nodeState': 'Status',
+    'storage.up': 'Läuft',
+    'storage.down': 'Ausgefallen',
+    'storage.draining': 'Wird geleert',
+    'storage.removed': 'Entfernt',
+    'storage.copies': 'Kopien',
+    'storage.stored': 'Gespeichert',
+    'storage.drain': 'Leeren',
+    'storage.drainConfirm':
+        'Die Kopien dieses Knotens auf andere Knoten verschieben und nichts Neues mehr darauf ablegen?',
+    'storage.activate': 'Aktivieren',
+    'storage.removeNode': 'Entfernen',
+    'storage.removeNodeConfirm':
+        'Diesen Knoten endgültig entfernen? Seine Kopien werden auf anderen Knoten neu angelegt, und er wird beendet.',
+    'storage.nodeChanged': 'Knoten aktualisiert',
+    'storage.repair': 'Jetzt reparieren',
+    'storage.repaired': 'Reparatur abgeschlossen',
+    'storage.rebalance': 'Neu verteilen',
+    'storage.rebalanced': 'Neuverteilung abgeschlossen',
     'storage.key': 'Schlüssel',
     'storage.source': 'Herkunft',
     'storage.sourceConfig': 'Konfiguration',
@@ -223,7 +283,8 @@ const de: Catalog = {
 
 const fr: Catalog = {
     'settings.storage': 'Stockage',
-    'storage.intro': 'Les buckets de Cairn Store avec leur occupation, leurs réglages et leurs quotas, et le journal d’audit infalsifiable du stockage.',
+    'storage.intro':
+        'Les buckets de Cairn Store avec leur occupation, leurs réglages et leurs quotas, et le journal d’audit infalsifiable du stockage.',
     'storage.bucket': 'Bucket',
     'storage.usage': 'Occupation',
     'storage.objects': '{n} objets',
@@ -249,7 +310,36 @@ const fr: Catalog = {
     'storage.chainValid': 'La chaîne est intacte : {n} entrées vérifiées.',
     'storage.chainBroken': 'La chaîne est rompue : {reason}',
     'storage.keys': 'Clés d’accès',
-    'storage.keysIntro': 'Les clés qui signent les requêtes vers Cairn Store. Les clés créées ici peuvent être restreintes, renouvelées et supprimées immédiatement ; les clés de la configuration du stockage sont listées mais se modifient là-bas.',
+    'storage.keysIntro':
+        'Les clés qui signent les requêtes vers Cairn Store. Les clés créées ici peuvent être restreintes, renouvelées et supprimées immédiatement ; les clés de la configuration du stockage sont listées mais se modifient là-bas.',
+    'storage.cluster': 'Cluster',
+    'storage.clusterIntro':
+        'Cairn Store fonctionne sur plusieurs nœuds. Chaque objet est conservé en {copies} copies sur des nœuds différents ; si un nœud tombe, les lectures passent à une autre copie et la réparation recrée ce qu’il contenait.',
+    'storage.clusterIntroEc':
+        'Cairn Store fonctionne sur plusieurs nœuds. Les petits objets sont conservés en {copies} copies sur des nœuds différents, les gros en {data} fragments de données et {parity} de parité ; {data} fragments quelconques suffisent à les reconstruire.',
+    'storage.clusterUnhealthy':
+        '{degraded} blobs ont moins de copies que prévu et {lost} sont illisibles. Rétablissez ou ajoutez des nœuds, puis lancez une réparation.',
+    'storage.clusterBlobs': '{healthy} blobs sur {total} ont toutes leurs copies.',
+    'storage.node': 'Nœud',
+    'storage.thisNode': 'répond',
+    'storage.nodeState': 'État',
+    'storage.up': 'En marche',
+    'storage.down': 'Hors ligne',
+    'storage.draining': 'En vidage',
+    'storage.removed': 'Retiré',
+    'storage.copies': 'Copies',
+    'storage.stored': 'Stocké',
+    'storage.drain': 'Vider',
+    'storage.drainConfirm': 'Déplacer les copies de ce nœud vers d’autres nœuds et ne plus rien y placer ?',
+    'storage.activate': 'Activer',
+    'storage.removeNode': 'Retirer',
+    'storage.removeNodeConfirm':
+        'Retirer définitivement ce nœud ? Ses copies sont recréées sur d’autres nœuds et il s’arrête.',
+    'storage.nodeChanged': 'Nœud mis à jour',
+    'storage.repair': 'Réparer maintenant',
+    'storage.repaired': 'Réparation terminée',
+    'storage.rebalance': 'Rééquilibrer',
+    'storage.rebalanced': 'Rééquilibrage terminé',
     'storage.key': 'Clé',
     'storage.source': 'Origine',
     'storage.sourceConfig': 'Configuration',
@@ -326,7 +416,8 @@ const fr: Catalog = {
 
 const es: Catalog = {
     'settings.storage': 'Almacenamiento',
-    'storage.intro': 'Los buckets de Cairn Store con su uso, su configuración y sus cuotas, y el registro de auditoría a prueba de manipulación del almacenamiento.',
+    'storage.intro':
+        'Los buckets de Cairn Store con su uso, su configuración y sus cuotas, y el registro de auditoría a prueba de manipulación del almacenamiento.',
     'storage.bucket': 'Bucket',
     'storage.usage': 'Uso',
     'storage.objects': '{n} objetos',
@@ -352,7 +443,36 @@ const es: Catalog = {
     'storage.chainValid': 'La cadena está intacta: {n} entradas verificadas.',
     'storage.chainBroken': 'La cadena está rota: {reason}',
     'storage.keys': 'Claves de acceso',
-    'storage.keysIntro': 'Las claves que firman las solicitudes a Cairn Store. Las claves creadas aquí se pueden limitar, rotar y eliminar al instante; las de la configuración del almacenamiento se muestran pero se cambian allí.',
+    'storage.keysIntro':
+        'Las claves que firman las solicitudes a Cairn Store. Las claves creadas aquí se pueden limitar, rotar y eliminar al instante; las de la configuración del almacenamiento se muestran pero se cambian allí.',
+    'storage.cluster': 'Clúster',
+    'storage.clusterIntro':
+        'Cairn Store funciona en varios nodos. Cada objeto se guarda como {copies} copias en nodos distintos; si un nodo falla, las lecturas pasan a otra copia y la reparación vuelve a crear lo que tenía.',
+    'storage.clusterIntroEc':
+        'Cairn Store funciona en varios nodos. Los objetos pequeños se guardan como {copies} copias en nodos distintos y los grandes como {data} fragmentos de datos y {parity} de paridad; cualquier conjunto de {data} fragmentos los reconstruye.',
+    'storage.clusterUnhealthy':
+        '{degraded} blobs tienen menos copias de las configuradas y {lost} no se pueden leer. Recupere o añada nodos y después ejecute una reparación.',
+    'storage.clusterBlobs': '{healthy} de {total} blobs tienen todas sus copias.',
+    'storage.node': 'Nodo',
+    'storage.thisNode': 'responde',
+    'storage.nodeState': 'Estado',
+    'storage.up': 'Activo',
+    'storage.down': 'Caído',
+    'storage.draining': 'Vaciándose',
+    'storage.removed': 'Retirado',
+    'storage.copies': 'Copias',
+    'storage.stored': 'Almacenado',
+    'storage.drain': 'Vaciar',
+    'storage.drainConfirm': '¿Mover las copias de este nodo a otros nodos y no colocar nada nuevo en él?',
+    'storage.activate': 'Activar',
+    'storage.removeNode': 'Retirar',
+    'storage.removeNodeConfirm':
+        '¿Retirar este nodo definitivamente? Sus copias se vuelven a crear en otros nodos y se detiene.',
+    'storage.nodeChanged': 'Nodo actualizado',
+    'storage.repair': 'Reparar ahora',
+    'storage.repaired': 'Reparación terminada',
+    'storage.rebalance': 'Reequilibrar',
+    'storage.rebalanced': 'Reequilibrio terminado',
     'storage.key': 'Clave',
     'storage.source': 'Origen',
     'storage.sourceConfig': 'Configuración',
@@ -455,7 +575,36 @@ const ja: Catalog = {
     'storage.chainValid': 'チェーンは正常です: {n} 件を検証しました。',
     'storage.chainBroken': 'チェーンが壊れています: {reason}',
     'storage.keys': 'アクセスキー',
-    'storage.keysIntro': 'Cairn Store へのリクエストに署名するキーです。ここで作成したキーは、範囲の制限、ローテーション、削除がすぐに反映されます。ストレージの設定にあるキーは一覧に表示されますが、変更は設定側で行います。',
+    'storage.keysIntro':
+        'Cairn Store へのリクエストに署名するキーです。ここで作成したキーは、範囲の制限、ローテーション、削除がすぐに反映されます。ストレージの設定にあるキーは一覧に表示されますが、変更は設定側で行います。',
+    'storage.cluster': 'クラスター',
+    'storage.clusterIntro':
+        'Cairn Store は複数のノードで動作しています。各オブジェクトは異なるノードに {copies} 個のコピーとして保存されます。ノードが停止すると読み取りは別のコピーに切り替わり、修復によってそのノードのデータが再作成されます。',
+    'storage.clusterIntroEc':
+        'Cairn Store は複数のノードで動作しています。小さなオブジェクトは異なるノードに {copies} 個のコピーとして、大きなオブジェクトは {data} 個のデータシャードと {parity} 個のパリティシャードとして保存され、任意の {data} 個のシャードから復元できます。',
+    'storage.clusterUnhealthy':
+        '{degraded} 個の Blob のコピー数が設定より少なく、{lost} 個は読み取れません。ノードを復旧または追加してから修復を実行してください。',
+    'storage.clusterBlobs': '{total} 個中 {healthy} 個の Blob はすべてのコピーがそろっています。',
+    'storage.node': 'ノード',
+    'storage.thisNode': '応答中',
+    'storage.nodeState': '状態',
+    'storage.up': '稼働中',
+    'storage.down': '停止',
+    'storage.draining': '退避中',
+    'storage.removed': '削除済み',
+    'storage.copies': '保持コピー数',
+    'storage.stored': '保存量',
+    'storage.drain': '退避',
+    'storage.drainConfirm': 'このノードのコピーを他のノードに移し、新しいデータを置かないようにしますか?',
+    'storage.activate': '有効化',
+    'storage.removeNode': '削除',
+    'storage.removeNodeConfirm':
+        'このノードを完全に削除しますか?コピーは他のノードに再作成され、このノードは停止します。',
+    'storage.nodeChanged': 'ノードを更新しました',
+    'storage.repair': '今すぐ修復',
+    'storage.repaired': '修復が完了しました',
+    'storage.rebalance': '再配置',
+    'storage.rebalanced': '再配置が完了しました',
     'storage.key': 'キー',
     'storage.source': '出所',
     'storage.sourceConfig': '設定',

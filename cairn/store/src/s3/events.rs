@@ -428,6 +428,10 @@ impl Server {
     /// Delivers events forever.
     pub async fn run_events(self: Arc<Self>) {
         loop {
+            if !self.may_run("events") {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
             let n = self.deliver_events().await;
             tokio::time::sleep(Duration::from_millis(if n > 0 { 10 } else { 500 })).await;
         }

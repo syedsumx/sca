@@ -655,7 +655,12 @@ export interface ReportSnapshot {
         pending_requests: number;
         median_hours_to_decision: number | null;
     };
-    quality: { open_incidents: number; monitored_pct: number; resolved_30d: number; mean_hours_to_resolve: number | null };
+    quality: {
+        open_incidents: number;
+        monitored_pct: number;
+        resolved_30d: number;
+        mean_hours_to_resolve: number | null;
+    };
     governance: { personas?: number; purposes?: number; active_grants?: number; grants_expiring_7d?: number };
 }
 
@@ -1267,6 +1272,27 @@ export interface StoreKey {
     secret_protected?: boolean | null;
     /** Only in the answer to a create or a rotation. */
     secret_key?: string;
+}
+
+export interface StoreClusterNode {
+    name: string;
+    url: string;
+    state: 'active' | 'draining' | 'removed';
+    alive: boolean;
+    heartbeat_age_ms: number;
+    version: string;
+    copies: number;
+    bytes: number;
+    this_node: boolean;
+}
+
+export interface StoreCluster {
+    enabled: boolean;
+    node?: string;
+    copies?: number;
+    erasure_coding?: { data: number; parity: number; above_bytes: number } | null;
+    nodes?: StoreClusterNode[];
+    blobs?: { total: number; healthy: number; degraded: number; lost: number };
 }
 
 export interface StoreKeySpec {

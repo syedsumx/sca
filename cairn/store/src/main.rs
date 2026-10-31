@@ -1,4 +1,4 @@
-//! cairn-store: Cairn's S3-compatible object store (single node).
+//! cairn-store: Cairn's S3-compatible object store (one node, or a cluster of nodes).
 //!
 //! ```text
 //! cairn-store serve        run the server (default)
@@ -53,6 +53,13 @@
 //! CAIRN_STORE_COMPACT_DEAD_RATIO  a pack is compacted when this share of it is dead (0.5)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_CLUSTER_NODE   run as this node of a cluster (off when empty; needs CAIRN_STORE_META, shared by the nodes)
+//! CAIRN_STORE_CLUSTER_URL    this node's address for the other nodes, e.g. http://store-0.store:8333
+//! CAIRN_STORE_CLUSTER_SECRET the secret that authenticates node-to-node calls, the same on every node (or _FILE)
+//! CAIRN_STORE_CLUSTER_COPIES copies of each blob, on distinct nodes (2)
+//! CAIRN_STORE_CLUSTER_EC     erasure-code large blobs as k data + m parity shards, e.g. 4+2 (off)
+//! CAIRN_STORE_CLUSTER_EC_ABOVE  ... blobs of at least this many bytes (1048576)
+//! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -150,6 +157,44 @@ fn meta() -> Option<String> {
     }
 }
 
+/// This node's name in a cluster (None: a single store).
+fn node_name() -> Option<String> {
+    Some(env("CAIRN_STORE_CLUSTER_NODE", "")).filter(|n| !n.is_empty())
+}
+
+/// Cluster settings (None: a single store). Everything a cluster needs is checked before serving.
+fn cluster_config() -> Option<s3::cluster::ClusterConfig> {
+    let node = node_name()?;
+    let secs = |k: &str, d: &str| -> Duration {
+        let v: f64 = env(k, d).parse().unwrap_or_else(|e| fail(k, e));
+        if v.is_nan() || v <= 0.0 {
+            fail(k, "must be more than 0");
+        }
+        Duration::from_secs_f64(v)
+    };
+    let cfg = s3::cluster::ClusterConfig {
+        node,
+        url: env("CAIRN_STORE_CLUSTER_URL", ""),
+        secret: secret("CAIRN_STORE_CLUSTER_SECRET").unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_SECRET", e)),
+        copies: env("CAIRN_STORE_CLUSTER_COPIES", "2").parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_COPIES", e)),
+        ec: s3::cluster::parse_ec(&env("CAIRN_STORE_CLUSTER_EC", "")).unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC", e)),
+        ec_above: env("CAIRN_STORE_CLUSTER_EC_ABOVE", "1048576").parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC_ABOVE", e)),
+        heartbeat: secs("CAIRN_STORE_CLUSTER_HEARTBEAT", "5"),
+        dead_after: secs("CAIRN_STORE_CLUSTER_DEAD_AFTER", "60"),
+        repair_every: secs("CAIRN_STORE_CLUSTER_REPAIR_INTERVAL", "300"),
+    };
+    cfg.validate().unwrap_or_else(|e| fail("cluster", e));
+    if meta().is_none() {
+        fail("cluster", "a cluster keeps its metadata in PostgreSQL: set CAIRN_STORE_META");
+    }
+    for k in ["CAIRN_STORE_PACK_BELOW", "CAIRN_STORE_BACKUP_DIR"] {
+        if !env(k, "").is_empty() && env(k, "") != "0" {
+            fail("cluster", format!("{k} is not available in a cluster (packs and backups cover one disk); unset it"));
+        }
+    }
+    Some(cfg)
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = if args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0) } else { "serve".to_string() };
@@ -178,7 +223,7 @@ fn main() {
     match cmd.as_str() {
         "version" => println!("cairn-store {VERSION}"),
         "fsck" => {
-            let eng = Engine::open_with(&data, true, meta().as_deref()).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_node(&data, true, meta().as_deref(), node_name().as_deref()).unwrap_or_else(|e| fail("open store", e));
             let rep = eng.recover().unwrap_or_else(|e| fail("fsck", e));
             println!("{}", serde_json::to_string_pretty(&rep).unwrap());
             if rep.objects_with_missing_blobs > 0 {
@@ -217,7 +262,7 @@ fn main() {
         "audit-verify" => {
             // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
             // writer and concurrent readers only within a process, so stop the store first).
-            let eng = Engine::open_with(&data, true, meta().as_deref()).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_node(&data, true, meta().as_deref(), node_name().as_deref()).unwrap_or_else(|e| fail("open store", e));
             let entries = eng.audit_entries(0, usize::MAX).unwrap_or_else(|e| fail("read audit trail", e));
             let res = audit::verify(&entries, true);
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -266,10 +311,15 @@ fn main() {
 async fn serve(addr: String, data: String) {
     let creds = credentials().unwrap_or_else(|e| fail("credentials", e));
     let fsync = env("CAIRN_STORE_FSYNC", "true") != "false";
-    let eng = Arc::new(Engine::open_with(&data, fsync, meta().as_deref()).unwrap_or_else(|e| fail("open store", e)));
+    let cluster = cluster_config();
+    let eng = Arc::new(
+        Engine::open_node(&data, fsync, meta().as_deref(), cluster.as_ref().map(|c| c.node.as_str()))
+            .unwrap_or_else(|e| fail("open store", e)),
+    );
     let metadata = if eng.meta_is_postgres() { "postgresql" } else { "embedded" };
     let num = |k: &str, d: &str| -> u64 { env(k, d).parse().unwrap_or_else(|e| fail(k, e)) };
-    eng.set_packing(num("CAIRN_STORE_PACK_BELOW", "65536"), num("CAIRN_STORE_PACK_FILE_BYTES", "1073741824"));
+    let pack_default = if cluster.is_some() { "0" } else { "65536" };
+    eng.set_packing(num("CAIRN_STORE_PACK_BELOW", pack_default), num("CAIRN_STORE_PACK_FILE_BYTES", "1073741824"));
     if !fsync {
         tracing::warn!("fsync is off: a crash or power loss can lose writes that were acknowledged");
     }
@@ -329,6 +379,7 @@ async fn serve(addr: String, data: String) {
                     u if u.is_empty() => None,
                     u => Some((u, secret("CAIRN_STORE_PDP_TOKEN").unwrap_or_else(|e| fail("CAIRN_STORE_PDP_TOKEN", e)))),
                 },
+                cluster: cluster.clone(),
             },
         )
         .unwrap_or_else(|e| fail("configure", e)),
@@ -336,12 +387,13 @@ async fn serve(addr: String, data: String) {
     let lifecycle_every: u64 =
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
     tokio::spawn(server.clone().run_events());
+    tokio::spawn(server.clone().run_cluster());
     let flush: u64 =
         env("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", "60").parse().unwrap_or_else(|e| fail("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", e));
     tokio::spawn(server.clone().run_access_logs(Duration::from_secs(flush.max(1))));
     let compact_every = num("CAIRN_STORE_COMPACT_INTERVAL", "3600");
     let dead: f64 = env("CAIRN_STORE_COMPACT_DEAD_RATIO", "0.5").parse().unwrap_or_else(|e| fail("CAIRN_STORE_COMPACT_DEAD_RATIO", e));
-    if compact_every > 0 {
+    if compact_every > 0 && cluster.is_none() {
         let eng = eng.clone();
         tokio::spawn(async move {
             loop {
@@ -389,7 +441,7 @@ async fn serve(addr: String, data: String) {
         });
     }
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
-    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), metadata, "cairn-store listening");
+    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), metadata, node = cluster.as_ref().map(|c| c.node.as_str()).unwrap_or(""), "cairn-store listening");
     let mut shutdown = Box::pin(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }

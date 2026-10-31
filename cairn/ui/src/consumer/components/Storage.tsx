@@ -17,12 +17,20 @@ import {
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { StoreAuditEntry, StoreAuditVerify, StoreBucket, StoreKey } from '../api/types';
+import type {
+    StoreAuditEntry,
+    StoreAuditVerify,
+    StoreBucket,
+    StoreCluster,
+    StoreClusterNode,
+    StoreKey,
+} from '../api/types';
 import { useT } from '../i18n';
 
 const BUCKETS = '/storage/buckets';
 const AUDIT = '/storage/audit';
 const KEYS = '/storage/keys';
+const CLUSTER = '/storage/cluster';
 const GiB = 1024 ** 3;
 
 /** Bytes as a short human-readable size. */
@@ -283,6 +291,150 @@ function AccessKeys() {
     );
 }
 
+/** The store's nodes and the health of its copies (shown only when the store runs as a cluster). */
+function Cluster() {
+    const t = useT();
+    const { client } = useConsumerApi();
+    const q = useDheQuery<StoreCluster>(CLUSTER, (c, signal) => c.storageCluster({ signal }));
+    const [busy, setBusy] = useState(false);
+    const run = async (f: () => Promise<unknown>, done: string) => {
+        setBusy(true);
+        try {
+            await f();
+            message.success(done);
+            q.refresh();
+        } catch (e) {
+            message.error((e as Error).message);
+        } finally {
+            setBusy(false);
+        }
+    };
+    if (!q.data?.enabled) return null;
+    const c = q.data;
+    const ec = c.erasure_coding;
+    return (
+        <Card
+            title={t('storage.cluster')}
+            extra={
+                <Space>
+                    <Button
+                        disabled={busy}
+                        onClick={() => run(() => client.storageClusterTask('repair'), t('storage.repaired'))}
+                    >
+                        {t('storage.repair')}
+                    </Button>
+                    <Button
+                        disabled={busy}
+                        onClick={() => run(() => client.storageClusterTask('rebalance'), t('storage.rebalanced'))}
+                    >
+                        {t('storage.rebalance')}
+                    </Button>
+                </Space>
+            }
+        >
+            <Typography.Paragraph type="secondary">
+                {ec
+                    ? t('storage.clusterIntroEc', { copies: c.copies ?? 0, data: ec.data, parity: ec.parity })
+                    : t('storage.clusterIntro', { copies: c.copies ?? 0 })}
+            </Typography.Paragraph>
+            {c.blobs && (c.blobs.degraded > 0 || c.blobs.lost > 0) && (
+                <Alert
+                    type={c.blobs.lost > 0 ? 'error' : 'warning'}
+                    showIcon
+                    message={t('storage.clusterUnhealthy', { degraded: c.blobs.degraded, lost: c.blobs.lost })}
+                />
+            )}
+            <Table<StoreClusterNode>
+                size="small"
+                rowKey="name"
+                pagination={false}
+                dataSource={c.nodes ?? []}
+                columns={[
+                    {
+                        title: t('storage.node'),
+                        dataIndex: 'name',
+                        render: (v: string, n) => (
+                            <Space size={4}>
+                                <Typography.Text code>{v}</Typography.Text>
+                                {n.this_node && <Tag>{t('storage.thisNode')}</Tag>}
+                            </Space>
+                        ),
+                    },
+                    {
+                        title: t('storage.nodeState'),
+                        render: (_: unknown, n) => (
+                            <Space size={4}>
+                                <Tag color={n.alive ? 'green' : 'red'}>
+                                    {n.alive ? t('storage.up') : t('storage.down')}
+                                </Tag>
+                                {n.state !== 'active' && (
+                                    <Tag color={n.state === 'removed' ? 'default' : 'orange'}>
+                                        {n.state === 'draining' ? t('storage.draining') : t('storage.removed')}
+                                    </Tag>
+                                )}
+                            </Space>
+                        ),
+                    },
+                    { title: t('storage.copies'), dataIndex: 'copies' },
+                    { title: t('storage.stored'), dataIndex: 'bytes', render: (v: number) => formatBytes(v) },
+                    {
+                        title: '',
+                        render: (_: unknown, n) => (
+                            <Space>
+                                {n.state === 'active' ? (
+                                    <Popconfirm
+                                        title={t('storage.drainConfirm')}
+                                        onConfirm={() =>
+                                            run(
+                                                () => client.storageClusterNode(n.name, 'drain'),
+                                                t('storage.nodeChanged'),
+                                            )
+                                        }
+                                    >
+                                        <Button size="small">{t('storage.drain')}</Button>
+                                    </Popconfirm>
+                                ) : (
+                                    <Button
+                                        size="small"
+                                        onClick={() =>
+                                            run(
+                                                () => client.storageClusterNode(n.name, 'activate'),
+                                                t('storage.nodeChanged'),
+                                            )
+                                        }
+                                    >
+                                        {t('storage.activate')}
+                                    </Button>
+                                )}
+                                {n.state !== 'removed' && (
+                                    <Popconfirm
+                                        title={t('storage.removeNodeConfirm')}
+                                        onConfirm={() =>
+                                            run(
+                                                () => client.storageClusterNode(n.name, 'remove'),
+                                                t('storage.nodeChanged'),
+                                            )
+                                        }
+                                    >
+                                        <Button size="small" danger>
+                                            {t('storage.removeNode')}
+                                        </Button>
+                                    </Popconfirm>
+                                )}
+                            </Space>
+                        ),
+                    },
+                ]}
+            />
+            {c.blobs && (
+                <Typography.Paragraph type="secondary" style={{ marginTop: 12, marginBottom: 0 }}>
+                    {t('storage.clusterBlobs', { total: c.blobs.total, healthy: c.blobs.healthy })}
+                </Typography.Paragraph>
+            )}
+        </Card>
+    );
+}
+
 function AuditTrail() {
     const t = useT();
     const { client } = useConsumerApi();
@@ -449,6 +601,7 @@ export function StorageSettings() {
                     }}
                 />
             )}
+            <Cluster />
             <AccessKeys />
             <AuditTrail />
         </Space>

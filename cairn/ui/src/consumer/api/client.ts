@@ -1,12 +1,6 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { CompiledPolicy } from './types';
-import type {
-    StoreAuditEntry,
-    StoreAuditVerify,
-    StoreKey,
-    StoreKeySpec,
-    StoreBucket,
-} from './types';
+import type { CompiledPolicy, StoreCluster, StoreClusterNode } from './types';
+import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
 import type {
     AIAssessment,
     AISystem,
@@ -368,7 +362,14 @@ export class ConsumerClient extends CairnClient {
         return this.request<ProductSlo[]>('GET', '/marketplace/slos', undefined, opts);
     }
 
-    putSlo(body: { id: string; product_urn: string; name: string; kind: string; objective: number; window_days: number }) {
+    putSlo(body: {
+        id: string;
+        product_urn: string;
+        name: string;
+        kind: string;
+        objective: number;
+        window_days: number;
+    }) {
         return this.request<ProductSlo>('PUT', `/marketplace/slos/${enc(body.id)}`, body);
     }
 
@@ -416,8 +417,23 @@ export class ConsumerClient extends CairnClient {
         return this.request<void>('DELETE', `/storage/v1/keys/${enc(accessKey)}`);
     }
 
+    storageCluster(opts?: RequestOptions) {
+        return this.request<StoreCluster>('GET', '/storage/v1/cluster', undefined, opts);
+    }
+
+    storageClusterNode(node: string, action: 'drain' | 'activate' | 'remove') {
+        return this.request<StoreClusterNode>('POST', `/storage/v1/cluster/nodes/${enc(node)}/${action}`);
+    }
+
+    storageClusterTask(task: 'repair' | 'rebalance') {
+        return this.request<Record<string, unknown>>('POST', `/storage/v1/cluster/${task}`);
+    }
+
     storageAudit(opts?: RequestOptions) {
-        return this.request<StoreAuditEntry[]>('GET', '/storage/v1/audit', undefined, { ...opts, query: { limit: 1000 } });
+        return this.request<StoreAuditEntry[]>('GET', '/storage/v1/audit', undefined, {
+            ...opts,
+            query: { limit: 1000 },
+        });
     }
 
     verifyStorageAudit() {
@@ -434,11 +450,20 @@ export class ConsumerClient extends CairnClient {
         return this.request<WorkspaceSummary>('GET', `/workspaces/${enc(id)}`, undefined, opts);
     }
 
-    workspaceAssets(id: string, query: { type?: string; start?: number; count?: number } = {}, opts: RequestOptions = {}) {
-        return this.request<{ total: number; items: WorkspaceAsset[] }>('GET', `/workspaces/${enc(id)}/assets`, undefined, {
-            ...opts,
-            query,
-        });
+    workspaceAssets(
+        id: string,
+        query: { type?: string; start?: number; count?: number } = {},
+        opts: RequestOptions = {},
+    ) {
+        return this.request<{ total: number; items: WorkspaceAsset[] }>(
+            'GET',
+            `/workspaces/${enc(id)}/assets`,
+            undefined,
+            {
+                ...opts,
+                query,
+            },
+        );
     }
 
     putWorkspace(body: Partial<WorkspaceDoc> & { id: string; name: string; domains: string[] }) {
@@ -455,25 +480,34 @@ export class ConsumerClient extends CairnClient {
         return this.request<PrivacyRequest[]>('GET', '/governance/privacy/requests', undefined, opts);
     }
 
-    openPrivacyRequest(body: { kind: string; identifier_kind: string; identifier: string; reference?: string; due_days?: number }) {
+    openPrivacyRequest(body: {
+        kind: string;
+        identifier_kind: string;
+        identifier: string;
+        reference?: string;
+        due_days?: number;
+    }) {
         return this.request<PrivacyRequest>('POST', '/governance/privacy/requests', body);
     }
 
     privacyRequestCsv(id: string) {
-        return this.request<string>('GET', `/governance/privacy/requests/${enc(id)}`, undefined, { query: { format: 'csv' } });
+        return this.request<string>('GET', `/governance/privacy/requests/${enc(id)}`, undefined, {
+            query: { format: 'csv' },
+        });
     }
 
     myPrivacyParts(opts?: RequestOptions) {
-        return this.request<(PrivacyPart & { request: string; identifier: string; due_ms: number; overdue: boolean })[]>(
-            'GET',
-            '/governance/privacy/my-parts',
-            undefined,
-            opts,
-        );
+        return this.request<
+            (PrivacyPart & { request: string; identifier: string; due_ms: number; overdue: boolean })[]
+        >('GET', '/governance/privacy/my-parts', undefined, opts);
     }
 
     markPrivacyPart(id: string, dataset: string, state: 'DONE' | 'NOT_APPLICABLE', note = '') {
-        return this.request<PrivacyRequest>('POST', `/governance/privacy/requests/${enc(id)}/parts`, { dataset, state, note });
+        return this.request<PrivacyRequest>('POST', `/governance/privacy/requests/${enc(id)}/parts`, {
+            dataset,
+            state,
+            note,
+        });
     }
 
     retention(opts?: RequestOptions) {
@@ -722,7 +756,13 @@ export class ConsumerClient extends CairnClient {
     // --- marketplace -----------------------------------------------------------------------
 
     listProducts(
-        query: { q?: string; domain?: string; certified?: boolean; access?: ProductAccessFilter; sort?: ProductSort } = {},
+        query: {
+            q?: string;
+            domain?: string;
+            certified?: boolean;
+            access?: ProductAccessFilter;
+            sort?: ProductSort;
+        } = {},
         opts: RequestOptions = {},
     ) {
         return this.request<ProductCard[]>('GET', '/marketplace/products', undefined, { ...opts, query });
@@ -759,14 +799,23 @@ export class ConsumerClient extends CairnClient {
     }
 
     formTask(formId: string, urn: string, opts?: RequestOptions) {
-        return this.request<FormTaskDetail>('GET', `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`, undefined, opts);
+        return this.request<FormTaskDetail>(
+            'GET',
+            `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`,
+            undefined,
+            opts,
+        );
     }
 
     submitFormTask(formId: string, urn: string, answers: Record<string, unknown>, verify = false) {
-        return this.request<{ state: FormTask['state'] }>('POST', `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`, {
-            answers,
-            verify,
-        });
+        return this.request<{ state: FormTask['state'] }>(
+            'POST',
+            `/governance/forms/${enc(formId)}/tasks/${enc(urn)}`,
+            {
+                answers,
+                verify,
+            },
+        );
     }
 
     listForms(opts?: RequestOptions) {
@@ -909,7 +958,11 @@ export class ConsumerClient extends CairnClient {
     }
 
     decideProposals(ids: string[], action: 'accept' | 'reject', edits: Record<string, unknown> = {}) {
-        return this.request<{ decided: number; batch_id: string | null }>('POST', '/ai/steward/decide', { ids, action, edits });
+        return this.request<{ decided: number; batch_id: string | null }>('POST', '/ai/steward/decide', {
+            ids,
+            action,
+            edits,
+        });
     }
 
     listPersonas(opts?: RequestOptions) {
@@ -972,7 +1025,9 @@ export class ConsumerClient extends CairnClient {
     }
 
     exportDefinitions(format: 'snowflake' | 'databricks', name: string, source?: string) {
-        return this.request<string>('GET', '/context/definitions/export', undefined, { query: { format, name, source } });
+        return this.request<string>('GET', '/context/definitions/export', undefined, {
+            query: { format, name, source },
+        });
     }
 
     pastAnswers(question: string, opts?: RequestOptions) {

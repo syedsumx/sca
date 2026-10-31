@@ -138,3 +138,19 @@ def test_access_keys_through_the_control_plane(store):
     assert c.delete("/storage/v1/keys/cp-made").status_code == 404
     assert [a[1] for a in recorded] == ["key.create", "key.update", "key.rotate", "key.delete"]
     assert all(secret not in json.dumps(a) and rotated not in json.dumps(a) for a in recorded)
+
+
+def test_cluster_view_on_a_single_store(store):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.storage.store_api import build_router
+
+    assert store.cluster() == {"enabled": False}
+    app = FastAPI()
+    app.include_router(build_router(store, lambda: Principal(urn="urn:li:corpuser:admin", via="dev"), lambda urn: True, None))
+    c = TestClient(app)
+    assert c.get("/storage/v1/cluster").json() == {"enabled": False}
+    assert c.post("/storage/v1/cluster/repair").status_code == 501  # not a cluster: refused, not ignored
+    assert c.post("/storage/v1/cluster/nodes/n0/explode").status_code == 404

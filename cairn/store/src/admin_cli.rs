@@ -16,6 +16,9 @@
 //! cairn-store admin key-update <ak> [the same options]
 //! cairn-store admin key-rotate <ak>
 //! cairn-store admin key-delete <ak>
+//! cairn-store admin cluster                (nodes and blob health)
+//! cairn-store admin cluster-repair | cluster-rebalance [--limit N]
+//! cairn-store admin cluster-drain <node> | cluster-activate <node> | cluster-remove <node>
 //! ```
 //!
 //! Endpoint: `CAIRN_STORE_ENDPOINT` (default: this store's listen address, http or https as configured);
@@ -98,7 +101,7 @@ pub fn sign_full(
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | compact [--min-dead R] | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak>");
+    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | compact [--min-dead R] | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak> | cluster | cluster-repair | cluster-rebalance [--limit N] | cluster-drain|cluster-activate|cluster-remove <node>");
     std::process::exit(2)
 }
 
@@ -128,6 +131,15 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);
             ("POST", "compact".to_string(), Some(serde_json::json!({"min_dead": min})))
         }
+        "cluster" => ("GET", "cluster".to_string(), None),
+        "cluster-repair" => ("POST", "cluster/repair".to_string(), None),
+        "cluster-rebalance" => {
+            let limit = flag("--limit").map(|v| v.parse::<u64>().unwrap_or_else(|_| usage())).unwrap_or(10_000);
+            ("POST", "cluster/rebalance".to_string(), Some(serde_json::json!({"limit": limit})))
+        }
+        "cluster-drain" => ("POST", format!("cluster/nodes/{}/drain", name()), None),
+        "cluster-activate" => ("POST", format!("cluster/nodes/{}/activate", name()), None),
+        "cluster-remove" => ("POST", format!("cluster/nodes/{}/remove", name()), None),
         "key" => ("GET", format!("keys/{}", name()), None),
         "key-rotate" => ("POST", format!("keys/{}/rotate", name()), None),
         "key-delete" => ("DELETE", format!("keys/{}", name()), None),

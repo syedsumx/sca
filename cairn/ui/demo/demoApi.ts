@@ -570,6 +570,35 @@ const storeKeys: Json[] = [
 ];
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
 const demoSecret = () => Array.from(crypto.getRandomValues(new Uint8Array(43)), (b) => ALPHABET[b % 64]).join('');
+const storeCluster = {
+    enabled: true,
+    node: 'store-0',
+    copies: 2,
+    erasure_coding: { data: 4, parity: 2, above_bytes: 1048576 },
+    nodes: [0, 1, 2, 3, 4, 5].map((i) => ({
+        name: `store-${i}`,
+        url: `http://store-${i}.store-nodes:8333`,
+        state: i === 5 ? 'draining' : 'active',
+        alive: true,
+        heartbeat_age_ms: 400 + i * 300,
+        version: '0.1.0',
+        copies: [2140, 2093, 2117, 2088, 2125, 312][i],
+        bytes: [61, 59, 60, 58, 60, 9][i] * 1024 ** 3,
+        this_node: i === 0,
+    })),
+    blobs: { total: 6437, healthy: 6125, degraded: 312, lost: 0 },
+};
+on('GET', '/storage/v1/cluster', () => storeCluster);
+on('POST', '/storage/v1/cluster/nodes/:id/:id', (_b, _q, [name, action]) => {
+    const n = storeCluster.nodes.find((x) => x.name === name)!;
+    n.state = action === 'drain' ? 'draining' : action === 'remove' ? 'removed' : 'active';
+    return n;
+});
+on('POST', '/storage/v1/cluster/repair', () => {
+    storeCluster.blobs = { ...storeCluster.blobs, healthy: storeCluster.blobs.total, degraded: 0 };
+    return { repaired: 312, lost: 0 };
+});
+on('POST', '/storage/v1/cluster/rebalance', () => ({ moved: 0, bytes: 0 }));
 on('GET', '/storage/v1/keys', () => storeKeys);
 on('POST', '/storage/v1/keys', (b) => {
     const k = {

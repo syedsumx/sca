@@ -45,6 +45,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             tiers: vec![],
             files_basic: false,
             files_basic_http: false,
+            cluster: None,
         },
     )
     .unwrap();

@@ -110,6 +110,24 @@ class StoreAdmin:
     def delete_key(self, access_key: str) -> None:
         self._call("DELETE", f"keys/{quote(access_key, safe='')}")
 
+    # --- cluster (a single store answers 501: reported as {"enabled": false}) -------------------------
+    def cluster(self) -> dict:
+        try:
+            return {"enabled": True, **self._call("GET", "cluster")}
+        except StoreAdminError as e:
+            if e.status == 501:
+                return {"enabled": False}
+            raise
+
+    def cluster_node(self, node: str, action: str) -> dict:
+        return self._call("POST", f"cluster/nodes/{quote(node, safe='')}/{action}")
+
+    def cluster_repair(self) -> dict:
+        return self._call("POST", "cluster/repair")
+
+    def cluster_rebalance(self, limit: int = 10000) -> dict:
+        return self._call("POST", "cluster/rebalance", {"limit": limit})
+
     def audit(self, after: int = 0, limit: int = 1000) -> list[dict]:
         return self._call("GET", "audit", query=f"after={after}&limit={limit}&format=jsonl")
 

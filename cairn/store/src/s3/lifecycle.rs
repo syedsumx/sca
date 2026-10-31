@@ -597,6 +597,9 @@ impl Server {
         tick.tick().await;
         loop {
             tick.tick().await;
+            if !self.may_run("lifecycle") {
+                continue;
+            }
             let me = self.clone();
             let _ = tokio::task::spawn_blocking(move || me.lifecycle_pass(engine::now_ms())).await;
         }

@@ -33,6 +33,7 @@ use crate::audit::{self, Audit, Entry};
 use crate::crypt::{self, ChunkCipher, Key};
 use redb::TableDefinition;
 
+pub mod cid;
 pub mod kv;
 pub mod pack;
 use kv::{Db, ReadableTable, WriteTransaction};
@@ -63,6 +64,10 @@ const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
 const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("audit");
 /// Access keys created through the admin API (access key -> JSON; the secret is wrapped when a keyring exists).
 const KEYS: TableDefinition<&str, &[u8]> = TableDefinition::new("keys");
+/// Cluster nodes (name -> JSON: address, state, last heartbeat).
+const NODES: TableDefinition<&str, &[u8]> = TableDefinition::new("nodes");
+/// Leases on cluster-wide background work (name -> JSON: holder, expiry), so one node runs each task.
+const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
 
 #[derive(Debug)]
 pub enum Error {
@@ -85,6 +90,8 @@ pub enum Error {
     Conflict,
     Io(io::Error),
     Index(String),
+    /// Not enough cluster nodes to place a blob (retryable).
+    Unavailable(String),
 }
 
 impl std::fmt::Display for Error {
@@ -130,6 +137,18 @@ pub struct Segment {
     /// The storage tier (a storage class) holding the blob; empty: this store's disk.
     #[serde(rename = "t", default, skip_serializing_if = "String::is_empty")]
     pub tier: String,
+}
+
+/// The cluster: where blobs are placed (copies on several nodes, or erasure-coded shards) and read
+/// from. Implemented by the S3 layer's cluster module; ids are described in `cid`.
+pub trait ClusterStore: Send + Sync {
+    /// Places a blob sealed on this node (its local segment) on the cluster; returns the segment with
+    /// its cluster id. The local blob is kept or removed as placement requires.
+    fn place(&self, eng: &Engine, local: &Segment) -> Result<Segment>;
+    /// Reads a cluster blob's stored bytes from `offset` on.
+    fn open(&self, id: &str, offset: u64) -> io::Result<Box<dyn Read + Send>>;
+    /// Deletes every copy or shard of a cluster blob (deleting a missing one succeeds).
+    fn delete(&self, id: &str) -> io::Result<()>;
 }
 
 /// Remote storage tiers: where lifecycle transitions move blobs (the bytes exactly as stored on disk, so
@@ -454,6 +473,12 @@ pub struct Condition {
     pub if_none_match: Option<String>,
 }
 
+/// A blob file written within the last hour (in a cluster: possibly a copy whose index entry is still
+/// being committed by another node).
+fn young(ent: &fs::DirEntry) -> bool {
+    ent.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_none_or(|age| age.as_secs() < 3600)
+}
+
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -516,6 +541,9 @@ pub struct Engine {
     pack_below: std::sync::atomic::AtomicU64,
     pack_max: std::sync::atomic::AtomicU64,
     compacting: Mutex<()>,
+    /// Cluster mode: this node's name, and the cluster.
+    node: Option<String>,
+    cluster: std::sync::RwLock<Option<std::sync::Arc<dyn ClusterStore>>>,
 }
 
 /// What a backup did.
@@ -542,6 +570,8 @@ pub struct BlobWriter<'a> {
     size: u64,
     md5: Md5,
     enc: Option<Encrypting>,
+    /// Kept on this node only (not placed on the cluster).
+    local: bool,
 }
 
 struct Encrypting {
@@ -610,7 +640,17 @@ impl BlobWriter<'_> {
         if self.engine.fsync {
             File::open(dst.parent().unwrap())?.sync_all()?;
         }
-        Ok(Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new() })
+        let seg = Segment { blob: self.id.clone(), size: self.size, nonce, tier: String::new() };
+        if self.local {
+            return Ok(seg);
+        }
+        let cluster = self.engine.cluster.read().unwrap().clone();
+        match cluster {
+            Some(c) => c.place(self.engine, &seg).inspect_err(|_| {
+                let _ = fs::remove_file(self.engine.blob_path(&seg.blob));
+            }),
+            None => Ok(seg),
+        }
     }
 }
 
@@ -739,6 +779,15 @@ impl Engine {
     /// Opens a store whose metadata lives in PostgreSQL (`meta`: a postgres:// URL) or, without one, in
     /// the data directory's embedded index.
     pub fn open_with(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>) -> Result<Engine> {
+        Self::open_node(dir, fsync, meta, None)
+    }
+
+    /// Opens one node of a cluster (`node`: its name; the metadata must be in PostgreSQL, shared by all
+    /// nodes) or, without a node name, a single store.
+    pub fn open_node(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>, node: Option<&str>) -> Result<Engine> {
+        if node.is_some() && meta.is_none() {
+            return Err(Error::Index("a cluster keeps its metadata in PostgreSQL: set CAIRN_STORE_META".into()));
+        }
         let dir = dir.as_ref().to_path_buf();
         for d in [dir.clone(), dir.join("blobs"), dir.join("tmp")] {
             fs::create_dir_all(&d)?;
@@ -752,7 +801,7 @@ impl Engine {
                     ));
                 }
                 let db = Db::Pg(kv::PgDb::open(url)?);
-                kv::bind(&db, &dir)?;
+                kv::bind(&db, &dir, node.is_some())?;
                 db
             }
             None => {
@@ -777,6 +826,8 @@ impl Engine {
             pack_below: std::sync::atomic::AtomicU64::new(0),
             pack_max: std::sync::atomic::AtomicU64::new(1 << 30),
             compacting: Mutex::new(()),
+            node: node.map(str::to_string),
+            cluster: Default::default(),
         };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
@@ -791,7 +842,10 @@ impl Engine {
         tx.open_table(OUTBOX)?;
         tx.open_table(AUDIT)?;
         tx.open_table(KEYS)?;
+        tx.open_table(NODES)?;
+        tx.open_table(LEASES)?;
         tx.commit()?;
+        e.check_membership()?;
         e.recover()?;
         Ok(e)
     }
@@ -821,7 +875,78 @@ impl Engine {
         let id = new_id();
         let tmp = self.dir.join("tmp").join(format!("{id}.{}", new_id()));
         let file = File::create(&tmp)?;
-        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None })
+        Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None, local: false })
+    }
+
+    /// Starts a blob kept on this node only (a copy or shard another node placed here).
+    pub fn new_local_blob(&self) -> Result<BlobWriter<'_>> {
+        let mut w = self.new_blob()?;
+        w.local = true;
+        Ok(w)
+    }
+
+    /// Sets the cluster that places and serves blobs.
+    pub fn set_cluster(&self, c: std::sync::Arc<dyn ClusterStore>) {
+        *self.cluster.write().unwrap() = Some(c);
+    }
+
+    /// Opens a blob on this node's disk at `offset` (a copy or shard served to another node).
+    pub fn open_local(&self, id: &str, offset: u64) -> Result<Box<dyn Read + Send>> {
+        if cid::is_cluster(id) || id.contains('/') || id.contains("..") {
+            return Err(Error::Index("not a local blob id".into()));
+        }
+        if pack::is_packed(id) {
+            return self.open_packed(id, offset);
+        }
+        let mut f = File::open(self.blob_path(id))?;
+        f.seek(SeekFrom::Start(offset))?;
+        Ok(Box::new(f))
+    }
+
+    /// Removes a blob from this node's disk (one copy or shard of a cluster blob).
+    pub fn remove_local(&self, id: &str) -> Result<()> {
+        if cid::is_cluster(id) || pack::is_packed(id) || id.contains('/') || id.contains("..") || id.len() < 4 {
+            return Err(Error::Index("not a local blob id".into()));
+        }
+        match fs::remove_file(self.blob_path(id)) {
+            Err(e) if e.kind() != io::ErrorKind::NotFound => Err(Error::Io(e)),
+            _ => Ok(()),
+        }
+    }
+
+    /// Deletes cluster blobs queued for collection (remote calls: run from a background task).
+    pub fn collect_cluster(&self) -> usize {
+        let Some(cluster) = self.cluster.read().unwrap().clone() else { return 0 };
+        let ids: Vec<String> = (|| -> Result<Vec<String>> {
+            let r = self.db.begin_read()?;
+            let mut ids = vec![];
+            for row in r.open_table(GC)?.iter()? {
+                let id = row?.0.value().to_string();
+                if cid::is_cluster(&id) {
+                    ids.push(id);
+                }
+            }
+            Ok(ids)
+        })()
+        .unwrap_or_default();
+        let mut gone = vec![];
+        for id in ids {
+            match cluster.delete(&id) {
+                Ok(()) => gone.push(id),
+                Err(err) => tracing::warn!(blob = %id, error = %err, "cluster blob not deleted; will retry"),
+            }
+        }
+        if !gone.is_empty() {
+            if let Ok(tx) = self.begin_write() {
+                if let Ok(mut t) = tx.open_table(GC) {
+                    for id in &gone {
+                        let _ = t.remove(id.as_str());
+                    }
+                }
+                let _ = tx.commit();
+            }
+        }
+        gone.len()
     }
 
     /// Starts a blob that is encrypted with `key` (None: in the clear).
@@ -836,8 +961,29 @@ impl Engine {
 
     /// Removes sealed blobs that were never committed.
     pub fn discard(&self, segs: &[Segment]) {
+        let mut placed = vec![];
         for s in segs.iter().filter(|s| s.tier.is_empty() && !pack::is_packed(&s.blob)) {
-            let _ = fs::remove_file(self.blob_path(&s.blob));
+            if cid::is_cluster(&s.blob) {
+                placed.push(s.blob.as_str()); // copies on other nodes: deleted by cluster collection
+            } else {
+                let _ = fs::remove_file(self.blob_path(&s.blob));
+            }
+        }
+        if !placed.is_empty() {
+            let res = (|| -> Result<()> {
+                let tx = self.begin_write()?;
+                {
+                    let mut gc = tx.open_table(GC)?;
+                    for id in &placed {
+                        gc.insert(*id, now_ms())?;
+                    }
+                }
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(err) = res {
+                tracing::warn!(error = %err, "cluster blobs of a failed write not queued for collection (orphan copies stay until their nodes sweep them)");
+            }
         }
     }
 
@@ -1029,11 +1175,43 @@ impl Engine {
                     }
                 })*};
             }
-            copy!(BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS);
+            copy!(BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS, NODES, LEASES);
             w.commit()?;
         }
-        kv::bind(&pg, &self.dir)?;
+        kv::bind(&pg, &self.dir, false)?;
         Ok(n)
+    }
+
+    /// Cluster nodes (name, record).
+    pub fn nodes(&self) -> Result<Vec<(String, Vec<u8>)>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(NODES)?.iter()? {
+            let (k, v) = row?;
+            out.push((k.value().to_string(), v.value().to_vec()));
+        }
+        Ok(out)
+    }
+
+    /// Every blob id the index refers to (local segments of objects and versions, and parts).
+    pub fn blob_ids(&self) -> Result<Vec<String>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for t in [OBJECTS] {
+            for row in r.open_table(t)?.iter()? {
+                let o: Object = serde_json::from_slice(row?.1.value())?;
+                out.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
+            }
+        }
+        for row in r.open_table(VERSIONS)?.iter()? {
+            let o: Object = serde_json::from_slice(row?.1.value())?;
+            out.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
+        }
+        for row in r.open_table(PARTS)?.iter()? {
+            let p: Part = serde_json::from_slice(row?.1.value())?;
+            out.push(p.blob);
+        }
+        Ok(out)
     }
 
     /// Stored access keys (access key, record).
@@ -1121,6 +1299,77 @@ impl Engine {
         }
     }
 
+    /// The local blob ids an index blob id refers to on this node (a cluster id names copies on several
+    /// nodes; recovery must keep this node's).
+    fn local_refs(&self, id: String) -> Vec<String> {
+        if cid::is_cluster(&id) {
+            return self.node.as_deref().map(|n| cid::local_ids(&id, n)).unwrap_or_default();
+        }
+        vec![id]
+    }
+
+    /// Refuses to open a cluster's metadata as a single store (its recovery would take every copy on
+    /// this disk for debris), and a data directory as another node than the one it belongs to.
+    fn check_membership(&self) -> Result<()> {
+        let has_nodes = self.db.begin_read()?.open_table(NODES)?.len()? > 0;
+        let file = self.dir.join("node-name");
+        let mine = fs::read_to_string(&file).ok().map(|s| s.trim().to_string());
+        match (&self.node, mine) {
+            (None, Some(n)) => Err(Error::Index(format!("this data directory is cluster node {n}: set CAIRN_STORE_CLUSTER_NODE={n}"))),
+            (None, None) if has_nodes => {
+                Err(Error::Index("this metadata belongs to a cluster: set CAIRN_STORE_CLUSTER_NODE to this node's name".into()))
+            }
+            (Some(n), Some(m)) if *n != m => {
+                Err(Error::Index(format!("this data directory is cluster node {m}, not {n}; refusing to serve it under another name")))
+            }
+            (Some(n), None) => {
+                fs::write(&file, n)?;
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Takes or renews the lease `name` for `holder` for `ttl_ms` (one transaction). False: another
+    /// holder has it.
+    pub fn try_lease(&self, name: &str, holder: &str, ttl_ms: u64) -> Result<bool> {
+        #[derive(Serialize, Deserialize)]
+        struct Lease {
+            holder: String,
+            until: u64,
+        }
+        let now = now_ms();
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(LEASES)?;
+            let cur: Option<Lease> = t.get(name)?.and_then(|v| serde_json::from_slice(v.value()).ok());
+            if cur.as_ref().is_some_and(|l| l.holder != holder && l.until > now) {
+                return Ok(false);
+            }
+            t.insert(name, serde_json::to_vec(&Lease { holder: holder.into(), until: now + ttl_ms })?.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Changes a node's record in one transaction: `f` gets the current record and returns the new one
+    /// (None: leave it).
+    pub fn update_node(&self, name: &str, f: impl FnOnce(Option<&[u8]>) -> Option<Vec<u8>>, audit: Option<&Audit>) -> Result<bool> {
+        let tx = self.begin_write()?;
+        let next = {
+            let t = tx.open_table(NODES)?;
+            let cur = t.get(name)?.map(|v| v.value().to_vec());
+            f(cur.as_deref())
+        };
+        let Some(next) = next else { return Ok(false) };
+        tx.open_table(NODES)?.insert(name, next.as_slice())?;
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Removes temporary files, finishes queued collection and removes blobs no object or upload
     /// refers to (left by a crash between sealing a blob and committing it). Counts objects whose blobs
     /// are missing, which means the disk lost data.
@@ -1150,7 +1399,7 @@ impl Engine {
                 let (k, v) = row?;
                 let o: Object = serde_json::from_slice(v.value())?;
                 count(k.value().0, o.size, 1);
-                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
+                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).flat_map(|s| self.local_refs(s.blob)));
             }
             let mut upload_bucket: HashMap<String, String> = HashMap::new();
             for row in r.open_table(UPLOADS)?.iter()? {
@@ -1164,7 +1413,7 @@ impl Engine {
                 if let Some(b) = upload_bucket.get(k.value().0) {
                     count(b, p.size, 0);
                 }
-                refs.insert(p.blob);
+                refs.extend(self.local_refs(p.blob));
             }
             for row in r.open_table(VERSIONS)?.iter()? {
                 let (k, v) = row?;
@@ -1172,10 +1421,12 @@ impl Engine {
                 if !o.delete_marker {
                     count(k.value().0, o.size, 1);
                 }
-                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).map(|s| s.blob));
+                refs.extend(o.segments.into_iter().filter(|s| s.tier.is_empty()).flat_map(|s| self.local_refs(s.blob)));
             }
         }
-        {
+        // In a cluster the counters are kept transactionally in PostgreSQL by every node; a rewrite from
+        // one node's snapshot would lose other nodes' concurrent updates.
+        if self.node.is_none() {
             let tx = self.begin_write()?;
             {
                 let mut t = tx.open_table(USAGE)?;
@@ -1203,6 +1454,8 @@ impl Engine {
                 let id = ent.file_name().to_string_lossy().to_string();
                 if refs.contains(&id) {
                     seen.insert(id);
+                } else if self.node.is_some() && young(&ent) {
+                    // A copy another node placed here may not be committed yet: swept once it is old.
                 } else if fs::remove_file(&p).is_ok() {
                     rep.unreferenced_blobs_removed += 1;
                 }
@@ -1862,6 +2115,10 @@ impl Engine {
         if s.tier.is_empty() && pack::is_packed(&s.blob) {
             return self.open_packed(&s.blob, offset);
         }
+        if s.tier.is_empty() && cid::is_cluster(&s.blob) {
+            let c = self.cluster.read().unwrap().clone().ok_or_else(|| Error::Index("this store is not part of a cluster".into()))?;
+            return Ok(c.open(&s.blob, offset)?);
+        }
         if s.tier.is_empty() {
             let mut f = File::open(self.blob_path(&s.blob))?;
             f.seek(SeekFrom::Start(offset))?;
@@ -1933,7 +2190,7 @@ impl Engine {
             let mut ids = vec![];
             for row in r.open_table(GC)?.iter()? {
                 let id = row?.0.value().to_string();
-                if id.contains(':') {
+                if id.contains(':') && !cid::is_cluster(&id) {
                     ids.push(id);
                 }
             }
@@ -2326,6 +2583,11 @@ impl Engine {
     /// deleted blobs are kept until the backup is done. Event deliveries pending at the snapshot are not
     /// included, so a restored store does not send them again.
     pub fn backup(&self, dest: &Path, link_from: Option<&Path>) -> Result<BackupReport> {
+        if self.node.is_some() {
+            return Err(Error::Index(
+                "online backups cover one disk; in a cluster, back up the PostgreSQL metadata database and keep enough copies".into(),
+            ));
+        }
         use std::sync::atomic::Ordering;
         struct Running<'a>(&'a std::sync::atomic::AtomicUsize);
         impl Drop for Running<'_> {

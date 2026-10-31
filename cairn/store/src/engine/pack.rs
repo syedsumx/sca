@@ -109,6 +109,10 @@ impl Engine {
         if let Some((_, _, len)) = parse(id) {
             return Ok((self.open_packed(id, 0)?, len));
         }
+        if let Some(p) = super::cid::parse(id) {
+            let c = self.cluster.read().unwrap().clone().ok_or_else(|| Error::Index("this store is not part of a cluster".into()))?;
+            return Ok((c.open(id, 0)?, p.len()));
+        }
         let f = File::open(self.blob_path(id))?;
         let len = f.metadata()?.len();
         Ok((Box::new(f), len))
@@ -142,13 +146,21 @@ impl Engine {
 
     /// Replaces packed blob ids (old -> new) wherever the index still refers to the old one, in one
     /// transaction.
-    fn swap_packed(&self, moved: &HashMap<String, String>) -> Result<u64> {
+    pub(crate) fn swap_packed(&self, moved: &HashMap<String, String>) -> Result<u64> {
+        Ok(self.swap_blobs(moved)?.1)
+    }
+
+    /// Replaces blob ids (old -> new) wherever the index still refers to the old one, in one
+    /// transaction. Returns the old ids that were found, and the rows changed.
+    pub(crate) fn swap_blobs(&self, moved: &HashMap<String, String>) -> Result<(HashSet<String>, u64)> {
         let tx = self.begin_write()?;
         let mut swapped = 0u64;
+        let found = std::cell::RefCell::new(HashSet::new());
         let fix = |segs: &mut Vec<Segment>| -> bool {
             let mut changed = false;
             for s in segs.iter_mut().filter(|s| s.tier.is_empty()) {
                 if let Some(n) = moved.get(&s.blob) {
+                    found.borrow_mut().insert(s.blob.clone());
                     s.blob = n.clone();
                     changed = true;
                 }
@@ -194,6 +206,7 @@ impl Engine {
                 let (k, v) = row?;
                 let mut p: Part = serde_json::from_slice(v.value())?;
                 if let Some(n) = moved.get(&p.blob) {
+                    found.borrow_mut().insert(p.blob.clone());
                     p.blob = n.clone();
                     let (id, num) = k.value();
                     updates.push((id.to_string(), num, serde_json::to_vec(&p)?));
@@ -205,12 +218,14 @@ impl Engine {
             }
         }
         tx.commit()?;
-        Ok(swapped)
+        Ok((found.into_inner(), swapped))
     }
 
     /// Compacts packs whose dead share is at least `min_dead` (0..1) and deletes packs nothing refers to.
     /// `dry`: only measure.
     pub fn compact(&self, min_dead: f64, dry: bool) -> Result<CompactReport> {
+        // In a cluster packs are not written; old ones (before joining) are only deleted once unreferenced.
+        let min_dead = if self.node.is_some() { 2.0 } else { min_dead };
         let _one = self.compacting.lock().unwrap();
         let mut rep = CompactReport::default();
         let dir = self.packs_dir();

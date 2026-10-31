@@ -42,7 +42,7 @@ def build_router(store: StoreAdmin, current_principal, is_admin, audit=None) -> 
         try:
             return fn()
         except StoreAdminError as e:
-            raise HTTPException(e.status if e.status < 500 else 502, str(e)) from e
+            raise HTTPException(e.status if e.status < 500 or e.status in (501, 503) else 502, str(e)) from e
 
     @router.get("/v1/stats")
     def stats(p: Principal = Depends(current_principal)):
@@ -110,6 +110,31 @@ def build_router(store: StoreAdmin, current_principal, is_admin, audit=None) -> 
         _call(lambda: store.delete_key(access_key))
         if audit is not None:
             audit.record("storage", "key.delete", p.urn, access_key, {})
+
+    @router.get("/v1/cluster")
+    def cluster(p: Principal = Depends(current_principal)):
+        _admin(p)
+        return _call(store.cluster)
+
+    @router.post("/v1/cluster/nodes/{node}/{action}")
+    def cluster_node(node: str, action: str, p: Principal = Depends(current_principal)):
+        _admin(p)
+        if action not in ("drain", "activate", "remove"):
+            raise HTTPException(404, "the actions are drain, activate and remove")
+        out = _call(lambda: store.cluster_node(node, action))
+        if audit is not None:
+            audit.record("storage", f"cluster.node.{action}", p.urn, node, {})
+        return out
+
+    @router.post("/v1/cluster/{task}")
+    def cluster_task(task: str, p: Principal = Depends(current_principal)):
+        _admin(p)
+        if task not in ("repair", "rebalance"):
+            raise HTTPException(404, "the tasks are repair and rebalance")
+        out = _call(store.cluster_repair if task == "repair" else store.cluster_rebalance)
+        if audit is not None:
+            audit.record("storage", f"cluster.{task}", p.urn, "", {})
+        return out
 
     @router.get("/v1/audit")
     def audit_entries(after: int = 0, limit: int = 200, p: Principal = Depends(current_principal)):

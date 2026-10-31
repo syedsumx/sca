@@ -128,7 +128,7 @@ impl Tiers {
         headers: &[(&str, String)],
         body: Body,
     ) -> std::io::Result<hyper::Response<hyper::body::Incoming>> {
-        let url = format!("{}/{}/{}{blob}", t.endpoint, t.bucket, t.prefix);
+        let url = format!("{}/{}/{}{}", t.endpoint, t.bucket, t.prefix, tier_name(blob));
         let mut req = hyper::Request::builder().method(method).uri(&url);
         for (k, v) in crate::admin_cli::sign_with_payload(
             method,
@@ -203,6 +203,15 @@ impl TierStore for Tiers {
     }
 }
 
+/// A blob's object name in a tier (cluster ids name nodes and local ids: hashed to a plain name).
+fn tier_name(blob: &str) -> std::borrow::Cow<'_, str> {
+    if crate::engine::cid::is_cluster(blob) {
+        use sha2::Digest;
+        return format!("c{}", hex::encode(&sha2::Sha256::digest(blob.as_bytes())[..20])).into();
+    }
+    blob.into()
+}
+
 fn empty() -> Body {
     Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
 }
@@ -232,10 +241,16 @@ pub(crate) fn file_body(mut file: impl Read + Send + 'static) -> Body {
 }
 
 /// Reads a response body from a blocking thread.
-struct BodyReader {
+pub(crate) struct BodyReader {
     rt: tokio::runtime::Handle,
     body: hyper::body::Incoming,
     buf: Bytes,
+}
+
+impl BodyReader {
+    pub(crate) fn new(rt: tokio::runtime::Handle, body: hyper::body::Incoming) -> BodyReader {
+        BodyReader { rt, body, buf: Bytes::new() }
+    }
 }
 
 impl Read for BodyReader {

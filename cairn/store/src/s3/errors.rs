@@ -160,6 +160,9 @@ errors! {
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
     MFA_DELETE_UNSUPPORTED = "NotImplemented", 501, "MFA Delete is not supported.";
+    CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
+    NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
+    UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";
     NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }
 
@@ -188,6 +191,10 @@ impl From<crate::engine::Error> for ApiError {
             E::Index(e) => {
                 tracing::error!(error = %e, "index");
                 INTERNAL.clone()
+            }
+            E::Unavailable(e) => {
+                tracing::warn!(error = %e, "cluster");
+                UNAVAILABLE.clone()
             }
         }
     }

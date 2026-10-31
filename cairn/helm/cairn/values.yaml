@@ -469,8 +469,8 @@ cairn:
     tolerations: []
     affinity: {}
 
-  # Cairn Store: Cairn's S3-compatible object store for the lakehouse (Iceberg tables, exports). Single
-  # node in this release: one replica on a persistent volume; back the volume up like a database.
+  # Cairn Store: Cairn's S3-compatible object store for the lakehouse (Iceberg tables, exports). One
+  # replica on a persistent volume by default (back the volume up like a database), or a cluster (below).
   # Credentials come from a Secret you create:
   #   kubectl create secret generic cairn-store \
   #     --from-literal=access-key=cairn-store --from-literal=secret-key=$(openssl rand -hex 24)
@@ -520,6 +520,20 @@ cairn:
     metadata:
       secretName: ""
       key: url
+    # A cluster: `replicas` nodes, each with its own volume, sharing the PostgreSQL metadata above (required).
+    # Every object is kept as `copies` copies on distinct nodes, or erasure-coded ("4+2": 4 data + 2 parity
+    # shards on 6 nodes) when at least erasureCodingAbove bytes. Online backups are off in a cluster.
+    # The node-to-node secret is `clusterSecretKey` in the store Secret (16+ characters):
+    #   kubectl create secret generic cairn-store ... --from-literal=cluster-secret=$(openssl rand -hex 24)
+    cluster:
+      enabled: false
+      replicas: 3
+      copies: 2
+      erasureCoding: ""
+      erasureCodingAbove: 1048576
+      clusterSecretKey: cluster-secret
+      deadAfterSeconds: 60
+      repairIntervalSeconds: 300
     # SFTP for file-transfer clients: the user name is an access key, signing in with its secret key or an
     # SSH public key (ssh_keys in the credentials file).
     sftp:

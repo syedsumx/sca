@@ -69,9 +69,42 @@ const KEYS = [
     },
 ];
 
-function wrap(calls: MockCall[]) {
+const CLUSTER = {
+    enabled: true,
+    node: 'store-0',
+    copies: 2,
+    erasure_coding: null,
+    nodes: [
+        {
+            name: 'store-0',
+            url: 'http://store-0:8333',
+            state: 'active',
+            alive: true,
+            heartbeat_age_ms: 900,
+            version: '0.1.0',
+            copies: 40,
+            bytes: 4 * 1024 ** 3,
+            this_node: true,
+        },
+        {
+            name: 'store-1',
+            url: 'http://store-1:8333',
+            state: 'active',
+            alive: false,
+            heartbeat_age_ms: 120000,
+            version: '0.1.0',
+            copies: 38,
+            bytes: 3 * 1024 ** 3,
+            this_node: false,
+        },
+    ],
+    blobs: { total: 40, healthy: 2, degraded: 38, lost: 0 },
+};
+
+function wrap(calls: MockCall[], extra: Record<string, unknown> = {}) {
     const { client } = makeClient(
         {
+            'GET /storage/v1/cluster': { enabled: false },
             'GET /ui/config': { ...UI_CONFIG, is_admin: true, storage_enabled: true },
             'GET /storage/v1/buckets': [LAKE, RAW],
             'GET /storage/v1/audit': AUDIT,
@@ -93,6 +126,7 @@ function wrap(calls: MockCall[]) {
                 ...RAW,
                 quota: body,
             }),
+            ...extra,
         },
         calls,
     );
@@ -167,4 +201,33 @@ it('lists access keys, creates one and shows its secret once, rotates and delete
     fireEvent.click(within(row).getByText('Rotate secret'));
     fireEvent.click(await screen.findByText('OK'));
     expect(await screen.findByText('rotated-secret')).toBeTruthy();
+});
+
+it('shows the cluster with node health only when the store runs as one, and drains a node', async () => {
+    const calls: MockCall[] = [];
+    wrap(calls, {
+        'GET /storage/v1/cluster': CLUSTER,
+        'POST /storage/v1/cluster/nodes/store-1/drain': { name: 'store-1', state: 'draining' },
+        'POST /storage/v1/cluster/repair': { repaired: 38 },
+    });
+    expect(await screen.findByText('Cluster')).toBeTruthy();
+    expect(screen.getByText(/38 stored blobs have fewer copies than configured and 0 cannot be read/)).toBeTruthy();
+    const down = screen.getByText('store-1').closest('tr') as HTMLElement;
+    expect(within(down).getByText('Down')).toBeTruthy();
+    expect(within(screen.getByText('store-0').closest('tr') as HTMLElement).getByText('answering')).toBeTruthy();
+    fireEvent.click(within(down).getByText('Drain'));
+    fireEvent.click(await screen.findByText('OK'));
+    await waitFor(() =>
+        expect(calls.some((c) => c.method === 'POST' && c.path === '/storage/v1/cluster/nodes/store-1/drain')).toBe(
+            true,
+        ),
+    );
+    fireEvent.click(screen.getByText('Repair now'));
+    await waitFor(() => expect(calls.some((c) => c.path === '/storage/v1/cluster/repair')).toBe(true));
+});
+
+it('shows no cluster card for a single store', async () => {
+    wrap([]);
+    expect(await screen.findByText('Access keys')).toBeTruthy();
+    expect(screen.queryByText('Cluster')).toBeNull();
 });

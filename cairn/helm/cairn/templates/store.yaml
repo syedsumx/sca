@@ -1,7 +1,18 @@
 {{- if .Values.cairn.store.enabled }}
 {{- $u := .Values.cairn.store }}
 {{- $ctx := dict "root" $ "component" "store" "cfg" $u }}
-# Cairn Store is single-node in this release: exactly one replica, data on one persistent volume.
+{{- $cl := $u.cluster }}
+{{- if $cl.enabled }}
+{{- if not $u.metadata.secretName }}{{ fail "cairn.store.cluster needs cairn.store.metadata.secretName (the nodes share PostgreSQL metadata)" }}{{ end }}
+{{- if $u.backups.enabled }}{{ fail "cairn.store.backups are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
+{{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
+{{- if $cl.erasureCoding }}
+{{- $p := splitList "+" (toString $cl.erasureCoding) }}
+{{- if or (ne (len $p) 2) (lt (int $cl.replicas) (add (int (index $p 0)) (int (index $p 1)))) }}{{ fail "cairn.store.cluster.erasureCoding is k+m (e.g. 4+2) and needs at least k+m replicas" }}{{ end }}
+{{- end }}
+{{- end }}
+# Cairn Store: one replica on one persistent volume, or (cairn.store.cluster) a node per replica, each with
+# its own volume, keeping every object's bytes on several nodes.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -9,8 +20,11 @@ metadata:
   labels:
     {{- include "cairn.componentLabels" $ctx | nindent 4 }}
 spec:
-  replicas: 1
-  serviceName: {{ include "cairn.componentName" $ctx }}
+  replicas: {{ if $cl.enabled }}{{ $cl.replicas }}{{ else }}1{{ end }}
+  serviceName: {{ include "cairn.componentName" $ctx }}{{ if $cl.enabled }}-nodes{{ end }}
+  {{- if $cl.enabled }}
+  podManagementPolicy: Parallel
+  {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:
@@ -44,6 +58,28 @@ spec:
               value: {{ $u.domain | quote }}
             - name: CAIRN_STORE_BUCKETS
               value: {{ join "," $u.buckets | quote }}
+            {{- if $cl.enabled }}
+            - name: CAIRN_STORE_CLUSTER_NODE
+              valueFrom:
+                fieldRef: { fieldPath: metadata.name }
+            - name: CAIRN_STORE_CLUSTER_URL
+              value: {{ printf "%s://$(CAIRN_STORE_CLUSTER_NODE).%s-nodes.%s.svc:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.componentName" $ctx) $.Release.Namespace $u.port | quote }}
+            - name: CAIRN_STORE_CLUSTER_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $cl.clusterSecretKey }} }
+            - name: CAIRN_STORE_CLUSTER_COPIES
+              value: {{ $cl.copies | quote }}
+            {{- if $cl.erasureCoding }}
+            - name: CAIRN_STORE_CLUSTER_EC
+              value: {{ $cl.erasureCoding | quote }}
+            - name: CAIRN_STORE_CLUSTER_EC_ABOVE
+              value: {{ $cl.erasureCodingAbove | int64 | quote }}
+            {{- end }}
+            - name: CAIRN_STORE_CLUSTER_DEAD_AFTER
+              value: {{ $cl.deadAfterSeconds | quote }}
+            - name: CAIRN_STORE_CLUSTER_REPAIR_INTERVAL
+              value: {{ $cl.repairIntervalSeconds | quote }}
+            {{- end }}
             {{- if $u.backups.enabled }}
             - name: CAIRN_STORE_BACKUP_DIR
               value: /backups
@@ -255,9 +291,20 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with $u.affinity }}
+      {{- if $u.affinity }}
       affinity:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml $u.affinity | nindent 8 }}
+      {{- else if $cl.enabled }}
+      # Spread the nodes over hosts, so one host failure takes at most one copy.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "cairn.selectorLabels" $ctx | nindent 20 }}
       {{- end }}
   volumeClaimTemplates:
     - metadata:
@@ -284,6 +331,26 @@ spec:
     {{- end }}
 ---
 {{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- if $cl.enabled }}
+---
+# Stable per-node addresses (<pod>.<name>-nodes) for node-to-node calls.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-nodes
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $u.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}
 {{- if $u.sftp.enabled }}
 ---
 apiVersion: v1

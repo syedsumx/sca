@@ -16,6 +16,10 @@
 //! PATCH  /-/admin/v1/keys/{key}                change its scope (not its secret)
 //! POST   /-/admin/v1/keys/{key}/rotate         a new secret (shown once); the old one stops working
 //! DELETE /-/admin/v1/keys/{key}
+//! GET    /-/admin/v1/cluster                   nodes (state, liveness, copies held) and blob health
+//! POST   /-/admin/v1/cluster/repair            re-create copies on dead, draining or removed nodes now
+//! POST   /-/admin/v1/cluster/rebalance         {"limit": n} move copies from the fullest nodes to the emptiest
+//! POST   /-/admin/v1/cluster/nodes/{node}/drain|activate|remove
 //! ```
 
 use bytes::Bytes;
@@ -245,6 +249,10 @@ impl Server {
                 self.eng.put_config_audited(b, "quota", None, Some(&audit))?;
                 tracing::info!(bucket = %b, admin = %a.cred.access_key, "bucket quota removed");
                 Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (m, ["cluster", rest @ ..]) => {
+                let (status, v) = self.cluster_admin(m, rest, &body, &a.cred.access_key)?;
+                Ok(json_resp(status, v))
             }
             (m, ["keys", rest @ ..]) => {
                 let (status, v) = self.keys_api(m, rest, &body, &a.cred.access_key)?;

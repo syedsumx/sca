@@ -6,6 +6,7 @@ pub mod auth;
 pub mod authz;
 pub mod body;
 pub mod checksum;
+pub mod cluster;
 mod config;
 mod cors;
 mod dav;
@@ -86,6 +87,8 @@ pub struct Config {
     /// The file API accepts HTTP Basic credentials (over TLS, or plain HTTP when allowed).
     pub files_basic: bool,
     pub files_basic_http: bool,
+    /// Cluster mode (None: a single store).
+    pub cluster: Option<cluster::ClusterConfig>,
 }
 
 pub struct Server {
@@ -119,6 +122,7 @@ pub struct Server {
     files_basic: bool,
     files_basic_http: bool,
     pub(crate) sftp_metrics: sftp::SftpMetrics,
+    pub(crate) cluster: Option<Arc<cluster::Cluster>>,
 }
 
 /// One request, after routing and authentication.
@@ -165,6 +169,10 @@ impl Server {
         if cfg.credentials.is_empty() {
             return Err("at least one credential is required".into());
         }
+        let cluster = match cfg.cluster {
+            Some(cc) => Some(cluster::Cluster::new(cc, eng.clone())?),
+            None => None,
+        };
         let mut keyset = keys::KeySet::default();
         for c in cfg.credentials {
             keyset.fixed.insert(c.access_key.clone());
@@ -209,6 +217,7 @@ impl Server {
             files_basic: cfg.files_basic,
             files_basic_http: cfg.files_basic_http,
             sftp_metrics: Default::default(),
+            cluster,
         };
         srv.reload_keys()?; // keys created through the admin API
         Ok(srv)
@@ -240,7 +249,9 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result, cors, mut info) = if path.starts_with("/-/admin/") {
+        let (op, result, cors, mut info) = if path.starts_with("/-/cluster/") {
+            ("ClusterApi", Ok(self.cluster_api(req).await), None, Default::default())
+        } else if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
         } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
@@ -500,6 +511,9 @@ impl Server {
                             v.load(Ordering::Relaxed)
                         ));
                     }
+                }
+                if let Some(c) = &self.cluster {
+                    tokio::task::block_in_place(|| c.metrics_text(&mut body));
                 }
                 if let Ok(n) = tokio::task::block_in_place(|| self.eng.outbox_len()) {
                     body.push_str(&format!("# TYPE cairn_store_events_pending gauge\ncairn_store_events_pending {n}\n"));
