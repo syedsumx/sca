@@ -176,7 +176,7 @@ impl Server {
             return Err(e::LOCK_NEEDS_VERSIONING_ENABLED.clone());
         }
         let v = serde_json::to_vec(&cfg).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "object-lock", Some(&v)))?;
+        self.set_config(c, "object-lock", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 
@@ -221,16 +221,28 @@ impl Server {
         }
         let bypass = self.bypass_governance(c, &c.key).await?;
         let mut refused = None;
+        let mut ev = self.ev(c, "");
+        ev.audit = Some(self.audit_rec(
+            c,
+            "object.retention.put",
+            serde_json::json!({"mode": mode, "retain_until": until, "bypass_governance": bypass, "version_id": c.q("versionId")}),
+        ));
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
-                if let Err(err) = retention_change_allowed(&o.lock, &mode, until, now, bypass) {
-                    refused = Some(err);
-                    return Err(engine::Error::ObjectLocked);
-                }
-                o.lock.mode = mode.clone();
-                o.lock.until = until;
-                Ok(())
-            })
+            self.eng.update_object_ev(
+                &c.bucket,
+                &c.key,
+                Some(c.q("versionId")),
+                |o| {
+                    if let Err(err) = retention_change_allowed(&o.lock, &mode, until, now, bypass) {
+                        refused = Some(err);
+                        return Err(engine::Error::ObjectLocked);
+                    }
+                    o.lock.mode = mode.clone();
+                    o.lock.until = until;
+                    Ok(())
+                },
+                &ev,
+            )
         })
         .map_err(|err| refused.take().unwrap_or_else(|| ApiError::from(err)))?;
         Ok(empty(StatusCode::OK))
@@ -264,11 +276,23 @@ impl Server {
             "OFF" => false,
             _ => return Err(e::MALFORMED_XML.clone()),
         };
+        let mut ev = self.ev(c, "");
+        ev.audit = Some(self.audit_rec(
+            c,
+            if on { "object.legal_hold.on" } else { "object.legal_hold.off" },
+            serde_json::json!({"version_id": c.q("versionId")}),
+        ));
         blocking(|| {
-            self.eng.update_object(&c.bucket, &c.key, Some(c.q("versionId")), |o| {
-                o.lock.legal_hold = on;
-                Ok(())
-            })
+            self.eng.update_object_ev(
+                &c.bucket,
+                &c.key,
+                Some(c.q("versionId")),
+                |o| {
+                    o.lock.legal_hold = on;
+                    Ok(())
+                },
+                &ev,
+            )
         })?;
         Ok(empty(StatusCode::OK))
     }

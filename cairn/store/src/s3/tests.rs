@@ -38,6 +38,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             website_domain: String::new(),
             event_targets: vec![],
             event_max_age_hours: 168,
+            log_requests: false,
         },
     )
     .unwrap();

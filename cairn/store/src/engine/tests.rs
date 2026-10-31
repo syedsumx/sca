@@ -305,7 +305,7 @@ fn suspended_versioning_replaces_the_null_version() {
 fn object_lock_is_enforced_by_the_engine() {
     let dir = tempfile::tempdir().unwrap();
     let e = Engine::open(dir.path(), false).unwrap();
-    e.create_bucket_with("b", "Enabled", &[("object-lock", b"{}")]).unwrap();
+    e.create_bucket_with("b", "Enabled", &[("object-lock", b"{}")], None).unwrap();
     let mut w = e.new_blob().unwrap();
     w.write(b"x").unwrap();
     let seg = w.seal().unwrap();

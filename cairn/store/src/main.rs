@@ -30,6 +30,8 @@
 //! CAIRN_STORE_WEBSITE_DOMAIN    serve bucket websites at <bucket>.<domain> (public buckets only; off when empty)
 //! CAIRN_STORE_EVENT_TARGETS_FILE  event notification targets: [{"type": "webhook"|"kafka", "id": ..., ...}]
 //! CAIRN_STORE_EVENT_MAX_AGE_HOURS  drop events still undeliverable after this long (168)
+//! CAIRN_STORE_LOG_REQUESTS      one JSON log line per request (false)
+//! CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS  how often server access logs are written to their target buckets (60)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -37,6 +39,7 @@
 // Errors are cold paths here; boxing them would only add allocations to the code that matters.
 #![allow(clippy::result_large_err)]
 
+mod audit;
 mod crypt;
 mod engine;
 mod s3;
@@ -148,6 +151,17 @@ fn main() {
                 std::process::exit(2);
             }
         }
+        "audit-verify" => {
+            // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
+            // writer and concurrent readers only within a process, so stop the store first).
+            let eng = Engine::open(&data, true).unwrap_or_else(|e| fail("open store", e));
+            let entries = eng.audit_entries(0, usize::MAX).unwrap_or_else(|e| fail("read audit trail", e));
+            let res = audit::verify(&entries, true);
+            println!("{}", serde_json::to_string_pretty(&res).unwrap());
+            if res["valid"] != true {
+                std::process::exit(1);
+            }
+        }
         "healthcheck" => {
             let ok = std::net::TcpStream::connect_timeout(
                 &listen_addr(&addr).replace("0.0.0.0", "127.0.0.1").parse::<SocketAddr>().unwrap_or_else(|e| fail("address", e)),
@@ -169,7 +183,7 @@ fn main() {
             rt.block_on(serve(addr, data));
         }
         other => {
-            eprintln!("unknown command {other:?} (serve, fsck, healthcheck, version)");
+            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, healthcheck, version)");
             std::process::exit(2);
         }
     }
@@ -207,6 +221,7 @@ async fn serve(addr: String, data: String) {
                     f => s3::events::load_targets(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)))
                         .unwrap_or_else(|e| fail(&f, e)),
                 },
+                log_requests: env("CAIRN_STORE_LOG_REQUESTS", "false") == "true",
                 event_max_age_hours: env("CAIRN_STORE_EVENT_MAX_AGE_HOURS", "168")
                     .parse()
                     .unwrap_or_else(|e| fail("CAIRN_STORE_EVENT_MAX_AGE_HOURS", e)),
@@ -224,6 +239,9 @@ async fn serve(addr: String, data: String) {
     let lifecycle_every: u64 =
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
     tokio::spawn(server.clone().run_events());
+    let flush: u64 =
+        env("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", "60").parse().unwrap_or_else(|e| fail("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", e));
+    tokio::spawn(server.clone().run_access_logs(Duration::from_secs(flush.max(1))));
     if lifecycle_every > 0 {
         tokio::spawn(server.clone().run_lifecycle(Duration::from_secs(lifecycle_every)));
     }

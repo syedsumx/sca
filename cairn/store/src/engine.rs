@@ -29,6 +29,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use md5::{Digest, Md5};
 
+use crate::audit::{self, Audit, Entry};
 use crate::crypt::{self, ChunkCipher, Key};
 use redb::{Database, Durability, ReadableTable, ReadableTableMetadata, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -53,6 +54,9 @@ const USAGE: TableDefinition<&str, (u64, u64)> = TableDefinition::new("usage");
 /// Event notifications waiting for delivery: sequence -> OutboxEntry. Written in the same transaction as
 /// the change they describe, removed once delivered, so no event is lost to a crash.
 const OUTBOX: TableDefinition<u64, &[u8]> = TableDefinition::new("outbox");
+/// The hash-chained audit trail: sequence -> audit::Entry. Entries are appended in the same transaction
+/// as the change they record and never modified.
+const AUDIT: TableDefinition<u64, &[u8]> = TableDefinition::new("audit");
 
 #[derive(Debug)]
 pub enum Error {
@@ -234,6 +238,8 @@ pub struct Ev {
     pub request_id: String,
     /// The change is a lifecycle expiration.
     pub lifecycle: bool,
+    /// Record this in the audit trail, in the same transaction as the change.
+    pub audit: Option<Audit>,
 }
 
 /// A bucket's notification rule (configuration kind "notification").
@@ -630,6 +636,7 @@ impl Engine {
         tx.open_table(META)?;
         tx.open_table(USAGE)?;
         tx.open_table(OUTBOX)?;
+        tx.open_table(AUDIT)?;
         tx.commit()?;
         e.recover()?;
         Ok(e)
@@ -780,6 +787,40 @@ impl Engine {
         Ok(())
     }
 
+    /// Appends to the audit trail inside `tx`.
+    fn audit_in(tx: &redb::WriteTransaction, a: &Audit) -> Result<()> {
+        let mut t = tx.open_table(AUDIT)?;
+        let (seq, prev) = match t.last()? {
+            Some((k, v)) => {
+                let e: Entry = serde_json::from_slice(v.value())?;
+                (k.value() + 1, e.hash)
+            }
+            None => (1, audit::GENESIS.to_string()),
+        };
+        let e = Entry::new(seq, &prev, a, time::OffsetDateTime::now_utc());
+        let v = serde_json::to_vec(&e)?;
+        t.insert(seq, v.as_slice())?;
+        Ok(())
+    }
+
+    /// Appends one audit entry on its own (for events that change nothing, e.g. refused requests).
+    pub fn append_audit(&self, a: &Audit) -> Result<()> {
+        let tx = self.begin_write()?;
+        Self::audit_in(&tx, a)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Audit entries after `after` (oldest first).
+    pub fn audit_entries(&self, after: u64, limit: usize) -> Result<Vec<Entry>> {
+        let r = self.db.begin_read()?;
+        let mut out = vec![];
+        for row in r.open_table(AUDIT)?.range(after + 1..)?.take(limit) {
+            out.push(serde_json::from_slice(row?.1.value())?);
+        }
+        Ok(out)
+    }
+
     /// A bucket's usage: (stored bytes, object versions).
     pub fn usage(&self, bucket: &str) -> Result<(u64, u64)> {
         let r = self.db.begin_read()?;
@@ -910,11 +951,11 @@ impl Engine {
     // ------------------------------------------------------------------------------------- buckets
 
     pub fn create_bucket(&self, name: &str) -> Result<()> {
-        self.create_bucket_with(name, "", &[])
+        self.create_bucket_with(name, "", &[], None)
     }
 
     /// Creates a bucket with its versioning state and configuration documents, in one transaction.
-    pub fn create_bucket_with(&self, name: &str, versioning: &str, configs: &[(&str, &[u8])]) -> Result<()> {
+    pub fn create_bucket_with(&self, name: &str, versioning: &str, configs: &[(&str, &[u8])], audit: Option<&Audit>) -> Result<()> {
         let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(BUCKETS)?;
@@ -928,11 +969,19 @@ impl Engine {
                 cfg.insert((name, *kind), *doc)?;
             }
         }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
+        }
         tx.commit()?;
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn delete_bucket(&self, name: &str) -> Result<()> {
+        self.delete_bucket_audited(name, None)
+    }
+
+    pub fn delete_bucket_audited(&self, name: &str, audit: Option<&Audit>) -> Result<()> {
         let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(BUCKETS)?;
@@ -965,6 +1014,9 @@ impl Engine {
             }
             tx.open_table(USAGE)?.remove(name)?;
         }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -979,7 +1031,13 @@ impl Engine {
     }
 
     /// Sets (Some) or removes (None) a bucket's configuration document of one kind.
+    #[cfg(test)]
     pub fn put_config(&self, bucket: &str, kind: &str, doc: Option<&[u8]>) -> Result<()> {
+        self.put_config_audited(bucket, kind, doc, None)
+    }
+
+    /// Sets or removes a configuration document, recording `audit` in the same transaction.
+    pub fn put_config_audited(&self, bucket: &str, kind: &str, doc: Option<&[u8]>, audit: Option<&Audit>) -> Result<()> {
         let tx = self.begin_write()?;
         {
             Self::bucket_exists(&tx.open_table(BUCKETS)?, bucket)?;
@@ -992,6 +1050,9 @@ impl Engine {
                     t.remove((bucket, kind))?;
                 }
             }
+        }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
         }
         tx.commit()?;
         Ok(())
@@ -1168,7 +1229,12 @@ impl Engine {
     }
 
     /// Sets a bucket's versioning state ("Enabled" or "Suspended").
+    #[cfg(test)]
     pub fn set_versioning(&self, bucket: &str, state: &str) -> Result<()> {
+        self.set_versioning_audited(bucket, state, None)
+    }
+
+    pub fn set_versioning_audited(&self, bucket: &str, state: &str, audit: Option<&Audit>) -> Result<()> {
         let tx = self.begin_write()?;
         {
             let mut t = tx.open_table(BUCKETS)?;
@@ -1176,6 +1242,9 @@ impl Engine {
             info.versioning = state.to_string();
             let v = serde_json::to_vec(&info)?;
             t.insert(bucket, v.as_slice())?;
+        }
+        if let Some(a) = audit {
+            Self::audit_in(&tx, a)?;
         }
         tx.commit()?;
         Ok(())
@@ -1221,6 +1290,7 @@ impl Engine {
     }
 
     /// Changes an object's metadata in place (no new bytes), atomically. `f` may refuse the change.
+    #[cfg(test)]
     pub fn update_object(
         &self,
         bucket: &str,
@@ -1270,6 +1340,9 @@ impl Engine {
         };
         if !ev.kind.is_empty() {
             Self::emit(&tx, bucket, ev.kind, &obj, ev)?;
+        }
+        if let Some(a) = &ev.audit {
+            Self::audit_in(&tx, a)?;
         }
         tx.commit()?;
         Ok(obj)
@@ -1384,7 +1457,7 @@ impl Engine {
                     }
                     if cur.is_some() {
                         drop((t, vt));
-                        return Self::finish_delete(self, tx, bucket, out, garbage);
+                        return Self::finish_delete(self, tx, bucket, out, garbage, ev);
                     }
                 }
             }
@@ -1400,10 +1473,13 @@ impl Engine {
             }
             (out, garbage)
         };
-        Self::finish_delete(self, tx, bucket, out, garbage)
+        Self::finish_delete(self, tx, bucket, out, garbage, ev)
     }
 
-    fn finish_delete(&self, tx: redb::WriteTransaction, bucket: &str, out: Deleted, garbage: Vec<Segment>) -> Result<Deleted> {
+    fn finish_delete(&self, tx: redb::WriteTransaction, bucket: &str, out: Deleted, garbage: Vec<Segment>, ev: &Ev) -> Result<Deleted> {
+        if let Some(a) = &ev.audit {
+            Self::audit_in(&tx, a)?;
+        }
         Self::queue_gc(&tx, bucket, &garbage)?;
         tx.commit()?;
         if !garbage.is_empty() {

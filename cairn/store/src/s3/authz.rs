@@ -76,6 +76,8 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "PutBucketAccelerateConfiguration" => "s3:PutAccelerateConfiguration",
         "GetObjectAttributes" => "s3:GetObjectAttributes",
         "PutBucketNotification" => "s3:PutBucketNotification",
+        "PutBucketLogging" => "s3:PutBucketLogging",
+        "GetBucketLogging" => "s3:GetBucketLogging",
         "GetBucketNotification" => "s3:GetBucketNotification",
         "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
         "GetObject" | "HeadObject" => "s3:GetObject",
@@ -384,7 +386,7 @@ impl Server {
         if p.is_public() && self.public_blocked(&c.bucket, true)? {
             return Err(e::PUBLIC_POLICY_BLOCKED.clone());
         }
-        blocking(|| self.eng.put_config(&c.bucket, "policy", Some(&doc)))?;
+        self.set_config(c, "policy", Some(&doc))?;
         Ok(empty(StatusCode::NO_CONTENT))
     }
 
@@ -428,7 +430,7 @@ impl Server {
             restrict_public_buckets: flag("RestrictPublicBuckets")?,
         };
         let v = serde_json::to_vec(&pab).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "publicAccessBlock", Some(&v)))?;
+        self.set_config(c, "publicAccessBlock", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 

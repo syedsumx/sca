@@ -142,7 +142,7 @@ impl Server {
         let doc = self.read_small(c, body, 64 << 10).await?;
         let rules = parse(&doc)?;
         let v = serde_json::to_vec(&rules).map_err(|_| e::INTERNAL.clone())?;
-        tokio::task::block_in_place(|| self.eng.put_config(&c.bucket, "cors", Some(&v)))?;
+        self.set_config(c, "cors", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 

@@ -174,7 +174,7 @@ impl Server {
         let doc = self.read_small(c, body, 64 << 10).await?;
         let tags = parse_tagging(&doc, MAX_BUCKET_TAGS)?;
         let v = serde_json::to_vec(&tags).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "tagging", Some(&v)))?;
+        self.set_config(c, "tagging", Some(&v))?;
         Ok(empty(StatusCode::NO_CONTENT))
     }
 
@@ -185,7 +185,7 @@ impl Server {
     }
 
     pub(crate) fn delete_config(&self, c: &Ctx, kind: &str) -> R {
-        blocking(|| self.eng.put_config(&c.bucket, kind, None))?;
+        self.set_config(c, kind, None)?;
         Ok(empty(StatusCode::NO_CONTENT))
     }
 

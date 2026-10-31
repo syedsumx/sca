@@ -31,7 +31,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 3] = ["replication", "logging", "intelligent-tiering"];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 2] = ["replication", "intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 6] =
@@ -107,7 +107,8 @@ impl Server {
             // ---------------------------------------------------------------- buckets
             "CreateBucket" => self.create_bucket(c, body).await,
             "DeleteBucket" => {
-                blocking(|| self.eng.delete_bucket(&c.bucket))?;
+                let a = self.audit_rec(c, "bucket.delete", serde_json::json!({}));
+                blocking(|| self.eng.delete_bucket_audited(&c.bucket, Some(&a)))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
             "HeadBucket" => {
@@ -175,6 +176,8 @@ impl Server {
             "DeleteBucketEncryption" => self.delete_config(c, "encryption"),
             "GetBucketWebsite" => self.get_website(c),
             "GetBucketNotification" => self.get_notification(c),
+            "GetBucketLogging" => self.get_logging(c),
+            "PutBucketLogging" => self.put_logging(c, body).await,
             "PutBucketNotification" => self.put_notification(c, body).await,
             "PutBucketWebsite" => self.put_website(c, body).await,
             "GetBucketRequestPayment" => {
@@ -230,9 +233,14 @@ impl Server {
             "DeleteObject" => {
                 let if_match = c.header("if-match");
                 let bypass = self.bypass_governance(c, &c.key).await?;
+                let mut ev = self.ev(c, "");
+                if bypass {
+                    ev.audit =
+                        Some(self.audit_rec(c, "object.delete.bypass_governance", serde_json::json!({"version_id": c.q("versionId")})));
+                }
                 let d = blocking(|| match c.q("versionId") {
-                    "" => self.eng.delete_object_ev(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match), &self.ev(c, "")),
-                    v => self.eng.delete_version_ev(&c.bucket, &c.key, v, bypass, &self.ev(c, "")),
+                    "" => self.eng.delete_object_ev(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match), &ev),
+                    v => self.eng.delete_version_ev(&c.bucket, &c.key, v, bypass, &ev),
                 })?;
                 let mut r = empty(StatusCode::NO_CONTENT);
                 if let Some(v) = &d.version_id {
@@ -394,9 +402,11 @@ impl Server {
         }
         if lock {
             // Object lock needs versioning: the bucket starts with it enabled, in the same transaction.
-            blocking(|| self.eng.create_bucket_with(&c.bucket, "Enabled", &[("object-lock", b"{}")]))?;
+            let a = self.audit_rec(c, "bucket.create", serde_json::json!({"object_lock": true}));
+            blocking(|| self.eng.create_bucket_with(&c.bucket, "Enabled", &[("object-lock", b"{}")], Some(&a)))?;
         } else {
-            blocking(|| self.eng.create_bucket(&c.bucket))?;
+            let a = self.audit_rec(c, "bucket.create", serde_json::json!({}));
+            blocking(|| self.eng.create_bucket_with(&c.bucket, "", &[], Some(&a)))?;
         }
         let mut r = empty(StatusCode::OK);
         set_header(&mut r, "location", &format!("/{}", c.bucket));
@@ -1157,6 +1167,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("encryption") => "PutBucketEncryption",
             Method::PUT if c.has("website") => "PutBucketWebsite",
             Method::PUT if c.has("notification") => "PutBucketNotification",
+            Method::PUT if c.has("logging") => "PutBucketLogging",
             Method::PUT if c.has("requestPayment") => "PutBucketRequestPayment",
             Method::PUT if c.has("accelerate") => "PutBucketAccelerateConfiguration",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
@@ -1193,7 +1204,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("requestPayment") => "GetBucketRequestPayment",
             Method::GET if c.has("accelerate") => "GetBucketAccelerateConfiguration",
             Method::GET if c.has("notification") => "GetBucketNotification",
-            Method::GET if any(&["replication", "logging", "intelligent-tiering"]) => "Unsupported",
+            Method::GET if c.has("logging") => "GetBucketLogging",
+            Method::GET if any(&["replication", "intelligent-tiering"]) => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",

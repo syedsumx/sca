@@ -36,10 +36,22 @@ impl Server {
             return Err(e::LOCK_NEEDS_VERSIONING.clone());
         }
         if info.versioning != status && !(info.versioning.is_empty() && status == "Suspended") {
-            blocking(|| self.eng.set_versioning(&c.bucket, &status))?;
+            blocking(|| {
+                self.eng.set_versioning_audited(
+                    &c.bucket,
+                    &status,
+                    Some(&self.audit_rec(c, format!("versioning.{}", status.to_lowercase()), serde_json::json!({}))),
+                )
+            })?;
         } else if info.versioning.is_empty() {
             // Suspending a bucket that never had versioning changes nothing, but it records the state.
-            blocking(|| self.eng.set_versioning(&c.bucket, &status))?;
+            blocking(|| {
+                self.eng.set_versioning_audited(
+                    &c.bucket,
+                    &status,
+                    Some(&self.audit_rec(c, format!("versioning.{}", status.to_lowercase()), serde_json::json!({}))),
+                )
+            })?;
         }
         Ok(empty(StatusCode::OK))
     }

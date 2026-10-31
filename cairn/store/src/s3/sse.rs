@@ -167,6 +167,17 @@ impl Server {
         Ok(None)
     }
 
+    /// The encryption a write without SSE headers gets: the bucket default, else the store default.
+    pub(crate) fn default_sse(&self, bucket: &str, key: &str) -> Result<Option<(Sse, Key)>, ApiError> {
+        if let Some(b) = self.bucket_encryption(bucket)? {
+            return self.keyring_sse(&b.alg, &b.key_id, bucket, key).map(Some);
+        }
+        if self.encrypt_by_default && !self.keyring.sse_s3_key.is_empty() {
+            return self.keyring_sse("AES256", "", bucket, key).map(Some);
+        }
+        Ok(None)
+    }
+
     /// The data key to read a version encrypted as `sse` (`copy`: the request's copy source).
     pub(crate) fn data_key(&self, c: &Ctx, bucket: &str, key: &str, sse: &Option<Sse>, copy: bool) -> Result<Option<Key>, ApiError> {
         let Some(sse) = sse else { return Ok(None) };
@@ -238,7 +249,7 @@ impl Server {
             _ => return Err(e::MALFORMED_XML.clone()),
         }
         let v = serde_json::to_vec(&cfg).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "encryption", Some(&v)))?;
+        self.set_config(c, "encryption", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 

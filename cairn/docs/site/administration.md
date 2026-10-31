@@ -436,6 +436,18 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Browser uploads.** HTML forms can upload straight to a bucket with a signed POST policy, as produced by any AWS SDK's `generate_presigned_post` (SigV4 or SigV2). The store checks the signature and the expiration. It also checks every condition (exact values, `starts-with`, `content-length-range`), and that every form field is covered by one, so a browser cannot add fields the policy did not allow. The upload is authorized as a PUT for the key that signed the policy. Supported form fields: object metadata, content type, tags, encryption, object lock, `success_action_status` and `success_action_redirect`. The file is streamed to disk and its size limits are enforced as it arrives. Allow the web app's origin with CORS rules.
 
+**Audit trail.** The store keeps an append-only, hash-chained audit trail in Cairn's audit format: each entry's hash is `sha256(prev_hash ‖ canonical JSON)`, so any change to a past entry, or a missing entry, is detected. An entry is written in the same transaction as the change it records. Recorded:
+
+- bucket creation and deletion;
+- every bucket configuration change (policy, CORS, lifecycle, encryption, website, notifications, logging, tags, public access block, object lock), with the document's SHA-256;
+- versioning changes and quotas;
+- object-lock retention and legal-hold changes, and deletes that bypassed governance retention;
+- requests from signed keys that were refused. Anonymous refusals are only logged.
+
+Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, admin key) and check it with `cairn audit verify-file` (use `--after-head` to prove that consecutive exports join up). On a stopped store, `cairn-store audit-verify -data /data` checks the chain too.
+
+**Access logs.** `PutBucketLogging` writes a bucket's requests, in S3's server access log format, to objects in a target bucket every `CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS` (default 60). The requester must be allowed to write to the target. Like S3's, these logs are best effort; the audit trail is the record of changes. `CAIRN_STORE_LOG_REQUESTS=true` also writes one structured JSON log line per request.
+
 **Event notifications.** Buckets can send events when objects are created (`Put`, `Post`, `Copy`, `CompleteMultipartUpload`), removed (`Delete`, `DeleteMarkerCreated`), tagged or expired by lifecycle rules. Rules are set with `PutBucketNotificationConfiguration` and can filter by key prefix and suffix. Events use S3's event JSON format.
 
 - **Targets.** Events go to targets the operator defines in `CAIRN_STORE_EVENT_TARGETS_FILE`: webhooks (`{"type": "webhook", "id": "cairn", "url": "http://...", "secret": "..."}`) and Kafka topics (`{"type": "kafka", "id": "lake", "brokers": ["kafka:9092"], "topic": "..."}`). A rule names its target as the last part of the destination ARN (`arn:cairn:store:::lake`).
@@ -447,7 +459,7 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Static websites.** With `CAIRN_STORE_WEBSITE_DOMAIN` set (for example `sites.example.com`), a bucket with a website configuration (`PutBucketWebsite`) is served at `<bucket>.sites.example.com`. Configurations support index and error documents, redirect-all, routing rules that redirect by key prefix or error code, and per-object redirects (`x-amz-website-redirect-location`). Website requests are anonymous, so a site is served only if its bucket policy grants public read and public access is allowed: hosting never exposes a bucket by itself.
 
-**Other S3 calls.** `GetObjectAttributes` (ETag, checksums, parts with their checksums, size). Request payment always answers `BucketOwner`, and setting `Requester` is refused. Transfer acceleration can only be `Suspended`. Replication, server access logging and intelligent tiering are refused with `NotImplemented` until their features exist.
+**Other S3 calls.** `GetObjectAttributes` (ETag, checksums, parts with their checksums, size). Request payment always answers `BucketOwner`, and setting `Requester` is refused. Transfer acceleration can only be `Suspended`. Replication and intelligent tiering are refused with `NotImplemented` until their features exist.
 
 **Encryption at rest.** Give the store a key and it encrypts every new object (SSE-S3): set `CAIRN_STORE_MASTER_KEY` (a base64 32-byte key, `openssl rand -base64 32`), or `CAIRN_STORE_KEYRING_FILE` for several keys. Each object gets its own data key; its bytes are encrypted with AES-256-GCM in 64 KiB chunks, so ranged reads stay fast and any tampering is detected. The data key is stored only wrapped by a keyring key.
 

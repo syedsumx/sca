@@ -253,6 +253,7 @@ impl Server {
             source_ip: c.peer.map(|p| p.to_string()).unwrap_or_default(),
             request_id: c.request_id.clone(),
             lifecycle: false,
+            audit: None,
         }
     }
 
@@ -303,7 +304,7 @@ impl Server {
             return Err(e::INVALID_ARGUMENT.clone());
         }
         let v = serde_json::to_vec(&rules).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "notification", if rules.is_empty() { None } else { Some(&v) }))?;
+        self.set_config(c, "notification", if rules.is_empty() { None } else { Some(&v) })?;
         Ok(empty(StatusCode::OK))
     }
 

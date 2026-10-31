@@ -201,7 +201,7 @@ impl Server {
         let doc = self.read_small(c, body, 128 << 10).await?;
         let w = parse(&doc)?;
         let v = serde_json::to_vec(&w).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "website", Some(&v)))?;
+        self.set_config(c, "website", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 

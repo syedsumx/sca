@@ -113,6 +113,27 @@ impl Server {
                 let st = self.eng.stats()?;
                 Ok(json_resp(StatusCode::OK, serde_json::to_value(st).map_err(|_| e::INTERNAL.clone())?))
             }
+            (&Method::GET, ["audit"]) => {
+                let q: std::collections::BTreeMap<String, String> = raw_query
+                    .split('&')
+                    .filter_map(|p| p.split_once('='))
+                    .map(|(k, v)| (auth::query_decode(k), auth::query_decode(v)))
+                    .collect();
+                let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+                let limit = q.get("limit").and_then(|v| v.parse().ok()).unwrap_or(1000usize).min(10_000);
+                let entries = self.eng.audit_entries(after, limit)?;
+                if q.get("format").map(String::as_str) == Some("jsonl") {
+                    let mut body = String::new();
+                    for en in &entries {
+                        body.push_str(&serde_json::to_string(en).map_err(|_| e::INTERNAL.clone())?);
+                        body.push('\n');
+                    }
+                    let mut r = full(StatusCode::OK, body);
+                    set_header(&mut r, "content-type", "application/x-ndjson");
+                    return Ok(r);
+                }
+                Ok(json_resp(StatusCode::OK, json!({"entries": entries, "head": entries.last().map(|en| en.hash.clone())})))
+            }
             (&Method::GET, ["buckets"]) => {
                 let mut out = vec![];
                 for b in self.eng.list_buckets()? {
@@ -127,12 +148,26 @@ impl Server {
                     return Err(e::MALFORMED_JSON.clone());
                 }
                 let v = serde_json::to_vec(&q).map_err(|_| e::INTERNAL.clone())?;
-                self.eng.put_config(b, "quota", Some(&v))?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "quota.put".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({"max_bytes": q.max_bytes, "max_objects": q.max_objects}),
+                };
+                self.eng.put_config_audited(b, "quota", Some(&v), Some(&audit))?;
                 tracing::info!(bucket = %b, admin = %a.cred.access_key, max_bytes = ?q.max_bytes, max_objects = ?q.max_objects, "bucket quota set");
                 Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
             }
             (&Method::DELETE, ["buckets", b, "quota"]) => {
-                self.eng.put_config(b, "quota", None)?;
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "quota.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                self.eng.put_config_audited(b, "quota", None, Some(&audit))?;
                 tracing::info!(bucket = %b, admin = %a.cred.access_key, "bucket quota removed");
                 Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
             }

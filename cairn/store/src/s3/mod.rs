@@ -1,5 +1,6 @@
 //! The S3 API over a Cairn Store engine.
 
+mod accesslog;
 mod admin;
 pub mod auth;
 pub mod authz;
@@ -15,6 +16,7 @@ mod objectlock;
 pub mod policy;
 mod post;
 pub mod sse;
+mod trail;
 mod versioning;
 mod website;
 pub mod xml;
@@ -39,6 +41,7 @@ use errors::{self as e, ApiError};
 pub type Body = BoxBody<Bytes, io::Error>;
 pub type Resp = Response<Body>;
 type CorsCtx = (String, String, HeaderMap);
+type Dispatched = (&'static str, Result<Resp, ApiError>, Option<CorsCtx>, accesslog::LogInfo);
 
 pub struct Config {
     pub region: String,
@@ -64,6 +67,8 @@ pub struct Config {
     /// Event notification targets, and how long an undeliverable event is kept.
     pub event_targets: Vec<events::Target>,
     pub event_max_age_hours: u64,
+    /// One JSON log line per request.
+    pub log_requests: bool,
 }
 
 pub struct Server {
@@ -88,6 +93,8 @@ pub struct Server {
     website_domain: String,
     pub(crate) delivery: Option<events::Delivery>,
     pub(crate) event_metrics: events::EventMetrics,
+    access_logs: accesslog::AccessLogs,
+    log_requests: bool,
 }
 
 /// One request, after routing and authentication.
@@ -163,6 +170,8 @@ impl Server {
             website_domain: cfg.website_domain.to_ascii_lowercase(),
             delivery: (!cfg.event_targets.is_empty()).then(|| events::Delivery::new(cfg.event_targets, cfg.event_max_age_hours)),
             event_metrics: Default::default(),
+            access_logs: Default::default(),
+            log_requests: cfg.log_requests,
         })
     }
 
@@ -192,17 +201,43 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result, cors) = if path.starts_with("/-/admin/") {
-            ("AdminApi", Ok(self.admin_api(req).await), None)
+        let (op, result, cors, mut info) = if path.starts_with("/-/admin/") {
+            ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
         } else if path.starts_with("/-/") {
-            ("admin", Ok(self.admin(&path)), None)
+            ("admin", Ok(self.admin(&path)), None, Default::default())
         } else {
             self.dispatch(req, peer, &request_id).await
         };
+        let mut error_code = "";
         let mut resp = match result {
             Ok(r) => r,
-            Err(err) => error_response(&err, &path, &request_id, head),
+            Err(err) => {
+                error_code = err.code;
+                error_response(&err, &path, &request_id, head)
+            }
         };
+        if let Some(ErrorCode(c)) = resp.extensions().get::<ErrorCode>() {
+            error_code = c;
+        }
+        if !op.starts_with("admin") && op != "AdminApi" {
+            let sent = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
+            info.version_id = resp.headers().get("x-amz-version-id").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            if op == "GetObject" || op == "HeadObject" {
+                info.object_size = Some(sent);
+            } else if op == "PutObject" {
+                info.object_size = Some(len_in);
+            }
+            self.log_request(
+                &info,
+                op,
+                resp.status().as_u16(),
+                error_code,
+                if head { 0 } else { sent },
+                started.elapsed().as_millis() as u64,
+                &request_id,
+                peer,
+            );
+        }
         if let Some((bucket, method, headers)) = cors {
             self.apply_cors(&bucket, &method, &headers, &mut resp);
         }
@@ -218,12 +253,7 @@ impl Server {
 
     /// Routes and authenticates a request. The third value is set for cross-origin requests (bucket,
     /// method, request headers), so their responses get CORS headers.
-    async fn dispatch<B>(
-        &self,
-        req: Request<B>,
-        peer: Option<std::net::IpAddr>,
-        request_id: &str,
-    ) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
+    async fn dispatch<B>(&self, req: Request<B>, peer: Option<std::net::IpAddr>, request_id: &str) -> Dispatched
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -231,7 +261,7 @@ impl Server {
         let (parts, mut body) = req.into_parts();
         let expect_continue =
             parts.headers.get("expect").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
-        let (op, mut res, cors) = self.dispatch_parts(parts, &mut body, peer, request_id).await;
+        let (op, mut res, cors, info) = self.dispatch_parts(parts, &mut body, peer, request_id).await;
         // A request refused before its body was read leaves that body on the connection. Read and drop
         // what is left (up to 1 MiB) so the connection stays usable; otherwise ask the client to close it,
         // instead of reading a large refused upload to the end.
@@ -248,7 +278,7 @@ impl Server {
                 }
             };
         }
-        (op, res, cors)
+        (op, res, cors, info)
     }
 
     async fn dispatch_parts<B>(
@@ -257,7 +287,7 @@ impl Server {
         body: &mut B,
         peer: Option<std::net::IpAddr>,
         request_id: &str,
-    ) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
+    ) -> Dispatched
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -274,7 +304,7 @@ impl Server {
         let vhost = (!self.domain.is_empty()).then(|| host_only.strip_suffix(&format!(".{}", self.domain)).map(str::to_string)).flatten();
         let decoded = match String::from_utf8(auth::percent_decode(&raw_path)) {
             Ok(p) => p,
-            Err(_) => return ("route", Err(e::INVALID_ARGUMENT.clone()), None),
+            Err(_) => return ("route", Err(e::INVALID_ARGUMENT.clone()), None, Default::default()),
         };
         let (bucket, key) = match &vhost {
             Some(b) => (b.clone(), decoded.trim_start_matches('/').to_string()),
@@ -288,11 +318,27 @@ impl Server {
         };
         if !self.website_domain.is_empty() {
             if let Some(site) = host_only.strip_suffix(&format!(".{}", self.website_domain)) {
-                return ("Website", Ok(self.serve_website(site, &parts.method, &raw_path, &parts.headers, peer).await), None);
+                return (
+                    "Website",
+                    Ok(self.serve_website(site, &parts.method, &raw_path, &parts.headers, peer).await),
+                    None,
+                    Default::default(),
+                );
             }
         }
+        let hdr = |n: &str| parts.headers.get(n).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        let mut info = accesslog::LogInfo {
+            bucket: bucket.clone(),
+            key: key.clone(),
+            method: parts.method.to_string(),
+            uri: if raw_query.is_empty() { raw_path.clone() } else { format!("{raw_path}?{raw_query}") },
+            referer: hdr("referer"),
+            user_agent: hdr("user-agent"),
+            host: hdr("host"),
+            ..Default::default()
+        };
         if parts.method == Method::OPTIONS {
-            return ("PreflightCORS", self.preflight(&bucket, &parts.headers), None);
+            return ("PreflightCORS", self.preflight(&bucket, &parts.headers), None, info);
         }
         let cors = parts.headers.contains_key("origin").then(|| (bucket.clone(), parts.method.to_string(), parts.headers.clone()));
         let request = auth::Request {
@@ -310,9 +356,14 @@ impl Server {
         } else {
             match auth::verify(&self.creds, &request) {
                 Ok(a) => a,
-                Err(err) => return ("auth", Err(err), cors),
+                Err(err) => return ("auth", Err(err), cors, info),
             }
         };
+        info.principal = auth.cred.access_key.clone();
+        if !auth.cred.access_key.is_empty() {
+            info.sig_version = if auth.scope.is_empty() { "SigV2" } else { "SigV4" };
+            info.auth_type = if parts.headers.contains_key("authorization") { "AuthHeader" } else { "QueryString" };
+        }
         let query = raw_query
             .split('&')
             .filter(|p| !p.is_empty())
@@ -336,7 +387,10 @@ impl Server {
             request_id: request_id.to_string(),
         };
         let res = if ctx.key.len() > 1024 { Err(e::KEY_TOO_LONG.clone()) } else { self.route(&mut ctx, body).await };
-        (ctx.op, res, cors)
+        if let Err(err) = &res {
+            self.audit_denial(&ctx, err);
+        }
+        (ctx.op, res, cors, info)
     }
 
     fn admin(&self, path: &str) -> Resp {
@@ -451,7 +505,17 @@ pub(crate) fn set_header(r: &mut Resp, name: &str, value: &str) {
     }
 }
 
+/// The S3 error code of an error response (a response extension, for access logs; never sent).
+#[derive(Clone, Copy)]
+pub(crate) struct ErrorCode(pub &'static str);
+
 fn error_response(err: &ApiError, resource: &str, request_id: &str, head: bool) -> Resp {
+    let mut r = error_response_inner(err, resource, request_id, head);
+    r.extensions_mut().insert(ErrorCode(err.code));
+    r
+}
+
+fn error_response_inner(err: &ApiError, resource: &str, request_id: &str, head: bool) -> Resp {
     let status = StatusCode::from_u16(err.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     if head {
         return empty(status);

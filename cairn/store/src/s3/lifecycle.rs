@@ -26,7 +26,7 @@ const MAX_RULES: usize = 1000;
 
 /// The event context of lifecycle actions.
 static LIFECYCLE: engine::Ev =
-    engine::Ev { kind: "", principal: String::new(), source_ip: String::new(), request_id: String::new(), lifecycle: true };
+    engine::Ev { kind: "", principal: String::new(), source_ip: String::new(), request_id: String::new(), lifecycle: true, audit: None };
 
 fn blocking<T>(f: impl FnOnce() -> T) -> T {
     tokio::task::block_in_place(f)
@@ -307,7 +307,7 @@ impl Server {
         let doc = self.read_small(c, body, 1 << 20).await?;
         let rules = parse(&doc)?;
         let v = serde_json::to_vec(&rules).map_err(|_| e::INTERNAL.clone())?;
-        blocking(|| self.eng.put_config(&c.bucket, "lifecycle", Some(&v)))?;
+        self.set_config(c, "lifecycle", Some(&v))?;
         Ok(empty(StatusCode::OK))
     }
 
