@@ -413,7 +413,9 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Ownership and ACLs.** The bucket owner owns every object (S3's `BucketOwnerEnforced`). Access comes from keys, never from ACLs: ACL requests that only grant the owner full control succeed, and any other grant is refused with `AccessControlListNotSupported`.
 
-**Not supported yet.** Versioning, object lock, lifecycle rules, bucket policies, CORS and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
+**CORS.** Each bucket can have CORS rules (`PutBucketCors`), so browser apps such as the Cairn UI can upload and download with presigned URLs. Browser preflight requests are answered from the bucket's rules without a signature. Responses to allowed origins carry the CORS headers, error responses included. A bucket without rules refuses every cross-origin request.
+
+**Not supported yet.** Versioning, object lock, lifecycle rules, bucket policies and encryption at rest. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

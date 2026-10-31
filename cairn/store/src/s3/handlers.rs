@@ -31,9 +31,8 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 14] = [
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 13] = [
     "versioning",
-    "cors",
     "policy",
     "lifecycle",
     "publicAccessBlock",
@@ -139,6 +138,10 @@ impl Server {
                 c.op = "PutBucketAcl";
                 self.put_acl(c, body, false).await
             }
+            Method::PUT if c.has("cors") => {
+                c.op = "PutBucketCors";
+                self.put_cors(c, body).await
+            }
             Method::PUT if c.has("ownershipControls") => {
                 c.op = "PutBucketOwnershipControls";
                 self.put_ownership(c, body).await
@@ -155,14 +158,16 @@ impl Server {
                 c.op = "DeleteBucketTagging";
                 self.delete_config(c, "tagging")
             }
+            Method::DELETE if c.has("cors") => {
+                c.op = "DeleteBucketCors";
+                self.delete_config(c, "cors")
+            }
             Method::DELETE if c.has("ownershipControls") => {
                 c.op = "Unsupported";
                 Err(e::NOT_IMPLEMENTED.clone())
             }
             Method::DELETE
-                if ["policy", "cors", "lifecycle", "publicAccessBlock", "encryption", "website", "replication"]
-                    .iter()
-                    .any(|k| c.has(k)) =>
+                if ["policy", "lifecycle", "publicAccessBlock", "encryption", "website", "replication"].iter().any(|k| c.has(k)) =>
             {
                 // None of these can be set yet, so there is nothing to delete.
                 c.op = "DeleteBucketConfig";
@@ -218,6 +223,10 @@ impl Server {
                     c.op = "GetBucketTagging";
                     return self.get_bucket_tagging(c);
                 }
+                if c.has("cors") {
+                    c.op = "GetBucketCors";
+                    return self.get_cors(c);
+                }
                 if c.has("ownershipControls") {
                     c.op = "GetBucketOwnershipControls";
                     return self.get_ownership(c);
@@ -225,7 +234,6 @@ impl Server {
                 for (k, err) in [
                     ("policy", &e::NO_SUCH_BUCKET_POLICY),
                     ("lifecycle", &e::NO_SUCH_LIFECYCLE),
-                    ("cors", &e::NO_SUCH_CORS),
                     ("publicAccessBlock", &e::NO_SUCH_PUBLIC_ACCESS_BLOCK),
                 ] {
                     if c.has(k) {

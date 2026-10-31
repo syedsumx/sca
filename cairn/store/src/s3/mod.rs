@@ -4,6 +4,7 @@ pub mod auth;
 pub mod body;
 pub mod checksum;
 mod config;
+mod cors;
 pub mod errors;
 mod handlers;
 pub mod xml;
@@ -27,6 +28,7 @@ use errors::{self as e, ApiError};
 
 pub type Body = BoxBody<Bytes, io::Error>;
 pub type Resp = Response<Body>;
+type CorsCtx = (String, String, HeaderMap);
 
 pub struct Config {
     pub region: String,
@@ -113,11 +115,14 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result) = if path.starts_with("/-/") { ("admin", Ok(self.admin(&path))) } else { self.dispatch(req).await };
+        let (op, result, cors) = if path.starts_with("/-/") { ("admin", Ok(self.admin(&path)), None) } else { self.dispatch(req).await };
         let mut resp = match result {
             Ok(r) => r,
             Err(err) => error_response(&err, &path, &request_id, head),
         };
+        if let Some((bucket, method, headers)) = cors {
+            self.apply_cors(&bucket, &method, &headers, &mut resp);
+        }
         let h = resp.headers_mut();
         h.insert("x-amz-request-id", HeaderValue::from_str(&request_id).unwrap());
         h.insert("x-amz-id-2", HeaderValue::from_str(&request_id).unwrap());
@@ -128,7 +133,9 @@ impl Server {
         Ok(resp)
     }
 
-    async fn dispatch<B>(&self, req: Request<B>) -> (&'static str, Result<Resp, ApiError>)
+    /// Routes and authenticates a request. The third value is set for cross-origin requests (bucket,
+    /// method, request headers), so their responses get CORS headers.
+    async fn dispatch<B>(&self, req: Request<B>) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -146,7 +153,7 @@ impl Server {
         let vhost = (!self.domain.is_empty()).then(|| host_only.strip_suffix(&format!(".{}", self.domain)).map(str::to_string)).flatten();
         let decoded = match String::from_utf8(auth::percent_decode(&raw_path)) {
             Ok(p) => p,
-            Err(_) => return ("route", Err(e::INVALID_ARGUMENT.clone())),
+            Err(_) => return ("route", Err(e::INVALID_ARGUMENT.clone()), None),
         };
         let (bucket, key) = match &vhost {
             Some(b) => (b.clone(), decoded.trim_start_matches('/').to_string()),
@@ -158,6 +165,10 @@ impl Server {
                 }
             }
         };
+        if parts.method == Method::OPTIONS {
+            return ("PreflightCORS", self.preflight(&bucket, &parts.headers), None);
+        }
+        let cors = parts.headers.contains_key("origin").then(|| (bucket.clone(), parts.method.to_string(), parts.headers.clone()));
         let request = auth::Request {
             method: parts.method.as_str(),
             raw_path: &raw_path,
@@ -169,13 +180,13 @@ impl Server {
         };
         let auth = match auth::verify(&self.creds, &request) {
             Ok(a) => a,
-            Err(err) => return ("auth", Err(err)),
+            Err(err) => return ("auth", Err(err), cors),
         };
         if !auth.cred.allows(&bucket) {
-            return ("auth", Err(e::ACCESS_DENIED.clone()));
+            return ("auth", Err(e::ACCESS_DENIED.clone()), cors);
         }
         if auth.cred.read_only && parts.method != Method::GET && parts.method != Method::HEAD {
-            return ("auth", Err(e::ACCESS_DENIED.clone()));
+            return ("auth", Err(e::ACCESS_DENIED.clone()), cors);
         }
         let query = raw_query
             .split('&')
@@ -189,7 +200,7 @@ impl Server {
         let mut ctx =
             Ctx { method: parts.method, bucket, key, path: raw_path, query, headers: parts.headers, auth, content_length, op: "unknown" };
         let res = if ctx.key.len() > 1024 { Err(e::KEY_TOO_LONG.clone()) } else { self.route(&mut ctx, body).await };
-        (ctx.op, res)
+        (ctx.op, res, cors)
     }
 
     fn admin(&self, path: &str) -> Resp {

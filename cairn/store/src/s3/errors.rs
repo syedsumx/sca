@@ -74,6 +74,11 @@ errors! {
     TOO_MANY_OBJECT_TAGS = "BadRequest", 400, "Object tags cannot be greater than 10";
     TOO_MANY_BUCKET_TAGS = "BadRequest", 400, "Bucket tags cannot be greater than 50";
     ACL_NOT_SUPPORTED = "AccessControlListNotSupported", 400, "The bucket does not allow ACLs";
+    CORS_INVALID_METHOD = "InvalidRequest", 400, "Found unsupported HTTP method in CORS config.";
+    CORS_INVALID_WILDCARD = "InvalidRequest", 400, "An AllowedOrigin or AllowedHeader can have at most one * wildcard character.";
+    CORS_BAD_PREFLIGHT = "BadRequest", 400, "Insufficient information. Origin request header needed.";
+    CORS_NOT_ENABLED = "AccessForbidden", 403, "CORSResponse: CORS is not enabled for this bucket.";
+    CORS_FORBIDDEN = "AccessForbidden", 403, "CORSResponse: This CORS request is not allowed. This is usually because the evalution of Origin, request method / Access-Control-Request-Method or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.";
     NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }
 

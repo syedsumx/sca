@@ -136,7 +136,6 @@ def test_ownership_is_bucket_owner_enforced(s3, bucket):
 
 UNSUPPORTED = [
     lambda s3, b: s3.put_bucket_versioning(Bucket=b, VersioningConfiguration={"Status": "Enabled"}),
-    lambda s3, b: s3.put_bucket_cors(Bucket=b, CORSConfiguration={"CORSRules": [{"AllowedMethods": ["GET"], "AllowedOrigins": ["*"]}]}),
     lambda s3, b: s3.put_bucket_policy(Bucket=b, Policy='{"Version":"2012-10-17","Statement":[]}'),
     lambda s3, b: s3.put_bucket_lifecycle_configuration(Bucket=b, LifecycleConfiguration={"Rules": [
         {"ID": "x", "Status": "Enabled", "Filter": {"Prefix": ""}, "Expiration": {"Days": 1}}]}),
