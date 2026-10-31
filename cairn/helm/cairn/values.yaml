@@ -501,6 +501,39 @@ cairn:
     tolerations: []
     affinity: {}
 
+  # Cairn Catalog: Iceberg REST catalog (Trino, Spark, pyiceberg connect to it). Writes table metadata
+  # to Cairn Store with the store's key (cairn.store.secret). One replica on a persistent volume.
+  # Tokens come from a Secret you create:
+  #   kubectl create secret generic cairn-catalog --from-literal=token=$(openssl rand -hex 24)
+  catalog:
+    enabled: false
+    port: 8181
+    image:
+      repository: ""   # empty = <global.cairn.registry>/catalog
+      tag: ""
+      pullPolicy: IfNotPresent
+    secret:
+      name: cairn-catalog
+      tokenKey: token
+    # Further tokens (namespace-scoped, read-only): a Secret with a "tokens.json" list, or empty.
+    extraTokensSecret: ""
+    warehouse: s3://lakehouse/warehouse
+    # Object store; empty = this release's Cairn Store.
+    s3Endpoint: ""
+    # The store endpoint handed to engines with each table (empty = s3Endpoint).
+    clientS3Endpoint: ""
+    vendCredentials: true
+    persistence:
+      size: 10Gi
+      storageClassName: ""
+      accessModes: [ReadWriteOnce]
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
   # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
   consumerUi:
     enabled: true
@@ -539,6 +572,8 @@ cairn:
     notifierEgressTo: []
     # Extra ingress sources allowed to reach Cairn Store (query and processing engines). Empty = none.
     storeIngressFrom: []
+    # Extra ingress sources allowed to reach Cairn Catalog (query and processing engines). Empty = none.
+    catalogIngressFrom: []
     # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
     apiIngressFrom:
       - namespaceSelector:

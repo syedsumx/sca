@@ -417,6 +417,35 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes and open uploads.
 
+## Cairn Catalog
+
+Cairn Catalog is Cairn's Iceberg REST catalog. Engines that speak the Iceberg REST protocol connect to it: Trino, Spark, Flink, pyiceberg and DuckDB. Table data and metadata files live in Cairn Store (or any S3 store); the catalog keeps track of each table's current metadata.
+
+- **Docker Compose:** service `cairn-catalog`, at `http://cairn-catalog:8181` inside the stack and `http://localhost:8181` from the host. Set `CAIRN_CATALOG_TOKEN` in `.env`. The catalog writes to the store with the store's key, and new tables go under `s3://lakehouse/warehouse`.
+- **Kubernetes:** set `cairn.catalog.enabled=true` (with `cairn.store.enabled=true`, or point `cairn.catalog.s3Endpoint` at another store). Create the Secret named in `cairn.catalog.secret`. Engines in other namespaces need an entry in `cairn.networkPolicy.catalogIngressFrom`.
+
+**Connecting an engine.** Use the catalog URL and the token as a bearer token. For example, in pyiceberg: `RestCatalog("cairn", uri="http://cairn-catalog:8181", token="...")`. With each table the catalog also gives the engine the store's endpoint and key, so engines need no storage settings of their own. Set `CAIRN_CATALOG_VEND_CREDENTIALS=false` to turn that off. Set `CAIRN_CATALOG_CLIENT_S3_ENDPOINT` when engines reach the store at another address.
+
+**Tokens.** `CAIRN_CATALOG_TOKEN` is an admin token. `CAIRN_CATALOG_TOKENS_FILE` adds more tokens as a JSON list. Each token can be limited to namespaces (`"namespaces": ["sales", "sales.*"]`) or to reading (`"read_only": true`).
+
+**What it supports.**
+
+- Namespaces, nested, with properties.
+- Tables: create (including staged creates for create-table-as-select), load, commit, rename, drop, and register an existing metadata file.
+- Multi-table transactions, and metrics reports (accepted and dropped).
+
+Views, server-side scan planning and remote request signing are not supported yet.
+
+**Commits.** Table metadata is checked and updated by iceberg-rust, the Apache Iceberg project's Rust library, so the catalog applies the table spec the same way the reference implementations do.
+
+1. A commit writes a new metadata file.
+2. The catalog then switches the table to that file, but only if the table has not changed since the commit was prepared.
+3. A writer that lost the race gets `409 CommitFailedException`. Engines refresh and retry by themselves.
+
+A multi-table transaction changes every table or none.
+
+**Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

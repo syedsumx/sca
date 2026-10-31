@@ -546,6 +546,36 @@ services:
       - storedata:/data
     networks: [catalog]
 
+  # Cairn Catalog: Iceberg REST catalog on http://cairn-catalog:8181 (http://localhost:8181 from the
+  # host); tables live in Cairn Store. Clients authenticate with CAIRN_CATALOG_TOKEN as a bearer token.
+  cairn-catalog:
+    image: ${CAIRN_REGISTRY:-cairn}/catalog:${CAIRN_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/catalog.Dockerfile
+    hostname: cairn-catalog
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:-cairn-catalog-dev-token}
+      CAIRN_CATALOG_WAREHOUSE: ${CAIRN_CATALOG_WAREHOUSE:-s3://lakehouse/warehouse}
+      CAIRN_CATALOG_S3_ENDPOINT: http://cairn-store:8333
+      CAIRN_CATALOG_S3_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
+      CAIRN_CATALOG_S3_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      # The store endpoint engines are told to use (in-stack engines reach cairn-store directly).
+      CAIRN_CATALOG_CLIENT_S3_ENDPOINT: ${CAIRN_CATALOG_CLIENT_S3_ENDPOINT:-http://cairn-store:8333}
+    ports:
+      - "${CAIRN_MAPPED_CATALOG_PORT:-8181}:8181"
+    volumes:
+      - catalogdata:/data
+    depends_on:
+      cairn-store:
+        condition: service_healthy
+    networks: [catalog]
+
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
   edge:
     image: nginx:1.27-alpine
@@ -657,6 +687,7 @@ networks:
 
 volumes:
   storedata:
+  catalogdata:
   mysqldata:
   osdata:
   broker:

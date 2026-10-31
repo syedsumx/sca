@@ -1,0 +1,42 @@
+[package]
+name = "cairn-catalog"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.94"
+license = "Apache-2.0"
+description = "Cairn Catalog: Cairn's Iceberg REST catalog"
+publish = false
+
+[dependencies]
+bytes = "1"
+glob-match = "0.2"
+hex = "0.4"
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
+iceberg = "0.10"
+percent-encoding = "2"
+rand = "0.8"
+redb = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+subtle = "2"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+strip = true
+
+[profile.dev]
+debug = "line-tables-only"

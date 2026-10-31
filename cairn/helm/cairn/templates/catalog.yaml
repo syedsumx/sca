@@ -1,0 +1,121 @@
+{{- if .Values.cairn.catalog.enabled }}
+{{- $u := .Values.cairn.catalog }}
+{{- $st := .Values.cairn.store }}
+{{- $ctx := dict "root" $ "component" "catalog" "cfg" $u }}
+{{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
+{{- $endpoint := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
+# Cairn Catalog is single-node in this release: exactly one replica, state on one persistent volume.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "cairn.componentName" $ctx }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: catalog
+          image: {{ printf "%s:%s" (default (printf "%s/catalog" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: CAIRN_CATALOG_ADDR
+              value: {{ printf ":%v" $u.port | quote }}
+            - name: CAIRN_CATALOG_DATA
+              value: /data
+            - name: CAIRN_CATALOG_WAREHOUSE
+              value: {{ $u.warehouse | quote }}
+            - name: CAIRN_CATALOG_S3_ENDPOINT
+              value: {{ $endpoint | quote }}
+            - name: CAIRN_CATALOG_CLIENT_S3_ENDPOINT
+              value: {{ default $endpoint $u.clientS3Endpoint | quote }}
+            - name: CAIRN_CATALOG_S3_REGION
+              value: {{ $st.region | quote }}
+            - name: CAIRN_CATALOG_VEND_CREDENTIALS
+              value: {{ $u.vendCredentials | quote }}
+            - name: CAIRN_CATALOG_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
+            - name: CAIRN_CATALOG_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            - name: CAIRN_CATALOG_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.tokenKey }} }
+            {{- if $u.extraTokensSecret }}
+            - name: CAIRN_CATALOG_TOKENS_FILE
+              value: /etc/cairn-catalog/tokens.json
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if $u.extraTokensSecret }}
+            - name: tokens
+              mountPath: /etc/cairn-catalog
+              readOnly: true
+            {{- end }}
+      {{- if $u.extraTokensSecret }}
+      volumes:
+        - name: tokens
+          secret:
+            secretName: {{ $u.extraTokensSecret }}
+      {{- end }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{ toYaml $u.persistence.accessModes | nindent 10 }}
+        {{- with $u.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.persistence.size }}
+---
+{{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- end }}

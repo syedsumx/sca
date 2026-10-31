@@ -84,6 +84,42 @@ jobs:
           pip install "boto3>=1.36" "botocore[crt]" requests pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
           cd conformance && pytest -q -p no:cacheprovider
 
+  catalog:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/catalog
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Format and lint
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets --locked -- -D warnings
+      - name: Unit tests
+        run: cargo test --locked
+      - name: Build (catalog and the store it writes to)
+        run: |
+          cargo build --release --locked
+          (cd ../store && cargo build --release --locked)
+      - name: Conformance (pyiceberg RestCatalog on Cairn Store)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          pip install requests pytest "pyarrow>=17" "pyiceberg[pyarrow]>=0.10"
+          cd conformance && pytest -q -p no:cacheprovider
+
   ui:
     runs-on: ubuntu-latest
     defaults:
@@ -203,7 +239,7 @@ jobs:
           exit 1
       - name: Scan Cairn-owned images (fail on fixable critical CVEs)
         run: |
-          for img in platform remote-agent store; do
+          for img in platform remote-agent store catalog; do
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
               aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL --ignore-unfixed \
               --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
@@ -219,7 +255,7 @@ jobs:
       - name: SBOMs
         run: |
           mkdir -p "$RUNNER_TEMP/sbom"
-          for img in platform consumer-ui remote-agent store authorizer core web setup executor; do
+          for img in platform consumer-ui remote-agent store catalog authorizer core web setup executor; do
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.18.1 \
               "cairn/${img}:${CAIRN_VERSION}" -o spdx-json > "$RUNNER_TEMP/sbom/${img}.spdx.json"
           done
@@ -253,7 +289,7 @@ jobs:
 
       - name: Live e2e
         run: |
-          pip install -e ".[test]" "boto3>=1.36"
+          pip install -e ".[test]" "boto3>=1.36" "pyiceberg[pyarrow]>=0.10"
           npm install --prefix "$RUNNER_TEMP/pw" "playwright@${PLAYWRIGHT_VERSION}"
           "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium
           KEEP_SINK=1 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
@@ -290,7 +326,7 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           curl -fsSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
           chmod +x /usr/local/bin/cosign
-          for img in platform consumer-ui remote-agent store authorizer core web setup executor; do
+          for img in platform consumer-ui remote-agent store catalog authorizer core web setup executor; do
             ref="${REGISTRY,,}/${img}:${CAIRN_VERSION}"
             docker tag "cairn/${img}:${CAIRN_VERSION}" "$ref"
             docker push "$ref"

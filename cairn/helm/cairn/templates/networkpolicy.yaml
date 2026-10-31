@@ -164,6 +164,32 @@ spec:
         - port: http
 {{- end }}
 {{- end }}
+{{- if .Values.cairn.catalog.enabled }}
+---
+# Cairn Catalog: this release's components plus the engines listed in cairn.networkPolicy.catalogIngressFrom.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-catalog
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: catalog
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.catalogIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+{{- end }}
 {{- if .Values.cairn.notifier.enabled }}
 ---
 # Notifier egress: in-cluster dependencies (DB, Cairn Core, DNS) plus HTTPS/SMTP to Slack, Teams and the
