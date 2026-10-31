@@ -4,6 +4,8 @@
 //! cairn-store serve        run the server (default)
 //! cairn-store fsck         check the data directory and remove debris left by a crash, then exit
 //! cairn-store healthcheck  exit 0 if the local server is ready (container health checks)
+//! cairn-store admin ...    the admin API (see admin_cli)
+//! cairn-store mount <bucket>[/prefix] <dir>  a bucket as a FUSE directory (see mount)
 //! cairn-store version      print the version
 //! ```
 //!
@@ -56,6 +58,7 @@ mod admin_cli;
 mod audit;
 mod crypt;
 mod engine;
+mod mount;
 mod s3;
 mod tls;
 
@@ -139,7 +142,7 @@ fn main() {
     let mut addr = env("CAIRN_STORE_ADDR", ":8333");
     let mut data = env("CAIRN_STORE_DATA", "/data");
     // `admin` takes its own arguments.
-    let rest: Vec<String> = if cmd == "admin" { std::mem::take(&mut args) } else { vec![] };
+    let rest: Vec<String> = if cmd == "admin" || cmd == "mount" { std::mem::take(&mut args) } else { vec![] };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.trim_start_matches('-') {
@@ -174,6 +177,14 @@ fn main() {
             let endpoint = env("CAIRN_STORE_ENDPOINT", &default);
             let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
             let code = admin_cli::run(&rest, &endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1"));
+            std::process::exit(code);
+        }
+        "mount" => {
+            let tls = !env("CAIRN_STORE_TLS_CERT", "").is_empty();
+            let default = format!("{}://{}", if tls { "https" } else { "http" }, listen_addr(&addr).replace("0.0.0.0", "127.0.0.1"));
+            let endpoint = env("CAIRN_STORE_ENDPOINT", &default);
+            let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
+            let code = mount::run(&rest, &endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1"));
             std::process::exit(code);
         }
         "audit-verify" => {
@@ -219,7 +230,7 @@ fn main() {
             rt.block_on(serve(addr, data));
         }
         other => {
-            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, healthcheck, version)");
+            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, mount, healthcheck, version)");
             std::process::exit(2);
         }
     }

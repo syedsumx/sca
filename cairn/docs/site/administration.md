@@ -491,6 +491,18 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 - **Uploads** are staged in the data directory's temporary area and stored in one step when the file is closed, so readers never see half a file. A dropped connection leaves nothing behind.
 - **Refused rather than faked:** appends, in-place updates and out-of-order writes (files are written from the start, in order); changing permissions or timestamps; links; and renaming directories (use WebDAV MOVE or the S3 API). A rename never overwrites an existing file.
 
+**Mounting a bucket (FUSE).** `cairn-store mount <bucket>[/prefix] <directory>` shows a bucket, or a prefix of it, as a local directory on Linux, for tools that only work with files. The `cairn-store` binary is static, so it can be copied to any Linux host with FUSE. Unmount with `fusermount3 -u <directory>` (or `umount`).
+
+```sh
+CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_STORE_SECRET_KEY=... \
+  cairn-store mount lake/raw /mnt/raw            # add --read-only, or --allow-other to share the mount
+```
+
+- **An ordinary client.** The mount talks to the store over the S3 API, signed with the key it is given, so that key's policies, Cairn policies, quotas, encryption, events and the audit trail apply as for any client. The mount fails at once if the key cannot list the bucket.
+- **Reads** are ranged GETs. **Writes** are staged in a private temporary file (`CAIRN_STORE_MOUNT_STAGING`, default the system temporary directory) and stored with one PUT when the file is closed or flushed, so other readers never see half a file. Overwriting a file (`>`, `cp`) replaces it in one step.
+- **Directories** are key prefixes. `mkdir` writes an empty `name/` marker object, as S3 consoles do. `rmdir` works only on empty directories.
+- **Refused rather than faked** (`Operation not supported`): appending, changing part of a file, writing out of order, changing modes (setting the mode a file already shows is allowed, so `cp` works), owners or times, links, and extended attributes. Renaming a directory returns `EXDEV`, so `mv` copies and deletes instead. Renaming a file is a copy followed by a delete.
+
 **Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
 
 - **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.

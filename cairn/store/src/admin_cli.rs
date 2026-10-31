@@ -37,6 +37,21 @@ pub fn sign_with_payload(
     region: &str,
     now: time::OffsetDateTime,
 ) -> Vec<(String, String)> {
+    sign_full(method, url, payload, &[], ak, sk, region, now)
+}
+
+/// SigV4 headers, also signing `extra` headers (lower-case names, e.g. x-amz-copy-source, range).
+#[allow(clippy::too_many_arguments)]
+pub fn sign_full(
+    method: &str,
+    url: &str,
+    payload: &str,
+    extra: &[(&str, &str)],
+    ak: &str,
+    sk: &str,
+    region: &str,
+    now: time::OffsetDateTime,
+) -> Vec<(String, String)> {
     let amz_date = now.format(time::macros::format_description!("[year][month][day]T[hour][minute][second]Z")).unwrap_or_default();
     let date = &amz_date[..8];
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
@@ -47,16 +62,20 @@ pub fn sign_with_payload(
         .filter(|p| !p.is_empty())
         .map(|p| {
             let (k, v) = p.split_once('=').unwrap_or((p, ""));
-            (aws_encode(k.as_bytes(), false), aws_encode(v.as_bytes(), false))
+            // Canonical form: decode what the URL carries, then encode as SigV4 does.
+            (aws_encode(&crate::s3::auth::percent_decode(k), false), aws_encode(&crate::s3::auth::percent_decode(v), false))
         })
         .collect();
     pairs.sort();
     let cq = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
     let payload = payload.to_string();
-    let canonical = format!(
-        "{method}\n{}\n{cq}\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{amz_date}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload}",
-        aws_encode(path.as_bytes(), true)
-    );
+    let mut signed: Vec<(String, String)> =
+        vec![("host".into(), host.to_string()), ("x-amz-content-sha256".into(), payload.clone()), ("x-amz-date".into(), amz_date.clone())];
+    signed.extend(extra.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())));
+    signed.sort();
+    let names = signed.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
+    let lines: String = signed.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    let canonical = format!("{method}\n{}\n{cq}\n{lines}\n{names}\n{payload}", aws_encode(path.as_bytes(), true));
     let scope = format!("{date}/{region}/s3/aws4_request");
     let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
     let k = hmac_sha256(
@@ -67,10 +86,7 @@ pub fn sign_with_payload(
     vec![
         ("x-amz-content-sha256".into(), payload),
         ("x-amz-date".into(), amz_date),
-        (
-            "authorization".into(),
-            format!("AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature={sig}"),
-        ),
+        ("authorization".into(), format!("AWS4-HMAC-SHA256 Credential={ak}/{scope}, SignedHeaders={names}, Signature={sig}")),
     ]
 }
 
