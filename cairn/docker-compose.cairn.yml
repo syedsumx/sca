@@ -522,6 +522,30 @@ services:
       retries: 6
     networks: [catalog]
 
+  # Cairn Store: S3-compatible object store for the lakehouse (Iceberg tables, metadata exports).
+  # S3 endpoint http://cairn-store:8333 inside the stack, http://localhost:8333 from the host.
+  cairn-store:
+    image: ${CAIRN_REGISTRY:-cairn}/store:${CAIRN_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/store.Dockerfile
+    hostname: cairn-store
+    restart: unless-stopped
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      CAIRN_STORE_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
+      CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      CAIRN_STORE_BUCKETS: ${CAIRN_STORE_BUCKETS:-lakehouse}
+      CAIRN_STORE_REGION: ${CAIRN_STORE_REGION:-us-east-1}
+    ports:
+      - "${CAIRN_MAPPED_STORE_PORT:-8333}:8333"
+    volumes:
+      - storedata:/data
+    networks: [catalog]
+
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
   edge:
     image: nginx:1.27-alpine
@@ -632,6 +656,7 @@ networks:
     internal: true
 
 volumes:
+  storedata:
   mysqldata:
   osdata:
   broker:

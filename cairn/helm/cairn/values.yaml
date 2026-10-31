@@ -469,6 +469,38 @@ cairn:
     tolerations: []
     affinity: {}
 
+  # Cairn Store: Cairn's S3-compatible object store for the lakehouse (Iceberg tables, exports). Single
+  # node in this release: one replica on a persistent volume; back the volume up like a database.
+  # Credentials come from a Secret you create:
+  #   kubectl create secret generic cairn-store \
+  #     --from-literal=access-key=cairn-store --from-literal=secret-key=$(openssl rand -hex 24)
+  store:
+    enabled: false
+    port: 8333
+    image:
+      repository: ""   # empty = <global.cairn.registry>/store
+      tag: ""
+      pullPolicy: IfNotPresent
+    secret:
+      name: cairn-store
+      accessKeyKey: access-key
+      secretKeyKey: secret-key
+    # Further keys (read-only, bucket-scoped): a Secret with a "credentials.json" list, or empty.
+    extraCredentialsSecret: ""
+    buckets: [lakehouse]      # created at start-up if missing
+    region: us-east-1
+    domain: ""                # set to enable virtual-hosted-style requests (<bucket>.<domain>)
+    persistence:
+      size: 100Gi
+      storageClassName: ""
+      accessModes: [ReadWriteOnce]
+    resources:
+      requests: { cpu: 100m, memory: 128Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
   # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
   consumerUi:
     enabled: true
@@ -505,6 +537,8 @@ cairn:
     # Egress for the notifier (Slack / Teams / SMTP over 443/587). Empty = allow any destination on
     # those ports; restrict with ipBlock / namespaceSelector entries for an egress proxy.
     notifierEgressTo: []
+    # Extra ingress sources allowed to reach Cairn Store (query and processing engines). Empty = none.
+    storeIngressFrom: []
     # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
     apiIngressFrom:
       - namespaceSelector:

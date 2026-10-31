@@ -400,6 +400,23 @@ helm install cairn ./helm/cairn -f my-values.yaml -f helm/cairn/values-ha.yaml
 - **The gateway** runs more than one replica only when its keys come from a shared Secret (`gateway.keys.existingSecret`). Without one, the keys live on a volume, the gateway runs a single replica and it gets no PodDisruptionBudget.
 - **Databases:** point `global.*` at managed, replicated Postgres, MySQL and OpenSearch. The databases the chart can run are single instances.
 
+## Cairn Store
+
+Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Iceberg data and metadata) and metadata exports. Any S3 client works with it: Trino, Spark, pyiceberg, pyarrow, DuckDB, the AWS CLI and SDKs.
+
+- **Docker Compose:** service `cairn-store`, S3 endpoint `http://cairn-store:8333` inside the stack and `http://localhost:8333` from the host. Set `CAIRN_STORE_ACCESS_KEY` and `CAIRN_STORE_SECRET_KEY` in `.env`; the bucket `lakehouse` is created at start.
+- **Kubernetes:** set `cairn.store.enabled=true` and create the Secret named in `cairn.store.secret`. The chart runs one replica on a persistent volume. Engines in other namespaces need an entry in `cairn.networkPolicy.storeIngressFrom`.
+
+**Keys.** The access key from the environment is an admin key: it may also create and delete buckets. `CAIRN_STORE_CREDENTIALS_FILE` adds more keys, as a JSON list. Each key may be limited to certain buckets (`"buckets": ["lake-*"]`) or to reading (`"read_only": true`). Requests are signed with AWS Signature Version 4, or Version 2 for older tools. Anonymous requests are refused.
+
+**What it supports.** Buckets; objects with metadata; ranged reads; conditional reads and writes (`If-Match`, `If-None-Match: *`); listing (versions 1 and 2); batch deletes; copies; multipart uploads, including copying parts; checksums (CRC32, CRC32C, CRC64NVME, SHA-1, SHA-256, composite and full-object); and presigned URLs. Versioning, object lock, lifecycle rules, bucket policies and encryption at rest are not supported yet.
+
+**Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
+
+**Limits.** This release runs on one node: there is no replication, so the volume is the only copy. Put it on reliable storage and back it up: stop the store and copy `/data`, or take a volume snapshot. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
+
+**Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes and open uploads.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

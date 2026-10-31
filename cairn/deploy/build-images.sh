@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Cairn images: Cairn Core (core, web, setup, executor), control plane, consumer UI,
-# remote agent, authorizer plugin.
+# remote agent, Cairn Store, authorizer plugin.
 #
 #   core/web/build.sh                            # once per engine release: builds the web UI bundle
 #   deploy/build-images.sh                       # tag cairn/*:0.1.0
@@ -10,6 +10,8 @@
 #   BASE_IMAGE      Python base image (default python:3.12-slim; e.g. mirror.gcr.io/library/python:3.12-slim
 #                   when Docker Hub rate-limits you)
 #   BUSYBOX_IMAGE   runtime for the plugin image (default busybox:1.37)
+#   GO_IMAGE        Go build image for Cairn Store (default golang:1.25-alpine)
+#   ALPINE_IMAGE    runtime for Cairn Store (default alpine:3.20)
 #   INGEST_EXTRAS   ingestion source extras baked into the agent (default "postgres")
 #   ONLY            space-separated subset to build, e.g. ONLY="core web"
 #   EXTRA_CA_FILE   CA bundle of a TLS-intercepting proxy; passed as a BuildKit secret (never stored)
@@ -47,6 +49,9 @@ build() {  # build <tag> <dockerfile> [extra args...]
 
 want platform && build "${PREFIX}/platform:${VERSION}" docker/Dockerfile
 want consumer-ui && build "${PREFIX}/consumer-ui:${VERSION}" docker/consumer-ui.Dockerfile
+want store && build "${PREFIX}/store:${VERSION}" docker/store.Dockerfile \
+  --build-arg "GO_IMAGE=${GO_IMAGE:-golang:1.25-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}" \
+  --build-arg "VERSION=${VERSION}"
 want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
   --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
 

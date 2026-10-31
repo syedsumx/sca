@@ -1,0 +1,111 @@
+{{- if .Values.cairn.store.enabled }}
+{{- $u := .Values.cairn.store }}
+{{- $ctx := dict "root" $ "component" "store" "cfg" $u }}
+# Cairn Store is single-node in this release: exactly one replica, data on one persistent volume.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "cairn.componentName" $ctx }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: store
+          image: {{ printf "%s:%s" (default (printf "%s/store" .Values.global.cairn.registry) $u.image.repository) (default (include "cairn.tag" .) $u.image.tag) }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: CAIRN_STORE_ADDR
+              value: {{ printf ":%v" $u.port | quote }}
+            - name: CAIRN_STORE_DATA
+              value: /data
+            - name: CAIRN_STORE_REGION
+              value: {{ $u.region | quote }}
+            - name: CAIRN_STORE_DOMAIN
+              value: {{ $u.domain | quote }}
+            - name: CAIRN_STORE_BUCKETS
+              value: {{ join "," $u.buckets | quote }}
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.secretKeyKey }} }
+            {{- if $u.extraCredentialsSecret }}
+            - name: CAIRN_STORE_CREDENTIALS_FILE
+              value: /etc/cairn-store/credentials.json
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if $u.extraCredentialsSecret }}
+            - name: credentials
+              mountPath: /etc/cairn-store
+              readOnly: true
+            {{- end }}
+      {{- if $u.extraCredentialsSecret }}
+      volumes:
+        - name: credentials
+          secret:
+            secretName: {{ $u.extraCredentialsSecret }}
+      {{- end }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $u.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: {{ toYaml $u.persistence.accessModes | nindent 10 }}
+        {{- with $u.persistence.storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $u.persistence.size }}
+---
+{{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- end }}
