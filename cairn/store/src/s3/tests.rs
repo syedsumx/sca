@@ -43,6 +43,8 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             backup_root: None,
             replication_targets: vec![],
             tiers: vec![],
+            files_basic: false,
+            files_basic_http: false,
         },
     )
     .unwrap();

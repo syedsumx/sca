@@ -465,6 +465,15 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 - **Metrics.** `cairn_store_events_{delivered,failed,dropped}_total` and `cairn_store_events_pending`.
 - **Helm.** Put the targets file in a Secret and set `cairn.store.eventTargetsSecret`.
 
+**File API and directory browser.** `/-/files/<bucket>/<path>` serves buckets as plain files and directories, for scripts and browsers.
+
+- `GET` or `HEAD` a file reads it (ranges and conditional requests work); `PUT` writes it; `DELETE` removes it. `?versionId=` picks a version.
+- `GET` a directory (a path ending in `/`, a bucket, or `/-/files/` for the list of buckets) lists it, as JSON (`{"path", "entries": [{"name", "type", "size", "modified", "etag", "storage_class"}], "next"}`) or, for browsers (`Accept: text/html`), as an HTML page. Page through with `?limit=` (up to 1000) and `?after=<next>`.
+- **Same rules as S3.** Each request is the S3 operation it stands for (GetObject, PutObject, DeleteObject, ListObjectsV2 with a `/` delimiter, ListBuckets), so bucket and key policies, Cairn policies, quotas, encryption, events, the audit trail and access logs all apply. Only `versionId`, `limit` and `after` are accepted; S3 subresources such as `?acl` stay on the S3 API.
+- **Signing in.** Sign requests with SigV4 (`curl --aws-sigv4 "aws:amz:us-east-1:s3" --user KEY:SECRET https://store/-/files/lake/report.csv`) or use a presigned URL. Anonymous requests work only where a public bucket policy allows them. For browsers, `CAIRN_STORE_FILES_BASIC_AUTH=true` also accepts HTTP Basic (the access key and secret key). This needs TLS, because Basic sends the secret with every request; set `CAIRN_STORE_FILES_BASIC_ALLOW_HTTP=true` only when TLS ends in front of the store. In Helm: `cairn.store.filesBasicAuth`.
+- **Browser safety.** Files are served with `Content-Security-Policy: sandbox` and `nosniff`, so an HTML file in a bucket cannot run script with the viewer's credentials. Listing pages allow no script. Writes take no form posts, so another site cannot write through the viewer's browser unless the bucket's CORS rules allow that site.
+- Errors are JSON: `{"error": "NoSuchKey", "message": "..."}`.
+
 **Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
 
 - **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.

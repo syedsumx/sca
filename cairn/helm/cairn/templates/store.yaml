@@ -86,6 +86,10 @@ spec:
             - name: CAIRN_STORE_EVENT_TARGETS_FILE
               value: /etc/cairn-store-events/targets.json
             {{- end }}
+            {{- if $u.filesBasicAuth }}
+            - name: CAIRN_STORE_FILES_BASIC_AUTH
+              value: "true"
+            {{- end }}
             {{- if $u.tiersSecret }}
             - name: CAIRN_STORE_TIERS_FILE
               value: /etc/cairn-store-tiers/tiers.json

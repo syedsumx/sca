@@ -38,6 +38,8 @@
 //! CAIRN_STORE_TLS_PROBE_CERT/KEY  client certificate for the healthcheck command under mutual TLS
 //! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
+//! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
+//! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
@@ -259,6 +261,8 @@ async fn serve(addr: String, data: String) {
                     f => s3::replication::load_targets(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)))
                         .unwrap_or_else(|e| fail(&f, e)),
                 },
+                files_basic: env("CAIRN_STORE_FILES_BASIC_AUTH", "false") == "true",
+                files_basic_http: env("CAIRN_STORE_FILES_BASIC_ALLOW_HTTP", "false") == "true",
                 tiers: match env("CAIRN_STORE_TIERS_FILE", "") {
                     f if f.is_empty() => vec![],
                     f => s3::tiering::load_tiers(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)))

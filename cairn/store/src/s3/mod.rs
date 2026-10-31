@@ -10,6 +10,7 @@ mod config;
 mod cors;
 pub mod errors;
 pub mod events;
+mod files;
 mod handlers;
 pub mod lifecycle;
 mod objectlock;
@@ -79,6 +80,9 @@ pub struct Config {
     pub replication_targets: Vec<replication::ReplTarget>,
     /// Storage tiers for lifecycle transitions.
     pub tiers: Vec<tiering::Tier>,
+    /// The file API accepts HTTP Basic credentials (over TLS, or plain HTTP when allowed).
+    pub files_basic: bool,
+    pub files_basic_http: bool,
 }
 
 pub struct Server {
@@ -110,6 +114,8 @@ pub struct Server {
     pub(crate) repl_metrics: events::EventMetrics,
     pub(crate) event_max_age_ms: u64,
     pub(crate) tiers: Option<Arc<tiering::Tiers>>,
+    files_basic: bool,
+    files_basic_http: bool,
 }
 
 /// One request, after routing and authentication.
@@ -206,6 +212,8 @@ impl Server {
             repl_metrics: Default::default(),
             event_max_age_ms: cfg.event_max_age_hours.max(1) * 3_600_000,
             tiers,
+            files_basic: cfg.files_basic,
+            files_basic_http: cfg.files_basic_http,
         })
     }
 
@@ -237,7 +245,7 @@ impl Server {
         let path = req.uri().path().to_string();
         let (op, result, cors, mut info) = if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
-        } else if path.starts_with("/-/") {
+        } else if path.starts_with("/-/") && !path.starts_with("/-/files") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
         } else {
             self.dispatch(req, peer, &request_id).await
@@ -350,6 +358,9 @@ impl Server {
                 }
             }
         };
+        if vhost.is_none() && Self::is_files_path(&decoded) {
+            return self.dispatch_files(parts, body, peer, request_id, &decoded, raw_path, raw_query, host).await;
+        }
         if !self.website_domain.is_empty() {
             if let Some(site) = host_only.strip_suffix(&format!(".{}", self.website_domain)) {
                 return (

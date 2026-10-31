@@ -512,6 +512,9 @@ cairn:
     # Storage tiers for lifecycle transitions: a Secret with a "tiers.json" ([{"storage_class",
     # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
     tiersSecret: ""
+    # The file API (/-/files/) also accepts HTTP Basic sign-in (access key and secret key), for browsers.
+    # Needs TLS (tlsSecret).
+    filesBasicAuth: false
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.
     blockPublicAccess: true
     # Ask this release's policy decision point about every request the store's own rules allow
