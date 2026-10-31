@@ -67,7 +67,22 @@ def test_kill_during_writes_loses_nothing_acknowledged(fresh_store):
 
     st.stop()
     out = subprocess.run([st.binary, "fsck", "-data", st.data], capture_output=True, text=True,
-                         env={**os.environ, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1]})
+                         env={**os.environ, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1], **st.meta_env()})
     report = json.loads(out.stdout)
     assert out.returncode == 0 and report["objects_with_missing_blobs"] == 0, out.stdout
     assert report["blobs_referenced"] == len(listed)
+
+
+def test_postgres_bound_data_directory_never_opens_on_an_empty_index(fresh_store):
+    if not os.environ.get("CAIRN_STORE_TEST_META"):
+        import pytest
+
+        pytest.skip("needs CAIRN_STORE_TEST_META (PostgreSQL)")
+    st = fresh_store.start()
+    st.client().create_bucket(Bucket="bound-" + uuid.uuid4().hex[:8])
+    st.stop()
+    env = {**os.environ, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1]}
+    env.pop("CAIRN_STORE_META", None)
+    out = subprocess.run([st.binary, "fsck", "-data", st.data], capture_output=True, text=True, env=env)
+    assert out.returncode != 0 and "metadata is in PostgreSQL" in (out.stdout + out.stderr)
+    assert not os.path.exists(os.path.join(st.data, "index.redb"))

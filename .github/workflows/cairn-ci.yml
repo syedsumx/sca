@@ -90,7 +90,40 @@ jobs:
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
-          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          cd conformance && pytest -q -p no:cacheprovider
+
+  store-postgres:
+    # The whole conformance suite again, with every store keeping its metadata in PostgreSQL.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pgpass
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 5s --health-retries 30
+    defaults:
+      run:
+        working-directory: cairn/store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build
+        run: cargo build --release --locked
+      - name: Conformance on PostgreSQL metadata
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_STORE_TEST_META: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
+        run: |
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
           cd conformance && pytest -q -p no:cacheprovider
 
   catalog:

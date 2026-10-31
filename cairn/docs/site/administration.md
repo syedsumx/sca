@@ -549,6 +549,13 @@ Use `s3a://<bucket>/<path>` paths. In Spark, prefix each setting with `spark.had
 
 Objects written before a key was set stay unencrypted. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 
+**Metadata in PostgreSQL.** By default the store keeps its index (buckets, objects, versions, uploads, settings, keys, events waiting to be sent and the audit trail) in an embedded database in the data directory. Set `CAIRN_STORE_META` to a PostgreSQL URL (`postgres://user:pass@host/db?sslmode=require`), or `CAIRN_STORE_META_FILE` to a file that holds one, to keep it in PostgreSQL instead. This suits teams that already run, back up and monitor PostgreSQL. In Helm, set `cairn.store.metadata.secretName`.
+
+- **Same behaviour.** Every change is still one transaction, together with its events and audit entry, and writers are serialized as before. The full conformance suite runs on both backends.
+- **Blobs stay on the data volume.** The data directory and its metadata database are bound together by a store id. A store refuses to start on another store's database, or on a database whose data directory has no store id. A data directory whose metadata is in PostgreSQL never opens with an empty embedded index, so `fsck` and `audit-verify` need `CAIRN_STORE_META` too.
+- **Moving an existing store.** Stop it, then run `cairn-store migrate-meta` with `CAIRN_STORE_META` set to an empty database. Everything is copied in one transaction, and the embedded index is kept aside as `index.redb.migrated-<time>`.
+- **Backups and TLS.** `cairn-store admin backup` still writes a data directory with an embedded index, which a store can start on, or which can be moved back with `migrate-meta`. Back up the PostgreSQL database with your usual tools as well. TLS to PostgreSQL uses the public roots plus `CAIRN_STORE_CA_FILE`.
+
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 
 **Backups.** With `CAIRN_STORE_BACKUP_DIR` set, `cairn-store admin backup <name>` (or `POST /-/admin/v1/backups`) writes an online backup while the store keeps serving.

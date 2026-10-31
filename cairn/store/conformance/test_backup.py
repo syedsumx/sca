@@ -54,7 +54,8 @@ def test_online_backup_and_restore(custom_store, tmp_path):
     restored_dir = tmp_path / "restored"
     shutil.copytree(root / "second", restored_dir)
     assert subprocess.run([st.binary, "fsck", "-data", str(restored_dir)], capture_output=True, timeout=60).returncode == 0
-    rst = Store(st.binary, str(restored_dir), _free_port()).start()
+    # A backup is a data directory with an embedded index (whatever the source store's metadata database).
+    rst = Store(st.binary, str(restored_dir), _free_port(), env={"CAIRN_STORE_META": ""}).start()
     try:
         r3 = rst.client()
         keys = {o["Key"] for o in r3.list_objects_v2(Bucket="data")["Contents"]}

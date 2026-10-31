@@ -45,6 +45,8 @@
 //! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
 //! CAIRN_STORE_SFTP_HOST_KEY  the SSH host key (OpenSSH format; default <data>/sftp_host_ed25519_key, created when missing)
 //! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
+//! CAIRN_STORE_META            keep metadata in PostgreSQL (postgres://user:pass@host/db?sslmode=require) instead of the
+//!                              embedded index; CAIRN_STORE_META_FILE reads the URL from a file (a mounted Secret)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
@@ -136,6 +138,14 @@ fn credentials() -> Result<Vec<Credential>, String> {
     Ok(out)
 }
 
+/// The PostgreSQL metadata database, when the store keeps its metadata there (`CAIRN_STORE_META`).
+fn meta() -> Option<String> {
+    match std::env::var("CAIRN_STORE_META_FILE") {
+        Ok(f) if !f.is_empty() => Some(std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)).trim().to_string()),
+        _ => std::env::var("CAIRN_STORE_META").ok().filter(|v| !v.is_empty()),
+    }
+}
+
 fn main() {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let cmd = if args.first().is_some_and(|a| !a.starts_with('-')) { args.remove(0) } else { "serve".to_string() };
@@ -164,7 +174,7 @@ fn main() {
     match cmd.as_str() {
         "version" => println!("cairn-store {VERSION}"),
         "fsck" => {
-            let eng = Engine::open(&data, true).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_with(&data, true, meta().as_deref()).unwrap_or_else(|e| fail("open store", e));
             let rep = eng.recover().unwrap_or_else(|e| fail("fsck", e));
             println!("{}", serde_json::to_string_pretty(&rep).unwrap());
             if rep.objects_with_missing_blobs > 0 {
@@ -187,10 +197,23 @@ fn main() {
             let code = mount::run(&rest, &endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1"));
             std::process::exit(code);
         }
+        "migrate-meta" => {
+            // Copies a stopped store's embedded index into PostgreSQL (CAIRN_STORE_META), then sets the
+            // embedded index aside so the store opens on PostgreSQL from now on.
+            let url = meta().unwrap_or_else(|| fail("migrate-meta", "set CAIRN_STORE_META to the postgres:// URL to copy to"));
+            let eng = Engine::open(&data, true).unwrap_or_else(|e| fail("open store (is it stopped?)", e));
+            let rows = eng.migrate_meta_to(&url).unwrap_or_else(|e| fail("migrate-meta", e));
+            drop(eng);
+            let index = std::path::Path::new(&data).join("index.redb");
+            let kept = index.with_extension(format!("redb.migrated-{}", engine::now_ms()));
+            std::fs::rename(&index, &kept).unwrap_or_else(|e| fail("set the embedded index aside", e));
+            println!("{}", serde_json::json!({"rows": rows, "embedded_index_kept_as": kept.display().to_string()}));
+            std::process::exit(0);
+        }
         "audit-verify" => {
             // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
             // writer and concurrent readers only within a process, so stop the store first).
-            let eng = Engine::open(&data, true).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_with(&data, true, meta().as_deref()).unwrap_or_else(|e| fail("open store", e));
             let entries = eng.audit_entries(0, usize::MAX).unwrap_or_else(|e| fail("read audit trail", e));
             let res = audit::verify(&entries, true);
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -230,7 +253,7 @@ fn main() {
             rt.block_on(serve(addr, data));
         }
         other => {
-            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, mount, healthcheck, version)");
+            eprintln!("unknown command {other:?} (serve, fsck, audit-verify, admin, mount, migrate-meta, healthcheck, version)");
             std::process::exit(2);
         }
     }
@@ -239,7 +262,8 @@ fn main() {
 async fn serve(addr: String, data: String) {
     let creds = credentials().unwrap_or_else(|e| fail("credentials", e));
     let fsync = env("CAIRN_STORE_FSYNC", "true") != "false";
-    let eng = Arc::new(Engine::open(&data, fsync).unwrap_or_else(|e| fail("open store", e)));
+    let eng = Arc::new(Engine::open_with(&data, fsync, meta().as_deref()).unwrap_or_else(|e| fail("open store", e)));
+    let metadata = if eng.meta_is_postgres() { "postgresql" } else { "embedded" };
     if !fsync {
         tracing::warn!("fsync is off: a crash or power loss can lose writes that were acknowledged");
     }
@@ -345,7 +369,7 @@ async fn serve(addr: String, data: String) {
         });
     }
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
-    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), "cairn-store listening");
+    tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), metadata, "cairn-store listening");
     let mut shutdown = Box::pin(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }

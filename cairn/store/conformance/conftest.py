@@ -49,13 +49,30 @@ class Store:
         self.endpoint = f"http://127.0.0.1:{port}"
         self.proc = None
 
+    def meta_env(self) -> dict:
+        """With CAIRN_STORE_TEST_META (a PostgreSQL URL), every store keeps its metadata in a database of its own."""
+        admin_url = os.environ.get("CAIRN_STORE_TEST_META")
+        if not admin_url or "CAIRN_STORE_META" in self.extra_env:
+            return {}
+        if not getattr(self, "meta_url", None):
+            import uuid
+
+            import psycopg
+
+            name = "store_" + uuid.uuid4().hex[:12]
+            with psycopg.connect(admin_url, autocommit=True) as c:
+                c.execute(f"CREATE DATABASE {name}")
+            base, _, query = admin_url.partition("?")
+            self.meta_url = base.rsplit("/", 1)[0] + "/" + name + (f"?{query}" if query else "")
+        return {"CAIRN_STORE_META": self.meta_url}
+
     def start(self):
         creds = Path(self.data).parent / f"creds-{self.port}.json"
         creds.write_text(json.dumps(credentials_file()))
         env = {**os.environ, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1],
                "CAIRN_STORE_CREDENTIALS_FILE": str(creds), "CAIRN_STORE_DATA": self.data,
                "CAIRN_STORE_ADDR": f"127.0.0.1:{self.port}", "CAIRN_STORE_FSYNC": "true" if self.fsync else "false",
-               "CAIRN_STORE_LOG_LEVEL": "warn", **self.extra_env}
+               "CAIRN_STORE_LOG_LEVEL": "warn", **self.meta_env(), **self.extra_env}
         self.proc = subprocess.Popen([self.binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(100):
             try:

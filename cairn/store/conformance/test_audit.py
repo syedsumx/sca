@@ -90,8 +90,10 @@ def test_changes_are_recorded_in_a_verifiable_chain(fresh_store):
 
     # Tampering is detected by the offline verifier.
     st.stop()
+    import os
     import subprocess
-    ok = subprocess.run([st.binary, "audit-verify", "-data", st.data], capture_output=True, text=True)
+    ok = subprocess.run([st.binary, "audit-verify", "-data", st.data], capture_output=True, text=True,
+                        env={**os.environ, **st.meta_env()})
     assert ok.returncode == 0 and json.loads(ok.stdout)["valid"] is True
     forged = [dict(e) for e in entries]
     forged[1]["actor"] = "someone-else"

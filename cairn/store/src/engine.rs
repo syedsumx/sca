@@ -31,7 +31,10 @@ use md5::{Digest, Md5};
 
 use crate::audit::{self, Audit, Entry};
 use crate::crypt::{self, ChunkCipher, Key};
-use redb::{Database, Durability, ReadableTable, ReadableTableMetadata, TableDefinition};
+use redb::TableDefinition;
+
+pub mod kv;
+use kv::{Db, ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
 
 pub const MIN_PART_SIZE: u64 = 5 << 20;
@@ -500,7 +503,7 @@ fn prefix_successor(p: &str) -> Option<String> {
 
 pub struct Engine {
     dir: PathBuf,
-    db: Database,
+    db: Db,
     fsync: bool,
     gc_lock: Mutex<()>,
     /// Backups in progress: while any runs, blobs are not deleted (their snapshot may still need them).
@@ -715,11 +718,39 @@ pub struct CompletePart {
 impl Engine {
     /// Opens (or creates) a store in `dir` and runs crash recovery.
     pub fn open(dir: impl AsRef<Path>, fsync: bool) -> Result<Engine> {
+        Self::open_with(dir, fsync, None)
+    }
+
+    /// Opens a store whose metadata lives in PostgreSQL (`meta`: a postgres:// URL) or, without one, in
+    /// the data directory's embedded index.
+    pub fn open_with(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>) -> Result<Engine> {
         let dir = dir.as_ref().to_path_buf();
         for d in [dir.clone(), dir.join("blobs"), dir.join("tmp")] {
             fs::create_dir_all(&d)?;
         }
-        let db = Database::create(dir.join("index.redb"))?;
+        let db = match meta {
+            Some(url) => {
+                if dir.join("index.redb").exists() {
+                    return Err(Error::Index(
+                        "this data directory has an embedded index (index.redb): copy it to PostgreSQL with `cairn-store migrate-meta` first"
+                            .into(),
+                    ));
+                }
+                let db = Db::Pg(kv::PgDb::open(url)?);
+                kv::bind(&db, &dir)?;
+                db
+            }
+            None => {
+                // A data directory whose metadata is in PostgreSQL must not get a new, empty embedded
+                // index: recovery would take every blob for debris.
+                if dir.join("store-id").exists() && !dir.join("index.redb").exists() {
+                    return Err(Error::Index(
+                        "this data directory's metadata is in PostgreSQL: set CAIRN_STORE_META (or CAIRN_STORE_META_FILE)".into(),
+                    ));
+                }
+                Db::Redb(redb::Database::create(dir.join("index.redb"))?)
+            }
+        };
         let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()), backups: Default::default(), tiers: Default::default() };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
@@ -739,10 +770,13 @@ impl Engine {
         Ok(e)
     }
 
-    fn begin_write(&self) -> Result<redb::WriteTransaction> {
-        let mut tx = self.db.begin_write()?;
-        tx.set_durability(if self.fsync { Durability::Immediate } else { Durability::None });
-        Ok(tx)
+    fn begin_write(&self) -> Result<WriteTransaction<'_>> {
+        self.db.begin_write(self.fsync)
+    }
+
+    /// Is the metadata in PostgreSQL (rather than the embedded index)?
+    pub fn meta_is_postgres(&self) -> bool {
+        self.db.is_postgres()
     }
 
     fn blob_path(&self, id: &str) -> PathBuf {
@@ -782,7 +816,7 @@ impl Engine {
     }
 
     /// Queues blobs for collection; their bytes no longer count towards the bucket's usage.
-    fn queue_gc(tx: &redb::WriteTransaction, bucket: &str, segs: &[Segment]) -> Result<()> {
+    fn queue_gc(tx: &WriteTransaction<'_>, bucket: &str, segs: &[Segment]) -> Result<()> {
         let mut gc = tx.open_table(GC)?;
         let now = now_ms();
         for s in segs {
@@ -803,7 +837,7 @@ impl Engine {
     }
 
     /// Adds to a bucket's usage counters.
-    fn adjust(tx: &redb::WriteTransaction, bucket: &str, bytes: i64, objects: i64) -> Result<()> {
+    fn adjust(tx: &WriteTransaction<'_>, bucket: &str, bytes: i64, objects: i64) -> Result<()> {
         let mut t = tx.open_table(USAGE)?;
         let (b, o) = Self::usage_in(&t, bucket)?;
         let v = ((b as i64 + bytes).max(0) as u64, (o as i64 + objects).max(0) as u64);
@@ -811,13 +845,13 @@ impl Engine {
         Ok(())
     }
 
-    fn usage_tx(tx: &redb::WriteTransaction, bucket: &str) -> Result<(u64, u64)> {
+    fn usage_tx(tx: &WriteTransaction<'_>, bucket: &str) -> Result<(u64, u64)> {
         Self::usage_in(&tx.open_table(USAGE)?, bucket)
     }
 
     /// Refuses a write that took usage past the bucket's quota (only growth is refused, so deletes and
     /// overwrites that shrink usage always succeed).
-    fn quota_guard(tx: &redb::WriteTransaction, bucket: &str, before: (u64, u64)) -> Result<()> {
+    fn quota_guard(tx: &WriteTransaction<'_>, bucket: &str, before: (u64, u64)) -> Result<()> {
         let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "quota"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
         let q: Quota = serde_json::from_slice(&doc)?;
         let after = Self::usage_tx(tx, bucket)?;
@@ -830,7 +864,7 @@ impl Engine {
     }
 
     /// Records the event for every notification rule of the bucket that matches it.
-    fn emit(tx: &redb::WriteTransaction, bucket: &str, event: &str, o: &Object, ev: &Ev) -> Result<()> {
+    fn emit(tx: &WriteTransaction<'_>, bucket: &str, event: &str, o: &Object, ev: &Ev) -> Result<()> {
         let name = format!("s3:{event}");
         // Bucket replication: new versions and (when enabled) delete markers go to the rule's destination.
         if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle {
@@ -860,7 +894,7 @@ impl Engine {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn outbox_in(tx: &redb::WriteTransaction, bucket: &str, target: &str, rule: &str, name: &str, o: &Object, ev: &Ev) -> Result<()> {
+    fn outbox_in(tx: &WriteTransaction<'_>, bucket: &str, target: &str, rule: &str, name: &str, o: &Object, ev: &Ev) -> Result<()> {
         {
             let mut meta = tx.open_table(META)?;
             let seq = meta.get("outbox_seq")?.map(|v| v.value()).unwrap_or(0) + 1;
@@ -900,7 +934,7 @@ impl Engine {
     }
 
     pub fn outbox_len(&self) -> Result<u64> {
-        Ok(self.db.begin_read()?.open_table(OUTBOX)?.len()?)
+        self.db.begin_read()?.open_table(OUTBOX)?.len()
     }
 
     /// Removes delivered (or abandoned) events, and records attempts for the rest.
@@ -921,7 +955,7 @@ impl Engine {
     }
 
     /// Appends to the audit trail inside `tx`.
-    fn audit_in(tx: &redb::WriteTransaction, a: &Audit) -> Result<()> {
+    fn audit_in(tx: &WriteTransaction<'_>, a: &Audit) -> Result<()> {
         let mut t = tx.open_table(AUDIT)?;
         let (seq, prev) = match t.last()? {
             Some((k, v)) => {
@@ -942,6 +976,35 @@ impl Engine {
         Self::audit_in(&tx, a)?;
         tx.commit()?;
         Ok(())
+    }
+
+    /// Copies this store's embedded index into an empty PostgreSQL metadata database (`cairn-store
+    /// migrate-meta`), in one transaction, and binds the data directory to it. Returns the rows copied.
+    pub fn migrate_meta_to(&self, url: &str) -> Result<u64> {
+        let pg = Db::Pg(kv::PgDb::open(url)?);
+        let mut n = 0u64;
+        {
+            let r = self.db.begin_read()?;
+            let w = pg.begin_write(true)?;
+            macro_rules! copy {
+                ($($t:expr),*) => {$({
+                    let src = r.open_table($t)?;
+                    let mut dst = w.open_table($t)?;
+                    if dst.len()? > 0 {
+                        return Err(Error::Index("the PostgreSQL metadata database is not empty".into()));
+                    }
+                    for row in src.iter()? {
+                        let (k, v) = row?;
+                        dst.insert(k.value(), v.value())?;
+                        n += 1;
+                    }
+                })*};
+            }
+            copy!(BUCKETS, OBJECTS, UPLOADS, PARTS, GC, CONFIG, VERSIONS, META, USAGE, OUTBOX, AUDIT, KEYS);
+            w.commit()?;
+        }
+        kv::bind(&pg, &self.dir)?;
+        Ok(n)
     }
 
     /// Stored access keys (access key, record).
@@ -992,7 +1055,8 @@ impl Engine {
     pub fn usage(&self, bucket: &str) -> Result<(u64, u64)> {
         let r = self.db.begin_read()?;
         Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
-        Self::usage_in(&r.open_table(USAGE)?, bucket)
+        let usage = Self::usage_in(&r.open_table(USAGE)?, bucket);
+        usage
     }
 
     /// Deletes blobs queued for collection.
@@ -1308,7 +1372,7 @@ impl Engine {
     }
 
     /// The next position in the version order (newer versions sort first).
-    fn next_order(tx: &redb::WriteTransaction) -> Result<String> {
+    fn next_order(tx: &WriteTransaction<'_>) -> Result<String> {
         let mut m = tx.open_table(META)?;
         let n = m.get("version_order")?.map(|v| v.value()).unwrap_or(0) + 1;
         m.insert("version_order", n)?;
@@ -1330,7 +1394,7 @@ impl Engine {
     }
 
     /// Moves a (formerly current) version into the version store.
-    fn archive(tx: &redb::WriteTransaction, bucket: &str, mut o: Object) -> Result<()> {
+    fn archive(tx: &WriteTransaction<'_>, bucket: &str, mut o: Object) -> Result<()> {
         let order = Self::next_order(tx)?;
         o.noncurrent_since = now_ms();
         let v = serde_json::to_vec(&o)?;
@@ -1339,7 +1403,7 @@ impl Engine {
     }
 
     /// Removes a key's stored null version (it is being replaced); returns its blobs.
-    fn drop_null_version(tx: &redb::WriteTransaction, bucket: &str, key: &str) -> Result<Vec<Segment>> {
+    fn drop_null_version(tx: &WriteTransaction<'_>, bucket: &str, key: &str) -> Result<Vec<Segment>> {
         let mut t = tx.open_table(VERSIONS)?;
         let mut garbage = vec![];
         for (order, o) in Self::versions_in(&t, bucket, key)? {
@@ -1357,7 +1421,7 @@ impl Engine {
     /// Makes `obj` the current version of its key, keeping or dropping the version it replaces as the
     /// bucket's versioning state says. Returns the stored object and the blobs to collect.
     fn install(
-        tx: &redb::WriteTransaction,
+        tx: &WriteTransaction<'_>,
         versioning: &str,
         bucket: &str,
         mut obj: Object,
@@ -1432,11 +1496,8 @@ impl Engine {
         if let Some(c) = cur.filter(|c| c.version_id == want) {
             return Ok(c);
         }
-        Self::versions_in(&r.open_table(VERSIONS)?, bucket, key)?
-            .into_iter()
-            .map(|(_, o)| o)
-            .find(|o| o.version_id == want)
-            .ok_or(Error::NoSuchVersion)
+        let versions = Self::versions_in(&r.open_table(VERSIONS)?, bucket, key)?;
+        versions.into_iter().map(|(_, o)| o).find(|o| o.version_id == want).ok_or(Error::NoSuchVersion)
     }
 
     /// If the key's latest version is a delete marker, its version ID.
@@ -1445,11 +1506,8 @@ impl Engine {
         if Self::current_in(&r.open_table(OBJECTS)?, bucket, key)?.is_some() {
             return Ok(None);
         }
-        Ok(Self::versions_in(&r.open_table(VERSIONS)?, bucket, key)?
-            .into_iter()
-            .next()
-            .filter(|(_, o)| o.delete_marker)
-            .map(|(_, o)| o.version().to_string()))
+        let versions = Self::versions_in(&r.open_table(VERSIONS)?, bucket, key)?;
+        Ok(versions.into_iter().next().filter(|(_, o)| o.delete_marker).map(|(_, o)| o.version().to_string()))
     }
 
     pub fn get_object(&self, bucket: &str, key: &str) -> Result<Object> {
@@ -1647,7 +1705,7 @@ impl Engine {
         Self::finish_delete(self, tx, bucket, out, garbage, ev)
     }
 
-    fn finish_delete(&self, tx: redb::WriteTransaction, bucket: &str, out: Deleted, garbage: Vec<Segment>, ev: &Ev) -> Result<Deleted> {
+    fn finish_delete(&self, tx: WriteTransaction<'_>, bucket: &str, out: Deleted, garbage: Vec<Segment>, ev: &Ev) -> Result<Deleted> {
         if let Some(a) = &ev.audit {
             Self::audit_in(&tx, a)?;
         }
@@ -2004,7 +2062,8 @@ impl Engine {
 
     pub fn get_upload(&self, bucket: &str, key: &str, id: &str) -> Result<Upload> {
         let r = self.db.begin_read()?;
-        Self::upload_in(&r.open_table(UPLOADS)?, bucket, key, id)
+        let upload = Self::upload_in(&r.open_table(UPLOADS)?, bucket, key, id);
+        upload
     }
 
     /// Records a sealed part, replacing an earlier upload of the same part number.
@@ -2082,7 +2141,7 @@ impl Engine {
         Ok(out)
     }
 
-    fn drop_upload(tx: &redb::WriteTransaction, id: &str) -> Result<Vec<Part>> {
+    fn drop_upload(tx: &WriteTransaction<'_>, id: &str) -> Result<Vec<Part>> {
         let mut t = tx.open_table(PARTS)?;
         let parts = Self::parts_of(&t, id)?;
         for p in &parts {
@@ -2240,7 +2299,7 @@ impl Engine {
         for d in [work.clone(), work.join("blobs"), work.join("tmp")] {
             fs::create_dir_all(&d)?;
         }
-        let out = Database::create(work.join("index.redb"))?;
+        let out = redb::Database::create(work.join("index.redb"))?;
         let mut blobs: HashSet<String> = HashSet::new();
         {
             let r = self.db.begin_read()?;

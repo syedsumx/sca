@@ -515,6 +515,11 @@ cairn:
     # The file API (/-/files/) also accepts HTTP Basic sign-in (access key and secret key), for browsers.
     # Needs TLS (tlsSecret).
     filesBasicAuth: false
+    # Keep the store's metadata in PostgreSQL instead of the embedded index: a Secret whose `key` holds a
+    # postgres:// URL (use ?sslmode=require). Blobs stay on the data volume.
+    metadata:
+      secretName: ""
+      key: url
     # SFTP for file-transfer clients: the user name is an access key, signing in with its secret key or an
     # SSH public key (ssh_keys in the credentials file).
     sftp:
