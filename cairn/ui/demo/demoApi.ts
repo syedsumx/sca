@@ -524,8 +524,44 @@ on('GET', '/ui/config', () => ({
     workspaces: [{ id: 'finance', name: 'Finance', domains: [FINANCE], role: 'admin' }, { id: 'growth', name: 'Growth marketing', domains: [MARKETING], role: 'member' }],
     gateway_url: 'https://cairn-gateway.northwind.example',
     features: { assistant: true, assistant_llm: true, marketplace: true, context: true, semantic_search: true, slack: true, teams: false, email: false, embeds: true, masking_proxy: true },
-    slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
+    storage_enabled: true, slack_enabled: true, teams_enabled: false, embed_allowed_origins: ['https://*.tableau.northwind.example', 'https://looker.northwind.example'],
 }));
+
+// --- Cairn Store (Settings → Storage) -----------------------------------------------------------
+const GiB = 1024 ** 3;
+const storeBuckets: Json[] = [
+    { name: 'lakehouse', created: iso(120 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(412.6 * GiB), objects: 184_220 },
+      quota: { max_bytes: 1024 * GiB }, object_lock: false, encryption_default: true, lifecycle: true, policy: true },
+    { name: 'raw-landing', created: iso(118 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(88.3 * GiB), objects: 1_204_511 },
+      quota: { max_bytes: 250 * GiB, max_objects: 2_000_000 }, object_lock: false, encryption_default: true, lifecycle: true, policy: false },
+    { name: 'finance-records', created: iso(90 * DAY), versioning: 'Enabled', usage: { bytes: Math.round(12.1 * GiB), objects: 30_877 },
+      quota: null, object_lock: true, encryption_default: true, lifecycle: false, policy: true },
+];
+const storeAudit: Json[] = [
+    ['bucket.create', 'cairn-admin', 'lakehouse', 120], ['bucket.create', 'cairn-admin', 'raw-landing', 118],
+    ['bucket.versioning.put', 'cairn-admin', 'lakehouse', 117], ['bucket.encryption.put', 'cairn-admin', 'lakehouse', 117],
+    ['bucket.create', 'cairn-admin', 'finance-records', 90], ['bucket.object_lock.put', 'cairn-admin', 'finance-records', 90],
+    ['bucket.lifecycle.put', 'cairn-admin', 'raw-landing', 60], ['bucket.replication.put', 'cairn-admin', 'finance-records', 30],
+    ['bucket.policy.put', 'cairn-admin', 'lakehouse', 12], ['quota.put', 'cairn-admin', 'raw-landing', 3],
+    ['request.denied', 'cairnanalyst', 'finance-records/payroll/2026-10.parquet', 1],
+].map(([action, actor, subject, days], i) => ({
+    seq: i + 1, id: `store-${i + 1}`, ts: iso((days as number) * DAY).replace('Z', '+00:00'), category: 'store', action, actor, subject,
+    details: action === 'request.denied' ? { operation: 'GetObject', code: 'AccessDenied' } : {},
+    prev_hash: i === 0 ? '0'.repeat(64) : `demo${String(i).padStart(60, '0')}`, hash: `demo${String(i + 1).padStart(60, '0')}`,
+})).reverse();
+on('GET', '/storage/v1/buckets', () => storeBuckets);
+on('PUT', '/storage/v1/buckets/:id/quota', (b, _q, [name]) => {
+    const bk = storeBuckets.find((x) => x.name === name)!;
+    bk.quota = { ...(b.max_bytes ? { max_bytes: b.max_bytes } : {}), ...(b.max_objects ? { max_objects: b.max_objects } : {}) };
+    return bk;
+});
+on('DELETE', '/storage/v1/buckets/:id/quota', (_b, _q, [name]) => {
+    const bk = storeBuckets.find((x) => x.name === name)!;
+    bk.quota = null;
+    return bk;
+});
+on('GET', '/storage/v1/audit', () => storeAudit);
+on('GET', '/storage/v1/audit/verify', () => ({ valid: true, entries_checked: storeAudit.length, head: storeAudit[0].hash }));
 on('GET', '/collab/trending', (_b, q) => {
     const type = q.get('entity_type');
     return [...ASSETS].filter((a) => !type || a.type === type.toUpperCase()).sort((x, y) => y.views - x.views).slice(0, Number(q.get('limit') ?? 12)).map((a, i) => ({
