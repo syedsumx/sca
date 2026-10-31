@@ -165,9 +165,8 @@ impl Tiers {
     }
 
     /// Copies a blob file to a tier.
-    pub fn upload(&self, class: &str, blob: &str, file: std::fs::File) -> std::io::Result<u64> {
+    pub fn upload(&self, class: &str, blob: &str, file: Box<dyn Read + Send>, len: u64) -> std::io::Result<u64> {
         let t = self.tier(class)?;
-        let len = file.metadata()?.len();
         self.rt.block_on(async {
             let resp = self.send(t, "PUT", blob, &[("content-length", len.to_string())], file_body(file)).await?;
             Self::check(resp, &format!("PUT {blob} to tier {class}")).await?;
@@ -209,7 +208,7 @@ fn empty() -> Body {
 }
 
 /// A file's bytes as a request body (read on a blocking thread).
-pub(crate) fn file_body(mut file: std::fs::File) -> Body {
+pub(crate) fn file_body(mut file: impl Read + Send + 'static) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Frame<Bytes>>>(4);
     tokio::task::spawn_blocking(move || {
         let mut buf = vec![0u8; 256 << 10];
@@ -280,7 +279,8 @@ impl Server {
         let mut bytes = 0u64;
         let res = (|| -> std::io::Result<bool> {
             for s in new.iter_mut().filter(|s| s.tier.is_empty()) {
-                bytes += tiers.upload(class, &s.blob, self.eng.blob_file(&s.blob)?)?;
+                let (reader, len) = self.eng.blob_reader(&s.blob).map_err(|e| std::io::Error::other(e.to_string()))?;
+                bytes += tiers.upload(class, &s.blob, reader, len)?;
                 uploaded.push(s.blob.clone());
                 s.tier = class.to_string();
             }

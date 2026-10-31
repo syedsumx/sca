@@ -13,7 +13,8 @@ from conftest import ADMIN, Store, _free_port
 
 def test_online_backup_and_restore(custom_store, tmp_path):
     root = tmp_path / "backups"
-    st = custom_store({"CAIRN_STORE_BACKUP_DIR": str(root)})
+    # Packing off here: this test is about blob files hard-linked between backups (test_packing covers packs).
+    st = custom_store({"CAIRN_STORE_BACKUP_DIR": str(root), "CAIRN_STORE_PACK_BELOW": "0"})
     s3 = st.client()
     s3.create_bucket(Bucket="data")
     s3.put_bucket_versioning(Bucket="data", VersioningConfiguration={"Status": "Enabled"})

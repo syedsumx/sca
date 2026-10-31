@@ -47,6 +47,10 @@
 //! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
 //! CAIRN_STORE_META            keep metadata in PostgreSQL (postgres://user:pass@host/db?sslmode=require) instead of the
 //!                              embedded index; CAIRN_STORE_META_FILE reads the URL from a file (a mounted Secret)
+//! CAIRN_STORE_PACK_BELOW       objects up to this many bytes are packed into shared pack files (65536; 0: off)
+//! CAIRN_STORE_PACK_FILE_BYTES  a pack file is closed at this size (1 GiB)
+//! CAIRN_STORE_COMPACT_INTERVAL seconds between compaction passes over packs (3600; 0: off)
+//! CAIRN_STORE_COMPACT_DEAD_RATIO  a pack is compacted when this share of it is dead (0.5)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
@@ -264,6 +268,8 @@ async fn serve(addr: String, data: String) {
     let fsync = env("CAIRN_STORE_FSYNC", "true") != "false";
     let eng = Arc::new(Engine::open_with(&data, fsync, meta().as_deref()).unwrap_or_else(|e| fail("open store", e)));
     let metadata = if eng.meta_is_postgres() { "postgresql" } else { "embedded" };
+    let num = |k: &str, d: &str| -> u64 { env(k, d).parse().unwrap_or_else(|e| fail(k, e)) };
+    eng.set_packing(num("CAIRN_STORE_PACK_BELOW", "65536"), num("CAIRN_STORE_PACK_FILE_BYTES", "1073741824"));
     if !fsync {
         tracing::warn!("fsync is off: a crash or power loss can lose writes that were acknowledged");
     }
@@ -276,7 +282,7 @@ async fn serve(addr: String, data: String) {
     let keys = creds.len();
     let server = Arc::new(
         s3::Server::new(
-            eng,
+            eng.clone(),
             s3::Config {
                 region: env("CAIRN_STORE_REGION", "us-east-1"),
                 domain: env("CAIRN_STORE_DOMAIN", ""),
@@ -333,6 +339,20 @@ async fn serve(addr: String, data: String) {
     let flush: u64 =
         env("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", "60").parse().unwrap_or_else(|e| fail("CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS", e));
     tokio::spawn(server.clone().run_access_logs(Duration::from_secs(flush.max(1))));
+    let compact_every = num("CAIRN_STORE_COMPACT_INTERVAL", "3600");
+    let dead: f64 = env("CAIRN_STORE_COMPACT_DEAD_RATIO", "0.5").parse().unwrap_or_else(|e| fail("CAIRN_STORE_COMPACT_DEAD_RATIO", e));
+    if compact_every > 0 {
+        let eng = eng.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(compact_every)).await;
+                let e = eng.clone();
+                if let Ok(Err(err)) = tokio::task::spawn_blocking(move || e.compact(dead, false)).await {
+                    tracing::warn!(error = %err, "pack compaction");
+                }
+            }
+        });
+    }
     if lifecycle_every > 0 {
         tokio::spawn(server.clone().run_lifecycle(Duration::from_secs(lifecycle_every)));
     }

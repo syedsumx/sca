@@ -34,6 +34,7 @@ use crate::crypt::{self, ChunkCipher, Key};
 use redb::TableDefinition;
 
 pub mod kv;
+pub mod pack;
 use kv::{Db, ReadableTable, WriteTransaction};
 use serde::{Deserialize, Serialize};
 
@@ -510,6 +511,11 @@ pub struct Engine {
     backups: std::sync::atomic::AtomicUsize,
     /// Remote storage tiers, when configured.
     tiers: std::sync::RwLock<Option<std::sync::Arc<dyn TierStore>>>,
+    /// The pack small blobs are appended to (see `pack`), and the packing thresholds.
+    pack: Mutex<Option<pack::ActivePack>>,
+    pack_below: std::sync::atomic::AtomicU64,
+    pack_max: std::sync::atomic::AtomicU64,
+    compacting: Mutex<()>,
 }
 
 /// What a backup did.
@@ -584,6 +590,15 @@ impl BlobWriter<'_> {
                 file.write_all(&e.cipher.seal(e.idx, &e.buf))?;
             }
             nonce = hex::encode(e.base);
+        }
+        if self.engine.packs_small(self.size) {
+            // Small: appended to a pack (see `pack`) instead of a file of its own.
+            file.flush()?;
+            drop(file);
+            let data = fs::read(&self.tmp)?;
+            let _ = fs::remove_file(&self.tmp);
+            let id = self.engine.append_packed(&data)?;
+            return Ok(Segment { blob: id, size: self.size, nonce, tier: String::new() });
         }
         if self.engine.fsync {
             file.sync_all()?;
@@ -751,7 +766,18 @@ impl Engine {
                 Db::Redb(redb::Database::create(dir.join("index.redb"))?)
             }
         };
-        let e = Engine { dir, db, fsync, gc_lock: Mutex::new(()), backups: Default::default(), tiers: Default::default() };
+        let e = Engine {
+            dir,
+            db,
+            fsync,
+            gc_lock: Mutex::new(()),
+            backups: Default::default(),
+            tiers: Default::default(),
+            pack: Mutex::new(None),
+            pack_below: std::sync::atomic::AtomicU64::new(0),
+            pack_max: std::sync::atomic::AtomicU64::new(1 << 30),
+            compacting: Mutex::new(()),
+        };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
         tx.open_table(OBJECTS)?;
@@ -810,7 +836,7 @@ impl Engine {
 
     /// Removes sealed blobs that were never committed.
     pub fn discard(&self, segs: &[Segment]) {
-        for s in segs.iter().filter(|s| s.tier.is_empty()) {
+        for s in segs.iter().filter(|s| s.tier.is_empty() && !pack::is_packed(&s.blob)) {
             let _ = fs::remove_file(self.blob_path(&s.blob));
         }
     }
@@ -820,6 +846,9 @@ impl Engine {
         let mut gc = tx.open_table(GC)?;
         let now = now_ms();
         for s in segs {
+            if s.tier.is_empty() && pack::is_packed(&s.blob) {
+                continue; // dead space in a pack, reclaimed by compaction
+            }
             // Tiered blobs are queued as "<tier>:<blob>" and deleted by collect_tiered.
             let id = if s.tier.is_empty() { s.blob.clone() } else { format!("{}:{}", s.tier, s.blob) };
             gc.insert(id.as_str(), now)?;
@@ -1179,7 +1208,26 @@ impl Engine {
                 }
             }
         }
-        rep.objects_with_missing_blobs = refs.difference(&seen).count();
+        // Packed blobs: their pack must hold their bytes; packs nothing refers to are debris.
+        let mut used_packs = HashSet::new();
+        let mut missing_packed = 0;
+        for id in refs.iter().filter(|r| pack::is_packed(r)) {
+            let (p, off, len) = pack::parse(id).unwrap_or(("", 0, 0));
+            used_packs.insert(p.to_string());
+            if !fs::metadata(self.pack_path(p)).is_ok_and(|m| m.len() >= off + len) {
+                missing_packed += 1;
+            }
+        }
+        if self.packs_dir().exists() {
+            for ent in fs::read_dir(self.packs_dir())? {
+                let path = ent?.path();
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
+                if !used_packs.contains(&stem) && fs::remove_file(&path).is_ok() {
+                    rep.unreferenced_blobs_removed += 1;
+                }
+            }
+        }
+        rep.objects_with_missing_blobs = refs.iter().filter(|r| !pack::is_packed(r) && !seen.contains(*r)).count() + missing_packed;
         Ok(rep)
     }
 
@@ -1811,6 +1859,9 @@ impl Engine {
 
     /// Opens a segment's blob (on disk or in its tier) at byte `offset` of the blob.
     fn open_blob(&self, s: &Segment, offset: u64) -> Result<Box<dyn Read + Send>> {
+        if s.tier.is_empty() && pack::is_packed(&s.blob) {
+            return self.open_packed(&s.blob, offset);
+        }
         if s.tier.is_empty() {
             let mut f = File::open(self.blob_path(&s.blob))?;
             f.seek(SeekFrom::Start(offset))?;
@@ -1824,11 +1875,6 @@ impl Engine {
     /// Configures the remote storage tiers.
     pub fn set_tiers(&self, t: std::sync::Arc<dyn TierStore>) {
         *self.tiers.write().unwrap() = Some(t);
-    }
-
-    /// A blob on disk, for copying it to a tier.
-    pub fn blob_file(&self, id: &str) -> io::Result<File> {
-        File::open(self.blob_path(id))
     }
 
     /// Moves a version's blobs to a tier: `new` replaces the segments (the same blobs, now in a tier), if
@@ -1870,7 +1916,7 @@ impl Engine {
             // The bytes now live in the tier: the local blobs go without changing the bucket's usage.
             let mut gc = tx.open_table(GC)?;
             let now = now_ms();
-            for s in expect.iter().filter(|s| s.tier.is_empty()) {
+            for s in expect.iter().filter(|s| s.tier.is_empty() && !pack::is_packed(&s.blob)) {
                 gc.insert(s.blob.as_str(), now)?;
             }
         }
@@ -2353,6 +2399,30 @@ impl Engine {
             w.commit()?;
         }
         drop(out);
+        // Packed blobs: their packs are copied whole (or linked from the previous backup when unchanged).
+        let packs: HashSet<String> = blobs.iter().filter_map(|b| pack::parse(b).map(|(p, _, _)| p.to_string())).collect();
+        blobs.retain(|b| !pack::is_packed(b));
+        for p in &packs {
+            let src = self.pack_path(p);
+            let rel = src.strip_prefix(&self.dir).map_err(|e| Error::Index(e.to_string()))?.to_path_buf();
+            let dst = work.join(&rel);
+            fs::create_dir_all(dst.parent().unwrap())?;
+            let size = fs::metadata(&src)?.len();
+            let linked = link_from
+                .map(|l| l.join(&rel))
+                .filter(|l| fs::metadata(l).is_ok_and(|m| m.len() == size))
+                .is_some_and(|l| fs::hard_link(&l, &dst).is_ok());
+            if linked {
+                rep.blobs_linked += 1;
+            } else {
+                fs::copy(&src, &dst)?;
+                if self.fsync {
+                    File::open(&dst)?.sync_all()?;
+                }
+            }
+            rep.blobs += 1;
+            rep.bytes += fs::metadata(&dst)?.len();
+        }
         for id in &blobs {
             let src = self.blob_path(id);
             let rel = src.strip_prefix(&self.dir).map_err(|e| Error::Index(e.to_string()))?.to_path_buf();

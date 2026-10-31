@@ -17,6 +17,7 @@ from conftest import ADMIN
 
 
 def test_kill_during_writes_loses_nothing_acknowledged(fresh_store):
+    fresh_store.extra_env = {"CAIRN_STORE_PACK_BELOW": str(128 << 10)}  # the writes below are packed
     st = fresh_store.start()
     s3 = st.client()
     bucket = "crash-" + uuid.uuid4().hex[:8]

@@ -9,6 +9,7 @@
 //! cairn-store admin audit [--after SEQ] [--jsonl]
 //! cairn-store admin backup <name>         (an online backup under CAIRN_STORE_BACKUP_DIR)
 //! cairn-store admin backups
+//! cairn-store admin compact [--min-dead 0.3]   (compact packs of small objects now)
 //! cairn-store admin keys | key <ak>
 //! cairn-store admin key-create [--name AK] [--admin] [--read-only] [--buckets a,b*] [--policy-file F]
 //!                              [--actor URN] [--ssh-key-file F] [--description TEXT]
@@ -97,7 +98,7 @@ pub fn sign_full(
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak>");
+    eprintln!("usage: cairn-store admin stats | buckets | bucket <name> | quota <name> [--max-bytes N] [--max-objects N] | quota-remove <name> | audit [--after SEQ] [--jsonl] | backup <name> | backups | compact [--min-dead R] | keys | key <ak> | key-create [options] | key-update <ak> [options] | key-rotate <ak> | key-delete <ak>");
     std::process::exit(2)
 }
 
@@ -123,6 +124,10 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         }
         "backups" => ("GET", "backups".to_string(), None),
         "keys" => ("GET", "keys".to_string(), None),
+        "compact" => {
+            let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);
+            ("POST", "compact".to_string(), Some(serde_json::json!({"min_dead": min})))
+        }
         "key" => ("GET", format!("keys/{}", name()), None),
         "key-rotate" => ("POST", format!("keys/{}/rotate", name()), None),
         "key-delete" => ("DELETE", format!("keys/{}", name()), None),

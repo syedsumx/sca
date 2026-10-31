@@ -556,6 +556,13 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Moving an existing store.** Stop it, then run `cairn-store migrate-meta` with `CAIRN_STORE_META` set to an empty database. Everything is copied in one transaction, and the embedded index is kept aside as `index.redb.migrated-<time>`.
 - **Backups and TLS.** `cairn-store admin backup` still writes a data directory with an embedded index, which a store can start on, or which can be moved back with `migrate-meta`. Back up the PostgreSQL database with your usual tools as well. TLS to PostgreSQL uses the public roots plus `CAIRN_STORE_CA_FILE`.
 
+**Small objects.** Objects up to `CAIRN_STORE_PACK_BELOW` bytes (64 KiB by default; `0` turns this off) are appended to shared pack files under `packs/` instead of getting a file each. Millions of small objects then become a few large files, and reading one is a seek. Pack files are closed at `CAIRN_STORE_PACK_FILE_BYTES` (1 GiB).
+
+- **Same guarantees.** Packed bytes are written and synced before the index entry that refers to them, are encrypted like any other object, and work with ranges, versions, copies, replication, tiering and backups.
+- **Deleting a small object** leaves dead space in its pack. Compaction runs every `CAIRN_STORE_COMPACT_INTERVAL` seconds (3600; `0` turns it off). It works on packs whose dead share is at least `CAIRN_STORE_COMPACT_DEAD_RATIO` (0.5): it copies their live objects into the current pack, switches each reference in one index transaction (only where the object is unchanged), and deletes the old pack once nothing refers to it. Packs that hold only deleted objects are removed. Compaction never runs during a backup.
+- **On demand.** `cairn-store admin compact [--min-dead 0.3]` (or `POST /-/admin/v1/compact`) compacts now; it is recorded in the audit trail. `cairn-store admin stats` reports packs, their bytes and the live bytes in them.
+- **Backups** copy pack files whole, and hard-link closed packs that are unchanged since the previous backup.
+
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 
 **Backups.** With `CAIRN_STORE_BACKUP_DIR` set, `cairn-store admin backup <name>` (or `POST /-/admin/v1/backups`) writes an online backup while the store keeps serving.

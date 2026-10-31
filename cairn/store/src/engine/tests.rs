@@ -487,7 +487,7 @@ fn transitions_move_blobs_to_a_tier() {
     assert_eq!(o.storage_class(), "STANDARD");
     // Copy the blob as the S3 layer does, then swap the segments.
     let mut bytes = vec![];
-    e.blob_file(&o.segments[0].blob).unwrap().read_to_end(&mut bytes).unwrap();
+    e.blob_reader(&o.segments[0].blob).unwrap().0.read_to_end(&mut bytes).unwrap();
     tier.0.lock().unwrap().insert(format!("STANDARD_IA/{}", o.segments[0].blob), bytes);
     let mut new = o.segments.clone();
     new[0].tier = "STANDARD_IA".into();
@@ -512,4 +512,75 @@ fn transitions_move_blobs_to_a_tier() {
     assert_eq!(tier.0.lock().unwrap().len(), 1);
     assert_eq!(e.collect_tiered(), 1);
     assert!(tier.0.lock().unwrap().is_empty());
+}
+
+fn pack_files(dir: &Path) -> Vec<PathBuf> {
+    fs::read_dir(dir.join("packs")).map(|d| d.filter_map(|e| e.ok().map(|e| e.path())).collect()).unwrap_or_default()
+}
+
+#[test]
+fn small_objects_are_packed_and_compacted() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), true).unwrap();
+    e.set_packing(4096, 1 << 20);
+    e.create_bucket("b").unwrap();
+    for i in 0..300 {
+        put(&e, "b", &format!("k{i:03}"), format!("small object {i}").as_bytes(), &Condition::default()).unwrap();
+    }
+    put(&e, "b", "big", &vec![7u8; 10_000], &Condition::default()).unwrap(); // above the threshold: a file
+    assert_eq!(blob_count(dir.path()), 1, "only the large object has a blob file");
+    assert_eq!(pack_files(dir.path()).len(), 1);
+    assert!(e.get_object("b", "k007").unwrap().segments[0].blob.starts_with("p:"));
+    assert_eq!(read(&e, "b", "k123"), b"small object 123");
+    let o = e.get_object("b", "k200").unwrap();
+    let mut part = vec![];
+    e.reader(&o, 6, 6, None).unwrap().read_to_end(&mut part).unwrap();
+    assert_eq!(part, b"object");
+    // Delete most of them: the pack is mostly dead, but the active pack is never compacted.
+    for i in 0..250 {
+        e.delete_object("b", &format!("k{i:03}"), None).unwrap();
+    }
+    assert_eq!(e.compact(0.5, false).unwrap().packs_compacted, 0);
+    // A fresh engine (no active pack) compacts it: live blobs move, the old pack goes.
+    drop(e);
+    let e = Engine::open(dir.path(), true).unwrap();
+    e.set_packing(4096, 1 << 20);
+    let before = pack_files(dir.path());
+    let rep = e.compact(0.5, false).unwrap();
+    assert_eq!((rep.packs_compacted, rep.blobs_moved, rep.packs_deleted), (1, 50, 1));
+    assert!(rep.bytes_reclaimed > 0);
+    let after = pack_files(dir.path());
+    assert!(after.iter().all(|p| !before.contains(p)), "the old pack is gone");
+    for i in 250..300 {
+        assert_eq!(read(&e, "b", &format!("k{i:03}")), format!("small object {i}").as_bytes());
+    }
+    assert!(e.get_object("b", "k000").is_err());
+    // Recovery agrees: nothing missing, nothing removed.
+    let rep = e.recover().unwrap();
+    assert_eq!((rep.objects_with_missing_blobs, rep.unreferenced_blobs_removed), (0, 0));
+}
+
+#[test]
+fn packed_versions_and_parts_survive_compaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(1024, 1 << 20);
+    e.create_bucket("v").unwrap();
+    e.set_versioning("v", "Enabled").unwrap();
+    let v1 = put_v(&e, "v", "doc", b"first", &Condition::default()).unwrap();
+    put(&e, "v", "doc", b"second", &Condition::default()).unwrap();
+    for i in 0..40 {
+        put(&e, "v", &format!("junk{i}"), b"junk junk junk junk", &Condition::default()).unwrap();
+        e.delete_version("v", &format!("junk{i}"), "", false).ok();
+    }
+    drop(e);
+    let e = Engine::open(dir.path(), false).unwrap();
+    e.set_packing(1024, 1 << 20);
+    let rep = e.compact(0.0, false).unwrap();
+    assert!(rep.packs_compacted >= 1);
+    let old = e.get_version("v", "doc", Some(&v1.version_id)).unwrap();
+    let mut out = vec![];
+    e.reader(&old, 0, old.size, None).unwrap().read_to_end(&mut out).unwrap();
+    assert_eq!(out, b"first");
+    assert_eq!(read(&e, "v", "doc"), b"second");
 }

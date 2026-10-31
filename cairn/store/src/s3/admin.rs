@@ -8,6 +8,7 @@
 //! GET    /-/admin/v1/buckets/{bucket}          one bucket
 //! PUT    /-/admin/v1/buckets/{bucket}/quota    {"max_bytes": n, "max_objects": n} (either or both)
 //! DELETE /-/admin/v1/buckets/{bucket}/quota
+//! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
 //! GET    /-/admin/v1/keys                      access keys (never their secrets)
 //! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
 //!                                              -> the new key with its secret (shown once)
@@ -118,7 +119,23 @@ impl Server {
         blocking(|| match (m, segs.as_slice()) {
             (&Method::GET, ["stats"]) => {
                 let st = self.eng.stats()?;
-                Ok(json_resp(StatusCode::OK, serde_json::to_value(st).map_err(|_| e::INTERNAL.clone())?))
+                let mut v = serde_json::to_value(st).map_err(|_| e::INTERNAL.clone())?;
+                v["packs"] = serde_json::to_value(self.eng.compact(2.0, true)?).map_err(|_| e::INTERNAL.clone())?;
+                Ok(json_resp(StatusCode::OK, v))
+            }
+            (&Method::POST, ["compact"]) => {
+                let v: Value =
+                    if body.is_empty() { json!({}) } else { serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())? };
+                let min_dead = v.get("min_dead").and_then(Value::as_f64).unwrap_or(0.0).clamp(0.0, 1.0);
+                let report = self.eng.compact(min_dead, false)?;
+                self.eng.append_audit(&crate::audit::Audit {
+                    category: "store",
+                    action: "packs.compact".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: String::new(),
+                    details: json!({"min_dead": min_dead, "packs_compacted": report.packs_compacted, "bytes_reclaimed": report.bytes_reclaimed}),
+                })?;
+                Ok(json_resp(StatusCode::OK, serde_json::to_value(report).map_err(|_| e::INTERNAL.clone())?))
             }
             (&Method::GET, ["audit"]) => {
                 let q: std::collections::BTreeMap<String, String> = raw_query
