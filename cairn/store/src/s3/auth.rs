@@ -259,6 +259,44 @@ pub fn verify(creds: &BTreeMap<String, Credential>, r: &Request) -> Result<Auth,
     Err(e::ACCESS_DENIED.clone())
 }
 
+/// Verifies a browser POST policy signed with SigV4: the signature is HMAC(signing key, policy base64).
+pub fn verify_post_v4(
+    creds: &BTreeMap<String, Credential>,
+    credential: &str,
+    amz_date: &str,
+    policy_b64: &str,
+    signature: &str,
+) -> Result<Credential, ApiError> {
+    let parts: Vec<&str> = credential.split('/').collect();
+    if parts.len() != 5 || parts[3] != "s3" || parts[4] != "aws4_request" || !amz_date.starts_with(parts[1]) || signature.is_empty() {
+        return Err(e::AUTH_HEADER_MALFORMED.clone());
+    }
+    let cred = creds.get(parts[0]).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+    let key = signing_key(&cred.secret_key, parts[1], parts[2], parts[3]);
+    let want = hex::encode(hmac_sha256(&key, policy_b64.as_bytes()));
+    if !bool::from(want.as_bytes().ct_eq(signature.as_bytes())) {
+        return Err(e::SIGNATURE_MISMATCH.clone());
+    }
+    Ok(cred.clone())
+}
+
+/// Verifies a browser POST policy signed with SigV2: base64(HMAC-SHA1(secret, policy base64)).
+pub fn verify_post_v2(
+    creds: &BTreeMap<String, Credential>,
+    access_key: &str,
+    policy_b64: &str,
+    signature: &str,
+) -> Result<Credential, ApiError> {
+    let cred = creds.get(access_key).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+    let mut m = <Hmac<Sha1>>::new_from_slice(cred.secret_key.as_bytes()).expect("hmac accepts any key");
+    m.update(policy_b64.as_bytes());
+    let want = base64::engine::general_purpose::STANDARD.encode(m.finalize().into_bytes());
+    if !bool::from(want.as_bytes().ct_eq(signature.as_bytes())) {
+        return Err(e::SIGNATURE_MISMATCH.clone());
+    }
+    Ok(cred.clone())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn check_v4(
     creds: &BTreeMap<String, Credential>,

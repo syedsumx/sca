@@ -11,6 +11,7 @@ mod handlers;
 pub mod lifecycle;
 mod objectlock;
 pub mod policy;
+mod post;
 pub mod sse;
 mod versioning;
 pub mod xml;
@@ -79,6 +80,7 @@ pub struct Server {
 }
 
 /// One request, after routing and authentication.
+#[derive(Clone)]
 pub(crate) struct Ctx {
     pub method: Method,
     pub bucket: String,

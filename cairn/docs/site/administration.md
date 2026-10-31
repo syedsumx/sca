@@ -434,6 +434,8 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 - **Where it is enforced.** The engine enforces protection, so client deletes, batch deletes and lifecycle rules all respect it. Overwrites and plain deletes keep the locked version, as a noncurrent version under a delete marker.
 - **Versioning.** Versioning cannot be suspended on such a bucket.
 
+**Browser uploads.** HTML forms can upload straight to a bucket with a signed POST policy, as produced by any AWS SDK's `generate_presigned_post` (SigV4 or SigV2). The store checks the signature and the expiration. It also checks every condition (exact values, `starts-with`, `content-length-range`), and that every form field is covered by one, so a browser cannot add fields the policy did not allow. The upload is authorized as a PUT for the key that signed the policy. Supported form fields: object metadata, content type, tags, encryption, object lock, `success_action_status` and `success_action_redirect`. The file is streamed to disk and its size limits are enforced as it arrives. Allow the web app's origin with CORS rules.
+
 **Encryption at rest.** Give the store a key and it encrypts every new object (SSE-S3): set `CAIRN_STORE_MASTER_KEY` (a base64 32-byte key, `openssl rand -base64 32`), or `CAIRN_STORE_KEYRING_FILE` for several keys. Each object gets its own data key; its bytes are encrypted with AES-256-GCM in 64 KiB chunks, so ranged reads stay fast and any tampering is detected. The data key is stored only wrapped by a keyring key.
 
 - **SSE-KMS.** Clients and bucket defaults can name a keyring key (`aws:kms` with a key id), for example one key per team.

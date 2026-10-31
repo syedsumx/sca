@@ -37,7 +37,7 @@ const UNSUPPORTED_BUCKET_CONFIG: [&str; 7] =
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 5] = ["content-encoding", "content-disposition", "content-language", "cache-control", "expires"];
 
-fn object_headers(c: &Ctx) -> (String, BTreeMap<String, String>, BTreeMap<String, String>) {
+pub(crate) fn object_headers(c: &Ctx) -> (String, BTreeMap<String, String>, BTreeMap<String, String>) {
     let ct = match c.header("content-type") {
         "" => "binary/octet-stream".to_string(),
         v => v.to_string(),
@@ -120,6 +120,7 @@ impl Server {
             "ListObjectsV2" => self.list(c, true),
             "ListMultipartUploads" => self.list_uploads(c),
             "DeleteObjects" => self.delete_objects(c, body).await,
+            "PostObject" => self.post_object(c, body).await,
             "GetBucketLocation" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 let region = if self.region == "us-east-1" { "" } else { self.region.as_str() };
@@ -1109,6 +1110,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::DELETE => "DeleteBucket",
             Method::HEAD => "HeadBucket",
             Method::POST if c.has("delete") => "DeleteObjects",
+            Method::POST if c.header("content-type").to_ascii_lowercase().starts_with("multipart/form-data") => "PostObject",
             Method::POST => "Unsupported",
             Method::GET if c.has("location") => "GetBucketLocation",
             Method::GET if c.has("versioning") => "GetBucketVersioning",

@@ -351,7 +351,8 @@ impl Server {
     /// Authorizes the operation `classify` named. DeleteObjects is checked per key by its handler.
     pub(crate) async fn authorize_request(&self, c: &Ctx) -> Result<(), ApiError> {
         match c.op {
-            "DeleteObjects" => Ok(()),
+            // Checked per key, and after the form's policy is verified, by their handlers.
+            "DeleteObjects" | "PostObject" => Ok(()),
             op => match action_of(op) {
                 Some(action) => self.authorize(c, versioned_action(action, c.has("versionId")), &c.bucket, &c.key).await,
                 // Unsupported or not allowed: still only for signed requests.

@@ -114,6 +114,12 @@ errors! {
     KMS_NOT_FOUND = "KMS.NotFoundException", 400, "The key id is not in the store's keyring.";
     KMS_KEY_UNAVAILABLE = "KMS.DisabledException", 500, "The key that encrypted this object is not available in the store's keyring.";
     NO_SUCH_ENCRYPTION = "ServerSideEncryptionConfigurationNotFoundError", 404, "The server side encryption configuration was not found";
+    MALFORMED_POST = "MalformedPOSTRequest", 400, "The body of your POST request is not well-formed multipart/form-data.";
+    POST_POLICY = "InvalidPolicyDocument", 400, "The policy document is missing, malformed or not signed.";
+    POST_EXPIRED = "AccessDenied", 403, "Invalid according to Policy: Policy expired.";
+    POST_CONDITION = "AccessDenied", 403, "Invalid according to Policy: Policy Condition failed (or a form field is not covered by a condition).";
+    POST_NO_FILE = "InvalidArgument", 400, "POST requires exactly one file upload per request.";
+    POST_NO_KEY = "InvalidArgument", 400, "Bucket POST must contain a field named 'key'.";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";
