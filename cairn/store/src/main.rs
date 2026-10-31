@@ -14,10 +14,13 @@
 //! CAIRN_STORE_DATA              data directory (/data)
 //! CAIRN_STORE_ACCESS_KEY        admin access key ...
 //! CAIRN_STORE_SECRET_KEY        ... and its secret (or CAIRN_STORE_SECRET_KEY_FILE)
-//! CAIRN_STORE_CREDENTIALS_FILE  JSON list of further keys: access_key, secret_key, buckets, read_only, admin
+//! CAIRN_STORE_CREDENTIALS_FILE  JSON list of further keys: access_key, secret_key, buckets, read_only, admin, policy, actor
 //! CAIRN_STORE_REGION            region reported to clients (us-east-1)
 //! CAIRN_STORE_DOMAIN            enables virtual-hosted-style requests on <bucket>.<domain>
 //! CAIRN_STORE_BUCKETS           comma-separated buckets to create at start-up
+//! CAIRN_STORE_BLOCK_PUBLIC_ACCESS  false allows public bucket policies and anonymous reads they grant (default true)
+//! CAIRN_STORE_PDP_URL           Cairn's policy decision point, e.g. http://cairn-pdp:8810 (optional; deny-only layer)
+//! CAIRN_STORE_PDP_TOKEN         a Cairn service token for it (or CAIRN_STORE_PDP_TOKEN_FILE)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -60,6 +63,14 @@ fn listen_addr(addr: &str) -> String {
     }
 }
 
+/// A secret from `<K>_FILE` (a mounted secret) or `<K>`.
+fn secret(k: &str) -> Result<String, String> {
+    match std::env::var(format!("{k}_FILE")) {
+        Ok(f) if !f.is_empty() => Ok(std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?.trim().to_string()),
+        _ => Ok(env(k, "")),
+    }
+}
+
 fn credentials() -> Result<Vec<Credential>, String> {
     let mut out = vec![];
     let mut secret = env("CAIRN_STORE_SECRET_KEY", "");
@@ -68,7 +79,7 @@ fn credentials() -> Result<Vec<Credential>, String> {
     }
     let ak = env("CAIRN_STORE_ACCESS_KEY", "");
     if !ak.is_empty() {
-        out.push(Credential { access_key: ak, secret_key: secret, buckets: vec![], read_only: false, admin: true });
+        out.push(Credential { access_key: ak, secret_key: secret, admin: true, ..Default::default() });
     }
     if let Ok(f) = std::env::var("CAIRN_STORE_CREDENTIALS_FILE") {
         let text = std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?;
@@ -163,6 +174,11 @@ async fn serve(addr: String, data: String) {
                 domain: env("CAIRN_STORE_DOMAIN", ""),
                 credentials: creds,
                 max_object: 0,
+                block_public: env("CAIRN_STORE_BLOCK_PUBLIC_ACCESS", "true") != "false",
+                pdp: match env("CAIRN_STORE_PDP_URL", "") {
+                    u if u.is_empty() => None,
+                    u => Some((u, secret("CAIRN_STORE_PDP_TOKEN").unwrap_or_else(|e| fail("CAIRN_STORE_PDP_TOKEN", e)))),
+                },
             },
         )
         .unwrap_or_else(|e| fail("configure", e)),
@@ -177,9 +193,9 @@ async fn serve(addr: String, data: String) {
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+                let Ok((stream, peer)) = accepted else { continue };
                 let server = server.clone();
-                let svc = service_fn(move |req| server.clone().handle(req));
+                let svc = service_fn(move |req| server.clone().handle_from(req, Some(peer.ip())));
                 let conn = http1::Builder::new().timer(hyper_util::rt::TokioTimer::new())
                     .header_read_timeout(Duration::from_secs(30)).keep_alive(true)
                     .serve_connection(TokioIo::new(stream), svc);

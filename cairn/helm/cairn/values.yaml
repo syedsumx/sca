@@ -490,6 +490,12 @@ cairn:
     buckets: [lakehouse]      # created at start-up if missing
     region: us-east-1
     domain: ""                # set to enable virtual-hosted-style requests (<bucket>.<domain>)
+    # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.
+    blockPublicAccess: true
+    # Ask this release's policy decision point about every request the store's own rules allow
+    # (a deny-only layer; the store refuses requests while the PDP is unreachable).
+    pdp:
+      enabled: false
     persistence:
       size: 100Gi
       storageClassName: ""

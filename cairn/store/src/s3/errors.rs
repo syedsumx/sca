@@ -79,6 +79,12 @@ errors! {
     CORS_BAD_PREFLIGHT = "BadRequest", 400, "Insufficient information. Origin request header needed.";
     CORS_NOT_ENABLED = "AccessForbidden", 403, "CORSResponse: CORS is not enabled for this bucket.";
     CORS_FORBIDDEN = "AccessForbidden", 403, "CORSResponse: This CORS request is not allowed. This is usually because the evalution of Origin, request method / Access-Control-Request-Method or Access-Control-Request-Headers are not whitelisted by the resource's CORS spec.";
+    MALFORMED_POLICY = "MalformedPolicy", 400, "Policies must be valid JSON in the IAM policy language.";
+    MALFORMED_POLICY_PRINCIPAL = "MalformedPolicy", 400, "Missing required field Principal";
+    MALFORMED_POLICY_RESOURCE = "MalformedPolicy", 400, "Policy has invalid resource";
+    MALFORMED_POLICY_ACTION = "MalformedPolicy", 400, "Policy has invalid action";
+    MALFORMED_POLICY_CONDITION = "MalformedPolicy", 400, "Policy has an invalid condition operator or key";
+    PUBLIC_POLICY_BLOCKED = "AccessDenied", 403, "Public policies are blocked by the public access block for this bucket or store.";
     NO_SUCH_PUBLIC_ACCESS_BLOCK = "NoSuchPublicAccessBlockConfiguration", 404, "The public access block configuration was not found";
 }
 

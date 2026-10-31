@@ -21,9 +21,12 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let eng = Arc::new(Engine::open(dir.path(), false).unwrap());
     eng.create_bucket("examplebucket").unwrap();
-    let creds = vec![Credential { access_key: AK.into(), secret_key: SK.into(), buckets: vec![], read_only: false, admin: true }];
-    let mut srv =
-        Server::new(eng.clone(), Config { region: String::new(), domain: String::new(), credentials: creds, max_object: 0 }).unwrap();
+    let creds = vec![Credential { access_key: AK.into(), secret_key: SK.into(), admin: true, ..Default::default() }];
+    let mut srv = Server::new(
+        eng.clone(),
+        Config { region: String::new(), domain: String::new(), credentials: creds, max_object: 0, block_public: true, pdp: None },
+    )
+    .unwrap();
     srv.set_clock(|| datetime!(2013-05-24 00:00:30 UTC));
     (Arc::new(srv), eng, dir)
 }

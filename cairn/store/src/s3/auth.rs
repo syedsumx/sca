@@ -23,7 +23,8 @@ pub const EMPTY_SHA256: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934c
 const MAX_SKEW_SECS: i64 = 15 * 60;
 
 /// An access key the store accepts.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Credential {
     pub access_key: String,
     pub secret_key: String,
@@ -36,6 +37,12 @@ pub struct Credential {
     /// May create and delete buckets.
     #[serde(default)]
     pub admin: bool,
+    /// An IAM-style policy for the key (no Principal). When set, it replaces the key's bucket scope.
+    #[serde(default)]
+    pub policy: Option<serde_json::Value>,
+    /// The key's Cairn identity (a corpuser URN), for Cairn's policy decision point.
+    #[serde(default)]
+    pub actor: String,
 }
 
 impl Credential {
@@ -44,7 +51,7 @@ impl Credential {
     }
 }
 
-/// A verified request signature.
+/// A verified request signature (or an anonymous request: empty access key).
 #[derive(Clone)]
 pub struct Auth {
     pub cred: Credential,
@@ -54,6 +61,28 @@ pub struct Auth {
     pub signing_key: Vec<u8>,
     pub amz_date: String,
     pub scope: String,
+}
+
+impl Auth {
+    pub fn anonymous() -> Auth {
+        Auth {
+            cred: Credential::default(),
+            payload_hash: UNSIGNED_PAYLOAD.into(),
+            seed_sig: String::new(),
+            signing_key: vec![],
+            amz_date: String::new(),
+            scope: String::new(),
+        }
+    }
+}
+
+/// Does the request carry no credentials at all (no Authorization header, no presigned parameters)?
+pub fn is_anonymous(headers: &HeaderMap, raw_query: &str) -> bool {
+    !headers.contains_key("authorization")
+        && !raw_query.split('&').any(|p| {
+            let k = p.split('=').next().unwrap_or("");
+            k == "X-Amz-Algorithm" || k == "X-Amz-Credential" || k == "AWSAccessKeyId" || k == "X-Amz-Signature"
+        })
 }
 
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {

@@ -1,12 +1,14 @@
 //! The S3 API over a Cairn Store engine.
 
 pub mod auth;
+pub mod authz;
 pub mod body;
 pub mod checksum;
 mod config;
 mod cors;
 pub mod errors;
 mod handlers;
+pub mod policy;
 pub mod xml;
 
 use std::collections::BTreeMap;
@@ -37,6 +39,10 @@ pub struct Config {
     pub credentials: Vec<Credential>,
     /// Largest single PUT (default 5 GiB).
     pub max_object: u64,
+    /// Refuse anonymous access and public bucket policies store-wide (default on).
+    pub block_public: bool,
+    /// Cairn's policy decision point (base URL, service token).
+    pub pdp: Option<(String, String)>,
 }
 
 pub struct Server {
@@ -47,6 +53,11 @@ pub struct Server {
     max_obj: u64,
     metrics: Metrics,
     clock: Box<dyn Fn() -> OffsetDateTime + Send + Sync>,
+    key_policies: BTreeMap<String, policy::Policy>,
+    block_public: bool,
+    pdp: Option<authz::Pdp>,
+    /// Requests arrive over TLS (aws:SecureTransport).
+    tls: bool,
 }
 
 /// One request, after routing and authentication.
@@ -60,6 +71,8 @@ pub(crate) struct Ctx {
     pub auth: Auth,
     pub content_length: Option<u64>,
     pub op: &'static str,
+    /// The client's address (aws:SourceIp).
+    pub peer: Option<std::net::IpAddr>,
 }
 
 impl Ctx {
@@ -82,12 +95,22 @@ impl Server {
             return Err("at least one credential is required".into());
         }
         let mut creds = BTreeMap::new();
+        let mut key_policies = BTreeMap::new();
         for c in cfg.credentials {
             if c.access_key.is_empty() || c.secret_key.len() < 8 {
                 return Err(format!("credential {:?}: an access key and a secret of at least 8 characters are required", c.access_key));
             }
+            if let Some(p) = &c.policy {
+                let parsed = policy::Policy::parse(p.to_string().as_bytes(), None)
+                    .map_err(|err| format!("credential {:?}: policy: {}", c.access_key, err.message))?;
+                key_policies.insert(c.access_key.clone(), parsed);
+            }
             creds.insert(c.access_key.clone(), c);
         }
+        let pdp = match cfg.pdp {
+            Some((url, token)) => Some(authz::Pdp::new(&url, &token)?),
+            None => None,
+        };
         Ok(Server {
             eng,
             creds,
@@ -96,6 +119,10 @@ impl Server {
             max_obj: if cfg.max_object == 0 { 5 << 30 } else { cfg.max_object },
             metrics: Metrics::default(),
             clock: Box::new(OffsetDateTime::now_utc),
+            key_policies,
+            block_public: cfg.block_public,
+            pdp,
+            tls: false,
         })
     }
 
@@ -105,7 +132,17 @@ impl Server {
         self.clock = Box::new(f);
     }
 
+    #[cfg(test)]
     pub async fn handle<B>(self: Arc<Self>, req: Request<B>) -> Result<Resp, Infallible>
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
+        self.handle_from(req, None).await
+    }
+
+    /// Handles a request from a client at `peer`.
+    pub async fn handle_from<B>(self: Arc<Self>, req: Request<B>, peer: Option<std::net::IpAddr>) -> Result<Resp, Infallible>
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -115,7 +152,8 @@ impl Server {
         let len_in = req.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse::<u64>().ok()).unwrap_or(0);
         let head = req.method() == Method::HEAD;
         let path = req.uri().path().to_string();
-        let (op, result, cors) = if path.starts_with("/-/") { ("admin", Ok(self.admin(&path)), None) } else { self.dispatch(req).await };
+        let (op, result, cors) =
+            if path.starts_with("/-/") { ("admin", Ok(self.admin(&path)), None) } else { self.dispatch(req, peer).await };
         let mut resp = match result {
             Ok(r) => r,
             Err(err) => error_response(&err, &path, &request_id, head),
@@ -135,7 +173,7 @@ impl Server {
 
     /// Routes and authenticates a request. The third value is set for cross-origin requests (bucket,
     /// method, request headers), so their responses get CORS headers.
-    async fn dispatch<B>(&self, req: Request<B>) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
+    async fn dispatch<B>(&self, req: Request<B>, peer: Option<std::net::IpAddr>) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
     where
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
@@ -178,16 +216,15 @@ impl Server {
             now: (self.clock)(),
             vhost_bucket: vhost.as_deref(),
         };
-        let auth = match auth::verify(&self.creds, &request) {
-            Ok(a) => a,
-            Err(err) => return ("auth", Err(err), cors),
+        // Unsigned requests are anonymous: only a public bucket policy can allow them (see authz).
+        let auth = if auth::is_anonymous(&parts.headers, &raw_query) {
+            auth::Auth::anonymous()
+        } else {
+            match auth::verify(&self.creds, &request) {
+                Ok(a) => a,
+                Err(err) => return ("auth", Err(err), cors),
+            }
         };
-        if !auth.cred.allows(&bucket) {
-            return ("auth", Err(e::ACCESS_DENIED.clone()), cors);
-        }
-        if auth.cred.read_only && parts.method != Method::GET && parts.method != Method::HEAD {
-            return ("auth", Err(e::ACCESS_DENIED.clone()), cors);
-        }
         let query = raw_query
             .split('&')
             .filter(|p| !p.is_empty())
@@ -197,8 +234,18 @@ impl Server {
             })
             .collect();
         let content_length = parts.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse().ok());
-        let mut ctx =
-            Ctx { method: parts.method, bucket, key, path: raw_path, query, headers: parts.headers, auth, content_length, op: "unknown" };
+        let mut ctx = Ctx {
+            method: parts.method,
+            bucket,
+            key,
+            path: raw_path,
+            query,
+            headers: parts.headers,
+            auth,
+            content_length,
+            op: "unknown",
+            peer,
+        };
         let res = if ctx.key.len() > 1024 { Err(e::KEY_TOO_LONG.clone()) } else { self.route(&mut ctx, body).await };
         (ctx.op, res, cors)
     }

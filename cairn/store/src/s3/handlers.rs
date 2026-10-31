@@ -31,11 +31,9 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 13] = [
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 11] = [
     "versioning",
-    "policy",
     "lifecycle",
-    "publicAccessBlock",
     "object-lock",
     "encryption",
     "notification",
@@ -111,237 +109,101 @@ impl Server {
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
     {
-        if c.bucket.is_empty() {
-            c.op = "ListBuckets";
-            if c.method != Method::GET {
-                return Err(e::METHOD_NOT_ALLOWED.clone());
-            }
-            return self.list_buckets(c);
-        }
-        if c.key.is_empty() {
-            return self.bucket_op(c, body).await;
-        }
-        self.object_op(c, body).await
-    }
-
-    async fn bucket_op<B>(&self, c: &mut Ctx, body: B) -> R
-    where
-        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
-        B::Error: std::fmt::Display,
-    {
-        match c.method {
-            Method::PUT if c.has("tagging") => {
-                c.op = "PutBucketTagging";
-                self.put_bucket_tagging(c, body).await
-            }
-            Method::PUT if c.has("acl") => {
-                c.op = "PutBucketAcl";
-                self.put_acl(c, body, false).await
-            }
-            Method::PUT if c.has("cors") => {
-                c.op = "PutBucketCors";
-                self.put_cors(c, body).await
-            }
-            Method::PUT if c.has("ownershipControls") => {
-                c.op = "PutBucketOwnershipControls";
-                self.put_ownership(c, body).await
-            }
-            Method::PUT if UNSUPPORTED_BUCKET_CONFIG.iter().any(|k| c.has(k)) => {
-                c.op = "Unsupported";
-                Err(e::NOT_IMPLEMENTED.clone())
-            }
-            Method::PUT => {
-                c.op = "CreateBucket";
-                self.create_bucket(c, body).await
-            }
-            Method::DELETE if c.has("tagging") => {
-                c.op = "DeleteBucketTagging";
-                self.delete_config(c, "tagging")
-            }
-            Method::DELETE if c.has("cors") => {
-                c.op = "DeleteBucketCors";
-                self.delete_config(c, "cors")
-            }
-            Method::DELETE if c.has("ownershipControls") => {
-                c.op = "Unsupported";
-                Err(e::NOT_IMPLEMENTED.clone())
-            }
-            Method::DELETE
-                if ["policy", "lifecycle", "publicAccessBlock", "encryption", "website", "replication"].iter().any(|k| c.has(k)) =>
-            {
-                // None of these can be set yet, so there is nothing to delete.
-                c.op = "DeleteBucketConfig";
-                blocking(|| self.eng.head_bucket(&c.bucket))?;
-                Ok(empty(StatusCode::NO_CONTENT))
-            }
-            Method::DELETE => {
-                c.op = "DeleteBucket";
-                if !c.auth.cred.admin {
-                    return Err(e::ACCESS_DENIED.clone());
-                }
+        c.op = classify(c);
+        self.authorize_request(c).await?;
+        match c.op {
+            "ListBuckets" => self.list_buckets(c),
+            "MethodNotAllowed" => Err(e::METHOD_NOT_ALLOWED.clone()),
+            "Unsupported" => Err(e::NOT_IMPLEMENTED.clone()),
+            // ---------------------------------------------------------------- buckets
+            "CreateBucket" => self.create_bucket(c, body).await,
+            "DeleteBucket" => {
                 blocking(|| self.eng.delete_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Method::HEAD => {
-                c.op = "HeadBucket";
+            "HeadBucket" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 let mut r = empty(StatusCode::OK);
                 set_header(&mut r, "x-amz-bucket-region", &self.region);
                 Ok(r)
             }
-            Method::POST if c.has("delete") => {
-                c.op = "DeleteObjects";
-                self.delete_objects(c, body).await
-            }
-            Method::GET => {
+            "ListObjects" => self.list(c, false),
+            "ListObjectsV2" => self.list(c, true),
+            "ListMultipartUploads" => self.list_uploads(c),
+            "DeleteObjects" => self.delete_objects(c, body).await,
+            "GetBucketLocation" => {
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
-                if c.has("location") {
-                    c.op = "GetBucketLocation";
-                    let region = if self.region == "us-east-1" { "" } else { self.region.as_str() };
-                    return Ok(xml_resp(
-                        StatusCode::OK,
-                        format!(
-                            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<LocationConstraint xmlns=\"{}\">{}</LocationConstraint>",
-                            xml::XMLNS,
-                            region
-                        ),
-                    ));
-                }
-                if c.has("versioning") {
-                    c.op = "GetBucketVersioning";
-                    return Ok(xml_resp(StatusCode::OK, Writer::new("VersioningConfiguration").finish()));
-                }
-                if c.has("acl") {
-                    c.op = "GetBucketAcl";
-                    return Ok(self.acl(c));
-                }
-                if c.has("uploads") {
-                    c.op = "ListMultipartUploads";
-                    return self.list_uploads(c);
-                }
-                if c.has("tagging") {
-                    c.op = "GetBucketTagging";
-                    return self.get_bucket_tagging(c);
-                }
-                if c.has("cors") {
-                    c.op = "GetBucketCors";
-                    return self.get_cors(c);
-                }
-                if c.has("ownershipControls") {
-                    c.op = "GetBucketOwnershipControls";
-                    return self.get_ownership(c);
-                }
-                for (k, err) in [
-                    ("policy", &e::NO_SUCH_BUCKET_POLICY),
-                    ("lifecycle", &e::NO_SUCH_LIFECYCLE),
-                    ("publicAccessBlock", &e::NO_SUCH_PUBLIC_ACCESS_BLOCK),
-                ] {
-                    if c.has(k) {
-                        return Err(err.clone());
-                    }
-                }
-                if ["versions", "object-lock", "replication", "encryption", "website", "logging", "notification", "requestPayment"]
-                    .iter()
-                    .any(|k| c.has(k))
-                {
-                    c.op = "Unsupported";
-                    return Err(e::NOT_IMPLEMENTED.clone());
-                }
-                if c.q("list-type") == "2" {
-                    c.op = "ListObjectsV2";
-                    return self.list(c, true);
-                }
-                c.op = "ListObjects";
-                self.list(c, false)
+                let region = if self.region == "us-east-1" { "" } else { self.region.as_str() };
+                Ok(xml_resp(
+                    StatusCode::OK,
+                    format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<LocationConstraint xmlns=\"{}\">{}</LocationConstraint>",
+                        xml::XMLNS,
+                        region
+                    ),
+                ))
             }
-            Method::POST => Err(e::NOT_IMPLEMENTED.clone()),
-            _ => Err(e::METHOD_NOT_ALLOWED.clone()),
-        }
-    }
-
-    async fn object_op<B>(&self, c: &mut Ctx, body: B) -> R
-    where
-        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
-        B::Error: std::fmt::Display,
-    {
-        let copy = !c.header("x-amz-copy-source").is_empty();
-        match c.method {
-            Method::PUT if c.has("uploadId") && c.has("partNumber") => {
-                if copy {
-                    c.op = "UploadPartCopy";
-                    self.upload_part_copy(c)
-                } else {
-                    c.op = "UploadPart";
-                    self.upload_part(c, body).await
-                }
+            "GetBucketVersioning" => {
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
+                Ok(xml_resp(StatusCode::OK, Writer::new("VersioningConfiguration").finish()))
             }
-            Method::PUT if c.has("tagging") => {
-                c.op = "PutObjectTagging";
-                self.put_object_tagging(c, body).await
-            }
-            Method::PUT if c.has("acl") => {
-                c.op = "PutObjectAcl";
-                self.put_acl(c, body, true).await
-            }
-            Method::PUT if ["retention", "legal-hold"].iter().any(|k| c.has(k)) => {
-                c.op = "Unsupported";
-                Err(e::NOT_IMPLEMENTED.clone())
-            }
-            Method::PUT if copy => {
-                c.op = "CopyObject";
-                self.copy_object(c)
-            }
-            Method::PUT => {
-                c.op = "PutObject";
-                self.put_object(c, body).await
-            }
-            Method::GET if c.has("uploadId") => {
-                c.op = "ListParts";
-                self.list_parts(c)
-            }
-            Method::GET if c.has("acl") => {
-                c.op = "GetObjectAcl";
-                blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
+            "GetBucketAcl" => {
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(self.acl(c))
             }
-            Method::GET if c.has("tagging") => {
-                c.op = "GetObjectTagging";
-                self.get_object_tagging(c)
+            "PutBucketAcl" => self.put_acl(c, body, false).await,
+            "GetBucketTagging" => self.get_bucket_tagging(c),
+            "PutBucketTagging" => self.put_bucket_tagging(c, body).await,
+            "DeleteBucketTagging" => self.delete_config(c, "tagging"),
+            "GetBucketCors" => self.get_cors(c),
+            "PutBucketCors" => self.put_cors(c, body).await,
+            "DeleteBucketCors" => self.delete_config(c, "cors"),
+            "GetBucketOwnershipControls" => self.get_ownership(c),
+            "PutBucketOwnershipControls" => self.put_ownership(c, body).await,
+            "GetBucketPolicy" => self.get_bucket_policy(c),
+            "PutBucketPolicy" => self.put_bucket_policy(c, body).await,
+            "DeleteBucketPolicy" => self.delete_config(c, "policy"),
+            "GetBucketPolicyStatus" => self.get_policy_status(c),
+            "GetPublicAccessBlock" => self.get_public_access_block(c),
+            "PutPublicAccessBlock" => self.put_public_access_block(c, body).await,
+            "DeletePublicAccessBlock" => self.delete_config(c, "publicAccessBlock"),
+            "GetBucketLifecycle" => {
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
+                Err(e::NO_SUCH_LIFECYCLE.clone())
             }
-            Method::GET if ["attributes", "torrent", "retention", "legal-hold"].iter().any(|k| c.has(k)) => Err(e::NOT_IMPLEMENTED.clone()),
-            Method::GET => {
-                c.op = "GetObject";
-                self.get_object(c, false)
-            }
-            Method::HEAD => {
-                c.op = "HeadObject";
-                self.get_object(c, true)
-            }
-            Method::DELETE if c.has("uploadId") => {
-                c.op = "AbortMultipartUpload";
-                blocking(|| self.eng.abort_upload(&c.bucket, &c.key, c.q("uploadId")))?;
+            "DeleteBucketLifecycle" | "DeleteBucketEncryption" | "DeleteBucketWebsite" | "DeleteBucketReplication" => {
+                // None of these can be set yet, so there is nothing to delete.
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Method::DELETE if c.has("tagging") => {
-                c.op = "DeleteObjectTagging";
-                self.delete_object_tagging(c)
-            }
-            Method::DELETE => {
-                c.op = "DeleteObject";
+            // ---------------------------------------------------------------- objects
+            "PutObject" => self.put_object(c, body).await,
+            "CopyObject" => self.copy_object(c).await,
+            "GetObject" => self.get_object(c, false),
+            "HeadObject" => self.get_object(c, true),
+            "DeleteObject" => {
                 let if_match = c.header("if-match");
                 blocking(|| self.eng.delete_object(&c.bucket, &c.key, (!if_match.is_empty()).then_some(if_match)))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
-            Method::POST if c.has("uploads") => {
-                c.op = "CreateMultipartUpload";
-                self.create_upload(c)
+            "GetObjectTagging" => self.get_object_tagging(c),
+            "PutObjectTagging" => self.put_object_tagging(c, body).await,
+            "DeleteObjectTagging" => self.delete_object_tagging(c),
+            "GetObjectAcl" => {
+                blocking(|| self.eng.get_object(&c.bucket, &c.key))?;
+                Ok(self.acl(c))
             }
-            Method::POST if c.has("uploadId") => {
-                c.op = "CompleteMultipartUpload";
-                self.complete_upload(c, body).await
+            "PutObjectAcl" => self.put_acl(c, body, true).await,
+            "CreateMultipartUpload" => self.create_upload(c),
+            "UploadPart" => self.upload_part(c, body).await,
+            "UploadPartCopy" => self.upload_part_copy(c).await,
+            "ListParts" => self.list_parts(c),
+            "CompleteMultipartUpload" => self.complete_upload(c, body).await,
+            "AbortMultipartUpload" => {
+                blocking(|| self.eng.abort_upload(&c.bucket, &c.key, c.q("uploadId")))?;
+                Ok(empty(StatusCode::NO_CONTENT))
             }
-            Method::POST => Err(e::NOT_IMPLEMENTED.clone()),
-            _ => Err(e::METHOD_NOT_ALLOWED.clone()),
+            _ => Err(e::INTERNAL.clone()),
         }
     }
 
@@ -449,7 +311,8 @@ impl Server {
         let mut w = Writer::new("ListAllMyBucketsResult");
         self.owner_xml(c, &mut w, "Owner");
         w.open("Buckets");
-        for b in buckets.iter().filter(|b| c.auth.cred.allows(&b.name)) {
+        let visible = |name: &str| c.auth.cred.admin || c.auth.cred.policy.is_some() || c.auth.cred.allows(name);
+        for b in buckets.iter().filter(|b| visible(&b.name)) {
             w.open("Bucket").el("Name", &b.name).el("CreationDate", iso_time(b.created)).close();
         }
         w.close();
@@ -461,9 +324,6 @@ impl Server {
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
     {
-        if !c.auth.cred.admin {
-            return Err(e::ACCESS_DENIED.clone());
-        }
         if !valid_bucket_name(&c.bucket) {
             return Err(e::INVALID_BUCKET_NAME.clone());
         }
@@ -497,6 +357,10 @@ impl Server {
         blocking(|| self.eng.head_bucket(&c.bucket))?;
         let mut w = Writer::new("DeleteResult");
         for k in keys {
+            if let Err(err) = self.authorize(c, "s3:DeleteObject", &c.bucket, &k).await {
+                w.open("Error").el("Key", &k).el("Code", err.code).el("Message", err.message).close();
+                continue;
+            }
             match blocking(|| self.eng.delete_object(&c.bucket, &k, None)) {
                 Ok(()) if !quiet => {
                     w.open("Deleted").el("Key", &k).close();
@@ -788,11 +652,9 @@ impl Server {
         Ok((src, seg, md5, hashers.iter().map(|(a, h)| (a.clone(), h.base64())).collect()))
     }
 
-    fn copy_object(&self, c: &Ctx) -> R {
+    async fn copy_object(&self, c: &Ctx) -> R {
         let (src_bucket, src_key) = copy_source(c.header("x-amz-copy-source"))?;
-        if !c.auth.cred.allows(&src_bucket) {
-            return Err(e::ACCESS_DENIED.clone());
-        }
+        self.authorize(c, "s3:GetObject", &src_bucket, &src_key).await?;
         let directive = match c.header("x-amz-metadata-directive").to_ascii_uppercase().as_str() {
             "" | "COPY" => "COPY",
             "REPLACE" => "REPLACE",
@@ -924,12 +786,10 @@ impl Server {
         Ok(r)
     }
 
-    fn upload_part_copy(&self, c: &Ctx) -> R {
+    async fn upload_part_copy(&self, c: &Ctx) -> R {
         let n = self.part_number(c)?;
         let (src_bucket, src_key) = copy_source(c.header("x-amz-copy-source"))?;
-        if !c.auth.cred.allows(&src_bucket) {
-            return Err(e::ACCESS_DENIED.clone());
-        }
+        self.authorize(c, "s3:GetObject", &src_bucket, &src_key).await?;
         let (etag, modified) = blocking(|| -> Result<_, ApiError> {
             let u = self.eng.get_upload(&c.bucket, &c.key, c.q("uploadId"))?;
             let algos: Vec<String> = [u.checksum_algo.clone()].into_iter().filter(|a| !a.is_empty()).collect();
@@ -1069,6 +929,95 @@ impl Server {
             w.el("ChecksumType", &obj.checksum_type);
         }
         Ok(xml_resp(StatusCode::OK, w.finish()))
+    }
+}
+
+/// Names the S3 operation a request is. Routing, authorization and metrics all use this name.
+pub(crate) fn classify(c: &Ctx) -> &'static str {
+    let any = |ks: &[&str]| ks.iter().any(|k| c.has(k));
+    if c.bucket.is_empty() {
+        return if c.method == Method::GET { "ListBuckets" } else { "MethodNotAllowed" };
+    }
+    if c.key.is_empty() {
+        return match c.method {
+            Method::PUT if c.has("tagging") => "PutBucketTagging",
+            Method::PUT if c.has("acl") => "PutBucketAcl",
+            Method::PUT if c.has("cors") => "PutBucketCors",
+            Method::PUT if c.has("ownershipControls") => "PutBucketOwnershipControls",
+            Method::PUT if c.has("policy") => "PutBucketPolicy",
+            Method::PUT if c.has("publicAccessBlock") => "PutPublicAccessBlock",
+            Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
+            Method::PUT => "CreateBucket",
+            Method::DELETE if c.has("tagging") => "DeleteBucketTagging",
+            Method::DELETE if c.has("cors") => "DeleteBucketCors",
+            Method::DELETE if c.has("policy") => "DeleteBucketPolicy",
+            Method::DELETE if c.has("publicAccessBlock") => "DeletePublicAccessBlock",
+            Method::DELETE if c.has("lifecycle") => "DeleteBucketLifecycle",
+            Method::DELETE if c.has("encryption") => "DeleteBucketEncryption",
+            Method::DELETE if c.has("website") => "DeleteBucketWebsite",
+            Method::DELETE if c.has("replication") => "DeleteBucketReplication",
+            Method::DELETE if any(&UNSUPPORTED_BUCKET_CONFIG) || c.has("ownershipControls") => "Unsupported",
+            Method::DELETE => "DeleteBucket",
+            Method::HEAD => "HeadBucket",
+            Method::POST if c.has("delete") => "DeleteObjects",
+            Method::POST => "Unsupported",
+            Method::GET if c.has("location") => "GetBucketLocation",
+            Method::GET if c.has("versioning") => "GetBucketVersioning",
+            Method::GET if c.has("acl") => "GetBucketAcl",
+            Method::GET if c.has("uploads") => "ListMultipartUploads",
+            Method::GET if c.has("tagging") => "GetBucketTagging",
+            Method::GET if c.has("cors") => "GetBucketCors",
+            Method::GET if c.has("ownershipControls") => "GetBucketOwnershipControls",
+            Method::GET if c.has("policyStatus") => "GetBucketPolicyStatus",
+            Method::GET if c.has("policy") => "GetBucketPolicy",
+            Method::GET if c.has("publicAccessBlock") => "GetPublicAccessBlock",
+            Method::GET if c.has("lifecycle") => "GetBucketLifecycle",
+            Method::GET
+                if any(&[
+                    "versions",
+                    "object-lock",
+                    "replication",
+                    "encryption",
+                    "website",
+                    "logging",
+                    "notification",
+                    "requestPayment",
+                ]) =>
+            {
+                "Unsupported"
+            }
+            Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
+            Method::GET => "ListObjects",
+            _ => "MethodNotAllowed",
+        };
+    }
+    let copy = !c.header("x-amz-copy-source").is_empty();
+    match c.method {
+        Method::PUT if c.has("uploadId") && c.has("partNumber") => {
+            if copy {
+                "UploadPartCopy"
+            } else {
+                "UploadPart"
+            }
+        }
+        Method::PUT if c.has("tagging") => "PutObjectTagging",
+        Method::PUT if c.has("acl") => "PutObjectAcl",
+        Method::PUT if any(&["retention", "legal-hold"]) => "Unsupported",
+        Method::PUT if copy => "CopyObject",
+        Method::PUT => "PutObject",
+        Method::GET if c.has("uploadId") => "ListParts",
+        Method::GET if c.has("acl") => "GetObjectAcl",
+        Method::GET if c.has("tagging") => "GetObjectTagging",
+        Method::GET if any(&["attributes", "torrent", "retention", "legal-hold"]) => "Unsupported",
+        Method::GET => "GetObject",
+        Method::HEAD => "HeadObject",
+        Method::DELETE if c.has("uploadId") => "AbortMultipartUpload",
+        Method::DELETE if c.has("tagging") => "DeleteObjectTagging",
+        Method::DELETE => "DeleteObject",
+        Method::POST if c.has("uploads") => "CreateMultipartUpload",
+        Method::POST if c.has("uploadId") => "CompleteMultipartUpload",
+        Method::POST => "Unsupported",
+        _ => "MethodNotAllowed",
     }
 }
 

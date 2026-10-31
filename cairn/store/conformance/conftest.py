@@ -22,6 +22,8 @@ from botocore.config import Config
 ADMIN = ("cairnadmin", "cairn-admin-secret")
 READER = ("cairnreader", "cairn-reader-secret")
 SCOPED = ("cairnlake", "cairn-lake-secret")  # may only touch buckets matching "lake-*"
+ANALYST = ("cairnanalyst", "cairn-analyst-secret")  # no buckets of its own: only what bucket policies grant
+RAWONLY = ("cairnraw", "cairn-raw-secret")  # a key policy: raw/ in pol-* buckets only
 REGION = "us-east-1"
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -42,8 +44,8 @@ def binary(tmp_path_factory) -> str:
 
 
 class Store:
-    def __init__(self, binary: str, data: str, port: int, fsync: bool = False):
-        self.binary, self.data, self.port, self.fsync = binary, data, port, fsync
+    def __init__(self, binary: str, data: str, port: int, fsync: bool = False, env: dict | None = None):
+        self.binary, self.data, self.port, self.fsync, self.extra_env = binary, data, port, fsync, env or {}
         self.endpoint = f"http://127.0.0.1:{port}"
         self.proc = None
 
@@ -53,7 +55,7 @@ class Store:
         env = {**os.environ, "CAIRN_STORE_ACCESS_KEY": ADMIN[0], "CAIRN_STORE_SECRET_KEY": ADMIN[1],
                "CAIRN_STORE_CREDENTIALS_FILE": str(creds), "CAIRN_STORE_DATA": self.data,
                "CAIRN_STORE_ADDR": f"127.0.0.1:{self.port}", "CAIRN_STORE_FSYNC": "true" if self.fsync else "false",
-               "CAIRN_STORE_LOG_LEVEL": "warn"}
+               "CAIRN_STORE_LOG_LEVEL": "warn", **self.extra_env}
         self.proc = subprocess.Popen([self.binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(100):
             try:
@@ -76,7 +78,12 @@ class Store:
 
 def credentials_file() -> list[dict]:
     return [{"access_key": READER[0], "secret_key": READER[1], "read_only": True},
-            {"access_key": SCOPED[0], "secret_key": SCOPED[1], "buckets": ["lake-*"]}]
+            {"access_key": SCOPED[0], "secret_key": SCOPED[1], "buckets": ["lake-*"]},
+            {"access_key": ANALYST[0], "secret_key": ANALYST[1], "buckets": ["no-such-bucket"], "actor": "urn:li:corpuser:analyst"},
+            {"access_key": RAWONLY[0], "secret_key": RAWONLY[1], "policy": {"Version": "2012-10-17", "Statement": [
+                {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::pol-*",
+                 "Condition": {"StringLike": {"s3:prefix": "raw/*"}}},
+                {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject"], "Resource": "arn:aws:s3:::pol-*/raw/*"}]}}]
 
 
 class RunningStore(Store):
@@ -112,6 +119,23 @@ def bucket(s3):
     name = "t-" + uuid.uuid4().hex[:16]
     s3.create_bucket(Bucket=name)
     return name
+
+
+@pytest.fixture
+def custom_store(request):
+    """Starts stores with extra environment: `custom_store({"CAIRN_STORE_...": ...})`."""
+    if os.environ.get("CAIRN_STORE_ENDPOINT"):
+        pytest.skip("needs a store this suite starts")
+    binary = request.getfixturevalue("binary")
+    started = []
+    with tempfile.TemporaryDirectory() as d:
+        def make(env: dict):
+            st = Store(binary, os.path.join(d, f"store{len(started)}"), _free_port(), env=env).start()
+            started.append(st)
+            return st
+        yield make
+        for st in started:
+            st.stop(kill=True)
 
 
 @pytest.fixture

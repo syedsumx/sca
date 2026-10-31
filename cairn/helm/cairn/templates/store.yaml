@@ -44,6 +44,15 @@ spec:
               value: {{ $u.domain | quote }}
             - name: CAIRN_STORE_BUCKETS
               value: {{ join "," $u.buckets | quote }}
+            - name: CAIRN_STORE_BLOCK_PUBLIC_ACCESS
+              value: {{ $u.blockPublicAccess | toString | quote }}
+            {{- if $u.pdp.enabled }}
+            - name: CAIRN_STORE_PDP_URL
+              value: {{ printf "http://%s-pdp:%v" (include "cairn.fullname" .) .Values.cairn.pdp.port | quote }}
+            - name: CAIRN_STORE_PDP_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ .Values.cairn.secrets.name }}, key: {{ .Values.cairn.secrets.serviceTokenKey }} }
+            {{- end }}
             - name: CAIRN_STORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.accessKeyKey }} }

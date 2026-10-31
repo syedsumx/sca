@@ -540,6 +540,10 @@ services:
       CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       CAIRN_STORE_BUCKETS: ${CAIRN_STORE_BUCKETS:-lakehouse}
       CAIRN_STORE_REGION: ${CAIRN_STORE_REGION:-us-east-1}
+      CAIRN_STORE_BLOCK_PUBLIC_ACCESS: ${CAIRN_STORE_BLOCK_PUBLIC_ACCESS:-true}
+      # Optional: ask Cairn's PDP (http://cairn-pdp:8810, with CAIRN_SERVICE_TOKEN) about every allowed request.
+      CAIRN_STORE_PDP_URL: ${CAIRN_STORE_PDP_URL:-}
+      CAIRN_STORE_PDP_TOKEN: ${CAIRN_STORE_PDP_TOKEN:-}
     ports:
       - "${CAIRN_MAPPED_STORE_PORT:-8333}:8333"
     volumes:

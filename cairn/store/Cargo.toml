@@ -17,8 +17,8 @@ hex = "0.4"
 hmac = "0.12"
 http-body-util = "0.1"
 httpdate = "1"
-hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
+hyper = { version = "1", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", "http1", "server-graceful"] }
 md-5 = "0.10"
 percent-encoding = "2"
 rand = "0.8"
