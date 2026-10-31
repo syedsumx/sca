@@ -170,6 +170,9 @@ pub struct Object {
     pub lock: Lock,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sse: Option<Sse>,
+    /// Multipart objects: each part's checksums (for GetObjectAttributes).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub part_checksums: Vec<BTreeMap<String, String>>,
 }
 
 /// Object lock state of one version: retention (mode and date) and legal hold.
@@ -1636,6 +1639,11 @@ impl Engine {
                 tags: u.tags.clone(),
                 lock: u.lock.clone(),
                 sse: u.sse.clone(),
+                part_checksums: if parts.iter().any(|p| !p.checksums.is_empty()) {
+                    parts.iter().map(|p| p.checksums.clone()).collect()
+                } else {
+                    vec![]
+                },
                 ..Default::default()
             };
             let before = Self::usage_tx(&tx, bucket)?;

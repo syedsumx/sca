@@ -35,6 +35,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             keyring: Default::default(),
             encrypt_by_default: false,
             sse_c_over_http: false,
+            website_domain: String::new(),
         },
     )
     .unwrap();

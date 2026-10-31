@@ -31,11 +31,11 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 7] =
-    ["notification", "replication", "logging", "website", "requestPayment", "accelerate", "intelligent-tiering"];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 4] = ["notification", "replication", "logging", "intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
-const STORED_HEADERS: [&str; 5] = ["content-encoding", "content-disposition", "content-language", "cache-control", "expires"];
+const STORED_HEADERS: [&str; 6] =
+    ["content-encoding", "content-disposition", "content-language", "cache-control", "expires", "x-amz-website-redirect-location"];
 
 pub(crate) fn object_headers(c: &Ctx) -> (String, BTreeMap<String, String>, BTreeMap<String, String>) {
     let ct = match c.header("content-type") {
@@ -173,7 +173,49 @@ impl Server {
             "GetBucketEncryption" => self.get_bucket_encryption(c),
             "PutBucketEncryption" => self.put_bucket_encryption(c, body).await,
             "DeleteBucketEncryption" => self.delete_config(c, "encryption"),
-            "DeleteBucketWebsite" | "DeleteBucketReplication" => {
+            "GetBucketWebsite" => self.get_website(c),
+            "PutBucketWebsite" => self.put_website(c, body).await,
+            "GetBucketRequestPayment" => {
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
+                let mut w = Writer::new("RequestPaymentConfiguration");
+                w.el("Payer", "BucketOwner");
+                Ok(xml_resp(StatusCode::OK, w.finish()))
+            }
+            "PutBucketRequestPayment" => {
+                let doc = self.read_small(c, body, 64 << 10).await?;
+                let root = xml::parse(&String::from_utf8_lossy(&doc))
+                    .filter(|r| r.name == "RequestPaymentConfiguration")
+                    .ok_or_else(|| e::MALFORMED_XML.clone())?;
+                match root.text_of("Payer").as_str() {
+                    "BucketOwner" => {
+                        blocking(|| self.eng.head_bucket(&c.bucket))?;
+                        Ok(empty(StatusCode::OK))
+                    }
+                    "Requester" => Err(e::REQUESTER_PAYS_UNSUPPORTED.clone()),
+                    _ => Err(e::MALFORMED_XML.clone()),
+                }
+            }
+            "GetBucketAccelerateConfiguration" => {
+                blocking(|| self.eng.head_bucket(&c.bucket))?;
+                Ok(xml_resp(StatusCode::OK, Writer::new("AccelerateConfiguration").finish()))
+            }
+            "PutBucketAccelerateConfiguration" => {
+                let doc = self.read_small(c, body, 64 << 10).await?;
+                let root = xml::parse(&String::from_utf8_lossy(&doc))
+                    .filter(|r| r.name == "AccelerateConfiguration")
+                    .ok_or_else(|| e::MALFORMED_XML.clone())?;
+                match root.text_of("Status").as_str() {
+                    "Suspended" => {
+                        blocking(|| self.eng.head_bucket(&c.bucket))?;
+                        Ok(empty(StatusCode::OK))
+                    }
+                    "Enabled" => Err(e::ACCELERATE_UNSUPPORTED.clone()),
+                    _ => Err(e::MALFORMED_XML.clone()),
+                }
+            }
+            "GetObjectAttributes" => self.get_object_attributes(c),
+            "DeleteBucketWebsite" => self.delete_config(c, "website"),
+            "DeleteBucketReplication" => {
                 // None of these can be set yet, so there is nothing to delete.
                 blocking(|| self.eng.head_bucket(&c.bucket))?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -545,6 +587,12 @@ impl Server {
         if meta_too_large(&um) {
             return Err(e::METADATA_TOO_LARGE.clone());
         }
+        if hs
+            .get("x-amz-website-redirect-location")
+            .is_some_and(|l| !(l.starts_with('/') || l.starts_with("http://") || l.starts_with("https://")))
+        {
+            return Err(e::INVALID_REDIRECT.clone());
+        }
         check_acl_headers(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
@@ -582,7 +630,7 @@ impl Server {
         Ok(r)
     }
 
-    fn get_object(&self, c: &Ctx, head: bool) -> R {
+    pub(crate) fn get_object(&self, c: &Ctx, head: bool) -> R {
         let part_number: u32 = match c.q("partNumber") {
             "" => 0,
             v => v.parse().ok().filter(|n| (1..=engine::MAX_PARTS).contains(n)).ok_or_else(|| e::INVALID_ARGUMENT.clone())?,
@@ -1096,6 +1144,9 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("lifecycle") => "PutBucketLifecycle",
             Method::PUT if c.has("object-lock") => "PutObjectLockConfiguration",
             Method::PUT if c.has("encryption") => "PutBucketEncryption",
+            Method::PUT if c.has("website") => "PutBucketWebsite",
+            Method::PUT if c.has("requestPayment") => "PutBucketRequestPayment",
+            Method::PUT if c.has("accelerate") => "PutBucketAccelerateConfiguration",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
             Method::PUT => "CreateBucket",
             Method::DELETE if c.has("tagging") => "DeleteBucketTagging",
@@ -1126,7 +1177,10 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("versions") => "ListObjectVersions",
             Method::GET if c.has("object-lock") => "GetObjectLockConfiguration",
             Method::GET if c.has("encryption") => "GetBucketEncryption",
-            Method::GET if any(&["replication", "website", "logging", "notification", "requestPayment"]) => "Unsupported",
+            Method::GET if c.has("website") => "GetBucketWebsite",
+            Method::GET if c.has("requestPayment") => "GetBucketRequestPayment",
+            Method::GET if c.has("accelerate") => "GetBucketAccelerateConfiguration",
+            Method::GET if any(&["replication", "logging", "notification", "intelligent-tiering"]) => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",
@@ -1152,7 +1206,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
         Method::GET if c.has("tagging") => "GetObjectTagging",
         Method::GET if c.has("retention") => "GetObjectRetention",
         Method::GET if c.has("legal-hold") => "GetObjectLegalHold",
-        Method::GET if any(&["attributes", "torrent"]) => "Unsupported",
+        Method::GET if c.has("attributes") => "GetObjectAttributes",
+        Method::GET if c.has("torrent") => "Unsupported",
         Method::GET => "GetObject",
         Method::HEAD => "HeadObject",
         Method::DELETE if c.has("uploadId") => "AbortMultipartUpload",
@@ -1162,6 +1217,71 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
         Method::POST if c.has("uploadId") => "CompleteMultipartUpload",
         Method::POST => "Unsupported",
         _ => "MethodNotAllowed",
+    }
+}
+
+impl Server {
+    /// GetObjectAttributes: the attributes named in x-amz-object-attributes, without the object's bytes.
+    fn get_object_attributes(&self, c: &Ctx) -> R {
+        let want: Vec<String> =
+            c.header("x-amz-object-attributes").split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        const KNOWN: [&str; 5] = ["ETag", "Checksum", "ObjectParts", "StorageClass", "ObjectSize"];
+        if want.is_empty() || want.iter().any(|a| !KNOWN.contains(&a.as_str())) {
+            return Err(e::ATTRIBUTES_REQUIRED.clone());
+        }
+        let version = c.q("versionId");
+        let obj = match blocking(|| self.eng.get_version(&c.bucket, &c.key, Some(version))) {
+            Ok(o) if o.delete_marker => {
+                let mut r = super::error_response(&e::NO_SUCH_KEY, &c.path, "", false);
+                set_header(&mut r, "x-amz-delete-marker", "true");
+                return Ok(r);
+            }
+            Ok(o) => o,
+            Err(err) => return Err(err.into()),
+        };
+        self.data_key(c, &c.bucket, &c.key, &obj.sse, false)?; // SSE-C objects need their key
+        let has = |a: &str| want.iter().any(|w| w == a);
+        let mut w = Writer::new("GetObjectAttributesResponse");
+        if has("ETag") {
+            w.el("ETag", &obj.etag);
+        }
+        if has("Checksum") && !obj.checksums.is_empty() {
+            w.open("Checksum");
+            checksum_elements(&mut w, &obj.checksums);
+            w.el("ChecksumType", &obj.checksum_type).close();
+        }
+        if has("ObjectParts") && obj.part_count > 0 {
+            let max: usize = c.header("x-amz-max-parts").parse().unwrap_or(1000).min(1000);
+            let marker: usize = c.header("x-amz-part-number-marker").parse().unwrap_or(0);
+            let total = obj.segments.len();
+            let end = (marker + max).min(total);
+            w.open("ObjectParts")
+                .el("PartsCount", total.to_string())
+                .el("PartNumberMarker", marker.to_string())
+                .el("NextPartNumberMarker", end.to_string())
+                .el("MaxParts", max.to_string())
+                .el("IsTruncated", (end < total).to_string());
+            for i in marker..end {
+                w.open("Part").el("PartNumber", (i + 1).to_string()).el("Size", obj.segments[i].size.to_string());
+                if let Some(cs) = obj.part_checksums.get(i) {
+                    checksum_elements(&mut w, cs);
+                }
+                w.close();
+            }
+            w.close();
+        }
+        if has("StorageClass") {
+            w.el("StorageClass", "STANDARD");
+        }
+        if has("ObjectSize") {
+            w.el("ObjectSize", obj.size.to_string());
+        }
+        let mut r = xml_resp(StatusCode::OK, w.finish());
+        set_header(&mut r, "last-modified", &http_time(obj.modified));
+        if !obj.version_id.is_empty() || !version.is_empty() {
+            set_header(&mut r, "x-amz-version-id", obj.version());
+        }
+        Ok(r)
     }
 }
 

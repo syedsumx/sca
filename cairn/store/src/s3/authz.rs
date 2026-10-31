@@ -68,6 +68,13 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "PutBucketEncryption" | "DeleteBucketEncryption" => "s3:PutEncryptionConfiguration",
         "GetBucketEncryption" => "s3:GetEncryptionConfiguration",
         "DeleteBucketWebsite" => "s3:DeleteBucketWebsite",
+        "PutBucketWebsite" => "s3:PutBucketWebsite",
+        "GetBucketWebsite" => "s3:GetBucketWebsite",
+        "GetBucketRequestPayment" => "s3:GetBucketRequestPayment",
+        "PutBucketRequestPayment" => "s3:PutBucketRequestPayment",
+        "GetBucketAccelerateConfiguration" => "s3:GetAccelerateConfiguration",
+        "PutBucketAccelerateConfiguration" => "s3:PutAccelerateConfiguration",
+        "GetObjectAttributes" => "s3:GetObjectAttributes",
         "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
         "GetObject" | "HeadObject" => "s3:GetObject",
         "PutObject" | "CopyObject" | "CreateMultipartUpload" | "UploadPart" | "UploadPartCopy" | "CompleteMultipartUpload" => {
@@ -97,6 +104,7 @@ pub fn versioned_action(action: &'static str, versioned: bool) -> &'static str {
         "s3:PutObjectTagging" => "s3:PutObjectVersionTagging",
         "s3:DeleteObjectTagging" => "s3:DeleteObjectVersionTagging",
         "s3:GetObjectAcl" => "s3:GetObjectVersionAcl",
+        "s3:GetObjectAttributes" => "s3:GetObjectVersionAttributes",
         "s3:PutObjectAcl" => "s3:PutObjectVersionAcl",
         a => a,
     }

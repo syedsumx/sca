@@ -123,6 +123,12 @@ errors! {
     QUOTA_EXCEEDED = "QuotaExceeded", 403, "The bucket's quota does not allow this write.";
     MALFORMED_JSON = "MalformedJSON", 400, "The request body must be a JSON document of the documented shape.";
     ADMIN_NOT_FOUND = "NotFound", 404, "No such admin API endpoint.";
+    NO_SUCH_WEBSITE = "NoSuchWebsiteConfiguration", 404, "The specified bucket does not have a website configuration";
+    WEBSITE_INDEX = "InvalidArgument", 400, "The IndexDocument Suffix is required and may not contain a slash.";
+    INVALID_REDIRECT = "InvalidRedirectLocation", 400, "The website redirect location must be non-empty and start with http://, https:// or /.";
+    REQUESTER_PAYS_UNSUPPORTED = "NotImplemented", 501, "Requester Pays is not supported: the bucket owner pays.";
+    ACCELERATE_UNSUPPORTED = "NotImplemented", 501, "Transfer Acceleration is not supported.";
+    ATTRIBUTES_REQUIRED = "InvalidArgument", 400, "x-amz-object-attributes must list one or more of ETag, Checksum, ObjectParts, StorageClass, ObjectSize.";
     NO_SUCH_VERSION = "NoSuchVersion", 404, "The specified version does not exist.";
     INVALID_REQUEST_DELETE_MARKER = "InvalidRequest", 400, "The source of a copy request may not specifically refer to a delete marker by version id.";
     LOCK_NEEDS_VERSIONING = "InvalidBucketState", 409, "An Object Lock configuration is present on this bucket, so the versioning state cannot be changed.";

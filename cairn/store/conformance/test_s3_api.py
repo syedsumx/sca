@@ -436,3 +436,20 @@ def test_health_and_metrics(store, s3, bucket):
     s3.put_object(Bucket=bucket, Key="m", Body=b"x")
     m = requests.get(f"{store.endpoint}/-/metrics").text
     assert 'cairn_store_requests_total{op="PutObject",status="200"}' in m and "cairn_store_objects" in m
+
+
+def test_refused_uploads_leave_the_connection_usable(store, s3, bucket):
+    """A request refused before its body is read (here: anonymous) must not poison the keep-alive
+    connection for the next request; a large refused body closes the connection instead."""
+    session = requests.Session()
+    for _ in range(20):
+        r = session.put(f"{store.endpoint}/{bucket}/denied", data=b"x" * 50_000, timeout=10)
+        assert r.status_code == 403
+        assert session.get(f"{store.endpoint}/-/healthy", timeout=10).status_code == 200
+    r = session.put(f"{store.endpoint}/{bucket}/denied", data=b"x" * (3 << 20), timeout=30)
+    assert r.status_code == 403 and r.headers.get("Connection", "").lower() == "close"
+    assert session.get(f"{store.endpoint}/-/healthy", timeout=10).status_code == 200
+    for i in range(30):  # signed clients too: refused writes followed by normal ones
+        with pytest.raises(ClientError):
+            s3.put_object(Bucket=bucket, Key="acl", Body=b"y" * 10_000, ACL="public-read")
+        s3.put_object(Bucket=bucket, Key=f"ok{i}", Body=b"z")

@@ -15,6 +15,7 @@ pub mod policy;
 mod post;
 pub mod sse;
 mod versioning;
+mod website;
 pub mod xml;
 
 use std::collections::BTreeMap;
@@ -57,6 +58,8 @@ pub struct Config {
     pub encrypt_by_default: bool,
     /// Accept SSE-C over plain HTTP (TLS terminated in front of the store).
     pub sse_c_over_http: bool,
+    /// Serve bucket websites at `<bucket>.<website_domain>` (empty: off).
+    pub website_domain: String,
 }
 
 pub struct Server {
@@ -78,6 +81,7 @@ pub struct Server {
     keyring: sse::Keyring,
     encrypt_by_default: bool,
     sse_c_over_http: bool,
+    website_domain: String,
 }
 
 /// One request, after routing and authentication.
@@ -149,6 +153,7 @@ impl Server {
             keyring: cfg.keyring,
             encrypt_by_default: cfg.encrypt_by_default,
             sse_c_over_http: cfg.sse_c_over_http,
+            website_domain: cfg.website_domain.to_ascii_lowercase(),
         })
     }
 
@@ -209,7 +214,39 @@ impl Server {
         B: hyper::body::Body<Data = Bytes> + Send + Unpin,
         B::Error: std::fmt::Display,
     {
-        let (parts, body) = req.into_parts();
+        let (parts, mut body) = req.into_parts();
+        let expect_continue =
+            parts.headers.get("expect").and_then(|v| v.to_str().ok()).is_some_and(|v| v.eq_ignore_ascii_case("100-continue"));
+        let (op, mut res, cors) = self.dispatch_parts(parts, &mut body, peer).await;
+        // A request refused before its body was read leaves that body on the connection. Read and drop
+        // what is left (up to 1 MiB) so the connection stays usable; otherwise ask the client to close it,
+        // instead of reading a large refused upload to the end.
+        if !drain(&mut body, 1 << 20, expect_continue).await {
+            res = match res {
+                Ok(mut r) => {
+                    r.headers_mut().insert("connection", HeaderValue::from_static("close"));
+                    Ok(r)
+                }
+                Err(err) => {
+                    let mut r = error_response(&err, "", "", false);
+                    r.headers_mut().insert("connection", HeaderValue::from_static("close"));
+                    Ok(r)
+                }
+            };
+        }
+        (op, res, cors)
+    }
+
+    async fn dispatch_parts<B>(
+        &self,
+        parts: hyper::http::request::Parts,
+        body: &mut B,
+        peer: Option<std::net::IpAddr>,
+    ) -> (&'static str, Result<Resp, ApiError>, Option<CorsCtx>)
+    where
+        B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+        B::Error: std::fmt::Display,
+    {
         let raw_path = parts.uri.path().to_string();
         let raw_query = parts.uri.query().unwrap_or("").to_string();
         let host = parts.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
@@ -234,6 +271,11 @@ impl Server {
                 }
             }
         };
+        if !self.website_domain.is_empty() {
+            if let Some(site) = host_only.strip_suffix(&format!(".{}", self.website_domain)) {
+                return ("Website", Ok(self.serve_website(site, &parts.method, &raw_path, &parts.headers, peer).await), None);
+            }
+        }
         if parts.method == Method::OPTIONS {
             return ("PreflightCORS", self.preflight(&bucket, &parts.headers), None);
         }
@@ -321,6 +363,38 @@ impl Server {
             _ => text(StatusCode::NOT_FOUND, ""),
         }
     }
+}
+
+/// Reads and drops the rest of a request body, up to `limit` bytes. false: more was left (or the client
+/// is waiting for 100-continue), so the connection should be closed after the response.
+async fn drain<B>(body: &mut B, limit: usize, expect_continue: bool) -> bool
+where
+    B: hyper::body::Body<Data = Bytes> + Send + Unpin,
+{
+    if body.is_end_stream() {
+        return true;
+    }
+    if expect_continue {
+        return false;
+    }
+    let mut seen = 0usize;
+    let read = async {
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(f) => {
+                    if let Some(d) = f.data_ref() {
+                        seen += d.len();
+                        if seen > limit {
+                            return false;
+                        }
+                    }
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    };
+    tokio::time::timeout(Duration::from_secs(10), read).await.unwrap_or(false)
 }
 
 // ------------------------------------------------------------------------------------------- responses

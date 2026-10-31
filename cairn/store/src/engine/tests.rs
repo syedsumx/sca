@@ -389,14 +389,15 @@ fn usage_counters_match_a_full_recount_and_quotas_hold() {
     e.delete_version("b", "a", marker.version_id.as_deref().unwrap(), false).unwrap();
     e.set_versioning("b", "Suspended").unwrap();
     put(&e, "b", "a", b"zz", &c).unwrap(); // replaces the null version
-    // A multipart upload: parts count while in progress, then become the object.
+                                           // A multipart upload: parts count while in progress, then become the object.
     let u = e.create_upload(Upload { bucket: "b".into(), key: "m".into(), ..Default::default() }).unwrap();
     for n in 1..=2u32 {
         let mut w = e.new_blob().unwrap();
         w.write(&vec![b'p'; if n == 1 { MIN_PART_SIZE as usize } else { 10 }]).unwrap();
         let md5 = w.md5();
         let seg = w.seal().unwrap();
-        e.put_part("b", "m", &u.id, Part { number: n, blob: seg.blob, size: seg.size, etag: hex::encode(&md5), md5, ..Default::default() }).unwrap();
+        e.put_part("b", "m", &u.id, Part { number: n, blob: seg.blob, size: seg.size, etag: hex::encode(&md5), md5, ..Default::default() })
+            .unwrap();
     }
     let live = e.usage("b").unwrap();
     assert_eq!(live, (7 + 2 + MIN_PART_SIZE + 10, 2));

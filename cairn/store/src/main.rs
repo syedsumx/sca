@@ -27,6 +27,7 @@
 //! CAIRN_STORE_MASTER_KEY        ... or one base64 key (or CAIRN_STORE_MASTER_KEY_FILE)
 //! CAIRN_STORE_ENCRYPT_BY_DEFAULT  with a keyring, encrypt new objects with SSE-S3 by default (true)
 //! CAIRN_STORE_SSE_C_ALLOW_HTTP  accept customer keys over plain HTTP, when TLS ends in front of the store (false)
+//! CAIRN_STORE_WEBSITE_DOMAIN    serve bucket websites at <bucket>.<domain> (public buckets only; off when empty)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -198,6 +199,7 @@ async fn serve(addr: String, data: String) {
                 keyring: keyring().unwrap_or_else(|e| fail("keyring", e)),
                 encrypt_by_default: env("CAIRN_STORE_ENCRYPT_BY_DEFAULT", "true") != "false",
                 sse_c_over_http: env("CAIRN_STORE_SSE_C_ALLOW_HTTP", "false") == "true",
+                website_domain: env("CAIRN_STORE_WEBSITE_DOMAIN", ""),
                 lifecycle_day_secs: env("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", "86400")
                     .parse()
                     .unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_DAY_SECONDS", e)),
