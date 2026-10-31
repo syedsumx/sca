@@ -165,6 +165,10 @@ errors! {
     NO_SUCH_BACKUP = "NotFound", 404, "No such backup.";
     BACKUP_EXISTS = "Conflict", 409, "A backup with this name exists.";
     SINK_FAILED = "BadGateway", 502, "The backup sink could not be reached or refused a request; see the store's log.";
+    NO_SUCH_REMOTE = "NotFound", 404, "No such remote: remotes are defined in CAIRN_STORE_REMOTES_FILE.";
+    REMOTE_IN_USE = "Conflict", 409, "This remote is mounted in another bucket.";
+    NOT_MOUNTED = "NotFound", 404, "This bucket has no remote mounted.";
+    REMOTE_FAILED = "BadGateway", 502, "The remote bucket could not be reached or refused a request; see the store's log.";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";

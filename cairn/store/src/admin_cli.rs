@@ -18,6 +18,8 @@
 //! cairn-store admin key-update <ak> [the same options]
 //! cairn-store admin key-rotate <ak>
 //! cairn-store admin key-delete <ak>
+//! cairn-store admin remote <bucket> | remote-mount <bucket> --remote ID [--write-back] | remote-unmount <bucket>
+//! cairn-store admin remote-sync <bucket> | remote-cache <bucket> [--prefix P] | remote-uncache <bucket> [--prefix P]
 //! cairn-store admin replication-resync <bucket>  (send objects written before replication was configured)
 //! cairn-store admin cluster                (nodes and blob health)
 //! cairn-store admin cluster-repair | cluster-rebalance [--limit N]
@@ -145,6 +147,19 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);
             ("POST", "compact".to_string(), Some(serde_json::json!({"min_dead": min})))
         }
+        "remote" => ("GET", format!("buckets/{}/remote", name()), None),
+        "remote-mount" => {
+            let remote = flag("--remote").unwrap_or_else(|| usage());
+            let wb = rest.iter().any(|a| a.as_str() == "--write-back");
+            ("PUT", format!("buckets/{}/remote", name()), Some(serde_json::json!({"remote": remote, "write_back": wb})))
+        }
+        "remote-unmount" => ("DELETE", format!("buckets/{}/remote", name()), None),
+        "remote-sync" => ("POST", format!("buckets/{}/remote/sync", name()), None),
+        "remote-cache" | "remote-uncache" => (
+            "POST",
+            format!("buckets/{}/remote/{}", name(), cmd.trim_start_matches("remote-")),
+            Some(serde_json::json!({"prefix": flag("--prefix").unwrap_or_default()})),
+        ),
         "replication-resync" => ("POST", format!("buckets/{}/replication/resync", name()), None),
         "cluster" => ("GET", "cluster".to_string(), None),
         "cluster-repair" => ("POST", "cluster/repair".to_string(), None),

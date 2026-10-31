@@ -44,6 +44,8 @@
 //! CAIRN_STORE_BACKUP_SINKS_FILE  S3-compatible backup sinks: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_BACKUP_SINK_SCHEDULE  back up to this sink on a schedule (off when empty) ...
 //! CAIRN_STORE_BACKUP_SINK_INTERVAL / _KEEP  ... every N seconds (86400), keeping the newest N scheduled ones (7)
+//! CAIRN_STORE_REMOTES_FILE      remote buckets that can be mounted into local ones: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_REMOTE_SYNC_INTERVAL  seconds between syncs of mounted remote buckets (60)
 //! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
 //! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
@@ -411,6 +413,11 @@ async fn serve(addr: String, data: String) {
                 },
                 cluster: cluster.clone(),
                 backup_sinks: backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e)),
+                remotes: match env("CAIRN_STORE_REMOTES_FILE", "") {
+                    f if f.is_empty() => vec![],
+                    f => s3::remote::load_specs(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)), "remote")
+                        .unwrap_or_else(|e| fail(&f, e)),
+                },
             },
         )
         .unwrap_or_else(|e| fail("configure", e)),
@@ -419,6 +426,7 @@ async fn serve(addr: String, data: String) {
         env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or_else(|e| fail("CAIRN_STORE_LIFECYCLE_INTERVAL", e));
     tokio::spawn(server.clone().run_events());
     tokio::spawn(server.clone().run_cluster());
+    tokio::spawn(server.clone().run_remote_sync(Duration::from_secs(num("CAIRN_STORE_REMOTE_SYNC_INTERVAL", "60").max(1))));
     let sink_auto = env("CAIRN_STORE_BACKUP_SINK_SCHEDULE", "");
     if !sink_auto.is_empty() {
         if !backup_sinks().unwrap_or_default().iter().any(|s| s.id == sink_auto) {

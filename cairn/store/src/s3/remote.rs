@@ -68,7 +68,6 @@ pub fn load_specs(text: &str, what: &str) -> Result<Vec<RemoteSpec>, String> {
 
 /// One listed object.
 #[derive(Clone, Debug, Default)]
-#[allow(dead_code)] // etag and modified: for mounted remote buckets
 pub struct Listed {
     /// The key below the spec's prefix.
     pub key: String,
@@ -76,6 +75,15 @@ pub struct Listed {
     pub etag: String,
     /// Milliseconds since the epoch.
     pub modified: u64,
+}
+
+/// What a HEAD tells about an object.
+#[derive(Clone, Debug, Default)]
+pub struct HeadInfo {
+    pub len: u64,
+    pub etag: String,
+    pub content_type: String,
+    pub meta: std::collections::BTreeMap<String, String>,
 }
 
 pub struct Remote {
@@ -201,6 +209,30 @@ impl Remote {
             let len = resp.headers().get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
             let etag = resp.headers().get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string();
             Ok(Some((len, etag)))
+        })
+    }
+
+    /// An object's size, ETag, content type and user metadata (None: no such object).
+    pub fn head_info(&self, key: &str) -> std::io::Result<Option<HeadInfo>> {
+        let url = self.url(key, "");
+        self.rt.block_on(async {
+            let resp = self.send("HEAD", &url, &[], small(Bytes::new())).await?;
+            if resp.status() == hyper::StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            let resp = Self::check(resp, &format!("HEAD {key} on {}", self.spec.id)).await?;
+            let h = resp.headers();
+            let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+            let meta = h
+                .iter()
+                .filter_map(|(k, v)| Some((k.as_str().strip_prefix("x-amz-meta-")?.to_string(), v.to_str().ok()?.to_string())))
+                .collect();
+            Ok(Some(HeadInfo {
+                len: get("content-length").parse().unwrap_or(0),
+                etag: get("etag").trim_matches('"').to_string(),
+                content_type: get("content-type"),
+                meta,
+            }))
         })
     }
 

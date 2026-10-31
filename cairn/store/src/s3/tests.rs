@@ -47,6 +47,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             files_basic_http: false,
             cluster: None,
             backup_sinks: vec![],
+            remotes: vec![],
         },
     )
     .unwrap();

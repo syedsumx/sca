@@ -16,6 +16,7 @@ mod files;
 mod handlers;
 pub mod keys;
 pub mod lifecycle;
+pub mod mounts;
 mod objectlock;
 pub mod policy;
 mod post;
@@ -93,6 +94,8 @@ pub struct Config {
     pub cluster: Option<cluster::ClusterConfig>,
     /// S3-compatible buckets backups can be written to.
     pub backup_sinks: Vec<remote::RemoteSpec>,
+    /// Remote buckets that can be mounted into local buckets.
+    pub remotes: Vec<remote::RemoteSpec>,
 }
 
 pub struct Server {
@@ -128,6 +131,7 @@ pub struct Server {
     pub(crate) sftp_metrics: sftp::SftpMetrics,
     pub(crate) cluster: Option<Arc<cluster::Cluster>>,
     pub(crate) sinks: Option<sinks::Sinks>,
+    pub(crate) remotes: Arc<BTreeMap<String, remote::Remote>>,
 }
 
 /// One request, after routing and authentication.
@@ -165,12 +169,16 @@ impl Server {
     pub fn new(eng: Arc<Engine>, cfg: Config) -> Result<Server, String> {
         let tiers = match cfg.tiers.is_empty() {
             true => None,
-            false => {
-                let t = Arc::new(tiering::Tiers::new(cfg.tiers.clone())?);
-                eng.set_tiers(t.clone());
-                Some(t)
-            }
+            false => Some(Arc::new(tiering::Tiers::new(cfg.tiers.clone())?)),
         };
+        let mut remotes = BTreeMap::new();
+        for r in cfg.remotes {
+            remotes.insert(r.id.clone(), remote::Remote::new(r)?);
+        }
+        let remotes = Arc::new(remotes);
+        if tiers.is_some() || !remotes.is_empty() {
+            eng.set_tiers(Arc::new(mounts::TierRouter { tiers: tiers.clone(), remotes: remotes.clone() }));
+        }
         if cfg.credentials.is_empty() {
             return Err("at least one credential is required".into());
         }
@@ -223,6 +231,7 @@ impl Server {
             files_basic_http: cfg.files_basic_http,
             sftp_metrics: Default::default(),
             cluster,
+            remotes,
             sinks: match cfg.backup_sinks.is_empty() {
                 true => None,
                 false => Some(sinks::Sinks::new(cfg.backup_sinks)?),

@@ -345,7 +345,7 @@ impl Server {
 
     /// Delivers what is in the outbox, once. Returns the number of events delivered.
     pub async fn deliver_events(&self) -> usize {
-        if self.delivery.is_none() && self.replicator.is_none() {
+        if self.delivery.is_none() && self.replicator.is_none() && self.remotes.is_empty() {
             return 0;
         }
         let batch = match blocking(|| self.eng.outbox(500)) {
@@ -371,13 +371,19 @@ impl Server {
                 let (t, b) = r.split_once(':').unwrap_or((r, ""));
                 (t.to_string(), b.to_string())
             });
-            let result: Result<(), (bool, String)> = match &replication {
-                Some((target, bucket)) => match self.replicate(target, bucket, &ent).await {
+            let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
+            let result: Result<(), (bool, String)> = match (&replication, &mount) {
+                (_, Some(remote)) => match self.write_back(remote, &ent).await {
                     Ok(()) => Ok(()),
                     Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
                     Err(super::replication::Failure::Retry(m)) => Err((false, m)),
                 },
-                None => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
+                (Some((target, bucket)), None) => match self.replicate(target, bucket, &ent).await {
+                    Ok(()) => Ok(()),
+                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                },
+                (None, None) => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
                     None => Err((true, "event target no longer configured".into())),
                     Some((d, t)) => {
                         let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
@@ -385,7 +391,7 @@ impl Server {
                     }
                 },
             };
-            let metrics = if replication.is_some() { &self.repl_metrics } else { &self.event_metrics };
+            let metrics = if replication.is_some() || mount.is_some() { &self.repl_metrics } else { &self.event_metrics };
             match result {
                 Ok(()) => {
                     metrics.delivered.fetch_add(1, Ordering::Relaxed);

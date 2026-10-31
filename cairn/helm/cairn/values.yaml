@@ -511,6 +511,9 @@ cairn:
       schedule: ""            # a sink id: back up there every intervalSeconds, keeping the newest `keep`
       intervalSeconds: 86400
       keep: 7
+    # Remote buckets that can be mounted into local buckets: a Secret with a "remotes.json" ([{"id",
+    # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
+    remotesSecret: ""
     # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka", "id": ...}]).
     eventTargetsSecret: ""
     # Replication destinations: a Secret with a "targets.json" ([{"id", "endpoint", "access_key",

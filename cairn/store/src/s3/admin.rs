@@ -12,6 +12,10 @@
 //! POST   /-/admin/v1/backups                   {"name", "sink"?}: an online backup (to a local directory, or a sink)
 //! GET    /-/admin/v1/backups[?sink=<id>]       backups (local, or in a sink)
 //! DELETE /-/admin/v1/backups/{name}?sink=<id>  a backup in a sink, and the blobs no other backup needs
+//! GET    /-/admin/v1/buckets/{bucket}/remote  a mounted remote bucket: settings, objects mirrored and cached
+//! PUT    /-/admin/v1/buckets/{bucket}/remote  {"remote": id, "write_back": bool} mount a remote (CAIRN_STORE_REMOTES_FILE)
+//! DELETE /-/admin/v1/buckets/{bucket}/remote  unmount
+//! POST   /-/admin/v1/buckets/{bucket}/remote/sync | cache | uncache   {"prefix"} for cache and uncache
 //! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
 //! GET    /-/admin/v1/keys                      access keys (never their secrets)
 //! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
@@ -246,6 +250,10 @@ impl Server {
                 Ok(json_resp(StatusCode::OK, json!({"buckets": out})))
             }
             (&Method::GET, ["buckets", b]) => Ok(json_resp(StatusCode::OK, self.bucket_json(b)?)),
+            (m, ["buckets", b, "remote", rest @ ..]) => {
+                let (status, v) = self.remote_admin(m, b, rest, &body, &a.cred.access_key)?;
+                Ok(json_resp(status, v))
+            }
             (&Method::POST, ["buckets", b, "replication", "resync"]) => {
                 let audit = crate::audit::Audit {
                     category: "store",

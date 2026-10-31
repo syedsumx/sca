@@ -222,12 +222,15 @@ pub struct Object {
     /// Bucket replication: PENDING, COMPLETED or FAILED (empty: not replicated).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub replication_status: String,
+    /// Mounted remote buckets: the ETag of the remote object this version mirrors or was written back as.
+    #[serde(rename = "re", default, skip_serializing_if = "String::is_empty")]
+    pub remote_etag: String,
 }
 
 impl Object {
-    /// The storage class: the tier holding its bytes, else STANDARD.
+    /// The storage class: the tier holding its bytes, else STANDARD (also for a mounted remote's bytes).
     pub fn storage_class(&self) -> &str {
-        self.segments.iter().find(|s| !s.tier.is_empty()).map(|s| s.tier.as_str()).unwrap_or("STANDARD")
+        self.segments.iter().find(|s| !s.tier.is_empty() && !s.tier.starts_with('@')).map(|s| s.tier.as_str()).unwrap_or("STANDARD")
     }
 }
 
@@ -365,6 +368,8 @@ impl ReplConfig {
 
 /// The outbox target prefix of replication deliveries: "@replicate:<target>:<destination bucket>".
 pub const REPLICATE: &str = "@replicate:";
+/// Outbox targets of write-back mounts: "@mount:<remote>".
+pub const MOUNT: &str = "@mount:";
 
 /// An event waiting in the outbox.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -1067,6 +1072,21 @@ impl Engine {
         if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle && ev.replica.is_none() {
             Self::queue_replication(tx, bucket, &name, o, ev)?;
         }
+        // Write-back mounts: changes made here go to the remote (not those that came from it).
+        if (event.starts_with("ObjectCreated:") || event.starts_with("ObjectRemoved:")) && ev.replica.is_none() {
+            if let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "remote"))?.map(|v| v.value().to_vec()) {
+                #[derive(Deserialize)]
+                struct M {
+                    remote: String,
+                    #[serde(default)]
+                    write_back: bool,
+                }
+                let m: M = serde_json::from_slice(&doc)?;
+                if m.write_back {
+                    Self::outbox_in(tx, bucket, &format!("{MOUNT}{}", m.remote), "", &name, o, ev)?;
+                }
+            }
+        }
         let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "notification"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
         let rules: Vec<NotifyRule> = serde_json::from_slice(&doc)?;
         for r in rules.iter().filter(|r| r.matches(&name, &o.key)) {
@@ -1131,6 +1151,22 @@ impl Engine {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// A bucket's current objects (not old versions or delete markers).
+    pub fn current_objects(&self, bucket: &str) -> Result<Vec<Object>> {
+        let r = self.db.begin_read()?;
+        Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
+        let t = r.open_table(OBJECTS)?;
+        let mut out = vec![];
+        for row in t.range((bucket, "")..)? {
+            let (k, v) = row?;
+            if k.value().0 != bucket {
+                break;
+            }
+            out.push(serde_json::from_slice(v.value())?);
+        }
+        Ok(out)
     }
 
     /// For a replica: is a version at least as new already here (the current one, or a newer delete
@@ -2234,6 +2270,19 @@ impl Engine {
     /// the version still has the segments `expect` (it was not rewritten meanwhile). The local copies are
     /// then collected. Returns whether the version was changed.
     pub fn transition(&self, bucket: &str, key: &str, version: &str, expect: &[Segment], new: Vec<Segment>) -> Result<bool> {
+        self.transition_with(bucket, key, version, expect, new, None)
+    }
+
+    /// `transition`, also setting the version's encryption (`sse`: Some(new value)) with its new bytes.
+    pub fn transition_with(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: &str,
+        expect: &[Segment],
+        new: Vec<Segment>,
+        sse: Option<Option<Sse>>,
+    ) -> Result<bool> {
         let tx = self.begin_write()?;
         let done = {
             let mut t = tx.open_table(OBJECTS)?;
@@ -2244,6 +2293,9 @@ impl Engine {
                         false
                     } else {
                         o.segments = new;
+                        if let Some(x) = sse {
+                            o.sse = x;
+                        }
                         t.insert((bucket, key), serde_json::to_vec(&o)?.as_slice())?;
                         true
                     }
@@ -2254,6 +2306,9 @@ impl Engine {
                     match Self::versions_in(&vt, bucket, key)?.into_iter().find(|(_, o)| o.version_id == version) {
                         Some((order, mut o)) if !o.delete_marker && o.segments == expect => {
                             o.segments = new;
+                            if let Some(x) = sse {
+                                o.sse = x;
+                            }
                             vt.insert((bucket, key, order.as_str()), serde_json::to_vec(&o)?.as_slice())?;
                             true
                         }
