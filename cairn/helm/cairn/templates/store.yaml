@@ -86,6 +86,10 @@ spec:
             - name: CAIRN_STORE_EVENT_TARGETS_FILE
               value: /etc/cairn-store-events/targets.json
             {{- end }}
+            {{- if $u.replicationTargetsSecret }}
+            - name: CAIRN_STORE_REPLICATION_TARGETS_FILE
+              value: /etc/cairn-store-replication/targets.json
+            {{- end }}
             {{- if $u.extraCredentialsSecret }}
             - name: CAIRN_STORE_CREDENTIALS_FILE
               value: /etc/cairn-store/credentials.json
@@ -136,6 +140,11 @@ spec:
               mountPath: /etc/cairn-store-events
               readOnly: true
             {{- end }}
+            {{- if $u.replicationTargetsSecret }}
+            - name: replication
+              mountPath: /etc/cairn-store-replication
+              readOnly: true
+            {{- end }}
             {{- if $u.tlsSecret }}
             - name: tls
               mountPath: /etc/cairn-store-tls
@@ -146,7 +155,7 @@ spec:
               mountPath: /etc/cairn-store-client-ca
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.tlsSecret }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tlsSecret }}
       volumes:
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
@@ -162,6 +171,11 @@ spec:
         - name: events
           secret:
             secretName: {{ $u.eventTargetsSecret }}
+        {{- end }}
+        {{- if $u.replicationTargetsSecret }}
+        - name: replication
+          secret:
+            secretName: {{ $u.replicationTargetsSecret }}
         {{- end }}
         {{- if $u.tlsSecret }}
         - name: tls

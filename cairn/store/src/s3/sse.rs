@@ -200,6 +200,20 @@ impl Server {
         })
     }
 
+    /// The data key of a version encrypted with a keyring key (None: not encrypted). SSE-C keys are not
+    /// available to the store.
+    pub(crate) fn unwrap_key(&self, bucket: &str, obj: &crate::engine::Object) -> Result<Option<Key>, ApiError> {
+        match &obj.sse {
+            None => Ok(None),
+            Some(s) if s.alg == "SSE-C" => Err(e::SSE_C_REQUIRED.clone()),
+            Some(s) => {
+                let kek = self.keyring.keys.get(&s.key_id).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
+                let wrapped = B64.decode(&s.wrapped).map_err(|_| e::INTERNAL.clone())?;
+                crypt::unwrap(kek, &wrapped, &aad(bucket, &obj.key)).map(Some).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())
+            }
+        }
+    }
+
     pub(crate) fn sse_headers(r: &mut Resp, sse: &Option<Sse>) {
         match sse.as_ref().map(|s| s.alg.as_str()) {
             Some("SSE-C") => {

@@ -24,6 +24,19 @@ use crate::s3::auth::{aws_encode, hmac_sha256};
 
 /// SigV4 headers (service "s3", signed payload).
 pub fn sign(method: &str, url: &str, body: &[u8], ak: &str, sk: &str, region: &str, now: time::OffsetDateTime) -> Vec<(String, String)> {
+    sign_with_payload(method, url, &hex::encode(Sha256::digest(body)), ak, sk, region, now)
+}
+
+/// SigV4 headers for a payload hash (a hex SHA-256, or "UNSIGNED-PAYLOAD").
+pub fn sign_with_payload(
+    method: &str,
+    url: &str,
+    payload: &str,
+    ak: &str,
+    sk: &str,
+    region: &str,
+    now: time::OffsetDateTime,
+) -> Vec<(String, String)> {
     let amz_date = now.format(time::macros::format_description!("[year][month][day]T[hour][minute][second]Z")).unwrap_or_default();
     let date = &amz_date[..8];
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
@@ -39,7 +52,7 @@ pub fn sign(method: &str, url: &str, body: &[u8], ak: &str, sk: &str, region: &s
         .collect();
     pairs.sort();
     let cq = pairs.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join("&");
-    let payload = hex::encode(Sha256::digest(body));
+    let payload = payload.to_string();
     let canonical = format!(
         "{method}\n{}\n{cq}\nhost:{host}\nx-amz-content-sha256:{payload}\nx-amz-date:{amz_date}\n\nhost;x-amz-content-sha256;x-amz-date\n{payload}",
         aws_encode(path.as_bytes(), true)

@@ -465,9 +465,18 @@ Export the trail with `GET /-/admin/v1/audit?after=<seq>&format=jsonl` (SigV4, a
 - **Metrics.** `cairn_store_events_{delivered,failed,dropped}_total` and `cairn_store_events_pending`.
 - **Helm.** Put the targets file in a Secret and set `cairn.store.eventTargetsSecret`.
 
+**Replication.** A bucket can copy its new objects to a bucket on another S3 endpoint (another Cairn Store, or any S3), set with `PutBucketReplication`.
+
+- **Destinations.** The operator defines them in `CAIRN_STORE_REPLICATION_TARGETS_FILE`: `[{"id": "dr", "endpoint": "https://store.dr.example.com", "access_key": "...", "secret_key_file": "/etc/...", "region": "us-east-1"}]`. A rule names one as its Role (`arn:cairn:store:::dr`) and gives the destination bucket (`arn:aws:s3:::lake-copy`), so bucket owners can only send data where the operator allowed. In Helm, put `targets.json` in a Secret and set `cairn.store.replicationTargetsSecret`.
+- **What is copied.** Versioning must be enabled. New versions matching a rule (by prefix and tags; rules have priorities) are copied with their metadata, tags, legal hold and the retention still in force (the destination bucket then needs object lock); delete markers too when the rule says `DeleteMarkerReplication: Enabled`. Permanent deletes of a version are not replicated, as in S3. Objects larger than `CAIRN_STORE_REPLICATION_MULTIPART_BYTES` (default 256 MiB) are sent as multipart uploads of `CAIRN_STORE_REPLICATION_PART_BYTES` (default 64 MiB).
+- **Delivery.** A copy is recorded in the same transaction as the write, then delivered at least once and in order per destination, retried with backoff while the destination is down. `HeadObject` reports `x-amz-replication-status`: `PENDING`, then `COMPLETED`, or `FAILED` when the destination refuses the copy for good (for example, a missing bucket or a refused key) or it is still undeliverable after `CAIRN_STORE_EVENT_MAX_AGE_HOURS`.
+- **Encryption.** Encrypted objects are decrypted and sent over the connection, so use `https` endpoints; the destination encrypts with its own keys. Objects encrypted with customer keys (SSE-C) cannot be read by the store and are marked `FAILED`.
+- **Not supported** (refused with `NotImplemented`, never accepted and ignored): replicating existing objects, replication time control, replication metrics, destination encryption settings and source selection criteria.
+- **Metrics.** `cairn_store_replication_delivered_total`, `_failed_total`, `_dropped_total`; `cairn_store_events_pending` counts the outbox, copies included.
+
 **Static websites.** With `CAIRN_STORE_WEBSITE_DOMAIN` set (for example `sites.example.com`), a bucket with a website configuration (`PutBucketWebsite`) is served at `<bucket>.sites.example.com`. Configurations support index and error documents, redirect-all, routing rules that redirect by key prefix or error code, and per-object redirects (`x-amz-website-redirect-location`). Website requests are anonymous, so a site is served only if its bucket policy grants public read and public access is allowed: hosting never exposes a bucket by itself.
 
-**Other S3 calls.** `GetObjectAttributes` (ETag, checksums, parts with their checksums, size). Request payment always answers `BucketOwner`, and setting `Requester` is refused. Transfer acceleration can only be `Suspended`. Replication and intelligent tiering are refused with `NotImplemented` until their features exist.
+**Other S3 calls.** `GetObjectAttributes` (ETag, checksums, parts with their checksums, size). Request payment always answers `BucketOwner`, and setting `Requester` is refused. Transfer acceleration can only be `Suspended`. Intelligent tiering is refused with `NotImplemented` until that feature exists.
 
 **Encryption at rest.** Give the store a key and it encrypts every new object (SSE-S3): set `CAIRN_STORE_MASTER_KEY` (a base64 32-byte key, `openssl rand -base64 32`), or `CAIRN_STORE_KEYRING_FILE` for several keys. Each object gets its own data key; its bytes are encrypted with AES-256-GCM in 64 KiB chunks, so ranged reads stay fast and any tampering is detected. The data key is stored only wrapped by a keyring key.
 
@@ -488,7 +497,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Restoring.** A backup is a complete data directory: check it with `cairn-store fsck -data <backup>`, and restore by starting the store on a copy of it. Event deliveries that were pending are not part of a backup, so they are not sent again. Backups are recorded in the audit trail.
 - **Helm.** Set `cairn.store.backups.enabled` for a second volume.
 
-**Limits.** This release runs on one node: there is no replication, so the volume and its backups are the only copies. Keep backups on other storage, or take volume snapshots. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
+**Limits.** This release runs on one node: the volume, its backups and any replicated buckets are the only copies. Keep backups on other storage, or take volume snapshots. Objects can be up to 5 GiB in one request, and up to 10,000 parts of 5 GiB each with multipart uploads.
 
 **Quotas and the admin API.** Cairn's admin API for the store lives under `/-/admin/v1/`. Requests are signed with SigV4 by an admin key, so any AWS SDK signer works; bodies and responses are JSON.
 

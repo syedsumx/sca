@@ -38,6 +38,7 @@
 //! CAIRN_STORE_TLS_PROBE_CERT/KEY  client certificate for the healthcheck command under mutual TLS
 //! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
+//! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -252,6 +253,11 @@ async fn serve(addr: String, data: String) {
                 },
                 log_requests: env("CAIRN_STORE_LOG_REQUESTS", "false") == "true",
                 tls: !env("CAIRN_STORE_TLS_CERT", "").is_empty(),
+                replication_targets: match env("CAIRN_STORE_REPLICATION_TARGETS_FILE", "") {
+                    f if f.is_empty() => vec![],
+                    f => s3::replication::load_targets(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)))
+                        .unwrap_or_else(|e| fail(&f, e)),
+                },
                 backup_root: match env("CAIRN_STORE_BACKUP_DIR", "") {
                     d if d.is_empty() => None,
                     d => {

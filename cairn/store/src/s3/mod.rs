@@ -15,6 +15,7 @@ pub mod lifecycle;
 mod objectlock;
 pub mod policy;
 mod post;
+pub mod replication;
 pub mod sse;
 mod trail;
 mod versioning;
@@ -73,6 +74,8 @@ pub struct Config {
     pub tls: bool,
     /// Where online backups are written (None: backups are off).
     pub backup_root: Option<std::path::PathBuf>,
+    /// Bucket replication destinations.
+    pub replication_targets: Vec<replication::ReplTarget>,
 }
 
 pub struct Server {
@@ -100,6 +103,9 @@ pub struct Server {
     access_logs: accesslog::AccessLogs,
     log_requests: bool,
     backup_root: Option<std::path::PathBuf>,
+    pub(crate) replicator: Option<replication::Replicator>,
+    pub(crate) repl_metrics: events::EventMetrics,
+    pub(crate) event_max_age_ms: u64,
 }
 
 /// One request, after routing and authentication.
@@ -181,6 +187,12 @@ impl Server {
             access_logs: Default::default(),
             log_requests: cfg.log_requests,
             backup_root: cfg.backup_root,
+            replicator: match cfg.replication_targets.is_empty() {
+                true => None,
+                false => Some(replication::Replicator::new(cfg.replication_targets)?),
+            },
+            repl_metrics: Default::default(),
+            event_max_age_ms: cfg.event_max_age_hours.max(1) * 3_600_000,
         })
     }
 
@@ -435,12 +447,13 @@ impl Server {
                         }
                     }
                 }
-                let em = &self.event_metrics;
-                for (name, v) in [("delivered", &em.delivered), ("failed", &em.failed), ("dropped", &em.dropped)] {
-                    body.push_str(&format!(
-                        "# TYPE cairn_store_events_{name}_total counter\ncairn_store_events_{name}_total {}\n",
-                        v.load(Ordering::Relaxed)
-                    ));
+                for (kind, em) in [("events", &self.event_metrics), ("replication", &self.repl_metrics)] {
+                    for (name, v) in [("delivered", &em.delivered), ("failed", &em.failed), ("dropped", &em.dropped)] {
+                        body.push_str(&format!(
+                            "# TYPE cairn_store_{kind}_{name}_total counter\ncairn_store_{kind}_{name}_total {}\n",
+                            v.load(Ordering::Relaxed)
+                        ));
+                    }
                 }
                 if let Ok(n) = tokio::task::block_in_place(|| self.eng.outbox_len()) {
                     body.push_str(&format!("# TYPE cairn_store_events_pending gauge\ncairn_store_events_pending {n}\n"));

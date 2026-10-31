@@ -41,6 +41,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             log_requests: false,
             tls: false,
             backup_root: None,
+            replication_targets: vec![],
         },
     )
     .unwrap();

@@ -80,7 +80,8 @@ pub fn action_of(op: &str) -> Option<&'static str> {
         "PutBucketLogging" => "s3:PutBucketLogging",
         "GetBucketLogging" => "s3:GetBucketLogging",
         "GetBucketNotification" => "s3:GetBucketNotification",
-        "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
+        "PutBucketReplication" | "DeleteBucketReplication" => "s3:PutReplicationConfiguration",
+        "GetBucketReplication" => "s3:GetReplicationConfiguration",
         "GetObject" | "HeadObject" => "s3:GetObject",
         "PutObject" | "CopyObject" | "CreateMultipartUpload" | "UploadPart" | "UploadPartCopy" | "CompleteMultipartUpload" => {
             "s3:PutObject"

@@ -31,7 +31,7 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 }
 
 /// Bucket configuration Cairn Store does not support yet: setting it is refused, never silently ignored.
-const UNSUPPORTED_BUCKET_CONFIG: [&str; 2] = ["replication", "intelligent-tiering"];
+const UNSUPPORTED_BUCKET_CONFIG: [&str; 1] = ["intelligent-tiering"];
 
 /// Headers stored with an object and returned on GET/HEAD.
 const STORED_HEADERS: [&str; 6] =
@@ -220,11 +220,9 @@ impl Server {
             }
             "GetObjectAttributes" => self.get_object_attributes(c),
             "DeleteBucketWebsite" => self.delete_config(c, "website"),
-            "DeleteBucketReplication" => {
-                // None of these can be set yet, so there is nothing to delete.
-                blocking(|| self.eng.head_bucket(&c.bucket))?;
-                Ok(empty(StatusCode::NO_CONTENT))
-            }
+            "DeleteBucketReplication" => self.delete_config(c, "replication"),
+            "GetBucketReplication" => self.get_replication(c),
+            "PutBucketReplication" => self.put_replication(c, body).await,
             // ---------------------------------------------------------------- objects
             "PutObject" => self.put_object(c, body).await,
             "CopyObject" => self.copy_object(c).await,
@@ -736,6 +734,9 @@ impl Server {
         }
         Self::lock_headers(&mut r, &obj);
         Self::sse_headers(&mut r, &obj.sse);
+        if !obj.replication_status.is_empty() {
+            set_header(&mut r, "x-amz-replication-status", &obj.replication_status);
+        }
         if version.is_empty() {
             if let Some(x) = self.expiration_header(&c.bucket, &obj) {
                 set_header(&mut r, "x-amz-expiration", &x);
@@ -1168,6 +1169,7 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::PUT if c.has("website") => "PutBucketWebsite",
             Method::PUT if c.has("notification") => "PutBucketNotification",
             Method::PUT if c.has("logging") => "PutBucketLogging",
+            Method::PUT if c.has("replication") => "PutBucketReplication",
             Method::PUT if c.has("requestPayment") => "PutBucketRequestPayment",
             Method::PUT if c.has("accelerate") => "PutBucketAccelerateConfiguration",
             Method::PUT if any(&UNSUPPORTED_BUCKET_CONFIG) => "Unsupported",
@@ -1205,7 +1207,8 @@ pub(crate) fn classify(c: &Ctx) -> &'static str {
             Method::GET if c.has("accelerate") => "GetBucketAccelerateConfiguration",
             Method::GET if c.has("notification") => "GetBucketNotification",
             Method::GET if c.has("logging") => "GetBucketLogging",
-            Method::GET if any(&["replication", "intelligent-tiering"]) => "Unsupported",
+            Method::GET if c.has("replication") => "GetBucketReplication",
+            Method::GET if c.has("intelligent-tiering") => "Unsupported",
             Method::GET if c.q("list-type") == "2" => "ListObjectsV2",
             Method::GET => "ListObjects",
             _ => "MethodNotAllowed",

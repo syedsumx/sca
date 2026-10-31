@@ -148,10 +148,10 @@ fn record(region: &str, seq: u64, e: &OutboxEntry) -> serde_json::Value {
 }
 
 pub struct Delivery {
-    targets: HashMap<String, Target>,
+    pub(crate) targets: HashMap<String, Target>,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
     kafka: Mutex<HashMap<String, Arc<rskafka::client::partition::PartitionClient>>>,
-    max_age_ms: u64,
+    pub(crate) max_age_ms: u64,
 }
 
 impl Delivery {
@@ -344,7 +344,9 @@ impl Server {
 
     /// Delivers what is in the outbox, once. Returns the number of events delivered.
     pub async fn deliver_events(&self) -> usize {
-        let Some(d) = &self.delivery else { return 0 };
+        if self.delivery.is_none() && self.replicator.is_none() {
+            return 0;
+        }
         let batch = match blocking(|| self.eng.outbox(500)) {
             Ok(b) => b,
             Err(err) => {
@@ -353,40 +355,63 @@ impl Server {
             }
         };
         let now = engine::now_ms();
+        let max_age = self.delivery.as_ref().map(|d| d.max_age_ms).unwrap_or(self.event_max_age_ms);
         let (mut done, mut retry, mut blocked) = (vec![], vec![], HashSet::new());
         let mut delivered = 0;
         for (seq, mut ent) in batch {
             if blocked.contains(&ent.target) {
                 continue; // keep per-target order: wait until the earlier event goes through
             }
-            let Some(t) = d.targets.get(&ent.target) else {
-                tracing::warn!(target = %ent.target, seq, "event target no longer configured; dropping the event");
-                self.event_metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                done.push(seq);
-                continue;
-            };
-            if now > ent.time + d.max_age_ms {
-                tracing::error!(target = %ent.target, seq, attempts = ent.attempts, "event undeliverable past its maximum age; dropping it");
-                self.event_metrics.dropped.fetch_add(1, Ordering::Relaxed);
-                done.push(seq);
-                continue;
-            }
             if now < ent.next_at {
                 blocked.insert(ent.target.clone());
                 continue;
             }
-            let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
-            match d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await {
+            let replication = ent.target.strip_prefix(engine::REPLICATE).map(|r| {
+                let (t, b) = r.split_once(':').unwrap_or((r, ""));
+                (t.to_string(), b.to_string())
+            });
+            let result: Result<(), (bool, String)> = match &replication {
+                Some((target, bucket)) => match self.replicate(target, bucket, &ent).await {
+                    Ok(()) => Ok(()),
+                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                },
+                None => match self.delivery.as_ref().and_then(|d| d.targets.get(&ent.target).map(|t| (d, t))) {
+                    None => Err((true, "event target no longer configured".into())),
+                    Some((d, t)) => {
+                        let body = json!({"Records": [record(&self.region, seq, &ent)]}).to_string().into_bytes();
+                        d.send(t, seq, body, &format!("{}/{}", ent.bucket, ent.key)).await.map_err(|e| (false, e))
+                    }
+                },
+            };
+            let metrics = if replication.is_some() { &self.repl_metrics } else { &self.event_metrics };
+            match result {
                 Ok(()) => {
-                    self.event_metrics.delivered.fetch_add(1, Ordering::Relaxed);
+                    metrics.delivered.fetch_add(1, Ordering::Relaxed);
                     delivered += 1;
                     done.push(seq);
                 }
-                Err(err) => {
-                    self.event_metrics.failed.fetch_add(1, Ordering::Relaxed);
+                Err((true, err)) => {
+                    tracing::error!(target = %ent.target, seq, key = %ent.key, error = %err, "delivery refused for good; dropping it");
+                    if replication.is_some() {
+                        self.mark_replication(&ent, "FAILED");
+                    }
+                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                    done.push(seq);
+                }
+                Err((false, err)) if now > ent.time + max_age => {
+                    tracing::error!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "undeliverable past its maximum age; dropping it");
+                    if replication.is_some() {
+                        self.mark_replication(&ent, "FAILED");
+                    }
+                    metrics.dropped.fetch_add(1, Ordering::Relaxed);
+                    done.push(seq);
+                }
+                Err((false, err)) => {
+                    metrics.failed.fetch_add(1, Ordering::Relaxed);
                     ent.attempts += 1;
                     ent.next_at = now + backoff_ms(ent.attempts);
-                    tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "event delivery failed; will retry");
+                    tracing::warn!(target = %ent.target, seq, attempts = ent.attempts, error = %err, "delivery failed; will retry");
                     blocked.insert(ent.target.clone());
                     retry.push((seq, ent));
                 }

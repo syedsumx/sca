@@ -180,6 +180,9 @@ pub struct Object {
     /// Multipart objects: each part's checksums (for GetObjectAttributes).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub part_checksums: Vec<BTreeMap<String, String>>,
+    /// Bucket replication: PENDING, COMPLETED or FAILED (empty: not replicated).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub replication_status: String,
 }
 
 /// Object lock state of one version: retention (mode and date) and legal hold.
@@ -269,6 +272,50 @@ impl NotifyRule {
             })
     }
 }
+
+/// A bucket's replication configuration (configuration kind "replication").
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReplConfig {
+    /// The operator-defined destination (endpoint and credentials).
+    pub target: String,
+    pub role: String,
+    pub rules: Vec<ReplRule>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ReplRule {
+    pub id: String,
+    #[serde(default)]
+    pub priority: i64,
+    pub enabled: bool,
+    #[serde(default)]
+    pub prefix: String,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+    pub dest_bucket: String,
+    #[serde(default)]
+    pub delete_markers: bool,
+    /// Whether the rule used <Filter> (V2) or a top-level <Prefix> (V1), to echo it back the same way.
+    #[serde(default)]
+    pub legacy: bool,
+}
+
+impl ReplConfig {
+    /// The rule that replicates this version (highest priority first), if any.
+    pub fn rule_for(&self, o: &Object) -> Option<&ReplRule> {
+        let mut rules: Vec<&ReplRule> = self
+            .rules
+            .iter()
+            .filter(|r| r.enabled && o.key.starts_with(&r.prefix) && r.tags.iter().all(|(k, v)| o.tags.get(k) == Some(v)))
+            .filter(|r| !o.delete_marker || r.delete_markers)
+            .collect();
+        rules.sort_by_key(|r| -r.priority);
+        rules.into_iter().next()
+    }
+}
+
+/// The outbox target prefix of replication deliveries: "@replicate:<target>:<destination bucket>".
+pub const REPLICATE: &str = "@replicate:";
 
 /// An event waiting in the outbox.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -742,18 +789,45 @@ impl Engine {
 
     /// Records the event for every notification rule of the bucket that matches it.
     fn emit(tx: &redb::WriteTransaction, bucket: &str, event: &str, o: &Object, ev: &Ev) -> Result<()> {
+        let name = format!("s3:{event}");
+        // Bucket replication: new versions and (when enabled) delete markers go to the rule's destination.
+        if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle {
+            if let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "replication"))?.map(|v| v.value().to_vec()) {
+                let cfg: ReplConfig = serde_json::from_slice(&doc)?;
+                if let Some(rule) = cfg.rule_for(o) {
+                    let target = format!("{REPLICATE}{}:{}", cfg.target, rule.dest_bucket);
+                    Self::outbox_in(tx, bucket, &target, &rule.id, &name, o, ev)?;
+                    if !o.delete_marker {
+                        let mut t = tx.open_table(OBJECTS)?;
+                        let cur = Self::current_in(&t, bucket, &o.key)?;
+                        if let Some(mut c) = cur.filter(|c| c.version_id == o.version_id) {
+                            c.replication_status = "PENDING".into();
+                            let v = serde_json::to_vec(&c)?;
+                            t.insert((bucket, o.key.as_str()), v.as_slice())?;
+                        }
+                    }
+                }
+            }
+        }
         let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "notification"))?.map(|v| v.value().to_vec()) else { return Ok(()) };
         let rules: Vec<NotifyRule> = serde_json::from_slice(&doc)?;
-        let name = format!("s3:{event}");
         for r in rules.iter().filter(|r| r.matches(&name, &o.key)) {
+            Self::outbox_in(tx, bucket, &r.target, &r.id, &name, o, ev)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn outbox_in(tx: &redb::WriteTransaction, bucket: &str, target: &str, rule: &str, name: &str, o: &Object, ev: &Ev) -> Result<()> {
+        {
             let mut meta = tx.open_table(META)?;
             let seq = meta.get("outbox_seq")?.map(|v| v.value()).unwrap_or(0) + 1;
             meta.insert("outbox_seq", seq)?;
             drop(meta);
             let entry = OutboxEntry {
-                target: r.target.clone(),
-                rule: r.id.clone(),
-                event: name.clone(),
+                target: target.to_string(),
+                rule: rule.to_string(),
+                event: name.to_string(),
                 bucket: bucket.into(),
                 key: o.key.clone(),
                 size: o.size,
