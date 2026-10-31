@@ -571,6 +571,12 @@ cairn:
       size: 100Gi
       storageClassName: ""
       accessModes: [ReadWriteOnce]
+      # The data volume's disk type (also that of buckets without one).
+      diskType: hdd
+    # More volumes for blob files, each with a disk type; a bucket can be pinned to a type
+    # (cairn-store admin bucket-disk <bucket> --type ssd). Keep entries once added: a missing one stops the store.
+    #   - { name: ssd1, type: ssd, size: 200Gi, storageClassName: fast }
+    extraDisks: []
     resources:
       requests: { cpu: 100m, memory: 128Mi }
       limits: { memory: 1Gi }

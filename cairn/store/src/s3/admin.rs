@@ -16,6 +16,9 @@
 //! PUT    /-/admin/v1/buckets/{bucket}/remote  {"remote": id, "write_back": bool} mount a remote (CAIRN_STORE_REMOTES_FILE)
 //! DELETE /-/admin/v1/buckets/{bucket}/remote  unmount
 //! POST   /-/admin/v1/buckets/{bucket}/remote/sync | cache | uncache   {"prefix"} for cache and uncache
+//! GET    /-/admin/v1/disks                     the disks holding blob files: path, type, free and total bytes
+//! PUT    /-/admin/v1/buckets/{bucket}/disk     {"type": "ssd"} new objects of the bucket go to disks of that type
+//! DELETE /-/admin/v1/buckets/{bucket}/disk
 //! POST   /-/admin/v1/compact                   {"min_dead": 0..1} compact packs of small blobs now (0: every pack with dead space)
 //! GET    /-/admin/v1/keys                      access keys (never their secrets)
 //! POST   /-/admin/v1/keys                      {"access_key"?, "buckets", "read_only", "admin", "policy", "actor", "ssh_keys", "description"}
@@ -76,6 +79,7 @@ impl Server {
             "encryption_default": has("encryption")?,
             "lifecycle": has("lifecycle")?,
             "policy": has("policy")?,
+            "disk_type": self.eng.bucket_disk_kind(name)?,
         }))
     }
 
@@ -252,6 +256,45 @@ impl Server {
                 Ok(json_resp(StatusCode::OK, json!({"buckets": out})))
             }
             (&Method::GET, ["buckets", b]) => Ok(json_resp(StatusCode::OK, self.bucket_json(b)?)),
+            (&Method::GET, ["disks"]) => {
+                let disks: Vec<Value> = self
+                    .eng
+                    .disks()
+                    .iter()
+                    .map(|d| {
+                        let (free, total) = crate::engine::disks::space(&d.path);
+                        json!({"disk": d.idx, "path": d.path.display().to_string(), "type": d.kind, "free_bytes": free, "total_bytes": total})
+                    })
+                    .collect();
+                Ok(json_resp(StatusCode::OK, json!({"disks": disks})))
+            }
+            (&Method::PUT, ["buckets", b, "disk"]) => {
+                let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
+                let kind = v.get("type").and_then(Value::as_str).unwrap_or("");
+                if !crate::engine::disks::valid_kind(kind) || !self.eng.disks().iter().any(|d| d.kind == kind) {
+                    return Err(e::NO_SUCH_DISK_TYPE.clone()); // refused rather than kept and ignored
+                }
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "bucket.disk.put".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({"type": kind}),
+                };
+                self.eng.put_config_audited(b, "disk", Some(json!({"type": kind}).to_string().as_bytes()), Some(&audit))?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
+            (&Method::DELETE, ["buckets", b, "disk"]) => {
+                let audit = crate::audit::Audit {
+                    category: "store",
+                    action: "bucket.disk.delete".into(),
+                    actor: a.cred.access_key.clone(),
+                    subject: b.to_string(),
+                    details: json!({}),
+                };
+                self.eng.put_config_audited(b, "disk", None, Some(&audit))?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
+            }
             (m, ["buckets", b, "remote", rest @ ..]) => {
                 let (status, v) = self.remote_admin(m, b, rest, &body, &a.cred.access_key)?;
                 Ok(json_resp(status, v))

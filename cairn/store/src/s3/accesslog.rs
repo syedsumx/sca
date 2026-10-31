@@ -203,7 +203,7 @@ impl Server {
             let key = format!("{}{stamp}-{}", cfg.target_prefix, hex::encode_upper(rand::random::<[u8; 8]>()));
             let res = (|| -> Result<(), ApiError> {
                 let sse = self.default_sse(&cfg.target_bucket, &key)?;
-                let mut blob = self.eng.new_blob_with(sse.as_ref().map(|(_, k)| k))?;
+                let mut blob = self.eng.new_blob_for(&cfg.target_bucket, sse.as_ref().map(|(_, k)| k))?;
                 blob.write(&data).map_err(engine::Error::Io)?;
                 let md5 = blob.md5();
                 let seg = blob.seal()?;

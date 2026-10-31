@@ -661,3 +661,14 @@ spec:
 {{- define "cairn.coreTokenSecret" -}}
 {{- printf "%s-core-token" (include "cairn.fullname" .) -}}
 {{- end -}}
+
+{{/* Cairn Store: CAIRN_STORE_DISKS from cairn.store.extraDisks ("/disks/<name>:<type>,..."). */}}
+{{- define "cairn.storeDisks" -}}
+{{- $out := list -}}
+{{- range . -}}
+{{- if not (regexMatch "^[a-z0-9-]{1,40}$" (toString .name)) -}}{{ fail "cairn.store.extraDisks: each name is 1-40 lowercase letters, digits and -" }}{{- end -}}
+{{- if not (regexMatch "^[a-z0-9]{1,16}$" (toString .type)) -}}{{ fail "cairn.store.extraDisks: each type is 1-16 lowercase letters and digits" }}{{- end -}}
+{{- $out = append $out (printf "/disks/%s:%s" .name .type) -}}
+{{- end -}}
+{{- join "," $out -}}
+{{- end -}}

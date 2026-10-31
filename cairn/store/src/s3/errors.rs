@@ -174,6 +174,7 @@ errors! {
     IMAGE_TOO_LARGE = "InvalidArgument", 400, "The image is too large to resize (64 MiB, 50 megapixels at most).";
     INVALID_TOPIC = "InvalidArgument", 400, "A topic name is 1-128 lowercase letters, digits, '.', '_' or '-'.";
     NO_SUCH_TOPIC = "NotFound", 404, "No such topic.";
+    NO_SUCH_DISK_TYPE = "InvalidArgument", 400, "This store has no disk of that type (CAIRN_STORE_DISKS, CAIRN_STORE_DATA_DISK_TYPE).";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";

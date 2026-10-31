@@ -346,7 +346,7 @@ impl Server {
         let (sse, dek) = self.sse_for_write(&fc, &c.bucket, &key)?.unzip();
         let (content_type, headers, user_meta) = super::handlers::object_headers(&fc);
         let max = range.map(|(_, hi)| hi).unwrap_or(u64::MAX).min(self.max_obj);
-        let mut blob = self.eng.new_blob_with(dek.as_ref())?;
+        let mut blob = self.eng.new_blob_for(&c.bucket, dek.as_ref())?;
         let mut pending: Vec<u8> = Vec::with_capacity(256 << 10);
         let mut too_large = false;
         form.stream(|chunk| {

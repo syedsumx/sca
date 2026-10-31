@@ -541,6 +541,14 @@ impl Server {
                 if let Some(c) = &self.cluster {
                     tokio::task::block_in_place(|| c.metrics_text(&mut body));
                 }
+                body.push_str("# TYPE cairn_store_disk_free_bytes gauge\n# TYPE cairn_store_disk_total_bytes gauge\n");
+                for d in self.eng.disks() {
+                    let (free, total) = crate::engine::disks::space(&d.path);
+                    body.push_str(&format!(
+                        "cairn_store_disk_free_bytes{{disk=\"{}\",type=\"{}\"}} {free}\ncairn_store_disk_total_bytes{{disk=\"{}\",type=\"{}\"}} {total}\n",
+                        d.idx, d.kind, d.idx, d.kind
+                    ));
+                }
                 for (name, v) in [
                     ("published", &self.queue_metrics.published),
                     ("delivered", &self.queue_metrics.delivered),

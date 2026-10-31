@@ -70,6 +70,8 @@
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
 //! CAIRN_STORE_COMPRESSION    compress new object data: off or zstd (off; in 1 MiB chunks, ranges stay cheap)
 //! CAIRN_STORE_QUEUE_RETENTION_INTERVAL  seconds between retention passes over message queue topics (60)
+//! CAIRN_STORE_DISKS          more disks for blob files: /mnt/a:hdd,/mnt/b:ssd (off when empty)
+//! CAIRN_STORE_DATA_DISK_TYPE the data directory's disk type, and that of buckets without one (hdd)
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
@@ -167,6 +169,14 @@ fn meta() -> Option<String> {
     }
 }
 
+/// Disks for blob files (CAIRN_STORE_DISKS) and the data directory's disk type.
+fn disk_config() -> engine::DiskConfig {
+    engine::DiskConfig {
+        main_kind: env("CAIRN_STORE_DATA_DISK_TYPE", "hdd"),
+        extra: engine::disks::parse_specs(&env("CAIRN_STORE_DISKS", "")).unwrap_or_else(|e| fail("CAIRN_STORE_DISKS", e)),
+    }
+}
+
 /// This node's name in a cluster (None: a single store).
 fn node_name() -> Option<String> {
     Some(env("CAIRN_STORE_CLUSTER_NODE", "")).filter(|n| !n.is_empty())
@@ -244,7 +254,8 @@ fn main() {
     match cmd.as_str() {
         "version" => println!("cairn-store {VERSION}"),
         "fsck" => {
-            let eng = Engine::open_node(&data, true, meta().as_deref(), node_name().as_deref()).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_full(&data, true, meta().as_deref(), node_name().as_deref(), &disk_config())
+                .unwrap_or_else(|e| fail("open store", e));
             let rep = eng.recover().unwrap_or_else(|e| fail("fsck", e));
             println!("{}", serde_json::to_string_pretty(&rep).unwrap());
             if rep.objects_with_missing_blobs > 0 {
@@ -271,7 +282,7 @@ fn main() {
             // Copies a stopped store's embedded index into PostgreSQL (CAIRN_STORE_META), then sets the
             // embedded index aside so the store opens on PostgreSQL from now on.
             let url = meta().unwrap_or_else(|| fail("migrate-meta", "set CAIRN_STORE_META to the postgres:// URL to copy to"));
-            let eng = Engine::open(&data, true).unwrap_or_else(|e| fail("open store (is it stopped?)", e));
+            let eng = Engine::open_full(&data, true, None, None, &disk_config()).unwrap_or_else(|e| fail("open store (is it stopped?)", e));
             let rows = eng.migrate_meta_to(&url).unwrap_or_else(|e| fail("migrate-meta", e));
             drop(eng);
             let index = std::path::Path::new(&data).join("index.redb");
@@ -299,7 +310,8 @@ fn main() {
         "audit-verify" => {
             // Checks the audit trail's hash chain (offline; safe while the store runs, as redb allows one
             // writer and concurrent readers only within a process, so stop the store first).
-            let eng = Engine::open_node(&data, true, meta().as_deref(), node_name().as_deref()).unwrap_or_else(|e| fail("open store", e));
+            let eng = Engine::open_full(&data, true, meta().as_deref(), node_name().as_deref(), &disk_config())
+                .unwrap_or_else(|e| fail("open store", e));
             let entries = eng.audit_entries(0, usize::MAX).unwrap_or_else(|e| fail("read audit trail", e));
             let res = audit::verify(&entries, true);
             println!("{}", serde_json::to_string_pretty(&res).unwrap());
@@ -352,7 +364,7 @@ async fn serve(addr: String, data: String) {
     let fsync = env("CAIRN_STORE_FSYNC", "true") != "false";
     let cluster = cluster_config();
     let eng = Arc::new(
-        Engine::open_node(&data, fsync, meta().as_deref(), cluster.as_ref().map(|c| c.node.as_str()))
+        Engine::open_full(&data, fsync, meta().as_deref(), cluster.as_ref().map(|c| c.node.as_str()), &disk_config())
             .unwrap_or_else(|e| fail("open store", e)),
     );
     let metadata = if eng.meta_is_postgres() { "postgresql" } else { "embedded" };

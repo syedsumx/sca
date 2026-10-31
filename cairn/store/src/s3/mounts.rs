@@ -221,7 +221,7 @@ impl Server {
             }
             let res = (|| -> Result<bool, ApiError> {
                 let (sse, dek) = self.default_sse(bucket, &o.key)?.unzip();
-                let mut w = self.eng.new_blob_with(dek.as_ref())?;
+                let mut w = self.eng.new_blob_for(bucket, dek.as_ref())?;
                 let mut src = r.get(&o.key, 0).map_err(sink_err)?;
                 let mut buf = vec![0u8; 256 << 10];
                 loop {

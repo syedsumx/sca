@@ -443,8 +443,12 @@ impl Cluster {
     }
 
     /// Stores a stream on `node`; returns its local id there and the length written.
-    async fn put_async(&self, node: &str, url: &str, body: Body) -> io::Result<(String, u64)> {
-        let resp = self.send(url, Method::PUT, "/-/cluster/v1/blobs", body).await?;
+    async fn put_async(&self, node: &str, url: &str, body: Body, kind: Option<&str>) -> io::Result<(String, u64)> {
+        let path = match kind {
+            Some(k) => format!("/-/cluster/v1/blobs?disk={k}"),
+            None => "/-/cluster/v1/blobs".to_string(),
+        };
+        let resp = self.send(url, Method::PUT, &path, body).await?;
         let resp = Self::check(resp, &format!("place a copy on {node}")).await?;
         let b = resp.into_body().collect().await.map_err(io_err)?.to_bytes();
         let v: Value = serde_json::from_slice(&b).map_err(io_err)?;
@@ -455,9 +459,9 @@ impl Cluster {
     }
 
     /// Writes `reader` as a blob on `node` (this node: its own disk). Blocking.
-    fn put_copy(&self, node: &str, reader: Box<dyn Read + Send>) -> io::Result<(String, u64)> {
+    fn put_copy(&self, node: &str, reader: Box<dyn Read + Send>, kind: Option<&str>) -> io::Result<(String, u64)> {
         if node == self.name() {
-            let mut w = self.eng.new_local_blob().map_err(io_err)?;
+            let mut w = self.eng.new_local_blob_on(kind).map_err(io_err)?;
             let mut r = reader;
             let mut buf = vec![0u8; 256 << 10];
             let mut n = 0u64;
@@ -473,7 +477,29 @@ impl Cluster {
             return Ok((seg.blob, n));
         }
         let rec = self.node(node).ok_or_else(|| io_err(format!("unknown node {node}")))?;
-        self.rt.block_on(self.put_async(node, &rec.url, super::tiering::file_body(reader)))
+        self.rt.block_on(self.put_async(node, &rec.url, super::tiering::file_body(reader), kind))
+    }
+
+    /// The disk type a copy or shard is on (None: unknown, e.g. its node is down).
+    fn kind_of(&self, c: &Copy) -> Option<String> {
+        if c.node == self.name() {
+            return Some(self.eng.disk_kind_of(&c.local).to_string());
+        }
+        let rec = self.node(&c.node)?;
+        let id = path_id(&c.local)?;
+        self.rt
+            .block_on(async {
+                let resp = self.send(&rec.url, Method::GET, &format!("/-/cluster/v1/kind/{id}"), empty()).await?;
+                let b = Self::check(resp, "disk type").await?.into_body().collect().await.map_err(io_err)?.to_bytes();
+                serde_json::from_slice::<Value>(&b).map_err(io_err)
+            })
+            .ok()
+            .and_then(|v| v["type"].as_str().map(str::to_string))
+    }
+
+    /// The disk type of a blob's first readable copy.
+    fn kind_of_any(&self, cs: &[Copy]) -> Option<String> {
+        cs.iter().find_map(|c| self.kind_of(c))
     }
 
     /// Reads one copy or shard from `offset` on. Blocking.
@@ -539,7 +565,8 @@ impl Cluster {
                 copies.push(Copy { node: name, local: local.blob.clone() });
                 continue;
             }
-            let res = self.eng.open_local(&local.blob, 0).map_err(io_err).and_then(|r| self.put_copy(&name, r));
+            let kind = self.eng.disk_kind_of(&local.blob).to_string();
+            let res = self.eng.open_local(&local.blob, 0).map_err(io_err).and_then(|r| self.put_copy(&name, r, Some(&kind)));
             match res {
                 Ok((id, n)) if n == len => copies.push(Copy { node: name, local: id }),
                 Ok((id, _)) => {
@@ -578,6 +605,7 @@ impl Cluster {
         (k, m): (usize, usize),
         unit: u64,
         which: &[(usize, String)],
+        kind: Option<String>,
     ) -> io::Result<HashMap<usize, Copy>> {
         let rs = ReedSolomon::new(k, m).map_err(|e| io_err(format!("{e:?}")))?;
         let stripes = len.div_ceil(k as u64 * unit).max(1);
@@ -590,7 +618,7 @@ impl Cluster {
             let mut local: HashMap<usize, engine::BlobWriter<'_>> = HashMap::new();
             for (i, node) in which {
                 if node == me.name() {
-                    local.insert(*i, me.eng.new_local_blob().map_err(io_err)?);
+                    local.insert(*i, me.eng.new_local_blob_on(kind.as_deref()).map_err(io_err)?);
                     continue;
                 }
                 let rec = me.node(node).ok_or_else(|| io_err(format!("unknown node {node}")))?;
@@ -599,7 +627,8 @@ impl Cluster {
                 let s = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) });
                 let body: Body = BodyExt::boxed(StreamBody::new(s));
                 let (c, node, url, i) = (me.clone(), node.clone(), rec.url.clone(), *i);
-                remote.push(tokio::spawn(async move { (i, node.clone(), c.put_async(&node, &url, body).await) }));
+                let k = kind.clone();
+                remote.push(tokio::spawn(async move { (i, node.clone(), c.put_async(&node, &url, body, k.as_deref()).await) }));
             }
             let mut buf = vec![0u8; (k as u64 * unit) as usize];
             let mut failure: Option<io::Error> = None;
@@ -683,7 +712,8 @@ impl Cluster {
         }
         let which: Vec<(usize, String)> = chosen.into_iter().enumerate().collect();
         let reader = self.eng.open_local(&local.blob, 0).map_err(|e| engine::Error::Index(e.to_string()))?;
-        let shards = self.encode_to(reader, len, (k, m), unit, &which).map_err(|e| engine::Error::Unavailable(e.to_string()))?;
+        let kind = Some(self.eng.disk_kind_of(&local.blob).to_string());
+        let shards = self.encode_to(reader, len, (k, m), unit, &which, kind).map_err(|e| engine::Error::Unavailable(e.to_string()))?;
         let shards: Vec<Copy> = (0..k + m).map(|i| shards[&i].clone()).collect();
         Ok(Placement::Erasure { k, m, len, unit, shards })
     }
@@ -1019,6 +1049,7 @@ impl Cluster {
         let mut targets: Vec<String> = self.targets().into_iter().map(|(n, _)| n).filter(|n| !holding.contains(n)).collect();
         targets.retain(|n| good.contains(n));
         let taken: Vec<String> = keep.iter().map(|c| c.node.clone()).collect();
+        let kind = self.kind_of_any(&sources);
         for t in self.diverse(targets, &taken) {
             if keep.len() >= self.cfg.copies {
                 break;
@@ -1027,7 +1058,7 @@ impl Cluster {
                 continue;
             }
             for s in &sources {
-                let res = self.open_copy(s, 0).and_then(|r| self.put_copy(&t, r));
+                let res = self.open_copy(s, 0).and_then(|r| self.put_copy(&t, r, kind.as_deref()));
                 match res {
                     Ok((lid, n)) if n == len => {
                         let c = Copy { node: t.clone(), local: lid };
@@ -1130,7 +1161,8 @@ impl Cluster {
         }
         let which: Vec<(usize, String)> = bad.iter().copied().zip(homes).collect();
         let reader = self.open(id, 0)?;
-        let written = self.encode_to(reader, len, km, unit, &which)?;
+        let kind = self.kind_of_any(shards);
+        let written = self.encode_to(reader, len, km, unit, &which, kind)?;
         let mut next = shards.to_vec();
         let mut dropped = vec![];
         let mut added = vec![];
@@ -1266,7 +1298,8 @@ impl Cluster {
             if self.strict() && !self.spread_ok(&after, ec_m) {
                 continue; // the move would put too much of this blob in one failure domain
             }
-            let Ok((lid, n)) = self.open_copy(&src, 0).and_then(|r| self.put_copy(&min_n, r)) else { continue };
+            let kind = self.kind_of(&src);
+            let Ok((lid, n)) = self.open_copy(&src, 0).and_then(|r| self.put_copy(&min_n, r, kind.as_deref())) else { continue };
             let new_copy = Copy { node: min_n.clone(), local: lid };
             if n != per {
                 let _ = self.delete_copy(&new_copy);
@@ -1415,9 +1448,26 @@ impl Server {
         let method = req.method().clone();
         match (method, rest) {
             (Method::GET, "ping") => full(StatusCode::OK, json!({"node": c.cfg.node}).to_string()),
+            (Method::GET, id) if id.starts_with("kind/") => {
+                let Some(id) = path_id(id.trim_start_matches("kind/")) else { return err(StatusCode::BAD_REQUEST, "bad id") };
+                full(StatusCode::OK, json!({"type": self.eng.disk_kind_of(id)}).to_string())
+            }
             (Method::PUT, "blobs") => {
+                let disk: Option<String> = req
+                    .uri()
+                    .query()
+                    .unwrap_or("")
+                    .split('&')
+                    .find_map(|p| p.strip_prefix("disk="))
+                    .filter(|k| engine::disks::valid_kind(k))
+                    .map(str::to_string);
+                let w = tokio::task::block_in_place(|| self.eng.new_local_blob_on(disk.as_deref()));
+                let mut w = match w {
+                    Ok(w) => w,
+                    // No disk of that type here: the placing node tries another node.
+                    Err(e) => return err(StatusCode::INSUFFICIENT_STORAGE, &e.to_string()),
+                };
                 let res = async {
-                    let mut w = tokio::task::block_in_place(|| self.eng.new_local_blob()).map_err(io_err)?;
                     let mut body = req.into_body();
                     let mut n = 0u64;
                     while let Some(frame) = body.frame().await {

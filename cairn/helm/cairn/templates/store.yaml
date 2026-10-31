@@ -92,6 +92,12 @@ spec:
             - name: CAIRN_STORE_BACKUP_DIR
               value: /backups
             {{- end }}
+            - name: CAIRN_STORE_DATA_DISK_TYPE
+              value: {{ $u.persistence.diskType | default "hdd" | quote }}
+            {{- with $u.extraDisks }}
+            - name: CAIRN_STORE_DISKS
+              value: {{ include "cairn.storeDisks" . | quote }}
+            {{- end }}
             - name: CAIRN_STORE_COMPRESSION
               value: {{ $u.compression | default "off" | quote }}
             - name: CAIRN_STORE_BLOCK_PUBLIC_ACCESS
@@ -210,6 +216,10 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /data
+            {{- range $u.extraDisks }}
+            - name: disk-{{ .name }}
+              mountPath: /disks/{{ .name }}
+            {{- end }}
             {{- if $u.backups.enabled }}
             - name: backups
               mountPath: /backups
@@ -365,6 +375,18 @@ spec:
         resources:
           requests:
             storage: {{ $u.persistence.size }}
+    {{- range $u.extraDisks }}
+    - metadata:
+        name: disk-{{ .name }}
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- with .storageClassName }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .size }}
+    {{- end }}
     {{- if $u.backups.enabled }}
     - metadata:
         name: backups

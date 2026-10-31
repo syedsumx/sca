@@ -344,7 +344,7 @@ impl Server {
         if check.expected_len().is_some_and(|n| n > limit) {
             return Err(e::ENTITY_TOO_LARGE.clone());
         }
-        let mut blob = self.eng.new_blob_with(key)?;
+        let mut blob = blocking(|| self.eng.new_blob_for(&c.bucket, key))?;
         if engine::zchunk::incompressible(c.header("content-type")) {
             blob.no_compress(); // already compressed: not worth a trial
         }
@@ -824,7 +824,7 @@ impl Server {
             Err(FreshError::Range(_, err)) => return Err(err),
         };
         let mut hashers: Vec<(String, Hasher)> = algos.iter().filter_map(|a| Hasher::new(a).map(|h| (a.clone(), h))).collect();
-        let mut blob = self.eng.new_blob_with(dest_key)?;
+        let mut blob = self.eng.new_blob_for(&c.bucket, dest_key)?;
         let mut buf = vec![0u8; 256 << 10];
         loop {
             let n = reader.read(&mut buf).map_err(engine::Error::Io)?;

@@ -18,6 +18,7 @@
 //! cairn-store admin key-update <ak> [the same options]
 //! cairn-store admin key-rotate <ak>
 //! cairn-store admin key-delete <ak>
+//! cairn-store admin disks | bucket-disk <bucket> [--type ssd]   (no --type: back to the default type)
 //! cairn-store admin remote <bucket> | remote-mount <bucket> --remote ID [--write-back] | remote-unmount <bucket>
 //! cairn-store admin remote-sync <bucket> | remote-cache <bucket> [--prefix P] | remote-uncache <bucket> [--prefix P]
 //! cairn-store admin replication-resync <bucket>  (send objects written before replication was configured)
@@ -147,6 +148,11 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
             let min = flag("--min-dead").map(|v| v.parse::<f64>().unwrap_or_else(|_| usage())).unwrap_or(0.0);
             ("POST", "compact".to_string(), Some(serde_json::json!({"min_dead": min})))
         }
+        "disks" => ("GET", "disks".to_string(), None),
+        "bucket-disk" => match flag("--type") {
+            Some(t) => ("PUT", format!("buckets/{}/disk", name()), Some(serde_json::json!({"type": t}))),
+            None => ("DELETE", format!("buckets/{}/disk", name()), None),
+        },
         "remote" => ("GET", format!("buckets/{}/remote", name()), None),
         "remote-mount" => {
             let remote = flag("--remote").unwrap_or_else(|| usage());

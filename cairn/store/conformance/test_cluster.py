@@ -465,3 +465,27 @@ def test_repair_moves_copies_that_share_a_zone(binary, tmp_path):
             bad.start()
     finally:
         c.stop()
+
+
+def test_copies_go_to_disks_of_the_bucket_type(binary, tmp_path):
+    tmp_path = tmp_path / "dt"
+    tmp_path.mkdir()
+    c = Cluster(binary, tmp_path, new_database(), CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    try:
+        for n in ("n0", "n1", "n2"):
+            c.add(n, CAIRN_STORE_DISKS=f"{tmp_path}/{n}-ssd:ssd")
+        s0 = c["n0"].client()
+        s0.create_bucket(Bucket="typed")
+        assert admin(c["n0"], "PUT", "buckets/typed/disk", {"type": "ssd"})[0] == 200
+        for i in range(8):
+            s0.put_object(Bucket="typed", Key=f"k{i}", Body=os.urandom(5000))
+        for (blob,) in blob_ids(c.meta, "typed").values():
+            assert all(part.split("@")[1].startswith("v01") for part in blob.split(";")[1:]), blob  # the ssd disk, everywhere
+        # Repair keeps the type: a copy re-created elsewhere lands on that node's ssd too.
+        kill(c["n1"])
+        wait_for(lambda: not {n["name"]: n["alive"] for n in status(c["n0"])["nodes"]}["n1"], what="n1 down")
+        admin(c["n0"], "POST", "cluster/repair")
+        for (blob,) in blob_ids(c.meta, "typed").values():
+            assert "n1" not in holders(blob) and all(p.split("@")[1].startswith("v01") for p in blob.split(";")[1:]), blob
+    finally:
+        c.stop()

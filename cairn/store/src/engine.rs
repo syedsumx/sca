@@ -34,6 +34,7 @@ use crate::crypt::{self, ChunkCipher, Key};
 use redb::TableDefinition;
 
 pub mod cid;
+pub mod disks;
 pub mod kv;
 pub mod pack;
 pub mod zchunk;
@@ -570,6 +571,8 @@ pub struct Engine {
     z_out: std::sync::atomic::AtomicU64,
     pack_max: std::sync::atomic::AtomicU64,
     compacting: Mutex<()>,
+    /// Disks holding blob files (disk 0: the data directory), and the type of buckets without one.
+    disks: Vec<disks::Disk>,
     /// Cluster mode: this node's name, and the cluster.
     node: Option<String>,
     cluster: std::sync::RwLock<Option<std::sync::Arc<dyn ClusterStore>>>,
@@ -577,6 +580,19 @@ pub struct Engine {
 
 /// What an index snapshot refers to on this disk: blob files, and packs with the length they had.
 pub type Snapshot = (HashSet<String>, Vec<(String, u64)>);
+
+/// Disks for blob files besides the data directory, and the data directory's disk type.
+#[derive(Clone, Debug)]
+pub struct DiskConfig {
+    pub main_kind: String,
+    pub extra: Vec<disks::DiskSpec>,
+}
+
+impl Default for DiskConfig {
+    fn default() -> Self {
+        DiskConfig { main_kind: "hdd".into(), extra: vec![] }
+    }
+}
 
 /// Keeps deleted blobs on disk while it lives (see `Engine::hold_collection`).
 pub struct CollectionHold<'a>(&'a Engine);
@@ -872,19 +888,27 @@ pub struct CompletePart {
 
 impl Engine {
     /// Opens (or creates) a store in `dir` and runs crash recovery.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open(dir: impl AsRef<Path>, fsync: bool) -> Result<Engine> {
         Self::open_with(dir, fsync, None)
     }
 
     /// Opens a store whose metadata lives in PostgreSQL (`meta`: a postgres:// URL) or, without one, in
     /// the data directory's embedded index.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open_with(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>) -> Result<Engine> {
         Self::open_node(dir, fsync, meta, None)
     }
 
     /// Opens one node of a cluster (`node`: its name; the metadata must be in PostgreSQL, shared by all
     /// nodes) or, without a node name, a single store.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn open_node(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>, node: Option<&str>) -> Result<Engine> {
+        Self::open_full(dir, fsync, meta, node, &DiskConfig::default())
+    }
+
+    /// `open_node` with more disks for blob files (see `disks`).
+    pub fn open_full(dir: impl AsRef<Path>, fsync: bool, meta: Option<&str>, node: Option<&str>, dc: &DiskConfig) -> Result<Engine> {
         if node.is_some() && meta.is_none() {
             return Err(Error::Index("a cluster keeps its metadata in PostgreSQL: set CAIRN_STORE_META".into()));
         }
@@ -892,6 +916,7 @@ impl Engine {
         for d in [dir.clone(), dir.join("blobs"), dir.join("tmp")] {
             fs::create_dir_all(&d)?;
         }
+        let disk_list = disks::setup(&dir, &dc.main_kind, &dc.extra)?;
         let db = match meta {
             Some(url) => {
                 if dir.join("index.redb").exists() {
@@ -931,6 +956,7 @@ impl Engine {
             compacting: Mutex::new(()),
             node: node.map(str::to_string),
             cluster: Default::default(),
+            disks: disk_list,
         };
         let tx = e.begin_write()?;
         tx.open_table(BUCKETS)?;
@@ -966,7 +992,50 @@ impl Engine {
     }
 
     fn blob_path(&self, id: &str) -> PathBuf {
-        self.dir.join("blobs").join(&id[0..2]).join(&id[2..4]).join(id)
+        let base = match disks::disk_of(id) {
+            0 => &self.dir,
+            i => self.disks.iter().find(|d| d.idx == i).map(|d| &d.path).unwrap_or(&self.dir), // restored elsewhere: the data directory
+        };
+        base.join(Self::blob_rel(id))
+    }
+
+    /// The disks holding blob files (disk 0 is the data directory).
+    pub fn disks(&self) -> &[disks::Disk] {
+        &self.disks
+    }
+
+    /// The type of the disk a blob id names.
+    pub fn disk_kind_of(&self, id: &str) -> &str {
+        let i = disks::disk_of(id);
+        self.disks.iter().find(|d| d.idx == i).map(|d| d.kind.as_str()).unwrap_or(&self.disks[0].kind)
+    }
+
+    /// Picks the disk for a new blob: the one with the most free space among those of `kind` (None: the
+    /// data directory's type).
+    fn pick_disk(&self, kind: Option<&str>) -> Result<&disks::Disk> {
+        let want = kind.unwrap_or(&self.disks[0].kind);
+        let mut cands: Vec<&disks::Disk> = self.disks.iter().filter(|d| d.kind == want).collect();
+        match cands.len() {
+            0 => Err(Error::Unavailable(format!("no {want} disk on this store"))),
+            1 => Ok(cands[0]),
+            _ => {
+                cands.sort_by_key(|d| std::cmp::Reverse(disks::space(&d.path).0));
+                Ok(cands[0])
+            }
+        }
+    }
+
+    /// The disk type a bucket's objects go to (None: the default).
+    pub fn bucket_disk_kind(&self, bucket: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct D {
+            #[serde(rename = "type")]
+            kind: String,
+        }
+        Ok(match self.get_config(bucket, "disk")? {
+            Some(d) => Some(serde_json::from_slice::<D>(&d)?.kind),
+            None => None,
+        })
     }
 
     /// A private temporary file in the data directory (removed at the next start if left behind).
@@ -977,16 +1046,28 @@ impl Engine {
     }
 
     /// Starts a blob.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new_blob(&self) -> Result<BlobWriter<'_>> {
-        let id = new_id();
-        let tmp = self.dir.join("tmp").join(format!("{id}.{}", new_id()));
+        self.new_blob_on(None)
+    }
+
+    /// Starts a blob on a disk of type `kind` (None: the default type).
+    pub fn new_blob_on(&self, kind: Option<&str>) -> Result<BlobWriter<'_>> {
+        let disk = self.pick_disk(kind)?;
+        let id = format!("{}{}", disks::prefix(disk.idx), new_id());
+        let tmp = disk.path.join("tmp").join(format!("{id}.{}", new_id()));
         let file = File::create(&tmp)?;
         Ok(BlobWriter { engine: self, id, tmp, file: Some(file), size: 0, md5: Md5::new(), enc: None, local: false, z: None, stored: 0 })
     }
 
     /// Starts a blob kept on this node only (a copy or shard another node placed here).
     pub fn new_local_blob(&self) -> Result<BlobWriter<'_>> {
-        let mut w = self.new_blob()?;
+        self.new_local_blob_on(None)
+    }
+
+    /// `new_local_blob` on a disk of type `kind`.
+    pub fn new_local_blob_on(&self, kind: Option<&str>) -> Result<BlobWriter<'_>> {
+        let mut w = self.new_blob_on(kind)?;
         w.local = true;
         Ok(w)
     }
@@ -1068,8 +1149,19 @@ impl Engine {
 
     /// Starts a blob of object data, encrypted with `key` (None: in the clear) and compressed when
     /// compression is on.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new_blob_with(&self, key: Option<&Key>) -> Result<BlobWriter<'_>> {
-        let mut w = self.new_blob()?;
+        self.new_blob_for_kind(key, None)
+    }
+
+    /// `new_blob_with` on the bucket's disk type.
+    pub fn new_blob_for(&self, bucket: &str, key: Option<&Key>) -> Result<BlobWriter<'_>> {
+        let kind = self.bucket_disk_kind(bucket)?;
+        self.new_blob_for_kind(key, kind.as_deref())
+    }
+
+    fn new_blob_for_kind(&self, key: Option<&Key>, kind: Option<&str>) -> Result<BlobWriter<'_>> {
+        let mut w = self.new_blob_on(kind)?;
         if self.compress.load(std::sync::atomic::Ordering::SeqCst) {
             w.z = Some((Vec::new(), zchunk::Table::default()));
         }
@@ -1585,9 +1677,11 @@ impl Engine {
     /// are missing, which means the disk lost data.
     pub fn recover(&self) -> Result<RecoveryReport> {
         let mut rep = RecoveryReport::default();
-        for ent in fs::read_dir(self.dir.join("tmp"))? {
-            if fs::remove_file(ent?.path()).is_ok() {
-                rep.temp_files_removed += 1;
+        for d in &self.disks {
+            for ent in fs::read_dir(d.path.join("tmp"))? {
+                if fs::remove_file(ent?.path()).is_ok() {
+                    rep.temp_files_removed += 1;
+                }
             }
         }
         rep.blobs_collected = self.db.begin_read()?.open_table(GC)?.len()? as usize;
@@ -1652,7 +1746,7 @@ impl Engine {
         }
         rep.blobs_referenced = refs.len();
         let mut seen = HashSet::new();
-        let mut stack = vec![self.dir.join("blobs")];
+        let mut stack: Vec<PathBuf> = self.disks.iter().map(|d| d.path.join("blobs")).collect();
         while let Some(d) = stack.pop() {
             for ent in fs::read_dir(&d)? {
                 let ent = ent?;
@@ -3013,7 +3107,7 @@ impl Engine {
         }
         for id in &blobs {
             let src = self.blob_path(id);
-            let rel = src.strip_prefix(&self.dir).map_err(|e| Error::Index(e.to_string()))?.to_path_buf();
+            let rel = Self::blob_rel(id); // into the backup's own data directory, whichever disk it is on
             let dst = work.join(&rel);
             fs::create_dir_all(dst.parent().unwrap())?;
             let linked = link_from.map(|p| p.join(&rel)).filter(|p| p.exists()).is_some_and(|p| fs::hard_link(&p, &dst).is_ok());

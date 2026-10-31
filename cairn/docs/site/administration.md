@@ -574,6 +574,13 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **On demand.** `cairn-store admin compact [--min-dead 0.3]` (or `POST /-/admin/v1/compact`) compacts now; it is recorded in the audit trail. `cairn-store admin stats` reports packs, their bytes and the live bytes in them.
 - **Backups** copy pack files whole, and hard-link closed packs that are unchanged since the previous backup.
 
+**Several disks.** A store can spread blob files over several disks, each with a type: `CAIRN_STORE_DISKS=/mnt/hdd2:hdd,/mnt/nvme1:ssd` adds disks to the data directory, whose own type is `CAIRN_STORE_DATA_DISK_TYPE` (`hdd`).
+
+- **Placement.** New objects go to the disk with the most free space among those of the bucket's type. Buckets without one use the data directory's type. `cairn-store admin bucket-disk <bucket> --type ssd` pins a bucket (refused if the store has no disk of that type); without `--type` it goes back to the default. A pinned bucket whose disks are all gone gets 503 rather than writes on another type. Existing objects stay where they are.
+- **Safe changes.** Each disk carries a marker naming its store and number, so the list can be reordered, and another store's disk is refused. The data directory remembers every disk it has used: if one is left out of the list, the store refuses to start rather than lose the blobs on it. The index, small-object packs and the audit trail stay in the data directory.
+- **Clusters.** Copies and shards placed on other nodes go to a disk of the same type there; a node without one is skipped. Repair and rebalancing keep the type.
+- **Seeing it.** `cairn-store admin disks` lists each disk with its free and total bytes, `/-/metrics` has `cairn_store_disk_free_bytes`, and backups and `fsck` cover every disk. In Helm, list them under `cairn.store.extraDisks` (`{name, type, size, storageClassName}`); each becomes a volume of its own per pod.
+
 **Compression.** Set `CAIRN_STORE_COMPRESSION=zstd` to compress new object data at rest. CSV, JSON, logs and similar text often take a third or less of the space.
 
 - **Ranged reads stay cheap.** Data is compressed in independent 1 MiB chunks, and each object records where its chunks start, so a read at any offset decompresses only the chunks it touches.
