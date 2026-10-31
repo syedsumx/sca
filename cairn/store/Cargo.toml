@@ -23,6 +23,8 @@ hyper-util = { version = "0.1", features = ["tokio", "server", "client-legacy", 
 md-5 = "0.10"
 percent-encoding = "2"
 rand = "0.8"
+russh = { version = "0.65", default-features = false, features = ["ring"] }
+russh-sftp = "3.0.1"
 redb = "2"
 rskafka = { version = "0.6", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }

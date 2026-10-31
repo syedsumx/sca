@@ -86,6 +86,16 @@ spec:
             - name: CAIRN_STORE_EVENT_TARGETS_FILE
               value: /etc/cairn-store-events/targets.json
             {{- end }}
+            {{- if $u.sftp.enabled }}
+            - name: CAIRN_STORE_SFTP_ADDR
+              value: {{ printf ":%v" $u.sftp.port | quote }}
+            - name: CAIRN_STORE_SFTP_PASSWORD_AUTH
+              value: {{ $u.sftp.passwordAuth | quote }}
+            {{- if $u.sftp.hostKeySecret }}
+            - name: CAIRN_STORE_SFTP_HOST_KEY
+              value: /etc/cairn-store-sftp/ssh_host_ed25519_key
+            {{- end }}
+            {{- end }}
             {{- if $u.filesBasicAuth }}
             - name: CAIRN_STORE_FILES_BASIC_AUTH
               value: "true"
@@ -106,6 +116,11 @@ spec:
             - name: http
               containerPort: {{ $u.port }}
               protocol: TCP
+            {{- if $u.sftp.enabled }}
+            - name: sftp
+              containerPort: {{ $u.sftp.port }}
+              protocol: TCP
+            {{- end }}
           {{- /* Under mutual TLS the kubelet has no client certificate: probe the port only. */}}
           readinessProbe:
             {{- if and $u.tlsSecret $u.clientCaSecret }}
@@ -148,6 +163,11 @@ spec:
               mountPath: /etc/cairn-store-events
               readOnly: true
             {{- end }}
+            {{- if and $u.sftp.enabled $u.sftp.hostKeySecret }}
+            - name: sftp-host-key
+              mountPath: /etc/cairn-store-sftp
+              readOnly: true
+            {{- end }}
             {{- if $u.tiersSecret }}
             - name: tiers
               mountPath: /etc/cairn-store-tiers
@@ -168,7 +188,7 @@ spec:
               mountPath: /etc/cairn-store-client-ca
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) }}
       volumes:
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
@@ -184,6 +204,12 @@ spec:
         - name: events
           secret:
             secretName: {{ $u.eventTargetsSecret }}
+        {{- end }}
+        {{- if and $u.sftp.enabled $u.sftp.hostKeySecret }}
+        - name: sftp-host-key
+          secret:
+            secretName: {{ $u.sftp.hostKeySecret }}
+            defaultMode: 0400
         {{- end }}
         {{- if $u.tiersSecret }}
         - name: tiers
@@ -243,4 +269,22 @@ spec:
     {{- end }}
 ---
 {{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
+{{- if $u.sftp.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-sftp
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: {{ $u.sftp.serviceType }}
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: sftp
+      port: {{ $u.sftp.port }}
+      targetPort: sftp
+      protocol: TCP
+{{- end }}
 {{- end }}

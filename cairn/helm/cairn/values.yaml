@@ -515,6 +515,17 @@ cairn:
     # The file API (/-/files/) also accepts HTTP Basic sign-in (access key and secret key), for browsers.
     # Needs TLS (tlsSecret).
     filesBasicAuth: false
+    # SFTP for file-transfer clients: the user name is an access key, signing in with its secret key or an
+    # SSH public key (ssh_keys in the credentials file).
+    sftp:
+      enabled: false
+      port: 2022
+      serviceType: ClusterIP
+      passwordAuth: true
+      # A Secret with "ssh_host_ed25519_key" (OpenSSH format). Empty: a key is created on the data volume.
+      hostKeySecret: ""
+      # Network policy peers allowed to connect (besides this release's pods), e.g. an ipBlock.
+      ingressFrom: []
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.
     blockPublicAccess: true
     # Ask this release's policy decision point about every request the store's own rules allow

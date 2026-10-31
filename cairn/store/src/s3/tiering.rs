@@ -209,7 +209,7 @@ fn empty() -> Body {
 }
 
 /// A file's bytes as a request body (read on a blocking thread).
-fn file_body(mut file: std::fs::File) -> Body {
+pub(crate) fn file_body(mut file: std::fs::File) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<Frame<Bytes>>>(4);
     tokio::task::spawn_blocking(move || {
         let mut buf = vec![0u8; 256 << 10];

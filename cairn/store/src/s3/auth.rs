@@ -43,6 +43,9 @@ pub struct Credential {
     /// The key's Cairn identity (a corpuser URN), for Cairn's policy decision point.
     #[serde(default)]
     pub actor: String,
+    /// SSH public keys (OpenSSH format) that sign in to the SFTP server as this key.
+    #[serde(default)]
+    pub ssh_keys: Vec<String>,
 }
 
 impl Credential {

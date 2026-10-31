@@ -159,7 +159,7 @@ impl Server {
     }
 
     /// Authorizes `op` on bucket/key with the request's credentials (a copy of its context).
-    async fn may(&self, c: &Ctx, op: &'static str, bucket: &str, key: &str, list_prefix: Option<&str>) -> Result<(), ApiError> {
+    pub(crate) async fn may(&self, c: &Ctx, op: &'static str, bucket: &str, key: &str, list_prefix: Option<&str>) -> Result<(), ApiError> {
         let mut x = c.clone();
         x.op = op;
         x.bucket = bucket.to_string();
@@ -194,7 +194,7 @@ impl Server {
     }
 
     /// Does a collection exist at `prefix` (ending in '/')? A bucket root always does.
-    fn collection_exists(&self, bucket: &str, prefix: &str) -> Result<bool, ApiError> {
+    pub(crate) fn collection_exists(&self, bucket: &str, prefix: &str) -> Result<bool, ApiError> {
         if prefix.is_empty() {
             blocking(|| self.eng.head_bucket(bucket))?;
             return Ok(true);
@@ -203,7 +203,7 @@ impl Server {
         Ok(!page.objects.is_empty() || !page.common_prefixes.is_empty())
     }
 
-    fn object(&self, bucket: &str, key: &str) -> Result<Option<Object>, ApiError> {
+    pub(crate) fn object(&self, bucket: &str, key: &str) -> Result<Option<Object>, ApiError> {
         match blocking(|| self.eng.get_object(bucket, key)) {
             Ok(o) if !o.delete_marker => Ok(Some(o)),
             Ok(_) | Err(engine::Error::NoSuchKey) => Ok(None),

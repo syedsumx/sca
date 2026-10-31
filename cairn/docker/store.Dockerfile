@@ -26,7 +26,7 @@ COPY --from=build /cairn-store /usr/local/bin/cairn-store
 USER 10001
 VOLUME /data
 ENV CAIRN_STORE_DATA=/data CAIRN_STORE_ADDR=:8333
-EXPOSE 8333
+EXPOSE 8333 2022
 HEALTHCHECK --interval=10s --timeout=4s --retries=6 CMD ["cairn-store", "healthcheck"]
 ENTRYPOINT ["cairn-store"]
 CMD ["serve"]

@@ -40,6 +40,9 @@
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
 //! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
 //! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
+//! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
+//! CAIRN_STORE_SFTP_HOST_KEY  the SSH host key (OpenSSH format; default <data>/sftp_host_ed25519_key, created when missing)
+//! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
@@ -80,7 +83,7 @@ fn fail(msg: &str, err: impl std::fmt::Display) -> ! {
     std::process::exit(1)
 }
 
-fn listen_addr(addr: &str) -> String {
+pub(crate) fn listen_addr(addr: &str) -> String {
     if addr.starts_with(':') {
         format!("0.0.0.0{addr}")
     } else {
@@ -312,6 +315,24 @@ async fn serve(addr: String, data: String) {
             Some(r)
         }
     };
+    let sftp_addr = env("CAIRN_STORE_SFTP_ADDR", "");
+    if !sftp_addr.is_empty() {
+        let cfg = s3::sftp::SftpConfig {
+            addr: sftp_addr,
+            host_key: match env("CAIRN_STORE_SFTP_HOST_KEY", "") {
+                k if k.is_empty() => std::path::Path::new(&data).join("sftp_host_ed25519_key"),
+                k => k.into(),
+            },
+            password_auth: env("CAIRN_STORE_SFTP_PASSWORD_AUTH", "true") == "true",
+        };
+        let srv = server.clone();
+        // A bad SFTP setting (host key, address, ssh_keys) stops the store rather than being ignored.
+        tokio::spawn(async move {
+            if let Err(e) = s3::sftp::serve(srv, cfg).await {
+                fail("SFTP", e)
+            }
+        });
+    }
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
     tracing::info!(addr = %addr, data = %data, version = VERSION, keys, fsync, tls = tls.is_some(), "cairn-store listening");
     let mut shutdown = Box::pin(async {

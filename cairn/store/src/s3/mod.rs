@@ -18,6 +18,7 @@ mod objectlock;
 pub mod policy;
 mod post;
 pub mod replication;
+pub mod sftp;
 pub mod sse;
 pub mod tiering;
 mod trail;
@@ -117,6 +118,7 @@ pub struct Server {
     pub(crate) tiers: Option<Arc<tiering::Tiers>>,
     files_basic: bool,
     files_basic_http: bool,
+    pub(crate) sftp_metrics: sftp::SftpMetrics,
 }
 
 /// One request, after routing and authentication.
@@ -215,6 +217,7 @@ impl Server {
             tiers,
             files_basic: cfg.files_basic,
             files_basic_http: cfg.files_basic_http,
+            sftp_metrics: Default::default(),
         })
     }
 
@@ -483,6 +486,12 @@ impl Server {
                             v.load(Ordering::Relaxed)
                         ));
                     }
+                }
+                for (name, v) in [("sessions", &self.sftp_metrics.sessions), ("auth_failures", &self.sftp_metrics.auth_failures)] {
+                    body.push_str(&format!(
+                        "# TYPE cairn_store_sftp_{name}_total counter\ncairn_store_sftp_{name}_total {}\n",
+                        v.load(Ordering::Relaxed)
+                    ));
                 }
                 if let Some(t) = &self.tiers {
                     let m = &t.metrics;

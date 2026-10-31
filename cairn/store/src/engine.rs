@@ -746,6 +746,13 @@ impl Engine {
         self.dir.join("blobs").join(&id[0..2]).join(&id[2..4]).join(id)
     }
 
+    /// A private temporary file in the data directory (removed at the next start if left behind).
+    pub fn temp_file(&self) -> io::Result<(PathBuf, File)> {
+        let p = self.dir.join("tmp").join(format!("staged.{}", new_id()));
+        let f = fs::OpenOptions::new().read(true).write(true).create_new(true).open(&p)?;
+        Ok((p, f))
+    }
+
     /// Starts a blob.
     pub fn new_blob(&self) -> Result<BlobWriter<'_>> {
         let id = new_id();
