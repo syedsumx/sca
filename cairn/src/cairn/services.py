@@ -107,6 +107,7 @@ class Services:
     trino_access: Optional[Any] = None
     trino_key: str = ""
     trino_tokens: Optional[Any] = None
+    trino_outbox: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -341,7 +342,17 @@ class Services:
                 except Exception:
                     logger.exception("policy layer reload failed")
 
+        def trino_lineage_loop() -> None:
+            every = float(os.environ.get("CAIRN_TRINO_LINEAGE_RETRY_SECONDS", "15"))
+            while not stop.wait(every):
+                try:
+                    self.trino_outbox.drain()
+                except Exception:
+                    logger.exception("held Trino lineage could not be retried")
+
         targets = [policy_loop, workflow_loop, layers_loop]
+        if self.trino_outbox is not None and self.openlineage is not None:
+            targets.append(trino_lineage_loop)
         if bootstrap_catalog:
             targets.append(lambda: self.bootstrap_catalog(stop))
             interval = float(os.environ.get("CAIRN_SEMANTIC_RECONCILE_SECONDS", "21600"))
@@ -906,6 +917,12 @@ def _build_data_access(s: Services) -> None:
         s.trino_tokens = TrinoTokens(s.engine, trino_key, os.environ.get("CAIRN_TRINO_TOKEN_ISSUER", "cairn"),
                                      int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
         s.data_access.trino_tokens = s.trino_tokens
+        # Lineage Core cannot take now waits in the database (Trino sends each event once).
+        from cairn.dataaccess.trino import LINEAGE_ACTOR
+        from cairn.dataaccess.trino_lineage import LineageOutbox
+
+        s.trino_outbox = LineageOutbox(s.engine, lambda events: s.openlineage.handle_many(events, LINEAGE_ACTOR),
+                                       s.audit, int(os.environ.get("CAIRN_TRINO_LINEAGE_MAX_AGE_SECONDS", str(7 * 86400))))
 
     from cairn.dataaccess.ask import AskService
 

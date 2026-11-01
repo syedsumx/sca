@@ -89,3 +89,13 @@ policies:
       all:
         - {attr: subject.groups, op: contains, value: "urn:li:corpGroup:break-glass"}
         - {not: {attr: environment.ip, op: cidr, value: ["10.0.0.0/8", "192.168.0.0/16"]}}
+
+  - id: lakehouse-admins-manage-tables
+    description: >-
+      Lakehouse administrators may change rows (WRITE_DATASET), create, alter and drop tables and schemas
+      (MANAGE_DATASET) and manage other users' queries (MANAGE_SYSTEM_OPERATIONS) through Trino. These are
+      Cairn's own privileges: Cairn Core policies never grant them, so without a policy like this nobody can.
+    effect: allow
+    priority: 5
+    actions: [WRITE_DATASET, MANAGE_DATASET, MANAGE_SYSTEM_OPERATIONS]
+    condition: {attr: subject.groups, op: contains, value: "urn:li:corpGroup:lakehouse-admins"}

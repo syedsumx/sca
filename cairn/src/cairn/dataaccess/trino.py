@@ -255,7 +255,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
-                       current_principal=None) -> APIRouter:
+                       current_principal=None, outbox=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -317,13 +317,21 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             body = await request.json()
         except ValueError:
             raise HTTPException(400, "the body is not JSON")
-        events = body if isinstance(body, list) else [body]
+        events = [name_jobs_by_outputs(e) for e in (body if isinstance(body, list) else [body])]
         try:
-            return lineage.handle_many([name_jobs_by_outputs(e) for e in events], LINEAGE_ACTOR)
+            return lineage.handle_many(events, LINEAGE_ACTOR)
         except OpenLineageError as e:
             raise HTTPException(422, str(e))
         except Exception as e:  # the metadata store is down or refused the write
-            logger.warning("trino lineage could not be recorded: %s", e)
+            logger.warning("trino lineage could not be recorded now: %s", e)
+            if outbox is not None:
+                try:  # Trino never resends: keep it and write it when Core is back
+                    from fastapi.responses import JSONResponse
+
+                    held = outbox.hold(events, str(e))
+                    return JSONResponse({"held": held, "events": len(events)}, status_code=202)
+                except Exception as e2:
+                    logger.error("trino lineage could not be held either: %s", e2)
             raise HTTPException(503, "lineage could not be recorded: the metadata store is unavailable")
 
     @router.post("/{given}/column-mask")

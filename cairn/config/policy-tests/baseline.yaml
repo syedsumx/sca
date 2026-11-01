@@ -95,3 +95,19 @@ cases:
       actor_groups: [urn:li:corpGroup:data-stewards]
       privilege: CAIRN_APPROVE_CERTIFICATION
     expect: ALLOW
+
+  - name: lakehouse admins create and change tables through Trino
+    request:
+      actor: urn:li:corpuser:lena
+      actor_groups: [urn:li:corpGroup:lakehouse-admins]
+      privilege: MANAGE_DATASET
+      resource: {type: dataset, urn: "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)"}
+    expect: ALLOW
+    expect_policies: [lakehouse-admins-manage-tables]
+
+  - name: no one else writes through Trino (Cairn Core policies never grant WRITE_DATASET)
+    request:
+      actor: urn:li:corpuser:ana
+      privilege: WRITE_DATASET
+      resource: {type: dataset, urn: "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)"}
+    expect: NOT_APPLICABLE

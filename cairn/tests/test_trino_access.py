@@ -137,11 +137,74 @@ def test_lineage_jobs_are_named_by_what_they_write(client):
     assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422
 
 
-def test_lineage_reports_an_unavailable_metadata_store(client, graph, monkeypatch):
+def test_lineage_is_held_while_the_metadata_store_is_down(client, graph, monkeypatch):
+    """Trino sends each event once: what Core cannot take now waits in Cairn's database and is written
+    when Core is back."""
+    real = graph.emit
+
     def down(_mcps):
         raise OSError("Name or service not known")
 
     monkeypatch.setattr(graph, "emit", down)
+    ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"},
+          "outputs": [{"namespace": "trino://t:8080", "name": "lake.s.t"}]}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 202 and r.json()["events"] == 1
+    box = client.app.state.services.trino_outbox
+    assert box.pending()["pending"] == 1
+    job = "urn:li:dataJob:(urn:li:dataFlow:(trino,t:8080,PROD),trino:lake.s.t)"
+    # Not due yet; then due but Core still down: retried later, with the error kept.
+    import time
+
+    assert box.drain()["written"] == 0
+    later = int(time.time() * 1000) + 20_000
+    assert box.drain(now=later) == {"written": 0, "retrying": 1, "dropped": 0}
+    assert box.drain(now=later + 1000)["retrying"] == 0  # backing off
+    assert box.pending()["pending"] == 1
+    # Core is back: written once, and gone from the outbox.
+    monkeypatch.setattr(graph, "emit", real)
+    assert box.drain(now=later + 3600_000) == {"written": 1, "retrying": 0, "dropped": 0}
+    assert graph.get_aspect(job, "dataJobInputOutput")["outputDatasets"] == [
+        "urn:li:dataset:(urn:li:dataPlatform:trino,lake.s.t,PROD)"]
+    assert box.pending()["pending"] == 0
+
+
+def test_held_lineage_is_dropped_and_audited_when_it_cannot_be_written(client, graph, monkeypatch):
+    from cairn.sources.openlineage import OpenLineageError
+
+    s = client.app.state.services
+    box = s.trino_outbox
+    box.hold([{"job": {"name": "trino:lake.a.b"}}], "down")
+    import time
+
+    soon = int(time.time() * 1000) + 60_000
+    monkeypatch.setattr(box, "write", lambda _e: (_ for _ in ()).throw(OpenLineageError("not valid")))
+    assert box.drain(now=soon)["dropped"] == 1
+    # Too old: dropped rather than retried forever.
+    box.hold([{"job": {"name": "trino:lake.c.d"}}], "down")
+    monkeypatch.setattr(box, "write", lambda _e: (_ for _ in ()).throw(OSError("still down")))
+    assert box.drain(now=soon + box.max_age_ms * 2)["dropped"] == 1
+    reasons = [e["details"]["reason"] for e in s.audit.entries(category="lineage") if e["action"] == "trino.lineage_dropped"]
+    assert any(r.startswith("rejected") for r in reasons) and any(r.startswith("expired") for r in reasons)
+
+
+def test_one_replica_writes_each_held_batch(client):
+    from cairn.dataaccess.trino_lineage import LineageOutbox
+
+    s = client.app.state.services
+    wrote = []
+    a = LineageOutbox(s.engine, lambda e: wrote.append(("a", e)))
+    b = LineageOutbox(s.engine, lambda e: wrote.append(("b", e)))
+    a.hold([{"n": 1}], "down")
+    now = 10**13
+    claimed_by_a = a._claim(now, 10)
+    assert len(claimed_by_a) == 1 and b._claim(now, 10) == []  # b sees it claimed
+
+
+def test_lineage_is_refused_when_it_cannot_be_held_either(client, graph, monkeypatch):
+    monkeypatch.setattr(graph, "emit", lambda _m: (_ for _ in ()).throw(OSError("down")))
+    box = client.app.state.services.trino_outbox
+    monkeypatch.setattr(box, "hold", lambda *_a: (_ for _ in ()).throw(OSError("database down")))
     ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"},
           "outputs": [{"namespace": "trino://t:8080", "name": "lake.s.t"}]}
     r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)

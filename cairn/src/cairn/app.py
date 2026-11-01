@@ -214,7 +214,7 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_trino_router(services.trino_access, services.trino_key, audit=services.audit,
                                               lineage=services.openlineage, tokens=services.trino_tokens,
-                                              current_principal=cp))
+                                              current_principal=cp, outbox=services.trino_outbox))
     if services.openlineage is not None:
         from cairn.sources.api import build_openlineage_router
 
