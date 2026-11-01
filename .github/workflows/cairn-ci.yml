@@ -90,7 +90,7 @@ jobs:
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
-          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
           cd conformance && pytest -q -p no:cacheprovider
 
   store-postgres:
@@ -123,7 +123,7 @@ jobs:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
           CAIRN_STORE_TEST_META: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
         run: |
-          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" pytest "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
           cd conformance && pytest -q -p no:cacheprovider
 
   catalog:

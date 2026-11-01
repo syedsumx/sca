@@ -31,6 +31,11 @@ postgres = "0.19"
 tokio-postgres-rustls = "0.13"
 reed-solomon-erasure = "6"
 zstd = { version = "0.13", default-features = false }
+tonic = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
+tokio-stream = { version = "0.1", features = ["net"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
 redb = "2"
 rskafka = { version = "0.6", default-features = false }

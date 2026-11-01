@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Cairn Store: Cairn's S3-compatible object store (single node, Rust). Data lives in /data.
+# Cairn Store: Cairn's S3-compatible object store (Rust). Data lives in /data. fuse3: for `mount` and `csi`.
 # Build context: cairn/ (see docker-compose.cairn.yml, service cairn-store).
 #   docker build -f docker/store.Dockerfile -t cairn/store:0.1.0 .
 # Behind a TLS-intercepting proxy pass its CA as a BuildKit secret (it is never stored in a layer):
@@ -20,7 +20,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
  && cp target/release/cairn-store /cairn-store
 
 FROM ${RUN_IMAGE}
-RUN addgroup -S -g 10001 cairn && adduser -S -u 10001 -G cairn cairn \
+RUN apk add --no-cache fuse3 \
+ && addgroup -S -g 10001 cairn && adduser -S -u 10001 -G cairn cairn \
  && mkdir -p /data && chown cairn:cairn /data
 COPY --from=build /cairn-store /usr/local/bin/cairn-store
 USER 10001

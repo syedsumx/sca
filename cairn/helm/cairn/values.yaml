@@ -565,6 +565,27 @@ cairn:
       hostKeySecret: ""
       # Network policy peers allowed to connect (besides this release's pods), e.g. an ipBlock.
       ingressFrom: []
+    # CSI driver (csi.cairn.store): PersistentVolumeClaims become buckets (with their size as a quota),
+    # or prefixes of one shared bucket, mounted into pods with FUSE. Runs privileged on every node.
+    csi:
+      enabled: false
+      kubeletDir: /var/lib/kubelet
+      storeEndpoint: ""        # empty: this release's store service
+      secretName: ""           # empty: cairn.store.secret (a key that may create buckets)
+      images:
+        registrar: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+        provisioner: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+      storageClass:
+        create: true
+        name: cairn-store
+        default: false
+        reclaimPolicy: Delete
+        bucket: ""             # set: volumes are prefixes of this bucket instead of buckets of their own
+      resources:
+        requests: { cpu: 50m, memory: 64Mi }
+        limits: { memory: 512Mi }
+      nodeSelector: {}
+      tolerations: []
     # Refuse anonymous access and public bucket policies store-wide. Set false only to serve public files.
     blockPublicAccess: true
     # Ask this release's policy decision point about every request the store's own rules allow

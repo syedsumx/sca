@@ -6,6 +6,7 @@
 //! cairn-store healthcheck  exit 0 if the local server is ready (container health checks)
 //! cairn-store admin ...    the admin API (see admin_cli)
 //! cairn-store mount <bucket>[/prefix] <dir>  a bucket as a FUSE directory (see mount)
+//! cairn-store csi         a Kubernetes CSI driver (csi.cairn.store) for buckets as volumes (see csi)
 //! cairn-store restore-backup <sink> <name> <dir>  download a backup from a sink into a new data directory
 //! cairn-store version      print the version
 //! ```
@@ -84,6 +85,7 @@
 mod admin_cli;
 mod audit;
 mod crypt;
+mod csi;
 mod engine;
 mod mount;
 mod s3;
@@ -241,7 +243,8 @@ fn main() {
     let mut addr = env("CAIRN_STORE_ADDR", ":8333");
     let mut data = env("CAIRN_STORE_DATA", "/data");
     // `admin` takes its own arguments.
-    let rest: Vec<String> = if cmd == "admin" || cmd == "mount" || cmd == "restore-backup" { std::mem::take(&mut args) } else { vec![] };
+    let rest: Vec<String> =
+        if cmd == "admin" || cmd == "mount" || cmd == "restore-backup" || cmd == "csi" { std::mem::take(&mut args) } else { vec![] };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.trim_start_matches('-') {
@@ -299,6 +302,13 @@ fn main() {
             std::fs::rename(&index, &kept).unwrap_or_else(|e| fail("set the embedded index aside", e));
             println!("{}", serde_json::json!({"rows": rows, "embedded_index_kept_as": kept.display().to_string()}));
             std::process::exit(0);
+        }
+        "csi" => {
+            let tls = !env("CAIRN_STORE_TLS_CERT", "").is_empty();
+            let default = format!("{}://{}", if tls { "https" } else { "http" }, listen_addr(&addr).replace("0.0.0.0", "127.0.0.1"));
+            let endpoint = env("CAIRN_STORE_ENDPOINT", &default);
+            let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
+            std::process::exit(csi::run(&endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1")));
         }
         "restore-backup" => {
             // Downloads a backup from a sink into a new data directory: restore-backup <sink> <name> <dir>.
@@ -361,7 +371,7 @@ fn main() {
         }
         other => {
             eprintln!(
-                "unknown command {other:?} (serve, fsck, audit-verify, admin, mount, migrate-meta, restore-backup, healthcheck, version)"
+                "unknown command {other:?} (serve, fsck, audit-verify, admin, mount, csi, migrate-meta, restore-backup, healthcheck, version)"
             );
             std::process::exit(2);
         }

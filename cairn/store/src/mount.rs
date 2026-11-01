@@ -1029,7 +1029,7 @@ fn libc_o_trunc() -> i32 {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store mount <bucket>[/prefix] <directory> [--read-only] [--allow-other]");
+    eprintln!("usage: cairn-store mount <bucket>[/prefix] <directory> [--read-only] [--allow-other] [--uid=N] [--gid=N]");
     std::process::exit(2)
 }
 
@@ -1089,7 +1089,10 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
     };
     use std::os::unix::fs::MetadataExt as _;
     let staging = std::env::var("CAIRN_STORE_MOUNT_STAGING").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
-    let fs = CairnFs { s3, state: Mutex::new(State::default()), uid: meta.uid(), gid: meta.gid(), read_only, staging };
+    // Files show as owned by the directory's owner, or by --uid=N / --gid=N (for pods running as non-root).
+    let id_flag = |name: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{name}="))?.parse::<u32>().ok());
+    let (uid, gid) = (id_flag("uid").unwrap_or(meta.uid()), id_flag("gid").unwrap_or(meta.gid()));
+    let fs = CairnFs { s3, state: Mutex::new(State::default()), uid, gid, read_only, staging };
     let mut cfg = fuser::Config::default();
     cfg.mount_options =
         vec![MountOption::FSName(format!("cairn:{target}")), MountOption::Subtype("cairn".into()), MountOption::NoDev, MountOption::NoSuid];

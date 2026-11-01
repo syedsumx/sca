@@ -507,6 +507,12 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
 - **Directories** are key prefixes. `mkdir` writes an empty `name/` marker object, as S3 consoles do. `rmdir` works only on empty directories.
 - **Refused rather than faked** (`Operation not supported`): changing modes (setting the mode a file already shows is allowed, so `cp` works), owners or times, links, and extended attributes. Renames of files and directories are one transaction in an unversioned bucket; in a versioned bucket a file rename is a copy and a delete, and a directory rename returns `EXDEV`, so `mv` copies and deletes instead.
 
+**Kubernetes volumes (CSI).** `cairn-store csi` is a CSI driver (`csi.cairn.store`): PersistentVolumeClaims of its StorageClass become Cairn Store buckets, mounted into pods with the FUSE client above. Enable it in Helm with `cairn.store.csi.enabled`. That runs it on every node, with the standard registrar and provisioner sidecars, and creates the `cairn-store` StorageClass.
+
+- **Volumes.** Each claim gets a bucket of its own, named after the volume, with the requested size as a hard quota. Or, with the StorageClass parameter `bucket` (`csi.storageClass.bucket`), each claim gets a prefix of one shared bucket. Each volume carries a marker object, so a bucket that already exists and is not a volume is never taken over. Deleting a claim (reclaim policy `Delete`) deletes its objects and bucket. Versioned and object-locked buckets are refused, so their history is not half deleted.
+- **Mounts.** Any access mode works (many pods on many nodes can mount a bucket); block volumes are refused. Read-only claims and publishes mount read-only. The mount options `uid=N,gid=N` set who owns the files, for pods that run as non-root; other options are refused rather than ignored. A volume uses the key in its node-publish secret (`access_key`, `secret_key`) when given, otherwise the driver's own key, which must be allowed to create buckets.
+- **Limits.** No snapshots, cloning or expansion. The driver container runs privileged, as FUSE drivers must, and needs `/dev/fuse` on each node.
+
 **Hadoop, Spark and Hive.** Hadoop's S3A file system (`hadoop-aws`, with Hadoop 3.4) works with Cairn Store as it is. The conformance suite runs Hadoop's own client against the store: directories, small and multipart writes, positioned reads, listings, file and directory renames and recursive deletes. The settings:
 
 ```properties
