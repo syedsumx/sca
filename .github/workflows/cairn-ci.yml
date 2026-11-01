@@ -162,6 +162,46 @@ jobs:
           pip install requests pytest "pyarrow>=17" "pyiceberg[pyarrow]>=0.10"
           cd conformance && pytest -q -p no:cacheprovider
 
+  # Trino against a real Cairn API, Cairn Catalog and Cairn Store: sign-in with Cairn tokens over TLS,
+  # access control, masks, row filters, lineage and the SQL editor (tests/test_trino_e2e.py), and the Helm
+  # chart's Trino as rendered: its coordinator, worker and init containers (tests/test_trino_helm.py).
+  trino:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog and the store
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Pull Trino
+        run: docker pull trinodb/trino:476
+      - name: Trino end to end
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          pip install -e ".[server,test,trino]"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py \
+            | tee "$RUNNER_TEMP/trino.log"
+          # Skipped is not passed: every Trino test must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+
   ui:
     runs-on: ubuntu-latest
     defaults:
@@ -218,11 +258,16 @@ jobs:
               "-f helm/cairn/values-ha.yaml" "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml" \
               "--set core.database.type=postgres" \
               "--set cairn.metadataExport.enabled=true --set cairn.metadataExport.destination=s3://bucket/cairn" \
-              "--set cairn.serviceMonitor.enabled=true --set cairn.prometheusRule.enabled=true --set cairn.grafanaDashboard.enabled=true"; do
+              "--set cairn.serviceMonitor.enabled=true --set cairn.prometheusRule.enabled=true --set cairn.grafanaDashboard.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.allowInsecureHttp=true"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # Trino without TLS is refused unless asked for explicitly.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.trino.enabled=true >/dev/null 2>&1
           helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
 
