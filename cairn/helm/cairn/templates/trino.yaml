@@ -12,6 +12,7 @@
 {{- $api := printf "http://%s:%v" (include "cairn.componentName" $apiCtx) .Values.cairn.api.port }}
 {{- $tls := $u.tls.secretName }}
 {{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
+{{- if and $u.sso.enabled (or (not $tls) (not $u.sso.publicUrl)) }}{{ fail "cairn.trino.sso needs cairn.trino.tls.secretName and cairn.trino.sso.publicUrl (https://...)" }}{{ end }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
@@ -31,8 +32,21 @@ data:
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
-    # Sign-in: tokens Cairn issues, checked against Cairn's public key.
+    # Sign-in: tokens Cairn issues (and with sso, people through Cairn), checked against Cairn's public key.
+    {{- if $u.sso.enabled }}
+    http-server.authentication.type=OAUTH2,JWT
+    web-ui.authentication.type=OAUTH2
+    http-server.authentication.oauth2.issuer={{ $u.tokenIssuer }}
+    http-server.authentication.oauth2.oidc.discovery=false
+    http-server.authentication.oauth2.auth-url={{ trimSuffix "/" .Values.cairn.publicUrl }}/cairn/api/v1/trino/oauth/authorize
+    http-server.authentication.oauth2.token-url={{ $api }}/v1/trino/oauth/token
+    http-server.authentication.oauth2.jwks-url={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.oauth2.client-id=trino
+    http-server.authentication.oauth2.client-secret=${ENV:CAIRN_TRINO_OAUTH_SECRET}
+    http-server.authentication.oauth2.scopes=trino
+    {{- else }}
     http-server.authentication.type=JWT
+    {{- end }}
     http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
     http-server.authentication.jwt.required-issuer={{ $u.tokenIssuer }}
     http-server.authentication.jwt.required-audience=trino
@@ -166,6 +180,11 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.sso.enabled }}
+            - name: CAIRN_TRINO_OAUTH_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.sso.clientSecretKey }} }
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ $u.port }}

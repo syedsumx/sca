@@ -729,6 +729,14 @@ cairn:
     allowInsecureHttp: false
     tokenIssuer: cairn
     tokenTtlSeconds: 3600
+    # People sign in to Trino's web UI and BI tools (external authentication) through Cairn (OAuth2).
+    # publicUrl: the address people reach Trino's HTTPS port at (its callback, publicUrl/oauth2/callback,
+    # is the only place Cairn sends them back to). Needs tls.secretName. clientSecret: a key (24+
+    # characters) in the Secret named by accessKeySecret.name.
+    sso:
+      enabled: false
+      publicUrl: ""
+      clientSecretKey: oauth-secret
     resources:
       requests: { cpu: 500m, memory: 2Gi }
       limits: { memory: 4Gi }

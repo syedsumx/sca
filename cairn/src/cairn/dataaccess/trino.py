@@ -337,7 +337,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
                        current_principal=None, outbox=None, usage=None, catalog_sync=None,
-                       authorize=None) -> APIRouter:
+                       authorize=None, oauth=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -367,6 +367,65 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             def catalog_sync_connections(p=Depends(current_principal)):
                 authorize(p, "MANAGE_INGESTION", None)
                 return {"connections": sorted(catalog_sync.connections())}
+
+        if oauth is not None:
+            from urllib.parse import quote, urlencode
+
+            from fastapi.responses import JSONResponse, RedirectResponse
+
+            from cairn.dataaccess.trino_oauth import OAuthError
+
+            def back(redirect_uri: str, **params) -> RedirectResponse:
+                sep = "&" if "?" in redirect_uri else "?"
+                return RedirectResponse(redirect_uri + sep + urlencode({k: v for k, v in params.items() if v}), 302)
+
+            @router.get("/oauth/authorize")
+            def oauth_authorize(request: Request, response_type: str = "", client_id: str = "", redirect_uri: str = "",
+                                state: str = "", code_challenge: str = "", code_challenge_method: str = ""):
+                """Trino's sign-in: a person signed in to Cairn goes back to Trino with a one-time code."""
+                try:
+                    oauth.check(client_id, redirect_uri, response_type, code_challenge_method if code_challenge else "")
+                except OAuthError as e:
+                    if e.error in ("unauthorized_client", "invalid_request") and not oauth.redirect_ok(redirect_uri):
+                        raise HTTPException(400, str(e))  # never redirect to an address Cairn does not trust
+                    return back(redirect_uri, error=e.error, error_description=str(e), state=state)
+                try:
+                    p = current_principal(request)
+                except HTTPException:
+                    p = None
+                if p is None or p.via not in ("session", "dev") or p.urn == f"urn:li:corpuser:{CRAWLER}":
+                    here = f"/cairn/api/v1/trino/oauth/authorize?{request.url.query}"
+                    return RedirectResponse(f"/login?redirect_uri={quote(here, safe='')}", 302)
+                code = oauth.issue_code(p.urn, redirect_uri, code_challenge, "S256" if code_challenge else "")
+                if audit is not None:
+                    audit.record("trino", "trino.sign_in", p.urn, None, {"redirect": redirect_uri.split("?")[0]})
+                return back(redirect_uri, code=code, state=state)
+
+            @router.post("/oauth/token")
+            async def oauth_token(request: Request):
+                """Trino exchanges the code for an access token (its client secret, HTTP Basic or form)."""
+                import base64
+                from urllib.parse import parse_qs
+
+                form = {k: v[0] for k, v in parse_qs((await request.body()).decode()).items()}
+                cid, secret = form.get("client_id", ""), form.get("client_secret", "")
+                basic = request.headers.get("authorization", "")
+                if basic.lower().startswith("basic "):
+                    try:
+                        from urllib.parse import unquote
+
+                        u, _, pw = base64.b64decode(basic[6:]).decode().partition(":")
+                        cid, secret = unquote(u), unquote(pw)
+                    except ValueError:
+                        pass
+                if form.get("grant_type") != "authorization_code":
+                    return JSONResponse({"error": "unsupported_grant_type"}, 400)
+                try:
+                    out = oauth.exchange(form.get("code", ""), form.get("redirect_uri", ""), cid, secret,
+                                         form.get("code_verifier", ""))
+                except OAuthError as e:
+                    return JSONResponse({"error": e.error, "error_description": str(e)}, e.status)
+                return JSONResponse(out, headers={"Cache-Control": "no-store"})
 
         @router.post("/token")
         def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):

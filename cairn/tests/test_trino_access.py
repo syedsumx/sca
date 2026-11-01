@@ -11,6 +11,7 @@ from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 from cairn.services import build_services
 
 KEY = "trino-key-" + "k" * 24
+OAUTH_SECRET = "oauth-secret-" + "o" * 24
 ADMIN, ANA, BOB, EVE = (f"urn:li:corpuser:{u}" for u in ("admin", "ana", "bob", "eve"))
 EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
 ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
@@ -26,6 +27,8 @@ def schema(*cols, labelled=()):
 def client(settings, graph, monkeypatch):
     monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", KEY)
     monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
+    monkeypatch.setenv("CAIRN_TRINO_OAUTH_SECRET", OAUTH_SECRET)
+    monkeypatch.setenv("CAIRN_TRINO_OAUTH_REDIRECT_URIS", "https://trino.test/oauth2/callback")
     graph.aspects[(ORDERS, "schemaMetadata")] = schema("id", "email", "region", "amount", labelled=("email",))
     graph.aspects[(SECRET, "schemaMetadata")] = schema("name", "salary")
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
@@ -341,3 +344,61 @@ def test_trino_types_become_catalog_types():
                                     "timestamp(6) with time zone", "array(integer)", "map(varchar, bigint)",
                                     "row(a integer)", "varbinary", "json")] == [
         "string", "number", "number", "boolean", "date", "time", "array", "map", "record", "bytes", "string"]
+
+
+def _code(client, actor=ANA, **extra):
+    from urllib.parse import parse_qs, urlsplit
+
+    params = {"response_type": "code", "client_id": "trino", "redirect_uri": "https://trino.test/oauth2/callback",
+              "state": "st-1", **extra}
+    r = client.get("/v1/trino/oauth/authorize", params=params, headers={"X-Cairn-Actor": actor} if actor else {},
+                   follow_redirects=False)
+    return r, {k: v[0] for k, v in parse_qs(urlsplit(r.headers.get("location", "")).query).items()}
+
+
+def _exchange(client, code, secret=OAUTH_SECRET, verifier="", redirect="https://trino.test/oauth2/callback"):
+    return client.post("/v1/trino/oauth/token", data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect,
+                                                      "client_id": "trino", "client_secret": secret, "code_verifier": verifier})
+
+
+def test_trino_signs_in_through_cairn(client):
+    import jwt
+
+    # Not signed in to Cairn: off to Cairn's sign-in, then back here.
+    r, _ = _code(client, actor=None)
+    assert r.status_code == 302 and r.headers["location"].startswith("/login?redirect_uri=%2Fcairn%2Fapi%2Fv1%2Ftrino%2Foauth%2Fauthorize")
+    # Signed in: back to Trino with a code and its state.
+    r, q = _code(client)
+    assert r.status_code == 302 and r.headers["location"].startswith("https://trino.test/oauth2/callback?") and q["state"] == "st-1"
+    out = _exchange(client, q["code"])
+    assert out.status_code == 200, out.text
+    key = jwt.algorithms.RSAAlgorithm.from_jwk(client.get("/v1/trino/jwks.json").json()["keys"][0])
+    assert jwt.decode(out.json()["access_token"], key, algorithms=["RS256"], audience="trino")["sub"] == "ana"
+    # One use only; the secret and the redirect address must match.
+    assert _exchange(client, q["code"]).json()["error"] == "invalid_grant"
+    _, q2 = _code(client)
+    assert _exchange(client, q2["code"], secret="wrong" * 6).status_code == 401
+    _, q3 = _code(client)
+    assert _exchange(client, q3["code"], redirect="https://trino.test/oauth2/callback/other").json()["error"] == "invalid_grant"
+    # Never redirects to an address Cairn does not trust.
+    r, _ = _code(client, redirect_uri="https://evil.test/cb")
+    assert r.status_code == 400
+    # The crawler identity cannot sign in.
+    r, _ = _code(client, actor="urn:li:corpuser:cairn-catalog")
+    assert r.status_code == 302 and r.headers["location"].startswith("/login")
+    entries = client.app.state.services.audit.entries(category="trino")
+    assert any(e["action"] == "trino.sign_in" and e["actor"] == ANA for e in entries)
+
+
+def test_trino_sign_in_with_pkce(client):
+    import base64
+    import hashlib
+
+    verifier = "v" * 50
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    _, q = _code(client, code_challenge=challenge, code_challenge_method="S256")
+    assert _exchange(client, q["code"], verifier="w" * 50).json()["error"] == "invalid_grant"
+    _, q = _code(client, code_challenge=challenge, code_challenge_method="S256")
+    assert _exchange(client, q["code"], verifier=verifier).status_code == 200
+    r, q = _code(client, code_challenge=challenge, code_challenge_method="plain")
+    assert q.get("error") == "invalid_request"

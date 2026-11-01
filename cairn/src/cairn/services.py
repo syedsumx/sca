@@ -110,6 +110,7 @@ class Services:
     trino_outbox: Optional[Any] = None
     trino_usage: Optional[Any] = None
     trino_catalog: Optional[Any] = None
+    trino_oauth: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -928,6 +929,14 @@ def _build_data_access(s: Services) -> None:
         s.trino_tokens = TrinoTokens(s.engine, trino_key, os.environ.get("CAIRN_TRINO_TOKEN_ISSUER", "cairn"),
                                      int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
         s.data_access.trino_tokens = s.trino_tokens
+        # Sign-in to Trino's web UI and clients' external authentication, with Cairn as the OAuth2 server.
+        oauth_secret = _secret_env("CAIRN_TRINO_OAUTH_SECRET")
+        if oauth_secret:
+            from cairn.dataaccess.trino_oauth import TrinoOAuth
+
+            s.trino_oauth = TrinoOAuth(s.engine, s.trino_tokens, oauth_secret,
+                                       os.environ.get("CAIRN_TRINO_OAUTH_REDIRECT_URIS", "").split(","),
+                                       int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
         # Lineage Core cannot take now waits in the database (Trino sends each event once).
         from cairn.dataaccess.trino import LINEAGE_ACTOR
         from cairn.dataaccess.trino_lineage import LineageOutbox

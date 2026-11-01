@@ -19,6 +19,7 @@ from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 
 TRINO = "trinodb/trino:476"
 KEY = "trino-e2e-" + "k" * 24
+OAUTH_SECRET = "trino-oauth-" + "o" * 24
 STORE_KEY = ("cairn-catalog", "catalog-store-secret")
 CATALOG_TOKEN = "admin-" + "x" * 24
 EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
@@ -88,6 +89,8 @@ def cairn(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("cairn")
     os.environ["CAIRN_TRINO_ACCESS_KEY"] = KEY
     os.environ["CAIRN_TRINO_CATALOGS"] = json.dumps({"lake": {"platform": "iceberg", "database": ""}})
+    os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
+    os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
     try:
         graph = InMemoryGraph()
         graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
@@ -99,6 +102,8 @@ def cairn(tmp_path_factory):
     finally:
         os.environ.pop("CAIRN_TRINO_ACCESS_KEY")
         os.environ.pop("CAIRN_TRINO_CATALOGS")
+        os.environ.pop("CAIRN_TRINO_OAUTH_SECRET")
+        os.environ.pop("CAIRN_TRINO_OAUTH_REDIRECT_URIS")
     sub = lambda u: {"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{u}"}  # noqa: E731
     s.pdp.set_bundle(PolicyBundle(policies=[
         Policy(id="admin", effect="allow", actions=["*"], condition=sub("admin")),
@@ -172,14 +177,23 @@ def trino(lake, cairn):
         f"http-event-listener.connect-ingest-uri={cairn_url}/v1/trino/{KEY}/queries", ""]))
     # Clients sign in over TLS with Cairn's tokens; plain HTTP is only for Trino's own nodes.
     tls = port()
+    services.trino_oauth.prefixes = [f"https://127.0.0.1:{tls}/oauth2/callback"]
     write_tls(d)
     open(f"{d}/config.properties", "w").write("\n".join([
         "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
         f"discovery.uri=http://127.0.0.1:{tp}", "http-server.https.enabled=true", f"http-server.https.port={tls}",
-        "http-server.https.keystore.path=/etc/trino/tls.pem", "http-server.authentication.type=JWT",
+        "http-server.https.keystore.path=/etc/trino/tls.pem",
         f"http-server.authentication.jwt.key-file={cairn_url}/v1/trino/jwks.json",
         "http-server.authentication.jwt.required-issuer=cairn", "http-server.authentication.jwt.required-audience=trino",
         "internal-communication.shared-secret=" + "s" * 32,
+        # Sign-in through Cairn (OAuth2) for the web UI and clients' external authentication.
+        "http-server.authentication.type=OAUTH2,JWT", "web-ui.authentication.type=OAUTH2",
+        "http-server.authentication.oauth2.issuer=cairn", "http-server.authentication.oauth2.oidc.discovery=false",
+        f"http-server.authentication.oauth2.auth-url={cairn_url}/v1/trino/oauth/authorize",
+        f"http-server.authentication.oauth2.token-url={cairn_url}/v1/trino/oauth/token",
+        f"http-server.authentication.oauth2.jwks-url={cairn_url}/v1/trino/jwks.json",
+        "http-server.authentication.oauth2.client-id=trino", f"http-server.authentication.oauth2.client-secret={OAUTH_SECRET}",
+        "http-server.authentication.oauth2.scopes=trino",
         "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
@@ -458,3 +472,44 @@ def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
     assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.scratch,PROD)", "status") == {"removed": True}
     with pytest.raises(DataAccessError, match="not in the catalog"):  # Cairn refuses before Trino is asked
         s.data_access.query("urn:li:corpuser:ana", "SELECT * FROM sales.scratch", connection="lakehouse")
+
+
+def test_trino_web_ui_and_clients_sign_in_through_cairn(trino, cairn):
+    """Single sign-on: Trino's web UI sends a person to Cairn and back (OAuth2); a client without a token is
+    told where to sign in (external authentication) and then gets a Cairn token from Trino."""
+    import re
+
+    import requests
+    import urllib3
+
+    urllib3.disable_warnings()
+    base = f"https://127.0.0.1:{trino.tls}"
+    browser = requests.Session()
+    browser.verify, browser.trust_env = False, False
+    browser.headers["X-Cairn-Actor"] = "urn:li:corpuser:ana"   # signed in to Cairn (dev header stands in for the session)
+    r = browser.get(f"{base}/ui/", timeout=60)
+    assert r.status_code == 200 and "trino" in r.text.lower(), (r.status_code, r.url)
+    hops = [h.headers.get("location", "") for h in r.history]
+    assert any("/v1/trino/oauth/authorize" in h for h in hops) and any("/oauth2/callback" in h for h in hops), hops
+    info = browser.get(f"{base}/ui/api/cluster", timeout=30)
+    assert info.status_code == 200 and info.json()["nodeVersion"]["version"] == "476"
+    # Without a Cairn session the UI sends the browser to Cairn's sign-in.
+    stranger = requests.Session()
+    stranger.verify, stranger.trust_env = False, False
+    r = stranger.get(f"{base}/ui/", timeout=60, allow_redirects=True)
+    assert "/login?redirect_uri=" in (r.url + "".join(h.headers.get("location", "") for h in r.history))
+    # A client (CLI, JDBC, Python) with external authentication: 401 names where to sign in and where to wait.
+    r = requests.post(f"{base}/v1/statement", data="SELECT 1", headers={"X-Trino-User": "ana"}, verify=False, timeout=30)
+    assert r.status_code == 401
+    challenge = r.headers["WWW-Authenticate"]
+    redirect = re.search(r'x_redirect_server="([^"]+)"', challenge).group(1)
+    token_server = re.search(r'x_token_server="([^"]+)"', challenge).group(1)
+    assert browser.get(redirect, timeout=60).status_code == 200   # the person signs in in their browser
+    token = requests.get(token_server, verify=False, timeout=30).json()["token"]
+    r = requests.post(f"{base}/v1/statement", data="SELECT current_user AS u",
+                      headers={"Authorization": f"Bearer {token}", "X-Trino-User": "ana"}, verify=False, timeout=30)
+    assert r.status_code == 200, r.text
+    # The token is Cairn's, for ana: she is ana to Trino, and Cairn's policies apply to her.
+    assert trino("SELECT current_user AS u", user="ana", token=token) == [{"u": "ana"}]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="ana", token=token)

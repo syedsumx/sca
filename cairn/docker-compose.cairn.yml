@@ -383,6 +383,9 @@ services:
       # Trino asks Cairn before every action (deploy/trino/access-control.properties) with this key.
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
+      # Trino's sign-in through Cairn (OAuth2): its client secret and where it may send people back to.
+      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:-cairn-trino-dev-oauth-secret-0001}
+      CAIRN_TRINO_OAUTH_REDIRECT_URIS: ${CAIRN_TRINO_OAUTH_REDIRECT_URIS:-https://localhost:8443/oauth2/callback}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
       CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
@@ -628,6 +631,8 @@ services:
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
       CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
       CAIRN_TRINO_SHARED_SECRET: ${CAIRN_TRINO_SHARED_SECRET:-cairn-trino-dev-shared-secret-0001}
+      CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:-cairn-trino-dev-oauth-secret-0001}
+      CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
     volumes:
       - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro
       - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
