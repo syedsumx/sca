@@ -178,6 +178,19 @@ impl Server {
         Ok(None)
     }
 
+    /// The encryption of an object renamed from `from` to `to` in `bucket`: its data key re-wrapped for
+    /// the new name (the bytes stay as they are). Customer keys (SSE-C) are not bound to the name.
+    pub(crate) fn rewrap_sse(&self, bucket: &str, from: &str, to: &str, sse: &Option<Sse>) -> Result<Option<Sse>, ApiError> {
+        let Some(s) = sse else { return Ok(None) };
+        if s.alg == "SSE-C" {
+            return Ok(Some(s.clone()));
+        }
+        let kek = self.keyring.keys.get(&s.key_id).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
+        let wrapped = B64.decode(&s.wrapped).map_err(|_| e::INTERNAL.clone())?;
+        let dek = crypt::unwrap(kek, &wrapped, &aad(bucket, from)).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
+        Ok(Some(Sse { wrapped: B64.encode(crypt::wrap(kek, &dek, &aad(bucket, to))), ..s.clone() }))
+    }
+
     /// The data key to read a version encrypted as `sse` (`copy`: the request's copy source).
     pub(crate) fn data_key(&self, c: &Ctx, bucket: &str, key: &str, sse: &Option<Sse>, copy: bool) -> Result<Option<Key>, ApiError> {
         let Some(sse) = sse else { return Ok(None) };

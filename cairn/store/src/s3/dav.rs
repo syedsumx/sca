@@ -12,7 +12,8 @@
 //! DeleteObject, CreateBucket) with the same policies, quotas, encryption, events and audit trail as
 //! the S3 API. A collection DELETE, COPY or MOVE first authorizes every key it would touch and changes
 //! nothing if any is refused; it is limited to `MAX_TREE` keys (larger trees: use the S3 API). A MOVE
-//! is a copy, then a delete of the source, so it is not atomic. Sign-in is the file API's (SigV4,
+//! within an unversioned bucket is one transaction (every key moves, data untouched, or none does);
+//! across buckets or in a versioned bucket it is a copy, then a delete of the source. Sign-in is the file API's (SigV4,
 //! presigned URLs, or HTTP Basic when `CAIRN_STORE_FILES_BASIC_AUTH` allows it).
 
 use std::collections::BTreeSet;
@@ -174,7 +175,7 @@ impl Server {
     }
 
     /// Every key under a prefix (at most MAX_TREE).
-    fn tree(&self, bucket: &str, prefix: &str) -> Result<Vec<Object>, ApiError> {
+    pub(crate) fn tree(&self, bucket: &str, prefix: &str) -> Result<Vec<Object>, ApiError> {
         let mut out = vec![];
         let mut after = String::new();
         loop {
@@ -512,6 +513,23 @@ impl Server {
         Ok((keys, Some(prefix)))
     }
 
+    /// Renames keys of one bucket atomically (callers have authorized every pair), audited.
+    pub(crate) fn rename_keys(&self, c: &Ctx, bucket: &str, pairs: &[(String, String)], overwrite: bool) -> Result<(), ApiError> {
+        let mut ev = self.ev(c, "Copy");
+        ev.audit = Some(crate::audit::Audit {
+            category: "store",
+            action: "object.rename".into(),
+            actor: c.auth.cred.access_key.clone(),
+            subject: format!("{bucket}/{}", pairs.first().map(|p| p.0.as_str()).unwrap_or("")),
+            details: serde_json::json!({"to": pairs.first().map(|p| p.1.as_str()).unwrap_or("")}),
+        });
+        let rewrap = |o: &Object, to: &str| -> engine::Result<Option<engine::Sse>> {
+            self.rewrap_sse(bucket, &o.key, to, &o.sse).map_err(|e| engine::Error::Index(format!("re-wrapping a data key: {}", e.message)))
+        };
+        tokio::task::block_in_place(|| self.eng.rename(bucket, pairs, overwrite, &ev, &rewrap))?;
+        Ok(())
+    }
+
     async fn delete_key(&self, c: &Ctx, bucket: &str, key: &str) -> Result<(), ApiError> {
         let mut x = c.clone();
         x.method = Method::DELETE;
@@ -581,6 +599,14 @@ impl Server {
             self.may(c, "PutObject", &db, d, None).await?;
             if mv {
                 self.may(c, "DeleteObject", &c.bucket, s, None).await?;
+            }
+        }
+        // Within one unversioned bucket a MOVE is one transaction: every key moves, or none does.
+        if mv && db == c.bucket {
+            match self.rename_keys(c, &db, &pairs, overwrite) {
+                Ok(()) => return Ok(status_only(if existed { StatusCode::NO_CONTENT } else { StatusCode::CREATED })),
+                Err(err) if err == e::RENAME_VERSIONED => {} // versioned: copy, then delete
+                Err(err) => return Err(err),
             }
         }
         for (s, d) in &pairs {

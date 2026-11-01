@@ -88,9 +88,8 @@ def test_what_objects_cannot_express_is_refused(s3, bucket, mounted):
         with pytest.raises(OSError) as ei:
             fn()
         assert ei.value.errno in (errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM)
-    with pytest.raises(OSError) as ei:
-        os.rename(m / "d", m / "e")  # directories: mv copies instead
-    assert ei.value.errno == errno.EXDEV
+    os.rename(m / "d", m / "e")  # a directory: one transaction in the store
+    assert (m / "e" / "x").read_bytes() == b"x" and not (m / "d").exists()
     with open(m / "g.txt", "wb", buffering=0) as f:
         f.write(b"abc")
         f.seek(100)

@@ -77,6 +77,11 @@ impl S3 {
             url.push('?');
             url.push_str(query);
         }
+        self.send(method, &url, extra, body, len)
+    }
+
+    fn send(&self, method: &str, url: &str, extra: &[(&str, &str)], body: Body, len: Option<u64>) -> Result<Resp, Errno> {
+        let url = url.to_string();
         let signed: Vec<(&str, &str)> = extra.iter().filter(|(k, _)| k.starts_with("x-amz-")).copied().collect();
         let mut req = hyper::Request::builder().method(method).uri(&url);
         for (k, v) in crate::admin_cli::sign_full(
@@ -203,6 +208,24 @@ impl S3 {
 
     fn delete(&self, key_path: &str) -> Result<(), Errno> {
         self.ok(self.call("DELETE", &self.key(key_path), "", &[], Self::empty(), None)?).map(|_| ())
+    }
+
+    /// Moves a file or a directory in one step (WebDAV MOVE: one transaction within an unversioned
+    /// bucket). Err(EXDEV): the store cannot do it in place (a versioned bucket).
+    fn rename(&self, from: &str, to: &str, dir: bool, replace: bool) -> Result<(), Errno> {
+        let dav = |p: &str| {
+            let k = self.key(p);
+            format!("/-/dav/{}/{}{}", aws_encode(self.bucket.as_bytes(), false), aws_encode(k.as_bytes(), true), if dir { "/" } else { "" })
+        };
+        let url = format!("{}{}", self.endpoint, dav(from));
+        let dest = dav(to);
+        let r =
+            self.send("MOVE", &url, &[("destination", &dest), ("overwrite", if replace { "T" } else { "F" })], Self::empty(), Some(0))?;
+        match r.status {
+            201 | 204 => Ok(()),
+            409 if dir => Err(Errno::EXDEV),
+            s => Err(errno_of(s)),
+        }
     }
 
     fn copy(&self, from: &str, to: &str) -> Result<(), Errno> {
@@ -700,22 +723,34 @@ impl Filesystem for CairnFs {
         let res = (|| {
             let from = join(&self.path(parent)?, name)?;
             let to = join(&self.path(newparent)?, newname)?;
-            if self.s3.head(&from)?.is_none() {
-                // A directory: renaming means copying every key; let mv do that (it falls back on EXDEV).
-                return Err(if self.s3.is_dir(&from)? { Errno::EXDEV } else { Errno::ENOENT });
-            }
             if flags.contains(RenameFlags::RENAME_EXCHANGE) {
                 return Err(Errno::EOPNOTSUPP);
             }
-            if flags.contains(RenameFlags::RENAME_NOREPLACE) && self.s3.head(&to)?.is_some() {
-                return Err(Errno::EEXIST);
+            let replace = !flags.contains(RenameFlags::RENAME_NOREPLACE);
+            let dir = self.s3.head(&from)?.is_none();
+            if dir && !self.s3.is_dir(&from)? {
+                return Err(Errno::ENOENT);
             }
-            self.s3.copy(&from, &to)?;
-            self.s3.delete(&from)?;
+            match self.s3.rename(&from, &to, dir, replace) {
+                Ok(()) => {}
+                Err(Errno::EXDEV) => return Err(Errno::EXDEV), // a directory in a versioned bucket: mv copies it
+                Err(e) if dir => return Err(e),
+                Err(Errno::EEXIST) if !replace => return Err(Errno::EEXIST),
+                Err(_) => {
+                    // A file in a versioned bucket: copy, then delete.
+                    self.s3.copy(&from, &to)?;
+                    self.s3.delete(&from)?;
+                }
+            }
+            // Inodes follow their paths (a directory's whole subtree).
             let mut st = self.state.lock().unwrap();
-            if let Some(i) = st.inodes.remove(&from) {
-                st.paths.insert(i, to.clone());
-                st.inodes.insert(to, i);
+            let moved: Vec<(String, u64)> =
+                st.inodes.iter().filter(|(p, _)| **p == from || p.starts_with(&format!("{from}/"))).map(|(p, i)| (p.clone(), *i)).collect();
+            for (p, i) in moved {
+                let np = format!("{to}{}", &p[from.len()..]);
+                st.inodes.remove(&p);
+                st.paths.insert(i, np.clone());
+                st.inodes.insert(np, i);
             }
             Ok(())
         })();

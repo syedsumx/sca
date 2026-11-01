@@ -176,6 +176,7 @@ errors! {
     NO_SUCH_TOPIC = "NotFound", 404, "No such topic.";
     NO_SUCH_DISK_TYPE = "InvalidArgument", 400, "This store has no disk of that type (CAIRN_STORE_DISKS, CAIRN_STORE_DATA_DISK_TYPE).";
     EC_OFF = "NotImplemented", 501, "Erasure coding is off: set CAIRN_STORE_CLUSTER_EC.";
+    RENAME_VERSIONED = "InvalidBucketState", 409, "Keys of a versioned bucket cannot be renamed in place: copy them instead.";
     CLUSTER_OFF = "NotImplemented", 501, "This store is not part of a cluster: set CAIRN_STORE_CLUSTER_NODE.";
     NO_SUCH_NODE = "NotFound", 404, "No such cluster node.";
     UNAVAILABLE = "ServiceUnavailable", 503, "Not enough storage nodes are reachable to keep the copies this write needs; retry later.";
@@ -209,6 +210,7 @@ impl From<crate::engine::Error> for ApiError {
                 INTERNAL.clone()
             }
             E::Stale => PRECONDITION.clone(),
+            E::RenameVersioned => RENAME_VERSIONED.clone(),
             E::Unavailable(e) => {
                 tracing::warn!(error = %e, "cluster");
                 UNAVAILABLE.clone()

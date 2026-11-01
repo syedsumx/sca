@@ -101,6 +101,8 @@ pub enum Error {
     Unavailable(String),
     /// A replica older than what is already here (two-way sync): dropped.
     Stale,
+    /// Renames move keys in place, which versioned buckets cannot do without rewriting history.
+    RenameVersioned,
 }
 
 impl std::fmt::Display for Error {
@@ -1338,6 +1340,77 @@ impl Engine {
         }
         tx.commit()?;
         Ok(n)
+    }
+
+    /// Renames keys (source, destination) of an unversioned bucket in one transaction: each object
+    /// moves with its data, metadata and modification time; nothing is copied. Destinations that exist
+    /// are replaced only with `overwrite`. Readers see either every key moved or none. Each move is an
+    /// ObjectRemoved:Delete of the source and an ObjectCreated:Copy of the destination for events,
+    /// replication and write-back. Returns how many destinations were replaced.
+    /// `rewrap` gives an encrypted object's encryption for its new key (data keys are bound to the
+    /// object's name).
+    pub fn rename(
+        &self,
+        bucket: &str,
+        pairs: &[(String, String)],
+        overwrite: bool,
+        ev: &Ev,
+        rewrap: &dyn Fn(&Object, &str) -> Result<Option<Sse>>,
+    ) -> Result<u64> {
+        let tx = self.begin_write()?;
+        let info = Self::bucket_in(&tx.open_table(BUCKETS)?, bucket)?;
+        if !info.versioning.is_empty() {
+            return Err(Error::RenameVersioned);
+        }
+        let mut garbage = vec![];
+        let mut replaced = 0u64;
+        let sources: HashSet<&str> = pairs.iter().map(|(s, _)| s.as_str()).collect();
+        {
+            let mut t = tx.open_table(OBJECTS)?;
+            let mut moving = vec![];
+            for (s, d) in pairs {
+                let o = Self::current_in(&t, bucket, s)?.ok_or(Error::NoSuchKey)?;
+                // A destination that is itself moving away (a swap within the tree) is not replaced.
+                if !sources.contains(d.as_str()) {
+                    if let Some(old) = Self::current_in(&t, bucket, d)? {
+                        if !overwrite {
+                            return Err(Error::PreconditionFailed);
+                        }
+                        garbage.extend(old.segments.clone());
+                        replaced += 1;
+                        Self::emit(&tx, bucket, "ObjectRemoved:Delete", &old, ev)?;
+                    }
+                }
+                moving.push((o, d.clone()));
+            }
+            for (o, _) in &moving {
+                t.remove((bucket, o.key.as_str()))?;
+            }
+            for (o, d) in moving {
+                Self::emit(&tx, bucket, "ObjectRemoved:Delete", &o, &Ev { audit: None, ..ev.clone() })?;
+                let sse = rewrap(&o, &d)?;
+                let mut n = o;
+                n.key = d.clone();
+                n.sse = sse;
+                t.insert((bucket, d.as_str()), serde_json::to_vec(&n)?.as_slice())?;
+                Self::emit(&tx, bucket, "ObjectCreated:Copy", &n, &Ev { audit: None, ..ev.clone() })?;
+            }
+        }
+        if replaced > 0 {
+            Self::adjust(&tx, bucket, 0, -(replaced as i64))?;
+        }
+        Self::queue_gc(&tx, bucket, &garbage)?;
+        if let Some(a) = &ev.audit {
+            let mut a = a.clone();
+            a.details["keys"] = pairs.len().into();
+            a.details["replaced"] = replaced.into();
+            Self::audit_in(&tx, &a)?;
+        }
+        tx.commit()?;
+        if !garbage.is_empty() {
+            self.collect();
+        }
+        Ok(replaced)
     }
 
     /// A bucket's current objects (not old versions or delete markers).

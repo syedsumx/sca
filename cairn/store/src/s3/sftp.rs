@@ -12,7 +12,8 @@
 //!
 //! What S3 cannot express is refused rather than faked: files are written sequentially from the start
 //! (uploads are staged in the data directory's temporary area, then stored on close, atomically); no
-//! appends, in-place updates, permissions, timestamps (setstat), links or directory renames.
+//! appends, in-place updates, permissions, timestamps (setstat) or links. Renames within a bucket
+//! (files and directories) are one transaction.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -610,15 +611,39 @@ impl russh_sftp::server::Handler for Sftp {
         if sk.is_empty() || dk.is_empty() {
             return Err(reply(StatusCode::OpUnsupported, "buckets cannot be renamed"));
         }
-        match self.head(&sb, &sk).await {
-            Ok(_) => {}
-            Err(e) if e.status_code == StatusCode::NoSuchFile && self.is_dir(&sb, &sk).await.unwrap_or(false) => {
-                return Err(reply(StatusCode::OpUnsupported, "directories cannot be renamed over SFTP: use WebDAV MOVE or the S3 API"));
-            }
+        let is_dir = match self.head(&sb, &sk).await {
+            Ok(_) => false,
+            Err(e) if e.status_code == StatusCode::NoSuchFile && self.is_dir(&sb, &sk).await.unwrap_or(false) => true,
             Err(e) => return Err(e),
-        }
-        if self.head(&db, &dk).await.is_ok() {
+        };
+        if self.head(&db, &dk).await.is_ok() || (is_dir && self.is_dir(&db, &dk).await.unwrap_or(false)) {
             return Err(reply(StatusCode::Failure, "the target exists")); // SFTP v3 rename does not overwrite
+        }
+        // Within one bucket: one transaction, files and whole directories alike.
+        if sb == db {
+            let pairs: Vec<(String, String)> = if is_dir {
+                let (sp, dp) = (format!("{}/", sk.trim_end_matches('/')), format!("{}/", dk.trim_end_matches('/')));
+                if dp.starts_with(&sp) {
+                    return Err(reply(StatusCode::Failure, "cannot move a directory into itself"));
+                }
+                let keys = self.srv.tree(&sb, &sp).map_err(|e| from_api(&e))?;
+                keys.iter().map(|o| (o.key.clone(), format!("{dp}{}", &o.key[sp.len()..]))).collect()
+            } else {
+                vec![(sk.clone(), dk.clone())]
+            };
+            let c = self.ctx(Method::PUT, &db, &dk);
+            for (s, d) in &pairs {
+                for (op, k) in [("GetObject", s), ("DeleteObject", s), ("PutObject", d)] {
+                    self.srv.may(&c, op, &sb, k, None).await.map_err(|e| from_api(&e))?;
+                }
+            }
+            match self.srv.rename_keys(&c, &sb, &pairs, false) {
+                Ok(()) => return Ok(ok(id)),
+                Err(err) if err == super::errors::RENAME_VERSIONED && !is_dir => {} // versioned: copy, then delete
+                Err(err) => return Err(from_api(&err)),
+            }
+        } else if is_dir {
+            return Err(reply(StatusCode::OpUnsupported, "directories cannot be moved to another bucket over SFTP"));
         }
         let mut c = self.ctx(Method::PUT, &db, &dk);
         let src = format!("/{}/{}", aws_encode(sb.as_bytes(), false), aws_encode(sk.as_bytes(), true));
