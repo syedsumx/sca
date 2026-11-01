@@ -3,18 +3,23 @@
 //!
 //! The mount is an S3 client of the store (`CAIRN_STORE_ENDPOINT`, signed with `CAIRN_STORE_ACCESS_KEY`
 //! and `CAIRN_STORE_SECRET_KEY`), so the key's policies, Cairn's policy decision point, quotas,
-//! encryption, events and the audit trail apply as for any client. Reads are ranged GETs. Writes are
-//! staged in a private temporary file and stored with one PUT when the file is closed (or flushed), so
-//! readers never see half a file; `O_TRUNC` opens (`>`, `cp`) replace a file atomically.
+//! encryption, events and the audit trail apply as for any client. Reads are ranged GETs.
 //!
-//! What objects cannot express fails with `EOPNOTSUPP` rather than being faked: appending, rewriting
-//! part of a file, writing out of order, chmod, chown, setting times, links. Renaming a directory fails
-//! with `EXDEV`, so `mv` falls back to copying and deleting. Directories are key prefixes; `mkdir`
-//! writes an empty `name/` marker, as S3 consoles do.
+//! Writes go to a private, sparse staging file in 8 MiB chunks and are stored when the file is flushed
+//! or closed, so readers never see half a file. Appends, writes at any offset, holes and truncation
+//! work: a chunk is fetched only when a write covers part of it, and a large file is stored as a
+//! multipart upload whose unchanged chunks are copied inside the store (UploadPartCopy), so editing a
+//! few bytes of a large file sends a chunk, not the file. Every store is conditional on the version the
+//! edit started from: if someone else changed the file meanwhile, the close fails with `ESTALE` and
+//! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file.
+//!
+//! What objects cannot express fails with `EOPNOTSUPP` rather than being faked: chmod, chown, setting
+//! times, links. Renames (directories too) are one transaction in an unversioned bucket. Directories are
+//! key prefixes; `mkdir` writes an empty `name/` marker, as S3 consoles do.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
-use std::io::{Seek, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -35,6 +40,10 @@ use crate::s3::xml;
 
 type Body = BoxBody<Bytes, std::io::Error>;
 const TTL: Duration = Duration::from_secs(1);
+/// Staging and multipart unit (at least S3's 5 MiB part minimum).
+const CHUNK: u64 = 8 << 20;
+/// Files up to this size are stored with one PUT; larger ones as multipart uploads that copy clean chunks.
+const WHOLE_PUT: u64 = 16 << 20;
 
 /// An S3 client for one bucket (and key prefix).
 struct S3 {
@@ -59,7 +68,7 @@ fn errno_of(status: u16) -> Errno {
         404 => Errno::ENOENT,
         403 | 401 => Errno::EACCES,
         409 => Errno::EEXIST,
-        412 => Errno::EEXIST,
+        412 => Errno::ESTALE,
         501 => Errno::EOPNOTSUPP,
         507 => Errno::ENOSPC,
         _ => Errno::EIO,
@@ -149,6 +158,89 @@ impl S3 {
         Ok(Some((size, mtime)))
     }
 
+    /// (size, ETag) of a file, or None.
+    fn head_etag(&self, path: &str) -> Result<Option<(u64, String)>, Errno> {
+        let r = self.call("HEAD", &self.key(path), "", &[], Self::empty(), None)?;
+        if r.status == 404 {
+            return Ok(None);
+        }
+        let r = self.ok(r)?;
+        let size = r.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
+        Ok(Some((size, etag_of(&r.headers))))
+    }
+
+    /// Reads `[off, off+len)` of the version with ETag `etag` (ESTALE: it changed).
+    fn get_of(&self, path: &str, etag: &str, off: u64, len: u64) -> Result<Bytes, Errno> {
+        let range = format!("bytes={off}-{}", off + len - 1);
+        let quoted = format!("\"{etag}\"");
+        let r = self.call("GET", &self.key(path), "", &[("range", &range), ("if-match", &quoted)], Self::empty(), None)?;
+        Ok(self.ok(r)?.body)
+    }
+
+    /// Stores `len` bytes from `file` (positioned at their start); `if_match`: only over that version.
+    /// Returns the new ETag.
+    fn put_from(&self, path: &str, file: std::fs::File, len: u64, if_match: Option<&str>) -> Result<String, Errno> {
+        let body = self.rt.block_on(async { crate::s3::tiering::file_body(file.take(len)) });
+        let q = if_match.map(|e| format!("\"{e}\""));
+        let h: Vec<(&str, &str)> = q.as_deref().map(|v| vec![("if-match", v)]).unwrap_or_default();
+        let r = self.ok(self.call("PUT", &self.key(path), "", &h, body, Some(len))?)?;
+        Ok(etag_of(&r.headers))
+    }
+
+    /// Stores a large file as a multipart upload: `parts` are (offset, length, local?) where local parts
+    /// are sent from `file` and the others copied from the version `base` inside the store.
+    fn put_multipart(&self, path: &str, file: &std::fs::File, parts: &[(u64, u64, bool)], base: Option<&str>) -> Result<String, Errno> {
+        let key = self.key(path);
+        let r = self.ok(self.call("POST", &key, "uploads", &[], Self::empty(), Some(0))?)?;
+        let doc = String::from_utf8_lossy(&r.body).into_owned();
+        let upload = xml::parse(&doc).map(|x| x.text_of("UploadId")).filter(|u| !u.is_empty()).ok_or(Errno::EIO)?;
+        let uq = aws_encode(upload.as_bytes(), false);
+        let res = (|| -> Result<String, Errno> {
+            let mut etags = vec![];
+            for (i, (off, len, local)) in parts.iter().enumerate() {
+                let q = format!("partNumber={}&uploadId={uq}", i + 1);
+                let etag = if *local {
+                    let mut f = file.try_clone().map_err(|_| Errno::EIO)?;
+                    f.seek(SeekFrom::Start(*off)).map_err(|_| Errno::EIO)?;
+                    let body = self.rt.block_on(async { crate::s3::tiering::file_body(f.take(*len)) });
+                    etag_of(&self.ok(self.call("PUT", &key, &q, &[], body, Some(*len))?)?.headers)
+                } else {
+                    let src = format!("/{}/{}", aws_encode(self.bucket.as_bytes(), false), aws_encode(key.as_bytes(), true));
+                    let range = format!("bytes={off}-{}", off + len - 1);
+                    let cond = format!("\"{}\"", base.unwrap_or(""));
+                    let h = [
+                        ("x-amz-copy-source", src.as_str()),
+                        ("x-amz-copy-source-range", range.as_str()),
+                        ("x-amz-copy-source-if-match", cond.as_str()),
+                    ];
+                    let r = self.ok(self.call("PUT", &key, &q, &h, Self::empty(), Some(0))?)?;
+                    let doc = String::from_utf8_lossy(&r.body).into_owned();
+                    xml::parse(&doc).map(|x| x.text_of("ETag")).ok_or(Errno::EIO)?.trim_matches('"').to_string()
+                };
+                etags.push(etag);
+            }
+            let mut body = String::from("<CompleteMultipartUpload>");
+            for (i, e) in etags.iter().enumerate() {
+                body.push_str(&format!("<Part><PartNumber>{}</PartNumber><ETag>\"{e}\"</ETag></Part>", i + 1));
+            }
+            body.push_str("</CompleteMultipartUpload>");
+            let n = body.len() as u64;
+            let q = base.map(|e| format!("\"{e}\""));
+            let mut h: Vec<(&str, &str)> = vec![("content-type", "application/xml")];
+            if let Some(v) = q.as_deref() {
+                h.push(("if-match", v));
+            }
+            let body = Full::new(Bytes::from(body)).map_err(|never| match never {}).boxed();
+            let r = self.ok(self.call("POST", &key, &format!("uploadId={uq}"), &h, body, Some(n))?)?;
+            let doc = String::from_utf8_lossy(&r.body).into_owned();
+            Ok(xml::parse(&doc).map(|x| x.text_of("ETag")).unwrap_or_default().trim_matches('"').to_string())
+        })();
+        if res.is_err() {
+            let _ = self.call("DELETE", &key, &format!("uploadId={uq}"), &[], Self::empty(), None);
+        }
+        res
+    }
+
     /// One level of a directory: (subdirectories, files with size and time). `limit` stops early.
     #[allow(clippy::type_complexity)]
     fn list(&self, dir: &str, limit: usize) -> Result<(Vec<String>, Vec<(String, u64, SystemTime)>), Errno> {
@@ -197,11 +289,6 @@ impl S3 {
         Ok(!d.is_empty() || !f.is_empty())
     }
 
-    fn put_file(&self, path: &str, file: std::fs::File, len: u64) -> Result<(), Errno> {
-        let body = self.rt.block_on(async { crate::s3::tiering::file_body(file) });
-        self.ok(self.call("PUT", &self.key(path), "", &[], body, Some(len))?).map(|_| ())
-    }
-
     fn put_empty(&self, key_path: &str) -> Result<(), Errno> {
         self.ok(self.call("PUT", &self.key(key_path), "", &[], Self::empty(), Some(0))?).map(|_| ())
     }
@@ -243,12 +330,30 @@ impl S3 {
     }
 }
 
-/// A file opened for writing: staged, then stored on flush/close.
+fn etag_of(h: &hyper::HeaderMap) -> String {
+    h.get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string()
+}
+
+/// A file opened for writing: a sparse staging file holding the chunks loaded or written, over the
+/// version the edit started from; stored on flush/close.
 struct Staged {
     path: PathBuf,
     file: std::fs::File,
-    written: u64,
+    /// The file's size now.
+    size: u64,
+    /// The version this edit started from (ETag, size); None: a new or truncated file.
+    base: Option<(String, u64)>,
+    /// Chunks present in the staging file (written, or fetched from the base).
+    loaded: HashSet<u64>,
+    /// O_APPEND: every write goes to the end.
+    append: bool,
     dirty: bool,
+}
+
+impl Staged {
+    fn base_size(&self) -> u64 {
+        self.base.as_ref().map(|b| b.1).unwrap_or(0)
+    }
 }
 
 impl Drop for Staged {
@@ -341,7 +446,7 @@ impl CairnFs {
         let staged = {
             let st = self.state.lock().unwrap();
             st.handles.values().find_map(|(p, o)| match o {
-                Open::Write(s) if p == path => Some(s.written),
+                Open::Write(s) if p == path => Some(s.size),
                 _ => None,
             })
         };
@@ -357,10 +462,111 @@ impl CairnFs {
         Err(Errno::ENOENT)
     }
 
-    fn stage(&self) -> Result<Staged, Errno> {
+    /// A staging file: empty (`base` None), or over an existing version.
+    fn stage(&self, base: Option<(String, u64)>, append: bool) -> Result<Staged, Errno> {
         let path = self.staging.join(format!("cairn-mount-{}", crate::engine::new_id()));
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).map_err(|_| Errno::EIO)?;
-        Ok(Staged { path, file, written: 0, dirty: true })
+        let size = base.as_ref().map(|b| b.1).unwrap_or(0);
+        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append })
+    }
+
+    /// Makes chunk `c` present in the staging file (fetching what the base has of it).
+    fn load(&self, path: &str, s: &mut Staged, c: u64) -> Result<(), Errno> {
+        if s.loaded.contains(&c) {
+            return Ok(());
+        }
+        let start = c * CHUNK;
+        if let Some((etag, bsize)) = &s.base {
+            if start < *bsize {
+                let len = CHUNK.min(bsize - start);
+                let data = self.s3.get_of(path, etag, start, len)?;
+                if data.len() as u64 != len {
+                    return Err(Errno::EIO);
+                }
+                s.file.seek(SeekFrom::Start(start)).map_err(|_| Errno::EIO)?;
+                s.file.write_all(&data).map_err(|_| Errno::EIO)?;
+            }
+        }
+        s.loaded.insert(c);
+        Ok(())
+    }
+
+    /// Reads from a file open for writing: staged chunks locally, the others from the base version.
+    fn read_staged(&self, path: &str, s: &mut Staged, off: u64, len: u64) -> Result<Vec<u8>, Errno> {
+        let end = (off + len).min(s.size);
+        let mut out = Vec::with_capacity(end.saturating_sub(off) as usize);
+        let mut pos = off;
+        while pos < end {
+            let c = pos / CHUNK;
+            let stop = end.min((c + 1) * CHUNK);
+            if s.loaded.contains(&c) {
+                let mut buf = vec![0u8; (stop - pos) as usize];
+                s.file.seek(SeekFrom::Start(pos)).map_err(|_| Errno::EIO)?;
+                let mut got = 0;
+                while got < buf.len() {
+                    let n = s.file.read(&mut buf[got..]).map_err(|_| Errno::EIO)?;
+                    if n == 0 {
+                        break; // a hole at the end of the staging file: zeros
+                    }
+                    got += n;
+                }
+                out.extend_from_slice(&buf);
+            } else if pos < s.base_size() {
+                let (etag, bsize) = s.base.clone().unwrap();
+                let upto = stop.min(bsize);
+                out.extend_from_slice(&self.s3.get_of(path, &etag, pos, upto - pos)?);
+                out.resize(out.len() + (stop - upto) as usize, 0);
+            } else {
+                out.resize(out.len() + (stop - pos) as usize, 0); // beyond the base: a hole
+            }
+            pos = stop;
+        }
+        Ok(out)
+    }
+
+    /// Writes into a staged file at `off`.
+    fn write_staged(&self, path: &str, s: &mut Staged, off: u64, data: &[u8]) -> Result<(), Errno> {
+        let end = off + data.len() as u64;
+        if off > s.size && s.size % CHUNK != 0 {
+            self.load(path, s, s.size / CHUNK)?; // the chunk holding the old end keeps its bytes
+        }
+        let mut c = off / CHUNK;
+        while c * CHUNK < end.max(off + 1) {
+            let (cs, ce) = (c * CHUNK, (c + 1) * CHUNK);
+            let whole = off <= cs && end >= ce.min(s.size.max(end));
+            if !whole {
+                self.load(path, s, c)?;
+            }
+            s.loaded.insert(c);
+            c += 1;
+        }
+        // Chunks between the old end and this write are holes: present, as zeros.
+        for h in s.size.div_ceil(CHUNK)..off / CHUNK {
+            s.loaded.insert(h);
+        }
+        s.file.seek(SeekFrom::Start(off)).map_err(|_| Errno::EIO)?;
+        s.file.write_all(data).map_err(|_| Errno::EIO)?;
+        s.size = s.size.max(end);
+        s.dirty = true;
+        Ok(())
+    }
+
+    /// Truncates (or extends with zeros) a staged file.
+    fn truncate_staged(&self, path: &str, s: &mut Staged, n: u64) -> Result<(), Errno> {
+        if n < s.size && n % CHUNK != 0 {
+            self.load(path, s, n / CHUNK)?; // the kept part of the last chunk
+        }
+        for c in s.size.div_ceil(CHUNK)..n.div_ceil(CHUNK) {
+            s.loaded.insert(c); // extended: zeros
+        }
+        if n > s.size && s.size % CHUNK != 0 {
+            self.load(path, s, s.size / CHUNK)?;
+        }
+        s.file.set_len(n).map_err(|_| Errno::EIO)?;
+        s.loaded.retain(|c| *c * CHUNK < n);
+        s.size = n;
+        s.dirty = true;
+        Ok(())
     }
 
     fn new_handle(&self, path: String, open: Open) -> FileHandle {
@@ -371,29 +577,43 @@ impl CairnFs {
         FileHandle(fh)
     }
 
-    /// Stores a dirty staged file.
+    /// Stores a dirty staged file, over the version the edit started from (ESTALE: it changed).
     fn store(&self, fh: FileHandle) -> Result<(), Errno> {
-        let job = {
-            let mut st = self.state.lock().unwrap();
-            match st.handles.get_mut(&fh.0) {
-                Some((path, Open::Write(s))) if s.dirty => {
-                    s.file.flush().map_err(|_| Errno::EIO)?;
-                    let mut f = s.file.try_clone().map_err(|_| Errno::EIO)?;
-                    f.rewind().map_err(|_| Errno::EIO)?;
-                    s.dirty = false;
-                    Some((path.clone(), f, s.written))
-                }
-                _ => None,
-            }
-        };
-        match job {
-            Some((path, f, len)) => self.s3.put_file(&path, f, len).inspect_err(|_| {
-                if let Some((_, Open::Write(s))) = self.state.lock().unwrap().handles.get_mut(&fh.0) {
-                    s.dirty = true; // try again on the next flush or close
-                }
-            }),
-            None => Ok(()),
+        let mut st = self.state.lock().unwrap();
+        let Some((path, Open::Write(s))) = st.handles.get_mut(&fh.0) else { return Ok(()) };
+        if !s.dirty {
+            return Ok(());
         }
+        let path = path.clone();
+        s.file.flush().map_err(|_| Errno::EIO)?;
+        let base_etag = s.base.as_ref().map(|b| b.0.clone());
+        let res = if s.size <= WHOLE_PUT || s.base.is_none() && s.loaded.len() as u64 * CHUNK >= s.size {
+            // Small (or entirely local): every chunk present, then one PUT.
+            (|| -> Result<String, Errno> {
+                for c in 0..s.size.div_ceil(CHUNK) {
+                    self.load(&path, s, c)?;
+                }
+                s.file.set_len(s.size).map_err(|_| Errno::EIO)?;
+                let mut f = s.file.try_clone().map_err(|_| Errno::EIO)?;
+                f.rewind().map_err(|_| Errno::EIO)?;
+                self.s3.put_from(&path, f, s.size, base_etag.as_deref())
+            })()
+        } else {
+            s.file.set_len(s.size).map_err(|_| Errno::EIO)?;
+            let bsize = s.base_size();
+            let parts: Vec<(u64, u64, bool)> = (0..s.size.div_ceil(CHUNK))
+                .map(|c| {
+                    let (off, len) = (c * CHUNK, CHUNK.min(s.size - c * CHUNK));
+                    (off, len, s.loaded.contains(&c) || off + len > bsize)
+                })
+                .collect();
+            self.s3.put_multipart(&path, &s.file, &parts, base_etag.as_deref())
+        };
+        let etag = res?;
+        // The stored version is the base of what follows; the staged chunks stay valid.
+        s.base = Some((etag, s.size));
+        s.dirty = false;
+        Ok(())
     }
 }
 
@@ -440,34 +660,44 @@ impl Filesystem for CairnFs {
         // the mode a file already shows (cp and shutil.copy do) changes nothing, so it is allowed.
         let shown = if self.path(ino).is_ok_and(|p| p.is_empty() || self.s3.is_dir(&p).unwrap_or(false)) { 0o755 } else { 0o644 };
         let mode = mode.filter(|m| m & 0o7777 != shown);
-        if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() || size.is_some_and(|n| n != 0) {
+        if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() {
             return reply.error(Errno::EOPNOTSUPP);
         }
         let path = match self.path(ino) {
             Ok(p) => p,
             Err(e) => return reply.error(e),
         };
-        if size == Some(0) {
+        if let Some(n) = size {
             if self.read_only {
                 return reply.error(Errno::EROFS);
             }
             let staged = fh.and_then(|fh| {
                 let mut st = self.state.lock().unwrap();
                 match st.handles.get_mut(&fh.0) {
-                    Some((_, Open::Write(s))) => {
-                        let ok = s.file.set_len(0).is_ok() && s.file.rewind().is_ok();
-                        s.written = 0;
-                        s.dirty = true;
-                        Some(ok)
-                    }
+                    Some((_, Open::Write(s))) => Some(self.truncate_staged(&path, s, n)),
                     _ => None,
                 }
             });
             match staged {
-                Some(true) => {}
-                Some(false) => return reply.error(Errno::EIO),
-                None => {
+                Some(Ok(())) => {}
+                Some(Err(e)) => return reply.error(e),
+                None if n == 0 => {
                     if let Err(e) = self.s3.put_empty(&path) {
+                        return reply.error(e);
+                    }
+                }
+                None => {
+                    // truncate(2) without an open file: stage over the current version, store at once.
+                    let res = (|| -> Result<(), Errno> {
+                        let base = self.s3.head_etag(&path)?.ok_or(Errno::ENOENT)?;
+                        let mut s = self.stage(Some((base.1, base.0)), false)?;
+                        self.truncate_staged(&path, &mut s, n)?;
+                        let fh = self.new_handle(path.clone(), Open::Write(s));
+                        let r = self.store(fh);
+                        self.state.lock().unwrap().handles.remove(&fh.0);
+                        r
+                    })();
+                    if let Err(e) = res {
                         return reply.error(e);
                     }
                 }
@@ -536,18 +766,18 @@ impl Filesystem for CairnFs {
         if self.read_only {
             return reply.error(Errno::EROFS);
         }
-        if flags.0 & libc_o_append() != 0 || flags.acc_mode() == OpenAccMode::O_RDWR {
-            return reply.error(Errno::EOPNOTSUPP); // objects are written whole
-        }
+        let append = flags.0 & libc_o_append() != 0;
         let truncate = flags.0 & libc_o_trunc() != 0;
-        if !truncate {
-            match self.s3.head(&path) {
-                Ok(Some((n, _))) if n > 0 => return reply.error(Errno::EOPNOTSUPP), // would rewrite part of it
-                Ok(_) => {}
+        let base = if truncate {
+            None
+        } else {
+            match self.s3.head_etag(&path) {
+                Ok(Some((n, etag))) => Some((etag, n)),
+                Ok(None) => None,
                 Err(e) => return reply.error(e),
             }
-        }
-        match self.stage() {
+        };
+        match self.stage(base, append) {
             Ok(s) => {
                 let fh = self.new_handle(path, Open::Write(s));
                 reply.opened(fh, FopenFlags::FOPEN_DIRECT_IO)
@@ -560,14 +790,12 @@ impl Filesystem for CairnFs {
         if self.read_only {
             return reply.error(Errno::EROFS);
         }
-        if flags & libc_o_append() != 0 {
-            return reply.error(Errno::EOPNOTSUPP);
-        }
+        let append = flags & libc_o_append() != 0;
         let path = match self.path(parent).and_then(|d| join(&d, name)) {
             Ok(p) => p,
             Err(e) => return reply.error(e),
         };
-        match self.stage() {
+        match self.stage(None, append) {
             Ok(s) => {
                 let ino = self.ino(&path);
                 let fh = self.new_handle(path, Open::Write(s));
@@ -585,13 +813,23 @@ impl Filesystem for CairnFs {
 
     #[allow(clippy::too_many_arguments)]
     fn read(&self, _: &Request, _: INodeNo, fh: FileHandle, offset: u64, size: u32, _: OpenFlags, _: Option<LockOwner>, reply: ReplyData) {
-        let path = match self.state.lock().unwrap().handles.get(&fh.0) {
-            Some((p, Open::Read)) => p.clone(),
-            _ => return reply.error(Errno::EBADF),
-        };
         if size == 0 {
             return reply.data(&[]);
         }
+        let path = {
+            let mut st = self.state.lock().unwrap();
+            match st.handles.get_mut(&fh.0) {
+                Some((p, Open::Read)) => p.clone(),
+                Some((p, Open::Write(s))) => {
+                    let p = p.clone();
+                    return match self.read_staged(&p, s, offset, size as u64) {
+                        Ok(b) => reply.data(&b),
+                        Err(e) => reply.error(e),
+                    };
+                }
+                _ => return reply.error(Errno::EBADF),
+            }
+        };
         match self.s3.get(&path, offset, size as u64) {
             Ok(b) => reply.data(&b),
             Err(e) => reply.error(e),
@@ -613,16 +851,13 @@ impl Filesystem for CairnFs {
     ) {
         let mut st = self.state.lock().unwrap();
         match st.handles.get_mut(&fh.0) {
-            Some((_, Open::Write(s))) => {
-                if offset != s.written {
-                    return reply.error(Errno::EOPNOTSUPP); // only sequential writes
+            Some((p, Open::Write(s))) => {
+                let p = p.clone();
+                let off = if s.append { s.size } else { offset };
+                match self.write_staged(&p, s, off, data) {
+                    Ok(()) => reply.written(data.len() as u32),
+                    Err(e) => reply.error(e),
                 }
-                if s.file.write_all(data).is_err() {
-                    return reply.error(Errno::EIO);
-                }
-                s.written += data.len() as u64;
-                s.dirty = true;
-                reply.written(data.len() as u32);
             }
             _ => reply.error(Errno::EBADF),
         }

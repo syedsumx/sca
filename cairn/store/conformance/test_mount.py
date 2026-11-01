@@ -83,20 +83,87 @@ def test_what_objects_cannot_express_is_refused(s3, bucket, mounted):
     s3.put_object(Bucket=bucket, Key="f.txt", Body=b"0123456789")
     s3.put_object(Bucket=bucket, Key="d/x", Body=b"x")
     m = mounted(bucket)
-    for fn in (lambda: open(m / "f.txt", "ab"), lambda: open(m / "f.txt", "r+b"), lambda: os.chmod(m / "f.txt", 0o600),
-               lambda: os.symlink(m / "f.txt", m / "link")):
+    for fn in (lambda: os.chmod(m / "f.txt", 0o600), lambda: os.symlink(m / "f.txt", m / "link")):
         with pytest.raises(OSError) as ei:
             fn()
         assert ei.value.errno in (errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM)
     os.rename(m / "d", m / "e")  # a directory: one transaction in the store
     assert (m / "e" / "x").read_bytes() == b"x" and not (m / "d").exists()
-    with open(m / "g.txt", "wb", buffering=0) as f:
-        f.write(b"abc")
-        f.seek(100)
-        with pytest.raises(OSError):
-            f.write(b"x")
-            f.flush()
     assert (m / "f.txt").read_bytes() == b"0123456789"  # untouched
+
+
+def received(store):
+    import requests
+
+    for line in requests.get(f"{store.endpoint}/-/metrics", timeout=5).text.splitlines():
+        if line.startswith("cairn_store_received_bytes_total "):
+            return int(line.split()[1])
+    return 0
+
+
+def test_appends_edits_holes_and_truncation(s3, bucket, mounted):
+    s3.put_object(Bucket=bucket, Key="log.txt", Body=b"line 1\n")
+    s3.put_object(Bucket=bucket, Key="f.bin", Body=b"0123456789")
+    m = mounted(bucket)
+    with open(m / "log.txt", "ab") as f:
+        f.write(b"line 2\n")
+        f.write(b"line 3\n")
+    assert s3.get_object(Bucket=bucket, Key="log.txt")["Body"].read() == b"line 1\nline 2\nline 3\n"
+    with open(m / "f.bin", "r+b") as f:
+        f.seek(3)
+        f.write(b"XY")
+        f.seek(0)
+        assert f.read() == b"012XY56789"  # reads see the edit before it is stored
+    assert s3.get_object(Bucket=bucket, Key="f.bin")["Body"].read() == b"012XY56789"
+    with open(m / "f.bin", "r+b") as f:
+        f.seek(20)
+        f.write(b"!")  # past the end: a hole of zeros
+    assert s3.get_object(Bucket=bucket, Key="f.bin")["Body"].read() == b"012XY56789" + b"\0" * 10 + b"!"
+    os.truncate(m / "f.bin", 4)  # without an open file
+    assert s3.get_object(Bucket=bucket, Key="f.bin")["Body"].read() == b"012X"
+    with open(m / "f.bin", "r+b") as f:
+        f.truncate(8)  # extend with zeros
+    assert s3.get_object(Bucket=bucket, Key="f.bin")["Body"].read() == b"012X\0\0\0\0"
+    with open(m / "new.txt", "wb", buffering=0) as f:  # out-of-order writes into a new file
+        f.seek(5)
+        f.write(b"world")
+        f.seek(0)
+        f.write(b"hello")
+    assert s3.get_object(Bucket=bucket, Key="new.txt")["Body"].read() == b"helloworld"
+
+
+def test_editing_a_large_file_sends_only_what_changed(store, s3, bucket, mounted):
+    big = os.urandom(40 << 20)  # five 8 MiB chunks
+    s3.put_object(Bucket=bucket, Key="big.bin", Body=big)
+    m = mounted(bucket)
+    before = received(store)
+    with open(m / "big.bin", "r+b") as f:
+        f.seek(17 << 20)
+        f.write(b"PATCHED")
+    sent = received(store) - before
+    data = s3.get_object(Bucket=bucket, Key="big.bin")["Body"].read()
+    want = big[:17 << 20] + b"PATCHED" + big[(17 << 20) + 7:]
+    assert hashlib.sha256(data).digest() == hashlib.sha256(want).digest()
+    assert sent < 10 << 20, sent  # one chunk travelled; the other four were copied inside the store
+    # Appending to it sends the new tail (and the last chunk), not the file.
+    before = received(store)
+    with open(m / "big.bin", "ab") as f:
+        f.write(b"tail" * 1000)
+    assert received(store) - before < 10 << 20
+    assert s3.head_object(Bucket=bucket, Key="big.bin")["ContentLength"] == len(big) + 4000
+
+
+def test_a_concurrent_change_is_not_overwritten(s3, bucket, mounted):
+    s3.put_object(Bucket=bucket, Key="shared.txt", Body=b"original")
+    m = mounted(bucket)
+    f = open(m / "shared.txt", "r+b", buffering=0)
+    f.seek(0)
+    f.write(b"MINE")
+    s3.put_object(Bucket=bucket, Key="shared.txt", Body=b"someone else's version")
+    with pytest.raises(OSError) as ei:
+        f.close()
+    assert ei.value.errno == errno.ESTALE
+    assert s3.get_object(Bucket=bucket, Key="shared.txt")["Body"].read() == b"someone else's version"
 
 
 def test_prefix_read_only_and_authorization(s3, bucket, mounted):
