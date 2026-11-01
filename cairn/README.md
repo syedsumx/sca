@@ -13,7 +13,7 @@ adds these modules on top:
 | **E. Active Metadata & AI Context Layer** | A consumer workspace micro-frontend: Discover, faceted search, trending assets, discussions, bookmarks, and a data marketplace where access is requested without tickets. It adds Personas & Purposes, with purpose denies overriding persona grants, and PII masking in the `cairn-core-proxy`. Rule-based tag and term propagation runs over column lineage. Context agents mine queries, dbt, BI and job runs for definitions, drift and ontologies. The layer also includes an assistant, plain-English lineage-anomaly explanations, and Slack/Teams actions. Trust components can be embedded in Tableau, Looker, Power BI and portals. |
 
 Read **[ARCHITECTURE.md](ARCHITECTURE.md)** for the design, **[UX_ACTIVE_METADATA_SPEC.md](UX_ACTIVE_METADATA_SPEC.md)** for the consumer UX and
-active-metadata blueprint (module E), and **[ROADMAP.md](ROADMAP.md)** for milestones and status.
+active-metadata blueprint (module E), and **[ROADMAP.md](ROADMAP.md)** for the platform map (Cairn as the one data platform), design decisions and what comes next.
 Deployment of module E is covered in [deploy/README-active-metadata.md](deploy/README-active-metadata.md).
 
 ## Layout

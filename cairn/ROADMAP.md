@@ -1,10 +1,66 @@
-# Cairn Implementation Roadmap
+# Cairn Roadmap
 
-Milestones are ordered by dependency. Each milestone has a definition of done (DoD) that can be
-checked against a running stack. **Status** reflects this repository as of v0.1:
-✅ implemented and unit-tested · 🟡 implemented, needs live-stack validation · ⬜ not started.
+**Goal.** Cairn is the one data platform an enterprise runs, the way teams use Snowflake or Databricks. It covers storage, tables, SQL, transformation, orchestration, Python and Spark, governance, discovery, quality and AI. It is built from open-source engines and runs in the customer's own network. Every engine signs in as a Cairn identity and is governed by the same Cairn policy.
 
-## M0 — Foundations (week 1–2)
+Principles every item is held to:
+
+- **One identity.** People sign in once (SSO, SCIM). Pipelines run as pipeline users with personal access tokens, exchanged for short-lived, audience-bound tokens per engine: `trino`, `lakehouse`, `airflow`. No engine holds a database password or a store key.
+- **One policy.** Cairn's policy decision point decides for every engine: Trino, Cairn Catalog (Spark, pyiceberg), the metadata APIs and the AI tools. Masks and row filters apply wherever data is read. Where an engine cannot apply them, it is refused, never trusted.
+- **Fail closed.** If a decision cannot be made, access is refused, and so is a deployment configured unsafely (for example, a catalog vending store keys alongside Cairn-issued tokens). Every change is one transaction with its audit entry.
+- **Tested for real.** Each capability has end-to-end tests against the real binaries and the images as shipped, run in CI.
+
+Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validated · ⬜ planned.
+
+## The platform today
+
+| Layer | Snowflake / Databricks | Cairn | Status |
+|---|---|---|---|
+| Object storage | Managed storage / cloud object stores | **Cairn Store** (Rust, S3 API). Clusters with replicas, erasure coding and racks/zones; versioning and object lock; SSE; STS temporary credentials; lifecycle and tiering; backups, continuous backup and two-way sync; WebDAV, SFTP, FUSE, CSI and Hadoop S3A; node TLS | ✅ |
+| Tables and catalog | Snowflake Iceberg tables / Unity Catalog | **Cairn Catalog** (Rust, Iceberg REST). Tables and views; commits via iceberg-rust; per-table credential vending; HA on PostgreSQL; Cairn identities governed per table | ✅ |
+| SQL warehouse | Virtual warehouses / Databricks SQL | **Trino 476** on the lakehouse. Cairn sign-in (JWT, OAuth2 SSO for the web UI and BI); access control through Cairn's policies (OPA protocol); query lineage and usage into Cairn; resource groups; fault-tolerant execution, spill and cache; workers with autoscaling | ✅ |
+| SQL in the product | Snowsight / SQL editor | Data preview and SQL editor on Trino; Ask-your-data (text-to-SQL) with the caller's permissions | ✅ |
+| Transformation | dbt Cloud on Snowflake / Databricks | **dbt-core 1.12** with dbt-trino (`cairn dbt`, `cairn/dbt`). Runs as a pipeline user; docs, tags, owners, lineage and tests recorded in Cairn; Helm CronJobs | ✅ |
+| Orchestration | Tasks / Databricks Workflows | **Apache Airflow 3.3** (`cairn/airflow`, `cairn-airflow-provider`). Cairn operators for Trino and dbt; OpenLineage to Cairn; UI sign-in through Cairn with group → role mapping; official chart values | ✅ |
+| Python and Spark | Snowpark / Databricks Spark | **Spark 4.0** with Iceberg 1.10 (`cairn/spark`, `cairn-spark`). Signed in as a Cairn identity; each table decided by Cairn; per-table credentials, read-only unless writable; column lineage to Cairn | ✅ |
+| Governance | Horizon / Unity Catalog | Policy decision point (RBAC with ABAC, deny-overrides, obligations), masking on every read path, row filters, personas and purposes, PII classification and propagation, certification workflows, compliance forms, hash-chained audit log | ✅ |
+| Discovery and metadata | Horizon catalog / Unity Catalog explorer | Cairn Core: search, search by meaning, lineage (column level), glossary, domains, data products, change history, bulk editing, workspaces, i18n | ✅ |
+| Data quality | Data metric functions / Lakehouse Monitoring | Monitors (volume, freshness, schema, drift, learned thresholds), data contracts, profiling, incidents, results from dbt and other tools | ✅ |
+| AI | Cortex / Mosaic AI | Assistant, documentation drafts, context agents, governed metrics (semantic layer), MCP server, AI-system governance, usage and budgets; Claude or local models | ✅ |
+| Sharing and marketplace | Listings / Delta Sharing | Internal marketplace with access requests; publishing to Snowflake listings and Delta Sharing shares | ✅ |
+| Ingestion | Connectors / Lakeflow Connect | Source connectors and in-VPC remote agents (signed, sealed); the store's message queues and events | ✅ |
+| Operations | Managed service | Compose and Helm (HA, network policies, PDBs); SSO and SCIM; Alembic migrations; signed images with SBOMs; monitoring dashboards; hosting tenants | ✅ |
+
+## Design decisions behind the lakehouse integration
+
+- **Restricted tables are refused to engines that read files.** A table with a mask or row filter for a user is not handed to Spark, pyiceberg or DuckDB, because its data files hold what the mask or filter hides. Those users query it through Trino, which applies the policy, or through a view. Governed Spark access to such tables is item L2 below.
+- **Airflow 3.3, not 3.0.** 3.3 is the current stable 3.x release, with the fixes 3.0 lacked. Providers are pinned by Airflow's constraints. dbt runs in its own virtualenv in the image, so its dependencies never meet Airflow's.
+- **Short-lived tokens, never secrets in projects.** dbt, Airflow and Spark exchange the pipeline user's token for an engine token at run time. Tokens default to 4 hours and are capped at 12. Issuing one is audited.
+- **One dataset per table, across engines.** Lineage from Trino, dbt, Airflow and Spark lands on the dataset names the catalog crawler uses. Spark's storage-path names are renamed through the OpenLineage symlinks facet.
+- **Opt-in images.** The dbt, Airflow and Spark images are built on request (`ONLY="dbt airflow spark"`). The core platform stays small.
+
+## Next
+
+Ordered by what an enterprise needs first to retire a Snowflake or Databricks contract. Each item has a definition of done that is tested end to end.
+
+| # | Item | Definition of done | Status |
+|---|---|---|---|
+| L1 | **Table maintenance service.** Snapshot expiry, orphan-file removal, data-file compaction and manifest rewrites per table, on a schedule and on demand, with retention as a table property | A table with 1,000 small files and 100 snapshots is compacted and expired on schedule. Time travel within retention still works, orphaned files are gone, and every action is audited | ⬜ |
+| L2 | **Governed Spark on restricted tables.** A policy-enforcing scan path for masks and row filters (Spark Connect on trusted compute, or a Cairn-planned scan through Trino), so Spark users are no longer refused | `ana` reads a masked table in Spark and sees masked values. `bob`'s row filter returns only his rows. Neither can reach the raw files | ⬜ |
+| L3 | **Spark on Kubernetes.** Spark operator in the chart, a `CairnSparkOperator` for Airflow, a history server, dynamic allocation and per-team namespaces with quotas | An Airflow DAG submits a Spark job to the cluster as a pipeline user. Its lineage and run appear in Cairn, and the job is refused a table outside its grants | ⬜ |
+| L4 | **Notebooks.** JupyterHub with Cairn sign-in; kernels with `cairn-spark` and Trino as the signed-in person; notebooks as catalog assets | A person signs in through Cairn, queries Trino and Spark from a notebook under their own policies, and the notebook appears in Cairn with lineage | ⬜ |
+| L5 | **Streaming and CDC ingestion.** Kafka → Iceberg (Kafka Connect Iceberg sink) and Debezium CDC as governed pipelines, with exactly-once commits and schema evolution | A PostgreSQL table's changes arrive in an Iceberg table within a minute, with lineage from the source and quality monitors on freshness | ⬜ |
+| L6 | **Workload management and chargeback.** Trino resource groups and Spark quotas per team, with costs from Trino and Spark query statistics fed into the cost report automatically | Two teams' queries are isolated under load, and each team's compute and storage costs appear per day without manual posting | 🟡 resource groups and cost report exist; automatic feeds are planned |
+| L7 | **Machine learning.** MLflow tracking and model registry behind Cairn sign-in; models and features as catalog assets, with lineage from training tables | A model trained in Spark is registered as a pipeline user. Cairn shows its lineage to the training tables, and access to the model follows Cairn's policy | ⬜ |
+| L8 | **Open data sharing.** Iceberg REST sharing to external recipients, with recipient identities, expiry and revocation in Cairn | A recipient in another organisation reads a shared table with pyiceberg. Revoking the share stops access at once | 🟡 publishing to Snowflake and Delta Sharing exists |
+| L9 | **Disaster recovery across regions.** Store replication, catalog and Cairn database replicas, and a tested failover runbook with measured recovery point and recovery time objectives | A region is lost in a test. The standby serves the lakehouse with the recorded RPO and RTO | 🟡 store sync, backups and continuous backup exist |
+| L10 | **Scale and assurance.** Load tests: PDP p99 under 5 ms cached at 2k rps, catalog decisions on 1k-table jobs, store throughput. Chaos tests. An external penetration test. KMS or HSM for gateway keys | Published results in CI, and pentest findings closed | ⬜ |
+| L11 | **Upgrade matrix.** Pin-and-test against new Trino, Iceberg, Spark, dbt and Airflow releases | A version bump is merged only after CI passes with the new engine version | ⬜ |
+
+## History: the metadata platform (M0–M6)
+
+The milestones below built Cairn's metadata, governance, quality and AI layers. Their statuses are as recorded at v0.1. Later work is reflected in the platform table above.
+
+### M0 — Foundations (week 1–2)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -17,7 +73,7 @@ checked against a running stack. **Status** reflects this repository as of v0.1:
 **DoD:** `docker compose -f docker-compose.cairn.yml up` reaches healthy. `cairn bootstrap` creates the
 certification structured properties, the `Certified` tag and the `Classification.PII.*` terms.
 
-## M1 — Native Data Quality & Anomaly Detection (week 2–5)
+### M1 — Native Data Quality & Anomaly Detection (week 2–5)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -34,7 +90,7 @@ certification structured properties, the `Certified` tag and the `Classification
 **DoD:** a volume monitor on a demo table pages within one interval when rows drop 90%. It auto-resolves
 on recovery, and both events are visible on the dataset's Quality and Incidents tabs.
 
-## M2 — Enterprise Governance (week 4–8)
+### M2 — Enterprise Governance (week 4–8)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -54,7 +110,7 @@ on recovery, and both events are visible on the dataset's Quality and Incidents 
 dataset in the native UI while an owner can still edit it. Tagging an upstream column as PII appears
 on downstream columns within one MCL round-trip.
 
-## M3 — In-VPC Remote Ingestion Agents (week 6–10)
+### M3 — In-VPC Remote Ingestion Agents (week 6–10)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -72,7 +128,7 @@ on downstream columns within one MCL round-trip.
 agent. The recipe in Cairn Core contains only `${PG_PASSWORD}`, and the gateway rejects a forged
 platform URN.
 
-## M4 — AI Context & Agentic Discovery (week 8–12)
+### M4 — AI Context & Agentic Discovery (week 8–12)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -90,7 +146,7 @@ platform URN.
 only assets the caller can see, each with a citation. `generate_documentation` creates a review item and
 writes nothing until it is approved.
 
-## M5 — Hardening & GA (week 12–16)
+### M5 — Hardening & GA (week 12–16)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -106,7 +162,7 @@ writes nothing until it is approved.
 | 5.10 | SSO (OIDC) with guided check (`cairn sso check`); SCIM 2.0 provisioning with a separate least-privilege account | ✅ mock IdP + Playwright sign-in, SCIM e2e incl. account separation |
 | 5.11 | Edge TLS + HSTS, rate limits, audit export (`/governance/audit/export`, `cairn audit export/verify-file`), `*_FILE` secrets | ✅ e2e test_edge, unit tests |
 
-## M6 — Active Metadata & AI Context Layer (UX_ACTIVE_METADATA_SPEC.md)
+### M6 — Active Metadata & AI Context Layer (UX_ACTIVE_METADATA_SPEC.md)
 
 | # | Deliverable | Status |
 |---|---|---|
@@ -118,7 +174,7 @@ writes nothing until it is approved.
 | U6 | Embeds: signed origin-bound tokens, web components + iframe pages, Tableau `.trex`, Looker/Power BI/portal guides; Teams adaptive cards | ✅ code + tests; ⬜ validated inside each BI tool |
 | U7 | Deployment: compose services (`cairn-core-proxy`, `cairn-context-miner`, `cairn-notifier`, `cairn-consumer-ui`), Helm templates + `values-active-metadata.yaml`, Slack app manifest | ✅ rendered and linted; ⬜ live cluster |
 
-## Issues found by the first live run (fixed)
+### Issues found by the first live run (fixed)
 
 Running against real Cairn Core surfaced five defects that unit tests with fakes could not catch:
 
@@ -132,7 +188,7 @@ Running against real Cairn Core surfaced five defects that unit tests with fakes
 5. OpenSearch blocks index creation at its 95% disk flood stage. The threshold is configurable in compose
    via `CAIRN_SEARCH_DISK_THRESHOLD_ENABLED`.
 
-## Code-generation plan (how each milestone was / will be produced)
+### Code-generation plan (how each milestone was / will be produced)
 
 1. **Contract first:** derive the shape of each aspect and API from the Cairn Core schemas (aspect
    models and the GraphQL schema). Encode it in builders
