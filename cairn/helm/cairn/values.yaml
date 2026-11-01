@@ -660,6 +660,14 @@ cairn:
     # get temporary keys for one table at a time and hold no store key; needs STS in the store
     # (cairn.store.secret.stsSecretKey).
     vendRole: ""
+    # State in PostgreSQL instead of a volume: a Secret whose urlKey holds a postgresql:// URL (one
+    # database per lakehouse; TLS unless ?sslmode=disable). Then replicas > 1 serve the same lakehouse,
+    # and a commit is still a compare-and-set across all of them.
+    database:
+      existingSecret: ""
+      urlKey: url
+    replicas: 1
+    # The volume for the embedded state (without database).
     persistence:
       size: 10Gi
       storageClassName: ""

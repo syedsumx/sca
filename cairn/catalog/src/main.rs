@@ -11,6 +11,8 @@
 //! ```text
 //! CAIRN_CATALOG_ADDR              listen address (:8181)
 //! CAIRN_CATALOG_DATA              state directory (/data)
+//! CAIRN_CATALOG_DATABASE_URL      PostgreSQL for the state instead (or _FILE), so several replicas serve one lakehouse
+//! CAIRN_CATALOG_DATABASE_CA_FILE  extra CA certificates for its TLS
 //! CAIRN_CATALOG_WAREHOUSE         base location for new tables (s3://lakehouse/warehouse)
 //! CAIRN_CATALOG_TOKEN             an admin bearer token (or CAIRN_CATALOG_TOKEN_FILE) ...
 //! CAIRN_CATALOG_TOKENS_FILE       ... and/or a JSON list: token, name, namespaces (globs), read_only
@@ -26,6 +28,7 @@
 
 mod api;
 mod db;
+mod pg;
 mod s3;
 
 use std::sync::Arc;
@@ -189,10 +192,22 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Re
         )
         .await
         .map_err(|e| e.to_string())?;
-    if status != 200 {
+    let arn = if status == 200 {
+        s3::xml_text(&xml, "Arn").ok_or("CreateRole: no Arn")?.to_string()
+    } else if s3::xml_text(&xml, "Code") == Some("EntityAlreadyExists") {
+        // Another catalog replica, starting at the same time, created it first; its policy is set below
+        // all the same (PutRolePolicy replaces it with the same document).
+        let (status, xml) = store
+            .query_api("iam", &[("Action", "GetRole"), ("Version", "2010-05-08"), ("RoleName", role)])
+            .await
+            .map_err(|e| e.to_string())?;
+        if status != 200 {
+            return Err(format!("GetRole {role}: HTTP {status}"));
+        }
+        s3::xml_text(&xml, "Arn").ok_or("GetRole: no Arn")?.to_string()
+    } else {
         return Err(format!("CreateRole {role}: HTTP {status}: {}", s3::xml_text(&xml, "Message").unwrap_or(&xml)));
-    }
-    let arn = s3::xml_text(&xml, "Arn").ok_or("CreateRole: no Arn")?.to_string();
+    };
     let (status, xml) = store
         .query_api(
             "iam",
@@ -216,7 +231,11 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Re
 async fn serve(addr: String) {
     let data = env("CAIRN_CATALOG_DATA", "/data");
     let fsync = env("CAIRN_CATALOG_FSYNC", "true") != "false";
-    let db = db::Db::open(&data, fsync).unwrap_or_else(|e| fail("open catalog state", e));
+    let warehouse = env("CAIRN_CATALOG_WAREHOUSE", "s3://lakehouse/warehouse");
+    let database_url = secret("CAIRN_CATALOG_DATABASE_URL");
+    let db = if database_url.is_empty() { db::Db::open(&data, fsync) } else { db::Db::postgres(&database_url, &warehouse) }
+        .unwrap_or_else(|e| fail("open catalog state", e));
+    let state = if database_url.is_empty() { data.clone() } else { "postgres".to_string() };
     let s3cfg = s3::S3Config {
         endpoint: env("CAIRN_CATALOG_S3_ENDPOINT", "http://cairn-store:8333"),
         region: env("CAIRN_CATALOG_S3_REGION", "us-east-1"),
@@ -228,7 +247,6 @@ async fn serve(addr: String) {
     }
     let s3cfg_endpoint = s3cfg.endpoint.clone();
     let warehouse_store = s3::Client::new(s3cfg.clone());
-    let warehouse = env("CAIRN_CATALOG_WAREHOUSE", "s3://lakehouse/warehouse");
     s3::parse_location(&format!("{}/x", warehouse.trim_end_matches('/'))).unwrap_or_else(|e| fail("warehouse", e));
     let cfg = api::Config {
         warehouse: warehouse.clone(),
@@ -240,7 +258,7 @@ async fn serve(addr: String) {
     let tokens = cfg.principals.len();
     let catalog = Arc::new(api::Catalog::new(db, cfg));
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));
-    tracing::info!(addr = %addr, data = %data, warehouse = %warehouse, tokens, fsync, version = VERSION, "cairn-catalog listening");
+    tracing::info!(addr = %addr, state = %state, warehouse = %warehouse, tokens, fsync, version = VERSION, "cairn-catalog listening");
     let mut shutdown = Box::pin(async {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }

@@ -135,6 +135,15 @@ jobs:
     defaults:
       run:
         working-directory: cairn/catalog
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: pgpass
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      CAIRN_CATALOG_TEST_PG: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -163,8 +172,14 @@ jobs:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
-          pip install requests pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10"
+          pip install requests pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10" "psycopg[binary]>=3.1"
           cd conformance && pytest -q -p no:cacheprovider
+      - name: Conformance again, with the state in PostgreSQL (and several replicas)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_TEST_DATABASE_URL: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
+        run: cd conformance && pytest -q -p no:cacheprovider -rs
 
   # Trino against a real Cairn API, Cairn Catalog and Cairn Store: sign-in with Cairn tokens over TLS,
   # access control, masks, row filters, lineage and the SQL editor (tests/test_trino_e2e.py), and the Helm
@@ -267,11 +282,15 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.allowInsecureHttp=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
-              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true"; do
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # Catalog replicas without a shared database are refused.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.catalog.replicas=2 >/dev/null 2>&1
           # Trino without TLS is refused unless asked for explicitly.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
               --set cairn.trino.enabled=true >/dev/null 2>&1

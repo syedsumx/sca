@@ -4,7 +4,23 @@
 {{- $ctx := dict "root" $ "component" "catalog" "cfg" $u }}
 {{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
 {{- $endpoint := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $u.s3Endpoint }}
-# Cairn Catalog is single-node in this release: exactly one replica, state on one persistent volume.
+{{- $pg := $u.database.existingSecret }}
+{{- if and (gt (int $u.replicas) 1) (not $pg) }}{{ fail "cairn.catalog.replicas > 1 needs cairn.catalog.database.existingSecret (replicas share their state in PostgreSQL)" }}{{ end }}
+{{- if $pg }}
+# Cairn Catalog's state is in PostgreSQL: any number of interchangeable replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $u.replicas }}
+  revisionHistoryLimit: 5
+  strategy:
+    rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+{{- else }}
+# Cairn Catalog's state is on one persistent volume: exactly one replica.
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -15,6 +31,7 @@ spec:
   replicas: 1
   serviceName: {{ include "cairn.componentName" $ctx }}
   revisionHistoryLimit: 5
+{{- end }}
   selector:
     matchLabels:
       {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
@@ -41,6 +58,11 @@ spec:
               value: {{ printf ":%v" $u.port | quote }}
             - name: CAIRN_CATALOG_DATA
               value: /data
+            {{- if $pg }}
+            - name: CAIRN_CATALOG_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ $pg }}, key: {{ $u.database.urlKey }} }
+            {{- end }}
             - name: CAIRN_CATALOG_WAREHOUSE
               value: {{ $u.warehouse | quote }}
             - name: CAIRN_CATALOG_S3_ENDPOINT
@@ -93,12 +115,19 @@ spec:
               mountPath: /etc/cairn-catalog
               readOnly: true
             {{- end }}
-      {{- if $u.extraTokensSecret }}
+      {{- if or $u.extraTokensSecret $pg }}
       volumes:
+        {{- if $pg }}
+        - name: data
+          emptyDir: {}
+        {{- end }}
+        {{- if $u.extraTokensSecret }}
         - name: tokens
           secret:
             secretName: {{ $u.extraTokensSecret }}
+        {{- end }}
       {{- end }}
+      {{- include "cairn.spread" (merge (dict "replicas" $u.replicas) $ctx) | nindent 6 }}
       {{- with $u.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -111,6 +140,7 @@ spec:
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+  {{- if not $pg }}
   volumeClaimTemplates:
     - metadata:
         name: data
@@ -122,6 +152,21 @@ spec:
         resources:
           requests:
             storage: {{ $u.persistence.size }}
+  {{- end }}
+{{- if and $pg (gt (int $u.replicas) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+{{- end }}
 ---
 {{ include "cairn.service" (merge (dict "port" $u.port) $ctx) }}
 {{- end }}

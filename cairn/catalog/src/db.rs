@@ -1,5 +1,6 @@
 //! Catalog state: namespaces, tables (their current metadata location and metadata) and staged
-//! creations, in one transactional index (redb).
+//! creations, in one transactional index: embedded (redb, one catalog) or PostgreSQL (`crate::pg`,
+//! several catalog replicas).
 //!
 //! Every commit is a compare-and-set on each table's metadata location inside a single transaction,
 //! so concurrent writers cannot both win and a multi-table commit applies to all tables or none.
@@ -82,16 +83,16 @@ pub struct Change {
     pub new: TableRow,
 }
 
-pub struct Db {
+pub struct Local {
     db: Database,
     fsync: bool,
 }
 
-impl Db {
-    pub fn open(dir: impl AsRef<Path>, fsync: bool) -> Result<Db> {
+impl Local {
+    pub fn open(dir: impl AsRef<Path>, fsync: bool) -> Result<Local> {
         std::fs::create_dir_all(dir.as_ref()).map_err(|e| Error::Index(e.to_string()))?;
         let db = Database::create(dir.as_ref().join("catalog.redb"))?;
-        let me = Db { db, fsync };
+        let me = Local { db, fsync };
         let tx = me.begin_write()?;
         tx.open_table(NAMESPACES)?;
         tx.open_table(TABLES)?;
@@ -440,6 +441,88 @@ impl Db {
     }
 }
 
+/// The catalog's state, embedded or in PostgreSQL; the same semantics on both.
+pub enum Db {
+    Local(Local),
+    Pg(crate::pg::Pg),
+}
+
+macro_rules! both {
+    ($self:ident, $local:ident => $l:expr, $pg:ident => $p:expr) => {
+        match $self {
+            Db::Local($local) => $l,
+            Db::Pg($pg) => $p,
+        }
+    };
+}
+
+impl Db {
+    pub fn open(dir: impl AsRef<Path>, fsync: bool) -> Result<Db> {
+        Ok(Db::Local(Local::open(dir, fsync)?))
+    }
+
+    pub fn postgres(url: &str, warehouse: &str) -> Result<Db> {
+        Ok(Db::Pg(crate::pg::Pg::open(url, warehouse)?))
+    }
+
+    pub fn create_namespace(&self, levels: &[String], properties: BTreeMap<String, String>) -> Result<()> {
+        both!(self, l => l.create_namespace(levels, properties), p => p.create_namespace(levels, properties))
+    }
+    pub fn namespace(&self, levels: &[String]) -> Result<BTreeMap<String, String>> {
+        both!(self, l => l.namespace(levels), p => p.namespace(levels))
+    }
+    pub fn list_namespaces(&self, parent: &[String]) -> Result<Vec<Vec<String>>> {
+        both!(self, l => l.list_namespaces(parent), p => p.list_namespaces(parent))
+    }
+    pub fn update_namespace(
+        &self,
+        levels: &[String],
+        removals: &[String],
+        updates: &BTreeMap<String, String>,
+    ) -> Result<(Vec<String>, Vec<String>, Vec<String>)> {
+        both!(self, l => l.update_namespace(levels, removals, updates), p => p.update_namespace(levels, removals, updates))
+    }
+    pub fn drop_namespace(&self, levels: &[String]) -> Result<()> {
+        both!(self, l => l.drop_namespace(levels), p => p.drop_namespace(levels))
+    }
+    pub fn list_tables(&self, levels: &[String]) -> Result<Vec<String>> {
+        both!(self, l => l.list_tables(levels), p => p.list("t", levels))
+    }
+    pub fn table(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        both!(self, l => l.table(levels, name), p => p.get("t", levels, name))
+    }
+    pub fn commit(&self, changes: &[Change]) -> Result<()> {
+        both!(self, l => l.commit(changes), p => p.commit(changes))
+    }
+    pub fn drop_table(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        both!(self, l => l.drop_table(levels, name), p => p.drop("t", levels, name))
+    }
+    pub fn rename_table(&self, from: (&[String], &str), to: (&[String], &str)) -> Result<()> {
+        both!(self, l => l.rename_table(from, to), p => p.rename("t", from, to))
+    }
+    pub fn list_views(&self, levels: &[String]) -> Result<Vec<String>> {
+        both!(self, l => l.list_views(levels), p => p.list("v", levels))
+    }
+    pub fn view(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        both!(self, l => l.view(levels, name), p => p.get("v", levels, name))
+    }
+    pub fn commit_view(&self, levels: &[String], name: &str, expected: Option<&str>, new: &TableRow) -> Result<()> {
+        both!(self, l => l.commit_view(levels, name, expected, new), p => p.commit_view(levels, name, expected, new))
+    }
+    pub fn drop_view(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        both!(self, l => l.drop_view(levels, name), p => p.drop("v", levels, name))
+    }
+    pub fn rename_view(&self, from: (&[String], &str), to: (&[String], &str)) -> Result<()> {
+        both!(self, l => l.rename_view(from, to), p => p.rename("v", from, to))
+    }
+    pub fn stage(&self, levels: &[String], name: &str, metadata: &str) -> Result<()> {
+        both!(self, l => l.stage(levels, name, metadata), p => p.stage(levels, name, metadata))
+    }
+    pub fn staged(&self, levels: &[String], name: &str) -> Result<Option<String>> {
+        both!(self, l => l.staged(levels, name), p => p.staged(levels, name))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,10 +535,34 @@ mod tests {
         TableRow { metadata_location: loc.into(), metadata: "{}".into() }
     }
 
+    /// Each test runs on the embedded database, and on PostgreSQL too when CAIRN_CATALOG_TEST_PG names
+    /// one (a scratch database: the tests empty it).
+    static PG: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn pg_lock() -> std::sync::MutexGuard<'static, ()> {
+        PG.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn backends() -> Vec<(Db, Option<tempfile::TempDir>)> {
+        let dir = tempfile::tempdir().unwrap();
+        let mut out = vec![(Db::open(dir.path(), false).unwrap(), Some(dir))];
+        if let Ok(url) = std::env::var("CAIRN_CATALOG_TEST_PG") {
+            let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+            c.batch_execute("DROP TABLE IF EXISTS cairn_catalog_namespaces, cairn_catalog_entries, cairn_catalog_info").unwrap();
+            out.push((Db::postgres(&url, "s3://lakehouse/warehouse").unwrap(), None));
+        }
+        out
+    }
+
     #[test]
     fn namespaces_nest_and_must_be_empty_to_drop() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(dir.path(), false).unwrap();
+        let _g = pg_lock();
+        for (db, _dir) in backends() {
+            namespaces_on(&db);
+        }
+    }
+
+    fn namespaces_on(db: &Db) {
         db.create_namespace(&lv("sales"), BTreeMap::from([("owner".into(), "ana".into())])).unwrap();
         assert!(matches!(db.create_namespace(&lv("sales"), BTreeMap::new()), Err(Error::NamespaceExists)));
         db.create_namespace(&lv("sales.eu"), BTreeMap::new()).unwrap();
@@ -473,8 +580,13 @@ mod tests {
 
     #[test]
     fn commits_are_compare_and_set_and_all_or_nothing() {
-        let dir = tempfile::tempdir().unwrap();
-        let db = Db::open(dir.path(), false).unwrap();
+        let _g = pg_lock();
+        for (db, _dir) in backends() {
+            commits_on(&db);
+        }
+    }
+
+    fn commits_on(db: &Db) {
         db.create_namespace(&lv("s"), BTreeMap::new()).unwrap();
         let ch = |name: &str, expected: Option<&str>, new: &str| Change {
             namespace: "s".into(),
@@ -495,5 +607,39 @@ mod tests {
         assert!(matches!(db.rename_table((&lv("s"), "b"), (&lv("s"), "c")), Err(Error::TableExists)));
         assert_eq!(db.drop_table(&lv("s"), "c").unwrap().metadata_location, "a1");
         assert!(matches!(db.table(&lv("s"), "c"), Err(Error::NoSuchTable)));
+    }
+
+    #[test]
+    fn views_and_tables_share_names_and_staged_creates_clear() {
+        let _g = pg_lock();
+        for (db, _dir) in backends() {
+            db.create_namespace(&lv("s"), BTreeMap::new()).unwrap();
+            db.commit_view(&lv("s"), "v", None, &row("v0")).unwrap();
+            let ch = |name: &str| Change { namespace: "s".into(), name: name.into(), expected: None, new: row("t0") };
+            assert!(matches!(db.commit(&[ch("v")]), Err(Error::ViewExists)));
+            assert!(matches!(db.commit_view(&lv("s"), "v", Some("old"), &row("v1")), Err(Error::Conflict(0))));
+            db.commit_view(&lv("s"), "v", Some("v0"), &row("v1")).unwrap();
+            assert!(matches!(db.drop_namespace(&lv("s")), Err(Error::NamespaceNotEmpty)));
+            db.stage(&lv("s"), "t", "{\"staged\":1}").unwrap();
+            assert_eq!(db.staged(&lv("s"), "t").unwrap().as_deref(), Some("{\"staged\":1}"));
+            db.commit(&[ch("t")]).unwrap();
+            assert_eq!(db.staged(&lv("s"), "t").unwrap(), None);
+            assert!(matches!(db.rename_view((&lv("s"), "v"), (&lv("s"), "t")), Err(Error::TableExists)));
+            db.rename_view((&lv("s"), "v"), (&lv("s"), "w")).unwrap();
+            assert_eq!(db.list_views(&lv("s")).unwrap(), ["w"]);
+            assert_eq!(db.drop_view(&lv("s"), "w").unwrap().metadata_location, "v1");
+            assert!(matches!(db.view(&lv("s"), "w"), Err(Error::NoSuchView)));
+        }
+    }
+
+    #[test]
+    fn a_postgres_database_belongs_to_one_warehouse() {
+        let _g = pg_lock();
+        let Ok(url) = std::env::var("CAIRN_CATALOG_TEST_PG") else { return };
+        let mut c = postgres::Client::connect(&url, postgres::NoTls).unwrap();
+        c.batch_execute("DROP TABLE IF EXISTS cairn_catalog_namespaces, cairn_catalog_entries, cairn_catalog_info").unwrap();
+        Db::postgres(&url, "s3://a/w").unwrap();
+        Db::postgres(&url, "s3://a/w/").unwrap();
+        assert!(Db::postgres(&url, "s3://b/w").is_err());
     }
 }

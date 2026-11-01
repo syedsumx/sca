@@ -45,14 +45,37 @@ def _wait(port: int):
     raise RuntimeError(f"nothing listening on {port}")
 
 
+PG = os.environ.get("CAIRN_CATALOG_TEST_DATABASE_URL", "")
+
+
+def fresh_database() -> str:
+    """A new, empty PostgreSQL database for one stack (CAIRN_CATALOG_TEST_DATABASE_URL names the server)."""
+    import psycopg
+
+    name = "cairn_catalog_" + uuid.uuid4().hex[:10]
+    with psycopg.connect(PG, autocommit=True) as c:
+        c.execute(f"CREATE DATABASE {name}")
+    base, _, query = PG.partition("?")
+    return f"{base.rsplit('/', 1)[0]}/{name}" + (f"?{query}" if query else "")
+
+
 class Stack:
-    def __init__(self, tmp: str, store_env: dict | None = None, catalog_env: dict | None = None):
+    """A store and catalog; with CAIRN_CATALOG_TEST_DATABASE_URL the catalog keeps its state in a fresh
+    PostgreSQL database, and `replicas` catalogs share it."""
+
+    def __init__(self, tmp: str, store_env: dict | None = None, catalog_env: dict | None = None, replicas: int = 1):
         self.tmp = tmp
-        self.store_env, self.catalog_env = store_env or {}, catalog_env or {}
-        self.store_port, self.catalog_port = _port(), _port()
+        self.store_env, self.catalog_env = store_env or {}, dict(catalog_env or {})
+        if PG and "CAIRN_CATALOG_DATABASE_URL" not in self.catalog_env:
+            self.catalog_env["CAIRN_CATALOG_DATABASE_URL"] = fresh_database()
+        assert replicas == 1 or "CAIRN_CATALOG_DATABASE_URL" in self.catalog_env, "replicas share PostgreSQL"
+        self.store_port, self.catalog_ports = _port(), [_port() for _ in range(replicas)]
+        self.catalog_port = self.catalog_ports[0]
         self.store_url = f"http://127.0.0.1:{self.store_port}"
-        self.uri = f"http://127.0.0.1:{self.catalog_port}"
+        self.uris = [f"http://127.0.0.1:{p}" for p in self.catalog_ports]
+        self.uri = self.uris[0]
         self.procs = []
+        self.replicas = []
 
     def start(self):
         store = subprocess.Popen([_bin("CAIRN_STORE_BIN", "store")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
@@ -65,14 +88,17 @@ class Stack:
         tokens = Path(self.tmp, "tokens.json")
         tokens.write_text('[{"token": "%s", "name": "sales", "namespaces": ["sales", "sales.*"]},'
                           ' {"token": "%s", "name": "reader", "read_only": true}]' % (SALES_TOKEN, READER_TOKEN))
-        catalog = subprocess.Popen([_bin("CAIRN_CATALOG_BIN", "catalog")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
-            **os.environ, "CAIRN_CATALOG_ADDR": f"127.0.0.1:{self.catalog_port}", "CAIRN_CATALOG_DATA": f"{self.tmp}/catalog",
-            "CAIRN_CATALOG_TOKEN": ADMIN_TOKEN, "CAIRN_CATALOG_TOKENS_FILE": str(tokens),
-            "CAIRN_CATALOG_S3_ENDPOINT": self.store_url, "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
-            "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
-            "CAIRN_CATALOG_FSYNC": "false", "CAIRN_CATALOG_LOG_LEVEL": "warn", **self.catalog_env})
-        self.procs.append(catalog)
-        _wait(self.catalog_port)
+        for i, port in enumerate(self.catalog_ports):
+            catalog = subprocess.Popen([_bin("CAIRN_CATALOG_BIN", "catalog")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+                **os.environ, "CAIRN_CATALOG_ADDR": f"127.0.0.1:{port}", "CAIRN_CATALOG_DATA": f"{self.tmp}/catalog{i or ''}",
+                "CAIRN_CATALOG_TOKEN": ADMIN_TOKEN, "CAIRN_CATALOG_TOKENS_FILE": str(tokens),
+                "CAIRN_CATALOG_S3_ENDPOINT": self.store_url, "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
+                "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
+                "CAIRN_CATALOG_FSYNC": "false", "CAIRN_CATALOG_LOG_LEVEL": "warn", **self.catalog_env})
+            self.procs.append(catalog)
+            self.replicas.append(catalog)
+        for port in self.catalog_ports:
+            _wait(port)
         return self
 
     def stop(self):
@@ -80,9 +106,9 @@ class Stack:
             p.terminate()
             p.wait(15)
 
-    def catalog(self, token: str = ADMIN_TOKEN, name: str = "cairn"):
+    def catalog(self, token: str = ADMIN_TOKEN, name: str = "cairn", replica: int = 0):
         from pyiceberg.catalog.rest import RestCatalog
-        return RestCatalog(name, uri=self.uri, token=token)
+        return RestCatalog(f"{name}{replica or ''}", uri=self.uris[replica], token=token)
 
 
 @pytest.fixture(scope="session")

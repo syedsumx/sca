@@ -805,7 +805,7 @@ Cairn Catalog is Cairn's Iceberg REST catalog. Engines that speak the Iceberg RE
 - Tables: create (including staged creates for create-table-as-select), load, commit, rename, drop, and register an existing metadata file.
 - Multi-table transactions, and metrics reports (accepted and dropped).
 
-Views, server-side scan planning and remote request signing are not supported yet.
+Server-side scan planning and remote request signing are not supported yet.
 
 **Commits.** Table metadata is checked and updated by iceberg-rust, the Apache Iceberg project's Rust library, so the catalog applies the table spec the same way the reference implementations do.
 
@@ -821,7 +821,25 @@ A multi-table transaction changes every table or none.
 - **Materialized views** are a Trino limitation for REST catalogs (`createMaterializedView is not supported`). Use a table refreshed by a scheduled `CREATE OR REPLACE TABLE … AS`.
 - **Tested:** the REST API (create, conflict, load, replace, stale replace, list, scope, drop), and Trino 476 (create, query, replace, comment, rename, name clashes both ways, read-only token, drop).
 
-**Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
+**Where its state lives.** By default it is embedded, on one volume (`/data`), and the catalog runs as a single replica. Back that volume up together with Cairn Store.
+
+**Several replicas (high availability).** Set `CAIRN_CATALOG_DATABASE_URL` (or `_FILE`) to a PostgreSQL URL. The catalog then keeps namespaces, tables, views and staged creates there, and any number of replicas serve the same lakehouse.
+- **Commits stay safe.** Every change is one transaction. A writer lock in PostgreSQL makes replicas take turns, so a commit's compare-and-set cannot interleave with another replica's, and a multi-table transaction still changes every table or none.
+- **TLS.** Connections use TLS unless the URL says `sslmode=disable`. `CAIRN_CATALOG_DATABASE_CA_FILE` adds a CA.
+- **One database per lakehouse.** The first catalog to connect records its warehouse in the database. A catalog with a different warehouse is refused at start-up.
+- **Scoped credentials.** Replicas starting at the same time all try to create the same store role. The first one wins; the others use the role it created.
+- **In Helm,** create a Secret with the URL and set `cairn.catalog.database.existingSecret` (key `urlKey`, default `url`) and `cairn.catalog.replicas`. The catalog then runs as a Deployment with no volume. It rolls out one pod at a time and has a PodDisruptionBudget; `cairn.ha.spreadReplicas` spreads pods over nodes and zones. The chart refuses `replicas` above 1 without a database.
+- **Back up** the PostgreSQL database together with Cairn Store.
+- **Tested.** CI runs the whole conformance suite twice: once on the embedded state, once on PostgreSQL. The PostgreSQL run adds three replicas sharing one database:
+  - a table written through one replica was read, appended and renamed through another;
+  - a commit prepared on stale metadata was refused by the other replica, and pyiceberg retried it on top;
+  - twelve racing creates of one table, spread over the replicas, left exactly one winner;
+  - nine concurrent appends lost none;
+  - the lakehouse kept working after a replica was killed.
+
+  The replicas start with scoped credentials on, so they also race to create the store role.
+
+**Limits.** Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
 **Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
 - **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` with HTTPS on `localhost:8443` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled` and `cairn.api.enabled`).
