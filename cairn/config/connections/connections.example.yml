@@ -5,3 +5,9 @@ connections:
     url: snowflake://${SF_USER}:${SF_PASSWORD}@${SF_ACCOUNT}/ANALYTICS?warehouse=CAIRN_WH&role=CAIRN_READONLY
   demo_postgres:
     url: postgresql+psycopg://${DEMO_PG_USER}:${DEMO_PG_PASSWORD}@demo-source:5432/finance
+  # The lakehouse through Trino (docker compose --profile trino): the SQL editor and Ask-your-data run
+  # each query as the signed-in user, so Trino's access control (Cairn's policies) applies as well.
+  lakehouse:
+    url: trino://cairn@cairn-trino:8080/lakehouse
+    run_as_user: true
+    catalog: {platform: trino, database: lakehouse}

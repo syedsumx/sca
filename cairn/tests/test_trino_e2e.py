@@ -91,6 +91,7 @@ def cairn(tmp_path_factory):
         graph = InMemoryGraph()
         graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
             {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+        graph.aspects[(SALARIES, "schemaMetadata")] = {"fields": [{"fieldPath": "name"}, {"fieldPath": "salary"}]}
         settings = Settings(database_url=f"sqlite:///{tmp}/cairn.db", service_token="svc-secret", dev_trust_actor_header=True,
                             gateway={"key_dir": str(tmp / "keys")})
         s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
@@ -225,3 +226,27 @@ def test_queries_that_write_become_lineage(trino, cairn):
         time.sleep(0.5)
         runs = [u for (u, a), v in s.graph.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == job]
     assert len(runs) == 2
+
+
+def test_the_sql_editor_runs_on_trino_as_the_signed_in_user(trino, cairn):
+    """Cairn's SQL editor and Ask-your-data on a Trino connection with run_as_user: Cairn's checks first,
+    then Trino's, as that user, so Trino's row filters apply to Cairn's queries too."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.port}/lake", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    q = "SELECT id, email, region FROM sales.orders ORDER BY id"
+    ana = s.data_access.query("urn:li:corpuser:ana", q, connection="lakehouse")
+    assert [r[1] for r in ana["rows"]][:3] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com"] and "email" in ana["masked_columns"]
+    # Bob's row filter lives in Trino: Cairn's own SQL editor never applied row filters; now it does.
+    bob = s.data_access.query("urn:li:corpuser:bob", q, connection="lakehouse")
+    assert {r[2] for r in bob["rows"]} == {"EU"}
+    # Cairn refuses first what Cairn knows the caller may not read.
+    with pytest.raises(DataAccessError, match="may not query hr.salaries"):
+        s.data_access.query("urn:li:corpuser:ana", "SELECT * FROM hr.salaries", connection="lakehouse")
+    # The admin sees the values as they are.
+    adm = s.data_access.query("urn:li:corpuser:admin", q, connection="lakehouse")
+    assert adm["rows"][0][1] == "jane@acme.com" and adm["masked_columns"] == []

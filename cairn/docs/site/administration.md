@@ -816,6 +816,19 @@ A multi-table transaction changes every table or none.
   - The job records the tables the query read and wrote, column-level lineage (which source columns feed which output columns), and the SQL.
   - Datasets carry the same URNs as access control, so lineage, policies and masking refer to the same datasets.
   - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
+- **The SQL editor and Ask-your-data on Trino.** Add a Trino connection with `run_as_user: true` (see `config/connections/connections.example.yml`):
+
+  ```yaml
+  lakehouse:
+    url: trino://cairn@cairn-trino:8080/lakehouse
+    run_as_user: true
+    catalog: {platform: trino, database: lakehouse}
+  ```
+
+  - **How a query runs.** Cairn checks the query as it does for every connection: catalogued tables only, the caller must be allowed to read each one, and results are masked. Trino then runs it as the signed-in user, so Trino's own checks (Cairn's policies, row filters included) apply as well. Row filters thus now reach the SQL editor and Ask-your-data.
+  - **Authentication.** With a password in the URL (`trino://cairn:<password>@host:443/lakehouse`), the connection uses HTTPS and `cairn` impersonates the caller. Trino must allow that, which it does for Cairn's service account.
+  - **Requirements.** It needs the `trino` extra (`cairn-platform[trino]`, part of `all`).
+  - **Row cap.** The editor's row cap now goes onto the query's own `LIMIT` (a smaller limit the query already has is kept), so `ORDER BY` holds on engines that drop the order of a subquery, as Trino does.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
 
 ## Backup and restore

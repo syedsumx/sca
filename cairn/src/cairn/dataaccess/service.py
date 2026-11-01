@@ -8,6 +8,17 @@ catalog datasets it serves::
         url: postgresql+psycopg://${WH_USER}:${WH_PASSWORD}@warehouse:5432/analytics
         catalog: {platform: postgres, database: analytics}     # datasets analytics.<schema>.<table>
 
+A Trino connection can run each query as the signed-in user, so Trino's own access control (Cairn's
+policies through Trino's OPA plugin: masks and row filters included) applies on top::
+
+    connections:
+      lakehouse:
+        url: trino://cairn@cairn-trino:8080/lakehouse      # trino://[principal[:password]@]host:port/catalog
+        run_as_user: true                                  # the query's Trino user is the caller
+        catalog: {platform: trino, database: lakehouse}
+
+With a password the connection uses HTTPS and the principal impersonates the caller (Trino must allow it).
+
 Every table a query reads must be in the catalog and the caller must be allowed to see its data
 (``VIEW_DATASET_PROFILE``, the privilege that guards sample values). Results are masked with the
 caller's masking plan, the same one the catalog applies to profiles, and every query is audited.
@@ -99,6 +110,23 @@ def tables_in(sql: str, dialect: str) -> tuple[exp.Expression, list[exp.Table]]:
     return tree, tables
 
 
+def capped(tree: exp.Expression, n: int, dialect: str) -> str:
+    """The query with at most ``n`` rows. A plain SELECT gets the cap as its own LIMIT (a smaller one it
+    has is kept), so its ORDER BY still holds: engines such as Trino drop the order of a subquery."""
+    if isinstance(tree, exp.Select):
+        current = tree.args.get("limit")
+        try:
+            have = int(current.expression.name) if current is not None and current.expression is not None else None
+        except (TypeError, ValueError):
+            have = None
+        if current is None or (have is not None and have > n):
+            tree = tree.copy().limit(n)
+        elif have is None:
+            return f"SELECT * FROM ({tree.sql(dialect=dialect)}) AS cairn_q LIMIT {n}"
+        return tree.sql(dialect=dialect)
+    return f"SELECT * FROM ({tree.sql(dialect=dialect)}) AS cairn_q LIMIT {n}"
+
+
 def output_sources(tree: exp.Expression) -> list[Optional[set[str]]]:
     """Per output column of the outermost SELECT, the simple names of the columns it is computed
     from; ``None`` for a ``*`` (resolved against the result's column names instead)."""
@@ -162,7 +190,10 @@ class DataAccessService:
         raise DataAccessError(f"unknown connection {connection!r}", 404)
 
     # ---- running ----------------------------------------------------------------------
-    def _execute(self, source: Source, sql: str, limit: int) -> tuple[list[str], list[list[Any]], bool]:
+    def _execute(self, source: Source, sql: str, limit: int, actor: str = "") -> tuple[list[str], list[list[Any]], bool]:
+        definition = (self.registry.definitions() or {}).get(source.connection) or {}
+        if definition.get("run_as_user"):
+            return self._execute_as(definition, sql, limit, actor)
         engine = self.registry.engine(source.connection)
         with engine.connect() as conn:
             with conn.begin():
@@ -172,6 +203,43 @@ class DataAccessService:
                 result = conn.execute(text(sql))
                 columns = list(result.keys())
                 rows = [list(r) for r in result.fetchmany(limit + 1)]
+        return columns, rows[:limit], len(rows) > limit
+
+    def _execute_as(self, definition: dict, sql: str, limit: int, actor: str) -> tuple[list[str], list[list[Any]], bool]:
+        """Runs ``sql`` on Trino with the caller as the query's user (``run_as_user``)."""
+        from urllib.parse import unquote, urlsplit
+
+        try:
+            import trino
+        except ImportError:
+            raise DataAccessError("this connection needs the trino client (pip install 'cairn-platform[trino]')", 503)
+        from cairn.quality.collectors import _expand_env
+
+        url = urlsplit(_expand_env(definition["url"]))
+        if url.scheme != "trino":
+            raise DataAccessError("run_as_user is for trino:// connections", 400)
+        user = actor.removeprefix("urn:li:corpuser:")
+        if not user or user == actor:
+            raise DataAccessError("queries on this connection run as a Cairn user", 403)
+        auth, scheme = None, "http"
+        if url.password:
+            auth, scheme = trino.auth.BasicAuthentication(unquote(url.username or ""), unquote(url.password)), "https"
+        path = [p for p in url.path.split("/") if p]
+        conn = trino.dbapi.connect(host=url.hostname, port=url.port or (443 if scheme == "https" else 8080), user=user,
+                                   catalog=path[0] if path else None, schema=path[1] if len(path) > 1 else None,
+                                   http_scheme=scheme, auth=auth, source="cairn",
+                                   request_timeout=max(5.0, self.timeout_ms / 1000))
+        try:
+            cur = conn.cursor()
+            cur.execute(sql)
+            rows = [list(r) for r in cur.fetchmany(limit + 1)]
+            columns = [d[0] for d in cur.description or []]
+        except trino.exceptions.TrinoUserError as e:
+            if e.error_name == "PERMISSION_DENIED":
+                raise DataAccessError(f"Trino refused the query: {e.message[:300]}", 403)
+            raise DataAccessError(f"the warehouse refused the query: {e.message[:300]}")
+        finally:
+            conn.close()
         return columns, rows[:limit], len(rows) > limit
 
     def _mask(self, actor: str, urns: list[str], columns: list[str], rows: list[list[Any]],
@@ -208,7 +276,7 @@ class DataAccessService:
         sql = exp.select("*").from_(exp.table_(table, db=schema, catalog=database, quoted=True)) \
             .limit(min(limit, self.max_rows) + 1).sql(dialect=source.dialect)    # one more: was it cut?
         started = time.monotonic()
-        columns, rows, truncated = self._execute(source, sql, min(limit, self.max_rows))
+        columns, rows, truncated = self._execute(source, sql, min(limit, self.max_rows), actor)
         masked = self._mask(actor, [urn], columns, rows, [None] * len(columns))
         out = QueryResult(columns, self._jsonable(rows), masked, truncated, int((time.monotonic() - started) * 1000),
                           [urn])
@@ -238,10 +306,10 @@ class DataAccessService:
                 raise DataAccessError(f"you may not query {t.db}.{t.name}", 403)
             urns.append(u)
         limit = max(1, min(limit, self.max_rows))
-        wrapped = f"SELECT * FROM ({tree.sql(dialect=source.dialect)}) AS cairn_q LIMIT {limit + 1}"
+        wrapped = capped(tree, limit + 1, source.dialect)
         started = time.monotonic()
         try:
-            columns, rows, truncated = self._execute(source, wrapped, limit)
+            columns, rows, truncated = self._execute(source, wrapped, limit, actor)
         except DataAccessError:
             raise
         except Exception as e:  # noqa: BLE001 - warehouse errors go back to the editor
