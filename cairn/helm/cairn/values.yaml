@@ -504,8 +504,8 @@ cairn:
       enabled: false
       size: 100Gi
       storageClassName: ""
-    # Backups to S3-compatible sinks: a Secret with a "sinks.json" ([{"id", "endpoint", "bucket", "prefix",
-    # "access_key", "secret_key", "region"}]). Optionally back up to one of them on a schedule.
+    # Backups to sinks (S3, Azure Blob, GCS): a Secret with a "sinks.json" ([{"id", "kind", "endpoint", "bucket", "prefix",
+    # ...}]; see the administration guide). Optionally back up to one of them on a schedule.
     backupSinks:
       secretName: ""
       schedule: ""            # a sink id: back up there every intervalSeconds, keeping the newest `keep`
@@ -515,15 +515,20 @@ cairn:
     # Compress new object data at rest: off or zstd (1 MiB chunks, so ranged reads stay cheap).
     compression: "off"
     # Remote buckets that can be mounted into local buckets: a Secret with a "remotes.json" ([{"id",
-    # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
+    # "kind": "s3"|"azure"|"gcs", "endpoint", "bucket", "prefix", ...}]; see the administration guide).
+    # Other keys of the Secret (an Azure account key, a GCS service account key) are files next to it
+    # in /etc/cairn-store-remotes/, for secret_key_file, sas_file and credentials_file.
     remotesSecret: ""
+    # The Kubernetes service account the store pods run as, e.g. one bound to a Google service account
+    # (GKE workload identity) for GCS remotes, sinks and tiers with "auth": "metadata".
+    serviceAccountName: ""
     # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka", "id": ...}]).
     eventTargetsSecret: ""
     # Replication destinations: a Secret with a "targets.json" ([{"id", "endpoint", "access_key",
     # "secret_key", "region"}]); bucket replication rules name one as arn:cairn:store:::<id>.
     replicationTargetsSecret: ""
-    # Storage tiers for lifecycle transitions: a Secret with a "tiers.json" ([{"storage_class",
-    # "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]).
+    # Storage tiers for lifecycle transitions: a Secret with a "tiers.json" ([{"storage_class", "kind":
+    # "s3"|"azure"|"gcs", "endpoint", "bucket", "prefix", ...}]); its other keys are in /etc/cairn-store-tiers/.
     tiersSecret: ""
     # The file API (/-/files/) also accepts HTTP Basic sign-in (access key and secret key), for browsers.
     # Needs TLS (tlsSecret).

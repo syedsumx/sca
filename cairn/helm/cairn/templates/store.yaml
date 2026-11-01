@@ -36,6 +36,9 @@ spec:
         {{- include "cairn.componentLabels" $ctx | nindent 8 }}
     spec:
       automountServiceAccountToken: false
+      {{- if $u.serviceAccountName }}
+      serviceAccountName: {{ $u.serviceAccountName }}
+      {{- end }}
       terminationGracePeriodSeconds: 45
       {{- with .Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:

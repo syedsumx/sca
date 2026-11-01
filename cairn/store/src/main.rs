@@ -42,11 +42,11 @@
 //! CAIRN_STORE_TLS_PROBE_CERT/KEY  client certificate for the healthcheck command under mutual TLS
 //! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
-//! CAIRN_STORE_BACKUP_SINKS_FILE  S3-compatible backup sinks: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_BACKUP_SINKS_FILE  backup sinks (S3, Azure Blob, GCS): [{"id", "kind", "endpoint", "bucket", "prefix", ...}] (see s3::remote::RemoteSpec)
 //! CAIRN_STORE_BACKUP_CONTINUOUS  journal every object change to this sink, for point-in-time restores (off when empty)
 //! CAIRN_STORE_BACKUP_SINK_SCHEDULE  back up to this sink on a schedule (off when empty) ...
 //! CAIRN_STORE_BACKUP_SINK_INTERVAL / _KEEP  ... every N seconds (86400), keeping the newest N scheduled ones (7)
-//! CAIRN_STORE_REMOTES_FILE      remote buckets that can be mounted into local ones: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_REMOTES_FILE      remote buckets (S3, Azure Blob, GCS) that can be mounted into local ones: [{"id", "kind", "endpoint", "bucket", "prefix", ...}]
 //! CAIRN_STORE_REMOTE_SYNC_INTERVAL  seconds between syncs of mounted remote buckets (60)
 //! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
 //! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
@@ -59,7 +59,7 @@
 //! CAIRN_STORE_PACK_FILE_BYTES  a pack file is closed at this size (1 GiB)
 //! CAIRN_STORE_COMPACT_INTERVAL seconds between compaction passes over packs (3600; 0: off)
 //! CAIRN_STORE_COMPACT_DEAD_RATIO  a pack is compacted when this share of it is dead (0.5)
-//! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: [{"storage_class", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: remote buckets with a "storage_class" instead of an "id"
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_CLUSTER_NODE   run as this node of a cluster (off when empty; needs CAIRN_STORE_META, shared by the nodes)
 //! CAIRN_STORE_CLUSTER_URL    this node's address for the other nodes, e.g. http://store-0.store:8333

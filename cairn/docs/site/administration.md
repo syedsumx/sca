@@ -525,9 +525,28 @@ fs.s3a.secret.key=...
 
 Use `s3a://<bucket>/<path>` paths. In Spark, prefix each setting with `spark.hadoop.`. S3A renames are copies followed by deletes, as on any S3 store, so write job output with an S3A committer (`fs.s3a.committer.name=magic` or `directory`). Hadoop sees the key's permissions: a key limited to some buckets cannot open others.
 
-**Storage tiers.** Lifecycle transitions can move object data to a bucket on another S3 endpoint (a cloud bucket, or another Cairn Store), to keep cold data off the store's disk.
+**Remote buckets: S3, Azure Blob Storage and Google Cloud Storage.** Storage tiers, mounted remote buckets and backup sinks all name a bucket elsewhere with the same fields. `kind` says how the store talks to it: `s3` (the default), `azure` or `gcs`. Azure and GCS are spoken natively, through their own APIs and sign-in, not through an S3 gateway.
 
-- **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.
+- **`s3`**: `endpoint`, `bucket`, `prefix`, `access_key`, `secret_key` (or `secret_key_file`), `region` (default `us-east-1`). This covers AWS S3, MinIO, another Cairn Store and other S3-compatible services.
+- **`azure`**: `bucket` is the container. `access_key` is the storage account. Sign in with one of two:
+  - the account key in `secret_key` (or `secret_key_file`), which uses Shared Key signing;
+  - a SAS token in `sas` (or `sas_file`).
+
+  `endpoint` defaults to `https://<account>.blob.core.windows.net`; for Azurite, give `http://host:10000/<account>`. Blobs above 64 MiB are uploaded in 16 MiB blocks. User metadata whose name Azure does not allow (S3 allows `-`, Azure does not) is stored under an encoded name and read back under the original one.
+- **`gcs`**: `bucket`, `prefix`, and `auth`, which is one of:
+  - `service_account`: `credentials_file` is a service account JSON key. The store signs its token request and caches the token.
+  - `metadata`: the service account of the VM or pod, from the metadata server. On GKE, bind the store's Kubernetes service account to a Google service account with workload identity, and set `cairn.store.serviceAccountName`.
+  - `none`: emulators only.
+
+  `endpoint` defaults to `https://storage.googleapis.com`.
+
+Example: `[{"id": "lake", "kind": "gcs", "bucket": "acme-lake", "prefix": "raw/", "auth": "service_account", "credentials_file": "/etc/cairn-store-remotes/sa.json"}, {"id": "archive", "kind": "azure", "bucket": "archive", "access_key": "acmestore", "secret_key_file": "/etc/cairn-store-remotes/azure-key"}]`.
+
+The store will not start with a field that does not apply to its kind (a `region` on Azure, keys on GCS), an unknown `kind`, or missing credentials. In Helm, the other keys of the Secret that holds `remotes.json`, `tiers.json` or `sinks.json` are mounted next to it, so key files can live in the same Secret. HDFS is not a remote kind: reach Hadoop data through S3A in the other direction (above).
+
+**Storage tiers.** Lifecycle transitions can move object data to a bucket elsewhere (S3, another Cairn Store, Azure Blob Storage or Google Cloud Storage; see above), to keep cold data off the store's disk.
+
+- **Tiers.** The operator defines them in `CAIRN_STORE_TIERS_FILE`: `[{"storage_class": "STANDARD_IA", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "lake-cold", "prefix": "cairn/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`, with the fields of any remote bucket (above) and a `storage_class` instead of an `id`. A tier's storage class is one of `STANDARD_IA`, `ONEZONE_IA` or `GLACIER_IR`: classes that are read without a restore. In Helm, put `tiers.json` in a Secret and set `cairn.store.tiersSecret`.
 - **Rules.** `Transition` (after `Days` or on a `Date`) and `NoncurrentVersionTransition` (after `NoncurrentDays`) name a tier by its storage class. A rule naming any other class is refused with `InvalidStorageClass`. Expiration wins over a transition due at the same time.
 - **How data moves.** Each blob is copied to the tier exactly as it is stored on disk, so with encryption at rest the tier only ever holds ciphertext. The version's index entry then points at the tier, in one transaction and only if the version was not rewritten meanwhile. The local copy is then deleted. A failed copy is retried on the next pass.
 - **Reads** are transparent: `GetObject`, ranges, copies and replication fetch the bytes from the tier. `HeadObject` and listings report the storage class. Copying an object onto itself with `StorageClass=STANDARD` brings it back to the store's disk.
@@ -536,7 +555,7 @@ Use `s3a://<bucket>/<path>` paths. In Spark, prefix each setting with `spark.had
 - **Backups** do not copy tiered data. Protect the tier bucket with its own versioning or replication.
 - **Metrics.** `cairn_store_tier_transitions_total`, `_transitioned_bytes_total`, `_transition_failures_total`, `_reads_total`, `_deletes_total`.
 
-**Mounting remote buckets.** A local bucket can mirror a bucket on another S3 endpoint (AWS S3, MinIO, another Cairn Store), so clients and engines use one store while the data stays where it is. Define remotes in `CAIRN_STORE_REMOTES_FILE`: `[{"id": "erp-exports", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "acme-erp", "prefix": "exports/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. Then mount one: `cairn-store admin remote-mount <bucket> --remote erp-exports [--write-back]` (or `PUT /-/admin/v1/buckets/<bucket>/remote`).
+**Mounting remote buckets.** A local bucket can mirror a bucket elsewhere (AWS S3, MinIO, another Cairn Store, an Azure container or a GCS bucket; see above), so clients and engines use one store while the data stays where it is. Define remotes in `CAIRN_STORE_REMOTES_FILE`: `[{"id": "erp-exports", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "acme-erp", "prefix": "exports/", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`. Then mount one: `cairn-store admin remote-mount <bucket> --remote erp-exports [--write-back]` (or `PUT /-/admin/v1/buckets/<bucket>/remote`).
 
 - **Sync.** Every `CAIRN_STORE_REMOTE_SYNC_INTERVAL` seconds (60), or on `remote-sync <bucket>`, the store lists the remote and makes each of its current objects a local object whose bytes stay on the remote: keys, sizes, ETags, content types and user metadata are local, so listings and `HeadObject` are fast. Objects changed or deleted on the remote follow at the next pass. A change made here and the remote's are settled as in two-way sync: the newer one wins.
 - **Reads** fetch the bytes from the remote, ranges included, so nothing is copied until it is read. `remote-cache <bucket> [--prefix P]` copies objects' bytes to this store (encrypted at rest like any new object), so reads stay local and work while the remote is down. `remote-uncache` drops the local copy of objects the remote still has unchanged.
@@ -614,7 +633,7 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Restoring.** A backup is a complete data directory: check it with `cairn-store fsck -data <backup>`, and restore by starting the store on a copy of it. Event deliveries that were pending are not part of a backup, so they are not sent again. Backups are recorded in the audit trail.
 - **Helm.** Set `cairn.store.backups.enabled` for a second volume.
 
-**Backups to S3-compatible storage.** Backups can also go to a bucket on another endpoint: another Cairn Store, AWS S3, MinIO, or Google Cloud Storage through its S3 interface. Define sinks in `CAIRN_STORE_BACKUP_SINKS_FILE`: `[{"id": "offsite", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "acme-store-backups", "prefix": "prod", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`.
+**Backups to S3-compatible storage, Azure and GCS.** Backups can also go to a bucket elsewhere: another Cairn Store, AWS S3, MinIO, an Azure container or a GCS bucket (see the remote bucket fields above). Define sinks in `CAIRN_STORE_BACKUP_SINKS_FILE`: `[{"id": "offsite", "endpoint": "https://s3.eu-west-1.amazonaws.com", "bucket": "acme-store-backups", "prefix": "prod", "access_key": "...", "secret_key_file": "/etc/...", "region": "eu-west-1"}]`.
 
 - **Writing one.** `cairn-store admin backup <name> --sink offsite` (or `POST /-/admin/v1/backups` with `"sink"`) takes the same consistent snapshot as a local backup while the store keeps serving, then uploads the index and every blob it refers to.
 - **Incremental.** Blobs are immutable, so each one is uploaded once and shared by every backup in the sink; a later backup uploads only what is new. Packs of small objects are shared once they are closed.

@@ -1,8 +1,8 @@
-//! Storage tiers: lifecycle transitions move object data to a bucket on another S3 endpoint (a cloud
-//! bucket, or another Cairn Store), and reads fetch it from there.
+//! Storage tiers: lifecycle transitions move object data to a bucket elsewhere (S3, another Cairn Store,
+//! Azure Blob or Google Cloud Storage), and reads fetch it from there.
 //!
-//! Tiers are defined by the operator (`CAIRN_STORE_TIERS_FILE`: `[{"storage_class", "endpoint", "bucket",
-//! "prefix", "access_key", "secret_key" | "secret_key_file", "region"}]`); a lifecycle rule names one by its
+//! Tiers are defined by the operator (`CAIRN_STORE_TIERS_FILE`: a list of remote buckets as in
+//! `remote::RemoteSpec`, each with a `storage_class` instead of an `id`); a lifecycle rule names one by its
 //! storage class. A transition copies each blob exactly as it is stored on disk (so with encryption at
 //! rest the tier only ever holds ciphertext), then swaps the version's segments in one index transaction,
 //! only if the version is unchanged; the local blobs are collected afterwards. Reads are ranged GETs on
@@ -17,13 +17,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::combinators::BoxBody;
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, StreamBody};
 use hyper::body::Frame;
-use hyper_util::client::legacy::{connect::HttpConnector, Client};
-use hyper_util::rt::TokioExecutor;
-use serde::Deserialize;
 
 use super::errors::{self as e, ApiError};
+use super::remote::{check_spec, Remote, RemoteSpec};
 use super::{Ctx, Server};
 use crate::engine::{Object, Segment, TierStore};
 
@@ -32,26 +30,8 @@ type Body = BoxBody<Bytes, std::io::Error>;
 /// The storage classes a tier may have: those S3 reads without a restore.
 pub const TIER_CLASSES: [&str; 3] = ["STANDARD_IA", "ONEZONE_IA", "GLACIER_IR"];
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Tier {
-    pub storage_class: String,
-    pub endpoint: String,
-    pub bucket: String,
-    #[serde(default)]
-    pub prefix: String,
-    pub access_key: String,
-    #[serde(default)]
-    pub secret_key: String,
-    #[serde(default)]
-    pub secret_key_file: String,
-    #[serde(default = "us_east_1")]
-    pub region: String,
-}
-
-fn us_east_1() -> String {
-    "us-east-1".into()
-}
+/// A tier: a remote bucket (S3, Azure Blob or GCS; see `remote::RemoteSpec`) named by its storage class.
+pub type Tier = RemoteSpec;
 
 pub fn load_tiers(text: &str) -> Result<Vec<Tier>, String> {
     let mut ts: Vec<Tier> = serde_json::from_str(text).map_err(|e| e.to_string())?;
@@ -67,20 +47,15 @@ pub fn load_tiers(text: &str) -> Result<Vec<Tier>, String> {
         if !seen.insert(t.storage_class.clone()) {
             return Err(format!("tier {}: defined twice", t.storage_class));
         }
-        if !t.secret_key_file.is_empty() {
-            t.secret_key =
-                std::fs::read_to_string(&t.secret_key_file).map_err(|e| format!("{}: {e}", t.secret_key_file))?.trim().to_string();
-        }
-        if t.bucket.is_empty() || t.access_key.is_empty() || t.secret_key.is_empty() {
-            return Err(format!("tier {}: bucket, access_key and secret_key are required", t.storage_class));
-        }
-        if !t.endpoint.starts_with("http://") && !t.endpoint.starts_with("https://") {
-            return Err(format!("tier {}: endpoint must be http:// or https://", t.storage_class));
+        if !t.id.is_empty() {
+            return Err(format!("tier {}: tiers are named by storage_class, not id", t.storage_class));
         }
         if !t.prefix.chars().all(|c| c.is_ascii_alphanumeric() || "/_.-".contains(c)) {
             return Err(format!("tier {}: prefix may only hold letters, digits and / _ . -", t.storage_class));
         }
-        t.endpoint = t.endpoint.trim_end_matches('/').to_string();
+        t.id = t.storage_class.clone();
+        // The prefix is used as given (a tier's objects are <prefix><blob>).
+        check_spec(t, "tier", false)?;
     }
     Ok(ts)
 }
@@ -96,82 +71,31 @@ pub struct TierMetrics {
 
 /// The tier client. Its calls block (they run on blocking threads: lifecycle passes and object readers).
 pub struct Tiers {
-    tiers: BTreeMap<String, Tier>,
-    http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
-    rt: tokio::runtime::Handle,
+    tiers: BTreeMap<String, Remote>,
     pub metrics: TierMetrics,
 }
 
 impl Tiers {
     pub fn new(tiers: Vec<Tier>) -> Result<Tiers, String> {
-        Ok(Tiers {
-            tiers: tiers.into_iter().map(|t| (t.storage_class.clone(), t)).collect(),
-            http: Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?),
-            rt: tokio::runtime::Handle::current(),
-            metrics: Default::default(),
-        })
+        let mut m = BTreeMap::new();
+        for t in tiers {
+            m.insert(t.storage_class.clone(), Remote::new(t)?);
+        }
+        Ok(Tiers { tiers: m, metrics: Default::default() })
     }
 
     pub fn has(&self, class: &str) -> bool {
         self.tiers.contains_key(class)
     }
 
-    fn tier(&self, class: &str) -> std::io::Result<&Tier> {
+    fn tier(&self, class: &str) -> std::io::Result<&Remote> {
         self.tiers.get(class).ok_or_else(|| std::io::Error::other(format!("storage tier {class} is not configured")))
-    }
-
-    async fn send(
-        &self,
-        t: &Tier,
-        method: &str,
-        blob: &str,
-        headers: &[(&str, String)],
-        body: Body,
-    ) -> std::io::Result<hyper::Response<hyper::body::Incoming>> {
-        let url = format!("{}/{}/{}{}", t.endpoint, t.bucket, t.prefix, tier_name(blob));
-        let mut req = hyper::Request::builder().method(method).uri(&url);
-        for (k, v) in crate::admin_cli::sign_with_payload(
-            method,
-            &url,
-            "UNSIGNED-PAYLOAD",
-            &t.access_key,
-            &t.secret_key,
-            &t.region,
-            time::OffsetDateTime::now_utc(),
-        ) {
-            req = req.header(k, v);
-        }
-        for (k, v) in headers {
-            req = req.header(*k, v.as_str());
-        }
-        let req = req.body(body).map_err(std::io::Error::other)?;
-        tokio::time::timeout(Duration::from_secs(60), self.http.request(req))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{method} {url}: timed out")))?
-            .map_err(|e| std::io::Error::other(format!("{method} {url}: {e}")))
-    }
-
-    async fn check(resp: hyper::Response<hyper::body::Incoming>, what: &str) -> std::io::Result<hyper::Response<hyper::body::Incoming>> {
-        if resp.status().is_success() {
-            return Ok(resp);
-        }
-        let status = resp.status();
-        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
-        let msg = format!("{what}: HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(300).collect::<String>());
-        Err(std::io::Error::new(
-            if status == hyper::StatusCode::NOT_FOUND { std::io::ErrorKind::NotFound } else { std::io::ErrorKind::Other },
-            msg,
-        ))
     }
 
     /// Copies a blob file to a tier.
     pub fn upload(&self, class: &str, blob: &str, file: Box<dyn Read + Send>, len: u64) -> std::io::Result<u64> {
-        let t = self.tier(class)?;
-        self.rt.block_on(async {
-            let resp = self.send(t, "PUT", blob, &[("content-length", len.to_string())], file_body(file)).await?;
-            Self::check(resp, &format!("PUT {blob} to tier {class}")).await?;
-            Ok(len)
-        })
+        self.tier(class)?.put(&tier_name(blob), file, len, &[])?;
+        Ok(len)
     }
 }
 
@@ -179,25 +103,11 @@ impl TierStore for Tiers {
     fn open(&self, class: &str, blob: &str, offset: u64) -> std::io::Result<Box<dyn Read + Send>> {
         let t = self.tier(class)?;
         self.metrics.reads.fetch_add(1, Ordering::Relaxed);
-        let resp = self.rt.block_on(async {
-            let resp = self.send(t, "GET", blob, &[("range", format!("bytes={offset}-"))], empty()).await?;
-            Self::check(resp, &format!("GET {blob} from tier {class}")).await
-        })?;
-        if offset > 0 && resp.status() != hyper::StatusCode::PARTIAL_CONTENT {
-            return Err(std::io::Error::other(format!("tier {class} ignored a range request")));
-        }
-        Ok(Box::new(BodyReader { rt: self.rt.clone(), body: resp.into_body(), buf: Bytes::new() }))
+        t.get(&tier_name(blob), offset)
     }
 
     fn delete(&self, class: &str, blob: &str) -> std::io::Result<()> {
-        let t = self.tier(class)?;
-        self.rt.block_on(async {
-            let resp = self.send(t, "DELETE", blob, &[], empty()).await?;
-            match Self::check(resp, &format!("DELETE {blob} from tier {class}")).await {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-                _ => Ok(()),
-            }
-        })?;
+        self.tier(class)?.delete(&tier_name(blob))?;
         self.metrics.deleted.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -210,10 +120,6 @@ fn tier_name(blob: &str) -> std::borrow::Cow<'_, str> {
         return format!("c{}", hex::encode(&sha2::Sha256::digest(blob.as_bytes())[..20])).into();
     }
     blob.into()
-}
-
-fn empty() -> Body {
-    Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
 }
 
 /// A file's bytes as a request body (read on a blocking thread).
