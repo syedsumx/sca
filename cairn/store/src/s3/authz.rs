@@ -264,8 +264,9 @@ impl Server {
         let anonymous = c.auth.cred.access_key.is_empty();
         put("aws:principaltype", if anonymous { "Anonymous" } else { "User" }.into());
         if !anonymous {
-            put("aws:username", c.auth.cred.access_key.clone());
-            put("aws:userid", c.auth.cred.access_key.clone());
+            let cred = &c.auth.cred;
+            put("aws:username", if cred.user.is_empty() { cred.access_key.clone() } else { cred.user.clone() });
+            put("aws:userid", cred.access_key.clone());
             put("s3:signatureversion", if c.auth.scope.is_empty() { "AWS" } else { "AWS4-HMAC-SHA256" }.into());
             put("s3:authtype", if c.headers.contains_key("authorization") { "REST-HEADER" } else { "REST-QUERY-STRING" }.into());
         }
@@ -330,7 +331,7 @@ impl Server {
         } else {
             BTreeMap::new()
         };
-        let req = PolicyRequest { action, resource: &resource, principal: &cred.access_key, context: &ctx };
+        let req = PolicyRequest { action, resource: &resource, principal: &cred.access_key, user: &cred.user, context: &ctx };
         let from_bucket = bucket_policy.as_ref().and_then(|p| p.evaluate(&req));
         let from_key = key_policy.and_then(|p| p.evaluate(&req));
         // Admin keys can always manage a bucket's policy, so a policy cannot lock them out.

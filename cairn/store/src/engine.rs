@@ -1674,6 +1674,58 @@ impl Engine {
         Ok(out)
     }
 
+    /// The IAM document (users, groups, managed policies), if any.
+    pub fn iam_doc(&self) -> Result<Option<Vec<u8>>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(CONFIG)?;
+        let v = t.get(("", "iam"))?.map(|v| v.value().to_vec());
+        Ok(v)
+    }
+
+    /// Changes the IAM document and access keys in one write transaction (writers are serialized, on
+    /// PostgreSQL too, so this is a safe read-modify-write across a cluster). `f` gets the document and
+    /// the stored keys and returns the new document, key changes (None: delete), the audit entry and a
+    /// value; an `Err` from `f` changes nothing.
+    #[allow(clippy::type_complexity)]
+    pub fn iam_update<T, X>(
+        &self,
+        f: impl FnOnce(Option<&[u8]>, &BTreeMap<String, Vec<u8>>) -> std::result::Result<(Vec<u8>, Vec<(String, Option<Vec<u8>>)>, Audit, T), X>,
+    ) -> Result<std::result::Result<T, X>> {
+        let tx = self.begin_write()?;
+        let out;
+        {
+            let mut cfg = tx.open_table(CONFIG)?;
+            let mut keys = tx.open_table(KEYS)?;
+            let cur = cfg.get(("", "iam"))?.map(|v| v.value().to_vec());
+            let mut all = BTreeMap::new();
+            for row in keys.iter()? {
+                let (k, v) = row?;
+                all.insert(k.value().to_string(), v.value().to_vec());
+            }
+            let (doc, changes, audit, t) = match f(cur.as_deref(), &all) {
+                Ok(v) => v,
+                Err(x) => return Ok(Err(x)),
+            };
+            cfg.insert(("", "iam"), doc.as_slice())?;
+            for (ak, rec) in changes {
+                match rec {
+                    Some(r) => {
+                        keys.insert(ak.as_str(), r.as_slice())?;
+                    }
+                    None => {
+                        keys.remove(ak.as_str())?;
+                    }
+                }
+            }
+            drop(cfg);
+            drop(keys);
+            Self::audit_in(&tx, &audit)?;
+            out = t;
+        }
+        tx.commit()?;
+        Ok(Ok(out))
+    }
+
     /// Stores (Some) or removes (None) an access key, with its audit entry, in one transaction.
     pub fn put_key(&self, access_key: &str, record: Option<&[u8]>, audit: Option<&Audit>) -> Result<()> {
         let tx = self.begin_write()?;

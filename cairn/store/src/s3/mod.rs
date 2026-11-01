@@ -14,6 +14,7 @@ pub mod errors;
 pub mod events;
 mod files;
 mod handlers;
+mod iam;
 pub mod images;
 pub mod keys;
 pub mod lifecycle;
@@ -279,6 +280,8 @@ impl Server {
             ("ClusterApi", Ok(self.cluster_api(req).await), None, Default::default())
         } else if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
+        } else if path == "/" && req.method() == Method::POST && iam::service_of(req.headers()).is_some() {
+            ("IamApi", self.iam_api(req, &request_id).await, None, Default::default())
         } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
         } else {

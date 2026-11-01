@@ -265,9 +265,7 @@ fn azure_meta_name(k: &str) -> String {
 }
 
 fn azure_meta_unname(k: &str) -> String {
-    k.strip_prefix(AZURE_META_HEX)
-        .and_then(|h| String::from_utf8(hex::decode(h).ok()?).ok())
-        .unwrap_or_else(|| k.to_string())
+    k.strip_prefix(AZURE_META_HEX).and_then(|h| String::from_utf8(hex::decode(h).ok()?).ok()).unwrap_or_else(|| k.to_string())
 }
 
 /// Splits a URL into its path (as sent) and query parameters (decoded).
@@ -291,13 +289,17 @@ fn url_parts(url: &str) -> (String, Vec<(String, String)>) {
 fn azure_shared_key(account: &str, key_b64: &str, method: &str, url: &str, headers: &[(String, String)]) -> String {
     use base64::Engine;
     use hmac::Mac;
-    let get = |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
+    let get =
+        |name: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|(_, v)| v.trim().to_string()).unwrap_or_default();
     let len = match get("content-length").as_str() {
         "0" => String::new(),
         l => l.to_string(),
     };
-    let mut ms: Vec<(String, String)> =
-        headers.iter().filter(|(k, _)| k.to_ascii_lowercase().starts_with("x-ms-")).map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string())).collect();
+    let mut ms: Vec<(String, String)> = headers
+        .iter()
+        .filter(|(k, _)| k.to_ascii_lowercase().starts_with("x-ms-"))
+        .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
     ms.sort();
     let (path, params) = url_parts(url);
     let mut resource = format!("/{account}{path}");
@@ -376,11 +378,7 @@ impl Remote {
     fn url(&self, key: &str, query: &str) -> String {
         let name = format!("{}{key}", self.spec.prefix);
         let path = match self.kind() {
-            "gcs" => format!(
-                "/storage/v1/b/{}/o/{}",
-                aws_encode(self.spec.bucket.as_bytes(), false),
-                aws_encode(name.as_bytes(), false)
-            ),
+            "gcs" => format!("/storage/v1/b/{}/o/{}", aws_encode(self.spec.bucket.as_bytes(), false), aws_encode(name.as_bytes(), false)),
             _ => format!("/{}/{}", aws_encode(self.spec.bucket.as_bytes(), false), aws_encode(name.as_bytes(), true)),
         };
         format!("{}{path}{}", self.spec.endpoint, if query.is_empty() { String::new() } else { format!("?{query}") })
@@ -543,7 +541,14 @@ impl Remote {
             .collect()
     }
 
-    fn azure_put(&self, key: &str, body: Box<dyn Read + Send>, len: u64, headers: &[(&str, String)], what: &str) -> std::io::Result<String> {
+    fn azure_put(
+        &self,
+        key: &str,
+        body: Box<dyn Read + Send>,
+        len: u64,
+        headers: &[(&str, String)],
+        what: &str,
+    ) -> std::io::Result<String> {
         let props = Self::azure_headers(headers);
         let url = self.url(key, "");
         self.rt.block_on(async {
@@ -595,11 +600,8 @@ impl Remote {
         }
         let ctype = doc["contentType"].as_str().map(str::to_string);
         let doc = doc.to_string();
-        let url = format!(
-            "{}/upload/storage/v1/b/{}/o?uploadType=resumable",
-            self.spec.endpoint,
-            aws_encode(self.spec.bucket.as_bytes(), false)
-        );
+        let url =
+            format!("{}/upload/storage/v1/b/{}/o?uploadType=resumable", self.spec.endpoint, aws_encode(self.spec.bucket.as_bytes(), false));
         self.rt.block_on(async {
             let mut h = vec![
                 ("content-type", "application/json; charset=UTF-8".to_string()),
@@ -692,10 +694,8 @@ impl Remote {
             let resp = Self::check(resp, &what).await?;
             let h = resp.headers();
             let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-            let meta = h
-                .iter()
-                .filter_map(|(k, v)| Some((unname(k.as_str().strip_prefix(prefix)?), v.to_str().ok()?.to_string())))
-                .collect();
+            let meta =
+                h.iter().filter_map(|(k, v)| Some((unname(k.as_str().strip_prefix(prefix)?), v.to_str().ok()?.to_string()))).collect();
             Ok(Some(HeadInfo {
                 len: get("content-length").parse().unwrap_or(0),
                 etag: get("etag").trim_matches('"').to_string(),
@@ -748,7 +748,8 @@ impl Remote {
                     }
                     let url = format!("{}/storage/v1/b/{bucket}/o?{}", self.spec.endpoint, Self::query(q));
                     let body = self.rt.block_on(self.get_doc(&url))?;
-                    let v: serde_json::Value = serde_json::from_slice(&body).map_err(|e| err(format!("{}: unreadable listing: {e}", self.spec.id)))?;
+                    let v: serde_json::Value =
+                        serde_json::from_slice(&body).map_err(|e| err(format!("{}: unreadable listing: {e}", self.spec.id)))?;
                     for it in v["items"].as_array().into_iter().flatten() {
                         let Some(key) = it["name"].as_str().and_then(rel) else { continue };
                         out.push(Listed {
@@ -860,8 +861,12 @@ mod tests {
     #[test]
     fn azure_shared_key_matches_the_documented_canonical_form() {
         // Canonicalized resource: the account, the path as sent, then the decoded query parameters, sorted.
-        let h = vec![("x-ms-version".to_string(), "2021-12-02".to_string()), ("x-ms-date".to_string(), "Sun, 01 Nov 2026 00:00:00 GMT".to_string())];
-        let a = azure_shared_key("acct", "a2V5", "GET", "https://acct.blob.core.windows.net/c?restype=container&comp=list&prefix=a%2Fb", &h);
+        let h = vec![
+            ("x-ms-version".to_string(), "2021-12-02".to_string()),
+            ("x-ms-date".to_string(), "Sun, 01 Nov 2026 00:00:00 GMT".to_string()),
+        ];
+        let a =
+            azure_shared_key("acct", "a2V5", "GET", "https://acct.blob.core.windows.net/c?restype=container&comp=list&prefix=a%2Fb", &h);
         use base64::Engine;
         use hmac::Mac;
         let sts = "GET\n\n\n\n\n\n\n\n\n\n\n\nx-ms-date:Sun, 01 Nov 2026 00:00:00 GMT\nx-ms-version:2021-12-02\n/acct/c\ncomp:list\nprefix:a/b\nrestype:container";

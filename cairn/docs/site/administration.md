@@ -678,6 +678,24 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 - **Audit.** Each change is written to the audit trail in the same transaction (`key.create`, `key.update`, `key.rotate`, `key.delete`), never with the secret. Changes made from Cairn are also recorded in Cairn's own audit log.
 - **Rules.** Keys from the environment and `CAIRN_STORE_CREDENTIALS_FILE` are listed, but are changed only in that configuration. A key cannot delete itself. Stored keys are included in backups.
 
+**IAM-compatible API.** The store answers the AWS IAM Query API, so `aws iam`, the AWS SDKs and Terraform's aws provider (pointed at the store's endpoint) can manage users, access keys and policies. Requests are `POST /` signed with SigV4 for the `iam` service; `aws sts get-caller-identity` (service `sts`) is also answered. The account id in ARNs is `000000000000`.
+
+- **Users and access keys.** Supported actions:
+  - `CreateUser`, `GetUser`, `ListUsers`, `DeleteUser`;
+  - `CreateAccessKey`, `ListAccessKeys`, `UpdateAccessKey` (`Active` or `Inactive`), `DeleteAccessKey`.
+
+  A user has at most two keys. An inactive key is refused like an unknown one. As in IAM, a user is deleted only once its keys, policies and group memberships are gone. IAM users' keys are listed in `/-/admin/v1/keys` with their `user` and `status`. They can be rotated or deleted there, but their permissions are changed only through IAM (`KeyManagedByIam`).
+- **Policies.**
+  - Inline: `PutUserPolicy` and `PutGroupPolicy`, with their `Get`, `List` and `Delete` counterparts.
+  - Managed: `CreatePolicy`, `GetPolicy`, `ListPolicies`, `DeletePolicy`. Versions: `CreatePolicyVersion`, `GetPolicyVersion`, `ListPolicyVersions`, `SetDefaultPolicyVersion`, `DeletePolicyVersion` (five at most).
+  - Attachments: `Attach` and `Detach` for users and groups, and `ListAttachedUserPolicies` / `ListAttachedGroupPolicies`.
+  - Groups: `CreateGroup`, `GetGroup`, `ListGroups`, `ListGroupsForUser`, `AddUserToGroup`, `RemoveUserFromGroup`, `DeleteGroup`.
+
+  Policy documents are checked like key policies: `s3:`, `iam:` and `sts:` actions, and `arn:aws:s3:::` or `arn:aws:iam::000000000000:` resources. A malformed document is refused with `MalformedPolicyDocument`. Other IAM actions (tags, roles, login profiles) answer `InvalidAction`.
+- **Evaluation.** A user's keys carry its effective policy: its inline and attached policies, plus those of its groups. As in IAM, an explicit Deny wins, and otherwise something must Allow. A user with no policy may do nothing. Bucket policies can name a user as a principal (`"AWS": "arn:aws:iam::000000000000:user/alice"`). `aws:username` is the user's name.
+- **Who may call it.** Admin keys may make any call. Other keys may call an action only where their policy allows `iam:<Action>` on the entity's ARN (`arn:aws:iam::000000000000:user/<path><name>`, `group/`, `policy/`). So a team lead can, for example, manage only the users under `/contractors/`.
+- **Consistency.** Users, groups and policies are kept in the index. Each change is one transaction, together with the keys it creates or deletes and its audit entry (`iam.<Action>`). That holds on PostgreSQL metadata across a cluster too, and backups include IAM.
+
 **Storage in the Cairn UI.** Cairn admins see **Settings → Storage**, which lists:
 
 - every bucket, with its usage, its quota, and whether it has versioning, object lock, default encryption, lifecycle rules or a bucket policy;

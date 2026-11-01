@@ -46,6 +46,9 @@ pub struct Credential {
     /// SSH public keys (OpenSSH format) that sign in to the SFTP server as this key.
     #[serde(default)]
     pub ssh_keys: Vec<String>,
+    /// The IAM user the key belongs to (keys made through the IAM API).
+    #[serde(skip)]
+    pub user: String,
 }
 
 impl Credential {
@@ -116,6 +119,29 @@ pub fn aws_encode(data: &[u8], keep_slash: bool) -> String {
         }
     }
     out
+}
+
+/// Verifies a header-signed SigV4 request whose payload hash the server computed (`payload`, hex). An
+/// x-amz-content-sha256 header, when sent, must match it.
+pub fn verify_with_payload(creds: &BTreeMap<String, Credential>, r: &Request, payload: &str) -> Result<Auth, ApiError> {
+    let auth = header_str(r.headers, "authorization");
+    let rest = auth.strip_prefix("AWS4-HMAC-SHA256 ").ok_or_else(|| e::ACCESS_DENIED.clone())?;
+    let sent = header_str(r.headers, "x-amz-content-sha256");
+    if !sent.is_empty() && sent != payload {
+        return Err(e::CONTENT_SHA_MISMATCH.clone());
+    }
+    let fields: BTreeMap<&str, &str> = rest.split(',').filter_map(|p| p.trim().split_once('=')).collect();
+    check_v4(
+        creds,
+        r,
+        fields.get("Credential").copied().unwrap_or(""),
+        fields.get("SignedHeaders").copied().unwrap_or(""),
+        fields.get("Signature").copied().unwrap_or(""),
+        header_str(r.headers, "x-amz-date"),
+        payload,
+        "",
+        None,
+    )
 }
 
 pub fn percent_decode(s: &str) -> Vec<u8> {

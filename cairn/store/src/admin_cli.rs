@@ -93,8 +93,7 @@ pub fn sign_full(
     let names = signed.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(";");
     let lines: String = signed.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
     // The path as the URL carries it (encoded or not), in SigV4's encoding.
-    let canonical =
-        format!("{method}\n{}\n{cq}\n{lines}\n{names}\n{payload}", aws_encode(&crate::s3::auth::percent_decode(path), true));
+    let canonical = format!("{method}\n{}\n{cq}\n{lines}\n{names}\n{payload}", aws_encode(&crate::s3::auth::percent_decode(path), true));
     let scope = format!("{date}/{region}/s3/aws4_request");
     let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
     let k = hmac_sha256(

@@ -33,6 +33,11 @@ impl Writer {
         w
     }
 
+    /// A writer for elements inside a document someone else wraps (no declaration, no root).
+    pub fn fragment() -> Writer {
+        Writer { buf: String::new(), stack: vec![] }
+    }
+
     pub fn open(&mut self, name: &'static str) -> &mut Self {
         self.buf.push_str(&format!("<{name}>"));
         self.stack.push(name);

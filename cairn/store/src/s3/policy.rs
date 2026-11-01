@@ -67,6 +67,8 @@ pub struct Request<'a> {
     pub resource: &'a str,
     /// The access key; empty for anonymous requests.
     pub principal: &'a str,
+    /// The IAM user the key belongs to (empty: none). Principals name it by its ARN.
+    pub user: &'a str,
     /// Condition keys (lower-cased names) and their values.
     pub context: &'a BTreeMap<String, Vec<String>>,
 }
@@ -240,8 +242,11 @@ impl Policy {
             if action.is_empty() == not_action.is_empty() || resource.is_empty() == not_resource.is_empty() {
                 return Err(e::MALFORMED_POLICY.clone());
             }
+            // Identity policies (no bucket) may also grant the IAM API (iam:, and sts: for GetCallerIdentity).
+            let services: &[&str] = if bucket.is_some() { &["s3:"] } else { &["s3:", "iam:", "sts:"] };
             for a in action.iter().chain(&not_action) {
-                if a != "*" && !a.to_ascii_lowercase().starts_with("s3:") {
+                let la = a.to_ascii_lowercase();
+                if a != "*" && !services.iter().any(|s| la.starts_with(s)) {
                     return Err(e::MALFORMED_POLICY_ACTION.clone());
                 }
             }
@@ -249,7 +254,7 @@ impl Policy {
                 let ok = r == "*"
                     || match bucket {
                         Some(b) => r == &format!("arn:aws:s3:::{b}") || r.starts_with(&format!("arn:aws:s3:::{b}/")),
-                        None => r.starts_with("arn:aws:s3:::"),
+                        None => r.starts_with("arn:aws:s3:::") || r.starts_with(&format!("arn:aws:iam::{}:", super::iam::ACCOUNT)),
                     };
                 if !ok {
                     return Err(e::MALFORMED_POLICY_RESOURCE.clone());
@@ -307,22 +312,22 @@ impl Policy {
     }
 }
 
-fn principal_matches(p: &Principals, key: &str) -> bool {
+fn principal_matches(p: &Principals, key: &str, user: &str) -> bool {
     match p {
         Principals::Any => true,
-        Principals::Keys(ks) => !key.is_empty() && ks.iter().any(|k| k == key),
+        Principals::Keys(ks) => !key.is_empty() && ks.iter().any(|k| k == key || (!user.is_empty() && k == user)),
     }
 }
 
 impl Statement {
     fn applies(&self, r: &Request) -> bool {
         if let Some(p) = &self.principal {
-            if !principal_matches(p, r.principal) {
+            if !principal_matches(p, r.principal, r.user) {
                 return false;
             }
         }
         if let Some(p) = &self.not_principal {
-            if principal_matches(p, r.principal) {
+            if principal_matches(p, r.principal, r.user) {
                 return false;
             }
         }
@@ -418,7 +423,7 @@ mod tests {
     }
 
     fn req<'a>(action: &'a str, resource: &'a str, principal: &'a str, c: &'a BTreeMap<String, Vec<String>>) -> Request<'a> {
-        Request { action, resource, principal, context: c }
+        Request { action, resource, principal, user: "", context: c }
     }
 
     #[test]

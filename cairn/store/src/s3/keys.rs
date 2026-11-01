@@ -78,6 +78,12 @@ pub struct StoredKey {
     pub created_by: String,
     #[serde(default)]
     pub rotated: String,
+    /// The IAM user that owns the key (IAM API keys): its policies are the key's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub user: String,
+    /// Disabled through IAM (UpdateAccessKey Status=Inactive): refused like an unknown key.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inactive: bool,
 }
 
 /// The settable parts of a key (create and update).
@@ -142,6 +148,7 @@ impl Server {
             policy: k.policy.clone(),
             actor: k.actor.clone(),
             ssh_keys: k.ssh_keys.clone(),
+            user: k.user.clone(),
         })
     }
 
@@ -154,15 +161,37 @@ impl Server {
                 next.insert(c.clone())?;
             }
         }
+        let iam = super::iam::IamDoc::parse(self.eng.iam_doc().map_err(|e| e.to_string())?.as_deref())?;
         for (ak, rec) in self.eng.keys().map_err(|e| e.to_string())? {
             if next.fixed.contains(&ak) {
                 return Err(format!("access key {ak} is defined both in the configuration and in the index"));
             }
             let k: StoredKey = serde_json::from_slice(&rec).map_err(|e| format!("access key {ak}: {e}"))?;
-            next.insert(self.credential_of(&k)?)?;
+            if k.inactive {
+                continue;
+            }
+            let c = self.credential_of(&k)?;
+            if k.user.is_empty() {
+                next.insert(c)?;
+            } else {
+                // An IAM user's key: the user's effective policy (none: nothing is allowed).
+                next.policies.insert(ak.clone(), iam.effective_policy(&k.user));
+                next.creds.insert(ak, c);
+            }
         }
         *self.keys.write().unwrap() = Arc::new(next);
         Ok(())
+    }
+
+    /// Every stored key (not those from the configuration).
+    pub(crate) fn stored_keys(&self) -> Result<Vec<StoredKey>, crate::engine::Error> {
+        let mut out = vec![];
+        for (_, rec) in self.eng.keys()? {
+            if let Ok(k) = serde_json::from_slice(&rec) {
+                out.push(k);
+            }
+        }
+        Ok(out)
     }
 
     fn stored(&self, ak: &str) -> Result<Option<StoredKey>, ApiError> {
@@ -175,7 +204,7 @@ impl Server {
     }
 
     /// A new secret, set (wrapped when possible) on `k`; returns the secret.
-    fn new_secret(&self, k: &mut StoredKey) -> String {
+    pub(crate) fn new_secret(&self, k: &mut StoredKey) -> String {
         let raw: [u8; 32] = rand::random();
         let kek_id = if !self.keyring.sse_s3_key.is_empty() {
             Some(self.keyring.sse_s3_key.clone())
@@ -198,9 +227,20 @@ impl Server {
     }
 
     fn key_json(&self, ks: &KeySet, ak: &str) -> Value {
-        let c = &ks.creds[ak];
         let stored = if ks.fixed.contains(ak) { None } else { self.stored(ak).ok().flatten() };
+        let inactive_cred;
+        let c = match ks.creds.get(ak) {
+            Some(c) => c,
+            None => {
+                inactive_cred = stored.as_ref().map(|k| super::auth::Credential { access_key: k.access_key.clone(), ..Default::default() });
+                inactive_cred.as_ref().expect("listed keys exist")
+            }
+        };
+        let user = stored.as_ref().map(|s| s.user.clone()).filter(|u| !u.is_empty());
+        let status = if stored.as_ref().is_some_and(|s| s.inactive) { "Inactive" } else { "Active" };
         json!({
+            "user": user,
+            "status": status,
             "access_key": ak,
             "source": if ks.fixed.contains(ak) { "configuration" } else { "api" },
             "admin": c.admin,
@@ -278,10 +318,12 @@ impl Server {
         let ks = self.keyset();
         match (method, segs) {
             (&Method::GET, []) => {
-                Ok((StatusCode::OK, json!({"keys": ks.creds.keys().map(|ak| self.key_json(&ks, ak)).collect::<Vec<_>>()})))
+                let mut all: std::collections::BTreeSet<String> = ks.creds.keys().cloned().collect();
+                all.extend(self.stored_keys()?.into_iter().map(|k| k.access_key));
+                Ok((StatusCode::OK, json!({"keys": all.iter().map(|ak| self.key_json(&ks, ak)).collect::<Vec<_>>()})))
             }
             (&Method::GET, [ak]) => {
-                if !ks.creds.contains_key(*ak) {
+                if !ks.creds.contains_key(*ak) && self.stored(ak)?.is_none() {
                     return Err(e::KEY_NOT_FOUND.clone());
                 }
                 Ok((StatusCode::OK, self.key_json(&ks, ak)))
@@ -319,6 +361,9 @@ impl Server {
                     return Err(e::KEY_FIXED.clone());
                 }
                 let mut k = self.stored(ak)?.ok_or_else(|| e::KEY_NOT_FOUND.clone())?;
+                if !k.user.is_empty() {
+                    return Err(e::KEY_IAM.clone()); // its permissions are its IAM user's
+                }
                 let spec: KeySpec = serde_json::from_slice(body).map_err(|_| e::MALFORMED_JSON.clone())?;
                 if spec.access_key.as_deref().is_some_and(|a| a != *ak) {
                     return Err(e::KEY_NAME.clone());
