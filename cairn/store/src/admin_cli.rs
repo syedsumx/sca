@@ -24,6 +24,7 @@
 //! cairn-store admin replication-resync <bucket>  (send objects written before replication was configured)
 //! cairn-store admin cluster                (nodes and blob health)
 //! cairn-store admin cluster-repair | cluster-rebalance [--limit N]
+//! cairn-store admin cluster-encode [--older-than SECONDS] [--limit N]   (re-encode replicated blobs as k+m shards)
 //! cairn-store admin cluster-drain <node> | cluster-activate <node> | cluster-remove <node>
 //! ```
 //!
@@ -169,6 +170,11 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         "replication-resync" => ("POST", format!("buckets/{}/replication/resync", name()), None),
         "cluster" => ("GET", "cluster".to_string(), None),
         "cluster-repair" => ("POST", "cluster/repair".to_string(), None),
+        "cluster-encode" => {
+            let older = flag("--older-than").map(|v| v.parse::<u64>().unwrap_or_else(|_| usage())).unwrap_or(0);
+            let limit = flag("--limit").map(|v| v.parse::<u64>().unwrap_or_else(|_| usage())).unwrap_or(10_000);
+            ("POST", "cluster/encode".to_string(), Some(serde_json::json!({"older_than_seconds": older, "limit": limit})))
+        }
         "cluster-rebalance" => {
             let limit = flag("--limit").map(|v| v.parse::<u64>().unwrap_or_else(|_| usage())).unwrap_or(10_000);
             ("POST", "cluster/rebalance".to_string(), Some(serde_json::json!({"limit": limit})))

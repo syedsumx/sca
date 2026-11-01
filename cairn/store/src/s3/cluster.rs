@@ -55,6 +55,10 @@ pub struct ClusterConfig {
     /// Erasure coding (data, parity shards) for blobs of at least `ec_above` stored bytes.
     pub ec: Option<(usize, usize)>,
     pub ec_above: u64,
+    /// Replicated blobs of at least `ec_convert_above` bytes whose object is older than this are
+    /// re-encoded as shards (None: never).
+    pub ec_after: Option<Duration>,
+    pub ec_convert_above: u64,
     pub heartbeat: Duration,
     pub dead_after: Duration,
     pub repair_every: Duration,
@@ -103,6 +107,9 @@ impl ClusterConfig {
                 ))
             }
             _ => return Err("CAIRN_STORE_CLUSTER_SPREAD: node, rack or zone".into()),
+        }
+        if self.ec_after.is_some() && self.ec.is_none() {
+            return Err("CAIRN_STORE_CLUSTER_EC_AFTER needs CAIRN_STORE_CLUSTER_EC (the k+m to convert to)".into());
         }
         if self.dead_after <= self.heartbeat * 2 {
             return Err("CAIRN_STORE_CLUSTER_DEAD_AFTER must be more than twice the heartbeat".into());
@@ -160,6 +167,16 @@ pub struct RepairReport {
     pub failed: u64,
     pub copies_deleted: u64,
     pub adopted: u64,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct EncodeReport {
+    pub candidates: u64,
+    pub converted: u64,
+    /// Bytes the copies took, and the shards take now.
+    pub bytes_before: u64,
+    pub bytes_after: u64,
+    pub failed: u64,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -1229,6 +1246,73 @@ impl Cluster {
         n
     }
 
+    /// Re-encodes replicated blobs of at least `ec_convert_above` bytes whose object is at least
+    /// `older_than` old as k+m shards (up to `limit`): cold data then takes (k+m)/k of its size instead
+    /// of `copies` times. Each blob's id is swapped in one transaction (only where unchanged); the old
+    /// copies are deleted after.
+    pub fn encode_cold(&self, older_than: Duration, limit: u64) -> Result<EncodeReport, String> {
+        let (k, m) = self.cfg.ec.ok_or("erasure coding is off: set CAIRN_STORE_CLUSTER_EC")?;
+        let _one = self.repairing.lock().unwrap();
+        *self.nodes.lock().unwrap() = None;
+        let mut rep = EncodeReport::default();
+        let cutoff = engine::now_ms().saturating_sub(older_than.as_millis() as u64);
+        let ages = self.eng.blob_ages().map_err(|e| e.to_string())?;
+        let mut cands: Vec<(String, u64)> = ages
+            .into_iter()
+            .filter(|(id, t)| *t <= cutoff && id.starts_with("r:"))
+            .filter_map(|(id, _)| match cid::parse(&id) {
+                Some(Placement::Replicas { len, .. }) if len >= self.cfg.ec_convert_above => Some((id, len)),
+                _ => None,
+            })
+            .collect();
+        cands.sort();
+        rep.candidates = cands.len() as u64;
+        for (id, len) in cands.into_iter().take(limit as usize) {
+            let Some(Placement::Replicas { copies, .. }) = cid::parse(&id) else { continue };
+            let res = (|| -> io::Result<bool> {
+                let mut chosen: Vec<String> = vec![];
+                for n in self.diverse(self.targets().into_iter().map(|(n, _)| n).collect(), &[]) {
+                    if chosen.len() == k + m {
+                        break;
+                    }
+                    let mut with = chosen.clone();
+                    with.push(n.clone());
+                    if !self.strict() || self.spread_ok(&with, Some(m)) {
+                        chosen = with;
+                    }
+                }
+                if chosen.len() < k + m {
+                    return Err(io_err(format!("erasure coding {k}+{m} needs more live nodes (or {}s)", self.cfg.spread)));
+                }
+                let unit = Self::unit_for(len, k);
+                let which: Vec<(usize, String)> = chosen.into_iter().enumerate().collect();
+                let kind = self.kind_of_any(&copies);
+                let reader = self.open(&id, 0)?;
+                let shards = self.encode_to(reader, len, (k, m), unit, &which, kind)?;
+                let shards: Vec<Copy> = (0..k + m).map(|i| shards[&i].clone()).collect();
+                let new = cid::format(&Placement::Erasure { k, m, len, unit, shards: shards.clone() });
+                let mut scratch = RepairReport::default();
+                self.commit_swap(&id, &new, &copies, &shards, &mut scratch)
+            })();
+            match res {
+                Ok(true) => {
+                    rep.converted += 1;
+                    rep.bytes_before += len * copies.len() as u64;
+                    rep.bytes_after += len.div_ceil(k as u64 * Self::unit_for(len, k)).max(1) * Self::unit_for(len, k) * (k + m) as u64;
+                }
+                Ok(false) => {} // changed meanwhile
+                Err(e) => {
+                    rep.failed += 1;
+                    tracing::warn!(blob = %id, error = %e, "converting to erasure coding");
+                }
+            }
+        }
+        if rep.converted > 0 {
+            tracing::info!(converted = rep.converted, before = rep.bytes_before, after = rep.bytes_after, "cold blobs erasure-coded");
+        }
+        Ok(rep)
+    }
+
     /// Stored bytes per node (from the index).
     fn usage(&self) -> HashMap<String, (u64, u64)> {
         let mut out: HashMap<String, (u64, u64)> = HashMap::new();
@@ -1544,6 +1628,11 @@ impl Server {
                     me.eng.collect_cluster();
                     if repair_due {
                         cl.repair(false);
+                        if let Some(after) = cl.cfg.ec_after {
+                            if let Err(e) = cl.encode_cold(after, 1000) {
+                                tracing::warn!(error = %e, "erasure coding cold blobs");
+                            }
+                        }
                     }
                 }
                 Ok(())
@@ -1583,6 +1672,19 @@ impl Server {
                     actor: actor.into(),
                     subject: String::new(),
                     details: json!({"repaired": r.repaired, "lost": r.lost, "degraded": r.degraded}),
+                })?;
+                Ok((StatusCode::OK, serde_json::to_value(r).map_err(|_| e::INTERNAL.clone())?))
+            }
+            (&Method::POST, ["encode"]) => {
+                let v: Value = serde_json::from_slice(body).unwrap_or(json!({}));
+                let older = Duration::from_secs(v.get("older_than_seconds").and_then(Value::as_u64).unwrap_or(0));
+                let r = c.encode_cold(older, limit()).map_err(|_| e::EC_OFF.clone())?;
+                self.eng.append_audit(&crate::audit::Audit {
+                    category: "store",
+                    action: "cluster.encode".into(),
+                    actor: actor.into(),
+                    subject: String::new(),
+                    details: json!({"converted": r.converted, "bytes_before": r.bytes_before, "bytes_after": r.bytes_after}),
                 })?;
                 Ok((StatusCode::OK, serde_json::to_value(r).map_err(|_| e::INTERNAL.clone())?))
             }

@@ -489,3 +489,48 @@ def test_copies_go_to_disks_of_the_bucket_type(binary, tmp_path):
             assert "n1" not in holders(blob) and all(p.split("@")[1].startswith("v01") for p in blob.split(";")[1:]), blob
     finally:
         c.stop()
+
+
+def test_cold_copies_are_converted_to_erasure_coding(make_cluster):
+    # Written as copies (EC only above 100 MB at write time); converted to 2+1 shards once cold.
+    c = make_cluster(3, CAIRN_STORE_CLUSTER_EC="2+1", CAIRN_STORE_CLUSTER_EC_ABOVE="100000000",
+                     CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE="100000", CAIRN_STORE_CLUSTER_REPAIR_INTERVAL="3600")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="cold")
+    big = {f"b{i}": os.urandom(400_000 + i) for i in range(4)}
+    for k, v in big.items():
+        s0.put_object(Bucket="cold", Key=k, Body=v)
+    s0.put_object(Bucket="cold", Key="small", Body=b"s" * 5000)
+    ids = blob_ids(c.meta, "cold")
+    assert all(b[0].startswith("r:") for b in ids.values())
+    before = sum(n["bytes"] for n in status(c["n0"])["nodes"])
+    # Nothing is old enough yet.
+    code, rep = admin(c["n0"], "POST", "cluster/encode", {"older_than_seconds": 3600})
+    assert code == 200 and rep["converted"] == 0
+    code, rep = admin(c["n0"], "POST", "cluster/encode", {"older_than_seconds": 0})
+    assert code == 200 and rep["converted"] == 4 and rep["failed"] == 0, rep
+    assert rep["bytes_after"] < rep["bytes_before"]
+    ids = blob_ids(c.meta, "cold")
+    assert all(ids[k][0].startswith("e:2+1:") for k in big) and ids["small"][0].startswith("r:")
+    after = sum(n["bytes"] for n in status(c["n0"])["nodes"])
+    assert after < before * 0.85, (before, after)
+    # Old copies are gone from the disks; reads survive losing a node.
+    kill(c["n2"])
+    for k, v in big.items():
+        assert c["n1"].client().get_object(Bucket="cold", Key=k)["Body"].read() == v
+    actions = [e["action"] for e in admin(c["n0"], "GET", "audit?after=0")[1]["entries"] if e["action"] == "cluster.encode"]
+    assert len(actions) == 2
+
+
+def test_conversion_runs_on_its_own(make_cluster):
+    c = make_cluster(3, CAIRN_STORE_CLUSTER_EC="2+1", CAIRN_STORE_CLUSTER_EC_ABOVE="100000000",
+                     CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE="100000", CAIRN_STORE_CLUSTER_EC_AFTER="1")
+    s0 = c["n0"].client()
+    s0.create_bucket(Bucket="aging")
+    body = os.urandom(300_000)
+    s0.put_object(Bucket="aging", Key="k", Body=body)
+    wait_for(lambda: blob_ids(c.meta, "aging")["k"][0].startswith("e:"), timeout=30, what="background conversion")
+    assert c["n2"].client().get_object(Bucket="aging", Key="k")["Body"].read() == body
+    # Without erasure coding configured, conversion is refused, not skipped silently.
+    plain = make_cluster(1, CAIRN_STORE_CLUSTER_COPIES="1")
+    assert admin(plain["n0"], "POST", "cluster/encode", {})[0] == 501

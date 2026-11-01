@@ -543,6 +543,10 @@ cairn:
       copies: 2
       erasureCoding: ""
       erasureCodingAbove: 1048576
+      # Re-encode replicated blobs as erasure-coded shards once their object is this old (0: never),
+      # for blobs of at least erasureCodingConvertAbove bytes. Needs erasureCoding.
+      erasureCodingAfterSeconds: 0
+      erasureCodingConvertAbove: 1048576
       clusterSecretKey: cluster-secret
       deadAfterSeconds: 60
       repairIntervalSeconds: 300

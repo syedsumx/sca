@@ -82,6 +82,12 @@ spec:
               value: {{ $cl.erasureCoding | quote }}
             - name: CAIRN_STORE_CLUSTER_EC_ABOVE
               value: {{ $cl.erasureCodingAbove | int64 | quote }}
+            {{- if gt (int64 $cl.erasureCodingAfterSeconds) 0 }}
+            - name: CAIRN_STORE_CLUSTER_EC_AFTER
+              value: {{ $cl.erasureCodingAfterSeconds | int64 | quote }}
+            - name: CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE
+              value: {{ $cl.erasureCodingConvertAbove | int64 | quote }}
+            {{- end }}
             {{- end }}
             - name: CAIRN_STORE_CLUSTER_DEAD_AFTER
               value: {{ $cl.deadAfterSeconds | quote }}

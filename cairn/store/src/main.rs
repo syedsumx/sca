@@ -65,6 +65,8 @@
 //! CAIRN_STORE_CLUSTER_COPIES copies of each blob, on distinct nodes (2)
 //! CAIRN_STORE_CLUSTER_EC     erasure-code large blobs as k data + m parity shards, e.g. 4+2 (off)
 //! CAIRN_STORE_CLUSTER_EC_ABOVE  ... blobs of at least this many bytes (1048576)
+//! CAIRN_STORE_CLUSTER_EC_AFTER  seconds after which replicated blobs are re-encoded as k+m shards (off)
+//! CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE  ... blobs of at least this many bytes (1048576)
 //! CAIRN_STORE_CLUSTER_ZONE / _RACK  where this node is (labels; copies are spread across zones, then racks)
 //! CAIRN_STORE_CLUSTER_SPREAD  the failure domain copies must not share: node (default), rack or zone
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
@@ -199,6 +201,13 @@ fn cluster_config() -> Option<s3::cluster::ClusterConfig> {
         copies: env("CAIRN_STORE_CLUSTER_COPIES", "2").parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_COPIES", e)),
         ec: s3::cluster::parse_ec(&env("CAIRN_STORE_CLUSTER_EC", "")).unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC", e)),
         ec_above: env("CAIRN_STORE_CLUSTER_EC_ABOVE", "1048576").parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC_ABOVE", e)),
+        ec_after: match env("CAIRN_STORE_CLUSTER_EC_AFTER", "") {
+            v if v.is_empty() || v == "off" => None,
+            v => Some(Duration::from_secs(v.parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC_AFTER", e)))),
+        },
+        ec_convert_above: env("CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE", "1048576")
+            .parse()
+            .unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC_CONVERT_ABOVE", e)),
         heartbeat: secs("CAIRN_STORE_CLUSTER_HEARTBEAT", "5"),
         dead_after: secs("CAIRN_STORE_CLUSTER_DEAD_AFTER", "60"),
         repair_every: secs("CAIRN_STORE_CLUSTER_REPAIR_INTERVAL", "300"),

@@ -1516,6 +1516,36 @@ impl Engine {
         Ok(out)
     }
 
+    /// Every on-disk blob id with the modification time of what refers to it (an object version, or an
+    /// upload part); a blob shared by several keeps the newest.
+    pub fn blob_ages(&self) -> Result<HashMap<String, u64>> {
+        let r = self.db.begin_read()?;
+        let mut out: HashMap<String, u64> = HashMap::new();
+        let mut add = |id: String, t: u64| {
+            let e = out.entry(id).or_insert(t);
+            *e = (*e).max(t);
+        };
+        for t in [OBJECTS] {
+            for row in r.open_table(t)?.iter()? {
+                let o: Object = serde_json::from_slice(row?.1.value())?;
+                for s in o.segments.into_iter().filter(|s| s.tier.is_empty()) {
+                    add(s.blob, o.modified);
+                }
+            }
+        }
+        for row in r.open_table(VERSIONS)?.iter()? {
+            let o: Object = serde_json::from_slice(row?.1.value())?;
+            for s in o.segments.into_iter().filter(|s| s.tier.is_empty()) {
+                add(s.blob, o.modified);
+            }
+        }
+        for row in r.open_table(PARTS)?.iter()? {
+            let p: Part = serde_json::from_slice(row?.1.value())?;
+            add(p.blob, p.modified);
+        }
+        Ok(out)
+    }
+
     /// Stored access keys (access key, record).
     pub fn keys(&self) -> Result<Vec<(String, Vec<u8>)>> {
         let r = self.db.begin_read()?;
