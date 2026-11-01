@@ -60,6 +60,9 @@ const INVOICES = ds('postgres', 'billing.public.invoices');
 const SHIPMENTS = ds('snowflake', 'analytics.supply.shipments');
 const INVENTORY = ds('postgres', 'wms.public.inventory_levels');
 const CAMPAIGNS = ds('bigquery', 'marketing.ads.campaign_spend');
+// The lakehouse: Iceberg tables in Cairn Catalog and Cairn Store, queried through Trino.
+const LAKE_ORDERS = ds('trino', 'lakehouse.sales.orders');
+const LAKE_BY_REGION = ds('trino', 'lakehouse.sales.by_region');
 const DASH_REV = 'urn:li:dashboard:(looker,revenue_overview)';
 const CHART_REV = 'urn:li:chart:(looker,revenue_by_region)';
 const DASH_CX = 'urn:li:dashboard:(tableau,customer_health)';
@@ -138,6 +141,28 @@ const ASSETS: Asset[] = [
         owners: ['urn:li:corpuser:mei'], tags: [], terms: [], certification: null, quality: 'HEALTHY', views: 15,
     },
     {
+        urn: LAKE_ORDERS, type: 'DATASET', name: 'orders', platform: 'trino', domain: FINANCE,
+        description: 'Lakehouse orders (Iceberg, in Cairn Store), queried through Trino. Trino asks Cairn before every query: '
+            + 'contact emails come back masked unless your purpose allows them, and the "EU sales" policy limits you to EU rows.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Lakehouse'], terms: [], certification: null, quality: 'HEALTHY', views: 9,
+        columns: [
+            { fieldPath: 'order_id', nativeDataType: 'bigint', description: 'Order identifier' },
+            { fieldPath: 'email', nativeDataType: 'varchar', description: 'Contact email (masked in Trino by policy)', terms: [PII_EMAIL] },
+            { fieldPath: 'region', nativeDataType: 'varchar', description: 'Sales region (row filter: EU only for EU sales)' },
+            { fieldPath: 'amount', nativeDataType: 'decimal(12,2)' },
+        ],
+    },
+    {
+        urn: LAKE_BY_REGION, type: 'DATASET', name: 'by_region', platform: 'trino', domain: FINANCE,
+        description: 'Orders per region, written by a Trino CREATE TABLE AS. Its lineage (table and column level) was recorded from '
+            + 'Trino\'s own query events, not crawled.',
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Lakehouse'], terms: [], certification: null, quality: 'HEALTHY', views: 4,
+        columns: [
+            { fieldPath: 'region', nativeDataType: 'varchar', description: 'From orders.region' },
+            { fieldPath: 'orders', nativeDataType: 'bigint', description: 'count(*) over orders' },
+        ],
+    },
+    {
         urn: DASH_REV, type: 'DASHBOARD', name: 'Revenue Overview', platform: 'looker', domain: FINANCE,
         description: 'Executive revenue dashboard: net revenue, orders and AOV by region.',
         owners: ['urn:li:corpuser:raj'], tags: [], terms: [T_REVENUE], certification: 'CERTIFIED', quality: null, views: 64,
@@ -162,6 +187,7 @@ const LINEAGE: Record<string, string[]> = {
     [CHART_REV]: [REV_DAILY],
     [DASH_REV]: [CHART_REV],
     [DASH_CX]: [CUSTOMERS],
+    [LAKE_BY_REGION]: [LAKE_ORDERS],
 };
 
 const PRODUCTS = [
@@ -1067,8 +1093,22 @@ const SAMPLE = {
            ['o-100233', 'c-8812', '2026-10-27 09:21:11', 310.25, 'a****@example.com'], ['o-100234', 'c-5550', '2026-10-27 09:30:58', 18.99, 'm****@example.com']],
     masked_columns: ['email'], truncated: false, elapsed_ms: 412, tables: [ORDERS],
 };
-on('GET', '/data/preview', () => SAMPLE);
-on('POST', '/data/query', () => ({ ...SAMPLE, elapsed_ms: 655 }));
+// Lakehouse tables answer through Trino as the signed-in user: masked emails, and only EU rows (a Trino row filter).
+const LAKE_SAMPLE = {
+    columns: ['order_id', 'email', 'region', 'amount'],
+    rows: [[1, 'j•••@•••.com', 'EU', 129.5], [3, 'l•••@•••.com', 'EU', 54.0], [5, 'p•••@•••.de', 'EU', 310.25], [8, 'm•••@•••.fr', 'EU', 18.99]],
+    masked_columns: ['email'], truncated: false, elapsed_ms: 238, tables: [LAKE_ORDERS],
+};
+const BY_REGION_SAMPLE = {
+    columns: ['region', 'orders'], rows: [['EU', 4]], masked_columns: [], truncated: false, elapsed_ms: 191, tables: [LAKE_BY_REGION],
+};
+const sampleFor = (urn: string | null | undefined, sql = '') => {
+    if (urn === LAKE_ORDERS || /lakehouse\.sales\.orders|sales\.orders/i.test(sql)) return LAKE_SAMPLE;
+    if (urn === LAKE_BY_REGION || /by_region/i.test(sql)) return BY_REGION_SAMPLE;
+    return SAMPLE;
+};
+on('GET', '/data/preview', (_b, q) => sampleFor(q.get('urn')));
+on('POST', '/data/query', (b) => ({ ...sampleFor(b?.urn, b?.sql ?? ''), elapsed_ms: 655 }));
 on('POST', '/data/ask', (body: { question?: string }) => ({
     question: body?.question ?? '', connection: 'warehouse', dialect: 'snowflake', tables: [ORDERS], attempts: 1,
     definitions: [{ name: 'net_revenue', kind: 'metric', version: 3 }], examples: ['Net revenue by region, last quarter'],
@@ -1079,7 +1119,8 @@ on('POST', '/data/ask', (body: { question?: string }) => ({
               masked_columns: [], truncated: false, elapsed_ms: 820, tables: [ORDERS] },
     error: null,
 }));
-on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' }]);
+on('GET', '/data/sources', () => [{ connection: 'warehouse', platform: 'snowflake', database: 'analytics', dialect: 'snowflake' },
+    { connection: 'lakehouse', platform: 'trino', database: 'lakehouse', dialect: 'trino' }]);
 
 // ------------------------------------------------------------------------------- Playbooks
 const PB_RUN = { id: 'pbr_8c21', playbook: 'incident_triage', subject: ORDERS, event: { type: 'quality.incident.raised' }, state: 'DONE',
