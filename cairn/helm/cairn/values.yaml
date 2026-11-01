@@ -670,6 +670,11 @@ cairn:
       tag: "476"
       pullPolicy: IfNotPresent
     queryMaxMemory: 2GB
+    # Trino asks Cairn's policy engine before every action (Trino's OPA access-control plugin): a Secret
+    # with the key both share (at least 24 characters). Required: Trino is not deployed without it.
+    accessKeySecret:
+      name: cairn-trino
+      key: access-key
     resources:
       requests: { cpu: 500m, memory: 2Gi }
       limits: { memory: 4Gi }

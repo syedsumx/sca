@@ -798,6 +798,19 @@ A multi-table transaction changes every table or none.
   - `CREATE TABLE AS`;
   - tables shared both ways with pyiceberg;
   - a read-only token refused every change.
+- **Access control through Cairn.** Trino asks Cairn's policy engine before every action, through Trino's OPA access-control plugin (`deploy/trino/access-control.properties`). Compose and Helm turn this on whenever Trino runs.
+  - **Users.** The Trino user `alice` is `urn:li:corpuser:alice`; Trino groups are `urn:li:corpGroup:<group>`.
+  - **Datasets.** A table `catalog.schema.table` is `urn:li:dataset:(urn:li:dataPlatform:trino,<catalog>.<schema>.<table>,PROD)`, the URN Cairn's Trino source gives it. `CAIRN_TRINO_CATALOGS` maps a catalog elsewhere, for example `{"lakehouse": {"platform": "iceberg", "database": ""}}`.
+  - **Privileges.**
+    - Seeing a table (listings, `SHOW COLUMNS`) needs `VIEW_ENTITY_PAGE`.
+    - Reading rows needs `VIEW_DATASET_PROFILE`, as in the SQL editor.
+    - Changing rows (`INSERT`, `UPDATE`, `DELETE`, `MERGE`, `TRUNCATE`) needs `WRITE_DATASET`.
+    - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
+    - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
+    - Operations Cairn does not know are refused.
+  - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. `row_filter` obligations (`{"expression": "region = 'EU'"}`, with `{user}` for the Trino user) become Trino row filters.
+  - **The key.** Trino presents `CAIRN_TRINO_ACCESS_KEY` (at least 24 characters) in the request path. Requests without it get a 404. In Helm, put it in the Secret named by `cairn.trino.accessKeySecret`; the API and Trino both read it.
+  - **Tested** with Trino 476 against a real Cairn API: hidden tables refused and left out of `SHOW TABLES`, labelled emails masked (`j•••@•••.com`, so `WHERE email = ...` finds nothing), row filters applied, and writes, drops and new schemas refused without the privilege.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
 
 ## Backup and restore

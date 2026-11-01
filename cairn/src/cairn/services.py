@@ -103,6 +103,9 @@ class Services:
     slos: Optional[Any] = None
     workspaces: Optional[Any] = None
     store_admin: Optional[Any] = None
+    # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
+    trino_access: Optional[Any] = None
+    trino_key: str = ""
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -843,6 +846,15 @@ def _build_steward(s: Services) -> None:
                                docgen=s.docgen if s.llm is not None else None, audit=s.audit)
 
 
+def _secret_env(name: str) -> str:
+    """A secret from ``<NAME>_FILE`` (a mounted secret) or ``<NAME>``."""
+    path = os.environ.get(name + "_FILE", "")
+    if path:
+        with open(path) as fh:
+            return fh.read().strip()
+    return os.environ.get(name, "")
+
+
 def _build_data_access(s: Services) -> None:
     from cairn.coreproxy.proxy import MaskingService
     from cairn.dataaccess.service import DataAccessService
@@ -866,6 +878,27 @@ def _build_data_access(s: Services) -> None:
             s.traces.record_reads(actor, agent, channel or "api", urns, "data")
 
     s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known, on_read=on_read)
+
+    # Trino asks Cairn before every action (its OPA access-control plugin) when given this key.
+    trino_key = _secret_env("CAIRN_TRINO_ACCESS_KEY")
+    if trino_key:
+        import json as _json
+
+        from cairn.dataaccess.trino import TrinoAccess, parse_catalogs
+        from cairn.governance.pdp import AuthorizeRequest, ResourceRef
+
+        if len(trino_key) < 24:
+            raise ValueError("CAIRN_TRINO_ACCESS_KEY must be at least 24 characters")
+        raw = os.environ.get("CAIRN_TRINO_CATALOGS", "").strip()
+        catalogs = parse_catalogs(_json.loads(open(raw).read() if raw and not raw.startswith("{") else (raw or "{}")))
+
+        def decide(actor: str, groups: list[str], privilege: str, urn: Optional[str]):
+            return s.pdp.decide(AuthorizeRequest(actor=actor, privilege=privilege, actor_groups=groups,
+                                                 resource=ResourceRef(type="dataset", urn=urn) if urn else None,
+                                                 environment={"channel": "trino"}))
+
+        s.trino_access = TrinoAccess(decide, masking.plan, catalogs)
+        s.trino_key = trino_key
 
     from cairn.dataaccess.ask import AskService
 

@@ -378,6 +378,8 @@ services:
       CAIRN_STORE_URL: http://cairn-store:8333
       CAIRN_STORE_ADMIN_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
       CAIRN_STORE_ADMIN_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      # Trino asks Cairn before every action (deploy/trino/access-control.properties) with this key.
+      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
       CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
@@ -601,13 +603,18 @@ services:
       CAIRN_STORE_ENDPOINT: http://cairn-store:8333
       CAIRN_STORE_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
       CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+      CAIRN_API_URL: http://cairn-api:8800
+      CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
     volumes:
       - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
+      - ./deploy/trino/access-control.properties:/etc/trino/access-control.properties:ro
       - ./deploy/trino/catalog:/etc/trino/catalog:ro
     ports:
       - "${CAIRN_MAPPED_TRINO_PORT:-8088}:8080"
     depends_on:
       cairn-catalog:
+        condition: service_started
+      cairn-api:
         condition: service_started
     networks: [catalog]
 

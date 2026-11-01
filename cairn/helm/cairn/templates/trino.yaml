@@ -6,6 +6,9 @@
 {{- $ctx := dict "root" $ "component" "trino" "cfg" $u }}
 {{- $catCtx := dict "root" $ "component" "catalog" "cfg" $cat }}
 {{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
+{{- if not .Values.cairn.api.enabled }}{{ fail "cairn.trino needs cairn.api.enabled (Trino asks Cairn before every action)" }}{{ end }}
+{{- $apiCtx := dict "root" $ "component" "api" "cfg" .Values.cairn.api }}
+{{- $api := printf "http://%s:%v" (include "cairn.componentName" $apiCtx) .Values.cairn.api.port }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
@@ -22,6 +25,12 @@ data:
     http-server.http.port={{ $u.port }}
     discovery.uri=http://localhost:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/allow
+    opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/batch
+    opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/row-filters
+    opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/column-mask
   lakehouse.properties: |
     connector.name=iceberg
     iceberg.catalog.type=rest
@@ -77,6 +86,9 @@ spec:
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            - name: CAIRN_TRINO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
           ports:
             - name: http
               containerPort: {{ $u.port }}
@@ -93,6 +105,10 @@ spec:
             - name: config
               mountPath: /etc/trino/config.properties
               subPath: config.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/access-control.properties
+              subPath: access-control.properties
               readOnly: true
             - name: config
               mountPath: /etc/trino/catalog/lakehouse.properties

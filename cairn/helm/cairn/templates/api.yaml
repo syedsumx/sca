@@ -5,6 +5,10 @@
 {{- with .Values.cairn.scim.tokenSecret }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SCIM_TOKEN_FILE" "value" "/run/cairn-scim/token") }}
 {{- end }}
+{{- /* Trino access control: the key Trino presents when it asks Cairn (cairn.trino.accessKeySecret). */ -}}
+{{- if .Values.cairn.trino.enabled }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.accessKeySecret.key))) }}
+{{- end }}
 {{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
 {{- if .Values.cairn.store.enabled }}
 {{- $s := .Values.cairn.store.secret }}
