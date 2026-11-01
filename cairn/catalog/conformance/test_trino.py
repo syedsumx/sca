@@ -164,7 +164,8 @@ def test_token_scopes_hold_for_trino(trino, schema):
 
 
 def test_views(trino, schema, cat):
-    trino.sql(f"CREATE TABLE lake.{schema}.sales AS SELECT * FROM (VALUES (1, 'EU', 10), (2, 'US', 20), (3, 'EU', 5)) t(id, region, amount)")
+    trino.sql(f"CREATE TABLE lake.{schema}.sales AS SELECT * FROM "
+              "(VALUES (1, 'EU', 10), (2, 'US', 20), (3, 'EU', 5)) t(id, region, amount)")
     trino.sql(f"CREATE VIEW lake.{schema}.eu AS SELECT id, amount FROM lake.{schema}.sales WHERE region = 'EU'")
     assert trino.sql(f"SELECT sum(amount) AS s FROM lake.{schema}.eu") == [{"s": 15}]
     assert {r["Table"] for r in trino.sql(f"SHOW TABLES FROM lake.{schema}")} == {"sales", "eu"}

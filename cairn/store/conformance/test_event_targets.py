@@ -151,7 +151,8 @@ def test_sqs_standard_and_fifo_queues(sqs, custom_store, tmp_path):
 
 def test_sqs_down_then_back_keeps_order(sqs, custom_store, tmp_path):
     c, port, name = sqs
-    url = c.create_queue(QueueName="outage")["QueueUrl"]
+    # A FIFO queue: a standard queue keeps no order of its own, so only a FIFO queue shows the store's.
+    url = c.create_queue(QueueName="outage.fifo", Attributes={"FifoQueue": "true"})["QueueUrl"]
     st = store_with(custom_store, tmp_path, [{"id": "q", "type": "sqs", "queue_url": host_url(url, port), "region": "elasticmq",
                                               "access_key": "AKIDCAIRN", "secret_key": "cairn-sqs-secret"}])
     s3 = st.client()
