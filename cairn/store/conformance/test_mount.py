@@ -79,17 +79,93 @@ def test_files_through_the_mount(s3, bucket, mounted):
     assert keys == ["big.bin", "docs/hello.txt", "docs/moved.txt"]
 
 
-def test_what_objects_cannot_express_is_refused(s3, bucket, mounted):
+def test_modes_owners_times_links_and_xattrs(s3, bucket, mounted):
+    """POSIX metadata in the objects' user metadata (s3fs-fuse's headers): it survives remounts, renames
+    and rewrites, and S3 clients see it."""
     s3.put_object(Bucket=bucket, Key="f.txt", Body=b"0123456789")
     s3.put_object(Bucket=bucket, Key="d/x", Body=b"x")
     m = mounted(bucket)
-    for fn in (lambda: os.chmod(m / "f.txt", 0o600), lambda: os.symlink(m / "f.txt", m / "link")):
-        with pytest.raises(OSError) as ei:
-            fn()
-        assert ei.value.errno in (errno.EOPNOTSUPP, errno.ENOSYS, errno.EPERM)
+    # An object written by an S3 client shows the defaults.
+    assert oct((m / "f.txt").stat().st_mode & 0o7777) == "0o644" and oct((m / "d").stat().st_mode & 0o7777) == "0o755"
+    os.chmod(m / "f.txt", 0o600)
+    os.utime(m / "f.txt", (1_600_000_000, 1_600_000_000))
+    os.chown(m / "f.txt", 4242, 4343)
+    st = (m / "f.txt").stat()
+    assert (st.st_mode & 0o7777, st.st_mtime, st.st_uid, st.st_gid) == (0o600, 1_600_000_000, 4242, 4343)
+    head = s3.head_object(Bucket=bucket, Key="f.txt")
+    assert head["Metadata"]["mode"] == str(0o100600) and head["Metadata"]["uid"] == "4242"
+    assert (m / "f.txt").read_bytes() == b"0123456789"  # the content is untouched
+    # A directory that exists only by its keys gets a marker to keep its mode.
+    os.chmod(m / "d", 0o750)
+    assert (m / "d").stat().st_mode & 0o7777 == 0o750
+    assert s3.head_object(Bucket=bucket, Key="d/")["Metadata"]["mode"] == str(0o040750)
+    # New files and directories keep the mode they were created with.
+    fd = os.open(m / "secret", os.O_CREAT | os.O_WRONLY, 0o640)
+    os.write(fd, b"s")
+    os.close(fd)
+    os.mkdir(m / "private", 0o700)
+    assert (m / "secret").stat().st_mode & 0o7777 == 0o640 and (m / "private").stat().st_mode & 0o7777 == 0o700
+    # Rewriting a file keeps its metadata.
+    with open(m / "f.txt", "r+b") as f:
+        f.seek(2)
+        f.write(b"XY")
+    assert (m / "f.txt").stat().st_mode & 0o7777 == 0o600 and (m / "f.txt").read_bytes() == b"01XY456789"
+    # Symbolic links: an object holding the target.
+    os.symlink("f.txt", m / "link")
+    os.symlink("../f.txt", m / "d" / "up")
+    assert os.readlink(m / "link") == "f.txt" and (m / "link").is_symlink()
+    assert (m / "link").read_bytes() == b"01XY456789" and (m / "d" / "up").read_bytes() == b"01XY456789"
+    assert s3.get_object(Bucket=bucket, Key="link")["Body"].read() == b"f.txt"
+    with pytest.raises(FileExistsError):
+        os.symlink("other", m / "link")
+    # Extended attributes (user. namespace).
+    os.setxattr(m / "f.txt", "user.origin", b"lab-7")
+    os.setxattr(m / "d", "user.owner", "\u00e9quipe".encode())
+    assert os.getxattr(m / "f.txt", "user.origin") == b"lab-7"
+    assert os.listxattr(m / "f.txt") == ["user.origin"] and os.getxattr(m / "d", "user.owner") == "\u00e9quipe".encode()
+    with pytest.raises(FileExistsError):
+        os.setxattr(m / "f.txt", "user.origin", b"x", os.XATTR_CREATE)
+    with pytest.raises(OSError) as ei:
+        os.setxattr(m / "f.txt", "trusted.x", b"x")
+    assert ei.value.errno == errno.EOPNOTSUPP
+    with pytest.raises(OSError) as ei:
+        os.setxattr(m / "f.txt", "user.big", b"x" * 4096)  # beyond S3's 2 KB of user metadata
+    assert ei.value.errno == errno.E2BIG
+    # Everything survives a rename and a new mount.
+    os.rename(m / "f.txt", m / "g.txt")
+    m2 = mounted(bucket)
+    st = (m2 / "g.txt").stat()
+    assert (st.st_mode & 0o7777, st.st_mtime, st.st_uid) == (0o600, 1_600_000_000, 4242)
+    assert os.getxattr(m2 / "g.txt", "user.origin") == b"lab-7"
+    os.removexattr(m2 / "g.txt", "user.origin")
+    assert os.listxattr(m2 / "g.txt") == []
+    assert os.readlink(m2 / "link") == "f.txt" and not (m2 / "link").exists()  # dangling now, as on any disk
+    # Hard links cannot be expressed: two names for one object.
+    with pytest.raises(OSError) as ei:
+        os.link(m2 / "g.txt", m2 / "hard")
+    assert ei.value.errno == errno.EPERM
     os.rename(m / "d", m / "e")  # a directory: one transaction in the store
     assert (m / "e" / "x").read_bytes() == b"x" and not (m / "d").exists()
-    assert (m / "f.txt").read_bytes() == b"0123456789"  # untouched
+
+
+def test_enforced_modes(s3, bucket, mounted):
+    """--enforce-modes: the kernel checks modes before each access, as on a local disk."""
+    if os.geteuid() != 0:
+        pytest.skip("needs root to act as another user")
+    s3.put_object(Bucket=bucket, Key="open.txt", Body=b"o")
+    m = mounted(bucket, ADMIN, "--enforce-modes", "--allow-other")
+    for p in m.parents:  # let the other user reach the mount point (pytest's directories are 0700)
+        if str(p).startswith("/tmp/pytest-of-"):
+            os.chmod(p, 0o755)
+    (m / "mine.txt").write_bytes(b"m")
+    os.chmod(m / "mine.txt", 0o600)
+
+    def as_nobody(path):
+        return subprocess.run(["setpriv", "--reuid=65534", "--regid=65534", "--clear-groups", "cat", str(path)],
+                              capture_output=True)
+    assert as_nobody(m / "open.txt").returncode == 0
+    r = as_nobody(m / "mine.txt")
+    assert r.returncode != 0 and b"Permission denied" in r.stderr
 
 
 def received(store):

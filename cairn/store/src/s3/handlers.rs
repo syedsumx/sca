@@ -895,7 +895,11 @@ impl Server {
         let lock = self.lock_for_write(c, &c.bucket)?;
         let ttl = self.ttl_for_write(c, &c.bucket)?; // a copy is a new object: the destination's time to live
         let (ct, hs, um) = if directive == "REPLACE" {
-            object_headers(c)
+            let replaced = object_headers(c);
+            if meta_too_large(&replaced.2) {
+                return Err(e::METADATA_TOO_LARGE.clone());
+            }
+            replaced
         } else {
             (src_obj.content_type.clone(), src_obj.headers.clone(), src_obj.user_meta.clone())
         };

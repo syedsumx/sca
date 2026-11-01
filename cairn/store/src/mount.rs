@@ -13,9 +13,19 @@
 //! edit started from: if someone else changed the file meanwhile, the close fails with `ESTALE` and
 //! their version stays. `O_TRUNC` opens (`>`, `cp`) replace a file.
 //!
-//! What objects cannot express fails with `EOPNOTSUPP` rather than being faked: chmod, chown, setting
-//! times, links. Renames (directories too) are one transaction in an unversioned bucket. Directories are
-//! key prefixes; `mkdir` writes an empty `name/` marker, as S3 consoles do.
+//! POSIX metadata lives in the object's user metadata, in the headers s3fs-fuse uses: `x-amz-meta-mode`
+//! (type and permission bits, decimal), `-uid`, `-gid`, `-mtime` (seconds) and `-xattr` (extended
+//! attributes, percent-encoded JSON of base64 values). chmod, chown, utimes and setxattr rewrite them
+//! with a copy of the object onto itself, conditional on the version they read, so a concurrent writer
+//! is never overwritten. A symbolic link is an object whose content is the target and whose mode says
+//! it is a link. Objects without these headers show as 0644 files and 0755 directories owned by the
+//! mount's user. Hard links fail with `EPERM`: two names cannot share one object. With
+//! `--enforce-modes` the kernel checks modes and owners before each access; the store's own policies
+//! apply either way.
+//!
+//! Renames (directories too) are one transaction in an unversioned bucket. Directories are key
+//! prefixes; `mkdir` writes an empty `name/` marker, as S3 consoles do, and a directory's metadata is
+//! kept on its marker.
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
@@ -140,33 +150,71 @@ impl S3 {
         Full::new(Bytes::new()).map_err(|never| match never {}).boxed()
     }
 
-    /// (size, modified) of a file, or None.
-    fn head(&self, path: &str) -> Result<Option<(u64, SystemTime)>, Errno> {
+    /// A file's size, time, version and metadata, or None.
+    fn info(&self, path: &str) -> Result<Option<Info>, Errno> {
         let r = self.call("HEAD", &self.key(path), "", &[], Self::empty(), None)?;
         if r.status == 404 {
             return Ok(None);
         }
         let r = self.ok(r)?;
         let size = r.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
-        let mtime = r
-            .headers
-            .get("last-modified")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc2822).ok())
-            .map(|t| UNIX_EPOCH + Duration::from_secs(t.unix_timestamp().max(0) as u64))
-            .unwrap_or(UNIX_EPOCH);
-        Ok(Some((size, mtime)))
+        let meta = Meta::from_headers(&r.headers);
+        let mtime = match meta.mtime {
+            Some(t) => UNIX_EPOCH + Duration::from_secs(t.max(0) as u64),
+            None => r
+                .headers
+                .get("last-modified")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| time::OffsetDateTime::parse(v, &time::format_description::well_known::Rfc2822).ok())
+                .map(|t| UNIX_EPOCH + Duration::from_secs(t.unix_timestamp().max(0) as u64))
+                .unwrap_or(UNIX_EPOCH),
+        };
+        let kept =
+            KEPT.iter().filter_map(|k| r.headers.get(*k).and_then(|v| v.to_str().ok()).map(|v| (k.to_string(), v.to_string()))).collect();
+        Ok(Some(Info { size, mtime, etag: etag_of(&r.headers), meta, kept }))
     }
 
-    /// (size, ETag) of a file, or None.
-    fn head_etag(&self, path: &str) -> Result<Option<(u64, String)>, Errno> {
-        let r = self.call("HEAD", &self.key(path), "", &[], Self::empty(), None)?;
-        if r.status == 404 {
-            return Ok(None);
+    /// (size, modified) of a file, or None.
+    fn head(&self, path: &str) -> Result<Option<(u64, SystemTime)>, Errno> {
+        Ok(self.info(path)?.map(|i| (i.size, i.mtime)))
+    }
+
+    /// Replaces a file's metadata, keeping its content, over the version `etag` (ESTALE: it changed).
+    /// Returns the new ETag.
+    fn set_meta(&self, path: &str, info: &Info, meta: &Meta) -> Result<String, Errno> {
+        let src = format!("/{}/{}", aws_encode(self.bucket.as_bytes(), false), aws_encode(self.key(path).as_bytes(), true));
+        let cond = format!("\"{}\"", info.etag);
+        let mh = meta.headers();
+        let mut h: Vec<(&str, &str)> = vec![
+            ("x-amz-copy-source", &src),
+            ("x-amz-metadata-directive", "REPLACE"),
+            ("x-amz-copy-source-if-match", &cond),
+            ("if-match", &cond),
+        ];
+        h.extend(info.kept.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        h.extend(mh.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+        let r = self.call("PUT", &self.key(path), "", &h, Self::empty(), Some(0))?;
+        if r.status == 400 && String::from_utf8_lossy(&r.body).contains("MetadataTooLarge") {
+            return Err(Errno::E2BIG);
         }
         let r = self.ok(r)?;
-        let size = r.headers.get("content-length").and_then(|v| v.to_str().ok()?.parse().ok()).unwrap_or(0);
-        Ok(Some((size, etag_of(&r.headers))))
+        let doc = String::from_utf8_lossy(&r.body).into_owned();
+        Ok(xml::parse(&doc).map(|x| x.text_of("ETag")).unwrap_or_default().trim_matches('"').to_string())
+    }
+
+    /// Writes a small object (a symbolic link, a directory marker) with metadata.
+    fn put_small(&self, path: &str, data: &[u8], meta: &Meta, if_none: bool) -> Result<(), Errno> {
+        let mh = meta.headers();
+        let mut h: Vec<(&str, &str)> = mh.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        if if_none {
+            h.push(("if-none-match", "*"));
+        }
+        let body = Full::new(Bytes::copy_from_slice(data)).map_err(|never| match never {}).boxed();
+        let r = self.call("PUT", &self.key(path), "", &h, body, Some(data.len() as u64))?;
+        if r.status == 412 && if_none {
+            return Err(Errno::EEXIST);
+        }
+        self.ok(r).map(|_| ())
     }
 
     /// Reads `[off, off+len)` of the version with ETag `etag` (ESTALE: it changed).
@@ -179,19 +227,35 @@ impl S3 {
 
     /// Stores `len` bytes from `file` (positioned at their start); `if_match`: only over that version.
     /// Returns the new ETag.
-    fn put_from(&self, path: &str, file: std::fs::File, len: u64, if_match: Option<&str>) -> Result<String, Errno> {
+    fn put_from(
+        &self,
+        path: &str,
+        file: std::fs::File,
+        len: u64,
+        if_match: Option<&str>,
+        meta: &[(String, String)],
+    ) -> Result<String, Errno> {
         let body = self.rt.block_on(async { crate::s3::tiering::file_body(file.take(len)) });
         let q = if_match.map(|e| format!("\"{e}\""));
-        let h: Vec<(&str, &str)> = q.as_deref().map(|v| vec![("if-match", v)]).unwrap_or_default();
+        let mut h: Vec<(&str, &str)> = q.as_deref().map(|v| vec![("if-match", v)]).unwrap_or_default();
+        h.extend(meta.iter().map(|(k, v)| (k.as_str(), v.as_str())));
         let r = self.ok(self.call("PUT", &self.key(path), "", &h, body, Some(len))?)?;
         Ok(etag_of(&r.headers))
     }
 
     /// Stores a large file as a multipart upload: `parts` are (offset, length, local?) where local parts
     /// are sent from `file` and the others copied from the version `base` inside the store.
-    fn put_multipart(&self, path: &str, file: &std::fs::File, parts: &[(u64, u64, bool)], base: Option<&str>) -> Result<String, Errno> {
+    fn put_multipart(
+        &self,
+        path: &str,
+        file: &std::fs::File,
+        parts: &[(u64, u64, bool)],
+        base: Option<&str>,
+        meta: &[(String, String)],
+    ) -> Result<String, Errno> {
         let key = self.key(path);
-        let r = self.ok(self.call("POST", &key, "uploads", &[], Self::empty(), Some(0))?)?;
+        let mh: Vec<(&str, &str)> = meta.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        let r = self.ok(self.call("POST", &key, "uploads", &mh, Self::empty(), Some(0))?)?;
         let doc = String::from_utf8_lossy(&r.body).into_owned();
         let upload = xml::parse(&doc).map(|x| x.text_of("UploadId")).filter(|u| !u.is_empty()).ok_or(Errno::EIO)?;
         let uq = aws_encode(upload.as_bytes(), false);
@@ -289,10 +353,6 @@ impl S3 {
         Ok(!d.is_empty() || !f.is_empty())
     }
 
-    fn put_empty(&self, key_path: &str) -> Result<(), Errno> {
-        self.ok(self.call("PUT", &self.key(key_path), "", &[], Self::empty(), Some(0))?).map(|_| ())
-    }
-
     fn delete(&self, key_path: &str) -> Result<(), Errno> {
         self.ok(self.call("DELETE", &self.key(key_path), "", &[], Self::empty(), None)?).map(|_| ())
     }
@@ -334,6 +394,88 @@ fn etag_of(h: &hyper::HeaderMap) -> String {
     h.get("etag").and_then(|v| v.to_str().ok()).unwrap_or("").trim_matches('"').to_string()
 }
 
+const S_IFMT: u32 = 0o170000;
+const S_IFREG: u32 = 0o100000;
+const S_IFDIR: u32 = 0o040000;
+const S_IFLNK: u32 = 0o120000;
+/// Headers an object keeps besides its user metadata; a metadata update sends them again.
+const KEPT: [&str; 6] = ["content-type", "cache-control", "content-disposition", "content-encoding", "content-language", "expires"];
+
+/// A file's POSIX metadata, as kept in its user metadata (s3fs-fuse's headers).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Meta {
+    mode: Option<u32>,
+    uid: Option<u32>,
+    gid: Option<u32>,
+    mtime: Option<i64>,
+    xattrs: std::collections::BTreeMap<String, Vec<u8>>,
+}
+
+impl Meta {
+    fn from_headers(h: &hyper::HeaderMap) -> Meta {
+        let num = |k: &str| h.get(k).and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<i64>().ok());
+        let xattrs = h
+            .get("x-amz-meta-xattr")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| percent_encoding::percent_decode_str(v).decode_utf8().ok().map(|s| s.into_owned()))
+            .and_then(|v| serde_json::from_str::<std::collections::BTreeMap<String, String>>(&v).ok())
+            .map(|m| {
+                use base64::Engine as _;
+                m.into_iter().filter_map(|(k, v)| Some((k, base64::engine::general_purpose::STANDARD.decode(v).ok()?))).collect()
+            })
+            .unwrap_or_default();
+        Meta {
+            mode: num("x-amz-meta-mode").and_then(|v| u32::try_from(v).ok()),
+            uid: num("x-amz-meta-uid").and_then(|v| u32::try_from(v).ok()),
+            gid: num("x-amz-meta-gid").and_then(|v| u32::try_from(v).ok()),
+            mtime: num("x-amz-meta-mtime"),
+            xattrs,
+        }
+    }
+
+    /// The headers that store it (none for what is unset).
+    fn headers(&self) -> Vec<(String, String)> {
+        let mut out = vec![];
+        if let Some(m) = self.mode {
+            out.push(("x-amz-meta-mode".into(), m.to_string()));
+        }
+        if let Some(u) = self.uid {
+            out.push(("x-amz-meta-uid".into(), u.to_string()));
+        }
+        if let Some(g) = self.gid {
+            out.push(("x-amz-meta-gid".into(), g.to_string()));
+        }
+        if let Some(t) = self.mtime {
+            out.push(("x-amz-meta-mtime".into(), t.to_string()));
+        }
+        if !self.xattrs.is_empty() {
+            use base64::Engine as _;
+            let m: std::collections::BTreeMap<&String, String> =
+                self.xattrs.iter().map(|(k, v)| (k, base64::engine::general_purpose::STANDARD.encode(v))).collect();
+            let json = serde_json::to_string(&m).unwrap_or_default();
+            out.push((
+                "x-amz-meta-xattr".into(),
+                percent_encoding::utf8_percent_encode(&json, percent_encoding::NON_ALPHANUMERIC).to_string(),
+            ));
+        }
+        out
+    }
+
+    fn is_symlink(&self) -> bool {
+        self.mode.is_some_and(|m| m & S_IFMT == S_IFLNK)
+    }
+}
+
+/// What a HEAD tells about a file.
+struct Info {
+    size: u64,
+    mtime: SystemTime,
+    etag: String,
+    meta: Meta,
+    /// The headers besides user metadata (content type and the like), resent when metadata changes.
+    kept: Vec<(String, String)>,
+}
+
 /// A file opened for writing: a sparse staging file holding the chunks loaded or written, over the
 /// version the edit started from; stored on flush/close.
 struct Staged {
@@ -348,6 +490,8 @@ struct Staged {
     /// O_APPEND: every write goes to the end.
     append: bool,
     dirty: bool,
+    /// The metadata stored with the file.
+    meta: Meta,
 }
 
 impl Staged {
@@ -418,6 +562,12 @@ impl CairnFs {
     }
 
     fn attr(&self, ino: INodeNo, kind: FileType, size: u64, mtime: SystemTime) -> FileAttr {
+        self.attr_of(ino, kind, size, mtime, &Meta::default())
+    }
+
+    /// Attributes from an object's metadata; what it does not say comes from the mount's defaults.
+    fn attr_of(&self, ino: INodeNo, kind: FileType, size: u64, mtime: SystemTime, meta: &Meta) -> FileAttr {
+        let default = if kind == FileType::Directory { 0o755 } else { 0o644 };
         FileAttr {
             ino,
             size,
@@ -427,10 +577,10 @@ impl CairnFs {
             ctime: mtime,
             crtime: mtime,
             kind,
-            perm: if kind == FileType::Directory { 0o755 } else { 0o644 },
+            perm: meta.mode.map(|m| (m & 0o7777) as u16).unwrap_or(default),
             nlink: if kind == FileType::Directory { 2 } else { 1 },
-            uid: self.uid,
-            gid: self.gid,
+            uid: meta.uid.unwrap_or(self.uid),
+            gid: meta.gid.unwrap_or(self.gid),
             rdev: 0,
             flags: 0,
             blksize: 4096,
@@ -446,15 +596,19 @@ impl CairnFs {
         let staged = {
             let st = self.state.lock().unwrap();
             st.handles.values().find_map(|(p, o)| match o {
-                Open::Write(s) if p == path => Some(s.size),
+                Open::Write(s) if p == path => Some((s.size, s.meta.clone())),
                 _ => None,
             })
         };
-        if let Some(n) = staged {
-            return Ok(self.attr(ino, FileType::RegularFile, n, SystemTime::now()));
+        if let Some((n, meta)) = staged {
+            return Ok(self.attr_of(ino, FileType::RegularFile, n, SystemTime::now(), &meta));
         }
-        if let Some((size, mtime)) = self.s3.head(path)? {
-            return Ok(self.attr(ino, FileType::RegularFile, size, mtime));
+        if let Some(i) = self.s3.info(path)? {
+            let kind = if i.meta.is_symlink() { FileType::Symlink } else { FileType::RegularFile };
+            return Ok(self.attr_of(ino, kind, i.size, i.mtime, &i.meta));
+        }
+        if let Some(i) = self.s3.info(&format!("{path}/"))? {
+            return Ok(self.attr_of(ino, FileType::Directory, 0, i.meta.mtime.map(|_| i.mtime).unwrap_or(UNIX_EPOCH), &i.meta));
         }
         if self.s3.is_dir(path)? {
             return Ok(self.attr(ino, FileType::Directory, 0, UNIX_EPOCH));
@@ -462,12 +616,100 @@ impl CairnFs {
         Err(Errno::ENOENT)
     }
 
+    /// The object holding a path's metadata: the file itself, or a directory's marker (written when an
+    /// implied directory gets metadata of its own).
+    fn meta_target(&self, path: &str) -> Result<(String, Info), Errno> {
+        if !path.is_empty() {
+            if let Some(i) = self.s3.info(path)? {
+                return Ok((path.to_string(), i));
+            }
+        }
+        let marker = if path.is_empty() { String::new() } else { format!("{path}/") };
+        if marker.is_empty() {
+            return Err(Errno::EPERM); // the mount root is the bucket (or prefix) itself
+        }
+        if let Some(i) = self.s3.info(&marker)? {
+            return Ok((marker, i));
+        }
+        if !self.s3.is_dir(path)? {
+            return Err(Errno::ENOENT);
+        }
+        self.s3.put_small(&marker, b"", &Meta { mode: Some(S_IFDIR | 0o755), ..Default::default() }, true).or_else(|e| match e {
+            Errno::EEXIST => Ok(()),
+            e => Err(e),
+        })?;
+        Ok((marker.clone(), self.s3.info(&marker)?.ok_or(Errno::ENOENT)?))
+    }
+
+    /// A path's metadata now (a file open for writing: its pending metadata).
+    fn current_meta(&self, path: &str) -> Result<Meta, Errno> {
+        {
+            let st = self.state.lock().unwrap();
+            if let Some(m) = st.handles.values().find_map(|(p, o)| match o {
+                Open::Write(s) if p == path => Some(s.meta.clone()),
+                _ => None,
+            }) {
+                return Ok(m);
+            }
+        }
+        if path.is_empty() {
+            return Ok(Meta::default());
+        }
+        if let Some(i) = self.s3.info(path)? {
+            return Ok(i.meta);
+        }
+        if let Some(i) = self.s3.info(&format!("{path}/"))? {
+            return Ok(i.meta);
+        }
+        if self.s3.is_dir(path)? {
+            return Ok(Meta::default());
+        }
+        Err(Errno::ENOENT)
+    }
+
+    /// Changes a path's metadata. A file open for writing keeps it with its pending content instead.
+    fn update_meta(&self, path: &str, f: impl Fn(&mut Meta)) -> Result<(), Errno> {
+        {
+            let mut st = self.state.lock().unwrap();
+            let mut found = false;
+            for (p, o) in st.handles.values_mut() {
+                if let Open::Write(s) = o {
+                    if p == path {
+                        f(&mut s.meta);
+                        s.dirty = true;
+                        found = true;
+                    }
+                }
+            }
+            if found {
+                return Ok(());
+            }
+        }
+        // Read, change and write back, over the version read: a writer in between makes it retry.
+        for _ in 0..5 {
+            let (target, info) = self.meta_target(path)?;
+            let mut meta = info.meta.clone();
+            if meta.mode.is_none() {
+                meta.mode = Some(if target.ends_with('/') { S_IFDIR | 0o755 } else { S_IFREG | 0o644 });
+            }
+            f(&mut meta);
+            if meta == info.meta {
+                return Ok(());
+            }
+            match self.s3.set_meta(&target, &info, &meta) {
+                Err(Errno::ESTALE) => continue,
+                r => return r.map(|_| ()),
+            }
+        }
+        Err(Errno::EAGAIN)
+    }
+
     /// A staging file: empty (`base` None), or over an existing version.
-    fn stage(&self, base: Option<(String, u64)>, append: bool) -> Result<Staged, Errno> {
+    fn stage(&self, base: Option<(String, u64)>, append: bool, meta: Meta) -> Result<Staged, Errno> {
         let path = self.staging.join(format!("cairn-mount-{}", crate::engine::new_id()));
         let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&path).map_err(|_| Errno::EIO)?;
         let size = base.as_ref().map(|b| b.1).unwrap_or(0);
-        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append })
+        Ok(Staged { path, file, size, dirty: base.is_none(), base, loaded: HashSet::new(), append, meta })
     }
 
     /// Makes chunk `c` present in the staging file (fetching what the base has of it).
@@ -569,6 +811,19 @@ impl CairnFs {
         Ok(())
     }
 
+    /// The metadata of something new: its type and mode, the creator as owner (unless that is the
+    /// mount's own user, which objects show by default), and the time.
+    fn new_meta(&self, req: &Request, kind: u32, mode: u32) -> Meta {
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+        Meta {
+            mode: Some(kind | (mode & 0o7777)),
+            uid: Some(req.uid()).filter(|u| *u != self.uid),
+            gid: Some(req.gid()).filter(|g| *g != self.gid),
+            mtime: Some(now),
+            xattrs: Default::default(),
+        }
+    }
+
     fn new_handle(&self, path: String, open: Open) -> FileHandle {
         let mut st = self.state.lock().unwrap();
         st.next_fh += 1;
@@ -587,6 +842,7 @@ impl CairnFs {
         let path = path.clone();
         s.file.flush().map_err(|_| Errno::EIO)?;
         let base_etag = s.base.as_ref().map(|b| b.0.clone());
+        let meta = s.meta.headers();
         let res = if s.size <= WHOLE_PUT || s.base.is_none() && s.loaded.len() as u64 * CHUNK >= s.size {
             // Small (or entirely local): every chunk present, then one PUT.
             (|| -> Result<String, Errno> {
@@ -596,7 +852,7 @@ impl CairnFs {
                 s.file.set_len(s.size).map_err(|_| Errno::EIO)?;
                 let mut f = s.file.try_clone().map_err(|_| Errno::EIO)?;
                 f.rewind().map_err(|_| Errno::EIO)?;
-                self.s3.put_from(&path, f, s.size, base_etag.as_deref())
+                self.s3.put_from(&path, f, s.size, base_etag.as_deref(), &meta)
             })()
         } else {
             s.file.set_len(s.size).map_err(|_| Errno::EIO)?;
@@ -607,7 +863,7 @@ impl CairnFs {
                     (off, len, s.loaded.contains(&c) || off + len > bsize)
                 })
                 .collect();
-            self.s3.put_multipart(&path, &s.file, &parts, base_etag.as_deref())
+            self.s3.put_multipart(&path, &s.file, &parts, base_etag.as_deref(), &meta)
         };
         let etag = res?;
         // The stored version is the base of what follows; the staged chunks stay valid.
@@ -656,17 +912,40 @@ impl Filesystem for CairnFs {
         _: Option<fuser::BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        // Objects have no modes, owners or settable times; only truncation to zero is meaningful. Setting
-        // the mode a file already shows (cp and shutil.copy do) changes nothing, so it is allowed.
-        let shown = if self.path(ino).is_ok_and(|p| p.is_empty() || self.s3.is_dir(&p).unwrap_or(false)) { 0o755 } else { 0o644 };
-        let mode = mode.filter(|m| m & 0o7777 != shown);
-        if mode.is_some() || uid.is_some() || gid.is_some() || atime.is_some() || mtime.is_some() {
-            return reply.error(Errno::EOPNOTSUPP);
-        }
         let path = match self.path(ino) {
             Ok(p) => p,
             Err(e) => return reply.error(e),
         };
+        // Modes, owners and the modification time are kept in the object's metadata (atime is not kept:
+        // it is never stored on its own).
+        let when = |t: TimeOrNow| match t {
+            TimeOrNow::SpecificTime(t) => t.duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0),
+            TimeOrNow::Now => SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0),
+        };
+        let new_mtime = mtime.map(when);
+        if mode.is_some() || uid.is_some() || gid.is_some() || new_mtime.is_some() {
+            if self.read_only {
+                return reply.error(Errno::EROFS);
+            }
+            let _ = atime;
+            let res = self.update_meta(&path, |m| {
+                if let Some(mode) = mode {
+                    m.mode = Some((m.mode.unwrap_or(S_IFREG) & S_IFMT) | (mode & 0o7777));
+                }
+                if let Some(u) = uid {
+                    m.uid = Some(u);
+                }
+                if let Some(g) = gid {
+                    m.gid = Some(g);
+                }
+                if let Some(t) = new_mtime {
+                    m.mtime = Some(t);
+                }
+            });
+            if let Err(e) = res {
+                return reply.error(e);
+            }
+        }
         if let Some(n) = size {
             if self.read_only {
                 return reply.error(Errno::EROFS);
@@ -682,15 +961,19 @@ impl Filesystem for CairnFs {
                 Some(Ok(())) => {}
                 Some(Err(e)) => return reply.error(e),
                 None if n == 0 => {
-                    if let Err(e) = self.s3.put_empty(&path) {
+                    let meta = match self.s3.info(&path) {
+                        Ok(i) => i.map(|i| i.meta).unwrap_or_default(),
+                        Err(e) => return reply.error(e),
+                    };
+                    if let Err(e) = self.s3.put_small(&path, b"", &meta, false) {
                         return reply.error(e);
                     }
                 }
                 None => {
                     // truncate(2) without an open file: stage over the current version, store at once.
                     let res = (|| -> Result<(), Errno> {
-                        let base = self.s3.head_etag(&path)?.ok_or(Errno::ENOENT)?;
-                        let mut s = self.stage(Some((base.1, base.0)), false)?;
+                        let base = self.s3.info(&path)?.ok_or(Errno::ENOENT)?;
+                        let mut s = self.stage(Some((base.etag, base.size)), false, base.meta)?;
                         self.truncate_staged(&path, &mut s, n)?;
                         let fh = self.new_handle(path.clone(), Open::Write(s));
                         let r = self.store(fh);
@@ -768,16 +1051,13 @@ impl Filesystem for CairnFs {
         }
         let append = flags.0 & libc_o_append() != 0;
         let truncate = flags.0 & libc_o_trunc() != 0;
-        let base = if truncate {
-            None
-        } else {
-            match self.s3.head_etag(&path) {
-                Ok(Some((n, etag))) => Some((etag, n)),
-                Ok(None) => None,
-                Err(e) => return reply.error(e),
-            }
+        let info = match self.s3.info(&path) {
+            Ok(i) => i,
+            Err(e) => return reply.error(e),
         };
-        match self.stage(base, append) {
+        let meta = info.as_ref().map(|i| i.meta.clone()).unwrap_or_default();
+        let base = if truncate { None } else { info.map(|i| (i.etag, i.size)) };
+        match self.stage(base, append, meta) {
             Ok(s) => {
                 let fh = self.new_handle(path, Open::Write(s));
                 reply.opened(fh, FopenFlags::FOPEN_DIRECT_IO)
@@ -786,7 +1066,7 @@ impl Filesystem for CairnFs {
         }
     }
 
-    fn create(&self, _: &Request, parent: INodeNo, name: &OsStr, _: u32, _: u32, flags: i32, reply: ReplyCreate) {
+    fn create(&self, req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, flags: i32, reply: ReplyCreate) {
         if self.read_only {
             return reply.error(Errno::EROFS);
         }
@@ -795,7 +1075,8 @@ impl Filesystem for CairnFs {
             Ok(p) => p,
             Err(e) => return reply.error(e),
         };
-        match self.stage(None, append) {
+        let meta = self.new_meta(req, S_IFREG, mode & !umask);
+        match self.stage(None, append, meta.clone()) {
             Ok(s) => {
                 let ino = self.ino(&path);
                 let fh = self.new_handle(path, Open::Write(s));
@@ -804,7 +1085,7 @@ impl Filesystem for CairnFs {
                     self.state.lock().unwrap().handles.remove(&fh.0);
                     return reply.error(e);
                 }
-                let attr = self.attr(ino, FileType::RegularFile, 0, SystemTime::now());
+                let attr = self.attr_of(ino, FileType::RegularFile, 0, SystemTime::now(), &meta);
                 reply.created(&TTL, &attr, Generation(0), fh, FopenFlags::FOPEN_DIRECT_IO);
             }
             Err(e) => reply.error(e),
@@ -903,7 +1184,7 @@ impl Filesystem for CairnFs {
         }
     }
 
-    fn mkdir(&self, _: &Request, parent: INodeNo, name: &OsStr, _: u32, _: u32, reply: ReplyEntry) {
+    fn mkdir(&self, req: &Request, parent: INodeNo, name: &OsStr, mode: u32, umask: u32, reply: ReplyEntry) {
         if self.read_only {
             return reply.error(Errno::EROFS);
         }
@@ -911,8 +1192,9 @@ impl Filesystem for CairnFs {
             if self.s3.head(&p)?.is_some() || self.s3.is_dir(&p)? {
                 return Err(Errno::EEXIST);
             }
-            self.s3.put_empty(&format!("{p}/"))?;
-            Ok(self.attr(self.ino(&p), FileType::Directory, 0, SystemTime::now()))
+            let meta = self.new_meta(req, S_IFDIR, mode & !umask);
+            self.s3.put_small(&format!("{p}/"), b"", &meta, false)?;
+            Ok(self.attr_of(self.ino(&p), FileType::Directory, 0, SystemTime::now(), &meta))
         });
         match res {
             Ok(a) => reply.entry(&TTL, &a, Generation(0)),
@@ -1000,16 +1282,133 @@ impl Filesystem for CairnFs {
         reply.ok();
     }
 
-    /// Objects carry no extended attributes.
-    fn getxattr(&self, _: &Request, _: INodeNo, _: &OsStr, _: u32, reply: fuser::ReplyXattr) {
-        reply.error(Errno::NO_XATTR);
+    fn symlink(&self, req: &Request, parent: INodeNo, link_name: &OsStr, target: &std::path::Path, reply: ReplyEntry) {
+        if self.read_only {
+            return reply.error(Errno::EROFS);
+        }
+        let res = (|| {
+            let p = join(&self.path(parent)?, link_name)?;
+            let target = target.to_str().ok_or(Errno::EINVAL)?;
+            if self.s3.is_dir(&p)? {
+                return Err(Errno::EEXIST);
+            }
+            let meta = self.new_meta(req, S_IFLNK, 0o777);
+            self.s3.put_small(&p, target.as_bytes(), &meta, true)?;
+            Ok(self.attr_of(self.ino(&p), FileType::Symlink, target.len() as u64, SystemTime::now(), &meta))
+        })();
+        match res {
+            Ok(a) => reply.entry(&TTL, &a, Generation(0)),
+            Err(e) => reply.error(e),
+        }
     }
 
-    fn listxattr(&self, _: &Request, _: INodeNo, size: u32, reply: fuser::ReplyXattr) {
-        if size == 0 {
-            reply.size(0)
-        } else {
-            reply.data(&[])
+    fn readlink(&self, _: &Request, ino: INodeNo, reply: ReplyData) {
+        let res = (|| {
+            let p = self.path(ino)?;
+            let i = self.s3.info(&p)?.ok_or(Errno::ENOENT)?;
+            if !i.meta.is_symlink() {
+                return Err(Errno::EINVAL);
+            }
+            if i.size == 0 {
+                return Ok(Bytes::new());
+            }
+            self.s3.get(&p, 0, i.size)
+        })();
+        match res {
+            Ok(b) => reply.data(&b),
+            Err(e) => reply.error(e),
+        }
+    }
+
+    /// Hard links need two names for one object, which a bucket cannot have.
+    fn link(&self, _: &Request, _: INodeNo, _: INodeNo, _: &OsStr, reply: ReplyEntry) {
+        reply.error(Errno::EPERM);
+    }
+
+    fn setxattr(&self, _: &Request, ino: INodeNo, name: &OsStr, value: &[u8], flags: i32, _: u32, reply: ReplyEmpty) {
+        if self.read_only {
+            return reply.error(Errno::EROFS);
+        }
+        const XATTR_CREATE: i32 = 1;
+        const XATTR_REPLACE: i32 = 2;
+        let res = (|| {
+            let p = self.path(ino)?;
+            let name = name.to_str().ok_or(Errno::EINVAL)?.to_string();
+            // The kernel's own namespaces (security., system., trusted.) are not the mount's to keep.
+            if !name.starts_with("user.") {
+                return Err(Errno::EOPNOTSUPP);
+            }
+            let (_, info) = self.meta_target(&p)?;
+            let exists = info.meta.xattrs.contains_key(&name);
+            if flags & XATTR_CREATE != 0 && exists {
+                return Err(Errno::EEXIST);
+            }
+            if flags & XATTR_REPLACE != 0 && !exists {
+                return Err(Errno::NO_XATTR);
+            }
+            let value = value.to_vec();
+            self.update_meta(&p, |m| {
+                m.xattrs.insert(name.clone(), value.clone());
+            })
+        })();
+        match res {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e),
+        }
+    }
+
+    fn getxattr(&self, _: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: fuser::ReplyXattr) {
+        let res = (|| {
+            let p = self.path(ino)?;
+            let meta = self.current_meta(&p)?;
+            meta.xattrs.get(name.to_str().ok_or(Errno::EINVAL)?).cloned().ok_or(Errno::NO_XATTR)
+        })();
+        match res {
+            Ok(v) if size == 0 => reply.size(v.len() as u32),
+            Ok(v) if v.len() > size as usize => reply.error(Errno::ERANGE),
+            Ok(v) => reply.data(&v),
+            Err(e) => reply.error(e),
+        }
+    }
+
+    fn listxattr(&self, _: &Request, ino: INodeNo, size: u32, reply: fuser::ReplyXattr) {
+        let res = self.path(ino).and_then(|p| self.current_meta(&p));
+        match res {
+            Ok(meta) => {
+                let mut out = vec![];
+                for k in meta.xattrs.keys() {
+                    out.extend_from_slice(k.as_bytes());
+                    out.push(0);
+                }
+                if size == 0 {
+                    reply.size(out.len() as u32)
+                } else if out.len() > size as usize {
+                    reply.error(Errno::ERANGE)
+                } else {
+                    reply.data(&out)
+                }
+            }
+            Err(e) => reply.error(e),
+        }
+    }
+
+    fn removexattr(&self, _: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        if self.read_only {
+            return reply.error(Errno::EROFS);
+        }
+        let res = (|| {
+            let p = self.path(ino)?;
+            let name = name.to_str().ok_or(Errno::EINVAL)?.to_string();
+            if !self.current_meta(&p)?.xattrs.contains_key(&name) {
+                return Err(Errno::NO_XATTR);
+            }
+            self.update_meta(&p, |m| {
+                m.xattrs.remove(&name);
+            })
+        })();
+        match res {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e),
         }
     }
 
@@ -1029,7 +1428,7 @@ fn libc_o_trunc() -> i32 {
 }
 
 fn usage() -> ! {
-    eprintln!("usage: cairn-store mount <bucket>[/prefix] <directory> [--read-only] [--allow-other] [--uid=N] [--gid=N]");
+    eprintln!("usage: cairn-store mount <bucket>[/prefix] <directory> [--read-only] [--allow-other] [--enforce-modes] [--uid=N] [--gid=N]");
     std::process::exit(2)
 }
 
@@ -1041,6 +1440,7 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         _ => usage(),
     };
     let read_only = args.iter().any(|a| a == "--read-only");
+    let enforce_modes = args.iter().any(|a| a == "--enforce-modes");
     let allow_other = args.iter().any(|a| a == "--allow-other");
     let (bucket, prefix) = match target.split_once('/') {
         Some((b, p)) if !p.trim_matches('/').is_empty() => (b.to_string(), format!("{}/", p.trim_matches('/'))),
@@ -1098,6 +1498,9 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
         vec![MountOption::FSName(format!("cairn:{target}")), MountOption::Subtype("cairn".into()), MountOption::NoDev, MountOption::NoSuid];
     if read_only {
         cfg.mount_options.push(MountOption::RO);
+    }
+    if enforce_modes {
+        cfg.mount_options.push(MountOption::DefaultPermissions);
     }
     if allow_other {
         cfg.acl = fuser::SessionACL::All;

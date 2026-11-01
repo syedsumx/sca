@@ -533,7 +533,24 @@ CAIRN_STORE_ENDPOINT=https://store.example.com CAIRN_STORE_ACCESS_KEY=... CAIRN_
 - **Reads** are ranged GETs. **Writes** are staged in a private, sparse temporary file (`CAIRN_STORE_MOUNT_STAGING`, default the system temporary directory) and stored when the file is closed or flushed, so other readers never see half a file. Overwriting a file (`>`, `cp`) replaces it in one step.
 - **Appends and edits in place** work, as do writes at any offset, holes and `truncate` to any size. The file is handled in 8 MiB chunks: a chunk is fetched only when a write covers part of it, and a file over 16 MiB is stored as a multipart upload whose unchanged chunks are copied inside the store, so changing a few bytes of a large file sends one chunk. Each store is conditional on the version the edit started from: if the file changed elsewhere meanwhile, the close fails with `ESTALE` and the other version stays.
 - **Directories** are key prefixes. `mkdir` writes an empty `name/` marker object, as S3 consoles do. `rmdir` works only on empty directories.
-- **Refused rather than faked** (`Operation not supported`): changing modes (setting the mode a file already shows is allowed, so `cp` works), owners or times, links, and extended attributes. Renames of files and directories are one transaction in an unversioned bucket; in a versioned bucket a file rename is a copy and a delete, and a directory rename returns `EXDEV`, so `mv` copies and deletes instead.
+- **Modes, owners, times and extended attributes** are kept in each object's user metadata, under the same headers s3fs-fuse uses: `x-amz-meta-mode`, `-uid`, `-gid`, `-mtime` and `-xattr`. So `chmod`, `chown`, `touch`, `cp -p`, `tar` and `rsync -a` work, and S3 clients see the values.
+  - New files and directories keep the mode they were created with.
+  - A change rewrites the object's metadata in place: a copy onto itself, conditional on the version it read, so a concurrent writer is never overwritten.
+  - A directory that exists only because keys sit below it gets a marker object to hold its metadata.
+  - Objects without these headers show as `0644` files and `0755` directories, owned by the mount's user (`--uid`, `--gid`).
+  - Extended attributes must be in the `user.` namespace. They share S3's 2 KB of user metadata per object; going over it fails with `E2BIG`.
+  - The access time is not kept.
+- **Permissions.** The store's policies always decide what the mount's key may do. With `--enforce-modes` the kernel also checks modes and owners before every access, as on a local disk (use it with `--allow-other` when several local users share a mount).
+- **Symbolic links** are objects whose content is the target, with a mode marking them as links. **Hard links** fail with `EPERM`: a bucket cannot give one object two names.
+- **Renames** of files and directories are one transaction in an unversioned bucket, and keep metadata. In a versioned bucket a file rename is a copy and a delete, and a directory rename returns `EXDEV`, so `mv` copies and deletes instead.
+- **Tested** (`store/conformance/test_mount.py`):
+  - modes, owners and times, read back after a rewrite, a rename and a new mount;
+  - a directory implied by its keys gets a marker;
+  - creation modes;
+  - symbolic links, including relative and dangling ones;
+  - extended attributes, including create-only, a foreign namespace and the size limit;
+  - hard links refused;
+  - with `--enforce-modes`, another local user can read a `0644` file but not a `0600` one.
 
 **Kubernetes volumes (CSI).** `cairn-store csi` is a CSI driver (`csi.cairn.store`): PersistentVolumeClaims of its StorageClass become Cairn Store buckets, mounted into pods with the FUSE client above. Enable it in Helm with `cairn.store.csi.enabled`. That runs it on every node, with the standard registrar and provisioner sidecars, and creates the `cairn-store` StorageClass.
 
