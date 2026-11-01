@@ -670,6 +670,8 @@ cairn:
       tag: "476"
       pullPolicy: IfNotPresent
     queryMaxMemory: 2GB
+    # Worker pods besides the coordinator (0: the coordinator runs queries itself).
+    workers: 0
     # Trino asks Cairn's policy engine before every action (Trino's OPA access-control plugin): a Secret
     # with the key both share (at least 24 characters). Required: Trino is not deployed without it.
     accessKeySecret:
@@ -720,6 +722,8 @@ cairn:
     storeIngressFrom: []
     # Extra ingress sources allowed to reach Cairn Catalog (query and processing engines). Empty = none.
     catalogIngressFrom: []
+    # Extra ingress sources allowed to reach Trino (BI tools, notebooks). Empty = this release's pods only.
+    trinoIngressFrom: []
     # Extra ingress sources allowed to reach the API (e.g. the ingress controller namespace).
     apiIngressFrom:
       - namespaceSelector:

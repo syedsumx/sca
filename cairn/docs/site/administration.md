@@ -786,7 +786,10 @@ A multi-table transaction changes every table or none.
 **Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
 **Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
-- **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` on `localhost:8088` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled`); `queryMaxMemory` and `resources` size it.
+- **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` on `localhost:8088` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled` and `cairn.api.enabled`).
+  - **Sizing:** `queryMaxMemory` and `resources`.
+  - **Workers:** `workers: N` adds N worker pods. The coordinator then plans queries and leaves the work to them. Access control and lineage stay on the coordinator, and the nodes share a secret (the access key) for their internal traffic.
+  - **Network policy:** with `cairn.networkPolicy.enabled`, only this release's pods reach Trino, plus the clients listed in `cairn.networkPolicy.trinoIngressFrom` (BI tools, notebooks).
 - **The `lakehouse` catalog.** Both setups configure it from `deploy/trino/catalog/lakehouse.properties`:
   - the catalog's REST URI with its token as an OAuth2 bearer token (`iceberg.rest-catalog.security=OAUTH2`);
   - the store through Trino's native S3 support, with path-style access.
@@ -826,7 +829,7 @@ A multi-table transaction changes every table or none.
   ```
 
   - **How a query runs.** Cairn checks the query as it does for every connection: catalogued tables only, the caller must be allowed to read each one, and results are masked. Trino then runs it as the signed-in user, so Trino's own checks (Cairn's policies, row filters included) apply as well. Row filters thus now reach the SQL editor and Ask-your-data.
-  - **Authentication.** With a password in the URL (`trino://cairn:<password>@host:443/lakehouse`), the connection uses HTTPS and `cairn` impersonates the caller. Trino must allow that, which it does for Cairn's service account.
+  - **Authentication.** With a password in the URL (`trino://cairn:<password>@host:443/lakehouse`), the connection uses HTTPS and `cairn` impersonates the caller. Trino asks Cairn before allowing an impersonation, so grant that user `MANAGE_SYSTEM_OPERATIONS`.
   - **Requirements.** It needs the `trino` extra (`cairn-platform[trino]`, part of `all`).
   - **Row cap.** The editor's row cap now goes onto the query's own `LIMIT` (a smaller limit the query already has is kept), so `ORDER BY` holds on engines that drop the order of a subquery, as Trino does.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
