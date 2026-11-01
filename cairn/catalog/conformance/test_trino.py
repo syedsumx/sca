@@ -161,3 +161,30 @@ def test_token_scopes_hold_for_trino(trino, schema):
     # Nothing changed.
     assert trino.sql(f"SELECT count(*) AS n FROM lake.{schema}.facts") == [{"n": 1}]
     assert [r["Table"] for r in trino.sql(f"SHOW TABLES FROM lake.{schema}")] == ["facts"]
+
+
+def test_views(trino, schema, cat):
+    trino.sql(f"CREATE TABLE lake.{schema}.sales AS SELECT * FROM (VALUES (1, 'EU', 10), (2, 'US', 20), (3, 'EU', 5)) t(id, region, amount)")
+    trino.sql(f"CREATE VIEW lake.{schema}.eu AS SELECT id, amount FROM lake.{schema}.sales WHERE region = 'EU'")
+    assert trino.sql(f"SELECT sum(amount) AS s FROM lake.{schema}.eu") == [{"s": 15}]
+    assert {r["Table"] for r in trino.sql(f"SHOW TABLES FROM lake.{schema}")} == {"sales", "eu"}
+    # Replacing the view adds a version; queries see the new definition.
+    trino.sql(f"CREATE OR REPLACE VIEW lake.{schema}.eu AS SELECT id, amount * 2 AS amount FROM lake.{schema}.sales WHERE region = 'EU'")
+    assert trino.sql(f"SELECT sum(amount) AS s FROM lake.{schema}.eu") == [{"s": 30}]
+    assert "amount * 2" in trino.sql(f"SHOW CREATE VIEW lake.{schema}.eu")[0]["Create View"]
+    trino.sql(f"COMMENT ON VIEW lake.{schema}.eu IS 'EU sales'")
+    # Every engine sees it: pyiceberg lists it as a view.
+    assert (schema, "eu") in [tuple(v) for v in cat.list_views(schema)]
+    trino.sql(f"ALTER VIEW lake.{schema}.eu RENAME TO lake.{schema}.europe")
+    assert trino.sql(f"SELECT count(*) AS n FROM lake.{schema}.europe") == [{"n": 2}]
+    # A view cannot take a table's name, nor a table a view's.
+    with pytest.raises(RuntimeError):
+        trino.sql(f"CREATE VIEW lake.{schema}.sales AS SELECT 1 AS x")
+    with pytest.raises(RuntimeError):
+        trino.sql(f"CREATE TABLE lake.{schema}.europe AS SELECT 1 AS x")
+    # The read-only token reads views and changes none.
+    assert trino.sql(f"SELECT count(*) AS n FROM lake_ro.{schema}.europe") == [{"n": 2}]
+    with pytest.raises(RuntimeError):
+        trino.sql(f"DROP VIEW lake_ro.{schema}.europe")
+    trino.sql(f"DROP VIEW lake.{schema}.europe")
+    assert {r["Table"] for r in trino.sql(f"SHOW TABLES FROM lake.{schema}")} == {"sales"}

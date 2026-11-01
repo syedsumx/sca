@@ -115,7 +115,9 @@ impl From<db::Error> for ApiError {
             db::Error::NamespaceExists => err(StatusCode::CONFLICT, "AlreadyExistsException", "The namespace already exists"),
             db::Error::NamespaceNotEmpty => err(StatusCode::CONFLICT, "NamespaceNotEmptyException", "The namespace is not empty"),
             db::Error::NoSuchTable => err(StatusCode::NOT_FOUND, "NoSuchTableException", "The table does not exist"),
-            db::Error::TableExists => err(StatusCode::CONFLICT, "AlreadyExistsException", "The table already exists"),
+            db::Error::TableExists => err(StatusCode::CONFLICT, "AlreadyExistsException", "A table with that name already exists"),
+            db::Error::NoSuchView => err(StatusCode::NOT_FOUND, "NoSuchViewException", "The view does not exist"),
+            db::Error::ViewExists => err(StatusCode::CONFLICT, "AlreadyExistsException", "A view with that name already exists"),
             db::Error::Conflict(i) => err(
                 StatusCode::CONFLICT,
                 "CommitFailedException",
@@ -203,6 +205,40 @@ struct CreateTable {
     properties: HashMap<String, String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case")]
+struct CreateView {
+    name: String,
+    location: Option<String>,
+    schema: iceberg::spec::Schema,
+    view_version: iceberg::spec::ViewVersion,
+    #[serde(default)]
+    properties: HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+struct CommitView {
+    identifier: Option<Identifier>,
+    #[serde(default)]
+    requirements: Vec<Value>,
+    updates: Vec<iceberg::ViewUpdate>,
+}
+
+/// Applies one REST view update to a view metadata builder.
+fn apply_view_update(b: iceberg::spec::ViewMetadataBuilder, u: iceberg::ViewUpdate) -> iceberg::Result<iceberg::spec::ViewMetadataBuilder> {
+    use iceberg::ViewUpdate as U;
+    Ok(match u {
+        U::AssignUuid { uuid } => b.assign_uuid(uuid),
+        U::UpgradeFormatVersion { format_version } => b.upgrade_format_version(format_version)?,
+        U::AddSchema { schema, .. } => b.add_schema(schema),
+        U::SetLocation { location } => b.set_location(location),
+        U::SetProperties { updates } => b.set_properties(updates)?,
+        U::RemoveProperties { removals } => b.remove_properties(&removals),
+        U::AddViewVersion { view_version } => b.add_version(view_version)?,
+        U::SetCurrentViewVersion { view_version_id } => b.set_current_version_id(view_version_id)?,
+    })
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 struct Identifier {
     namespace: Vec<String>,
@@ -261,7 +297,7 @@ struct Prepared {
     metadata: Value,
 }
 
-const ENDPOINTS: [&str; 17] = [
+const ENDPOINTS: [&str; 23] = [
     "GET /v1/{prefix}/namespaces",
     "POST /v1/{prefix}/namespaces",
     "GET /v1/{prefix}/namespaces/{namespace}",
@@ -277,6 +313,12 @@ const ENDPOINTS: [&str; 17] = [
     "POST /v1/{prefix}/namespaces/{namespace}/register",
     "POST /v1/{prefix}/namespaces/{namespace}/tables/{table}/metrics",
     "POST /v1/{prefix}/tables/rename",
+    "GET /v1/{prefix}/namespaces/{namespace}/views",
+    "POST /v1/{prefix}/namespaces/{namespace}/views",
+    "GET /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "POST /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
+    "POST /v1/{prefix}/views/rename",
     "POST /v1/{prefix}/transactions/commit",
     "GET /v1/config",
 ];
@@ -470,6 +512,52 @@ impl Catalog {
                     _ => Err(bad_request("Unsupported method")),
                 }
             }
+            (Method::GET, ["v1", "namespaces", ns, "views"]) => {
+                let levels = ns_param(ns);
+                scope(&levels)?;
+                let ids: Vec<Identifier> =
+                    self.db.list_views(&levels)?.into_iter().map(|name| Identifier { namespace: levels.clone(), name }).collect();
+                Ok(json_resp(StatusCode::OK, &json!({"identifiers": ids, "next-page-token": null})))
+            }
+            (Method::POST, ["v1", "namespaces", ns, "views"]) => {
+                let levels = ns_param(ns);
+                scope(&levels)?;
+                self.create_view(&levels, parse(&body)?).await
+            }
+            (m, ["v1", "namespaces", ns, "views", v]) => {
+                let (levels, name) = (ns_param(ns), decode(v));
+                scope(&levels)?;
+                match m {
+                    Method::GET => {
+                        let row = self.db.view(&levels, &name)?;
+                        let metadata: Value = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
+                        Ok(json_resp(
+                            StatusCode::OK,
+                            &json!({"metadata-location": row.metadata_location, "metadata": metadata, "config": {}}),
+                        ))
+                    }
+                    Method::HEAD => {
+                        self.db.view(&levels, &name)?;
+                        Ok(empty(StatusCode::NO_CONTENT))
+                    }
+                    Method::POST => self.replace_view(&levels, &name, parse(&body)?).await,
+                    Method::DELETE => {
+                        self.db.drop_view(&levels, &name)?;
+                        Ok(empty(StatusCode::NO_CONTENT))
+                    }
+                    _ => Err(bad_request("Unsupported method")),
+                }
+            }
+            (Method::POST, ["v1", "views", "rename"]) => {
+                let req: Rename = parse(&body)?;
+                scope(&req.source.namespace)?;
+                scope(&req.destination.namespace)?;
+                if !valid_name(&req.destination.name) {
+                    return Err(bad_request("Invalid view name"));
+                }
+                self.db.rename_view((&req.source.namespace, &req.source.name), (&req.destination.namespace, &req.destination.name))?;
+                Ok(empty(StatusCode::NO_CONTENT))
+            }
             (Method::POST, ["v1", "tables", "rename"]) => {
                 let req: Rename = parse(&body)?;
                 scope(&req.source.namespace)?;
@@ -618,6 +706,78 @@ impl Catalog {
         };
         self.apply(vec![change]).await?;
         self.load_result(&loc, serde_json::from_str(&json).unwrap(), false).await
+    }
+
+    /// Writes a view's metadata file under its location and returns the file's location.
+    async fn write_view_metadata(&self, metadata: &iceberg::spec::ViewMetadata) -> Result<(String, String), ApiError> {
+        let json = serde_json::to_string(metadata).map_err(|e| bad_request(e.to_string()))?;
+        let n = metadata.history().len();
+        let loc = format!("{}/metadata/{n:05}-{}.metadata.json", metadata.location().trim_end_matches('/'), uuid::Uuid::new_v4());
+        self.store.put_new(&loc, json.as_bytes().to_vec(), "application/json").await?;
+        Ok((loc, json))
+    }
+
+    async fn create_view(&self, levels: &[String], req: CreateView) -> Result<Resp, ApiError> {
+        if !valid_name(&req.name) {
+            return Err(bad_request("Invalid view name"));
+        }
+        self.db.namespace(levels)?;
+        let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
+        let metadata = iceberg::spec::ViewMetadataBuilder::new(
+            location,
+            req.schema,
+            req.view_version,
+            iceberg::spec::ViewFormatVersion::V1,
+            req.properties,
+        )
+        .and_then(|b| b.build())
+        .map_err(iceberg_err)?
+        .metadata;
+        let (loc, json) = self.write_view_metadata(&metadata).await?;
+        let row = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
+        if let Err(e) = self.db.commit_view(levels, &req.name, None, &row) {
+            let _ = self.store.delete(&loc).await;
+            return Err(e.into());
+        }
+        Ok(json_resp(
+            StatusCode::OK,
+            &json!({"metadata-location": loc, "metadata": serde_json::from_str::<Value>(&json).unwrap(), "config": {}}),
+        ))
+    }
+
+    async fn replace_view(&self, levels: &[String], name: &str, req: CommitView) -> Result<Resp, ApiError> {
+        if let Some(id) = &req.identifier {
+            if id.namespace != levels || id.name != name {
+                return Err(bad_request("The identifier in the body differs from the path"));
+            }
+        }
+        let row = self.db.view(levels, name)?;
+        let current: iceberg::spec::ViewMetadata = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
+        for r in &req.requirements {
+            match r["type"].as_str() {
+                Some("assert-view-uuid") => {
+                    if r["uuid"].as_str() != Some(current.uuid().to_string().as_str()) {
+                        return Err(err(StatusCode::CONFLICT, "CommitFailedException", "The view's UUID changed"));
+                    }
+                }
+                other => return Err(bad_request(format!("Unknown view requirement {other:?}"))),
+            }
+        }
+        let mut builder = iceberg::spec::ViewMetadataBuilder::new_from_metadata(current);
+        for u in req.updates {
+            builder = apply_view_update(builder, u).map_err(iceberg_err)?;
+        }
+        let metadata = builder.build().map_err(iceberg_err)?.metadata;
+        let (loc, json) = self.write_view_metadata(&metadata).await?;
+        let new = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
+        if let Err(e) = self.db.commit_view(levels, name, Some(&row.metadata_location), &new) {
+            let _ = self.store.delete(&loc).await;
+            return Err(e.into());
+        }
+        Ok(json_resp(
+            StatusCode::OK,
+            &json!({"metadata-location": loc, "metadata": serde_json::from_str::<Value>(&json).unwrap(), "config": {}}),
+        ))
     }
 
     async fn register(&self, levels: &[String], req: Register) -> Result<Resp, ApiError> {

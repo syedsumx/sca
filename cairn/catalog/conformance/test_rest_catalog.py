@@ -190,3 +190,40 @@ def test_token_scopes(stack):
     assert reader.load_table("sales.orders").scan().to_arrow().num_rows == 3
     with pytest.raises(ForbiddenError):
         reader.create_namespace("anything")
+
+
+def test_view_endpoints(stack, cat, ns):
+    """The views API as the REST spec defines it, with a namespace-scoped token and stale replaces."""
+    import requests
+
+    from conftest import ADMIN_TOKEN, SALES_TOKEN
+
+    h = {"Authorization": f"Bearer {ADMIN_TOKEN}"}
+    cfg = requests.get(f"{stack.uri}/v1/config", headers=h, timeout=10).json()
+    assert "POST /v1/{prefix}/namespaces/{namespace}/views" in cfg["endpoints"]
+    schema = {"type": "struct", "schema-id": 0, "fields": [{"id": 1, "name": "x", "type": "int", "required": False}]}
+    version = {"version-id": 1, "timestamp-ms": 1700000000000, "schema-id": 0, "summary": {"engine-name": "test"},
+               "default-namespace": [ns], "representations": [{"type": "sql", "sql": "SELECT 1 AS x", "dialect": "trino"}]}
+    r = requests.post(f"{stack.uri}/v1/namespaces/{ns}/views", headers=h, timeout=10,
+                      json={"name": "v1", "schema": schema, "view-version": version, "properties": {"comment": "one"}})
+    assert r.status_code == 200, r.text
+    first = r.json()
+    assert first["metadata"]["current-version-id"] == 1 and first["metadata-location"].endswith(".metadata.json")
+    assert requests.post(f"{stack.uri}/v1/namespaces/{ns}/views", headers=h, timeout=10,
+                         json={"name": "v1", "schema": schema, "view-version": version}).status_code == 409
+    got = requests.get(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, timeout=10).json()
+    assert got["metadata"]["view-uuid"] == first["metadata"]["view-uuid"]
+    v2 = {**version, "version-id": 2, "representations": [{"type": "sql", "sql": "SELECT 2 AS x", "dialect": "trino"}]}
+    upd = {"requirements": [{"type": "assert-view-uuid", "uuid": first["metadata"]["view-uuid"]}],
+           "updates": [{"action": "add-view-version", "view-version": v2}, {"action": "set-current-view-version", "view-version-id": -1}]}
+    r = requests.post(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, json=upd, timeout=10)
+    assert r.status_code == 200 and r.json()["metadata"]["current-version-id"] == 2, r.text
+    stale = {**upd, "requirements": [{"type": "assert-view-uuid", "uuid": "00000000-0000-0000-0000-000000000000"}]}
+    assert requests.post(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, json=stale, timeout=10).status_code == 409
+    ids = requests.get(f"{stack.uri}/v1/namespaces/{ns}/views", headers=h, timeout=10).json()["identifiers"]
+    assert ids == [{"namespace": [ns], "name": "v1"}]
+    # A namespace-scoped token sees only its namespaces.
+    assert requests.get(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers={"Authorization": f"Bearer {SALES_TOKEN}"},
+                        timeout=10).status_code == 403
+    assert requests.delete(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, timeout=10).status_code == 204
+    assert requests.get(f"{stack.uri}/v1/namespaces/{ns}/views/v1", headers=h, timeout=10).status_code == 404

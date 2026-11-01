@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 const NAMESPACES: TableDefinition<&str, &[u8]> = TableDefinition::new("namespaces");
 const TABLES: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("tables");
 const STAGED: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("staged");
+const VIEWS: TableDefinition<(&str, &str), &[u8]> = TableDefinition::new("views");
 
 /// Namespace levels are stored joined by the unit separator, which the REST spec also uses in paths.
 pub const SEP: char = '\u{1f}';
@@ -32,6 +33,8 @@ pub enum Error {
     NamespaceNotEmpty,
     NoSuchTable,
     TableExists,
+    NoSuchView,
+    ViewExists,
     /// A table's metadata changed since the commit was prepared (index of the change).
     Conflict(usize),
     Index(String),
@@ -93,6 +96,7 @@ impl Db {
         tx.open_table(NAMESPACES)?;
         tx.open_table(TABLES)?;
         tx.open_table(STAGED)?;
+        tx.open_table(VIEWS)?;
         tx.commit()?;
         Ok(me)
     }
@@ -193,9 +197,11 @@ impl Db {
                     return Err(Error::NamespaceNotEmpty);
                 }
             }
-            let tables = tx.open_table(TABLES)?;
-            if tables.range((key.as_str(), "")..)?.next().transpose()?.is_some_and(|(k, _)| k.value().0 == key) {
-                return Err(Error::NamespaceNotEmpty);
+            for def in [TABLES, VIEWS] {
+                let rows = tx.open_table(def)?;
+                if rows.range((key.as_str(), "")..)?.next().transpose()?.is_some_and(|(k, _)| k.value().0 == key) {
+                    return Err(Error::NamespaceNotEmpty);
+                }
             }
             t.remove(key.as_str())?;
         }
@@ -240,10 +246,14 @@ impl Db {
         let tx = self.begin_write()?;
         {
             let ns = tx.open_table(NAMESPACES)?;
+            let views = tx.open_table(VIEWS)?;
             let mut t = tx.open_table(TABLES)?;
             for (i, c) in changes.iter().enumerate() {
                 if ns.get(c.namespace.as_str())?.is_none() {
                     return Err(Error::NoSuchNamespace);
+                }
+                if c.expected.is_none() && views.get((c.namespace.as_str(), c.name.as_str()))?.is_some() {
+                    return Err(Error::ViewExists);
                 }
                 let cur: Option<TableRow> = match t.get((c.namespace.as_str(), c.name.as_str()))? {
                     Some(v) => Some(serde_json::from_slice(v.value())?),
@@ -290,6 +300,9 @@ impl Db {
             if tx.open_table(NAMESPACES)?.get(tk.as_str())?.is_none() {
                 return Err(Error::NoSuchNamespace);
             }
+            if tx.open_table(VIEWS)?.get((tk.as_str(), to.1))?.is_some() {
+                return Err(Error::ViewExists);
+            }
             let mut t = tx.open_table(TABLES)?;
             if t.get((tk.as_str(), to.1))?.is_some() {
                 return Err(Error::TableExists);
@@ -297,6 +310,104 @@ impl Db {
             let v = match t.remove((fk.as_str(), from.1))? {
                 Some(v) => v.value().to_vec(),
                 None => return Err(Error::NoSuchTable),
+            };
+            t.insert((tk.as_str(), to.1), v.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------------------------ views
+
+    pub fn list_views(&self, levels: &[String]) -> Result<Vec<String>> {
+        let key = ns_key(levels);
+        let r = self.db.begin_read()?;
+        if r.open_table(NAMESPACES)?.get(key.as_str())?.is_none() {
+            return Err(Error::NoSuchNamespace);
+        }
+        let mut out = vec![];
+        for row in r.open_table(VIEWS)?.range((key.as_str(), "")..)? {
+            let (k, _) = row?;
+            let (ns, name) = k.value();
+            if ns != key {
+                break;
+            }
+            out.push(name.to_string());
+        }
+        Ok(out)
+    }
+
+    pub fn view(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        let r = self.db.begin_read()?;
+        let key = ns_key(levels);
+        if r.open_table(NAMESPACES)?.get(key.as_str())?.is_none() {
+            return Err(Error::NoSuchNamespace);
+        }
+        let v = r.open_table(VIEWS)?.get((key.as_str(), name))?.ok_or(Error::NoSuchView)?.value().to_vec();
+        Ok(serde_json::from_slice(&v)?)
+    }
+
+    /// Creates (`expected` None) or replaces a view: compare-and-set on its metadata location. A view
+    /// cannot take a table's name.
+    pub fn commit_view(&self, levels: &[String], name: &str, expected: Option<&str>, new: &TableRow) -> Result<()> {
+        let key = ns_key(levels);
+        let tx = self.begin_write()?;
+        {
+            if tx.open_table(NAMESPACES)?.get(key.as_str())?.is_none() {
+                return Err(Error::NoSuchNamespace);
+            }
+            if expected.is_none() && tx.open_table(TABLES)?.get((key.as_str(), name))?.is_some() {
+                return Err(Error::TableExists);
+            }
+            let mut t = tx.open_table(VIEWS)?;
+            let cur: Option<TableRow> = match t.get((key.as_str(), name))? {
+                Some(v) => Some(serde_json::from_slice(v.value())?),
+                None => None,
+            };
+            match (expected, &cur) {
+                (None, Some(_)) => return Err(Error::ViewExists),
+                (Some(_), None) => return Err(Error::NoSuchView),
+                (Some(want), Some(have)) if want != have.metadata_location => return Err(Error::Conflict(0)),
+                _ => {}
+            }
+            t.insert((key.as_str(), name), serde_json::to_vec(new)?.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn drop_view(&self, levels: &[String], name: &str) -> Result<TableRow> {
+        let key = ns_key(levels);
+        let tx = self.begin_write()?;
+        let row = {
+            let mut t = tx.open_table(VIEWS)?;
+            let row = match t.remove((key.as_str(), name))? {
+                Some(v) => serde_json::from_slice(v.value())?,
+                None => return Err(Error::NoSuchView),
+            };
+            row
+        };
+        tx.commit()?;
+        Ok(row)
+    }
+
+    pub fn rename_view(&self, from: (&[String], &str), to: (&[String], &str)) -> Result<()> {
+        let (fk, tk) = (ns_key(from.0), ns_key(to.0));
+        let tx = self.begin_write()?;
+        {
+            if tx.open_table(NAMESPACES)?.get(tk.as_str())?.is_none() {
+                return Err(Error::NoSuchNamespace);
+            }
+            if tx.open_table(TABLES)?.get((tk.as_str(), to.1))?.is_some() {
+                return Err(Error::TableExists);
+            }
+            let mut t = tx.open_table(VIEWS)?;
+            if t.get((tk.as_str(), to.1))?.is_some() {
+                return Err(Error::ViewExists);
+            }
+            let v = match t.remove((fk.as_str(), from.1))? {
+                Some(v) => v.value().to_vec(),
+                None => return Err(Error::NoSuchView),
             };
             t.insert((tk.as_str(), to.1), v.as_slice())?;
         }

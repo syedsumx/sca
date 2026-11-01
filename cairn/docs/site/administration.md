@@ -815,6 +815,12 @@ Views, server-side scan planning and remote request signing are not supported ye
 
 A multi-table transaction changes every table or none.
 
+**Views.** The catalog serves Iceberg views (the REST spec's views API: list, create, load, replace, rename, drop), so `CREATE VIEW`, `CREATE OR REPLACE VIEW`, `ALTER VIEW … RENAME`, `COMMENT ON VIEW` and `DROP VIEW` work in Trino, and pyiceberg lists them.
+- **How they are kept.** A view's metadata file is written under its location, and every replace adds a version, checked with `assert-view-uuid`. A view and a table cannot share a name.
+- **Who may change them.** Read-only tokens read views but change none; namespace-scoped tokens see only their namespaces.
+- **Materialized views** are a Trino limitation for REST catalogs (`createMaterializedView is not supported`). Use a table refreshed by a scheduled `CREATE OR REPLACE TABLE … AS`.
+- **Tested:** the REST API (create, conflict, load, replace, stale replace, list, scope, drop), and Trino 476 (create, query, replace, comment, rename, name clashes both ways, read-only token, drop).
+
 **Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
 **Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
