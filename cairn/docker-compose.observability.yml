@@ -17,6 +17,7 @@ services:
     volumes:
       - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/observability/cairn-alerts.yaml:/etc/prometheus/cairn-alerts.yaml:ro
+      - ./deploy/observability/cairn-store-alerts.yaml:/etc/prometheus/cairn-store-alerts.yaml:ro
     ports: ["127.0.0.1:9090:9090"]
     networks: [catalog]
 
@@ -31,5 +32,6 @@ services:
       - ./deploy/observability/grafana/datasources.yaml:/etc/grafana/provisioning/datasources/cairn.yaml:ro
       - ./deploy/observability/grafana/dashboards.yaml:/etc/grafana/provisioning/dashboards/cairn.yaml:ro
       - ./deploy/observability/cairn-overview.json:/var/lib/grafana/dashboards/cairn-overview.json:ro
+      - ./deploy/observability/cairn-store.json:/var/lib/grafana/dashboards/cairn-store.json:ro
     ports: ["127.0.0.1:3300:3000"]
     networks: [catalog]

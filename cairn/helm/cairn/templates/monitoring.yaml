@@ -47,4 +47,22 @@ metadata:
 data:
   cairn-overview.json: |-
 {{ .Files.Get "files/cairn-overview.json" | indent 4 }}
+{{- if .Values.cairn.store.enabled }}
+  cairn-store.json: |-
+{{ .Files.Get "files/cairn-store.json" | indent 4 }}
+{{- end }}
+{{- end }}
+{{- if and .Values.cairn.prometheusRule.enabled .Values.cairn.store.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "cairn.fullname" . }}-store
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+    {{- with .Values.cairn.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+{{ .Files.Get "files/cairn-store-alerts.yaml" | indent 2 }}
 {{- end }}

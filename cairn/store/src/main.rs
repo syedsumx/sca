@@ -88,6 +88,7 @@
 
 mod admin_cli;
 mod audit;
+mod bench;
 mod crypt;
 mod csi;
 mod engine;
@@ -265,8 +266,11 @@ fn main() {
     let mut addr = env("CAIRN_STORE_ADDR", ":8333");
     let mut data = env("CAIRN_STORE_DATA", "/data");
     // `admin` takes its own arguments.
-    let rest: Vec<String> =
-        if cmd == "admin" || cmd == "mount" || cmd == "restore-backup" || cmd == "csi" { std::mem::take(&mut args) } else { vec![] };
+    let rest: Vec<String> = if cmd == "admin" || cmd == "mount" || cmd == "restore-backup" || cmd == "csi" || cmd == "bench" {
+        std::mem::take(&mut args)
+    } else {
+        vec![]
+    };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.trim_start_matches('-') {
@@ -311,6 +315,19 @@ fn main() {
             let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
             let code = mount::run(&rest, &endpoint, &env("CAIRN_STORE_ACCESS_KEY", ""), &sk, &env("CAIRN_STORE_REGION", "us-east-1"));
             std::process::exit(code);
+        }
+        "bench" => {
+            let tls = !env("CAIRN_STORE_TLS_CERT", "").is_empty();
+            let default = format!("{}://{}", if tls { "https" } else { "http" }, listen_addr(&addr).replace("0.0.0.0", "127.0.0.1"));
+            let endpoint = env("CAIRN_STORE_ENDPOINT", &default);
+            let sk = secret("CAIRN_STORE_SECRET_KEY").unwrap_or_else(|e| fail("CAIRN_STORE_SECRET_KEY", e));
+            std::process::exit(bench::run(
+                &rest,
+                &endpoint,
+                &env("CAIRN_STORE_ACCESS_KEY", ""),
+                &sk,
+                &env("CAIRN_STORE_REGION", "us-east-1"),
+            ));
         }
         "migrate-meta" => {
             // Copies a stopped store's embedded index into PostgreSQL (CAIRN_STORE_META), then sets the

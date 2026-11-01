@@ -355,12 +355,14 @@ Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an
 **Dashboards and alerts** live in `deploy/observability/`:
 
 - `cairn-overview.json`, a Grafana dashboard,
+- `cairn-store.json`, the Cairn Store dashboard: requests and errors by operation, latency, capacity and disks, events, replication, queues, lifecycle and tiers, the cluster, and SFTP, for one node or all,
+- `cairn-store-alerts.yaml`, the store's rules: a node down, server errors, disks filling up and full, an event backlog or dropped events, replication failing, a cluster node down or copies that cannot be placed, failing tier transitions, and many failed SFTP sign-ins,
 - `cairn-alerts.yaml`, Prometheus rules (checked with `promtool` in CI) covering: a service down, server errors above 5%, slow requests, slow policy decisions, a spike in denials, a stalled or failing worker, a notification backlog or failing channel, a burst of quality incidents, the AI budget reached, and the licence expiring, read-only or out of seats.
 
 **To run them:**
 
 - **Compose:** `docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d` adds Prometheus (`localhost:9090`) and Grafana (`localhost:3300`, with `GRAFANA_ADMIN_PASSWORD` in `.env`), pre-loaded with both.
-- **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor). `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
+- **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor), and the store at `/-/metrics`. `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
 
 **Tracing** is optional OpenTelemetry. Install the `otel` extra and set `CAIRN_OTEL_ENDPOINT` to an OTLP/HTTP collector. Requests, outgoing calls and database queries are then traced, sampled at `CAIRN_OTEL_SAMPLE_RATIO` (default 10%). Health and metrics endpoints are not traced.
 
@@ -745,6 +747,12 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 The control plane calls the store's admin API with the store's admin key (`CAIRN_STORE_URL`, `CAIRN_STORE_ADMIN_ACCESS_KEY`, `CAIRN_STORE_ADMIN_SECRET_KEY`; set automatically in Compose and Helm), and records quota changes in Cairn's own audit log too. Users never see the key.
 
 **On the command line.** `cairn-store admin stats | buckets | bucket <name> | quota <name> --max-bytes N --max-objects N | quota-remove <name> | audit [--after SEQ] [--jsonl]` calls the same API. It is signed with `CAIRN_STORE_ACCESS_KEY` and `CAIRN_STORE_SECRET_KEY` (an admin key), against `CAIRN_STORE_ENDPOINT` or the local listener.
+
+**Benchmarking.** `cairn-store bench` measures an S3 endpoint: this store, or any S3-compatible one, with the endpoint and key as for `cairn-store admin`.
+- **Options:** `--objects 1000 --size 64KiB --concurrency 16 --ops put,get,list,delete`, with `--bucket` (default `cairn-bench`) and `--keep`.
+- **What it does.** It writes the objects under a fresh prefix and reads them back, checking every byte count and ETag. It then lists and deletes them. It never touches other keys in the bucket.
+- **The report** is JSON: for each phase, operations, errors, seconds, operations and MiB per second, and latency (mean, p50, p90, p99, max). Watch the Cairn Store dashboard while it runs.
+- **Clean-up and exit codes.** A bucket the run created is removed again (unless `--keep`). The command exits 1 if any request failed.
 
 **Monitoring.** `/-/healthy`, `/-/ready` and Prometheus metrics at `/-/metrics`: requests by operation and status, bytes in and out, buckets, objects, stored bytes, open uploads and noncurrent versions, per-bucket bytes and objects (`cairn_store_bucket_bytes`, `cairn_store_bucket_objects`), and lifecycle actions.
 
