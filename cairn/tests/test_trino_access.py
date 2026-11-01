@@ -120,9 +120,15 @@ def test_the_key_is_required(client):
 
 
 def test_mask_expressions_keep_types():
-    assert mask_expression("salary", "decimal(10,2)", "partial") == "CAST(NULL AS decimal(10,2))"
+    """Every mask is cast to the column's type (Trino requires it); the matrix runs on a real Trino in
+    test_trino_e2e.py::test_masks_keep_every_type."""
+    assert mask_expression("salary", "decimal(10,2)", "partial").endswith("AS decimal(10,2)) END")
+    assert "truncate(" in mask_expression("salary", "decimal(10,2)", "partial")
+    assert "date_trunc('month'" in mask_expression("born", "date", "partial")
     assert mask_expression("e", "varchar", "null") == "CAST(NULL AS varchar)"
-    assert "sha256" in mask_expression("e", "varchar(255)", "hash")
+    assert mask_expression("flag", "boolean", "partial") == "CAST(NULL AS boolean)"
+    assert mask_expression("tags", "array(varchar)", "hash") == "CAST(NULL AS array(varchar))"
+    assert "sha256" in mask_expression("e", "varchar(255)", "hash") and "'sha256:'" not in mask_expression("e", "char(3)", "hash")
     assert "'••••'" in mask_expression('we"ird', "varchar", "redact") and '"we""ird"' in mask_expression('we"ird', "varchar", "redact")
 
 

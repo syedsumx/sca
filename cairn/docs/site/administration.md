@@ -819,7 +819,13 @@ A multi-table transaction changes every table or none.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
     - **Who has them.** `WRITE_DATASET`, `MANAGE_DATASET` and `MANAGE_SYSTEM_OPERATIONS` are Cairn's own privileges, and Cairn Core policies never grant them. Trino has no Core fallback, so a request no Cairn policy allows is refused. The baseline bundle grants all three to the group `urn:li:corpGroup:lakehouse-admins` (policy `lakehouse-admins-manage-tables`). Add your lakehouse administrators to it (SCIM, or Core's group page), or write your own policy. Tested with a real Cairn Core: a user put in the group through SCIM created schemas and tables through Trino, while the Core admin, who is not in the group, was refused.
-  - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. `row_filter` obligations (`{"expression": "region = 'EU'"}`, with `{user}` for the Trino user) become Trino row filters.
+  - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. Every mask keeps the column's type:
+    - **Text:** `partial` (`j•••@•••.com`), `hash` (a stable digest) or `redact` (`••••`).
+    - **Numbers:** `partial` keeps one significant figure, cut toward zero, so 98,765.43 becomes 90,000.00 and never overflows the type. `hash` gives a stable number of the same type, so joins still match. `redact` gives 0.
+    - **Dates and timestamps:** `partial` keeps the month, `hash` gives a stable date and `redact` gives 1970-01-01. Times keep the hour.
+    - **Anything else:** booleans, binary, JSON, arrays, maps and rows become NULL.
+    - **Tested** on Trino 476 for every strategy on 18 column types, including `char(n)`, `varchar(n)`, `decimal(p,s)`, `real`, `timestamp(p) with time zone` and `time`: the type is kept and NULL stays NULL.
+   - **Row filters.** `row_filter` obligations (`{"expression": "region = 'EU'"}`, with `{user}` for the Trino user) become Trino row filters.
   - **The key.** Trino presents `CAIRN_TRINO_ACCESS_KEY` (at least 24 characters) in the request path. Requests without it get a 404. In Helm, put it in the Secret named by `cairn.trino.accessKeySecret`; the API and Trino both read it.
   - **Tested** with Trino 476 against a real Cairn API: hidden tables refused and left out of `SHOW TABLES`, labelled emails masked (`j•••@•••.com`, so `WHERE email = ...` finds nothing), row filters applied, and writes, drops and new schemas refused without the privilege.
 - **Lineage from Trino.** Trino's OpenLineage event listener (`deploy/trino/event-listener.properties`, on in Compose and Helm) sends every query that writes to Cairn: `INSERT`, `CREATE TABLE AS`, `MERGE`, `UPDATE` and `DELETE`.

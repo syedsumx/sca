@@ -93,22 +93,87 @@ def ident(s: str) -> str:
     return '"' + s.replace('"', '""') + '"'
 
 
+INTEGER_TYPES = {"tinyint": 2**7, "smallint": 2**15, "integer": 2**31, "int": 2**31, "bigint": None}
+
+
+def _hash64(c: str) -> str:
+    """A stable 64-bit number from the value (the same value always masks the same, so joins still match)."""
+    return f"from_big_endian_64(substr(sha256(to_utf8(CAST({c} AS varchar))), 1, 8))"
+
+
 def mask_expression(column: str, column_type: str, strategy: str) -> str:
-    """A Trino expression that masks ``column`` and keeps its type (non-text columns become NULL)."""
+    """A Trino expression that masks ``column`` and keeps its type (Trino requires the mask's type to be
+    the column's). Text: partial (``j•••@•••.com``), hash, redact. Numbers: partial keeps one significant
+    figure, cut toward zero (37 → 30, 123456 → 100000), hash a stable number of the same type, redact 0. Dates and
+    timestamps: partial keeps the month, hash a stable date, redact 1970-01-01. Anything else (booleans,
+    binary, JSON, arrays, maps, rows) becomes NULL."""
     c = ident(column)
-    text = column_type.lower().startswith(("varchar", "char"))
-    if strategy == "null" or not text:
-        return f"CAST(NULL AS {column_type})"
-    if strategy == "redact":
-        return f"CASE WHEN {c} IS NULL THEN NULL ELSE '••••' END"
-    if strategy == "hash":
-        return f"CASE WHEN {c} IS NULL THEN NULL ELSE 'sha256:' || substr(lower(to_hex(sha256(to_utf8({c})))), 1, 12) END"
-    # partial: like the catalog's masking of sample values
-    return (f"CASE WHEN {c} IS NULL THEN NULL "
-            f"WHEN strpos({c}, '@') > 0 THEN substr({c}, 1, 1) || '•••@•••' || "
-            f"coalesce('.' || regexp_extract(split_part({c}, '@', 2), '\\.([^.]+)$', 1), '') "
-            f"WHEN length({c}) <= 4 THEN rpad('', length({c}), '•') "
-            f"ELSE substr({c}, 1, 1) || rpad('', least(length({c}) - 2, 8), '•') || substr({c}, length({c})) END")
+    t = column_type.strip()
+    base = t.lower().split("(")[0].strip()
+    null = f"CAST(NULL AS {t})"
+
+    def typed(expr: str) -> str:
+        return f"CASE WHEN {c} IS NULL THEN NULL ELSE CAST({expr} AS {t}) END"
+
+    if strategy == "null":
+        return null
+    if base in ("varchar", "char"):
+        v = f"CAST({c} AS varchar)"
+        if strategy == "redact":
+            return typed("'••••'")
+        if strategy == "hash":
+            digest = f"lower(to_hex(sha256(to_utf8({v}))))"
+            size = t[t.find("(") + 1:t.rfind(")")] if "(" in t else ""
+            if size.isdigit() and int(size) < 19:  # too short for the prefix: the digest alone, cut to fit
+                return typed(f"substr({digest}, 1, {size})")
+            return typed(f"'sha256:' || substr({digest}, 1, 12)")
+        # partial: like the catalog's masking of sample values
+        return typed(f"CASE WHEN strpos({v}, '@') > 0 THEN substr({v}, 1, 1) || '•••@•••' || "
+                     f"coalesce('.' || regexp_extract(split_part({v}, '@', 2), '\\.([^.]+)$', 1), '') "
+                     f"WHEN length({v}) <= 4 THEN rpad('', length({v}), '•') "
+                     f"ELSE substr({v}, 1, 1) || rpad('', least(length({v}) - 2, 8), '•') || substr({v}, length({v})) END")
+    if base in INTEGER_TYPES or base in ("decimal", "real", "double"):
+        if strategy == "redact":
+            return typed("0")
+        if strategy == "hash":
+            if base in INTEGER_TYPES:
+                bound = INTEGER_TYPES[base]
+                return typed(_hash64(c) if bound is None else f"mod({_hash64(c)}, {bound})")
+            if base == "decimal":
+                parts = [p.strip() for p in t[t.find("(") + 1:t.rfind(")")].split(",")] if "(" in t else ["38", "0"]
+                digits = min(18, max(1, int(parts[0]) - int(parts[1] if len(parts) > 1 else 0)))
+                return typed(f"mod({_hash64(c)}, {10 ** digits})")
+            return typed(f"CAST({_hash64(c)} AS double) / 1e9")
+        # partial: one significant figure, cut toward zero (rounding up could overflow the type)
+        mag = f"floor(log10(abs(CAST({c} AS double))))"
+        if base == "decimal":
+            cut = f"truncate({c}, -CAST({mag} AS integer))"
+        else:
+            unit = f"power(10e0, {mag})"
+            cut = f"sign(CAST({c} AS double)) * floor(abs(CAST({c} AS double)) / {unit}) * {unit}"
+        return f"CASE WHEN {c} IS NULL THEN NULL WHEN {c} = 0 THEN {c} ELSE CAST({cut} AS {t}) END"
+    if base == "date":
+        if strategy == "redact":
+            return typed("DATE '1970-01-01'")
+        if strategy == "hash":
+            return typed(f"date_add('day', abs(mod({_hash64(c)}, 36525)), DATE '1970-01-01')")
+        return typed(f"date_trunc('month', {c})")
+    if base == "timestamp":
+        epoch = ("TIMESTAMP '1970-01-01 00:00:00 UTC'" if "with time zone" in t.lower()
+                 else "TIMESTAMP '1970-01-01 00:00:00'")
+        if strategy == "redact":
+            return typed(epoch)
+        if strategy == "hash":
+            return typed(f"date_add('second', abs(mod({_hash64(c)}, 86400)), "
+                         f"date_add('day', abs(mod({_hash64(c)}, 36525)), {epoch}))")
+        return typed(f"date_trunc('month', {c})")
+    if base == "time":
+        if strategy == "partial":
+            return typed(f"date_trunc('hour', {c})")
+        if strategy == "hash":
+            return typed(f"date_add('second', abs(mod({_hash64(c)}, 86400)), TIME '00:00:00')")
+        return typed("TIME '00:00:00'")
+    return null
 
 
 class TrinoAccess:

@@ -197,12 +197,13 @@ def trino(lake, cairn):
 
     def sql(statement, user="admin", token=None, as_user=None):
         token = token if token is not None else services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
-        out = subprocess.run(["docker", "exec", name, "trino", "--server", f"https://127.0.0.1:{tls}", "--insecure",
+        out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"https://127.0.0.1:{tls}", "--insecure",
                               *(["--access-token", token] if token else []), "--user", as_user or user,
                               "--catalog", "lake", "--output-format", "JSON", "--execute", statement],
                              capture_output=True, text=True, timeout=300)
         if out.returncode != 0:
-            raise RuntimeError(out.stderr.strip().splitlines()[-1] if out.stderr.strip() else out.stdout)
+            why = [ln for ln in out.stderr.splitlines() if "failed:" in ln or "Error" in ln]
+            raise RuntimeError(why[0] if why else out.stderr.strip()[-500:] or out.stdout)
         return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
 
     sql("CREATE SCHEMA lake.sales")
@@ -362,3 +363,57 @@ def test_reads_become_usage(trino, cairn):
     assert all(u["user"] != "urn:li:corpuser:ana" for r in s.graph.get_timeseries(hr, "datasetUsageStatistics", 5)
                for u in r.get("userCounts") or [])
     assert s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] >= before
+
+
+MASK_CASES = [("varchar", "'jane@acme.com'"), ("varchar(20)", "'Johnathan'"), ("char(3)", "'abc'"), ("tinyint", "TINYINT '37'"),
+              ("smallint", "SMALLINT '-1234'"), ("integer", "37"), ("bigint", "BIGINT '123456789'"),
+              ("decimal(10,2)", "DECIMAL '98765.43'"), ("decimal(38,0)", "DECIMAL '12345678901234567890'"),
+              ("real", "REAL '0.0345'"), ("double", "DOUBLE '-4567.8'"), ("date", "DATE '1985-07-23'"),
+              ("timestamp(3)", "TIMESTAMP '2026-03-14 15:09:26.535'"),
+              ("timestamp(6) with time zone", "TIMESTAMP '2026-03-14 15:09:26.535897 Europe/Paris'"),
+              ("time(3)", "TIME '15:09:26.535'"), ("boolean", "true"), ("varbinary", "X'0102'"), ("array(integer)", "ARRAY[1, 2]")]
+
+
+def test_masks_keep_every_type(trino):
+    """Every strategy on every column type runs on Trino, keeps the column's exact type (Trino refuses a
+    mask that does not) and keeps NULL as NULL; numbers keep one significant figure, dates the month."""
+    from cairn.dataaccess.trino import mask_expression
+
+    strategies = ("partial", "hash", "redact", "null")
+    got = {}
+    for typ, lit in MASK_CASES:
+        cols = ", ".join(f"typeof({mask_expression('c', typ, st)}) = typeof(c) AS t_{st}, "
+                         f"({mask_expression('c', typ, st)}) IS NULL AS n_{st}" for st in strategies)
+        if not typ.startswith(("array", "varbinary", "boolean")):
+            cols += ", " + ", ".join(f"CAST({mask_expression('c', typ, st)} AS varchar) AS v_{st}" for st in strategies)
+        rows = trino(f"SELECT c IS NULL AS is_null, {cols} FROM (VALUES CAST({lit} AS {typ}), CAST(NULL AS {typ})) AS x(c) "
+                     "ORDER BY is_null")
+        value, null = rows
+        assert all(value[f"t_{st}"] and null[f"t_{st}"] for st in strategies), (typ, value)
+        assert all(null[f"n_{st}"] for st in strategies), (typ, null)  # NULL stays NULL
+        got[typ] = value
+    assert got["integer"]["v_partial"] == "30" and got["bigint"]["v_partial"] == "100000000"
+    assert got["decimal(10,2)"]["v_partial"] == "90000.00" and got["decimal(10,2)"]["v_redact"] == "0.00"
+    assert got["date"]["v_partial"] == "1985-07-01" and got["date"]["v_redact"] == "1970-01-01"
+    assert got["timestamp(3)"]["v_partial"].startswith("2026-03-01 00:00:00")
+    assert got["varchar"]["v_partial"] == "j•••@•••.com"
+    assert got["boolean"]["n_partial"] and got["array(integer)"]["n_hash"]  # no meaningful mask: NULL
+    # A hash is stable (the same value masks the same, so joins still match) and hides the value.
+    again = trino(f"SELECT CAST({mask_expression('c', 'integer', 'hash')} AS varchar) AS v FROM (VALUES 37) AS x(c)")
+    assert again[0]["v"] == got["integer"]["v_hash"] != "37"
+
+
+def test_numbers_and_dates_are_masked_for_the_caller(trino, cairn):
+    """A labelled salary and birth date come back masked, not NULL, and keep their types."""
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.people AS SELECT * FROM (VALUES (1, DECIMAL '98765.43', DATE '1985-07-23'), "
+          "(2, DECIMAL '51234.00', DATE '1990-02-11')) AS t(id, salary, born)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.people,PROD)", "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "salary", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "born", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}]}
+    rows = trino("SELECT id, CAST(salary AS varchar) AS salary, CAST(born AS varchar) AS born, typeof(salary) AS t "
+                 "FROM sales.people ORDER BY id", user="ana")
+    assert [(r["salary"], r["born"]) for r in rows] == [("90000.00", "1985-07-01"), ("50000.00", "1990-02-01")]
+    assert rows[0]["t"] == "decimal(7,2)"
+    admin = trino("SELECT CAST(salary AS varchar) AS salary FROM sales.people ORDER BY id")
+    assert admin[0]["salary"] == "98765.43"
