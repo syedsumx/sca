@@ -13,6 +13,8 @@
 {{- $tls := $u.tls.secretName }}
 {{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
 {{- if and $u.sso.enabled (or (not $tls) (not $u.sso.publicUrl)) }}{{ fail "cairn.trino.sso needs cairn.trino.tls.secretName and cairn.trino.sso.publicUrl (https://...)" }}{{ end }}
+{{- if and $u.faultTolerance.enabled (not (has $u.faultTolerance.retryPolicy (list "TASK" "QUERY"))) }}{{ fail "cairn.trino.faultTolerance.retryPolicy is TASK or QUERY" }}{{ end }}
+{{- if and $u.faultTolerance.enabled (lt (int $u.workers) 1) }}{{ fail "cairn.trino.faultTolerance needs workers (cairn.trino.workers >= 1): a task is retried on another node" }}{{ end }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
@@ -29,6 +31,15 @@ data:
     http-server.http.port={{ $u.port }}
     discovery.uri=http://localhost:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
+    {{- if $u.faultTolerance.enabled }}
+    retry-policy={{ $u.faultTolerance.retryPolicy }}
+    {{- end }}
+    {{- if $u.spill.enabled }}
+    spill-enabled=true
+    spiller-spill-path=/var/trino/spill
+    max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    {{- end }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
@@ -62,8 +73,27 @@ data:
     http-server.http.port={{ $u.port }}
     discovery.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
+    {{- if $u.faultTolerance.enabled }}
+    retry-policy={{ $u.faultTolerance.retryPolicy }}
+    {{- end }}
+    {{- if $u.spill.enabled }}
+    spill-enabled=true
+    spiller-spill-path=/var/trino/spill
+    max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    query-max-spill-per-node={{ $u.spill.maxUsedSpacePerNode }}
+    {{- end }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+  {{- if $u.faultTolerance.enabled }}
+  exchange-manager.properties: |
+    exchange-manager.name=filesystem
+    exchange.base-directories=s3://{{ $u.faultTolerance.exchangeBucket }}
+    exchange.s3.endpoint={{ $s3 }}
+    exchange.s3.region={{ $st.region }}
+    exchange.s3.path-style-access=true
+    exchange.s3.aws-access-key=${ENV:CAIRN_TRINO_EXCHANGE_ACCESS_KEY}
+    exchange.s3.aws-secret-key=${ENV:CAIRN_TRINO_EXCHANGE_SECRET_KEY}
+  {{- end }}
   {{- if $u.resourceGroups }}
   resource-groups.properties: |
     resource-groups.configuration-manager=file
@@ -103,6 +133,11 @@ data:
     s3.endpoint={{ $s3 }}
     s3.region={{ $st.region }}
     s3.path-style-access=true
+    {{- if $u.cache.enabled }}
+    fs.cache.enabled=true
+    fs.cache.directories=/var/trino/cache
+    fs.cache.max-sizes={{ $u.cache.maxSize }}
+    {{- end }}
     {{- if $cat.vendRole }}
     # No store key: the catalog hands Trino temporary keys for one table at a time.
     iceberg.rest-catalog.vended-credentials-enabled=true
@@ -180,6 +215,14 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.faultTolerance.enabled }}
+            - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.accessKeyKey }} }
+            - name: CAIRN_TRINO_EXCHANGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.secretKeyKey }} }
+            {{- end }}
             {{- if $u.sso.enabled }}
             - name: CAIRN_TRINO_OAUTH_SECRET
               valueFrom:
@@ -233,6 +276,18 @@ spec:
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
               readOnly: true
+            {{- if $u.faultTolerance.enabled }}
+            - name: config
+              mountPath: /etc/trino/exchange-manager.properties
+              subPath: exchange-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.spill.enabled }}
+            - { name: spill, mountPath: /var/trino/spill }
+            {{- end }}
+            {{- if $u.cache.enabled }}
+            - { name: cache, mountPath: /var/trino/cache }
+            {{- end }}
             {{- if $tls }}
             - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
             {{- end }}
@@ -245,6 +300,14 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $u.spill.enabled }}
+        - name: spill
+          emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
+        {{- end }}
+        {{- if $u.cache.enabled }}
+        - name: cache
+          emptyDir: { sizeLimit: {{ $u.cache.sizeLimit }} }
+        {{- end }}
         {{- if $tls }}
         - name: tls-src
           secret: { secretName: {{ $tls }} }
@@ -309,6 +372,14 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.faultTolerance.enabled }}
+            - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.accessKeyKey }} }
+            - name: CAIRN_TRINO_EXCHANGE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.faultTolerance.exchangeKeySecret.name }}, key: {{ $u.faultTolerance.exchangeKeySecret.secretKeyKey }} }
+            {{- end }}
           lifecycle:
             preStop:
               # Stop taking work, finish what runs, then leave (Trino's graceful shutdown).
@@ -343,6 +414,18 @@ spec:
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
               readOnly: true
+            {{- if $u.faultTolerance.enabled }}
+            - name: config
+              mountPath: /etc/trino/exchange-manager.properties
+              subPath: exchange-manager.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.spill.enabled }}
+            - { name: spill, mountPath: /var/trino/spill }
+            {{- end }}
+            {{- if $u.cache.enabled }}
+            - { name: cache, mountPath: /var/trino/cache }
+            {{- end }}
           resources:
             {{- toYaml $u.resources | nindent 12 }}
           securityContext:
@@ -352,6 +435,14 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $u.spill.enabled }}
+        - name: spill
+          emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
+        {{- end }}
+        {{- if $u.cache.enabled }}
+        - name: cache
+          emptyDir: { sizeLimit: {{ $u.cache.sizeLimit }} }
+        {{- end }}
       {{- with $u.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

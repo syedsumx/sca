@@ -692,6 +692,29 @@ cairn:
       maxWorkers: 10
       targetCPUUtilizationPercentage: 70
     gracefulShutdownSeconds: 120
+    # Fault-tolerant execution: a worker lost mid-query has its tasks run again elsewhere instead of
+    # failing the query. Intermediate data is staged in a Cairn Store bucket (create it, and give Trino
+    # a key that reaches only that bucket: exchangeKeySecret). retryPolicy TASK (retries tasks, for long
+    # batch queries) or QUERY (reruns the whole query).
+    faultTolerance:
+      enabled: false
+      retryPolicy: TASK
+      exchangeBucket: trino-exchange
+      exchangeKeySecret:
+        name: cairn-trino-exchange
+        accessKeyKey: access-key
+        secretKeyKey: secret-key
+    # Spill: joins, aggregations and sorts larger than memory use local disk (an emptyDir).
+    spill:
+      enabled: false
+      maxUsedSpacePerNode: 20GB
+      sizeLimit: 25Gi
+    # File cache: lakehouse data and metadata files kept on local disk (an emptyDir), so repeated reads
+    # skip the store.
+    cache:
+      enabled: false
+      maxSize: 10GB
+      sizeLimit: 12Gi
     # Resource groups: queues and limits per kind of work. Cairn's own queries (the SQL editor,
     # Ask-your-data and the catalog crawler, source "cairn"), pipelines (source airflow, dbt or etl…)
     # and everyone else, each person in their own group. Trino's resource-groups JSON; {} turns it off.

@@ -266,7 +266,8 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.networkPolicy.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.allowInsecureHttp=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
-              "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls"; do
+              "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
