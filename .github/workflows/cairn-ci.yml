@@ -86,6 +86,8 @@ jobs:
       - name: Hadoop S3A check (hadoop-aws 3.4)
         working-directory: cairn/store/hadoop-check
         run: ./gradlew --no-daemon -q installDist
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other)
+        run: grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
       - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, Hadoop S3A, crash safety)
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -118,6 +120,8 @@ jobs:
           python-version: "3.12"
       - name: Build
         run: cargo build --release --locked
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other)
+        run: grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
       - name: Conformance on PostgreSQL metadata
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -275,7 +279,8 @@ jobs:
   # the images (~10 GB) are not worth moving between jobs.
   stack:
     needs: [python, ui, java]
-    runs-on: ubuntu-latest
+    # Playwright 1.56 installs Chromium on Ubuntu 24.04, not on 26.04 (ubuntu-latest).
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
       contents: read
