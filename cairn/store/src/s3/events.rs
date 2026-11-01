@@ -345,7 +345,7 @@ impl Server {
 
     /// Delivers what is in the outbox, once. Returns the number of events delivered.
     pub async fn deliver_events(&self) -> usize {
-        if self.delivery.is_none() && self.replicator.is_none() && self.remotes.is_empty() {
+        if self.delivery.is_none() && self.replicator.is_none() && self.remotes.is_empty() && self.sinks.is_none() {
             return 0;
         }
         let batch = match blocking(|| self.eng.outbox(500)) {
@@ -372,7 +372,13 @@ impl Server {
                 (t.to_string(), b.to_string())
             });
             let mount = ent.target.strip_prefix(engine::MOUNT).map(str::to_string);
+            let journal = ent.target.strip_prefix(engine::JOURNAL).map(str::to_string);
             let result: Result<(), (bool, String)> = match (&replication, &mount) {
+                _ if journal.is_some() => match self.journal_backup(journal.as_deref().unwrap(), seq, &ent).await {
+                    Ok(()) => Ok(()),
+                    Err(super::replication::Failure::Permanent(m)) => Err((true, m)),
+                    Err(super::replication::Failure::Retry(m)) => Err((false, m)),
+                },
                 (_, Some(remote)) => match self.write_back(remote, &ent).await {
                     Ok(()) => Ok(()),
                     Err(super::replication::Failure::Permanent(m)) => Err((true, m)),

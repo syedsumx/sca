@@ -382,6 +382,8 @@ impl ReplConfig {
 pub const REPLICATE: &str = "@replicate:";
 /// Outbox targets of write-back mounts: "@mount:<remote>".
 pub const MOUNT: &str = "@mount:";
+/// Outbox targets of continuous backups: "@backup:<sink>".
+pub const JOURNAL: &str = "@backup:";
 
 /// An event waiting in the outbox.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -619,6 +621,8 @@ pub struct BackupReport {
     pub blobs_linked: u64,
     pub audit_entries: u64,
     pub millis: u64,
+    /// The last change sequence (outbox) the snapshot includes: continuous backups replay what follows.
+    pub journal_seq: u64,
 }
 
 /// Writes the bytes of one segment. `seal` makes them durable; dropping an unsealed writer discards them.
@@ -1261,6 +1265,13 @@ impl Engine {
         if (event.starts_with("ObjectCreated:") || event.ends_with("DeleteMarkerCreated")) && !ev.lifecycle && ev.replica.is_none() {
             Self::queue_replication(tx, bucket, &name, o, ev)?;
         }
+        // Continuous backup: every object change, whatever made it, goes to the sink's journal.
+        if event.starts_with("ObjectCreated:") || event.starts_with("ObjectRemoved:") || event.starts_with("LifecycleExpiration:") {
+            if let Some(doc) = tx.open_table(CONFIG)?.get(("", "backup-journal"))?.map(|v| v.value().to_vec()) {
+                let sink = String::from_utf8_lossy(&doc).into_owned();
+                Self::outbox_in(tx, bucket, &format!("{JOURNAL}{sink}"), "", &name, o, ev)?;
+            }
+        }
         // Write-back mounts: changes made here go to the remote (not those that came from it).
         if (event.starts_with("ObjectCreated:") || event.starts_with("ObjectRemoved:")) && ev.replica.is_none() {
             if let Some(doc) = tx.open_table(CONFIG)?.get((bucket, "remote"))?.map(|v| v.value().to_vec()) {
@@ -1411,6 +1422,39 @@ impl Engine {
             self.collect();
         }
         Ok(replaced)
+    }
+
+    /// Turns the continuous-backup journal on (Some(sink)) or off. Store-wide, in the index, so every
+    /// write records its change in the same transaction.
+    pub fn set_journal(&self, sink: Option<&str>) -> Result<()> {
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(CONFIG)?;
+            match sink {
+                Some(s) => t.insert(("", "backup-journal"), s.as_bytes())?,
+                None => t.remove(("", "backup-journal"))?,
+            };
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Restores one journalled version: `obj`'s segments must name blobs already on this disk. Creates
+    /// the bucket if needed; installs the object as the key's current version.
+    pub fn journal_put(&self, bucket: &str, obj: Object) -> Result<()> {
+        match self.create_bucket(bucket) {
+            Ok(()) | Err(Error::BucketExists) => {}
+            Err(e) => return Err(e),
+        }
+        self.put_object_ev(bucket, obj, &Condition::default(), &Ev { replica: None, ..Default::default() }).map(|_| ())
+    }
+
+    /// Replays a journalled delete of a key's current version.
+    pub fn journal_delete(&self, bucket: &str, key: &str) -> Result<()> {
+        match self.delete_object_ev(bucket, key, None, &Ev::default()) {
+            Ok(_) | Err(Error::NoSuchBucket) | Err(Error::NoSuchKey) => Ok(()),
+            Err(e) => Err(e),
+        }
     }
 
     /// A bucket's current objects (not old versions or delete markers).
@@ -3095,6 +3139,7 @@ impl Engine {
         let mut blobs: HashSet<String> = HashSet::new();
         {
             let r = self.db.begin_read()?;
+            rep.journal_seq = r.open_table(META)?.get("outbox_seq")?.map(|v| v.value()).unwrap_or(0);
             let w = out.begin_write()?;
             macro_rules! copy {
                 ($t:expr, $kty:ty, $vty:ty, $on:expr) => {{

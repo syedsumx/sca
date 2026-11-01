@@ -169,6 +169,10 @@ spec:
             {{- if $u.backupSinks.secretName }}
             - name: CAIRN_STORE_BACKUP_SINKS_FILE
               value: /etc/cairn-store-sinks/sinks.json
+            {{- with $u.backupSinks.continuous }}
+            - name: CAIRN_STORE_BACKUP_CONTINUOUS
+              value: {{ . | quote }}
+            {{- end }}
             {{- if $u.backupSinks.schedule }}
             - name: CAIRN_STORE_BACKUP_SINK_SCHEDULE
               value: {{ $u.backupSinks.schedule | quote }}

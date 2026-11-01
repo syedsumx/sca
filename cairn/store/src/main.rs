@@ -43,6 +43,7 @@
 //! CAIRN_STORE_CA_FILE           extra CA certificates trusted for outbound HTTPS (webhooks, PDP)
 //! CAIRN_STORE_BACKUP_DIR        where online backups (admin API: POST /-/admin/v1/backups) are written (off when empty)
 //! CAIRN_STORE_BACKUP_SINKS_FILE  S3-compatible backup sinks: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_BACKUP_CONTINUOUS  journal every object change to this sink, for point-in-time restores (off when empty)
 //! CAIRN_STORE_BACKUP_SINK_SCHEDULE  back up to this sink on a schedule (off when empty) ...
 //! CAIRN_STORE_BACKUP_SINK_INTERVAL / _KEEP  ... every N seconds (86400), keeping the newest N scheduled ones (7)
 //! CAIRN_STORE_REMOTES_FILE      remote buckets that can be mounted into local ones: [{"id", "endpoint", "bucket", "prefix", "access_key", "secret_key", "region"}]
@@ -313,7 +314,7 @@ fn main() {
         "restore-backup" => {
             // Downloads a backup from a sink into a new data directory: restore-backup <sink> <name> <dir>.
             let (Some(sink), Some(name), Some(dir)) = (rest.first(), rest.get(1), rest.get(2)) else {
-                eprintln!("usage: cairn-store restore-backup <sink> <name> <dir>   (sinks: CAIRN_STORE_BACKUP_SINKS_FILE)");
+                eprintln!("usage: cairn-store restore-backup <sink> <name|latest> <dir> [--until <RFC 3339 time>]   (sinks: CAIRN_STORE_BACKUP_SINKS_FILE)");
                 std::process::exit(2);
             };
             let specs = backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e));
@@ -322,7 +323,19 @@ fn main() {
             let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap_or_else(|e| fail("runtime", e));
             let _enter = rt.enter();
             let remote = s3::remote::Remote::new(spec).unwrap_or_else(|e| fail("restore-backup", e));
-            let out = s3::sinks::restore(&remote, name, std::path::Path::new(dir)).unwrap_or_else(|e| fail("restore-backup", e));
+            // restore-backup <sink> <name|latest> <dir> [--until <RFC 3339 time>]
+            let until = rest.iter().position(|a| a == "--until").and_then(|i| rest.get(i + 1)).map(|t| {
+                time::OffsetDateTime::parse(t, &time::format_description::well_known::Rfc3339)
+                    .map(|t| (t.unix_timestamp_nanos() / 1_000_000) as u64)
+                    .unwrap_or_else(|e| fail("--until (an RFC 3339 time, e.g. 2026-11-01T12:00:00Z)", e))
+            });
+            let continuous = until.is_some() || name == "latest";
+            let out = if continuous {
+                s3::sinks::restore_until(&remote, (name != "latest").then_some(name.as_str()), until, std::path::Path::new(dir))
+            } else {
+                s3::sinks::restore(&remote, name, std::path::Path::new(dir))
+            }
+            .unwrap_or_else(|e| fail("restore-backup", e));
             println!("{out}");
             std::process::exit(0);
         }
@@ -471,6 +484,12 @@ async fn serve(addr: String, data: String) {
     tokio::spawn(server.clone().run_cluster());
     tokio::spawn(server.clone().run_queue_retention(Duration::from_secs(num("CAIRN_STORE_QUEUE_RETENTION_INTERVAL", "60").max(1))));
     tokio::spawn(server.clone().run_remote_sync(Duration::from_secs(num("CAIRN_STORE_REMOTE_SYNC_INTERVAL", "60").max(1))));
+    // Continuous backup: every object change goes to the sink's journal (point-in-time restore).
+    let continuous = env("CAIRN_STORE_BACKUP_CONTINUOUS", "");
+    if !continuous.is_empty() && !backup_sinks().unwrap_or_default().iter().any(|s| s.id == continuous) {
+        fail("CAIRN_STORE_BACKUP_CONTINUOUS", format!("no backup sink {continuous} in CAIRN_STORE_BACKUP_SINKS_FILE"));
+    }
+    eng.set_journal((!continuous.is_empty()).then_some(continuous.as_str())).unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_CONTINUOUS", e));
     let sink_auto = env("CAIRN_STORE_BACKUP_SINK_SCHEDULE", "");
     if !sink_auto.is_empty() {
         if !backup_sinks().unwrap_or_default().iter().any(|s| s.id == sink_auto) {

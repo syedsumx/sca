@@ -43,6 +43,38 @@ pub struct Manifest {
     pub blobs: BTreeMap<String, u64>,
     /// Pack id -> length backed up.
     pub packs: BTreeMap<String, u64>,
+    /// The last change the snapshot includes (continuous backups replay the journal after it).
+    #[serde(default)]
+    pub journal_seq: u64,
+}
+
+/// One journalled change (continuous backup): `journal/<seq>.json`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JournalRecord {
+    pub seq: u64,
+    pub time: u64,
+    /// "put" or "delete".
+    pub op: String,
+    pub bucket: String,
+    pub key: String,
+    /// put: the version, its segments naming blobs in the sink (`sink_blobs`, same order).
+    #[serde(default)]
+    pub object: Option<engine::Object>,
+    #[serde(default)]
+    pub sink_blobs: Vec<String>,
+}
+
+/// The sink name of a blob's bytes (packed and cluster ids are not plain file names).
+fn sink_name(id: &str) -> String {
+    if id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return id.to_string();
+    }
+    use sha2::Digest;
+    format!("j{}", hex::encode(&sha2::Sha256::digest(id.as_bytes())[..20]))
+}
+
+fn journal_key(seq: u64) -> String {
+    format!("journal/{seq:020}.json")
 }
 
 pub struct Sinks {
@@ -119,6 +151,7 @@ impl Server {
                 version: crate::VERSION.into(),
                 objects: rep.objects,
                 versions: rep.versions,
+                journal_seq: rep.journal_seq,
                 ..Default::default()
             };
             let (mut uploaded, mut bytes) = (0u64, 0u64);
@@ -163,6 +196,56 @@ impl Server {
         Ok(out)
     }
 
+    /// Ships one change to the sink's journal (continuous backup): the version's blobs first (each once),
+    /// then the record, so a record never names a missing blob.
+    pub(crate) async fn journal_backup(&self, sink: &str, seq: u64, ent: &engine::OutboxEntry) -> Result<(), super::replication::Failure> {
+        use super::replication::Failure;
+        let r = self.sink(sink).map_err(|e| Failure::Permanent(e.message.to_string()))?;
+        let put = ent.event.contains("ObjectCreated");
+        let mut rec = JournalRecord {
+            seq,
+            time: ent.modified.max(ent.time),
+            op: if put { "put" } else { "delete" }.into(),
+            bucket: ent.bucket.clone(),
+            key: ent.key.clone(),
+            object: None,
+            sink_blobs: vec![],
+        };
+        if put {
+            let version = if ent.version.is_empty() { "null" } else { ent.version.as_str() };
+            let obj = match tokio::task::block_in_place(|| self.eng.get_version(&ent.bucket, &ent.key, Some(version))) {
+                Ok(o) if !o.delete_marker => o,
+                _ => return Ok(()), // replaced or deleted since: its own journal entry follows
+            };
+            let _hold = self.eng.hold_collection();
+            for s in &obj.segments {
+                if !s.tier.is_empty() {
+                    rec.sink_blobs.push(String::new()); // stays in its tier
+                    continue;
+                }
+                let name = sink_name(&s.blob);
+                let key = format!("blobs/{name}");
+                let res = tokio::task::block_in_place(|| -> std::io::Result<()> {
+                    if r.head(&key)?.is_some() {
+                        return Ok(());
+                    }
+                    let (reader, len) = self.eng.blob_reader(&s.blob).map_err(|e| std::io::Error::other(e.to_string()))?;
+                    r.put(&key, reader, len, &[]).map(|_| ())
+                });
+                match res {
+                    Ok(()) => rec.sink_blobs.push(name),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()), // collected meanwhile: superseded
+                    Err(e) => return Err(Failure::Retry(e.to_string())),
+                }
+            }
+            rec.object = Some(obj);
+        }
+        let body = serde_json::to_vec(&rec).map_err(|e| Failure::Permanent(e.to_string()))?;
+        tokio::task::block_in_place(|| r.put_bytes(&journal_key(seq), body, "application/json"))
+            .map_err(|e| Failure::Retry(e.to_string()))?;
+        Ok(())
+    }
+
     /// The complete backups in a sink, oldest first.
     pub(crate) fn sink_backups(&self, id: &str) -> Result<Value, ApiError> {
         let r = self.sink(id)?;
@@ -191,7 +274,17 @@ impl Server {
         r.delete(&format!("backups/{name}/manifest.json")).map_err(io)?;
         r.delete(&format!("backups/{name}/index.redb")).map_err(io)?;
         let keep = manifests(r).map_err(io)?;
-        let blobs: HashSet<String> = keep.iter().flat_map(|m| m.blobs.keys().map(|b| format!("blobs/{b}"))).collect();
+        let mut blobs: HashSet<String> = keep.iter().flat_map(|m| m.blobs.keys().map(|b| format!("blobs/{b}"))).collect();
+        // The journal before the oldest remaining backup is of no use; what follows it keeps its blobs.
+        let from = keep.iter().map(|m| m.journal_seq).min().unwrap_or(u64::MAX);
+        for l in r.list("journal/", "").map_err(io)?.0 {
+            let seq: u64 = l.key.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
+            if seq <= from {
+                r.delete(&l.key).map_err(io)?;
+            } else if let Ok(rec) = serde_json::from_slice::<JournalRecord>(&r.get_bytes(&l.key).map_err(io)?) {
+                blobs.extend(rec.sink_blobs.into_iter().filter(|b| !b.is_empty()).map(|b| format!("blobs/{b}")));
+            }
+        }
         let packs: HashSet<String> = keep.iter().flat_map(|m| m.packs.iter().map(|(p, l)| format!("packs/{p}.{l}"))).collect();
         let (mut deleted, mut freed) = (0u64, 0u64);
         for (prefix, live) in [("blobs/", &blobs), ("packs/", &packs)] {
@@ -254,6 +347,69 @@ impl Server {
             .await;
         }
     }
+}
+
+/// Point-in-time restore: the newest backup made at or before `until` (or the backup `name`), then every
+/// journalled change after it up to `until` (None: all of them). Returns the restore's report.
+pub fn restore_until(r: &Remote, name: Option<&str>, until: Option<u64>, dir: &Path) -> Result<Value, String> {
+    let all = manifests(r).map_err(|e| e.to_string())?;
+    let base = match name {
+        Some(n) => all.iter().find(|m| m.name == n).ok_or_else(|| format!("no backup {n}"))?,
+        None => all
+            .iter()
+            .filter(|m| until.is_none_or(|t| m.created <= t))
+            .max_by_key(|m| m.created)
+            .ok_or("no backup was made before that time")?,
+    };
+    if until.is_some_and(|t| base.created > t) {
+        return Err(format!("backup {} was made after that time", base.name));
+    }
+    let mut out = restore(r, &base.name, dir)?;
+    let eng = Engine::open(dir, true).map_err(|e| e.to_string())?;
+    eng.set_journal(None).map_err(|e| e.to_string())?; // the restored store does not write the old journal
+    let mut records: Vec<String> = r.list("journal/", "").map_err(|e| e.to_string())?.0.into_iter().map(|l| l.key).collect();
+    records.sort();
+    let (mut applied, mut last) = (0u64, base.created);
+    for k in records {
+        let seq: u64 = k.trim_start_matches("journal/").trim_end_matches(".json").parse().unwrap_or(0);
+        if seq <= base.journal_seq {
+            continue;
+        }
+        let rec: JournalRecord =
+            serde_json::from_slice(&r.get_bytes(&k).map_err(|e| format!("{k}: {e}"))?).map_err(|e| format!("{k}: {e}"))?;
+        if until.is_some_and(|t| rec.time > t) {
+            break;
+        }
+        match (rec.op.as_str(), rec.object) {
+            ("put", Some(mut o)) => {
+                for (s, name) in o.segments.iter_mut().zip(&rec.sink_blobs) {
+                    if s.tier.is_empty() {
+                        let mut w = eng.new_blob().map_err(|e| e.to_string())?;
+                        let mut src = r.get(&format!("blobs/{name}"), 0).map_err(|e| format!("blobs/{name}: {e}"))?;
+                        let mut buf = vec![0u8; 256 << 10];
+                        loop {
+                            let n = std::io::Read::read(&mut src, &mut buf).map_err(|e| e.to_string())?;
+                            if n == 0 {
+                                break;
+                            }
+                            w.write(&buf[..n]).map_err(|e| e.to_string())?;
+                        }
+                        let seg = w.seal().map_err(|e| e.to_string())?;
+                        s.blob = seg.blob; // the bytes as stored (encrypted, compressed): nonce and table stay
+                    }
+                }
+                o.replication_status.clear();
+                eng.journal_put(&rec.bucket, o).map_err(|e| format!("{k}: {e}"))?;
+            }
+            _ => eng.journal_delete(&rec.bucket, &rec.key).map_err(|e| format!("{k}: {e}"))?,
+        }
+        applied += 1;
+        last = rec.time;
+    }
+    out["base"] = base.name.clone().into();
+    out["changes_applied"] = applied.into();
+    out["restored_to"] = super::iso_time(last).into();
+    Ok(out)
 }
 
 /// Downloads backup `name` from a sink into `dir` (which must not exist, or be empty): a data directory

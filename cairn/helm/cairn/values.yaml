@@ -509,6 +509,7 @@ cairn:
     backupSinks:
       secretName: ""
       schedule: ""            # a sink id: back up there every intervalSeconds, keeping the newest `keep`
+      continuous: ""          # a sink id: journal every object change there, for point-in-time restores
       intervalSeconds: 86400
       keep: 7
     # Compress new object data at rest: off or zstd (1 MiB chunks, so ranged reads stay cheap).

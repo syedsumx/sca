@@ -167,3 +167,104 @@ def test_errors_and_cli(setup, custom_store):
     # A sink that cannot be reached: 502, nothing written.
     sink.stop(kill=True)
     assert admin(src, "POST", "backups", {"name": "unreachable", "sink": "offsite"})[0] == 502
+
+
+def pending(st):
+    for line in requests.get(f"{st.endpoint}/-/metrics", timeout=5).text.splitlines():
+        if line.startswith("cairn_store_events_pending "):
+            return int(line.split()[1])
+    return -1
+
+
+def drained(st, timeout=30):
+    end = time.time() + timeout
+    while time.time() < end:
+        if pending(st) == 0:
+            return
+        time.sleep(0.2)
+    raise AssertionError("the journal did not catch up")
+
+
+def iso(ms):
+    import datetime
+
+    return datetime.datetime.fromtimestamp(ms / 1000, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def test_continuous_backup_and_point_in_time_restore(setup, tmp_path, binary):
+    sink, sinks, source = setup
+    src = source(CAIRN_STORE_BACKUP_CONTINUOUS="offsite")
+    s3 = src.client()
+    s3.create_bucket(Bucket="pitr")
+    s3.put_object(Bucket="pitr", Key="a.txt", Body=b"a, before the backup")
+    s3.put_object(Bucket="pitr", Key="b.txt", Body=b"b version 1")
+    assert admin(src, "POST", "backups", {"name": "base", "sink": "offsite"})[0] == 201
+    big = os.urandom(300_000)
+    s3.put_object(Bucket="pitr", Key="c.bin", Body=big)  # after the backup: only in the journal
+    drained(src)
+    time.sleep(0.05)
+    t1 = int(time.time() * 1000)
+    time.sleep(0.05)
+    s3.delete_object(Bucket="pitr", Key="a.txt")
+    s3.put_object(Bucket="pitr", Key="b.txt", Body=b"b version 2")
+    s3.create_bucket(Bucket="later")
+    s3.put_object(Bucket="later", Key="new.txt", Body=b"made after t1")
+    drained(src)
+    assert len(sink_keys(sink, "cairn/journal/")) >= 5
+    env = {**os.environ, "CAIRN_STORE_BACKUP_SINKS_FILE": str(sinks)}
+
+    def restore(*args):
+        out = subprocess.run([binary, "restore-backup", "offsite", *args], env=env, capture_output=True, text=True, timeout=120)
+        assert out.returncode == 0, out.stderr
+        return json.loads(out.stdout)
+
+    def started(d):
+        return Store(binary, str(d), _free_port(), env={"CAIRN_STORE_META": "", "CAIRN_STORE_MASTER_KEY": MASTER}).start()
+
+    # As of t1: the backup, plus c.bin from the journal; not what came later.
+    rep = restore("latest", str(tmp_path / "at-t1"), "--until", iso(t1))
+    assert rep["base"] == "base" and rep["changes_applied"] >= 1
+    st = started(tmp_path / "at-t1")
+    try:
+        r3 = st.client()
+        assert r3.get_object(Bucket="pitr", Key="a.txt")["Body"].read() == b"a, before the backup"
+        assert r3.get_object(Bucket="pitr", Key="b.txt")["Body"].read() == b"b version 1"
+        assert r3.get_object(Bucket="pitr", Key="c.bin")["Body"].read() == big  # encrypted at the source, readable here
+        assert "later" not in [b["Name"] for b in r3.list_buckets()["Buckets"]]
+    finally:
+        st.stop()
+    # The latest state: every change replayed.
+    restore("latest", str(tmp_path / "now"))
+    st = started(tmp_path / "now")
+    try:
+        r3 = st.client()
+        assert "Contents" not in r3.list_objects_v2(Bucket="pitr", Prefix="a.txt")
+        assert r3.get_object(Bucket="pitr", Key="b.txt")["Body"].read() == b"b version 2"
+        assert r3.get_object(Bucket="later", Key="new.txt")["Body"].read() == b"made after t1"
+        # The restored store does not write into the old journal.
+        before = len(sink_keys(sink, "cairn/journal/"))
+        r3.put_object(Bucket="pitr", Key="restored-write", Body=b"x")
+        time.sleep(1)
+        assert len(sink_keys(sink, "cairn/journal/")) == before
+    finally:
+        st.stop()
+    # Before the first backup there is nothing to start from.
+    out = subprocess.run([binary, "restore-backup", "offsite", "latest", str(tmp_path / "too-early"), "--until", "2020-01-01T00:00:00Z"],
+                         env=env, capture_output=True, text=True, timeout=60)
+    assert out.returncode != 0
+    # A newer backup makes the older journal prunable; its blobs stay while the journal after it needs them.
+    assert admin(src, "POST", "backups", {"name": "second", "sink": "offsite"})[0] == 201
+    journal_before = len(sink_keys(sink, "cairn/journal/"))
+    assert admin(src, "DELETE", "backups/base?sink=offsite")[0] == 200
+    assert len(sink_keys(sink, "cairn/journal/")) < journal_before
+    restore("latest", str(tmp_path / "after-prune"))
+    st = started(tmp_path / "after-prune")
+    try:
+        assert st.client().get_object(Bucket="pitr", Key="c.bin")["Body"].read() == big
+    finally:
+        st.stop()
+
+
+def test_continuous_backup_needs_a_known_sink(custom_store):
+    with pytest.raises(RuntimeError):
+        custom_store({"CAIRN_STORE_BACKUP_CONTINUOUS": "nowhere"})
