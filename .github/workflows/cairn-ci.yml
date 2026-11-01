@@ -224,17 +224,54 @@ jobs:
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
-      - name: dbt on the lakehouse (the cairn/dbt image, as shipped)
+
+  # dbt and Airflow 3 on the lakehouse, as shipped (the cairn/dbt and cairn/airflow images), against a real
+  # Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies, run recording, lineage
+  # and Airflow sign-in through Cairn.
+  pipelines:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+          df -h /
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog and the store
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - name: Build the cairn/dbt and cairn/airflow images; pull Trino
+        working-directory: cairn
+        run: |
+          docker build -q -f docker/dbt.Dockerfile -t cairn/dbt:ci .
+          docker build -q -f docker/airflow.Dockerfile -t cairn/airflow:ci .
+          docker pull -q trinodb/trino:476
+      - name: dbt and Airflow end to end
         working-directory: cairn
         env:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
           CAIRN_DBT_IMAGE: cairn/dbt:ci
+          CAIRN_AIRFLOW_IMAGE: cairn/airflow:ci
         run: |
-          docker build -q -f docker/dbt.Dockerfile -t cairn/dbt:ci .
-          pip install "dbt-core==1.12.6" "dbt-trino==1.11.0"  # the test reads dbt's own manifest format
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py | tee "$RUNNER_TEMP/dbt.log"
-          ! grep -q "skipped" "$RUNNER_TEMP/dbt.log"
+          pip install -e ".[server,test,trino]" "dbt-core==1.12.6" "dbt-trino==1.11.0"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_airflow_e2e.py | tee "$RUNNER_TEMP/pipelines.log"
+          # Skipped is not passed: every pipeline test must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
 
   ui:
     runs-on: ubuntu-latest
@@ -305,6 +342,11 @@ jobs:
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
+          curl -fsSL -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          tar xzf /tmp/airflow-chart.tgz -C /tmp
+          helm template airflow /tmp/airflow -f deploy/airflow/values-cairn.yaml \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           # A store cluster without TLS between its nodes is refused unless asked for explicitly.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
               --set cairn.store.metadata.secretName=cairn-store-meta >/dev/null 2>&1

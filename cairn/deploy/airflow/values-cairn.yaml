@@ -1,0 +1,92 @@
+# Airflow 3 on the Cairn lakehouse, with the official Apache Airflow chart (1.20+):
+#
+#   helm install airflow apache-airflow/airflow --version 1.20.0 -f deploy/airflow/values-cairn.yaml
+#
+# Uses the cairn/airflow image (Airflow 3.3 with the Cairn provider, FAB and OpenLineage, and `cairn dbt`
+# in its own virtualenv). Before installing, create these Secrets in Airflow's namespace:
+#
+#   airflow-metadata     connection: postgresql://airflow:...@db.example.com:5432/airflow   (external PostgreSQL)
+#   airflow-fernet       fernet-key: <python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())">
+#   airflow-api-secret   api-secret-key: <random>
+#   airflow-jwt          jwt-secret: <random>
+#   airflow-cairn        oauth-secret:  the secret Cairn has for client "airflow" (CAIRN_AIRFLOW_OAUTH_SECRET)
+#                        connection:    {"conn_type": "cairn", "host": "https://cairn.example.com/cairn/api",
+#                                        "password": "<svc-airflow's Cairn token>",
+#                                        "extra": {"trino_host": "cairn-trino.cairn.svc", "trino_port": 8443,
+#                                                  "trino_catalog": "lakehouse", "ca_file": "/etc/cairn/ca.crt"}}
+#                        openlineage:   {"type": "http", "url": "https://cairn.example.com/cairn/api",
+#                                        "endpoint": "openlineage/api/v1/lineage",
+#                                        "auth": {"type": "api_key", "apiKey": "<svc-airflow's Cairn token>"}}
+#   cairn-trino-ca       ca.crt: the CA of Cairn's and Trino's certificates
+#
+# and on Cairn's side set CAIRN_AIRFLOW_OAUTH_SECRET (the same oauth-secret) and
+# CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS=https://airflow.example.com/auth/oauth-authorized/cairn.
+
+defaultAirflowRepository: registry.example.com/cairn/airflow
+defaultAirflowTag: "0.1.0"
+airflowVersion: "3.3.2"
+
+# Every task in its own pod: no shared workers, resources per task.
+executor: KubernetesExecutor
+
+postgresql:
+  enabled: false
+data:
+  metadataSecretName: airflow-metadata
+fernetKeySecretName: airflow-fernet
+apiSecretKeySecretName: airflow-api-secret
+jwtSecretName: airflow-jwt
+
+# People sign in through Cairn only: no local admin account.
+createUserJob:
+  enabled: false
+
+env:
+  - name: CAIRN_URL
+    value: https://cairn.example.com/cairn/api
+  - name: CAIRN_PUBLIC_URL
+    value: https://cairn.example.com
+  - name: CAIRN_CA_FILE
+    value: /etc/cairn/ca.crt
+  # Cairn group -> Airflow roles; anyone else signs in with no access (Public).
+  - name: CAIRN_AIRFLOW_ROLES
+    value: "cairn-admins=Admin;data-platform=Op;data-engineers=User;analysts=Viewer"
+  - name: CAIRN_DBT_SCHEMA
+    value: analytics
+  - name: AIRFLOW__API__BASE_URL
+    value: https://airflow.example.com
+
+secret:
+  - envName: CAIRN_AIRFLOW_OAUTH_SECRET
+    secretName: airflow-cairn
+    secretKey: oauth-secret
+  - envName: AIRFLOW_CONN_CAIRN_DEFAULT
+    secretName: airflow-cairn
+    secretKey: connection
+  - envName: AIRFLOW__OPENLINEAGE__TRANSPORT
+    secretName: airflow-cairn
+    secretKey: openlineage
+
+volumes:
+  - name: cairn-ca
+    secret:
+      secretName: cairn-trino-ca
+volumeMounts:
+  - name: cairn-ca
+    mountPath: /etc/cairn
+    readOnly: true
+
+apiServer:
+  apiServerConfig: |
+    # Sign-in through Cairn (FAB auth manager, OAuth2): see cairn_airflow.auth.
+    from cairn_airflow.auth import configure
+
+    configure(globals())
+
+# DAGs from git (git-sync); dbt projects can live in the same repository.
+dags:
+  gitSync:
+    enabled: true
+    repo: https://git.example.com/data/airflow-dags.git
+    branch: main
+    subPath: dags

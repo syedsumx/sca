@@ -90,7 +90,9 @@ class TrinoTokens:
         return {"keys": [{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": _int_b64(n.n), "e": _int_b64(n.e)}]}
 
     # ---- tokens -------------------------------------------------------------------------------
-    def mint(self, actor: str, ttl: int | None = None) -> dict:
+    def mint(self, actor: str, ttl: int | None = None, audience: str = AUDIENCE, groups: tuple[str, ...] = ()) -> dict:
+        """A signed token for ``actor``. ``audience`` names the one service that accepts it (Trino by default;
+        another OAuth client's tokens are refused by Trino); ``groups`` go in a ``groups`` claim."""
         from cryptography.hazmat.primitives import hashes
         from cryptography.hazmat.primitives.asymmetric import padding
 
@@ -103,8 +105,10 @@ class TrinoTokens:
         key, kid = self._load()
         now = int(time.time())
         header = {"alg": "RS256", "typ": "JWT", "kid": kid}
-        claims = {"iss": self.issuer, "aud": AUDIENCE, "sub": user, "iat": now, "nbf": now - 30, "exp": now + ttl,
+        claims = {"iss": self.issuer, "aud": audience, "sub": user, "iat": now, "nbf": now - 30, "exp": now + ttl,
                   "jti": uuid.uuid4().hex}
+        if groups:
+            claims["groups"] = [g.removeprefix("urn:li:corpGroup:") for g in groups]
         signing = _b64(json.dumps(header, separators=(",", ":")).encode()) + "." + \
             _b64(json.dumps(claims, separators=(",", ":")).encode())
         sig = key.sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256())

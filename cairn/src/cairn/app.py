@@ -216,7 +216,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                                               lineage=services.openlineage, tokens=services.trino_tokens,
                                               current_principal=cp, outbox=services.trino_outbox,
                                               usage=services.trino_usage, catalog_sync=services.trino_catalog,
-                                              authorize=authz, oauth=services.trino_oauth))
+                                              authorize=authz, oauth=services.trino_oauth,
+                                              groups_of=lambda urn: services.attributes.subject(urn).get("groups", [])))
     if services.dbt_runs is not None:
         from cairn.pipelines.dbt import build_dbt_router
 

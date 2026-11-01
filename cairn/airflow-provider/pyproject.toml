@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cairn-airflow-provider"
+version = "0.1.0"
+description = "Airflow on the Cairn lakehouse: tasks sign in as a Cairn identity (Trino SQL, dbt), lineage to Cairn, sign-in through Cairn."
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = ["apache-airflow>=3.0", "trino>=0.330", "httpx>=0.27", "pyjwt[crypto]>=2.8"]
+
+[project.entry-points.apache_airflow_provider]
+provider_info = "cairn_airflow:get_provider_info"
+
+[tool.setuptools.packages.find]
+where = ["src"]

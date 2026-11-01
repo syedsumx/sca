@@ -1017,6 +1017,31 @@ A multi-table transaction changes every table or none.
   - **Policies.** `svc-dbt` was refused tables outside its grants and saw masked PII.
   - **Recording.** It was refused without the rights to record.
 
+**Airflow.** Airflow 3 (3.3) orchestrates pipelines on the lakehouse: its tasks run as a Cairn identity, its runs and lineage go to Cairn, and people sign in to its UI through Cairn.
+
+- **The image.** `cairn/airflow` (`docker/airflow.Dockerfile`) is the official Apache Airflow image with:
+  - the FAB, OpenLineage and Kubernetes providers, pinned by Airflow's own constraints;
+  - `cairn-airflow-provider` (`airflow-provider/`);
+  - `cairn dbt` with dbt-core and dbt-trino in a virtualenv of their own, `/opt/cairn-dbt`, so dbt's dependencies never meet Airflow's.
+- **Who a task is.** A `cairn` connection (`cairn_default`) holds Cairn's API URL and a pipeline user's Cairn token, for example `svc-airflow`. Put the token in a secrets backend in production, or in `AIRFLOW_CONN_CAIRN_DEFAULT`. Its `extra` names Trino (`trino_host`, `trino_port`, `trino_catalog`) and the CA (`ca_file`). Grant the user what its DAGs read and build, plus `EDIT_LINEAGE` and `EDIT_ENTITY_ASSERTIONS`.
+- **Operators.**
+  - `CairnTrinoOperator(sql=..., schema=...)` runs SQL on Trino with a fresh short-lived Trino token per task. Cairn's policies, masks and row filters apply, and the last statement's rows (at most 1000) are the task's result. Queries run in the `pipelines` resource group.
+  - `CairnDbtOperator(project_dir=..., command="build", select=...)` runs `cairn dbt` (see **dbt**), so the run is recorded in Cairn. Artifacts, logs and packages go to a scratch directory per run, so projects can be read-only. The task fails when dbt fails, and when Cairn could not record a successful run.
+  - The connection's CA file wins over `REQUESTS_CA_BUNDLE`.
+- **Runs and lineage in Cairn.** Point OpenLineage's HTTP transport at Cairn (`AIRFLOW__OPENLINEAGE__TRANSPORT`: url `<cairn>`, endpoint `openlineage/api/v1/lineage`, `api_key` auth with the pipeline user's token). Each DAG becomes a pipeline in Cairn and each task a job with its runs. Trino's own lineage adds the tables each query read and wrote, named like the catalog's datasets.
+- **Sign-in through Cairn.** Airflow's UI signs people in with Cairn as the OAuth2 server (client `airflow`, with its own secret, redirect addresses and token audience).
+  - **Roles.** `webserver_config.py` calls `cairn_airflow.auth.configure(globals())`. The token's signature is checked against Cairn's published key, and the person's Cairn groups map to Airflow roles through `CAIRN_AIRFLOW_ROLES` (`cairn-admins=Admin;data-engineers=User`, or JSON).
+  - **Fails closed.** Anyone in no mapped group signs in with the `Public` role, which sees nothing. Roles are synced at every sign-in, so removing someone from a group removes their access at their next sign-in.
+  - **Kept apart from Trino.** Airflow's tokens are refused by Trino (another audience), and a code issued to one client cannot be redeemed by the other. Sign-ins are audited (`airflow.sign_in`).
+  - **On Cairn's side,** set `CAIRN_AIRFLOW_OAUTH_SECRET` and `CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS` (`https://<airflow>/auth/oauth-authorized/cairn`; plain HTTP only for `localhost`). This needs Trino's sign-in to be on (`CAIRN_TRINO_ACCESS_KEY`), whose signing key it uses.
+- **Compose:** `docker compose -f docker-compose.cairn.yml --profile trino --profile airflow up -d` starts Airflow's API server (`http://localhost:8090`), scheduler, DAG processor and triggerer. It uses LocalExecutor and an `airflow` database in Cairn's PostgreSQL, created by `airflow-init`. Tasks run with the token in `CAIRN_AIRFLOW_TOKEN`, on the DAGs in `CAIRN_AIRFLOW_DAGS` (default `examples/airflow/dags`) and the dbt projects in `examples/dbt`.
+- **Kubernetes:** use the official Apache Airflow chart (1.20+) with `deploy/airflow/values-cairn.yaml`. It sets the `cairn/airflow` image, KubernetesExecutor (each task in its own pod), external PostgreSQL, secrets for the Cairn connection, OpenLineage and the OAuth secret, sign-in through Cairn with no local admin account, and DAGs from git. The file lists the Secrets to create. CI renders the chart with it.
+- **Tested** (`tests/test_airflow_e2e.py`, in CI against the `cairn/airflow` image as built) with Airflow 3.3.2, Trino 476, Cairn Catalog and Cairn Store:
+  - **A DAG.** It ran SQL on Trino and a dbt build as `svc-airflow`. Both tables were built, the dbt run was recorded, the DAG and both tasks reached Cairn through OpenLineage, and Trino's lineage named the source table.
+  - **Policies.** A DAG reading a table `svc-airflow` may not see failed with Access Denied, and its dbt task never ran.
+  - **Sign-in.** Airflow's API server (over TLS) sent the browser to Cairn. Signed in to Cairn, the browser came back and was signed in to Airflow. `ana` got the User role from her group, and `bob`, in no mapped group, got only Public. A token not signed by Cairn was refused.
+  - **Compose.** In a Compose slice the API server became healthy, the scheduler, DAG processor and triggerer ran, the example DAG parsed, and `/auth/login/cairn` redirected to Cairn's sign-in, with PKCE.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

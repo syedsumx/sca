@@ -103,6 +103,45 @@ x-cairn-http-healthcheck: &cairn-http-healthcheck
   retries: 6
   start_period: 20s
 
+# Airflow 3 on the lakehouse (opt-in: `--profile airflow`, with `--profile trino`): http://localhost:8090,
+# sign-in through Cairn. Tasks run as the Cairn user whose token is CAIRN_AIRFLOW_TOKEN (the cairn_default
+# connection); runs and lineage go to Cairn (OpenLineage). DAGs from CAIRN_AIRFLOW_DAGS.
+x-airflow: &airflow
+  image: ${CAIRN_REGISTRY:-cairn}/airflow:${CAIRN_VERSION:-0.1.0}
+  profiles: [airflow]
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://cairn:${CAIRN_POSTGRES_PASSWORD:-cairn}@cairn-postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${CAIRN_AIRFLOW_FERNET_KEY:-ZmDfcTF7_60GrrY167zsiPd67pEvs0aGOv2oasOM1Pg=}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${CAIRN_AIRFLOW_JWT_SECRET:-cairn-airflow-dev-jwt-secret-0001}
+    AIRFLOW__API__SECRET_KEY: ${CAIRN_AIRFLOW_SECRET_KEY:-cairn-airflow-dev-secret-key-0001}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-api-server:8080/execution/
+    AIRFLOW__API__BASE_URL: ${CAIRN_AIRFLOW_PUBLIC_URL:-http://localhost:8090}
+    AIRFLOW__FAB__CONFIG_FILE: /opt/airflow/config/webserver_config.py
+    AIRFLOW_CONN_CAIRN_DEFAULT: >-
+      {"conn_type": "cairn", "host": "http://cairn-api:8800", "password": "${CAIRN_AIRFLOW_TOKEN:-}",
+       "extra": {"trino_host": "cairn-trino", "trino_port": 8443, "trino_catalog": "lakehouse",
+                 "ca_file": "/etc/trino/tls/ca.pem"}}
+    AIRFLOW__OPENLINEAGE__TRANSPORT: >-
+      {"type": "http", "url": "http://cairn-api:8800", "endpoint": "openlineage/api/v1/lineage",
+       "auth": {"type": "api_key", "apiKey": "${CAIRN_AIRFLOW_TOKEN:-}"}}
+    CAIRN_DBT_SCHEMA: analytics
+    # Sign-in through Cairn (client "airflow"): the same secret as cairn-api's CAIRN_AIRFLOW_OAUTH_SECRET.
+    CAIRN_URL: http://cairn-api:8800
+    CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
+    CAIRN_AIRFLOW_ALLOW_HTTP: "true"   # Compose on localhost only: production signs in over HTTPS
+    CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:-cairn-airflow-dev-oauth-secret-0001}
+    CAIRN_AIRFLOW_ROLES: ${CAIRN_AIRFLOW_ROLES:-cairn-admins=Admin;data-engineers=User}
+  volumes:
+    - ${CAIRN_AIRFLOW_DAGS:-./examples/airflow/dags}:/opt/airflow/dags:ro
+    - ./examples/dbt:/opt/airflow/dbt:ro
+    - ./deploy/airflow/webserver_config.py:/opt/airflow/config/webserver_config.py:ro
+    - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro
+  networks: [catalog]
+
 services:
   # ============================================================ Cairn Core storage
   mysql:
@@ -385,6 +424,8 @@ services:
       CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
       # Trino's sign-in through Cairn (OAuth2): its client secret and where it may send people back to.
       CAIRN_TRINO_OAUTH_SECRET: ${CAIRN_TRINO_OAUTH_SECRET:-cairn-trino-dev-oauth-secret-0001}
+      CAIRN_AIRFLOW_OAUTH_SECRET: ${CAIRN_AIRFLOW_OAUTH_SECRET:-cairn-airflow-dev-oauth-secret-0001}
+      CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS: ${CAIRN_AIRFLOW_PUBLIC_URL:-http://localhost:8090}/auth/oauth-authorized/cairn
       CAIRN_TRINO_OAUTH_REDIRECT_URIS: ${CAIRN_TRINO_OAUTH_REDIRECT_URIS:-https://localhost:8443/oauth2/callback}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
@@ -680,6 +721,64 @@ services:
       cairn-trino:
         condition: service_started
     networks: [catalog]
+
+  airflow-init:
+    <<: *airflow
+    restart: "no"
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        python - <<'PY'
+        import os, psycopg2
+        c = psycopg2.connect(host="cairn-postgres", user="cairn", password=os.environ["PGPASSWORD"], dbname="postgres")
+        c.autocommit = True
+        cur = c.cursor()
+        cur.execute("SELECT 1 FROM pg_database WHERE datname = 'airflow'")
+        if not cur.fetchone():
+            cur.execute("CREATE DATABASE airflow")
+        PY
+        airflow db migrate
+    environment:
+      <<: *airflow-env
+      PGPASSWORD: ${CAIRN_POSTGRES_PASSWORD:-cairn}
+    depends_on:
+      cairn-postgres:
+        condition: service_healthy
+
+  airflow-api-server:
+    <<: *airflow
+    command: ["api-server"]
+    ports:
+      - "${CAIRN_MAPPED_AIRFLOW_PORT:-8090}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/api/v2/monitor/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow
+    command: ["scheduler"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow
+    command: ["dag-processor"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow
+    command: ["triggerer"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
 
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
   edge:

@@ -12,6 +12,7 @@ from cairn.services import build_services
 
 KEY = "trino-key-" + "k" * 24
 OAUTH_SECRET = "oauth-secret-" + "o" * 24
+AIRFLOW_SECRET = "airflow-secret-" + "a" * 24
 ADMIN, ANA, BOB, EVE = (f"urn:li:corpuser:{u}" for u in ("admin", "ana", "bob", "eve"))
 EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
 ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
@@ -29,6 +30,8 @@ def client(settings, graph, monkeypatch):
     monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
     monkeypatch.setenv("CAIRN_TRINO_OAUTH_SECRET", OAUTH_SECRET)
     monkeypatch.setenv("CAIRN_TRINO_OAUTH_REDIRECT_URIS", "https://trino.test/oauth2/callback")
+    monkeypatch.setenv("CAIRN_AIRFLOW_OAUTH_SECRET", AIRFLOW_SECRET)
+    monkeypatch.setenv("CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS", "https://airflow.test/auth/oauth-authorized/cairn")
     graph.aspects[(ORDERS, "schemaMetadata")] = schema("id", "email", "region", "amount", labelled=("email",))
     graph.aspects[(SECRET, "schemaMetadata")] = schema("name", "salary")
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
@@ -402,3 +405,37 @@ def test_trino_sign_in_with_pkce(client):
     assert _exchange(client, q["code"], verifier=verifier).status_code == 200
     r, q = _code(client, code_challenge=challenge, code_challenge_method="plain")
     assert q.get("error") == "invalid_request"
+
+
+def test_airflow_signs_in_through_cairn_with_its_own_client(client, graph):
+    import jwt
+
+    graph.aspects[(ANA, "groupMembership")] = {"groups": ["urn:li:corpGroup:data-engineers"]}
+    client.app.state.services.attributes.invalidate(ANA)
+    cb = "https://airflow.test/auth/oauth-authorized/cairn"
+    r, q = _code(client, client_id="airflow", redirect_uri=cb)
+    assert r.status_code == 302 and r.headers["location"].startswith(cb + "?"), r.headers.get("location")
+    # The code is Airflow's: Trino's credentials cannot redeem it, nor Airflow's at Trino's address.
+    assert _exchange(client, q["code"], redirect=cb).json()["error"] == "invalid_grant"  # Trino's credentials, Airflow's code
+    _, q = _code(client, client_id="airflow", redirect_uri=cb)
+    out = client.post("/v1/trino/oauth/token", data={"grant_type": "authorization_code", "code": q["code"], "redirect_uri": cb,
+                                                      "client_id": "airflow", "client_secret": AIRFLOW_SECRET})
+    assert out.status_code == 200, out.text
+    key = jwt.algorithms.RSAAlgorithm.from_jwk(client.get("/v1/trino/jwks.json").json()["keys"][0])
+    claims = jwt.decode(out.json()["access_token"], key, algorithms=["RS256"], audience="airflow")
+    assert claims["sub"] == "ana" and claims["groups"] == ["data-engineers"]
+    # Trino never accepts an Airflow token (another audience), and Airflow's redirects are not Trino's.
+    with pytest.raises(jwt.InvalidAudienceError):
+        jwt.decode(out.json()["access_token"], key, algorithms=["RS256"], audience="trino")
+    r, _ = _code(client, client_id="airflow", redirect_uri="https://trino.test/oauth2/callback")
+    assert r.status_code == 400
+    r, _ = _code(client, client_id="trino", redirect_uri=cb)
+    assert r.status_code == 400
+    # A code for Trino cannot be redeemed with Airflow's credentials either.
+    _, q = _code(client)
+    out = client.post("/v1/trino/oauth/token", data={"grant_type": "authorization_code", "code": q["code"],
+                                                      "redirect_uri": "https://trino.test/oauth2/callback",
+                                                      "client_id": "airflow", "client_secret": AIRFLOW_SECRET})
+    assert out.json()["error"] == "invalid_grant"
+    entries = client.app.state.services.audit.entries(category="identity")
+    assert any(e["action"] == "airflow.sign_in" and e["actor"] == ANA for e in entries)

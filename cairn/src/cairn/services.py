@@ -931,13 +931,18 @@ def _build_data_access(s: Services) -> None:
                                      int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
         s.data_access.trino_tokens = s.trino_tokens
         # Sign-in to Trino's web UI and clients' external authentication, with Cairn as the OAuth2 server.
+        # Cairn's OAuth2 sign-in for Trino and Airflow: each client its own secret, redirects and audience.
         oauth_secret = _secret_env("CAIRN_TRINO_OAUTH_SECRET")
-        if oauth_secret:
+        airflow_secret = _secret_env("CAIRN_AIRFLOW_OAUTH_SECRET")
+        if oauth_secret or airflow_secret:
             from cairn.dataaccess.trino_oauth import TrinoOAuth
 
-            s.trino_oauth = TrinoOAuth(s.engine, s.trino_tokens, oauth_secret,
+            s.trino_oauth = TrinoOAuth(s.engine, s.trino_tokens, oauth_secret or "",
                                        os.environ.get("CAIRN_TRINO_OAUTH_REDIRECT_URIS", "").split(","),
                                        int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
+            if airflow_secret:
+                s.trino_oauth.add_client("airflow", airflow_secret,
+                                         os.environ.get("CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS", "").split(","), "airflow")
         # Lineage Core cannot take now waits in the database (Trino sends each event once).
         from cairn.dataaccess.trino import LINEAGE_ACTOR
         from cairn.dataaccess.trino_lineage import LineageOutbox

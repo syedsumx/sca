@@ -53,7 +53,10 @@ want store && build "${PREFIX}/store:${VERSION}" docker/store.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
 want catalog && build "${PREFIX}/catalog:${VERSION}" docker/catalog.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
-want dbt && build "${PREFIX}/dbt:${VERSION}" docker/dbt.Dockerfile
+# The pipeline images (dbt, Airflow) are opt-in: ONLY="dbt airflow", or PIPELINE_IMAGES=true with the rest.
+want_pipeline() { [[ " ${ONLY:-} " == *" $1 "* || "${PIPELINE_IMAGES:-false}" == true ]]; }
+want_pipeline dbt && build "${PREFIX}/dbt:${VERSION}" docker/dbt.Dockerfile
+want_pipeline airflow && build "${PREFIX}/airflow:${VERSION}" docker/airflow.Dockerfile
 want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
   --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
 

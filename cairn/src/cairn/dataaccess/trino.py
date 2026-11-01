@@ -197,6 +197,35 @@ class TrinoAccess:
         db = catalog if m.database is None else m.database
         return m.platform, ".".join(p for p in (db, schema, table) if p).lower(), m.env
 
+    def remap_lineage(self, event: dict) -> dict:
+        """Names a Trino lineage event's datasets the way the catalog, access control and usage name them
+        (``CAIRN_TRINO_CATALOGS``): Trino sends ``trino://host:port`` + ``catalog.schema.table``."""
+        def one(d):
+            if not isinstance(d, dict) or not str(d.get("namespace", "")).startswith("trino://"):
+                return d
+            parts = str(d.get("name", "")).split(".")
+            if len(parts) != 3:
+                return d
+            platform, name, _ = self.dataset_name(*parts)
+            return {**d, "namespace": f"{platform}://", "name": name}
+
+        def fields(facets):
+            cl = (facets or {}).get("columnLineage")
+            if not isinstance(cl, dict) or not isinstance(cl.get("fields"), dict):
+                return facets
+            out = {k: {**v, "inputFields": [one(i) for i in v.get("inputFields") or []]} if isinstance(v, dict) else v
+                   for k, v in cl["fields"].items()}
+            return {**facets, "columnLineage": {**cl, "fields": out}}
+
+        if not isinstance(event, dict):
+            return event
+        ev = dict(event)
+        for side in ("inputs", "outputs"):
+            if isinstance(ev.get(side), list):
+                ev[side] = [{**one(d), **({"facets": fields(d.get("facets"))} if isinstance(d, dict) and d.get("facets") else {})}
+                            for d in ev[side]]
+        return ev
+
     def urn(self, catalog: str, schema: str, table: str) -> str:
         platform, name, env = self.dataset_name(catalog, schema, table)
         return f"urn:li:dataset:(urn:li:dataPlatform:{platform},{name},{env})"
@@ -337,7 +366,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
                        current_principal=None, outbox=None, usage=None, catalog_sync=None,
-                       authorize=None, oauth=None) -> APIRouter:
+                       authorize=None, oauth=None, groups_of=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -386,7 +415,7 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                 try:
                     oauth.check(client_id, redirect_uri, response_type, code_challenge_method if code_challenge else "")
                 except OAuthError as e:
-                    if e.error in ("unauthorized_client", "invalid_request") and not oauth.redirect_ok(redirect_uri):
+                    if e.error in ("unauthorized_client", "invalid_request") and not oauth.redirect_ok(redirect_uri, client_id):
                         raise HTTPException(400, str(e))  # never redirect to an address Cairn does not trust
                     return back(redirect_uri, error=e.error, error_description=str(e), state=state)
                 try:
@@ -396,9 +425,12 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                 if p is None or p.via not in ("session", "dev") or p.urn == f"urn:li:corpuser:{CRAWLER}":
                     here = f"/cairn/api/v1/trino/oauth/authorize?{request.url.query}"
                     return RedirectResponse(f"/login?redirect_uri={quote(here, safe='')}", 302)
-                code = oauth.issue_code(p.urn, redirect_uri, code_challenge, "S256" if code_challenge else "")
+                groups = tuple(p.groups) or (tuple(groups_of(p.urn)) if groups_of is not None else ())
+                code = oauth.issue_code(p.urn, redirect_uri, code_challenge, "S256" if code_challenge else "", client_id,
+                                        groups)
                 if audit is not None:
-                    audit.record("trino", "trino.sign_in", p.urn, None, {"redirect": redirect_uri.split("?")[0]})
+                    audit.record("trino" if client_id == "trino" else "identity", f"{client_id}.sign_in", p.urn, None,
+                                 {"redirect": redirect_uri.split("?")[0], "client": client_id})
                 return back(redirect_uri, code=code, state=state)
 
             @router.post("/oauth/token")
@@ -478,7 +510,8 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             body = await request.json()
         except ValueError:
             raise HTTPException(400, "the body is not JSON")
-        events = [name_jobs_by_outputs(e) for e in (body if isinstance(body, list) else [body])]
+        # Jobs are named by what they write (as Trino names it), then datasets as Cairn names them.
+        events = [access.remap_lineage(name_jobs_by_outputs(e)) for e in (body if isinstance(body, list) else [body])]
         try:
             return lineage.handle_many(events, LINEAGE_ACTOR)
         except OpenLineageError as e:

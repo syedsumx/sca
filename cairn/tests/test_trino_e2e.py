@@ -265,8 +265,9 @@ def test_queries_that_write_become_lineage(trino, cairn):
     _, s = cairn
     trino("CREATE TABLE lake.sales.by_region AS SELECT region, count(*) AS orders FROM lake.sales.orders GROUP BY region")
     trino("INSERT INTO lake.sales.by_region SELECT region, count(*) FROM lake.sales.orders WHERE id > 100 GROUP BY region")
-    up = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.orders,PROD)"
-    down = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.by_region,PROD)"
+    # Datasets as the catalog names them (this test maps the catalog "lake" to the iceberg platform).
+    up = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+    down = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.by_region,PROD)"
     job = f"urn:li:dataJob:(urn:li:dataFlow:(trino,127.0.0.1:{trino.port},PROD),trino:lake.sales.by_region)"
     end = time.time() + 30
     while time.time() < end and not s.graph.get_aspect(job, "dataJobInputOutput"):
