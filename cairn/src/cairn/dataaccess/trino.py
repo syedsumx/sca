@@ -19,6 +19,10 @@ masking plans and row filters that govern the catalog and its SQL editor:
   (``partial``, ``hash``, ``redact`` or ``null``). ``row_filter`` obligations (``{"expression": "region =
   'EU'"}``, with ``{user}`` standing for the Trino user as a quoted string) become row filters.
 
+**Lineage.** Trino's OpenLineage event listener posts to ``/v1/trino/<key>/lineage``: each query that
+writes becomes a run of a job named after the tables it writes (``trino:<catalog>.<schema>.<table>``), with
+its inputs, outputs, column lineage and SQL, so repeated loads into a table share one job and its history.
+
 Requests are refused unless they carry the shared key in the path: ``/v1/trino/<key>/allow``, so only
 the Trino servers given ``CAIRN_TRINO_ACCESS_KEY`` can ask. Every refused table action is audited by the
 policy engine like any other deny.
@@ -234,7 +238,23 @@ class TrinoAccess:
         return {"expression": mask_expression(name, col.get("columnType", "varchar"), plan.strategy)}
 
 
-def build_trino_router(access: TrinoAccess, key: str, audit=None) -> APIRouter:
+LINEAGE_ACTOR = "urn:li:corpuser:cairn-trino"
+
+
+def name_jobs_by_outputs(event: dict) -> dict:
+    """Trino names a job by its query id; name it by what it writes instead (a run keeps the query id)."""
+    if not isinstance(event, dict) or not isinstance(event.get("job"), dict):
+        return event
+    outs = sorted({o.get("name", "") for o in event.get("outputs") or [] if isinstance(o, dict) and o.get("name")})
+    if not outs:
+        return event
+    job = dict(event["job"])
+    job["facets"] = {**(job.get("facets") or {}), "documentation": {"description": f"Trino query {job.get('name', '')}"}}
+    job["name"] = "trino:" + ",".join(outs)
+    return {**event, "job": job}
+
+
+def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     def check(given: str):
@@ -262,6 +282,23 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None) -> APIRouter:
     async def row_filters(given: str, request: Request):
         check(given)
         return {"result": access.row_filters(await body(request))}
+
+    @router.post("/{given}/lineage")
+    async def lineage_events(given: str, request: Request):
+        check(given)
+        if lineage is None:
+            raise HTTPException(503, "lineage is not available")
+        from cairn.sources.openlineage import OpenLineageError
+
+        try:
+            body = await request.json()
+        except ValueError:
+            raise HTTPException(400, "the body is not JSON")
+        events = body if isinstance(body, list) else [body]
+        try:
+            return lineage.handle_many([name_jobs_by_outputs(e) for e in events], LINEAGE_ACTOR)
+        except OpenLineageError as e:
+            raise HTTPException(422, str(e))
 
     @router.post("/{given}/column-mask")
     async def column_mask(given: str, request: Request):

@@ -124,3 +124,14 @@ def test_mask_expressions_keep_types():
     assert mask_expression("e", "varchar", "null") == "CAST(NULL AS varchar)"
     assert "sha256" in mask_expression("e", "varchar(255)", "hash")
     assert "'••••'" in mask_expression('we"ird', "varchar", "redact") and '"we""ird"' in mask_expression('we"ird', "varchar", "redact")
+
+
+def test_lineage_jobs_are_named_by_what_they_write(client):
+    ev = {"eventType": "COMPLETE", "eventTime": "2026-11-01T00:00:00Z", "run": {"runId": "q1"},
+          "job": {"namespace": "trino://trino:8080", "name": "20261101_000000_00001_abcde"},
+          "inputs": [{"namespace": "trino://trino:8080", "name": "lake.sales.orders"}],
+          "outputs": [{"namespace": "trino://trino:8080", "name": "lake.sales.daily"}]}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 200 and r.json()["results"][0]["job"].endswith("trino:lake.sales.daily)")
+    assert client.post("/v1/trino/wrong-key/lineage", json=ev).status_code == 404
+    assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422

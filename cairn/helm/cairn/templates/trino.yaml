@@ -31,6 +31,12 @@ data:
     opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/batch
     opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/row-filters
     opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/column-mask
+  event-listener.properties: |
+    event-listener.name=openlineage
+    openlineage-event-listener.transport.type=HTTP
+    openlineage-event-listener.transport.url={{ $api }}
+    openlineage-event-listener.transport.endpoint=/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/lineage
+    openlineage-event-listener.trino.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
   lakehouse.properties: |
     connector.name=iceberg
     iceberg.catalog.type=rest
@@ -109,6 +115,10 @@ spec:
             - name: config
               mountPath: /etc/trino/access-control.properties
               subPath: access-control.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/event-listener.properties
+              subPath: event-listener.properties
               readOnly: true
             - name: config
               mountPath: /etc/trino/catalog/lakehouse.properties

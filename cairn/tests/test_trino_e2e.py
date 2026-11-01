@@ -113,13 +113,14 @@ def cairn(tmp_path_factory):
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
     wait(p)
-    yield f"http://127.0.0.1:{p}"
+    yield f"http://127.0.0.1:{p}", s
     server.should_exit = True
     t.join(10)
 
 
 @pytest.fixture(scope="module")
 def trino(lake, cairn):
+    cairn_url, _ = cairn
     d = tempfile.mkdtemp(prefix="trino-")
     os.makedirs(f"{d}/catalog")
     tp = port()
@@ -128,17 +129,23 @@ def trino(lake, cairn):
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
         "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
-    base = f"{cairn}/v1/trino/{KEY}"
+    base = f"{cairn_url}/v1/trino/{KEY}"
     open(f"{d}/access-control.properties", "w").write("\n".join([
         "access-control.name=opa", f"opa.policy.uri={base}/allow", f"opa.policy.batched-uri={base}/batch",
         f"opa.policy.row-filters-uri={base}/row-filters", f"opa.policy.column-masking-uri={base}/column-mask", ""]))
+    open(f"{d}/event-listener.properties", "w").write("\n".join([
+        "event-listener.name=openlineage", "openlineage-event-listener.transport.type=HTTP",
+        f"openlineage-event-listener.transport.url={cairn_url}",
+        f"openlineage-event-listener.transport.endpoint=/v1/trino/{KEY}/lineage",
+        f"openlineage-event-listener.trino.uri=http://127.0.0.1:{tp}", ""]))
     open(f"{d}/config.properties", "w").write(f"coordinator=true\nnode-scheduler.include-coordinator=true\n"
                                               f"http-server.http.port={tp}\ndiscovery.uri=http://127.0.0.1:{tp}\n")
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
-                    "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro", TRINO],
+                    "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
+                    "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro", TRINO],
                    check=True, capture_output=True, timeout=600)
     end = time.time() + 240
     while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
@@ -158,6 +165,7 @@ def trino(lake, cairn):
     sql("CREATE TABLE lake.sales.orders AS SELECT * FROM (VALUES (1, 'jane@acme.com', 'EU'), (2, 'bo@example.org', 'US'), "
         "(3, 'li@acme.com', 'EU')) AS t(id, email, region)")
     sql("CREATE TABLE lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
+    sql.port = tp
     yield sql
     subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
     shutil.rmtree(d, ignore_errors=True)
@@ -191,3 +199,29 @@ def test_row_filters_and_writes(trino):
         trino("CREATE SCHEMA lake.mine", user="ana")
     trino("INSERT INTO sales.orders VALUES (4, 'x@y.z', 'EU')")  # the admin may
     assert trino("SELECT count(*) AS n FROM sales.orders", user="ana") == [{"n": 4}]
+
+
+def test_queries_that_write_become_lineage(trino, cairn):
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.by_region AS SELECT region, count(*) AS orders FROM lake.sales.orders GROUP BY region")
+    trino("INSERT INTO lake.sales.by_region SELECT region, count(*) FROM lake.sales.orders WHERE id > 100 GROUP BY region")
+    up = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.orders,PROD)"
+    down = "urn:li:dataset:(urn:li:dataPlatform:trino,lake.sales.by_region,PROD)"
+    job = f"urn:li:dataJob:(urn:li:dataFlow:(trino,127.0.0.1:{trino.port},PROD),trino:lake.sales.by_region)"
+    end = time.time() + 30
+    while time.time() < end and not s.graph.get_aspect(job, "dataJobInputOutput"):
+        time.sleep(0.5)
+    io = s.graph.get_aspect(job, "dataJobInputOutput")
+    assert io and io["inputDatasets"] == [up] and io["outputDatasets"] == [down], io
+    # Column lineage: by_region.region comes from orders.region.
+    pairs = {(tuple(f["upstreams"]), tuple(f["downstreams"])) for f in io["fineGrainedLineages"]}
+    assert ((f"urn:li:schemaField:({up},region)",), (f"urn:li:schemaField:({down},region)",)) in pairs, pairs
+    info = s.graph.get_aspect(job, "dataJobInfo")
+    assert "lake.sales.orders" in info["customProperties"]["sql"]
+    # Both queries are runs of the one job (named by what they write, not by query id).
+    runs = [u for (u, a), v in s.graph.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == job]
+    end = time.time() + 30
+    while len(runs) < 2 and time.time() < end:
+        time.sleep(0.5)
+        runs = [u for (u, a), v in s.graph.aspects.items() if a == "dataProcessInstanceRelationships" and v["parentTemplate"] == job]
+    assert len(runs) == 2

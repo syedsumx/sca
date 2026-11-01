@@ -605,9 +605,11 @@ services:
       CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       CAIRN_API_URL: http://cairn-api:8800
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
+      CAIRN_TRINO_URI: http://cairn-trino:8080
     volumes:
       - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
       - ./deploy/trino/access-control.properties:/etc/trino/access-control.properties:ro
+      - ./deploy/trino/event-listener.properties:/etc/trino/event-listener.properties:ro
       - ./deploy/trino/catalog:/etc/trino/catalog:ro
     ports:
       - "${CAIRN_MAPPED_TRINO_PORT:-8088}:8080"

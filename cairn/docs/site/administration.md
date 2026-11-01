@@ -811,6 +811,11 @@ A multi-table transaction changes every table or none.
   - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. `row_filter` obligations (`{"expression": "region = 'EU'"}`, with `{user}` for the Trino user) become Trino row filters.
   - **The key.** Trino presents `CAIRN_TRINO_ACCESS_KEY` (at least 24 characters) in the request path. Requests without it get a 404. In Helm, put it in the Secret named by `cairn.trino.accessKeySecret`; the API and Trino both read it.
   - **Tested** with Trino 476 against a real Cairn API: hidden tables refused and left out of `SHOW TABLES`, labelled emails masked (`j•••@•••.com`, so `WHERE email = ...` finds nothing), row filters applied, and writes, drops and new schemas refused without the privilege.
+- **Lineage from Trino.** Trino's OpenLineage event listener (`deploy/trino/event-listener.properties`, on in Compose and Helm) sends every query that writes to Cairn: `INSERT`, `CREATE TABLE AS`, `MERGE`, `UPDATE` and `DELETE`.
+  - Each query becomes a run of a job named after the tables it writes (`trino:<catalog>.<schema>.<table>`), so repeated loads into a table share one job and its run history.
+  - The job records the tables the query read and wrote, column-level lineage (which source columns feed which output columns), and the SQL.
+  - Datasets carry the same URNs as access control, so lineage, policies and masking refer to the same datasets.
+  - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
 
 ## Backup and restore
