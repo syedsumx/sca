@@ -617,6 +617,7 @@ def build_parser() -> argparse.ArgumentParser:
     gw.add_argument("--no-dispatcher", action="store_true")
     gw.add_argument("--dispatch-interval", type=float, default=10.0)
 
+    sub.add_parser("dbt", help="run dbt on the lakehouse as a Cairn identity and record the run (cairn dbt build ...)")
     sch = sub.add_parser("scheduler", help="data-quality monitor scheduler")
     sch.add_argument("--tick", type=float, default=15.0)
     sch.add_argument("--workers", type=int, default=8)
@@ -775,6 +776,12 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv=None) -> None:
     from cairn.common.config import load_secret_files
 
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["dbt"]:
+        # Everything after "dbt" is dbt's own command line.
+        from cairn.pipelines.dbt_runner import main as dbt_main
+
+        sys.exit(dbt_main(argv[1:]))
     _setup_logging()
     args = build_parser().parse_args(argv)
     try:

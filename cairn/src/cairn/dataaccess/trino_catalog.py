@@ -88,6 +88,32 @@ class TrinoCatalogSync:
             raise CatalogSyncError(f"more than {MAX_ROWS} columns: sync this catalog in parts", 413)
         return rows
 
+    def _keep_dbt_docs(self, mcp: dict) -> dict:
+        """Keeps what dbt wrote (``cairn.pipelines.dbt``) across syncs: a description where Trino has no
+        comment, column descriptions likewise, and ``dbt.*`` properties."""
+        import json
+
+        name = mcp.get("aspectName")
+        if name not in ("datasetProperties", "schemaMetadata"):
+            return mcp
+        before = self.graph.get_aspect(mcp["entityUrn"], name)
+        if not before:
+            return mcp
+        new = json.loads(mcp["aspect"]["value"])
+        if name == "datasetProperties":
+            if not new.get("description") and before.get("description"):
+                new["description"] = before["description"]
+            kept = {k: v for k, v in (before.get("customProperties") or {}).items() if k.startswith("dbt.")}
+            new["customProperties"] = {**kept, **(new.get("customProperties") or {})}
+        else:
+            old_docs = {f.get("fieldPath"): f.get("description") for f in before.get("fields") or [] if f.get("description")}
+            for f in new.get("fields") or []:
+                if not f.get("description") and old_docs.get(f.get("fieldPath")):
+                    f["description"] = old_docs[f["fieldPath"]]
+        mcp = dict(mcp)
+        mcp["aspect"] = {**mcp["aspect"], "value": json.dumps(new, sort_keys=True, separators=(",", ":"))}
+        return mcp
+
     def sync(self, connection: str, actor: str) -> dict:
         from cairn.common.proposals import make_mcp
         from cairn.sdk.source import Dataset, Field, to_mcps
@@ -126,7 +152,7 @@ class TrinoCatalogSync:
                          subtype="View" if "VIEW" in str(kinds.get((schema, table), "")).upper() else "Table",
                          properties={"trino_catalog": cat, "trino_schema": schema, "trino_table": table,
                                      "cairn_connection": connection})
-            out = to_mcps(platform, [ds], env)
+            out = [self._keep_dbt_docs(m) for m in to_mcps(platform, [ds], env)]
             urns.add(out[0]["entityUrn"])
             mcps += out
         t = trino_catalog_tables

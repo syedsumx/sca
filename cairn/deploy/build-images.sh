@@ -53,6 +53,7 @@ want store && build "${PREFIX}/store:${VERSION}" docker/store.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
 want catalog && build "${PREFIX}/catalog:${VERSION}" docker/catalog.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
+want dbt && build "${PREFIX}/dbt:${VERSION}" docker/dbt.Dockerfile
 want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
   --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
 

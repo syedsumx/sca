@@ -1,0 +1,94 @@
+{{- range $job := .Values.cairn.dbt.jobs }}
+{{- $ctx := dict "root" $ "component" (printf "dbt-%s" $job.name) "cfg" $job }}
+{{- if not $.Values.cairn.trino.enabled }}{{ fail "cairn.dbt.jobs run on Trino: set cairn.trino.enabled" }}{{ end }}
+{{- if not $.Values.cairn.trino.tls.secretName }}{{ fail "cairn.dbt.jobs sign in to Trino over TLS: set cairn.trino.tls.secretName" }}{{ end }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$" (toString $job.name)) }}{{ fail (printf "cairn.dbt.jobs: name %q is 1-32 lowercase letters, digits and -" (toString $job.name)) }}{{ end }}
+{{- $tok := required (printf "cairn.dbt.jobs[%s].tokenSecret: the pipeline user's Cairn token" $job.name) $job.tokenSecret }}
+{{- $api := dict "root" $ "component" "api" "cfg" $.Values.cairn.api }}
+{{- $trino := dict "root" $ "component" "trino" "cfg" $.Values.cairn.trino }}
+---
+# dbt project {{ $job.name }}: `cairn dbt` signs in as the pipeline user and records each run in Cairn.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  schedule: {{ required (printf "cairn.dbt.jobs[%s].schedule" $job.name) $job.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ $job.timeoutSeconds | default 7200 }}
+      template:
+        metadata:
+          labels:
+            {{- include "cairn.componentLabels" $ctx | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          {{- with $.Values.global.cairn.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $.Values.cairn.podSecurityContext | nindent 12 }}
+          containers:
+            - name: dbt
+              image: {{ required (printf "cairn.dbt.jobs[%s].image: the project's image (FROM cairn/dbt)" $job.name) $job.image | quote }}
+              imagePullPolicy: IfNotPresent
+              args:
+                {{- range ($job.args | default (list "build")) }}
+                - {{ . | quote }}
+                {{- end }}
+              env:
+                - name: CAIRN_URL
+                  value: {{ printf "http://%s:%v" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+                - name: CAIRN_TOKEN
+                  valueFrom:
+                    secretKeyRef: { name: {{ $tok.name }}, key: {{ $tok.key | default "token" }} }
+                - name: CAIRN_TRINO_HOST
+                  value: {{ include "cairn.componentName" $trino | quote }}
+                - name: CAIRN_TRINO_PORT
+                  value: {{ $.Values.cairn.trino.tls.httpsPort | quote }}
+                - name: CAIRN_TRINO_CATALOG
+                  value: lakehouse
+                - name: CAIRN_DBT_SCHEMA
+                  value: {{ $job.schema | default "analytics" | quote }}
+                - name: CAIRN_DBT_THREADS
+                  value: {{ $job.threads | default 4 | quote }}
+                {{- if $job.caSecret }}
+                - name: CAIRN_CA_FILE
+                  value: /etc/cairn-dbt-ca/ca.crt
+                {{- end }}
+                {{- with $job.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              resources:
+                {{- toYaml ($job.resources | default $.Values.cairn.dbt.resources) | nindent 16 }}
+              securityContext:
+                {{- toYaml $.Values.cairn.containerSecurityContext | nindent 16 }}
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp/cairn
+                {{- if $job.caSecret }}
+                - name: ca
+                  mountPath: /etc/cairn-dbt-ca
+                  readOnly: true
+                {{- end }}
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 2Gi
+            {{- if $job.caSecret }}
+            - name: ca
+              secret:
+                secretName: {{ $job.caSecret.name }}
+                items:
+                  - key: {{ $job.caSecret.key | default "ca.crt" }}
+                    path: ca.crt
+            {{- end }}
+{{- end }}

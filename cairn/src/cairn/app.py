@@ -217,6 +217,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                                               current_principal=cp, outbox=services.trino_outbox,
                                               usage=services.trino_usage, catalog_sync=services.trino_catalog,
                                               authorize=authz, oauth=services.trino_oauth))
+    if services.dbt_runs is not None:
+        from cairn.pipelines.dbt import build_dbt_router
+
+        app.include_router(build_dbt_router(services.dbt_runs, cp, authz))
     if services.openlineage is not None:
         from cairn.sources.api import build_openlineage_router
 

@@ -982,6 +982,41 @@ A multi-table transaction changes every table or none.
   - **Tested** with a real Cairn Core in Compose (MySQL, OpenSearch, Kafka). Lineage from `CREATE TABLE AS` and `INSERT` reached Core with column lineage. With Core stopped, a `CREATE TABLE AS` still ran and its two events were held; 10 seconds after Core came back they were written and the job was in Core.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
 
+**dbt.** dbt projects run on the lakehouse through Trino, as a Cairn identity, and each run is recorded in Cairn.
+
+- **Who a run is.** Each project runs as its own Cairn user, for example `svc-dbt`: create the user in Cairn and a personal access token for it. Cairn's policies then decide what the project may read and build, like for anyone:
+  - `VIEW_DATASET_PROFILE` on its sources;
+  - `WRITE_DATASET` and `MANAGE_DATASET` on its target schema;
+  - `EDIT_LINEAGE` and `EDIT_ENTITY_ASSERTIONS` to record its runs.
+
+  Masks and row filters apply to it. Lineage, usage and the audit trail name it.
+- **No database password.** `cairn dbt <dbt arguments>` exchanges the Cairn token for a short-lived Trino token (`CAIRN_DBT_TOKEN_TTL`, 4 hours by default, at most 12; it must outlast the run). It writes a private profile (`method: jwt`, TLS) and runs dbt. The token never reaches the project or dbt's artifacts. With `CAIRN_CA_FILE`, Trino's certificate is checked against that CA only, whatever `REQUESTS_CA_BUNDLE` says. Queries run in Trino's `pipelines` resource group.
+- **What a run records** (`POST /pipelines/dbt/runs`, sent by `cairn dbt` after `run`, `build`, `test`, `seed` or `snapshot`), on the datasets Trino names, for the models, seeds and snapshots the run built:
+  - **Docs.** Descriptions and column descriptions fill only empty ones: a Trino comment or a description written in Cairn is never overwritten. `dbt.*` properties hold the unique id, materialization, package, path and last status. Catalog syncs keep them. To keep docs in the tables themselves, where every engine sees them, set `+persist_docs: {relation: true, columns: true}` in the project, as the example does.
+  - **Tags and owners.** dbt `tags` become tags, and `meta.owner` (a Cairn user name) a technical owner. Both are added, never removed.
+  - **Lineage.** Each model's upstream models and sources. dbt's lineage is replaced on every run, so a removed `ref` disappears, and lineage from elsewhere is kept. Trino's own query lineage still arrives as well.
+  - **Tests.** Each dbt test becomes a check on the model it tests (pass, warn, fail or error), on its Quality tab, and a newly failing test tells the model's owners.
+  - The run is audited (`dbt.run_recorded`).
+- **Exit codes.** `cairn dbt` exits with dbt's code. If dbt succeeded but the run could not be recorded, it exits 3, so a scheduler notices; set `CAIRN_DBT_RECORD=optional` to only warn.
+- **The image.** `cairn/dbt` (`docker/dbt.Dockerfile`) has dbt-core 1.12 and dbt-trino 1.11 and runs as a non-root user. It works with a read-only root filesystem and a read-only project: dbt writes only under `/tmp/cairn`, artifacts in `/tmp/cairn/target`. A project's own image adds its code: `FROM cairn/dbt` and `COPY . /project`.
+- **Compose:** `docker compose -f docker-compose.cairn.yml --profile trino --profile dbt run --rm cairn-dbt build` runs `CAIRN_DBT_PROJECT` (default `examples/dbt/lakehouse`) with the token in `CAIRN_DBT_TOKEN`.
+- **Helm:** `cairn.dbt.jobs` makes a CronJob per project. Each job sets:
+  - `name`, `image`, `schedule` and `args` (default `build`);
+  - `schema`, the default schema;
+  - `tokenSecret`, the pipeline user's token;
+  - `caSecret`, Trino's CA;
+  - `timeoutSeconds` and `threads`.
+
+  Jobs never overlap and are not retried, since a failed build is for a person to look at. The chart refuses jobs without `cairn.trino` and its TLS. Trino's certificate must name `<release>-cairn-trino`. Airflow can run the same image instead of a CronJob.
+- **Tested** (`tests/test_dbt_e2e.py`, in CI against the `cairn/dbt` image as built) with dbt-core 1.12.6 and dbt-trino 1.11.0, on Trino 476, Cairn Catalog and Cairn Store:
+  - **The build.** `svc-dbt`, signed in with its personal access token, built a seed, a table from a source and a view. The table's docs, owner, tag, lineage and properties landed on the datasets Trino names, and the view's lineage named both of its upstreams.
+  - **Tests.** A passing and a failing test became checks on their models. dbt's exit code (1, for the failing test) came back after the run was recorded.
+  - **Secrets.** The Trino token appeared in none of the project's or dbt's files.
+  - **Crawls.** A catalog sync kept dbt's description and properties, and the next run's column docs.
+  - **The example project.** It built, and with `persist_docs` its docs were in the Iceberg table and its columns, as Trino shows them.
+  - **Policies.** `svc-dbt` was refused tables outside its grants and saw masked PII.
+  - **Recording.** It was refused without the rights to record.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

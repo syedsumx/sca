@@ -654,6 +654,33 @@ services:
         condition: service_healthy  # Trino reads Cairn's signing key (JWKS) when it starts
     networks: [catalog]
 
+  # dbt on the lakehouse (opt-in: `--profile dbt`): `docker compose -f docker-compose.cairn.yml --profile trino
+  # --profile dbt run --rm cairn-dbt build` runs the project in CAIRN_DBT_PROJECT (default: the example) as
+  # the Cairn user whose token is CAIRN_DBT_TOKEN, and records the run in Cairn.
+  cairn-dbt:
+    image: ${CAIRN_REGISTRY:-cairn}/dbt:${CAIRN_VERSION:-0.1.0}
+    profiles: [dbt]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CAIRN_URL: http://cairn-api:8800
+      CAIRN_TOKEN: ${CAIRN_DBT_TOKEN:-}
+      CAIRN_CA_FILE: /etc/trino/tls/ca.pem
+      CAIRN_TRINO_HOST: cairn-trino
+      CAIRN_TRINO_PORT: "8443"
+      CAIRN_TRINO_CATALOG: lakehouse
+      CAIRN_DBT_SCHEMA: ${CAIRN_DBT_SCHEMA:-analytics}
+    volumes:
+      - ${CAIRN_DBT_PROJECT:-./examples/dbt/lakehouse}:/project:ro
+      - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro
+    tmpfs:
+      - /tmp/cairn:uid=10001,gid=10001
+    depends_on:
+      cairn-trino:
+        condition: service_started
+    networks: [catalog]
+
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
   edge:
     image: nginx:1.27-alpine

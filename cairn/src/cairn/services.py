@@ -98,6 +98,7 @@ class Services:
     openlineage: Optional[Any] = None
     git: Optional[Any] = None
     external_quality: Optional[Any] = None
+    dbt_runs: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
@@ -950,6 +951,13 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.trino_catalog import TrinoCatalogSync
 
             s.trino_catalog = TrinoCatalogSync(s.engine, s.graph, s.data_access, s.trino_access, s.audit)
+
+    if s.external_quality is not None and s.graph is not None:
+        # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.
+        from cairn.pipelines.dbt import DbtRuns
+
+        s.dbt_runs = DbtRuns(s.graph, s.external_quality, s.audit,
+                             s.trino_access.urn if getattr(s, "trino_access", None) is not None else None)
 
     from cairn.dataaccess.ask import AskService
 

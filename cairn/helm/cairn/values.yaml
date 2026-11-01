@@ -846,6 +846,26 @@ cairn:
       requests: { cpu: 200m, memory: 512Mi }
       limits: { memory: 2Gi }
 
+  # dbt projects on the lakehouse, each a CronJob running `cairn dbt` in the project's own image (FROM
+  # cairn/dbt, with the project copied in). Each signs in as its own Cairn user (a personal access token
+  # in tokenSecret), so Cairn's policies decide what it may read and build, and its runs are recorded
+  # in Cairn (docs, lineage, tests). Needs cairn.trino (with TLS).
+  dbt:
+    jobs: []
+    #  - name: shop
+    #    image: registry.example.com/analytics/shop-dbt:1.4.0
+    #    schedule: "23 3 * * *"
+    #    args: [build]                      # dbt's arguments
+    #    schema: analytics                  # the default schema models are built in
+    #    tokenSecret: { name: svc-dbt-token, key: token }
+    #    caSecret: { name: cairn-trino-tls, key: ca.crt }   # Trino's CA; empty: the system's
+    #    timeoutSeconds: 7200
+    #    threads: 4
+    #    extraEnv: []
+    resources:
+      requests: { cpu: 200m, memory: 512Mi }
+      limits: { memory: 2Gi }
+
   licence:
     # true: Cairn is read-only until a valid licence is installed (hosted tenants). false: without a
     # licence it runs in evaluation mode. Licences are installed in Administration, or from a Secret.

@@ -82,7 +82,7 @@ def _dataset(platform: str, name: str, env: str = "PROD") -> str:
 
 
 # ---- parsers: each returns [{dataset, name, column, status, message, url, ts}] -------------------------
-def parse_dbt(body: dict, platform: str) -> list[dict]:
+def parse_dbt(body: dict, platform: str, urn_of=None) -> list[dict]:
     rr, manifest = body.get("run_results") or {}, body.get("manifest") or {}
     if not rr.get("results"):
         raise ExternalError("dbt: send {\"run_results\": <run_results.json>, \"manifest\": <manifest.json>}")
@@ -99,13 +99,14 @@ def parse_dbt(body: dict, platform: str) -> list[dict]:
                       if d in nodes and d.split(".")[0] in ("model", "source", "snapshot", "seed")), None)
         if model is None:
             continue
-        name = ".".join(p for p in (model.get("database"), model.get("schema"),
-                                    model.get("alias") or model.get("identifier") or model.get("name")) if p)
+        table = model.get("alias") or model.get("identifier") or model.get("name")
+        name = ".".join(p for p in (model.get("database"), model.get("schema"), table) if p)
         status = _status(r.get("status")) or ("PASS" if r.get("status") == "skipped" else "ERROR")
         if r.get("status") == "skipped":
             continue
         meta = test.get("test_metadata") or {}
-        out.append({"dataset": _dataset(adapter, name), "name": test.get("name") or uid.split(".")[2],
+        dataset = urn_of(model.get("database"), model.get("schema"), table) if urn_of else _dataset(adapter, name)
+        out.append({"dataset": dataset, "name": test.get("name") or uid.split(".")[2],
                     "column": test.get("column_name") or (meta.get("kwargs") or {}).get("column_name"),
                     "status": status, "message": (r.get("message") or "")[:2000] or
                     (f"{r.get('failures')} failing rows" if r.get("failures") else ""), "url": None, "ts": ts})
@@ -191,13 +192,13 @@ class ExternalResults:
         self.audit = audit
 
     def ingest(self, tool: str, body: dict, platform: str = "snowflake", dataset: Optional[str] = None,
-               actor: str = "urn:li:corpuser:cairn-quality") -> dict:
+               actor: str = "urn:li:corpuser:cairn-quality", urn_of=None) -> dict:
         if tool not in TOOLS:
             raise ExternalError(f"tool is one of {sorted(TOOLS)}")
         if not isinstance(body, dict):
             raise ExternalError("the body is a JSON object")
         if tool == "dbt":
-            results = parse_dbt(body, platform)
+            results = parse_dbt(body, platform, urn_of)
         elif tool == "great_expectations":
             results = parse_great_expectations(body, platform, dataset)
         elif tool == "soda":
