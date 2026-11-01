@@ -101,6 +101,8 @@ class OpenLineageReceiver:
         self.graph = graph
         self.audit = audit
         self.env = env
+        # Renames datasets before they are recorded (lakehouse tables named by their storage paths).
+        self.rewrite = None
 
     def _datasets(self, items: list[dict], mcps: list[dict]) -> list[str]:
         urns = []
@@ -205,6 +207,8 @@ class OpenLineageReceiver:
         events = body if isinstance(body, list) else [body]
         if not events or len(events) > 500:
             raise OpenLineageError("send between 1 and 500 events")
+        if self.rewrite is not None:
+            events = [self.rewrite(e) for e in events]
         results = [self.handle(e, actor) for e in events]
         if self.audit is not None:
             self.audit.record("lineage", "openlineage.received", actor, None, {

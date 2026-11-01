@@ -674,6 +674,15 @@ cairn:
       existingSecret: ""
       urlKey: url
     replicas: 1
+    # People and pipeline users on the catalog (Spark, pyiceberg, DuckDB): they sign in with a Cairn token
+    # (POST /v1/lakehouse/token) and the catalog asks Cairn about every table for them, refusing what
+    # Cairn's policies do not allow and tables a mask or row filter applies to (query those through
+    # Trino). Needs vendRole (engines get per-table temporary credentials, never a store key) and
+    # cairn.trino (Cairn's policies on the lakehouse). The catalog asks with Cairn's service token.
+    identity:
+      enabled: false
+      # Cairn Catalog's address as engines name it in OpenLineage (lineage lands on lakehouse tables).
+      publicUrl: ""
     # The volume for the embedded state (without database).
     persistence:
       size: 10Gi

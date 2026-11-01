@@ -218,6 +218,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                                               usage=services.trino_usage, catalog_sync=services.trino_catalog,
                                               authorize=authz, oauth=services.trino_oauth,
                                               groups_of=lambda urn: services.attributes.subject(urn).get("groups", [])))
+    if services.lakehouse is not None and services.trino_tokens is not None:
+        from cairn.dataaccess.lakehouse import build_lakehouse_router
+
+        app.include_router(build_lakehouse_router(services.lakehouse, services.trino_tokens, cp, services.audit))
     if services.dbt_runs is not None:
         from cairn.pipelines.dbt import build_dbt_router
 

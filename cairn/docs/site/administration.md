@@ -1042,6 +1042,41 @@ A multi-table transaction changes every table or none.
   - **Sign-in.** Airflow's API server (over TLS) sent the browser to Cairn. Signed in to Cairn, the browser came back and was signed in to Airflow. `ana` got the User role from her group, and `bob`, in no mapped group, got only Public. A token not signed by Cairn was refused.
   - **Compose.** In a Compose slice the API server became healthy, the scheduler, DAG processor and triggerer ran, the example DAG parsed, and `/auth/login/cairn` redirected to Cairn's sign-in, with PKCE.
 
+**Spark and other engines that read files (pyiceberg, DuckDB).** Spark 4 runs on the lakehouse as a Cairn identity. Cairn decides every table it touches, the catalog vends storage credentials one table at a time, and its lineage reaches Cairn.
+
+- **Why this is different from Trino.** Trino applies Cairn's masks and row filters inside each query. Spark reads a table's data files itself, and those files hold what a mask or filter would hide. So for these engines:
+  - Cairn Catalog asks Cairn about each table, as the user (`POST /v1/lakehouse/decide`, with Cairn's service token; decisions are cached for 15 seconds).
+  - A table with a mask or row filter for that user is **refused**: "Masks or row filters apply to this table for you. Query it through Trino." The user queries it through Trino, or through a view a data owner builds in Trino.
+  - Tables the user may not see are not listed. Their namespaces show only what is visible.
+  - Reading needs read. Appending, overwriting and deleting rows needs write. Creating, dropping, renaming and changing schema or properties needs manage. Namespaces need Cairn's system privilege.
+  - Vended credentials are read-only unless the user may write the table. They cover only that table's location.
+- **Fails closed.** The catalog refuses every Cairn-issued token when Cairn cannot answer (503), and any error in a decision decides nothing. It will not start with Cairn-issued tokens unless it vends scoped credentials (`CAIRN_CATALOG_VEND_ROLE`), since a store key would bypass the per-table decisions. Tokens are RS256, checked against Cairn's published key (`/v1/trino/jwks.json`) for issuer, audience `lakehouse`, expiry and not-before. Trino's and Airflow's tokens are refused (other audiences). The catalog's static tokens (`CAIRN_CATALOG_TOKEN`, for Trino and admin tools) work as before.
+- **Who a job is.** A person, or a pipeline user such as `svc-spark` with a personal access token. `POST /v1/lakehouse/token` exchanges it for a short-lived catalog token (`CAIRN_SPARK_TOKEN_TTL`, 4 hours by default, at most 12; it must outlast the job). Issuing one is audited (`lakehouse.token_issued`). Service and agent tokens get none.
+- **In a job.** `from cairn_spark import lakehouse_session; spark = lakehouse_session("my-job")` (package `cairn-spark`, `spark/`). It reads:
+  - `CAIRN_URL`, Cairn's API;
+  - `CAIRN_TOKEN` or `CAIRN_TOKEN_FILE`, the caller's Cairn token;
+  - `CAIRN_CATALOG_URI`, Cairn Catalog;
+  - `CAIRN_CA_FILE`, if needed.
+
+  The `lakehouse` catalog is the default, so `spark.sql("SELECT … FROM analytics.products")` works. For `spark-submit --conf` settings instead, see `cairn_spark.lakehouse_conf(...)`.
+- **Lineage.** The OpenLineage Spark listener sends each job's runs, with table and column lineage, to Cairn as the same user. Spark names tables by their storage paths, so Cairn renames the tables of Cairn Catalog (`CAIRN_LAKEHOUSE_CATALOG_URIS`: the catalog's addresses as engines reach it) to the datasets Trino and the catalog crawler name. Lineage from Trino, dbt and Spark then meets on one dataset.
+- **The image.** `cairn/spark` (`docker/spark.Dockerfile`) is the official Apache Spark 4.0 image with:
+  - Apache Iceberg 1.10 (Spark runtime and AWS bundle, for S3FileIO);
+  - OpenLineage for Spark 1.55;
+  - `cairn-spark`.
+- **Turning it on.**
+  - **Compose:** on by default (`CAIRN_CATALOG_JWKS_URL` and `CAIRN_CATALOG_CAIRN_URL` on `cairn-catalog`). `docker compose -f docker-compose.cairn.yml --profile spark run --rm cairn-spark /jobs/lakehouse_products.py` runs a job from `CAIRN_SPARK_JOBS` (default `examples/spark`) with the token in `CAIRN_SPARK_TOKEN`.
+  - **Helm:** set `cairn.catalog.identity.enabled: true`. This needs `cairn.catalog.vendRole` and `cairn.trino.enabled`, or the chart refuses to render. Set `identity.publicUrl` to the catalog's address outside the cluster, if engines use one.
+  - **Network policy:** Spark's pods need to reach the API (`cairn.networkPolicy.apiIngressFrom`), the catalog (`catalogIngressFrom`) and the store.
+  - **Running jobs:** run `cairn/spark` (or `FROM cairn/spark` with your code) with the Spark operator, `spark-submit --master k8s://…`, or Airflow's KubernetesPodOperator.
+- **Tested** (`tests/test_spark_e2e.py`, in CI against the `cairn/spark` image as built) with Spark 4.0.1, Iceberg 1.10.0 and OpenLineage 1.55.0, on Cairn Catalog with the store's STS:
+  - **Reads.** `ana` listed only what she may see. A table with her masked column was refused, and so was one she may not read.
+  - **Writes.** She read, built a table (CTAS) and inserted into it in a schema she manages, and was refused an insert into one she may only read.
+  - **Lineage.** It reached Cairn on the lakehouse dataset names, column by column.
+  - **Row filters.** `bob`'s row filter kept the files away from him too.
+  - **The example job.** It ran as `ana` and was refused as `bob`.
+  - **Tokens.** A forged signature, a malformed token and Trino's token were refused (401). A service token got no lakehouse token, and only a service token could ask for decisions. With Cairn unreachable the catalog answered 503. It would not start with Cairn-issued tokens but no scoped credentials.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

@@ -36,6 +36,9 @@ pub struct Principal {
     pub namespaces: Vec<String>,
     #[serde(default)]
     pub read_only: bool,
+    /// A Cairn user signed in with a Cairn-issued token: every table is decided by Cairn for them.
+    #[serde(skip)]
+    pub user: Option<String>,
 }
 
 impl Principal {
@@ -54,6 +57,32 @@ pub struct Config {
     pub vend: Vend,
     /// The object store endpoint as clients reach it (defaults to the catalog's own).
     pub client_endpoint: String,
+    /// People and pipeline users (Cairn-issued tokens), decided by Cairn table by table.
+    pub identity: Option<std::sync::Arc<crate::identity::Identity>>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Need {
+    View,
+    Read,
+    Write,
+    Manage,
+}
+
+/// Commits that only add or expire data (snapshots, refs, statistics) need write; any other change
+/// (schema, partitioning, properties, location) needs manage.
+fn data_only(updates: &[TableUpdate]) -> bool {
+    const DATA: [&str; 8] = [
+        "add-snapshot",
+        "set-snapshot-ref",
+        "remove-snapshots",
+        "remove-snapshot-ref",
+        "set-statistics",
+        "remove-statistics",
+        "set-partition-statistics",
+        "remove-partition-statistics",
+    ];
+    updates.iter().all(|u| serde_json::to_value(u).ok().and_then(|v| v["action"].as_str().map(|a| DATA.contains(&a))).unwrap_or(false))
 }
 
 /// Credentials handed to engines with each table.
@@ -328,16 +357,94 @@ impl Catalog {
         Catalog { db, store: s3::Client::new(cfg.s3.clone()), cfg, vended: Default::default() }
     }
 
-    fn authenticate(&self, auth: &str) -> Result<&Principal, ApiError> {
+    async fn authenticate(&self, auth: &str) -> Result<Principal, ApiError> {
         let token = auth.strip_prefix("Bearer ").unwrap_or("");
         if token.is_empty() {
             return Err(err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "A bearer token is required"));
         }
-        self.cfg
-            .principals
-            .iter()
-            .find(|p| bool::from(p.token.as_bytes().ct_eq(token.as_bytes())))
-            .ok_or_else(|| err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "The token is not valid"))
+        if let Some(p) = self.cfg.principals.iter().find(|p| bool::from(p.token.as_bytes().ct_eq(token.as_bytes()))) {
+            return Ok(p.clone());
+        }
+        match &self.cfg.identity {
+            Some(id) if token.matches('.').count() == 2 => match id.verify(token).await {
+                Ok(user) => Ok(Principal {
+                    token: String::new(),
+                    name: format!("user:{user}"),
+                    namespaces: vec![],
+                    read_only: false,
+                    user: Some(user),
+                }),
+                Err(why) => {
+                    tracing::info!(error = %why, "a Cairn token was refused");
+                    Err(err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", format!("The token is not valid: {why}")))
+                }
+            },
+            _ => Err(err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "The token is not valid")),
+        }
+    }
+
+    /// For a Cairn user, Cairn's decision on one table; refuses what they may not do (and reading a
+    /// table a mask or row filter applies to). Other principals may do everything their scope allows.
+    async fn need(&self, p: &Principal, levels: &[String], name: &str, need: Need) -> Result<crate::identity::Decision, ApiError> {
+        let (Some(user), Some(id)) = (&p.user, &self.cfg.identity) else { return Ok(crate::identity::Decision::all()) };
+        let d = id
+            .decide(user, &[(levels.to_vec(), name.to_string())])
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, user = %user, "a lakehouse decision could not be made: refused");
+                err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", "Cairn could not decide access to this table now")
+            })?
+            .pop()
+            .unwrap_or_default();
+        let table = format!("{}.{name}", levels.join("."));
+        let (ok, verb) = match need {
+            Need::View => (d.view, "see"),
+            Need::Read => (d.read, "read"),
+            Need::Write => (d.write, "write to"),
+            Need::Manage => (d.manage, "change or drop"),
+        };
+        if !ok {
+            tracing::info!(user = %user, table = %table, need = verb, "refused by Cairn's policies");
+            return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("Cairn's policies do not let {user} {verb} {table}")));
+        }
+        if need == Need::Read && d.restricted {
+            tracing::info!(user = %user, table = %table, "restricted: refused to engines reading files");
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                format!("Masks or row filters apply to {user} on {table}: its files cannot be handed out. Query it through Trino, which applies them."),
+            ));
+        }
+        Ok(d)
+    }
+
+    /// For a Cairn user: may they create, change and drop namespaces?
+    async fn need_schemas(&self, p: &Principal) -> Result<(), ApiError> {
+        let (Some(user), Some(id)) = (&p.user, &self.cfg.identity) else { return Ok(()) };
+        match id.schemas(user).await {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("Cairn's policies do not let {user} manage namespaces")))
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "a lakehouse decision could not be made: refused");
+                Err(err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", "Cairn could not decide access now"))
+            }
+        }
+    }
+
+    /// For a Cairn user, the names they may see.
+    async fn visible(&self, p: &Principal, levels: &[String], names: Vec<String>) -> Result<Vec<String>, ApiError> {
+        let (Some(user), Some(id)) = (&p.user, &self.cfg.identity) else { return Ok(names) };
+        if names.is_empty() {
+            return Ok(names);
+        }
+        let q: Vec<(Vec<String>, String)> = names.iter().map(|n| (levels.to_vec(), n.clone())).collect();
+        let ds = id
+            .decide(user, &q)
+            .await
+            .map_err(|_| err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", "Cairn could not decide access now"))?;
+        Ok(names.into_iter().zip(ds).filter(|(_, d)| d.view).map(|(n, _)| n).collect())
     }
 
     pub async fn handle<B>(self: Arc<Self>, req: Request<B>) -> Result<Resp, Infallible>
@@ -366,7 +473,7 @@ impl Catalog {
             return Ok(empty(StatusCode::OK));
         }
         let auth = req.headers().get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-        let principal = self.authenticate(&auth)?.clone();
+        let principal = self.authenticate(&auth).await?;
         tracing::debug!(principal = %principal.name, "authenticated");
         let method = req.method().clone();
         let query: BTreeMap<String, String> = req
@@ -411,6 +518,7 @@ impl Catalog {
                     return Err(bad_request("Invalid namespace name"));
                 }
                 scope(&req.namespace)?;
+                self.need_schemas(&principal).await?;
                 self.db.create_namespace(&req.namespace, req.properties.clone())?;
                 Ok(json_resp(StatusCode::OK, &json!({"namespace": req.namespace, "properties": req.properties})))
             }
@@ -430,6 +538,7 @@ impl Catalog {
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
                     Method::DELETE => {
+                        self.need_schemas(&principal).await?;
                         self.db.drop_namespace(&levels)?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
@@ -447,25 +556,30 @@ impl Catalog {
                         "A key cannot be both removed and updated",
                     ));
                 }
+                self.need_schemas(&principal).await?;
                 let (updated, removed, missing) = self.db.update_namespace(&levels, &req.removals, &req.updates)?;
                 Ok(json_resp(StatusCode::OK, &json!({"updated": updated, "removed": removed, "missing": missing})))
             }
             (Method::GET, ["v1", "namespaces", ns, "tables"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
-                let ids: Vec<Identifier> =
-                    self.db.list_tables(&levels)?.into_iter().map(|name| Identifier { namespace: levels.clone(), name }).collect();
+                let names = self.visible(&principal, &levels, self.db.list_tables(&levels)?).await?;
+                let ids: Vec<Identifier> = names.into_iter().map(|name| Identifier { namespace: levels.clone(), name }).collect();
                 Ok(json_resp(StatusCode::OK, &json!({"identifiers": ids, "next-page-token": null})))
             }
             (Method::POST, ["v1", "namespaces", ns, "tables"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
-                self.create_table(&levels, parse(&body)?).await
+                let req: CreateTable = parse(&body)?;
+                self.need(&principal, &levels, &req.name, Need::Manage).await?;
+                self.create_table(&levels, req).await
             }
             (Method::POST, ["v1", "namespaces", ns, "register"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
-                self.register(&levels, parse(&body)?).await
+                let req: Register = parse(&body)?;
+                self.need(&principal, &levels, &req.name, Need::Manage).await?;
+                self.register(&levels, req).await
             }
             (Method::POST, ["v1", "namespaces", ns, "tables", t, "metrics"]) => {
                 scope(&ns_param(ns))?;
@@ -477,20 +591,24 @@ impl Catalog {
                 scope(&levels)?;
                 match m {
                     Method::GET => {
+                        let d = self.need(&principal, &levels, &name, Need::Read).await?;
                         let row = self.db.table(&levels, &name)?;
                         self.load_result(
                             &row.metadata_location,
                             serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?,
-                            principal.read_only,
+                            principal.read_only || !d.write,
                         )
                         .await
                     }
                     Method::HEAD => {
+                        self.need(&principal, &levels, &name, Need::View).await?;
                         self.db.table(&levels, &name)?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
                     Method::POST => {
                         let req: CommitTable = parse(&body)?;
+                        let need = if data_only(&req.updates) { Need::Write } else { Need::Manage };
+                        self.need(&principal, &levels, &name, need).await?;
                         if let Some(id) = &req.identifier {
                             if id.namespace != levels || id.name != name {
                                 return Err(bad_request("The identifier in the body differs from the path"));
@@ -502,6 +620,7 @@ impl Catalog {
                         Ok(json_resp(StatusCode::OK, &json!({"metadata-location": location, "metadata": p.metadata})))
                     }
                     Method::DELETE => {
+                        self.need(&principal, &levels, &name, Need::Manage).await?;
                         let row = self.db.drop_table(&levels, &name)?;
                         if query.get("purgeRequested").is_some_and(|v| v == "true") {
                             // Data files are left for the store's lifecycle tooling; the current metadata goes now.
@@ -515,20 +634,23 @@ impl Catalog {
             (Method::GET, ["v1", "namespaces", ns, "views"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
-                let ids: Vec<Identifier> =
-                    self.db.list_views(&levels)?.into_iter().map(|name| Identifier { namespace: levels.clone(), name }).collect();
+                let names = self.visible(&principal, &levels, self.db.list_views(&levels)?).await?;
+                let ids: Vec<Identifier> = names.into_iter().map(|name| Identifier { namespace: levels.clone(), name }).collect();
                 Ok(json_resp(StatusCode::OK, &json!({"identifiers": ids, "next-page-token": null})))
             }
             (Method::POST, ["v1", "namespaces", ns, "views"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
-                self.create_view(&levels, parse(&body)?).await
+                let req: CreateView = parse(&body)?;
+                self.need(&principal, &levels, &req.name, Need::Manage).await?;
+                self.create_view(&levels, req).await
             }
             (m, ["v1", "namespaces", ns, "views", v]) => {
                 let (levels, name) = (ns_param(ns), decode(v));
                 scope(&levels)?;
                 match m {
                     Method::GET => {
+                        self.need(&principal, &levels, &name, Need::View).await?;
                         let row = self.db.view(&levels, &name)?;
                         let metadata: Value = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
                         Ok(json_resp(
@@ -537,11 +659,16 @@ impl Catalog {
                         ))
                     }
                     Method::HEAD => {
+                        self.need(&principal, &levels, &name, Need::View).await?;
                         self.db.view(&levels, &name)?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
-                    Method::POST => self.replace_view(&levels, &name, parse(&body)?).await,
+                    Method::POST => {
+                        self.need(&principal, &levels, &name, Need::Manage).await?;
+                        self.replace_view(&levels, &name, parse(&body)?).await
+                    }
                     Method::DELETE => {
+                        self.need(&principal, &levels, &name, Need::Manage).await?;
                         self.db.drop_view(&levels, &name)?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
@@ -555,6 +682,8 @@ impl Catalog {
                 if !valid_name(&req.destination.name) {
                     return Err(bad_request("Invalid view name"));
                 }
+                self.need(&principal, &req.source.namespace, &req.source.name, Need::Manage).await?;
+                self.need(&principal, &req.destination.namespace, &req.destination.name, Need::Manage).await?;
                 self.db.rename_view((&req.source.namespace, &req.source.name), (&req.destination.namespace, &req.destination.name))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
@@ -565,6 +694,8 @@ impl Catalog {
                 if !valid_name(&req.destination.name) {
                     return Err(bad_request("Invalid table name"));
                 }
+                self.need(&principal, &req.source.namespace, &req.source.name, Need::Manage).await?;
+                self.need(&principal, &req.destination.namespace, &req.destination.name, Need::Manage).await?;
                 self.db.rename_table((&req.source.namespace, &req.source.name), (&req.destination.namespace, &req.destination.name))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
@@ -577,6 +708,8 @@ impl Catalog {
                 for c in req.table_changes {
                     let id = c.identifier.ok_or_else(|| bad_request("Each table change needs an identifier"))?;
                     scope(&id.namespace)?;
+                    let need = if data_only(&c.updates) { Need::Write } else { Need::Manage };
+                    self.need(&principal, &id.namespace, &id.name, need).await?;
                     prepared.push(self.prepare(&id.namespace, &id.name, c.requirements, c.updates).await?);
                 }
                 self.apply(prepared.into_iter().map(|p| p.change).collect()).await?;

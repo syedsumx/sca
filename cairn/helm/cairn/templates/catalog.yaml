@@ -79,6 +79,20 @@ spec:
             - name: CAIRN_CATALOG_VEND_CREDENTIALS
               value: {{ $u.vendCredentials | quote }}
             {{- end }}
+            {{- if $u.identity.enabled }}
+            {{- if not $u.vendRole }}{{ fail "cairn.catalog.identity needs cairn.catalog.vendRole (per-table temporary credentials, never the store key)" }}{{ end }}
+            {{- if not $.Values.cairn.trino.enabled }}{{ fail "cairn.catalog.identity needs cairn.trino.enabled (Cairn's policies on the lakehouse)" }}{{ end }}
+            {{- $api := dict "root" $ "component" "api" "cfg" $.Values.cairn.api }}
+            - name: CAIRN_CATALOG_JWKS_URL
+              value: {{ printf "http://%s:%v/v1/trino/jwks.json" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+            - name: CAIRN_CATALOG_JWT_ISSUER
+              value: {{ $.Values.cairn.trino.tokenIssuer | quote }}
+            - name: CAIRN_CATALOG_CAIRN_URL
+              value: {{ printf "http://%s:%v" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+            - name: CAIRN_CATALOG_CAIRN_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $.Values.cairn.secrets.name }}, key: {{ $.Values.cairn.secrets.serviceTokenKey }} }
+            {{- end }}
             - name: CAIRN_CATALOG_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }

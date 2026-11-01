@@ -225,9 +225,9 @@ jobs:
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
 
-  # dbt and Airflow 3 on the lakehouse, as shipped (the cairn/dbt and cairn/airflow images), against a real
-  # Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies, run recording, lineage
-  # and Airflow sign-in through Cairn.
+  # dbt, Airflow 3 and Spark 4 on the lakehouse, as shipped (the cairn/dbt, cairn/airflow and cairn/spark
+  # images), against a real Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies,
+  # run recording, lineage, Airflow sign-in through Cairn and Spark governed table by table.
   pipelines:
     runs-on: ubuntu-latest
     steps:
@@ -254,22 +254,25 @@ jobs:
         run: |
           (cd catalog && cargo build --release --locked)
           (cd store && cargo build --release --locked)
-      - name: Build the cairn/dbt and cairn/airflow images; pull Trino
+      - name: Build the cairn/dbt, cairn/airflow and cairn/spark images; pull Trino
         working-directory: cairn
         run: |
           docker build -q -f docker/dbt.Dockerfile -t cairn/dbt:ci .
           docker build -q -f docker/airflow.Dockerfile -t cairn/airflow:ci .
+          docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
           docker pull -q trinodb/trino:476
-      - name: dbt and Airflow end to end
+      - name: dbt, Airflow and Spark end to end
         working-directory: cairn
         env:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
           CAIRN_DBT_IMAGE: cairn/dbt:ci
           CAIRN_AIRFLOW_IMAGE: cairn/airflow:ci
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
         run: |
-          pip install -e ".[server,test,trino]" "dbt-core==1.12.6" "dbt-trino==1.11.0"
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_airflow_e2e.py | tee "$RUNNER_TEMP/pipelines.log"
+          pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_airflow_e2e.py \
+            tests/test_spark_e2e.py tests/test_lakehouse_access.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
 
@@ -335,6 +338,7 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \
+              "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.catalog.identity.enabled=true --set cairn.catalog.identity.publicUrl=https://catalog.example.com --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls"; do
@@ -350,6 +354,10 @@ jobs:
           # A store cluster without TLS between its nodes is refused unless asked for explicitly.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
               --set cairn.store.metadata.secretName=cairn-store-meta >/dev/null 2>&1
+          # Cairn-issued tokens on the catalog without per-table temporary credentials are refused.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
+              --set cairn.catalog.identity.enabled=true --set cairn.trino.enabled=true \
+              --set cairn.trino.tls.secretName=cairn-trino-tls >/dev/null 2>&1
           # Catalog replicas without a shared database are refused.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
               --set cairn.catalog.replicas=2 >/dev/null 2>&1

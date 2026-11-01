@@ -22,12 +22,17 @@
 //! CAIRN_CATALOG_S3_SECRET_KEY     ... and its secret (or CAIRN_CATALOG_S3_SECRET_KEY_FILE)
 //! CAIRN_CATALOG_VEND_CREDENTIALS  true: give clients the endpoint and key with each table (default true)
 //! CAIRN_CATALOG_CLIENT_S3_ENDPOINT  the object store endpoint as clients reach it (default: the one above)
+//! CAIRN_CATALOG_JWKS_URL          accept Cairn-issued tokens (people, pipeline users): Cairn's keys, e.g. https://cairn/cairn/api/v1/trino/jwks.json
+//! CAIRN_CATALOG_CAIRN_URL         ... Cairn's API, asked about every table such a token touches
+//! CAIRN_CATALOG_CAIRN_TOKEN       ... a Cairn service token to ask with (or _FILE)
+//! CAIRN_CATALOG_JWT_ISSUER / _AUDIENCE  the tokens' issuer (cairn) and audience (lakehouse)
 //! CAIRN_CATALOG_FSYNC             false disables fsync (tests only)
 //! CAIRN_CATALOG_LOG_LEVEL         debug, info, warn, error
 //! ```
 
 mod api;
 mod db;
+mod identity;
 mod pg;
 mod s3;
 
@@ -70,7 +75,7 @@ fn principals() -> Vec<api::Principal> {
     let mut out = vec![];
     let token = secret("CAIRN_CATALOG_TOKEN");
     if !token.is_empty() {
-        out.push(api::Principal { token, name: "admin".into(), namespaces: vec![], read_only: false });
+        out.push(api::Principal { token, name: "admin".into(), namespaces: vec![], read_only: false, user: None });
     }
     if let Ok(f) = std::env::var("CAIRN_CATALOG_TOKENS_FILE") {
         let text = std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e));
@@ -228,6 +233,26 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Re
     Ok(arn)
 }
 
+/// People and pipeline users signing in with Cairn-issued tokens (CAIRN_CATALOG_JWKS_URL), decided by Cairn.
+fn identity_config() -> Option<std::sync::Arc<identity::Identity>> {
+    let jwks = env("CAIRN_CATALOG_JWKS_URL", "");
+    if jwks.is_empty() {
+        return None;
+    }
+    let cairn_url = env("CAIRN_CATALOG_CAIRN_URL", "");
+    if cairn_url.is_empty() {
+        fail("CAIRN_CATALOG_CAIRN_URL", "Cairn's API, which decides each table for Cairn-issued tokens");
+    }
+    let cfg = identity::IdentityConfig {
+        jwks_url: jwks,
+        issuer: env("CAIRN_CATALOG_JWT_ISSUER", "cairn"),
+        audience: env("CAIRN_CATALOG_JWT_AUDIENCE", "lakehouse"),
+        cairn_url,
+        cairn_token: secret("CAIRN_CATALOG_CAIRN_TOKEN"),
+    };
+    Some(std::sync::Arc::new(identity::Identity::new(cfg).unwrap_or_else(|e| fail("Cairn-issued tokens", e))))
+}
+
 async fn serve(addr: String) {
     let data = env("CAIRN_CATALOG_DATA", "/data");
     let fsync = env("CAIRN_CATALOG_FSYNC", "true") != "false";
@@ -254,7 +279,12 @@ async fn serve(addr: String) {
         s3: s3cfg,
         vend: vend_mode(&warehouse_store, &warehouse).await,
         client_endpoint: env("CAIRN_CATALOG_CLIENT_S3_ENDPOINT", &s3cfg_endpoint),
+        identity: identity_config(),
     };
+    if cfg.identity.is_some() && !matches!(cfg.vend, api::Vend::Scoped { .. }) {
+        // A person's token must never carry the catalog's own store key, nor nothing at all.
+        fail("CAIRN_CATALOG_JWKS_URL", "Cairn-issued tokens need scoped credentials: set CAIRN_CATALOG_VEND_ROLE (the store's STS on)");
+    }
     let tokens = cfg.principals.len();
     let catalog = Arc::new(api::Catalog::new(db, cfg));
     let listener = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("listen", e));

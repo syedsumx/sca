@@ -99,6 +99,7 @@ class Services:
     git: Optional[Any] = None
     external_quality: Optional[Any] = None
     dbt_runs: Optional[Any] = None
+    lakehouse: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
@@ -956,6 +957,16 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.trino_catalog import TrinoCatalogSync
 
             s.trino_catalog = TrinoCatalogSync(s.engine, s.graph, s.data_access, s.trino_access, s.audit)
+
+    if getattr(s, "trino_access", None) is not None:
+        # Engines that read files themselves (Spark, pyiceberg): Cairn Catalog asks about every table.
+        from cairn.dataaccess.lakehouse import LakehouseAccess
+
+        s.lakehouse = LakehouseAccess(s.trino_access, lambda urn: s.attributes.subject(urn).get("groups", []),
+                                      os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse"),
+                                      tuple(os.environ.get("CAIRN_LAKEHOUSE_CATALOG_URIS", "").split(",")))
+        if s.openlineage is not None:
+            s.openlineage.rewrite = s.lakehouse.remap_lineage
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

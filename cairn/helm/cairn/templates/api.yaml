@@ -15,6 +15,13 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_REDIRECT_URIS" "value" (printf "%s/oauth2/callback" (trimSuffix "/" .Values.cairn.trino.sso.publicUrl))) }}
 {{- end }}
 {{- end }}
+{{- /* Lakehouse tables in Spark's lineage: Cairn Catalog's addresses as engines name it. */ -}}
+{{- if and .Values.cairn.catalog.enabled .Values.cairn.catalog.identity.enabled }}
+{{- $cat := dict "root" $ "component" "catalog" "cfg" .Values.cairn.catalog }}
+{{- $uris := list (printf "http://%s:%v" (include "cairn.componentName" $cat) .Values.cairn.catalog.port) }}
+{{- with .Values.cairn.catalog.identity.publicUrl }}{{ $uris = append $uris . }}{{ end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_CATALOG_URIS" "value" (join "," $uris)) }}
+{{- end }}
 {{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
 {{- if .Values.cairn.store.enabled }}
 {{- $s := .Values.cairn.store.secret }}
