@@ -487,8 +487,15 @@ cairn:
       secretKeyKey: secret-key
       # Optional: a base64 32-byte key in the same Secret turns on encryption at rest.
       masterKeyKey: ""
+      # Optional: a key in the same Secret (32+ characters) turns on temporary credentials (STS:
+      # AssumeRole, GetSessionToken, AssumeRoleWithWebIdentity). Cairn Catalog needs it to hand out
+      # per-table credentials.
+      stsSecretKey: ""
       # Optional: a Secret with a "keyring.json" ({"keys": {...}, "sse_s3_key": ...}) instead, for key rotation.
       keyringSecret: ""
+    # OIDC issuers whose tokens AssumeRoleWithWebIdentity accepts, e.g.
+    #   [{issuer: cairn, audiences: [cairn-store], jwks_url: "http://<release>-cairn-api:8800/v1/trino/jwks.json"}]
+    stsProviders: []
     # Further keys (read-only, bucket-scoped): a Secret with a "credentials.json" list, or empty.
     extraCredentialsSecret: ""
     buckets: [lakehouse]      # created at start-up if missing

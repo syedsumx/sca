@@ -29,6 +29,7 @@ pub mod replication;
 pub mod sftp;
 pub mod sinks;
 pub mod sse;
+pub mod sts;
 pub mod tiering;
 mod trail;
 pub mod ttl;
@@ -105,6 +106,8 @@ pub struct Config {
     pub kafka: Option<kafka::KafkaConfig>,
     /// Seconds between lifecycle passes (0: lifecycle processing is off).
     pub lifecycle_secs: u64,
+    /// Temporary credentials (None: STS is off).
+    pub sts: Option<sts::StsConfig>,
 }
 
 pub struct Server {
@@ -203,7 +206,7 @@ impl Server {
             Some(cc) => Some(cluster::Cluster::new(cc, eng.clone())?),
             None => None,
         };
-        let mut keyset = keys::KeySet::default();
+        let mut keyset = keys::KeySet { sts: cfg.sts.map(Arc::new), ..Default::default() };
         for c in cfg.credentials {
             keyset.fixed.insert(c.access_key.clone());
             keyset.insert(c)?;
@@ -296,7 +299,10 @@ impl Server {
             ("ClusterApi", Ok(self.cluster_api(req).await), None, Default::default())
         } else if path.starts_with("/-/admin/") {
             ("AdminApi", Ok(self.admin_api(req).await), None, Default::default())
-        } else if path == "/" && req.method() == Method::POST && iam::service_of(req.headers()).is_some() {
+        } else if path == "/"
+            && req.method() == Method::POST
+            && (iam::service_of(req.headers()).is_some() || iam::is_unsigned_sts(req.headers(), req.uri().query().unwrap_or("")))
+        {
             ("IamApi", self.iam_api(req, &request_id).await, None, Default::default())
         } else if path.starts_with("/-/") && !path.starts_with("/-/files") && !path.starts_with("/-/dav") {
             ("admin", Ok(self.admin(&path)), None, Default::default())
@@ -455,7 +461,7 @@ impl Server {
         let auth = if auth::is_anonymous(&parts.headers, &raw_query) {
             auth::Auth::anonymous()
         } else {
-            match auth::verify(&self.keyset().creds, &request) {
+            match auth::verify(&*self.keyset(), &request) {
                 Ok(a) => a,
                 Err(err) => return ("auth", Err(err), cors, info),
             }

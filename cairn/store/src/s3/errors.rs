@@ -28,6 +28,8 @@ errors! {
     INVALID_ACCESS_KEY = "InvalidAccessKeyId", 403, "The access key ID you provided does not exist in our records.";
     SIGNATURE_MISMATCH = "SignatureDoesNotMatch", 403, "The request signature we calculated does not match the signature you provided.";
     EXPIRED = "AccessDenied", 403, "Request has expired";
+    INVALID_SESSION_TOKEN = "InvalidToken", 400, "The provided token is malformed or otherwise invalid.";
+    EXPIRED_TOKEN = "ExpiredToken", 400, "The provided token has expired.";
     TIME_SKEWED = "RequestTimeTooSkewed", 403, "The difference between the request time and the server's time is too large.";
     MISSING_CONTENT_SHA = "InvalidRequest", 400, "Missing required header for this request: x-amz-content-sha256";
     CONTENT_SHA_INVALID = "InvalidArgument", 400, "x-amz-content-sha256 must be UNSIGNED-PAYLOAD, a streaming mode, or a valid sha256 value.";

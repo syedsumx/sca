@@ -325,8 +325,9 @@ impl Server {
         }
         let bucket_policy = self.bucket_policy(bucket)?;
         let keyset = self.keyset();
-        let key_policy = keyset.policies.get(&cred.access_key);
-        let ctx = if bucket_policy.is_some() || key_policy.is_some() {
+        let key_policy = keyset.policy_of(cred);
+        let session_policy = cred.session.as_ref().is_some_and(|s| s.policy.is_some());
+        let ctx = if bucket_policy.is_some() || key_policy.is_some() || session_policy {
             self.context(c, bucket, key, !matches!(action, "s3:PutObject" | "s3:AbortMultipartUpload"))
         } else {
             BTreeMap::new()
@@ -352,6 +353,12 @@ impl Server {
         };
         if !allowed {
             return Err(e::ACCESS_DENIED.clone());
+        }
+        // A session policy narrows what the session may do: it must allow the request too.
+        if let Some(sp) = cred.session.as_ref().and_then(|s| s.policy.as_ref()) {
+            if sp.evaluate(&req) != Some(Effect::Allow) {
+                return Err(e::ACCESS_DENIED.clone());
+            }
         }
         if let (Some(pdp), false) = (&self.pdp, anonymous) {
             let actor = if cred.actor.is_empty() { format!("urn:li:corpuser:{}", cred.access_key) } else { cred.actor.clone() };

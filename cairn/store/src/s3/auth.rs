@@ -49,6 +49,36 @@ pub struct Credential {
     /// The IAM user the key belongs to (keys made through the IAM API).
     #[serde(skip)]
     pub user: String,
+    /// A temporary key's session (STS): its role and session policy.
+    #[serde(skip)]
+    pub session: Option<std::sync::Arc<super::sts::Session>>,
+}
+
+/// Where the authenticator finds a request's key: the configured keys, and (through the key set)
+/// temporary keys from STS, which need the request's session token.
+pub trait Keys {
+    fn lookup(&self, access_key: &str, token: &str, now: i64) -> Result<Credential, ApiError>;
+}
+
+impl Keys for BTreeMap<String, Credential> {
+    fn lookup(&self, access_key: &str, _token: &str, _now: i64) -> Result<Credential, ApiError> {
+        self.get(access_key).cloned().ok_or_else(|| e::INVALID_ACCESS_KEY.clone())
+    }
+}
+
+/// A request's session token (header or presigned query).
+fn security_token(r: &Request) -> String {
+    let h = header_str(r.headers, "x-amz-security-token");
+    if !h.is_empty() {
+        return h.to_string();
+    }
+    r.raw_query
+        .split('&')
+        .find_map(|p| {
+            let (k, v) = p.split_once('=')?;
+            query_decode(k).eq_ignore_ascii_case("X-Amz-Security-Token").then(|| query_decode(v))
+        })
+        .unwrap_or_default()
 }
 
 impl Credential {
@@ -123,7 +153,7 @@ pub fn aws_encode(data: &[u8], keep_slash: bool) -> String {
 
 /// Verifies a header-signed SigV4 request whose payload hash the server computed (`payload`, hex). An
 /// x-amz-content-sha256 header, when sent, must match it.
-pub fn verify_with_payload(creds: &BTreeMap<String, Credential>, r: &Request, payload: &str) -> Result<Auth, ApiError> {
+pub fn verify_with_payload(creds: &impl Keys, r: &Request, payload: &str) -> Result<Auth, ApiError> {
     let auth = header_str(r.headers, "authorization");
     let rest = auth.strip_prefix("AWS4-HMAC-SHA256 ").ok_or_else(|| e::ACCESS_DENIED.clone())?;
     let sent = header_str(r.headers, "x-amz-content-sha256");
@@ -204,7 +234,7 @@ pub struct Request<'a> {
     pub vhost_bucket: Option<&'a str>,
 }
 
-pub fn verify(creds: &BTreeMap<String, Credential>, r: &Request) -> Result<Auth, ApiError> {
+pub fn verify(creds: &impl Keys, r: &Request) -> Result<Auth, ApiError> {
     let q: BTreeMap<String, String> = r
         .raw_query
         .split('&')
@@ -290,7 +320,7 @@ pub fn verify(creds: &BTreeMap<String, Credential>, r: &Request) -> Result<Auth,
 
 /// Verifies a browser POST policy signed with SigV4: the signature is HMAC(signing key, policy base64).
 pub fn verify_post_v4(
-    creds: &BTreeMap<String, Credential>,
+    creds: &impl Keys,
     credential: &str,
     amz_date: &str,
     policy_b64: &str,
@@ -300,7 +330,8 @@ pub fn verify_post_v4(
     if parts.len() != 5 || parts[3] != "s3" || parts[4] != "aws4_request" || !amz_date.starts_with(parts[1]) || signature.is_empty() {
         return Err(e::AUTH_HEADER_MALFORMED.clone());
     }
-    let cred = creds.get(parts[0]).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+    // Browser POST forms do not carry session tokens: temporary keys cannot sign them.
+    let cred = creds.lookup(parts[0], "", 0)?;
     let key = signing_key(&cred.secret_key, parts[1], parts[2], parts[3]);
     let want = hex::encode(hmac_sha256(&key, policy_b64.as_bytes()));
     if !bool::from(want.as_bytes().ct_eq(signature.as_bytes())) {
@@ -310,13 +341,8 @@ pub fn verify_post_v4(
 }
 
 /// Verifies a browser POST policy signed with SigV2: base64(HMAC-SHA1(secret, policy base64)).
-pub fn verify_post_v2(
-    creds: &BTreeMap<String, Credential>,
-    access_key: &str,
-    policy_b64: &str,
-    signature: &str,
-) -> Result<Credential, ApiError> {
-    let cred = creds.get(access_key).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+pub fn verify_post_v2(creds: &impl Keys, access_key: &str, policy_b64: &str, signature: &str) -> Result<Credential, ApiError> {
+    let cred = creds.lookup(access_key, "", 0)?;
     let mut m = <Hmac<Sha1>>::new_from_slice(cred.secret_key.as_bytes()).expect("hmac accepts any key");
     m.update(policy_b64.as_bytes());
     let want = base64::engine::general_purpose::STANDARD.encode(m.finalize().into_bytes());
@@ -328,7 +354,7 @@ pub fn verify_post_v2(
 
 #[allow(clippy::too_many_arguments)]
 fn check_v4(
-    creds: &BTreeMap<String, Credential>,
+    creds: &impl Keys,
     r: &Request,
     credential: &str,
     signed_headers: &str,
@@ -342,7 +368,7 @@ fn check_v4(
     if parts.len() != 5 || parts[4] != "aws4_request" || signed_headers.is_empty() || signature.is_empty() {
         return Err(e::AUTH_HEADER_MALFORMED.clone());
     }
-    let cred = creds.get(parts[0]).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+    let cred = creds.lookup(parts[0], &security_token(r), r.now.unix_timestamp())?;
     let t = parse_amz_date(amz_date).ok_or_else(|| e::AUTH_HEADER_MALFORMED.clone())?;
     if !amz_date.starts_with(parts[1]) {
         return Err(e::AUTH_HEADER_MALFORMED.clone());
@@ -420,8 +446,8 @@ const V2_SUBRESOURCES: [&str; 25] = [
     "response-expires",
 ];
 
-fn check_v2(creds: &BTreeMap<String, Credential>, r: &Request, ak: &str, sig: &str, date: &str) -> Result<Auth, ApiError> {
-    let cred = creds.get(ak).ok_or_else(|| e::INVALID_ACCESS_KEY.clone())?;
+fn check_v2(creds: &impl Keys, r: &Request, ak: &str, sig: &str, date: &str) -> Result<Auth, ApiError> {
+    let cred = creds.lookup(ak, &security_token(r), r.now.unix_timestamp())?;
     let mut amz: Vec<String> = r
         .headers
         .keys()
@@ -432,6 +458,16 @@ fn check_v2(creds: &BTreeMap<String, Credential>, r: &Request, ak: &str, sig: &s
             format!("{k}:{}", vals.join(","))
         })
         .collect();
+    // A presigned SigV2 URL signs its x-amz-* query parameters as if they were headers.
+    if r.raw_query.split('&').any(|p| p.starts_with("AWSAccessKeyId=")) {
+        for p in r.raw_query.split('&') {
+            let (k, v) = p.split_once('=').unwrap_or((p, ""));
+            let k = query_decode(k).to_ascii_lowercase();
+            if k.starts_with("x-amz-") {
+                amz.push(format!("{k}:{}", query_decode(v)));
+            }
+        }
+    }
     amz.sort();
     amz.dedup();
     let mut resource = match r.vhost_bucket {

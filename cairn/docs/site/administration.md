@@ -738,6 +738,20 @@ A write that would take a bucket over its quota is refused with `QuotaExceeded`,
 - **Who may call it.** Admin keys may make any call. Other keys may call an action only where their policy allows `iam:<Action>` on the entity's ARN (`arn:aws:iam::000000000000:user/<path><name>`, `group/`, `policy/`). So a team lead can, for example, manage only the users under `/contractors/`.
 - **Consistency.** Users, groups and policies are kept in the index. Each change is one transaction, together with the keys it creates or deletes and its audit entry (`iam.<Action>`). That holds on PostgreSQL metadata across a cluster too, and backups include IAM.
 
+**Temporary credentials (STS).** Set `CAIRN_STORE_STS_SECRET` (32+ characters, the same on every cluster node; or `_FILE`; in Helm, `cairn.store.secret.stsSecretKey`) and the store answers AWS STS. Tools get short-lived, narrowly scoped keys instead of long-lived ones; any AWS SDK uses them as it uses AWS's.
+- **Roles.** IAM roles (`aws iam create-role`, `put-role-policy`, `attach-role-policy`, `get-role`, `list-roles`, `update-assume-role-policy`, `delete-role`) have a trust policy, which says who may assume the role, and permission policies, which say what its sessions may do. A trust policy names only `sts:` actions. `MaxSessionDuration` runs from 3600 to 43200 seconds.
+- **`AssumeRole`.** A session of a role whose trust policy names the caller, an IAM user by its ARN. If it trusts the whole account (`arn:aws:iam::000000000000:root`) or everyone, the caller's own policy must also allow `sts:AssumeRole` on the role. A `Policy` (2048 characters at most) narrows the session further: the session may only do what both the role and that policy allow. Cairn Catalog uses this to hand engines credentials for one table.
+- **`GetSessionToken`.** A temporary key of the caller's own key, with that key's limits; a read-only key stays read-only. A session of an admin key is not an admin key.
+- **`AssumeRoleWithWebIdentity`.** A signed-in person's OIDC token (RS256 JWT) buys a role's session; the request is unsigned, and the token is the credential. `CAIRN_STORE_STS_PROVIDERS` lists the issuers the store trusts: `[{"issuer": "cairn", "audiences": ["cairn-store"], "jwks_url": "…/v1/trino/jwks.json"}]`, or `jwks_file`. The trust policy names the issuer as `Federated` and can require `"<issuer>:sub"` and `"<issuer>:aud"` with `StringEquals` or `StringLike`. The session carries the person's Cairn identity (`urn:li:corpuser:<sub>`), so Cairn's policy decision point sees the person, not the role.
+- **How a temporary key works.**
+  - Its id starts with `ASIA`, and its secret is derived from the id with the STS secret, so neither is stored.
+  - Its session token is the session's claims (role, expiry, session policy, identity), signed with the STS secret. Every node can check it, and an edited or swapped token is refused (`InvalidToken`).
+  - Deleting a role ends its sessions at once. A session's policies are the role's current ones, so detaching one takes effect immediately.
+  - Temporary keys cannot manage IAM, assume further roles or sign browser POST forms. Presigned URLs (SigV4 and SigV2) carry the token.
+  - Every issue is audited (`sts.AssumeRole`, `sts.GetSessionToken`, `sts.AssumeRoleWithWebIdentity`) with the temporary key's id.
+- **Off by default.** Without `CAIRN_STORE_STS_SECRET`, STS actions are refused. In Compose a development secret is set; change it.
+- **Tested** with boto3's STS client: role and session-policy limits; edited, swapped and missing tokens; deleted roles; trust by name and by account; read-only and admin key sessions; web identity with good, foreign-signed, expired, wrong-audience and untrusted tokens; presigned URLs.
+
 **Storage in the Cairn UI.** Cairn admins see **Settings → Storage**, which lists:
 
 - every bucket, with its usage, its quota, and whether it has versioning, object lock, default encryption, lifecycle rules or a bucket policy;

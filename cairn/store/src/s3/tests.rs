@@ -50,6 +50,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             remotes: vec![],
             kafka: None,
             lifecycle_secs: 3600,
+            sts: None,
         },
     )
     .unwrap();

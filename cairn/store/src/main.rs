@@ -66,6 +66,8 @@
 //! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
 //! CAIRN_STORE_CLUSTER_NODE   run as this node of a cluster (off when empty; needs CAIRN_STORE_META, shared by the nodes)
 //! CAIRN_STORE_CLUSTER_URL    this node's address for the other nodes, e.g. http://store-0.store:8333
+//! CAIRN_STORE_STS_SECRET      turns on temporary credentials (STS): at least 32 characters, the same on every node (or _FILE)
+//! CAIRN_STORE_STS_PROVIDERS   OIDC issuers AssumeRoleWithWebIdentity trusts: JSON [{issuer, audiences, jwks_url|jwks_file, actor}] (or _FILE)
 //! CAIRN_STORE_CLUSTER_SECRET the secret that authenticates node-to-node calls, the same on every node (or _FILE)
 //! CAIRN_STORE_CLUSTER_COPIES copies of each blob, on distinct nodes (2)
 //! CAIRN_STORE_CLUSTER_EC     erasure-code large blobs as k data + m parity shards, e.g. 4+2 (off)
@@ -152,6 +154,19 @@ fn secret(k: &str) -> Result<String, String> {
         Ok(f) if !f.is_empty() => Ok(std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?.trim().to_string()),
         _ => Ok(env(k, "")),
     }
+}
+
+/// Temporary credentials: on when CAIRN_STORE_STS_SECRET is set (identity providers are optional).
+fn sts_config() -> Result<Option<s3::sts::StsConfig>, String> {
+    let key = secret("CAIRN_STORE_STS_SECRET")?;
+    if key.is_empty() {
+        return Ok(None);
+    }
+    let providers = match env("CAIRN_STORE_STS_PROVIDERS_FILE", "") {
+        f if f.is_empty() => env("CAIRN_STORE_STS_PROVIDERS", ""),
+        f => std::fs::read_to_string(&f).map_err(|e| format!("{f}: {e}"))?,
+    };
+    s3::sts::StsConfig::new(&key, &providers).map(Some)
 }
 
 /// Keys for encryption at rest: a keyring file, or one master key. None configured: no SSE-S3/SSE-KMS.
@@ -509,6 +524,7 @@ async fn serve(addr: String, data: String) {
                 backup_sinks: backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e)),
                 kafka: kafka_config().unwrap_or_else(|e| fail("CAIRN_STORE_KAFKA_ADDR", e)),
                 lifecycle_secs: env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or(3600),
+                sts: sts_config().unwrap_or_else(|e| fail("STS", e)),
                 remotes: match env("CAIRN_STORE_REMOTES_FILE", "") {
                     f if f.is_empty() => vec![],
                     f => s3::remote::load_specs(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)), "remote")

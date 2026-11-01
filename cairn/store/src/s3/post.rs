@@ -307,9 +307,9 @@ impl Server {
                 let policy: Value = serde_json::from_slice(&doc).map_err(|_| e::POST_POLICY.clone())?;
                 let cred = if fields.get("x-amz-algorithm").map(String::as_str) == Some(auth::ALGORITHM) {
                     let g = |k: &str| fields.get(k).map(String::as_str).unwrap_or("");
-                    auth::verify_post_v4(&self.keyset().creds, g("x-amz-credential"), g("x-amz-date"), p64.trim(), g("x-amz-signature"))?
+                    auth::verify_post_v4(&*self.keyset(), g("x-amz-credential"), g("x-amz-date"), p64.trim(), g("x-amz-signature"))?
                 } else if let Some(ak) = fields.get("awsaccesskeyid") {
-                    auth::verify_post_v2(&self.keyset().creds, ak, p64.trim(), fields.get("signature").map(String::as_str).unwrap_or(""))?
+                    auth::verify_post_v2(&*self.keyset(), ak, p64.trim(), fields.get("signature").map(String::as_str).unwrap_or(""))?
                 } else {
                     return Err(e::POST_POLICY.clone());
                 };

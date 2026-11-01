@@ -13,6 +13,7 @@
 //! IAM user as a principal by its ARN. Inactive keys are refused like unknown ones.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use hyper::StatusCode;
 use serde::{Deserialize, Serialize};
@@ -39,6 +40,25 @@ pub struct IamDoc {
     pub groups: BTreeMap<String, Group>,
     #[serde(default)]
     pub policies: BTreeMap<String, ManagedPolicy>,
+    #[serde(default)]
+    pub roles: BTreeMap<String, Role>,
+}
+
+/// An IAM role: who may assume it (its trust policy) and what its sessions may do (its policies).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Role {
+    pub id: String,
+    pub path: String,
+    pub created: String,
+    #[serde(default)]
+    pub description: String,
+    pub trust: Value,
+    /// Longest session, seconds (3600 to 43200).
+    pub max_session: i64,
+    #[serde(default)]
+    pub inline: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub attached: BTreeSet<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -91,6 +111,15 @@ fn group_arn(path: &str, name: &str) -> String {
     format!("arn:aws:iam::{ACCOUNT}:group{path}{name}")
 }
 
+pub fn role_arn(path: &str, name: &str) -> String {
+    format!("arn:aws:iam::{ACCOUNT}:role{path}{name}")
+}
+
+/// A role's name from its ARN (`arn:aws:iam::000000000000:role/<path/>name`).
+pub fn role_name(arn: &str) -> Option<&str> {
+    arn.strip_prefix(&format!("arn:aws:iam::{ACCOUNT}:role/"))?.rsplit('/').next().filter(|n| !n.is_empty())
+}
+
 fn policy_arn(path: &str, name: &str) -> String {
     format!("arn:aws:iam::{ACCOUNT}:policy{path}{name}")
 }
@@ -106,6 +135,7 @@ impl IamDoc {
     fn attachments(&self, policy: &str) -> usize {
         self.users.values().filter(|u| u.attached.contains(policy)).count()
             + self.groups.values().filter(|g| g.attached.contains(policy)).count()
+            + self.roles.values().filter(|r| r.attached.contains(policy)).count()
     }
 
     fn managed_doc(&self, name: &str) -> Option<&Value> {
@@ -131,6 +161,24 @@ impl IamDoc {
             }
         }
         out
+    }
+
+    /// The policy a role's sessions act with (no statements: may do nothing).
+    pub fn effective_role_policy(&self, role: &str) -> policy::Policy {
+        let Some(r) = self.roles.get(role) else { return policy::Policy::default() };
+        let mut st = vec![];
+        for d in r.inline.values().chain(r.attached.iter().filter_map(|p| self.managed_doc(p))) {
+            match &d["Statement"] {
+                Value::Array(a) => st.extend(a.iter().cloned()),
+                o @ Value::Object(_) => st.push(o.clone()),
+                _ => {}
+            }
+        }
+        if st.is_empty() {
+            return policy::Policy::default();
+        }
+        let doc = serde_json::json!({"Version": "2012-10-17", "Statement": st});
+        policy::Policy::parse(doc.to_string().as_bytes(), None).unwrap_or_default()
     }
 
     /// The policy a user's keys carry (no statements: may do nothing).
@@ -183,6 +231,13 @@ impl From<crate::engine::Error> for IamError {
 }
 
 /// Is the request an IAM or STS call (by its SigV4 credential scope)?
+/// An unsigned STS call (AssumeRoleWithWebIdentity): `POST /` with a form body and no signature.
+pub fn is_unsigned_sts(headers: &hyper::HeaderMap, query: &str) -> bool {
+    headers.get("authorization").is_none()
+        && !query.contains("X-Amz-Signature")
+        && headers.get("content-type").and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/x-www-form-urlencoded"))
+}
+
 pub fn service_of(headers: &hyper::HeaderMap) -> Option<&'static str> {
     let a = headers.get("authorization")?.to_str().ok()?;
     let cred = a.strip_prefix("AWS4-HMAC-SHA256 ")?.split(',').find_map(|p| p.trim().strip_prefix("Credential="))?;
@@ -296,6 +351,85 @@ fn write_user(w: &mut Writer, name: &str, u: &User) {
     w.el("Path", &u.path).el("UserName", name).el("UserId", &u.id).el("Arn", user_arn(&u.path, name)).el("CreateDate", &u.created);
 }
 
+fn assumed_arn(role: &str, session: &str) -> String {
+    format!("arn:aws:sts::{ACCOUNT}:assumed-role/{role}/{session}")
+}
+
+fn session_name(raw: &str) -> Result<String, IamError> {
+    let ok = (2..=64).contains(&raw.len()) && raw.chars().all(|c| c.is_ascii_alphanumeric() || "+=,.@-_".contains(c));
+    if ok {
+        Ok(raw.to_string())
+    } else {
+        Err(invalid("RoleSessionName is 2 to 64 letters, digits and +=,.@-_"))
+    }
+}
+
+fn write_credentials(w: &mut Writer, i: &super::sts::Issued) {
+    w.open("Credentials")
+        .el("AccessKeyId", &i.access_key)
+        .el("SecretAccessKey", &i.secret_key)
+        .el("SessionToken", &i.token)
+        .el("Expiration", super::iso_time(i.expires as u64 * 1000))
+        .close();
+}
+
+fn write_role(w: &mut Writer, name: &str, r: &Role) {
+    w.el("Path", &r.path)
+        .el("RoleName", name)
+        .el("RoleId", &r.id)
+        .el("Arn", role_arn(&r.path, name))
+        .el("CreateDate", &r.created)
+        .el("AssumeRolePolicyDocument", encoded(&r.trust))
+        .opt("Description", &r.description)
+        .el("MaxSessionDuration", r.max_session.to_string());
+}
+
+/// A trust policy: JSON with statements naming `sts:` actions and principals.
+fn trust_document(raw: &str) -> Result<Value, IamError> {
+    if raw.chars().filter(|c| !c.is_whitespace()).count() > 2048 {
+        return Err(limit("Cannot exceed quota for ACLSizePerRole: 2048"));
+    }
+    let v: Value =
+        serde_json::from_str(raw).map_err(|_| fail(StatusCode::BAD_REQUEST, "MalformedPolicyDocument", "Syntax errors in policy."))?;
+    let statements: Vec<&Value> = match &v["Statement"] {
+        Value::Array(a) => a.iter().collect(),
+        o @ Value::Object(_) => vec![o],
+        _ => vec![],
+    };
+    let bad = |m: &str| fail(StatusCode::BAD_REQUEST, "MalformedPolicyDocument", m.to_string());
+    if statements.is_empty() {
+        return Err(bad("A trust policy needs at least one statement."));
+    }
+    for s in statements {
+        if !matches!(s["Effect"].as_str(), Some("Allow" | "Deny")) {
+            return Err(bad("Effect must be Allow or Deny."));
+        }
+        if s["Principal"].is_null() {
+            return Err(bad("A trust policy statement needs a Principal."));
+        }
+        let acts: Vec<&str> = match &s["Action"] {
+            Value::String(a) => vec![a.as_str()],
+            Value::Array(a) => a.iter().filter_map(Value::as_str).collect(),
+            _ => vec![],
+        };
+        if acts.is_empty() || acts.iter().any(|a| !a.starts_with("sts:") && *a != "*") {
+            return Err(bad("A trust policy may only name sts: actions."));
+        }
+    }
+    Ok(v)
+}
+
+fn role_max_session(raw: &str) -> Result<i64, IamError> {
+    match raw {
+        "" => Ok(3600),
+        m => m
+            .parse::<i64>()
+            .ok()
+            .filter(|n| (3600..=super::sts::MAX_SECS).contains(n))
+            .ok_or_else(|| invalid("MaxSessionDuration must be between 3600 and 43200.")),
+    }
+}
+
 fn write_group(w: &mut Writer, name: &str, g: &Group) {
     w.el("Path", &g.path).el("GroupName", name).el("GroupId", &g.id).el("Arn", group_arn(&g.path, name)).el("CreateDate", &g.created);
 }
@@ -348,6 +482,8 @@ impl Server {
         let result = if service == "sts" {
             match action.as_str() {
                 "GetCallerIdentity" => Ok(self.caller_identity(cred)),
+                "AssumeRole" => self.assume_role(cred, &f),
+                "GetSessionToken" => self.session_token(cred, &f),
                 _ => {
                     Err(fail(StatusCode::BAD_REQUEST, "InvalidAction", format!("Could not find operation {action} for version 2011-06-15")))
                 }
@@ -376,12 +512,207 @@ impl Server {
     }
 
     fn caller_identity(&self, cred: &super::auth::Credential) -> String {
+        if let Some(s) = cred.session.as_ref().filter(|s| !s.role.is_empty()) {
+            let doc = self.iam_doc();
+            let id = doc.roles.get(&s.role).map(|r| r.id.clone()).unwrap_or_default();
+            return format!(
+                "<Arn>{}</Arn><UserId>{}</UserId><Account>{ACCOUNT}</Account>",
+                escape(&assumed_arn(&s.role, &s.name)),
+                escape(&format!("{id}:{}", s.name))
+            );
+        }
         let doc = self.iam_doc();
         let (arn, id) = match doc.users.get(&cred.user) {
             Some(u) if !cred.user.is_empty() => (user_arn(&u.path, &cred.user), u.id.clone()),
             _ => (user_arn("/", &cred.access_key), cred.access_key.clone()),
         };
         format!("<Arn>{}</Arn><UserId>{}</UserId><Account>{ACCOUNT}</Account>", escape(&arn), escape(&id))
+    }
+
+    fn sts_config(&self) -> Result<Arc<super::sts::StsConfig>, IamError> {
+        self.keyset()
+            .sts
+            .clone()
+            .ok_or_else(|| fail(StatusCode::BAD_REQUEST, "InvalidAction", "Temporary credentials are off: set CAIRN_STORE_STS_SECRET."))
+    }
+
+    fn sts_audit(&self, action: &str, actor: &str, subject: &str, details: Value) {
+        let a = crate::audit::Audit {
+            category: "store",
+            action: format!("sts.{action}"),
+            actor: actor.to_string(),
+            subject: subject.to_string(),
+            details,
+        };
+        if let Err(err) = self.eng.append_audit(&a) {
+            tracing::error!(error = %err, "audit entry for {action}");
+        }
+    }
+
+    /// AssumeRole: a session of a role whose trust policy names the caller (or the account, when the
+    /// caller's own policy allows `sts:AssumeRole` on the role).
+    fn assume_role(&self, cred: &super::auth::Credential, f: &Form) -> Result<String, IamError> {
+        let sts = self.sts_config()?;
+        if cred.session.is_some() {
+            return Err(fail(StatusCode::FORBIDDEN, "AccessDenied", "Temporary keys cannot assume roles."));
+        }
+        let arn = f.req("RoleArn")?.to_string();
+        let name = role_name(&arn).ok_or_else(|| invalid(format!("{arn} is not a role ARN.")))?.to_string();
+        let session = session_name(f.req("RoleSessionName")?)?;
+        let doc = self.iam_doc();
+        let deny = || {
+            fail(
+                StatusCode::FORBIDDEN,
+                "AccessDenied",
+                format!("User: {} is not authorized to perform: sts:AssumeRole on resource: {arn}", cred.access_key),
+            )
+        };
+        let role = doc.roles.get(&name).ok_or_else(deny)?;
+        let caller = match doc.users.get(&cred.user) {
+            Some(u) if !cred.user.is_empty() => user_arn(&u.path, &cred.user),
+            _ => user_arn("/", &cred.access_key),
+        };
+        let ctx = BTreeMap::from([("sts:RoleSessionName".to_string(), session.clone())]);
+        if !super::sts::trusts(&role.trust, "sts:AssumeRole", "AWS", &caller, &ctx) {
+            return Err(deny());
+        }
+        // Trusting the whole account (or everyone) needs the caller's own policy to allow it too.
+        let named = role.trust.to_string().contains(&format!("\"{caller}\""));
+        if !named && !cred.admin && !self.key_allows(cred, "sts:AssumeRole", &role_arn(&role.path, &name)) {
+            return Err(deny());
+        }
+        let secs = super::sts::duration(f.get("DurationSeconds"), role.max_session).map_err(invalid)?;
+        let pol = super::sts::session_policy(f.get("Policy")).map_err(|m| fail(StatusCode::BAD_REQUEST, "MalformedPolicyDocument", m))?;
+        let now = crate::engine::now_ms() as i64 / 1000;
+        let issued = super::sts::issue(
+            &sts,
+            super::sts::Claims {
+                v: 1,
+                ak: String::new(),
+                role: name.clone(),
+                key: String::new(),
+                exp: now + secs,
+                pol: pol.clone(),
+                act: cred.actor.clone(),
+                src: cred.access_key.clone(),
+                name: session.clone(),
+            },
+        );
+        self.sts_audit(
+            "AssumeRole",
+            &cred.access_key,
+            &name,
+            serde_json::json!({
+            "session": session, "temporary_key": issued.access_key, "seconds": secs, "session_policy": pol.is_some()}),
+        );
+        let mut w = Writer::fragment();
+        write_credentials(&mut w, &issued);
+        w.open("AssumedRoleUser").el("AssumedRoleId", format!("{}:{session}", role.id)).el("Arn", assumed_arn(&name, &session)).close();
+        Ok(w.finish())
+    }
+
+    /// GetSessionToken: a temporary key of the caller's own key, with the key's permissions.
+    fn session_token(&self, cred: &super::auth::Credential, f: &Form) -> Result<String, IamError> {
+        let sts = self.sts_config()?;
+        if cred.session.is_some() {
+            return Err(fail(StatusCode::FORBIDDEN, "AccessDenied", "Temporary keys cannot get session tokens."));
+        }
+        let secs = super::sts::duration(f.get("DurationSeconds"), super::sts::MAX_SECS).map_err(invalid)?;
+        let now = crate::engine::now_ms() as i64 / 1000;
+        let issued = super::sts::issue(
+            &sts,
+            super::sts::Claims {
+                v: 1,
+                ak: String::new(),
+                role: String::new(),
+                key: cred.access_key.clone(),
+                exp: now + secs,
+                pol: None,
+                act: cred.actor.clone(),
+                src: cred.access_key.clone(),
+                name: String::new(),
+            },
+        );
+        self.sts_audit(
+            "GetSessionToken",
+            &cred.access_key,
+            &cred.access_key,
+            serde_json::json!({
+            "temporary_key": issued.access_key, "seconds": secs}),
+        );
+        let mut w = Writer::fragment();
+        write_credentials(&mut w, &issued);
+        Ok(w.finish())
+    }
+
+    /// AssumeRoleWithWebIdentity: a signed-in user's OIDC token for a role's session (unsigned request).
+    pub(crate) async fn assume_role_with_web_identity(&self, f: &BTreeMap<String, String>) -> Result<String, IamError> {
+        let form = Form(f.clone());
+        let sts = self.sts_config()?;
+        let arn = form.req("RoleArn")?.to_string();
+        let name = role_name(&arn).ok_or_else(|| invalid(format!("{arn} is not a role ARN.")))?.to_string();
+        let session = session_name(form.req("RoleSessionName")?)?;
+        let now = crate::engine::now_ms() as i64 / 1000;
+        let who = sts
+            .web_identity(form.req("WebIdentityToken")?, now)
+            .await
+            .map_err(|m| fail(StatusCode::BAD_REQUEST, "InvalidIdentityToken", m))?;
+        let doc = self.iam_doc();
+        let deny =
+            || fail(StatusCode::FORBIDDEN, "AccessDenied", format!("Not authorized to perform sts:AssumeRoleWithWebIdentity on {arn}"));
+        let role = doc.roles.get(&name).ok_or_else(deny)?;
+        let ctx = BTreeMap::from([
+            (format!("{}:sub", who.issuer), who.subject.clone()),
+            (format!("{}:aud", who.issuer), who.audience.clone()),
+            ("sts:RoleSessionName".to_string(), session.clone()),
+        ]);
+        if !super::sts::trusts(&role.trust, "sts:AssumeRoleWithWebIdentity", "Federated", &who.issuer, &ctx) {
+            return Err(deny());
+        }
+        let secs = super::sts::duration(form.get("DurationSeconds"), role.max_session).map_err(invalid)?;
+        let pol =
+            super::sts::session_policy(form.get("Policy")).map_err(|m| fail(StatusCode::BAD_REQUEST, "MalformedPolicyDocument", m))?;
+        let issued = super::sts::issue(
+            &sts,
+            super::sts::Claims {
+                v: 1,
+                ak: String::new(),
+                role: name.clone(),
+                key: String::new(),
+                exp: now + secs,
+                pol: pol.clone(),
+                act: who.actor.clone(),
+                src: format!("{}#{}", who.issuer, who.subject),
+                name: session.clone(),
+            },
+        );
+        self.sts_audit(
+            "AssumeRoleWithWebIdentity",
+            &who.actor,
+            &name,
+            serde_json::json!({
+            "issuer": who.issuer, "subject": who.subject, "session": session, "temporary_key": issued.access_key,
+            "seconds": secs, "session_policy": pol.is_some()}),
+        );
+        let mut w = Writer::fragment();
+        write_credentials(&mut w, &issued);
+        w.el("SubjectFromWebIdentityToken", &who.subject)
+            .open("AssumedRoleUser")
+            .el("AssumedRoleId", format!("{}:{session}", role.id))
+            .el("Arn", assumed_arn(&name, &session))
+            .close()
+            .el("Provider", &who.issuer)
+            .el("Audience", &who.audience);
+        Ok(w.finish())
+    }
+
+    /// Does the key's own policy allow `action` on `resource`?
+    fn key_allows(&self, cred: &super::auth::Credential, action: &str, resource: &str) -> bool {
+        let ks = self.keyset();
+        let Some(p) = ks.policies.get(&cred.access_key) else { return false };
+        let ctx = BTreeMap::new();
+        let r = policy::Request { action, resource, principal: &cred.access_key, user: &cred.user, context: &ctx };
+        p.evaluate(&r) == Some(policy::Effect::Allow)
     }
 
     /// The current IAM document (empty when unreadable: callers that change it re-read it in their transaction).
@@ -391,6 +722,9 @@ impl Server {
 
     /// May `cred` run `action` on `resource`?
     fn iam_allowed(&self, cred: &super::auth::Credential, action: &str, resource: &str) -> bool {
+        if cred.session.is_some() {
+            return false; // temporary keys do not manage IAM
+        }
         if cred.admin {
             return true;
         }
@@ -477,6 +811,21 @@ impl Server {
             | "ListAttachedGroupPolicies" => {
                 let n = f.get("GroupName");
                 group_arn(doc.groups.get(n).map_or("/", |g| g.path.as_str()), n)
+            }
+            "CreateRole" => role_arn(&f.path()?, f.get("RoleName")),
+            "GetRole"
+            | "DeleteRole"
+            | "UpdateRole"
+            | "UpdateAssumeRolePolicy"
+            | "PutRolePolicy"
+            | "GetRolePolicy"
+            | "DeleteRolePolicy"
+            | "ListRolePolicies"
+            | "AttachRolePolicy"
+            | "DetachRolePolicy"
+            | "ListAttachedRolePolicies" => {
+                let n = f.get("RoleName");
+                role_arn(doc.roles.get(n).map_or("/", |r| r.path.as_str()), n)
             }
             "CreatePolicy" => policy_arn(&f.path()?, f.get("PolicyName")),
             "GetPolicy"
@@ -960,6 +1309,153 @@ impl Server {
                 w.close();
                 w.el("IsTruncated", "false");
             }
+            // ------------------------------------------------------------------------------- roles
+            "CreateRole" => {
+                let name = f.name("RoleName", 64)?.to_string();
+                let path = f.path()?;
+                let trust = trust_document(f.req("AssumeRolePolicyDocument")?)?;
+                let max_session = role_max_session(f.get("MaxSessionDuration"))?;
+                let description = f.get("Description").to_string();
+                if description.len() > 1000 {
+                    return Err(invalid("Description is at most 1000 characters."));
+                }
+                let r = self.iam_change(cred, action, &name, |d, _, _| {
+                    if d.roles.keys().any(|k| k.eq_ignore_ascii_case(&name)) {
+                        return Err(exists("Role", &name));
+                    }
+                    let r = Role { id: new_id("AROA"), path, created: now(), description, trust, max_session, ..Default::default() };
+                    d.roles.insert(name.clone(), r.clone());
+                    Ok(r)
+                })?;
+                w.open("Role");
+                write_role(&mut w, &name, &r);
+                w.close();
+            }
+            "GetRole" => {
+                let name = f.req("RoleName")?;
+                let r = doc.roles.get(name).ok_or_else(|| no_such("role", name))?;
+                w.open("Role");
+                write_role(&mut w, name, r);
+                w.close();
+            }
+            "ListRoles" => {
+                let prefix = match f.get("PathPrefix") {
+                    "" => "/",
+                    p => p,
+                };
+                let (items, next) = page(doc.roles.iter().filter(|(_, r)| r.path.starts_with(prefix)), f)?;
+                w.open("Roles");
+                for (n, r) in items {
+                    w.open("member");
+                    write_role(&mut w, n, r);
+                    w.close();
+                }
+                w.close();
+                truncation(&mut w, next);
+            }
+            "DeleteRole" => {
+                let name = f.req("RoleName")?.to_string();
+                self.iam_change(cred, action, &name, |d, _, _| {
+                    let r = d.roles.get(&name).ok_or_else(|| no_such("role", &name))?;
+                    if !r.inline.is_empty() || !r.attached.is_empty() {
+                        return Err(conflict("Cannot delete entity, must delete or detach policies first."));
+                    }
+                    d.roles.remove(&name);
+                    Ok(())
+                })?;
+            }
+            "UpdateRole" | "UpdateAssumeRolePolicy" => {
+                let name = f.req("RoleName")?.to_string();
+                let trust = match action {
+                    "UpdateAssumeRolePolicy" => Some(trust_document(f.req("PolicyDocument")?)?),
+                    _ => None,
+                };
+                let max = match f.get("MaxSessionDuration") {
+                    "" => None,
+                    m => Some(role_max_session(m)?),
+                };
+                let description = f.0.get("Description").cloned();
+                self.iam_change(cred, action, &name, |d, _, _| {
+                    let r = d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?;
+                    if let Some(t) = trust {
+                        r.trust = t;
+                    }
+                    if let Some(m) = max {
+                        r.max_session = m;
+                    }
+                    if let Some(desc) = description {
+                        r.description = desc;
+                    }
+                    Ok(())
+                })?;
+            }
+            "PutRolePolicy" => {
+                let name = f.name("RoleName", 64)?.to_string();
+                let pname = f.name("PolicyName", 128)?.to_string();
+                let pdoc = f.document("PolicyDocument", 10240)?;
+                self.iam_change(cred, action, &name, |d, _, _| {
+                    d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?.inline.insert(pname, pdoc);
+                    Ok(())
+                })?;
+            }
+            "GetRolePolicy" => {
+                let name = f.req("RoleName")?;
+                let pname = f.req("PolicyName")?;
+                let r = doc.roles.get(name).ok_or_else(|| no_such("role", name))?;
+                let p = r.inline.get(pname).ok_or_else(|| no_such("policy", pname))?;
+                w.el("RoleName", name).el("PolicyName", pname).el("PolicyDocument", encoded(p));
+            }
+            "DeleteRolePolicy" => {
+                let name = f.req("RoleName")?.to_string();
+                let pname = f.req("PolicyName")?.to_string();
+                self.iam_change(cred, action, &name, |d, _, _| {
+                    let r = d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?;
+                    r.inline.remove(&pname).ok_or_else(|| no_such("policy", &pname))?;
+                    Ok(())
+                })?;
+            }
+            "ListRolePolicies" => {
+                let name = f.req("RoleName")?;
+                let r = doc.roles.get(name).ok_or_else(|| no_such("role", name))?;
+                let (items, next) = page(r.inline.iter(), f)?;
+                w.open("PolicyNames");
+                for (n, _) in items {
+                    w.el("member", n);
+                }
+                w.close();
+                truncation(&mut w, next);
+            }
+            "AttachRolePolicy" | "DetachRolePolicy" => {
+                let name = f.req("RoleName")?.to_string();
+                let pname = f.policy_name_from_arn()?;
+                let attach = action == "AttachRolePolicy";
+                self.iam_change(cred, action, &name, |d, _, _| {
+                    if !d.policies.contains_key(&pname) {
+                        return Err(no_such("policy", &pname));
+                    }
+                    let set = &mut d.roles.get_mut(&name).ok_or_else(|| no_such("role", &name))?.attached;
+                    if attach {
+                        if set.len() >= MAX_ATTACHED && !set.contains(&pname) {
+                            return Err(limit(format!("Cannot exceed quota for PoliciesPerRole: {MAX_ATTACHED}")));
+                        }
+                        set.insert(pname.clone());
+                    } else if !set.remove(&pname) {
+                        return Err(no_such("attached policy", &pname));
+                    }
+                    Ok(())
+                })?;
+            }
+            "ListAttachedRolePolicies" => {
+                let name = f.req("RoleName")?;
+                let r = doc.roles.get(name).ok_or_else(|| no_such("role", name))?;
+                w.open("AttachedPolicies");
+                for n in &r.attached {
+                    let path = doc.policies.get(n).map_or("/", |p| p.path.as_str());
+                    w.open("member").el("PolicyName", n).el("PolicyArn", policy_arn(path, n)).close();
+                }
+                w.close();
+                w.el("IsTruncated", "false");
+            }
             _ => {
                 return Err(fail(
                     StatusCode::BAD_REQUEST,
@@ -1007,6 +1503,27 @@ impl Server {
         }
         let raw_path = parts.uri.path().to_string();
         let raw_query = parts.uri.query().unwrap_or("").to_string();
+        if is_unsigned_sts(&parts.headers, &raw_query) {
+            // Only AssumeRoleWithWebIdentity is unsigned: the token in the form is the credential.
+            let mut form = BTreeMap::new();
+            for p in std::str::from_utf8(&body).unwrap_or("").split('&').filter(|p| !p.is_empty()) {
+                let (k, v) = p.split_once('=').unwrap_or((p, ""));
+                form.insert(super::auth::query_decode(k), super::auth::query_decode(v));
+            }
+            let action = form.get("Action").cloned().unwrap_or_default();
+            if action != "AssumeRoleWithWebIdentity" {
+                return Ok(error(&super::errors::ACCESS_DENIED));
+            }
+            let ns = STS_NS;
+            let out = match self.assume_role_with_web_identity(&form).await {
+                Ok(inner) => (StatusCode::OK, format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<{action}Response xmlns=\"{ns}\"><{action}Result>{inner}</{action}Result><ResponseMetadata><RequestId>{request_id}</RequestId></ResponseMetadata></{action}Response>")),
+                Err(e) => (e.status, format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<ErrorResponse xmlns=\"{ns}\"><Error><Type>Sender</Type><Code>{}</Code><Message>{}</Message></Error><RequestId>{request_id}</RequestId></ErrorResponse>",
+                    e.code, escape(&e.message))),
+            };
+            return Ok(reply(out.0, out.1));
+        }
         let host = parts.headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
         let request = super::auth::Request {
             method: parts.method.as_str(),
@@ -1017,7 +1534,7 @@ impl Server {
             now: (self.clock)(),
             vhost_bucket: None,
         };
-        let auth = match super::auth::verify_with_payload(&self.keyset().creds, &request, &super::auth::sha256_hex(&body)) {
+        let auth = match super::auth::verify_with_payload(&*self.keyset(), &request, &super::auth::sha256_hex(&body)) {
             Ok(a) => a,
             Err(err) => return Ok(error(&err)),
         };

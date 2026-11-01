@@ -172,7 +172,7 @@ impl Server {
             now: (self.clock)(),
             vhost_bucket: None,
         };
-        auth::verify(&self.keyset().creds, &request)
+        auth::verify(&*self.keyset(), &request)
     }
 
     #[allow(clippy::too_many_arguments)]

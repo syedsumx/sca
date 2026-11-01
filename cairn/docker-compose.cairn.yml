@@ -552,6 +552,9 @@ services:
       CAIRN_STORE_BLOCK_PUBLIC_ACCESS: ${CAIRN_STORE_BLOCK_PUBLIC_ACCESS:-true}
       # Encryption at rest (SSE-S3 for every new object) when set: a base64 32-byte key.
       CAIRN_STORE_MASTER_KEY: ${CAIRN_STORE_MASTER_KEY:-}
+      # Temporary credentials (STS): the catalog's per-table credentials need them.
+      CAIRN_STORE_STS_SECRET: ${CAIRN_STORE_STS_SECRET:-cairn-store-dev-sts-secret-0001-change-me}
+      CAIRN_STORE_STS_PROVIDERS: ${CAIRN_STORE_STS_PROVIDERS:-}
       # Optional: ask Cairn's PDP (http://cairn-pdp:8810, with CAIRN_SERVICE_TOKEN) about every allowed request.
       CAIRN_STORE_PDP_URL: ${CAIRN_STORE_PDP_URL:-}
       CAIRN_STORE_PDP_TOKEN: ${CAIRN_STORE_PDP_TOKEN:-}

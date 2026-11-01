@@ -117,7 +117,7 @@ impl Server {
         if auth::is_anonymous(&parts.headers, &raw_query) {
             return Err(e::ACCESS_DENIED.clone());
         }
-        let a = auth::verify(&self.keyset().creds, &request)?;
+        let a = auth::verify(&*self.keyset(), &request)?;
         if !a.cred.admin {
             return Err(e::ACCESS_DENIED.clone());
         }

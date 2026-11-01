@@ -31,6 +31,55 @@ pub struct KeySet {
     pub policies: BTreeMap<String, policy::Policy>,
     /// Keys from the environment or the credentials file (read-only here).
     pub fixed: std::collections::BTreeSet<String>,
+    /// IAM roles' effective policies (sessions act with them).
+    pub roles: BTreeMap<String, policy::Policy>,
+    /// Temporary credentials (None: off).
+    pub sts: Option<Arc<super::sts::StsConfig>>,
+}
+
+impl super::auth::Keys for KeySet {
+    fn lookup(&self, access_key: &str, token: &str, now: i64) -> Result<Credential, ApiError> {
+        if let Some(c) = self.creds.get(access_key) {
+            return Ok(c.clone());
+        }
+        let (Some(sts), true) = (&self.sts, super::sts::is_temporary(access_key)) else {
+            return Err(e::INVALID_ACCESS_KEY.clone());
+        };
+        if token.is_empty() {
+            return Err(e::INVALID_ACCESS_KEY.clone());
+        }
+        let claims = super::sts::verify(sts, access_key, token, now)?;
+        let parent = if claims.role.is_empty() {
+            // A session of a key: the key must still exist and be active.
+            Some(self.creds.get(&claims.key).ok_or_else(|| e::INVALID_SESSION_TOKEN.clone())?)
+        } else {
+            // A role's session ends when the role is deleted.
+            if !self.roles.contains_key(&claims.role) {
+                return Err(e::INVALID_SESSION_TOKEN.clone());
+            }
+            None
+        };
+        super::sts::credential(sts, &claims, parent)
+    }
+}
+
+impl KeySet {
+    /// The identity policy a request's key acts with: a role's (sessions of a role), else the key's.
+    pub fn policy_of(&self, cred: &Credential) -> Option<&policy::Policy> {
+        match &cred.session {
+            Some(s) if !s.role.is_empty() => Some(self.roles.get(&s.role).unwrap_or(&EMPTY)),
+            Some(_) => self.policies.get(&cred_parent(cred)),
+            None => self.policies.get(&cred.access_key),
+        }
+    }
+}
+
+static EMPTY: std::sync::LazyLock<policy::Policy> = std::sync::LazyLock::new(policy::Policy::default);
+
+/// A key session's parent key is recorded on the credential's user/buckets; its policy is found by
+/// the original key, which the session keeps in `parent`.
+fn cred_parent(cred: &Credential) -> String {
+    cred.session.as_ref().map(|s| s.parent.clone()).unwrap_or_default()
 }
 
 impl KeySet {
@@ -149,19 +198,23 @@ impl Server {
             actor: k.actor.clone(),
             ssh_keys: k.ssh_keys.clone(),
             user: k.user.clone(),
+            session: None,
         })
     }
 
     /// Rebuilds the key set from the fixed keys and the stored ones.
     pub(crate) fn reload_keys(&self) -> Result<(), String> {
         let fixed = self.keyset();
-        let mut next = KeySet { fixed: fixed.fixed.clone(), ..Default::default() };
+        let mut next = KeySet { fixed: fixed.fixed.clone(), sts: fixed.sts.clone(), ..Default::default() };
         for ak in &fixed.fixed {
             if let Some(c) = fixed.creds.get(ak) {
                 next.insert(c.clone())?;
             }
         }
         let iam = super::iam::IamDoc::parse(self.eng.iam_doc().map_err(|e| e.to_string())?.as_deref())?;
+        for name in iam.roles.keys() {
+            next.roles.insert(name.clone(), iam.effective_role_policy(name));
+        }
         for (ak, rec) in self.eng.keys().map_err(|e| e.to_string())? {
             if next.fixed.contains(&ak) {
                 return Err(format!("access key {ak} is defined both in the configuration and in the index"));

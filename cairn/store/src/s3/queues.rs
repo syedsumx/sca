@@ -245,7 +245,7 @@ impl Server {
             now: (self.clock)(),
             vhost_bucket: None,
         };
-        let a = auth::verify(&self.keyset().creds, &request)?;
+        let a = auth::verify(&*self.keyset(), &request)?;
         let body = body.collect().await.map_err(|_| e::INCOMPLETE_BODY.clone())?.to_bytes();
         if body.len() > MAX_MESSAGE * 2 {
             return Err(e::ENTITY_TOO_LARGE.clone());

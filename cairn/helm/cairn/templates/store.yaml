@@ -129,6 +129,15 @@ spec:
               valueFrom:
                 secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.masterKeyKey }} }
             {{- end }}
+            {{- if $u.secret.stsSecretKey }}
+            - name: CAIRN_STORE_STS_SECRET
+              valueFrom:
+                secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $u.secret.stsSecretKey }} }
+            {{- with $u.stsProviders }}
+            - name: CAIRN_STORE_STS_PROVIDERS
+              value: {{ toJson . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if $u.secret.keyringSecret }}
             - name: CAIRN_STORE_KEYRING_FILE
               value: /etc/cairn-store-keyring/keyring.json
