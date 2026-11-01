@@ -146,3 +146,46 @@ def test_lineage_reports_an_unavailable_metadata_store(client, graph, monkeypatc
           "outputs": [{"namespace": "trino://t:8080", "name": "lake.s.t"}]}
     r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
     assert r.status_code == 503 and "metadata store" in r.json()["detail"]
+
+
+def test_sign_in_tokens_verify_against_the_published_key(client):
+    import jwt
+
+    keys = client.get("/v1/trino/jwks.json").json()["keys"]  # public: Trino fetches it without credentials
+    assert len(keys) == 1 and keys[0]["alg"] == "RS256" and "d" not in keys[0]
+    r = client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 600})
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert out["user"] == "ana" and out["expires_in"] == 600
+    pub = jwt.algorithms.RSAAlgorithm.from_jwk(keys[0])
+    claims = jwt.decode(out["token"], pub, algorithms=["RS256"], audience="trino", issuer="cairn")
+    assert claims["sub"] == "ana" and claims["exp"] - claims["iat"] == 600
+    assert jwt.get_unverified_header(out["token"])["kid"] == keys[0]["kid"]
+    # Issuing is audited.
+    entries = client.app.state.services.audit.entries(category="trino")
+    assert any(e["action"] == "trino.token_issued" and e["actor"] == ANA for e in entries)
+
+
+def test_sign_in_tokens_are_for_people(client):
+    assert client.post("/v1/trino/token").status_code == 401
+    svc = client.post("/v1/trino/token", headers={"Authorization": "Bearer svc-secret"})
+    assert svc.status_code == 403
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 5}).status_code == 422
+    assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 86400 * 2}).status_code == 422
+
+
+def test_every_replica_signs_with_the_one_key(settings, graph):
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.dataaccess.trino_auth import TrinoTokens
+
+    engine = create_engine(settings.database_url)
+    init_db(engine)
+    a, b = TrinoTokens(engine, KEY, "cairn"), TrinoTokens(engine, KEY, "cairn")
+    assert a.jwks() == b.jwks()
+    # The key in the database is encrypted with the access key: another key cannot use it.
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        TrinoTokens(engine, "another-key-" + "z" * 24, "cairn").jwks()
+    with pytest.raises(ValueError):
+        a.mint("urn:li:corpGroup:analysts")

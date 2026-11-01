@@ -254,8 +254,31 @@ def name_jobs_by_outputs(event: dict) -> dict:
     return {**event, "job": job}
 
 
-def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None) -> APIRouter:
+def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
+                       current_principal=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
+
+    if tokens is not None:
+        from fastapi import Body, Depends
+
+        @router.get("/jwks.json")
+        def jwks():
+            """Trino's ``http-server.authentication.jwt.key-file``: the public key Cairn signs tokens with."""
+            return tokens.jwks()
+
+        @router.post("/token")
+        def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):
+            """A Trino sign-in token for the caller (BI tools, the Trino CLI, notebooks)."""
+            if p.is_service or p.via in ("agent", "extension"):
+                raise HTTPException(403, "Trino tokens are for people signed in to Cairn")
+            try:
+                out = tokens.mint(p.urn, ttl_seconds)
+            except ValueError as e:
+                raise HTTPException(422, str(e))
+            if audit is not None:
+                audit.record("trino", "trino.token_issued", p.urn, None,
+                             {"token_id": out["token_id"], "expires_at": out["expires_at"]})
+            return out
 
     def check(given: str):
         if not hmac.compare_digest(given.encode(), key.encode()):

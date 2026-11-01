@@ -119,9 +119,36 @@ def cairn(tmp_path_factory):
     t.join(10)
 
 
+def write_tls(d):
+    """A self-signed certificate for 127.0.0.1: tls.pem (key and certificate, for Trino), ca.pem (for clients)."""
+    import datetime
+    import ipaddress
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "cairn-trino")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+            .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
+                                                        x509.DNSName("localhost")]), critical=False)
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .sign(key, hashes.SHA256()))
+    pem = cert.public_bytes(serialization.Encoding.PEM)
+    open(f"{d}/ca.pem", "wb").write(pem)
+    open(f"{d}/tls.pem", "wb").write(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                       serialization.NoEncryption()) + pem)
+    os.chmod(f"{d}/tls.pem", 0o644)
+
+
 @pytest.fixture(scope="module")
 def trino(lake, cairn):
-    cairn_url, _ = cairn
+    cairn_url, services = cairn
     d = tempfile.mkdtemp(prefix="trino-")
     os.makedirs(f"{d}/catalog")
     tp = port()
@@ -139,22 +166,33 @@ def trino(lake, cairn):
         f"openlineage-event-listener.transport.url={cairn_url}",
         f"openlineage-event-listener.transport.endpoint=/v1/trino/{KEY}/lineage",
         f"openlineage-event-listener.trino.uri=http://127.0.0.1:{tp}", ""]))
-    open(f"{d}/config.properties", "w").write(f"coordinator=true\nnode-scheduler.include-coordinator=true\n"
-                                              f"http-server.http.port={tp}\ndiscovery.uri=http://127.0.0.1:{tp}\n")
+    # Clients sign in over TLS with Cairn's tokens; plain HTTP is only for Trino's own nodes.
+    tls = port()
+    write_tls(d)
+    open(f"{d}/config.properties", "w").write("\n".join([
+        "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
+        f"discovery.uri=http://127.0.0.1:{tp}", "http-server.https.enabled=true", f"http-server.https.port={tls}",
+        "http-server.https.keystore.path=/etc/trino/tls.pem", "http-server.authentication.type=JWT",
+        f"http-server.authentication.jwt.key-file={cairn_url}/v1/trino/jwks.json",
+        "http-server.authentication.jwt.required-issuer=cairn", "http-server.authentication.jwt.required-audience=trino",
+        "internal-communication.shared-secret=" + "s" * 32, ""]))
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
-                    "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro", TRINO],
+                    "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
+                    "-v", f"{d}/tls.pem:/etc/trino/tls.pem:ro", TRINO],
                    check=True, capture_output=True, timeout=600)
     end = time.time() + 240
     while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
         assert time.time() < end, "Trino did not start"
         time.sleep(1)
 
-    def sql(statement, user="admin"):
-        out = subprocess.run(["docker", "exec", name, "trino", "--server", f"http://127.0.0.1:{tp}", "--user", user,
+    def sql(statement, user="admin", token=None, as_user=None):
+        token = token if token is not None else services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
+        out = subprocess.run(["docker", "exec", name, "trino", "--server", f"https://127.0.0.1:{tls}", "--insecure",
+                              *(["--access-token", token] if token else []), "--user", as_user or user,
                               "--catalog", "lake", "--output-format", "JSON", "--execute", statement],
                              capture_output=True, text=True, timeout=300)
         if out.returncode != 0:
@@ -166,7 +204,7 @@ def trino(lake, cairn):
     sql("CREATE TABLE lake.sales.orders AS SELECT * FROM (VALUES (1, 'jane@acme.com', 'EU'), (2, 'bo@example.org', 'US'), "
         "(3, 'li@acme.com', 'EU')) AS t(id, email, region)")
     sql("CREATE TABLE lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
-    sql.port = tp
+    sql.port, sql.tls, sql.dir = tp, tls, d
     yield sql
     subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
     shutil.rmtree(d, ignore_errors=True)
@@ -236,7 +274,7 @@ def test_the_sql_editor_runs_on_trino_as_the_signed_in_user(trino, cairn):
 
     _, s = cairn
     s.data_access.registry = ConnectionRegistry({"lakehouse": {
-        "url": f"trino://cairn@127.0.0.1:{trino.port}/lake", "run_as_user": True,
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
         "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
     q = "SELECT id, email, region FROM sales.orders ORDER BY id"
     ana = s.data_access.query("urn:li:corpuser:ana", q, connection="lakehouse")
@@ -250,3 +288,40 @@ def test_the_sql_editor_runs_on_trino_as_the_signed_in_user(trino, cairn):
     # The admin sees the values as they are.
     adm = s.data_access.query("urn:li:corpuser:admin", q, connection="lakehouse")
     assert adm["rows"][0][1] == "jane@acme.com" and adm["masked_columns"] == []
+
+
+def test_trino_only_believes_cairns_tokens(trino, cairn):
+    """Who the Trino user is comes from Cairn's signed token: no token, a token signed with another key, an
+    expired one, or a token for one user claiming another are all refused."""
+    import base64
+
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.dataaccess.trino_auth import TrinoTokens
+
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", user="admin", token="")
+    other = create_engine("sqlite://")
+    init_db(other)
+    forged = TrinoTokens(other, KEY, "cairn").mint("urn:li:corpuser:admin")["token"]
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", token=forged)
+    # The right key's token, edited to say another user: the signature no longer matches.
+    _, s = cairn
+    good = s.trino_tokens.mint("urn:li:corpuser:ana")["token"]
+    head, body, sig = good.split(".")
+    claims = json.loads(base64.urlsafe_b64decode(body + "=="))
+    claims["sub"] = "admin"
+    edited = ".".join([head, base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode(), sig])
+    with pytest.raises(RuntimeError, match="401|Unauthorized|Authentication"):
+        trino("SELECT 1", token=edited)
+    # Ana's token, claiming to be the admin: Trino asks Cairn (ImpersonateUser) and Cairn says no.
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT salary FROM hr.salaries", user="ana", as_user="admin")
+    assert trino("SELECT count(*) AS n FROM sales.orders", user="ana")[0]["n"] >= 3
+    # Plain HTTP refuses sign-in altogether (tokens only travel over TLS).
+    out = subprocess.run(["curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "-H", f"Authorization: Bearer {good}",
+                          "-H", "X-Trino-User: ana", "-X", "POST", "-d", "SELECT 1", f"http://127.0.0.1:{trino.port}/v1/statement"],
+                         capture_output=True, text=True, timeout=30)
+    assert out.stdout in ("401", "403"), out.stdout

@@ -239,6 +239,9 @@ spec:
         {{- end }}
       ports:
         - port: http
+        {{- if .Values.cairn.trino.tls.secretName }}
+        - port: https
+        {{- end }}
 {{- end }}
 {{- if .Values.cairn.notifier.enabled }}
 ---

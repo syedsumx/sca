@@ -153,6 +153,7 @@ class DataAccessService:
         self.known = known
         self.on_read = on_read
         self.registry = registry
+        self.trino_tokens = None   # TrinoTokens: run_as_user queries sign in as the caller
         self.plan_for = plan_for
         self.can_read = can_read
         self.audit = audit
@@ -221,14 +222,34 @@ class DataAccessService:
         user = actor.removeprefix("urn:li:corpuser:")
         if not user or user == actor:
             raise DataAccessError("queries on this connection run as a Cairn user", 403)
-        auth, scheme = None, "http"
+        from urllib.parse import parse_qs
+
+        opts = {k: v[-1] for k, v in parse_qs(url.query).items()}
+        scheme = opts.get("protocol", "http")
+        if scheme not in ("http", "https"):
+            raise DataAccessError("protocol must be http or https", 400)
+        auth, headers = None, {}
         if url.password:
             auth, scheme = trino.auth.BasicAuthentication(unquote(url.username or ""), unquote(url.password)), "https"
+        elif self.trino_tokens is not None:
+            # Signed in as the caller with a token from Cairn (Trino checks it against Cairn's key), so
+            # Trino knows the user from the token, not from a name Cairn claims.
+            headers["Authorization"] = "Bearer " + self.trino_tokens.mint(actor, 300)["token"]
+        verify = opts.get("verify", "true")
+        verify = False if verify == "false" else (True if verify == "true" else verify)
+        session = None
+        if isinstance(verify, str):
+            # The connection's own CA: requests would let REQUESTS_CA_BUNDLE in the environment win over it.
+            import requests
+
+            session = requests.Session()
+            session.trust_env = False
+            session.verify = verify
         path = [p for p in url.path.split("/") if p]
         conn = trino.dbapi.connect(host=url.hostname, port=url.port or (443 if scheme == "https" else 8080), user=user,
                                    catalog=path[0] if path else None, schema=path[1] if len(path) > 1 else None,
-                                   http_scheme=scheme, auth=auth, source="cairn",
-                                   request_timeout=max(5.0, self.timeout_ms / 1000))
+                                   http_scheme=scheme, auth=auth, http_headers=headers or None, verify=verify,
+                                   http_session=session, source="cairn", request_timeout=max(5.0, self.timeout_ms / 1000))
         try:
             cur = conn.cursor()
             cur.execute(sql)
@@ -238,6 +259,11 @@ class DataAccessService:
             if e.error_name == "PERMISSION_DENIED":
                 raise DataAccessError(f"Trino refused the query: {e.message[:300]}", 403)
             raise DataAccessError(f"the warehouse refused the query: {e.message[:300]}")
+        except trino.exceptions.HttpError as e:
+            if "401" in str(e):
+                raise DataAccessError("Trino did not accept Cairn's sign-in (check http-server.authentication.jwt "
+                                      "points at Cairn's /v1/trino/jwks.json)", 502)
+            raise DataAccessError(f"Trino could not be reached: {str(e)[:300]}", 502)
         finally:
             conn.close()
         return columns, rows[:limit], len(rows) > limit

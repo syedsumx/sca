@@ -8,6 +8,6 @@ connections:
   # The lakehouse through Trino (docker compose --profile trino): the SQL editor and Ask-your-data run
   # each query as the signed-in user, so Trino's access control (Cairn's policies) applies as well.
   lakehouse:
-    url: trino://cairn@cairn-trino:8080/lakehouse
+    url: trino://cairn@cairn-trino:8443/lakehouse?protocol=https&verify=/etc/cairn/trino-tls/ca.pem
     run_as_user: true
     catalog: {platform: trino, database: lakehouse}

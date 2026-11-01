@@ -786,10 +786,16 @@ A multi-table transaction changes every table or none.
 **Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
 **Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
-- **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` on `localhost:8088` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled` and `cairn.api.enabled`).
+- **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` with HTTPS on `localhost:8443` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled` and `cairn.api.enabled`).
   - **Sizing:** `queryMaxMemory` and `resources`.
   - **Workers:** `workers: N` adds N worker pods. The coordinator then plans queries and leaves the work to them. Access control and lineage stay on the coordinator, and the nodes share a secret (the access key) for their internal traffic.
   - **Network policy:** with `cairn.networkPolicy.enabled`, only this release's pods reach Trino, plus the clients listed in `cairn.networkPolicy.trinoIngressFrom` (BI tools, notebooks).
+- **Sign-in.** Trino believes only tokens Cairn signs. The Trino user is whoever Cairn says it is, not a name a client claims.
+  - **Getting a token.** A signed-in user calls `POST /v1/trino/token` (optional `{"ttl_seconds": 600}`, 60 seconds to 12 hours; default `CAIRN_TRINO_TOKEN_TTL`, 3600). The answer has the `token` and the Trino `user`. Use it from the Trino CLI (`trino --server https://… --access-token <token> --user <user>`), JDBC (`accessToken`) or Python (`Authorization: Bearer`). Every token issued is audited (`trino.token_issued`). Service and agent credentials get no token.
+  - **How Trino checks it.** Trino's JWT authenticator reads Cairn's public key from `/v1/trino/jwks.json`, which needs no sign-in, and requires the issuer (`CAIRN_TRINO_TOKEN_ISSUER`, default `cairn`) and the audience `trino`. A missing, edited, expired or foreign-signed token gets 401. Ana's token with `--user admin` is an impersonation: Trino asks Cairn, and Cairn refuses it without `MANAGE_SYSTEM_OPERATIONS`.
+  - **The signing key.** It is made on first use and kept in Cairn's database (`cairn_trino_signing_keys`), so every API replica signs with the same key. It is encrypted with `CAIRN_TRINO_ACCESS_KEY`: the database alone cannot sign a token. Changing the access key therefore means deleting that row, which makes a new key and invalidates outstanding tokens. Trino reads the key when it starts, so Compose starts Trino once the API is healthy, and in Helm an init container waits for it.
+  - **TLS.** Tokens travel only over HTTPS; plain HTTP stays for Trino's own nodes, which share a secret. In Compose, `cairn-trino-tls` makes a self-signed certificate once, into the `trinotls` volume: `keystore.p12` for Trino, `ca.pem` for clients. Mount your own with `CAIRN_TRINO_TLS_DIR`. In Helm, set `cairn.trino.tls.secretName` to a `kubernetes.io/tls` Secret; Trino serves it on `cairn.trino.tls.httpsPort` (8443). The chart refuses to render without it unless `cairn.trino.allowInsecureHttp` is true, which is for tests only because tokens then cross the network unencrypted.
+  - **Tested** with Trino 476 over TLS: no token, a token signed with another key, an edited token and a claimed impersonation all refused; plain HTTP refused; the CLI and the SQL editor signed in with Cairn tokens. In Compose: 401 without a token, and a query with a token, the certificate verified against `ca.pem`, both from the host and from the API container.
 - **The `lakehouse` catalog.** Both setups configure it from `deploy/trino/catalog/lakehouse.properties`:
   - the catalog's REST URI with its token as an OAuth2 bearer token (`iceberg.rest-catalog.security=OAUTH2`);
   - the store through Trino's native S3 support, with path-style access.
@@ -823,13 +829,13 @@ A multi-table transaction changes every table or none.
 
   ```yaml
   lakehouse:
-    url: trino://cairn@cairn-trino:8080/lakehouse
+    url: trino://cairn@cairn-trino:8443/lakehouse?protocol=https&verify=/etc/cairn/trino-tls/ca.pem
     run_as_user: true
     catalog: {platform: trino, database: lakehouse}
   ```
 
   - **How a query runs.** Cairn checks the query as it does for every connection: catalogued tables only, the caller must be allowed to read each one, and results are masked. Trino then runs it as the signed-in user, so Trino's own checks (Cairn's policies, row filters included) apply as well. Row filters thus now reach the SQL editor and Ask-your-data.
-  - **Authentication.** With a password in the URL (`trino://cairn:<password>@host:443/lakehouse`), the connection uses HTTPS and `cairn` impersonates the caller. Trino asks Cairn before allowing an impersonation, so grant that user `MANAGE_SYSTEM_OPERATIONS`.
+  - **Authentication.** Each query signs in with a five-minute Cairn token for the caller, so Trino knows the user from the token. `protocol=https` selects TLS, and `verify` is the CA file to trust (`true` means the system's CAs; `false` turns checking off). The connection's CA file wins over `REQUESTS_CA_BUNDLE`. For a Trino that does not trust Cairn's tokens, put a password in the URL (`trino://cairn:<password>@host:443/lakehouse`): `cairn` then impersonates the caller, which needs `MANAGE_SYSTEM_OPERATIONS`. If Trino answers 401, the editor says that Trino did not accept Cairn's sign-in.
   - **Requirements.** It needs the `trino` extra (`cairn-platform[trino]`, part of `all`).
   - **Row cap.** The editor's row cap now goes onto the query's own `LIMIT` (a smaller limit the query already has is kept), so `ORDER BY` holds on engines that drop the order of a subquery, as Trino does.
 - **When Cairn Core is down.** Lineage from Trino is answered with 503 and logged, and the query itself is unaffected. Trino does not resend the event, so that query's lineage is lost.

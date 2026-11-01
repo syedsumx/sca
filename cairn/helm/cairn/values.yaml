@@ -677,6 +677,16 @@ cairn:
     accessKeySecret:
       name: cairn-trino
       key: access-key
+    # Sign-in: clients present a token Cairn issues (POST /v1/trino/token; the SQL editor does it itself)
+    # and Trino checks it against Cairn's public key. Tokens travel over HTTPS: set tls.secretName to a
+    # kubernetes.io/tls Secret (tls.crt, tls.key) for Trino's HTTPS port. Without one the chart refuses to
+    # render unless allowInsecureHttp is true (tokens then cross the network in the clear: tests only).
+    tls:
+      secretName: ""
+      httpsPort: 8443
+    allowInsecureHttp: false
+    tokenIssuer: cairn
+    tokenTtlSeconds: 3600
     resources:
       requests: { cpu: 500m, memory: 2Gi }
       limits: { memory: 4Gi }

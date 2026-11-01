@@ -370,6 +370,8 @@ services:
       - ./deploy/actions:/etc/cairn/actions:ro
       - cairn-bootstrap:/run/cairn:ro
       - cairn-provisioner:/run/cairn-provisioner:ro
+      # Trino's certificate (ca.pem), for SQL editor connections to it over HTTPS.
+      - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/cairn/trino-tls:ro
     environment:
       <<: *cairn-env
       # SCIM provisioning (Administration → User provisioning). Empty = SCIM answers 503.
@@ -380,6 +382,7 @@ services:
       CAIRN_STORE_ADMIN_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       # Trino asks Cairn before every action (deploy/trino/access-control.properties) with this key.
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
+      CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
       CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
@@ -590,6 +593,19 @@ services:
 
   # Trino on the lakehouse (opt-in: `--profile trino`): SQL on Cairn Catalog's Iceberg tables, data in
   # Cairn Store, as the `lakehouse` catalog. http://localhost:8088 (e.g. `trino --server localhost:8088`).
+  # Once: a self-signed certificate for Trino's HTTPS port (kept in the trinotls volume).
+  cairn-trino-tls:
+    image: trinodb/trino:476
+    profiles: [trino]
+    user: "0"
+    entrypoint: ["/bin/sh", "/make-tls.sh"]
+    environment:
+      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
+    volumes:
+      - ./deploy/trino/make-tls.sh:/make-tls.sh:ro
+      - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls
+    networks: [catalog]
+
   cairn-trino:
     image: trinodb/trino:476
     hostname: cairn-trino
@@ -606,18 +622,25 @@ services:
       CAIRN_API_URL: http://cairn-api:8800
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
       CAIRN_TRINO_URI: http://cairn-trino:8080
+      CAIRN_TRINO_TOKEN_ISSUER: ${CAIRN_TRINO_TOKEN_ISSUER:-cairn}
+      CAIRN_TRINO_KEYSTORE_PASSWORD: ${CAIRN_TRINO_KEYSTORE_PASSWORD:-cairn-trino-dev-keystore}
+      CAIRN_TRINO_SHARED_SECRET: ${CAIRN_TRINO_SHARED_SECRET:-cairn-trino-dev-shared-secret-0001}
     volumes:
+      - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro
       - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
       - ./deploy/trino/access-control.properties:/etc/trino/access-control.properties:ro
       - ./deploy/trino/event-listener.properties:/etc/trino/event-listener.properties:ro
       - ./deploy/trino/catalog:/etc/trino/catalog:ro
     ports:
-      - "${CAIRN_MAPPED_TRINO_PORT:-8088}:8080"
+      # HTTPS with a Cairn token: get one with POST /v1/trino/token (or the SQL editor does it for you).
+      - "${CAIRN_MAPPED_TRINO_PORT:-8443}:8443"
     depends_on:
+      cairn-trino-tls:
+        condition: service_completed_successfully
       cairn-catalog:
         condition: service_started
       cairn-api:
-        condition: service_started
+        condition: service_healthy  # Trino reads Cairn's signing key (JWKS) when it starts
     networks: [catalog]
 
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
@@ -732,6 +755,7 @@ networks:
 volumes:
   storedata:
   catalogdata:
+  trinotls:
   mysqldata:
   osdata:
   broker:

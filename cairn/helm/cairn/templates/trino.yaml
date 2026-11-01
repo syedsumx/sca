@@ -10,6 +10,8 @@
 {{- if not .Values.cairn.api.enabled }}{{ fail "cairn.trino needs cairn.api.enabled (Trino asks Cairn before every action)" }}{{ end }}
 {{- $apiCtx := dict "root" $ "component" "api" "cfg" .Values.cairn.api }}
 {{- $api := printf "http://%s:%v" (include "cairn.componentName" $apiCtx) .Values.cairn.api.port }}
+{{- $tls := $u.tls.secretName }}
+{{- if and (not $tls) (not $u.allowInsecureHttp) }}{{ fail "cairn.trino needs cairn.trino.tls.secretName (sign-in tokens travel over HTTPS), or cairn.trino.allowInsecureHttp=true for tests" }}{{ end }}
 {{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
 # Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
 # tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
@@ -27,6 +29,18 @@ data:
     discovery.uri=http://localhost:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    # Sign-in: tokens Cairn issues, checked against Cairn's public key.
+    http-server.authentication.type=JWT
+    http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.jwt.required-issuer={{ $u.tokenIssuer }}
+    http-server.authentication.jwt.required-audience=trino
+    {{- if $tls }}
+    http-server.https.enabled=true
+    http-server.https.port={{ $u.tls.httpsPort }}
+    http-server.https.keystore.path=/etc/trino/tls/keystore.pem
+    {{- else }}
+    http-server.authentication.allow-insecure-over-http=true
+    {{- end }}
   worker.properties: |
     coordinator=false
     http-server.http.port={{ $u.port }}
@@ -75,7 +89,7 @@ spec:
       labels:
         {{- include "cairn.componentLabels" $ctx | nindent 8 }}
       annotations:
-        checksum/config: {{ printf "%s%s%s" $u.port $u.queryMaxMemory $s3 | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%s%v" $u.port $u.queryMaxMemory $s3 $tls $u.tokenIssuer | sha256sum }}
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.cairn.imagePullSecrets }}
@@ -86,6 +100,28 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      initContainers:
+        # Trino reads Cairn's signing key (JWKS) when it starts: wait for the API.
+        - name: wait-for-cairn
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "until curl -sf -o /dev/null {{ $api }}/v1/trino/jwks.json; do echo waiting for Cairn; sleep 3; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- if $tls }}
+        # Trino wants the key and certificate in one PEM file.
+        - name: tls-keystore
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cat /tls-src/tls.key /tls-src/tls.crt > /etc/trino/tls/keystore.pem && chmod 0600 /etc/trino/tls/keystore.pem"]
+          volumeMounts:
+            - { name: tls-src, mountPath: /tls-src, readOnly: true }
+            - { name: tls, mountPath: /etc/trino/tls }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- end }}
       containers:
         - name: trino
           image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
@@ -107,6 +143,11 @@ spec:
             - name: http
               containerPort: {{ $u.port }}
               protocol: TCP
+            {{- if $tls }}
+            - name: https
+              containerPort: {{ $u.tls.httpsPort }}
+              protocol: TCP
+            {{- end }}
           readinessProbe:
             httpGet: { path: /v1/info, port: http }
             initialDelaySeconds: 20
@@ -132,6 +173,9 @@ spec:
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
               readOnly: true
+            {{- if $tls }}
+            - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml $u.resources | nindent 12 }}
           securityContext:
@@ -141,6 +185,12 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $tls }}
+        - name: tls-src
+          secret: { secretName: {{ $tls }} }
+        - name: tls
+          emptyDir: { medium: Memory }
+        {{- end }}
       {{- with $u.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -222,7 +272,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "cairn.componentName" $wctx }}
+            name: {{ include "cairn.componentName" $ctx }}
       {{- with $u.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -243,4 +293,10 @@ spec:
       port: {{ $u.port }}
       targetPort: http
       protocol: TCP
+    {{- if $tls }}
+    - name: https
+      port: {{ $u.tls.httpsPort }}
+      targetPort: https
+      protocol: TCP
+    {{- end }}
 {{- end }}

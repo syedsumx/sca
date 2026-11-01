@@ -106,6 +106,7 @@ class Services:
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
     trino_key: str = ""
+    trino_tokens: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -899,6 +900,12 @@ def _build_data_access(s: Services) -> None:
 
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs)
         s.trino_key = trino_key
+        # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
+        from cairn.dataaccess.trino_auth import TrinoTokens
+
+        s.trino_tokens = TrinoTokens(s.engine, trino_key, os.environ.get("CAIRN_TRINO_TOKEN_ISSUER", "cairn"),
+                                     int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
+        s.data_access.trino_tokens = s.trino_tokens
 
     from cairn.dataaccess.ask import AskService
 
