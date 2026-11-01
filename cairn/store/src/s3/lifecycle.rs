@@ -359,6 +359,7 @@ pub struct Pass {
     pub noncurrent_expired: u64,
     pub uploads_aborted: u64,
     pub transitioned: u64,
+    pub ttl_expired: u64,
 }
 
 #[derive(Default)]
@@ -368,6 +369,7 @@ pub struct LifecycleMetrics {
     pub noncurrent_expired: AtomicU64,
     pub uploads_aborted: AtomicU64,
     pub transitioned: AtomicU64,
+    pub ttl_expired: AtomicU64,
     pub runs: AtomicU64,
 }
 
@@ -422,6 +424,12 @@ impl Server {
     pub fn lifecycle_pass(&self, now: u64) -> Pass {
         let mut total = Pass::default();
         let buckets = self.eng.list_buckets().unwrap_or_default();
+        for b in &buckets {
+            match self.ttl_sweep(&b.name, b.versioning.is_empty()) {
+                Ok(n) => total.ttl_expired += n,
+                Err(err) => tracing::warn!(bucket = %b.name, error = %err, "time-to-live sweep"),
+            }
+        }
         for b in buckets {
             let rules = match self.eng.get_config(&b.name, "lifecycle") {
                 Ok(Some(d)) => serde_json::from_slice::<Vec<Rule>>(&d).unwrap_or_default(),
@@ -438,6 +446,7 @@ impl Server {
                     total.noncurrent_expired += p.noncurrent_expired;
                     total.uploads_aborted += p.uploads_aborted;
                     total.transitioned += p.transitioned;
+                    total.ttl_expired += p.ttl_expired;
                 }
                 Err(err) => tracing::warn!(bucket = %b.name, error = %err, "lifecycle pass"),
             }
@@ -448,6 +457,7 @@ impl Server {
         m.noncurrent_expired.fetch_add(total.noncurrent_expired, Ordering::Relaxed);
         m.uploads_aborted.fetch_add(total.uploads_aborted, Ordering::Relaxed);
         m.transitioned.fetch_add(total.transitioned, Ordering::Relaxed);
+        m.ttl_expired.fetch_add(total.ttl_expired, Ordering::Relaxed);
         self.eng.collect_tiered();
         m.runs.fetch_add(1, Ordering::Relaxed);
         if total != Pass::default() {
@@ -457,6 +467,7 @@ impl Server {
                 noncurrent_expired = total.noncurrent_expired,
                 uploads_aborted = total.uploads_aborted,
                 transitioned = total.transitioned,
+                ttl_expired = total.ttl_expired,
                 "lifecycle pass"
             );
         }

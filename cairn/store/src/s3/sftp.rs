@@ -406,7 +406,8 @@ impl Sftp {
         let prefix = if key.is_empty() { String::new() } else { format!("{}/", key.trim_end_matches('/')) };
         let mut after = String::new();
         loop {
-            let opt = ListOptions { prefix: prefix.clone(), delimiter: "/".into(), after: after.clone(), max_keys: 1000 };
+            let opt =
+                ListOptions { prefix: prefix.clone(), delimiter: "/".into(), after: after.clone(), max_keys: 1000, include_expired: false };
             let page = blocking(|| self.srv.eng.list(&bucket, &opt)).map_err(|e| from_api(&e.into()))?;
             for p in &page.common_prefixes {
                 out.push(File::new(p[prefix.len()..].trim_end_matches('/'), dir_attrs(0)));

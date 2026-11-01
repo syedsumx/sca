@@ -80,6 +80,7 @@ impl Server {
             "lifecycle": has("lifecycle")?,
             "policy": has("policy")?,
             "disk_type": self.eng.bucket_disk_kind(name)?,
+            "ttl_seconds": self.bucket_ttl(name)?,
         }))
     }
 
@@ -267,6 +268,10 @@ impl Server {
                     })
                     .collect();
                 Ok(json_resp(StatusCode::OK, json!({"disks": disks})))
+            }
+            (m, ["buckets", b, "ttl"]) if m == Method::PUT || m == Method::DELETE => {
+                self.put_bucket_ttl(b, (m == Method::PUT).then_some(&body[..]), &a.cred.access_key)?;
+                Ok(json_resp(StatusCode::OK, self.bucket_json(b)?))
             }
             (&Method::PUT, ["buckets", b, "disk"]) => {
                 let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;

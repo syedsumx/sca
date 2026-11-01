@@ -49,6 +49,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             backup_sinks: vec![],
             remotes: vec![],
             kafka: None,
+            lifecycle_secs: 3600,
         },
     )
     .unwrap();

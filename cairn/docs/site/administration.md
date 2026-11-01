@@ -426,6 +426,14 @@ Cairn Store is Cairn's own S3-compatible object store, for lakehouse tables (Ice
 
 **Lifecycle rules.** Each bucket can have lifecycle rules (`PutBucketLifecycleConfiguration`). Rules can expire current objects a number of days after they were written, or on a date. They can also remove delete markers that are the last thing left of an object, expire noncurrent versions (optionally keeping the newest few), and abort multipart uploads left unfinished. A rule can select objects by prefix, tags and size. The store applies the rules in the background, every `CAIRN_STORE_LIFECYCLE_INTERVAL` seconds (default 3600). It only expires the version it checked, so an object rewritten in the meantime is kept. Responses for objects that will expire carry `x-amz-expiration`. Rules can also move objects, or noncurrent versions, to a storage tier (below). Metrics: `cairn_store_lifecycle_*_total`.
 
+**Times to live.** Besides rules, a single object can be given a time to live.
+- **On a write.** Send `x-cairn-ttl` on `PutObject`, `CopyObject` or `CreateMultipartUpload`. The value is a number of seconds, or a number followed by `s`, `m`, `h`, `d` or `w` (at most 100 years).
+  - A copy and a completed multipart upload are new objects, so their time counts from when the copy is made or the upload completes.
+  - `GET` and `HEAD` answer with `x-cairn-expires`.
+- **A bucket default.** `PUT /-/admin/v1/buckets/<bucket>/ttl` with `{"ttl": "7d"}` (or `{"seconds": n}`) gives every new object in the bucket that time to live. `DELETE` removes the default. A write with `x-cairn-ttl: 0` opts out. Setting and removing the default is recorded in the audit trail, and the bucket's admin view shows `ttl_seconds`.
+- **When the time runs out.** The object is gone at once for reads and listings on every protocol (S3, file API, WebDAV, SFTP, mounts), and its key can be written again. The lifecycle worker then deletes it, counted in `cairn_store_lifecycle_ttl_expired_total`. In versioned buckets it deletes the expired version itself rather than adding a delete marker, so its bytes go too; earlier versions stay.
+- **Refusals.** A time to live is refused in buckets with Object Lock, since a locked object must not vanish. It is also refused when `CAIRN_STORE_LIFECYCLE_INTERVAL` is 0, because nothing would delete expired objects.
+
 **Object lock.** Buckets created with object lock (`x-amz-bucket-object-lock-enabled: true`), or versioned buckets that get an object lock configuration, keep versions write-once:
 
 - **Retention.** A version can carry retention until a date, in `GOVERNANCE` or `COMPLIANCE` mode, set per object or from the bucket's default retention.

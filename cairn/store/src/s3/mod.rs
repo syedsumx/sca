@@ -31,6 +31,7 @@ pub mod sinks;
 pub mod sse;
 pub mod tiering;
 mod trail;
+pub mod ttl;
 mod versioning;
 mod website;
 pub mod xml;
@@ -102,6 +103,8 @@ pub struct Config {
     pub remotes: Vec<remote::RemoteSpec>,
     /// The Kafka listener (None: off).
     pub kafka: Option<kafka::KafkaConfig>,
+    /// Seconds between lifecycle passes (0: lifecycle processing is off).
+    pub lifecycle_secs: u64,
 }
 
 pub struct Server {
@@ -118,6 +121,9 @@ pub struct Server {
     tls: bool,
     /// A lifecycle "day" in ms (86 400 000; shorter only in tests).
     lifecycle_day_ms: u64,
+    /// Seconds between lifecycle passes (0: off, so times to live are refused).
+    pub(crate) lifecycle_secs: u64,
+    pub(crate) ttl_buckets: std::sync::Mutex<std::collections::HashSet<String>>,
     lifecycle_metrics: lifecycle::LifecycleMetrics,
     keyring: sse::Keyring,
     encrypt_by_default: bool,
@@ -218,6 +224,8 @@ impl Server {
             pdp,
             tls: cfg.tls,
             lifecycle_day_ms: if cfg.lifecycle_day_secs == 0 { 86_400_000 } else { cfg.lifecycle_day_secs * 1000 },
+            lifecycle_secs: cfg.lifecycle_secs,
+            ttl_buckets: Default::default(),
             lifecycle_metrics: Default::default(),
             keyring: cfg.keyring,
             encrypt_by_default: cfg.encrypt_by_default,
@@ -502,6 +510,7 @@ impl Server {
                     ("noncurrent_expired", &lm.noncurrent_expired),
                     ("uploads_aborted", &lm.uploads_aborted),
                     ("transitioned", &lm.transitioned),
+                    ("ttl_expired", &lm.ttl_expired),
                     ("runs", &lm.runs),
                 ] {
                     body.push_str(&format!(

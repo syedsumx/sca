@@ -180,8 +180,16 @@ impl Server {
         let mut after = String::new();
         loop {
             let page = blocking(|| {
-                self.eng
-                    .list(bucket, &ListOptions { prefix: prefix.into(), delimiter: String::new(), after: after.clone(), max_keys: 1000 })
+                self.eng.list(
+                    bucket,
+                    &ListOptions {
+                        prefix: prefix.into(),
+                        delimiter: String::new(),
+                        after: after.clone(),
+                        max_keys: 1000,
+                        include_expired: false,
+                    },
+                )
             })?;
             out.extend(page.objects);
             if out.len() > MAX_TREE {
@@ -405,7 +413,13 @@ impl Server {
                         let page = blocking(|| {
                             self.eng.list(
                                 bucket,
-                                &ListOptions { prefix: p.clone(), delimiter: "/".into(), after: after.clone(), max_keys: 1000 },
+                                &ListOptions {
+                                    prefix: p.clone(),
+                                    delimiter: "/".into(),
+                                    after: after.clone(),
+                                    max_keys: 1000,
+                                    include_expired: false,
+                                },
                             )
                         })?;
                         for cp in &page.common_prefixes {

@@ -357,7 +357,13 @@ impl Server {
             c.query.insert("delimiter".into(), "/".into());
             c.op = super::handlers::classify(c);
             self.authorize_request(c).await?;
-            let opt = ListOptions { prefix: prefix.to_string(), delimiter: "/".into(), after: after.to_string(), max_keys: limit };
+            let opt = ListOptions {
+                prefix: prefix.to_string(),
+                delimiter: "/".into(),
+                after: after.to_string(),
+                max_keys: limit,
+                include_expired: false,
+            };
             let bucket = c.bucket.clone();
             let res = blocking(|| self.eng.list(&bucket, &opt))?;
             for p in &res.common_prefixes {

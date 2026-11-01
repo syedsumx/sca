@@ -491,6 +491,7 @@ async fn serve(addr: String, data: String) {
                 cluster: cluster.clone(),
                 backup_sinks: backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e)),
                 kafka: kafka_config().unwrap_or_else(|e| fail("CAIRN_STORE_KAFKA_ADDR", e)),
+                lifecycle_secs: env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or(3600),
                 remotes: match env("CAIRN_STORE_REMOTES_FILE", "") {
                     f if f.is_empty() => vec![],
                     f => s3::remote::load_specs(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)), "remote")

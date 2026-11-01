@@ -499,7 +499,7 @@ impl Server {
         } else {
             c.q("marker").to_string()
         };
-        let opt = ListOptions { prefix: c.q("prefix").into(), delimiter: c.q("delimiter").into(), after, max_keys };
+        let opt = ListOptions { prefix: c.q("prefix").into(), delimiter: c.q("delimiter").into(), after, max_keys, include_expired: false };
         let res = blocking(|| self.eng.list(&c.bucket, &opt))?;
         let mut w = Writer::new("ListBucketResult");
         w.el("Name", &c.bucket).el("Prefix", enc(c.q("prefix")));
@@ -633,6 +633,7 @@ impl Server {
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let info = blocking(|| self.eng.head_bucket(&c.bucket))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
+        let ttl = self.ttl_for_write(c, &c.bucket)?;
         let (sse, dek) = self.sse_for_write(c, &c.bucket, &c.key)?.unzip();
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         let compute: Vec<&str> = [algo.as_str()].into_iter().filter(|a| !a.is_empty()).collect();
@@ -652,6 +653,7 @@ impl Server {
             tags,
             lock,
             sse,
+            expires: super::ttl::expires_at(ttl),
             ..Default::default()
         };
         let mut ev = self.ev(c, "Put");
@@ -771,6 +773,9 @@ impl Server {
         if !obj.replication_status.is_empty() {
             set_header(&mut r, "x-amz-replication-status", &obj.replication_status);
         }
+        if obj.expires > 0 {
+            set_header(&mut r, "x-cairn-expires", &super::http_time(obj.expires));
+        }
         if version.is_empty() {
             if let Some(x) = self.expiration_header(&c.bucket, &obj) {
                 set_header(&mut r, "x-amz-expiration", &x);
@@ -888,6 +893,7 @@ impl Server {
         })?;
         let tags = if tag_directive == "REPLACE" { new_tags } else { src_obj.tags.clone() };
         let lock = self.lock_for_write(c, &c.bucket)?;
+        let ttl = self.ttl_for_write(c, &c.bucket)?; // a copy is a new object: the destination's time to live
         let (ct, hs, um) = if directive == "REPLACE" {
             object_headers(c)
         } else {
@@ -908,6 +914,7 @@ impl Server {
             tags,
             lock,
             sse,
+            expires: super::ttl::expires_at(ttl),
             ..Default::default()
         };
         let stored = blocking(|| self.eng.put_object_ev(&c.bucket, obj, &cond_of(c), &self.ev(c, "Copy")))?;
@@ -934,7 +941,8 @@ impl Server {
         self.check_storage_class(c)?;
         let tags = parse_tag_header(c.header("x-amz-tagging"))?;
         let lock = self.lock_for_write(c, &c.bucket)?;
-        // The upload's data key is chosen now; every part is encrypted with it.
+        let ttl = self.ttl_for_write(c, &c.bucket)?; // counted from the completion
+                                                     // The upload's data key is chosen now; every part is encrypted with it.
         let sse = self.sse_for_write(c, &c.bucket, &c.key)?.map(|(sse, _)| sse);
         let algo = c.header("x-amz-checksum-algorithm").to_ascii_lowercase();
         if !algo.is_empty() && !checksum::valid(&algo) {
@@ -962,6 +970,7 @@ impl Server {
                 tags,
                 lock,
                 sse,
+                ttl,
                 ..Default::default()
             })
         })?;

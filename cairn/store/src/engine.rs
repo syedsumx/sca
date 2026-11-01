@@ -237,9 +237,18 @@ pub struct Object {
     /// Mounted remote buckets: the ETag of the remote object this version mirrors or was written back as.
     #[serde(rename = "re", default, skip_serializing_if = "String::is_empty")]
     pub remote_etag: String,
+    /// When the version expires (ms since the epoch; 0: never): from then on it is not read or listed,
+    /// and the lifecycle worker deletes it.
+    #[serde(rename = "ex", default, skip_serializing_if = "is_zero")]
+    pub expires: u64,
 }
 
 impl Object {
+    /// Has the version's time to live run out?
+    pub fn expired(&self) -> bool {
+        self.expires != 0 && self.expires <= now_ms()
+    }
+
     /// The storage class: the tier holding its bytes, else STANDARD (also for a mounted remote's bytes).
     pub fn storage_class(&self) -> &str {
         self.segments.iter().find(|s| !s.tier.is_empty() && !s.tier.starts_with('@')).map(|s| s.tier.as_str()).unwrap_or("STANDARD")
@@ -445,6 +454,9 @@ pub struct VersionList {
 /// An in-progress multipart upload.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Upload {
+    /// Time to live of the completed object, in seconds (0: none).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ttl: u64,
     pub id: String,
     pub bucket: String,
     pub key: String,
@@ -867,6 +879,8 @@ pub struct ListOptions {
     /// List keys strictly after this one.
     pub after: String,
     pub max_keys: usize,
+    /// Also list versions whose time to live has run out (the lifecycle worker's sweep).
+    pub include_expired: bool,
 }
 
 #[derive(Debug, Default)]
@@ -2301,14 +2315,14 @@ impl Engine {
     pub fn get_version(&self, bucket: &str, key: &str, version: Option<&str>) -> Result<Object> {
         let r = self.db.begin_read()?;
         Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
-        let cur = Self::current_in(&r.open_table(OBJECTS)?, bucket, key)?;
+        let cur = Self::current_in(&r.open_table(OBJECTS)?, bucket, key)?.filter(|o| !o.expired());
         let Some(want) = version.filter(|v| !v.is_empty()) else { return cur.ok_or(Error::NoSuchKey) };
         let want = if want == "null" { "" } else { want };
         if let Some(c) = cur.filter(|c| c.version_id == want) {
             return Ok(c);
         }
         let versions = Self::versions_in(&r.open_table(VERSIONS)?, bucket, key)?;
-        versions.into_iter().map(|(_, o)| o).find(|o| o.version_id == want).ok_or(Error::NoSuchVersion)
+        versions.into_iter().map(|(_, o)| o).find(|o| o.version_id == want && !o.expired()).ok_or(Error::NoSuchVersion)
     }
 
     /// If the key's latest version is a delete marker, its version ID.
@@ -2326,7 +2340,11 @@ impl Engine {
         Self::bucket_exists(&r.open_table(BUCKETS)?, bucket)?;
         let t = r.open_table(OBJECTS)?;
         let v = t.get((bucket, key))?.ok_or(Error::NoSuchKey)?;
-        Ok(serde_json::from_slice(v.value())?)
+        let o: Object = serde_json::from_slice(v.value())?;
+        if o.expired() {
+            return Err(Error::NoSuchKey); // its time to live ran out: gone, though not yet swept
+        }
+        Ok(o)
     }
 
     /// Changes an object's metadata in place (no new bytes), atomically. `f` may refuse the change.
@@ -2906,11 +2924,15 @@ impl Engine {
                         }
                     }
                 }
+                let o: Object = serde_json::from_slice(v.value())?;
+                if o.expired() && !opt.include_expired {
+                    continue;
+                }
                 if count >= opt.max_keys {
                     res.truncated = true;
                     break 'outer;
                 }
-                res.objects.push(serde_json::from_slice(v.value())?);
+                res.objects.push(o);
                 res.next_after = key.to_string();
                 count += 1;
             }
@@ -3116,6 +3138,7 @@ impl Engine {
                 content_type: u.content_type.clone(),
                 headers: u.headers.clone(),
                 user_meta: u.user_meta.clone(),
+                expires: if u.ttl > 0 { now_ms() + u.ttl * 1000 } else { 0 },
                 checksums,
                 checksum_type: ctype,
                 segments: parts
