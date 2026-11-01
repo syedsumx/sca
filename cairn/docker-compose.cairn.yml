@@ -586,6 +586,31 @@ services:
         condition: service_healthy
     networks: [catalog]
 
+  # Trino on the lakehouse (opt-in: `--profile trino`): SQL on Cairn Catalog's Iceberg tables, data in
+  # Cairn Store, as the `lakehouse` catalog. http://localhost:8088 (e.g. `trino --server localhost:8088`).
+  cairn-trino:
+    image: trinodb/trino:476
+    hostname: cairn-trino
+    restart: unless-stopped
+    profiles: [trino]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CAIRN_CATALOG_URI: http://cairn-catalog:8181
+      CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:-cairn-catalog-dev-token}
+      CAIRN_STORE_ENDPOINT: http://cairn-store:8333
+      CAIRN_STORE_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
+      CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
+    volumes:
+      - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
+      - ./deploy/trino/catalog:/etc/trino/catalog:ro
+    ports:
+      - "${CAIRN_MAPPED_TRINO_PORT:-8088}:8080"
+    depends_on:
+      cairn-catalog:
+        condition: service_started
+    networks: [catalog]
+
   # Single origin for the UI + Cairn API (+ remote MCP) on http://localhost:9000
   edge:
     image: nginx:1.27-alpine

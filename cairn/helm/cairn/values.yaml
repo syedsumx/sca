@@ -660,6 +660,21 @@ cairn:
     tolerations: []
     affinity: {}
 
+  # Trino on the lakehouse: SQL on Cairn Catalog's Iceberg tables (data in Cairn Store), as the
+  # `lakehouse` catalog. Needs catalog.enabled. One coordinator that also runs queries.
+  trino:
+    enabled: false
+    port: 8080
+    image:
+      repository: trinodb/trino
+      tag: "476"
+      pullPolicy: IfNotPresent
+    queryMaxMemory: 2GB
+    resources:
+      requests: { cpu: 500m, memory: 2Gi }
+      limits: { memory: 4Gi }
+    nodeSelector: {}
+
   # Static host for the consumer workspace MFE (remoteEntry.js) and the embed SDK (web components).
   consumerUi:
     enabled: true

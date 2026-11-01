@@ -43,7 +43,9 @@ def test_namespaces(cat):
     cat.create_namespace((root, "eu"))
     assert (root,) in cat.list_namespaces()
     assert cat.list_namespaces(root) == [(root, "eu")]
-    assert cat.load_namespace_properties(root) == {"owner": "ana"}
+    # The namespace reports where its tables go (engines such as Trino build table locations from it).
+    assert cat.load_namespace_properties(root) == {"owner": "ana", "location": f"s3://lakehouse/warehouse/{root}"}
+    assert cat.load_namespace_properties((root, "eu"))["location"] == f"s3://lakehouse/warehouse/{root}/eu"
     summary = cat.update_namespace_properties(root, removals={"owner", "nope"}, updates={"tier": "1"})
     assert summary.removed == ["owner"] and summary.missing == ["nope"] and summary.updated == ["tier"]
     with pytest.raises(NamespaceNotEmptyError):

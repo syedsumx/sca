@@ -1,0 +1,129 @@
+{{- if .Values.cairn.trino.enabled }}
+{{- $u := .Values.cairn.trino }}
+{{- $cat := .Values.cairn.catalog }}
+{{- $st := .Values.cairn.store }}
+{{- if not $cat.enabled }}{{ fail "cairn.trino needs cairn.catalog.enabled (Trino's Iceberg tables live in Cairn Catalog)" }}{{ end }}
+{{- $ctx := dict "root" $ "component" "trino" "cfg" $u }}
+{{- $catCtx := dict "root" $ "component" "catalog" "cfg" $cat }}
+{{- $storeCtx := dict "root" $ "component" "store" "cfg" $st }}
+{{- $s3 := default (printf "http://%s:%v" (include "cairn.componentName" $storeCtx) $st.port) $cat.s3Endpoint }}
+# Trino on the lakehouse: one coordinator that also runs queries, with the `lakehouse` catalog (Iceberg
+# tables in Cairn Catalog, data in Cairn Store). Secrets reach the catalog file through ${ENV:...}.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://localhost:{{ $u.port }}
+    query.max-memory={{ $u.queryMaxMemory }}
+  lakehouse.properties: |
+    connector.name=iceberg
+    iceberg.catalog.type=rest
+    iceberg.rest-catalog.uri=http://{{ include "cairn.componentName" $catCtx }}:{{ $cat.port }}
+    iceberg.rest-catalog.security=OAUTH2
+    iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_CATALOG_TOKEN}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ $s3 }}
+    s3.region={{ $st.region }}
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:CAIRN_STORE_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:CAIRN_STORE_SECRET_KEY}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+      annotations:
+        checksum/config: {{ printf "%s%s%s" $u.port $u.queryMaxMemory $s3 | sha256sum }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: trino
+          image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
+          imagePullPolicy: {{ $u.image.pullPolicy }}
+          env:
+            - name: CAIRN_CATALOG_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $cat.secret.name }}, key: {{ $cat.secret.tokenKey }} }
+            - name: CAIRN_STORE_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
+            - name: CAIRN_STORE_SECRET_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+          ports:
+            - name: http
+              containerPort: {{ $u.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /v1/info, port: http }
+            initialDelaySeconds: 60
+            periodSeconds: 30
+          volumeMounts:
+            - name: config
+              mountPath: /etc/trino/config.properties
+              subPath: config.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/catalog/lakehouse.properties
+              subPath: lakehouse.properties
+              readOnly: true
+          resources:
+            {{- toYaml $u.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "cairn.componentName" $ctx }}
+      {{- with $u.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $u.port }}
+      targetPort: http
+      protocol: TCP
+{{- end }}

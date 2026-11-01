@@ -348,7 +348,10 @@ impl Catalog {
                 scope(&levels)?;
                 match m {
                     Method::GET => {
-                        let props = self.db.namespace(&levels)?;
+                        let mut props = self.db.namespace(&levels)?;
+                        // Where its tables go unless they name a location (engines such as Trino build
+                        // table locations from it).
+                        props.entry("location".into()).or_insert_with(|| self.namespace_location(&levels));
                         Ok(json_resp(StatusCode::OK, &json!({"namespace": levels, "properties": props})))
                     }
                     Method::HEAD => {
@@ -483,9 +486,18 @@ impl Catalog {
         c
     }
 
+    /// A namespace's location: its own `location` property, else its place under the warehouse.
+    fn namespace_location(&self, levels: &[String]) -> String {
+        format!("{}/{}", self.cfg.warehouse.trim_end_matches('/'), levels.join("/"))
+    }
+
     fn default_location(&self, levels: &[String], name: &str) -> String {
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
-        format!("{}/{}/{name}-{suffix}", self.cfg.warehouse.trim_end_matches('/'), levels.join("/"))
+        let base = match self.db.namespace(levels).ok().and_then(|p| p.get("location").cloned()) {
+            Some(l) => l.trim_end_matches('/').to_string(),
+            None => self.namespace_location(levels),
+        };
+        format!("{base}/{name}-{suffix}")
     }
 
     async fn create_table(&self, levels: &[String], req: CreateTable) -> Result<Resp, ApiError> {

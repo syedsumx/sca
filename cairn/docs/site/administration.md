@@ -785,6 +785,21 @@ A multi-table transaction changes every table or none.
 
 **Limits.** This release runs on one node. Its state lives on one volume (`/data`): back it up together with Cairn Store. Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
+**Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
+- **Running it.** In Compose, `docker compose -f docker-compose.cairn.yml --profile trino up -d` starts `cairn-trino` on `localhost:8088` (`CAIRN_MAPPED_TRINO_PORT`). In Helm, set `cairn.trino.enabled` (it needs `cairn.catalog.enabled`); `queryMaxMemory` and `resources` size it.
+- **The `lakehouse` catalog.** Both setups configure it from `deploy/trino/catalog/lakehouse.properties`:
+  - the catalog's REST URI with its token as an OAuth2 bearer token (`iceberg.rest-catalog.security=OAUTH2`);
+  - the store through Trino's native S3 support, with path-style access.
+
+  Secrets come from the environment (`${ENV:...}`), never from the file itself. To give another Trino a scoped view, configure a second catalog with a namespace-scoped or read-only token. The catalog then enforces the scope for every statement.
+- **What works.** The conformance suite runs Trino 476 against the store and catalog binaries:
+  - creating schemas and partitioned tables, and `INSERT`, `UPDATE`, `DELETE` and `MERGE`;
+  - time travel (`FOR VERSION AS OF`), the `$snapshots` and `$partitions` tables, `ALTER TABLE ... ADD COLUMN` and `EXECUTE optimize`;
+  - `CREATE TABLE AS`;
+  - tables shared both ways with pyiceberg;
+  - a read-only token refused every change.
+- **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:
