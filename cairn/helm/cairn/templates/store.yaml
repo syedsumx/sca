@@ -151,6 +151,15 @@ spec:
             - name: CAIRN_STORE_META_FILE
               value: /etc/cairn-store-meta/{{ $u.metadata.key }}
             {{- end }}
+            {{- if $u.kafka.enabled }}
+            {{- if and (not $u.tlsSecret) (not $u.kafka.allowPlaintext) }}{{ fail "cairn.store.kafka needs cairn.store.tlsSecret (SASL/PLAIN sends secrets), or kafka.allowPlaintext=true" }}{{ end }}
+            - name: CAIRN_STORE_KAFKA_ADDR
+              value: {{ printf ":%v" $u.kafka.port | quote }}
+            - name: CAIRN_STORE_KAFKA_ADVERTISED
+              value: {{ default (printf "%s-kafka.%s.svc:%v" (include "cairn.componentName" $ctx) $.Release.Namespace $u.kafka.port) $u.kafka.advertised | quote }}
+            - name: CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT
+              value: {{ $u.kafka.allowPlaintext | quote }}
+            {{- end }}
             {{- if $u.sftp.enabled }}
             - name: CAIRN_STORE_SFTP_ADDR
               value: {{ printf ":%v" $u.sftp.port | quote }}
@@ -204,6 +213,11 @@ spec:
             {{- if $u.sftp.enabled }}
             - name: sftp
               containerPort: {{ $u.sftp.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if $u.kafka.enabled }}
+            - name: kafka
+              containerPort: {{ $u.kafka.port }}
               protocol: TCP
             {{- end }}
           {{- /* Under mutual TLS the kubelet has no client certificate: probe the port only. */}}
@@ -450,6 +464,24 @@ spec:
     - name: sftp
       port: {{ $u.sftp.port }}
       targetPort: sftp
+      protocol: TCP
+{{- end }}
+{{- if $u.kafka.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}-kafka
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: {{ $u.kafka.serviceType }}
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: kafka
+      port: {{ $u.kafka.port }}
+      targetPort: kafka
       protocol: TCP
 {{- end }}
 {{- end }}

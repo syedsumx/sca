@@ -3459,6 +3459,21 @@ impl Engine {
         Ok(off)
     }
 
+    /// Sets a group's offset exactly (Kafka consumers may move back); never past the last message.
+    pub fn queue_set_offset(&self, topic: &str, group: &str, seq: u64) -> Result<()> {
+        let tx = self.begin_write()?;
+        if tx.open_table(QTOPICS)?.get(topic)?.is_none() {
+            return Err(Error::NoSuchKey);
+        }
+        let last = tx.open_table(META)?.get(format!("q:{topic}").as_str())?.map(|v| v.value()).unwrap_or(0);
+        if seq > last {
+            return Err(Error::InvalidPart);
+        }
+        tx.open_table(QGROUPS)?.insert((topic, group), seq)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Removes a topic's oldest messages while there are more than `keep`, or while `old` says so.
     pub fn queue_trim(&self, topic: &str, keep: Option<u64>, old: &dyn Fn(&[u8]) -> bool) -> Result<u64> {
         let (first, next) = self.queue_bounds(topic)?;

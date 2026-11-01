@@ -16,6 +16,7 @@ mod files;
 mod handlers;
 mod iam;
 pub mod images;
+pub mod kafka;
 pub mod keys;
 pub mod lifecycle;
 pub mod mounts;
@@ -99,6 +100,8 @@ pub struct Config {
     pub backup_sinks: Vec<remote::RemoteSpec>,
     /// Remote buckets that can be mounted into local buckets.
     pub remotes: Vec<remote::RemoteSpec>,
+    /// The Kafka listener (None: off).
+    pub kafka: Option<kafka::KafkaConfig>,
 }
 
 pub struct Server {
@@ -137,6 +140,9 @@ pub struct Server {
     pub(crate) remotes: Arc<BTreeMap<String, remote::Remote>>,
     pub(crate) queue_notify: tokio::sync::Notify,
     pub(crate) queue_metrics: queues::QueueMetrics,
+    /// The Kafka listener's advertised address (None: off).
+    pub(crate) kafka: Option<kafka::KafkaConfig>,
+    pub(crate) kafka_groups: kafka::Groups,
 }
 
 /// One request, after routing and authentication.
@@ -239,6 +245,8 @@ impl Server {
             remotes,
             queue_notify: tokio::sync::Notify::new(),
             queue_metrics: Default::default(),
+            kafka: cfg.kafka,
+            kafka_groups: Default::default(),
             sinks: match cfg.backup_sinks.is_empty() {
                 true => None,
                 false => Some(sinks::Sinks::new(cfg.backup_sinks)?),

@@ -48,6 +48,7 @@ fn server() -> (Arc<Server>, Arc<Engine>, tempfile::TempDir) {
             cluster: None,
             backup_sinks: vec![],
             remotes: vec![],
+            kafka: None,
         },
     )
     .unwrap();

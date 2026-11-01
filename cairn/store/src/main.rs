@@ -50,6 +50,9 @@
 //! CAIRN_STORE_REMOTE_SYNC_INTERVAL  seconds between syncs of mounted remote buckets (60)
 //! CAIRN_STORE_FILES_BASIC_AUTH  the file API (/-/files/) also accepts HTTP Basic access_key:secret_key (false; TLS only)
 //! CAIRN_STORE_FILES_BASIC_ALLOW_HTTP  ... also over plain HTTP, when TLS ends in front of the store (false)
+//! CAIRN_STORE_KAFKA_ADDR  serve the Kafka protocol on the message queues on this address (off when empty), e.g. :9092
+//! CAIRN_STORE_KAFKA_ADVERTISED  host:port Kafka clients connect to (default: CAIRN_STORE_KAFKA_ADDR, which must then name a host)
+//! CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT  true: serve Kafka without TLS (SASL/PLAIN then sends secrets in the clear)
 //! CAIRN_STORE_SFTP_ADDR  serve SFTP on this address (off when empty), e.g. :2022
 //! CAIRN_STORE_SFTP_HOST_KEY  the SSH host key (OpenSSH format; default <data>/sftp_host_ed25519_key, created when missing)
 //! CAIRN_STORE_SFTP_PASSWORD_AUTH  keys sign in with their secret key as the password (true)
@@ -122,6 +125,24 @@ pub(crate) fn listen_addr(addr: &str) -> String {
     } else {
         addr.to_string()
     }
+}
+
+/// The Kafka listener's settings (None: off). The advertised address must be one clients can reach.
+fn kafka_config() -> Result<Option<s3::kafka::KafkaConfig>, String> {
+    let addr = env("CAIRN_STORE_KAFKA_ADDR", "");
+    if addr.is_empty() {
+        return Ok(None);
+    }
+    let adv = match env("CAIRN_STORE_KAFKA_ADVERTISED", "") {
+        a if a.is_empty() => addr.clone(),
+        a => a,
+    };
+    let (host, port) = adv.rsplit_once(':').ok_or("the advertised address is host:port")?;
+    let port: i32 = port.parse().map_err(|_| "the advertised port is not a number")?;
+    if host.is_empty() || host == "0.0.0.0" || host == "[::]" {
+        return Err("set CAIRN_STORE_KAFKA_ADVERTISED to the host:port Kafka clients connect to".into());
+    }
+    Ok(Some(s3::kafka::KafkaConfig { addr, advertised_host: host.trim_matches(['[', ']']).to_string(), advertised_port: port }))
 }
 
 /// A secret from `<K>_FILE` (a mounted secret) or `<K>`.
@@ -469,6 +490,7 @@ async fn serve(addr: String, data: String) {
                 },
                 cluster: cluster.clone(),
                 backup_sinks: backup_sinks().unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_SINKS_FILE", e)),
+                kafka: kafka_config().unwrap_or_else(|e| fail("CAIRN_STORE_KAFKA_ADDR", e)),
                 remotes: match env("CAIRN_STORE_REMOTES_FILE", "") {
                     f if f.is_empty() => vec![],
                     f => s3::remote::load_specs(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)), "remote")
@@ -533,6 +555,17 @@ async fn serve(addr: String, data: String) {
             Some(r)
         }
     };
+    if let Some(addr) = server.kafka.as_ref().map(|k| k.addr.clone()) {
+        if tls.is_none() && env("CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT", "false") != "true" {
+            fail(
+                "CAIRN_STORE_KAFKA_ADDR",
+                "Kafka sign-in (SASL/PLAIN) needs TLS (CAIRN_STORE_TLS_CERT); set CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT=true to serve it in the clear",
+            );
+        }
+        let l = TcpListener::bind(listen_addr(&addr)).await.unwrap_or_else(|e| fail("CAIRN_STORE_KAFKA_ADDR", e));
+        tracing::info!(addr = %addr, tls = tls.is_some(), "kafka listening");
+        tokio::spawn(server.clone().run_kafka(l, tls.clone()));
+    }
     let sftp_addr = env("CAIRN_STORE_SFTP_ADDR", "");
     if !sftp_addr.is_empty() {
         let cfg = s3::sftp::SftpConfig {

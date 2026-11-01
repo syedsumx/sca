@@ -640,7 +640,21 @@ Objects written before a key was set stay unencrypted. Requests to set them are 
 - **Consuming.** `GET .../messages?group=<g>&max=100` returns the messages after the group's committed offset, in order; `?wait=10` long-polls for up to 20 seconds. `POST .../groups/<g>` with `{"seq": n}` commits, so delivery is at least once: until a group commits, it gets the same messages again. Offsets never move back. `?after=<seq>` reads from a position without a group. `GET .../topics/<name>` shows each group's offset and lag.
 - **Retention.** Messages older than `retention_seconds`, or beyond `max_messages`, are removed from the oldest, every `CAIRN_STORE_QUEUE_RETENTION_INTERVAL` seconds (60). A group behind the oldest kept message continues from there.
 - **Access.** Other keys publish and consume on topics their bucket patterns allow (`lake-*` covers a `lake-feed` topic); read-only keys consume and commit only. Topics live in the store's metadata, so they work on PostgreSQL metadata and in clusters, and are part of backups. Metrics: `cairn_store_queue_published_total`, `_delivered_total`, `_trimmed_total`.
-- **When to use Kafka instead.** For high throughput, partitioned topics, or many consumers, use Cairn's Kafka (which Cairn Store's event notifications can feed); these queues favour simplicity and transactional durability.
+- **Partitions.** A topic has `partitions` (1 by default, up to 64; `PUT` with a higher number adds some, and they are never removed). Order, sequence numbers and group offsets are per partition. A message goes to:
+  - `?partition=p`, when given;
+  - otherwise, the partition its key hashes to (Kafka's murmur2, so the HTTP API and Kafka producers agree). A batch's keys must all hash to one partition;
+  - otherwise, the next partition in turn.
+
+  Reads and commits name a `partition` (default 0), and `GET .../topics/<name>` shows every partition's bounds and group lags.
+- **The Kafka protocol.** With `CAIRN_STORE_KAFKA_ADDR` (e.g. `:9092`), Kafka clients use these topics: producers, consumers, consumer groups and the admin client. In Helm, set `cairn.store.kafka.enabled`.
+  - Kafka offsets are sequence numbers minus one. A group's committed offsets are the queue group's offsets, so the HTTP API and Kafka consumers see the same progress.
+  - **Sign-in.** SASL/PLAIN, with an access key as the user name and its secret as the password. Keys reach topics as above, and a wrong secret is refused. Nothing but the version and SASL requests is answered before sign-in.
+  - **TLS.** The listener uses TLS (SASL_SSL) with the store's certificate. Without one, it starts only with `CAIRN_STORE_KAFKA_ALLOW_PLAINTEXT=true`, since PLAIN sends the secret as it is.
+  - **Advertised address.** `CAIRN_STORE_KAFKA_ADVERTISED` is the `host:port` clients reach. It defaults to the listen address, which must then name a host. Helm defaults it to the release's kafka Service.
+  - **Requests.** ApiVersions, SASL, Metadata, Produce (record batches, uncompressed), Fetch (long polling), ListOffsets (earliest, latest, by time), CreateTopics (admin keys; replication factor 1, since the store keeps its own copies), FindCoordinator, OffsetCommit/Fetch, and JoinGroup, SyncGroup, Heartbeat and LeaveGroup. Partitions are assigned by the clients' own assignors.
+  - **Not offered.** Compressed batches (refused with `UNSUPPORTED_COMPRESSION_TYPE`, so set `compression.type=none`), transactions and idempotent producers (set `enable.idempotence=false` on Java clients).
+  - **Clusters.** The node a group's members connect to keeps the group's membership, so point all members of a group at one node or address.
+- **When to use a Kafka cluster instead.** For very high throughput, compression, transactions or exactly-once processing, use Cairn's Kafka, which the store's event notifications can feed. These queues favour simplicity and transactional durability.
 
 **Durability.** A write is acknowledged only once its bytes and its index entry are on disk. It is readable immediately afterwards. Conditional writes are atomic. After a crash the store keeps every acknowledged write and drops any half-finished ones when it starts. `cairn-store fsck -data /data` checks a stopped store and reports objects whose data is missing.
 

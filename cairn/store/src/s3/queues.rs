@@ -13,6 +13,11 @@
 //! POST   /-/queues/v1/topics/{topic}/groups/{group}  {"seq": n}  commit: the group has processed up to n
 //! ```
 //!
+//! A topic has `partitions` (1 by default; they can be added, never removed). Sequence numbers, offsets
+//! and order are per partition. A message goes to `?partition=p`, else to the partition its key hashes to
+//! (Kafka's murmur2, as Kafka producers pick), else round robin; reads and commits name a `partition`
+//! (default 0). The Kafka protocol (`kafka.rs`) serves the same topics.
+//!
 //! Messages are written in one index transaction each batch, so an acknowledged publish survives a
 //! crash, and get gapless increasing sequence numbers per topic. Consumers read at least once: a group's
 //! offset moves only when it commits. `wait` long-polls for new messages (up to 20 s). Retention removes
@@ -37,7 +42,8 @@ use super::errors::{self as e, ApiError};
 use super::{full, set_header, Resp, Server};
 use crate::engine;
 
-const MAX_MESSAGE: usize = 1 << 20;
+pub const MAX_MESSAGE: usize = 1 << 20;
+pub const MAX_PARTITIONS: u32 = 64;
 const MAX_BATCH: usize = 1000;
 
 /// Messages read: (sequence number, stored message).
@@ -53,16 +59,87 @@ pub struct TopicConfig {
     pub max_messages: u64,
     #[serde(default)]
     pub created: u64,
+    /// Partitions (0 is read as 1).
+    #[serde(default)]
+    pub partitions: u32,
+}
+
+impl TopicConfig {
+    pub fn parts(&self) -> u32 {
+        self.partitions.max(1)
+    }
 }
 
 /// A stored message: a JSON header line, then the value's bytes.
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct Header {
     t: u64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     k: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     ct: String,
+    /// The key is base64 (a Kafka key that is not UTF-8).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    kb: bool,
+    /// Kafka record headers (values in base64).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    h: Vec<(String, String)>,
+}
+
+/// A stored message for a Kafka record.
+pub(crate) fn encode_record(t: u64, key: Option<&[u8]>, headers: &[(String, Vec<u8>)], value: &[u8]) -> Vec<u8> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let (k, kb) = match key.map(std::str::from_utf8) {
+        None => (String::new(), false),
+        Some(Ok(s)) => (s.to_string(), false),
+        Some(Err(_)) => (b64.encode(key.unwrap_or_default()), true),
+    };
+    let h = headers.iter().map(|(n, v)| (n.clone(), b64.encode(v))).collect();
+    encode(&Header { t, k, ct: String::new(), kb, h }, value)
+}
+
+/// A stored message as a Kafka record.
+pub(crate) fn decode_record(raw: &[u8]) -> Option<super::kafka::Record> {
+    let (h, v) = decode(raw)?;
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let key = match (h.k.is_empty(), h.kb) {
+        (true, _) => None,
+        (false, true) => Some(b64.decode(&h.k).ok()?),
+        (false, false) => Some(h.k.into_bytes()),
+    };
+    let headers = h.h.into_iter().filter_map(|(n, v)| Some((n, b64.decode(v).ok()?))).collect();
+    Some(super::kafka::Record { key, value: v.to_vec(), headers, time: h.t as i64 })
+}
+
+/// Kafka's default partitioner: murmur2 of the key, made positive, modulo the partitions.
+pub(crate) fn key_partition(key: &[u8], parts: u32) -> u32 {
+    let (seed, m, r): (u32, u32, u32) = (0x9747_b28c, 0x5bd1_e995, 24);
+    let len = key.len();
+    let mut h: u32 = seed ^ (len as u32);
+    let mut chunks = key.chunks_exact(4);
+    for c in &mut chunks {
+        let mut k = u32::from_le_bytes(c.try_into().unwrap());
+        k = k.wrapping_mul(m);
+        k ^= k >> r;
+        k = k.wrapping_mul(m);
+        h = h.wrapping_mul(m);
+        h ^= k;
+    }
+    let rest = chunks.remainder();
+    if rest.len() >= 3 {
+        h ^= (rest[2] as u32) << 16;
+    }
+    if rest.len() >= 2 {
+        h ^= (rest[1] as u32) << 8;
+    }
+    if !rest.is_empty() {
+        h ^= rest[0] as u32;
+        h = h.wrapping_mul(m);
+    }
+    h ^= h >> 13;
+    h = h.wrapping_mul(m);
+    h ^= h >> 15;
+    (h & 0x7fff_ffff) % parts.max(1)
 }
 
 fn encode(h: &Header, value: &[u8]) -> Vec<u8> {
@@ -79,6 +156,43 @@ fn decode(raw: &[u8]) -> Option<(Header, &[u8])> {
 
 pub fn valid_topic(name: &str) -> bool {
     !name.is_empty() && name.len() <= 128 && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "._-".contains(c))
+}
+
+use super::kafka::part_name;
+
+impl Server {
+    /// Creates a topic or changes its settings, partitions included (added, never removed), in one
+    /// transaction per partition topic, audited once.
+    pub(crate) fn queue_create(&self, cred: &auth::Credential, t: &str, mut cfg: TopicConfig) -> Result<Value, ApiError> {
+        if cfg.parts() > MAX_PARTITIONS {
+            return Err(e::INVALID_ARGUMENT.clone());
+        }
+        let existing: Option<TopicConfig> = self.eng.queue_topic(t)?.and_then(|d| serde_json::from_slice(&d).ok());
+        if let Some(old) = &existing {
+            if cfg.partitions == 0 {
+                cfg.partitions = old.parts(); // not given: unchanged
+            }
+            if cfg.parts() < old.parts() {
+                return Err(e::PARTITIONS_REMOVED.clone());
+            }
+        }
+        cfg.created = existing.as_ref().map(|c| c.created).unwrap_or_else(engine::now_ms);
+        cfg.partitions = cfg.parts();
+        let doc = serde_json::to_vec(&cfg).unwrap();
+        // Partitions after the first are their own queue topics, created before the topic shows them.
+        for p in 1..cfg.parts() {
+            self.eng.queue_put_topic(&part_name(t, p as i32), Some(&doc), None)?;
+        }
+        let audit = crate::audit::Audit {
+            category: "store",
+            action: if existing.is_some() { "queue.update" } else { "queue.create" }.into(),
+            actor: cred.access_key.clone(),
+            subject: t.to_string(),
+            details: json!({"retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages, "partitions": cfg.partitions}),
+        };
+        self.eng.queue_put_topic(t, Some(&doc), Some(&audit))?;
+        Ok(json!({"name": t, "retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages, "partitions": cfg.partitions}))
+    }
 }
 
 #[derive(Default)]
@@ -167,12 +281,17 @@ impl Server {
                 let v = blocking(&mut || {
                     let mut out = vec![];
                     for (name, cfg) in self.eng.queue_topics()? {
-                        if !(cred.admin || cred.allows(&name)) {
+                        if name.contains('#') || !(cred.admin || cred.allows(&name)) {
                             continue;
                         }
-                        let (first, next) = self.eng.queue_bounds(&name)?;
                         let cfg: TopicConfig = serde_json::from_slice(&cfg).unwrap_or_default();
-                        out.push(json!({"name": name, "messages": next - first, "first": first, "next": next,
+                        let (first, next) = self.eng.queue_bounds(&name)?;
+                        let mut messages = next - first;
+                        for p in 1..cfg.parts() {
+                            let (f, n) = self.eng.queue_bounds(&part_name(&name, p as i32))?;
+                            messages += n - f;
+                        }
+                        out.push(json!({"name": name, "messages": messages, "first": first, "next": next, "partitions": cfg.parts(),
                                         "retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages}));
                     }
                     Ok(json!({"topics": out}))
@@ -184,28 +303,24 @@ impl Server {
                     return Err(e::ACCESS_DENIED.clone());
                 }
                 may(t, true)?;
-                let mut cfg: TopicConfig = if body.is_empty() {
-                    TopicConfig::default()
-                } else {
-                    serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct In {
+                    #[serde(default)]
+                    retention_seconds: u64,
+                    #[serde(default)]
+                    max_messages: u64,
+                    #[serde(default)]
+                    partitions: u32,
+                }
+                let i: In = serde_json::from_slice(if body.is_empty() { b"{}" } else { &body }).map_err(|_| e::MALFORMED_JSON.clone())?;
+                let cfg = TopicConfig {
+                    retention_seconds: i.retention_seconds,
+                    max_messages: i.max_messages,
+                    partitions: i.partitions,
+                    created: 0,
                 };
-                let v = blocking(&mut || {
-                    let existing = self.eng.queue_topic(t)?;
-                    cfg.created = existing
-                        .as_ref()
-                        .and_then(|d| serde_json::from_slice::<TopicConfig>(d).ok())
-                        .map(|c| c.created)
-                        .unwrap_or_else(engine::now_ms);
-                    let audit = crate::audit::Audit {
-                        category: "store",
-                        action: if existing.is_some() { "queue.update" } else { "queue.create" }.into(),
-                        actor: cred.access_key.clone(),
-                        subject: t.to_string(),
-                        details: json!({"retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages}),
-                    };
-                    self.eng.queue_put_topic(t, Some(&serde_json::to_vec(&cfg).unwrap()), Some(&audit))?;
-                    Ok(json!({"name": t, "retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages}))
-                })?;
+                let v = blocking(&mut || self.queue_create(cred, t, TopicConfig { ..cfg.clone() }))?;
                 Ok(json_resp(StatusCode::OK, v))
             }
             (&Method::GET, ["topics", t]) => {
@@ -220,8 +335,22 @@ impl Server {
                         .into_iter()
                         .map(|(g, off)| (g, json!({"offset": off, "lag": next.saturating_sub(off + 1).min(next - first)})))
                         .collect();
-                    Ok(json!({"name": t, "first": first, "next": next, "messages": next - first, "groups": groups,
-                              "retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages}))
+                    let mut parts = vec![];
+                    let mut messages = 0;
+                    for p in 0..cfg.parts() {
+                        let name = part_name(t, p as i32);
+                        let (f, n) = self.eng.queue_bounds(&name)?;
+                        messages += n - f;
+                        let lags: BTreeMap<String, Value> = self
+                            .eng
+                            .queue_groups(&name)?
+                            .into_iter()
+                            .map(|(g, off)| (g, json!({"offset": off, "lag": n.saturating_sub(off + 1).min(n - f)})))
+                            .collect();
+                        parts.push(json!({"partition": p, "first": f, "next": n, "messages": n - f, "groups": lags}));
+                    }
+                    Ok(json!({"name": t, "first": first, "next": next, "messages": messages, "groups": groups, "partitions": cfg.parts(),
+                              "partition_detail": parts, "retention_seconds": cfg.retention_seconds, "max_messages": cfg.max_messages}))
                 })?;
                 Ok(json_resp(StatusCode::OK, v))
             }
@@ -231,7 +360,11 @@ impl Server {
                 }
                 may(t, true)?;
                 blocking(&mut || {
-                    self.eng.queue_topic(t)?.ok_or_else(|| e::NO_SUCH_TOPIC.clone())?;
+                    let cfg: TopicConfig =
+                        serde_json::from_slice(&self.eng.queue_topic(t)?.ok_or_else(|| e::NO_SUCH_TOPIC.clone())?).unwrap_or_default();
+                    for p in 1..cfg.parts() {
+                        self.eng.queue_put_topic(&part_name(t, p as i32), None, None)?;
+                    }
                     let audit = crate::audit::Audit {
                         category: "store",
                         action: "queue.delete".into(),
@@ -247,6 +380,7 @@ impl Server {
             (&Method::POST, ["topics", t, "messages"]) => {
                 may(t, true)?;
                 let now = engine::now_ms();
+                let mut keys: Vec<String> = vec![];
                 let msgs: Vec<Vec<u8>> = if q.contains_key("batch") {
                     #[derive(Deserialize)]
                     struct In {
@@ -279,7 +413,8 @@ impl Server {
                         if v.len() > MAX_MESSAGE || m.key.len() > 1024 {
                             return Err(e::ENTITY_TOO_LARGE.clone());
                         }
-                        out.push(encode(&Header { t: now, k: m.key, ct: m.content_type }, &v));
+                        keys.push(m.key.clone());
+                        out.push(encode(&Header { t: now, k: m.key, ct: m.content_type, ..Default::default() }, &v));
                     }
                     out
                 } else {
@@ -287,16 +422,40 @@ impl Server {
                         return Err(e::ENTITY_TOO_LARGE.clone());
                     }
                     let h = |k: &str| parts.headers.get(k).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
-                    vec![encode(&Header { t: now, k: h("x-cairn-key"), ct: h("content-type") }, &body)]
+                    keys.push(h("x-cairn-key"));
+                    vec![encode(&Header { t: now, k: h("x-cairn-key"), ct: h("content-type"), ..Default::default() }, &body)]
                 };
                 let n = msgs.len() as u64;
-                let (first, last) = tokio::task::block_in_place(|| self.eng.queue_publish(t, &msgs)).map_err(|err| match err {
-                    engine::Error::NoSuchKey => e::NO_SUCH_TOPIC.clone(),
-                    other => other.into(),
-                })?;
+                let parts = tokio::task::block_in_place(|| self.eng.queue_topic(t))?
+                    .and_then(|d| serde_json::from_slice::<TopicConfig>(&d).ok())
+                    .ok_or_else(|| e::NO_SUCH_TOPIC.clone())?
+                    .parts();
+                // One partition for the request: the one asked for, the first key's, or the next in turn.
+                let partition = match q.get("partition") {
+                    Some(p) => p.parse::<u32>().ok().filter(|p| *p < parts).ok_or_else(|| e::INVALID_ARGUMENT.clone())?,
+                    None => match keys.first().filter(|k| !k.is_empty()) {
+                        Some(k) if parts > 1 => {
+                            let p = key_partition(k.as_bytes(), parts);
+                            if keys.iter().any(|o| key_partition(o.as_bytes(), parts) != p) {
+                                return Err(e::MIXED_PARTITIONS.clone()); // a batch goes to one partition
+                            }
+                            p
+                        }
+                        _ => (self.queue_metrics.published.load(Ordering::Relaxed) % parts as u64) as u32,
+                    },
+                };
+                let (first, last) = tokio::task::block_in_place(|| self.eng.queue_publish(&part_name(t, partition as i32), &msgs))
+                    .map_err(|err| match err {
+                        engine::Error::NoSuchKey => e::NO_SUCH_TOPIC.clone(),
+                        other => other.into(),
+                    })?;
                 self.queue_metrics.published.fetch_add(n, Ordering::Relaxed);
                 self.queue_notify.notify_waiters();
-                let v = if q.contains_key("batch") { json!({"first": first, "last": last}) } else { json!({"seq": first}) };
+                let v = if q.contains_key("batch") {
+                    json!({"first": first, "last": last, "partition": partition})
+                } else {
+                    json!({"seq": first, "partition": partition})
+                };
                 Ok(json_resp(StatusCode::CREATED, v))
             }
             (&Method::GET, ["topics", t, "messages"]) => {
@@ -312,11 +471,21 @@ impl Server {
                     None if !group.is_empty() => None,
                     None => return Err(e::INVALID_ARGUMENT.clone()), // a group or a position
                 };
+                let partition: u32 =
+                    q.get("partition").map(|p| p.parse().map_err(|_| e::INVALID_ARGUMENT.clone())).transpose()?.unwrap_or(0);
+                let base = *t;
+                let pname = part_name(base, partition as i32);
+                let t = &pname.as_str();
                 let deadline = tokio::time::Instant::now() + wait;
                 loop {
                     let notified = self.queue_notify.notified();
                     let got = tokio::task::block_in_place(|| -> Result<(u64, Batch), ApiError> {
-                        self.eng.queue_topic(t)?.ok_or_else(|| e::NO_SUCH_TOPIC.clone())?;
+                        let cfg: TopicConfig =
+                            serde_json::from_slice(&self.eng.queue_topic(base)?.ok_or_else(|| e::NO_SUCH_TOPIC.clone())?)
+                                .unwrap_or_default();
+                        if partition >= cfg.parts() {
+                            return Err(e::INVALID_ARGUMENT.clone());
+                        }
                         let from = match after {
                             Some(a) => a,
                             None => self.eng.queue_groups(t)?.into_iter().find(|(g, _)| *g == group).map(|(_, o)| o).unwrap_or(0),
@@ -345,7 +514,10 @@ impl Server {
                             })
                             .collect();
                         self.queue_metrics.delivered.fetch_add(out.len() as u64, Ordering::Relaxed);
-                        return Ok(json_resp(StatusCode::OK, json!({"topic": t, "messages": out, "next_after": next})));
+                        return Ok(json_resp(
+                            StatusCode::OK,
+                            json!({"topic": base, "partition": partition, "messages": out, "next_after": next}),
+                        ));
                     }
                     // Woken by a publish on this node, or polling for other nodes' publishes.
                     let _ = tokio::time::timeout(
@@ -362,12 +534,17 @@ impl Server {
                 }
                 let v: Value = serde_json::from_slice(&body).map_err(|_| e::MALFORMED_JSON.clone())?;
                 let seq = v.get("seq").and_then(Value::as_u64).ok_or_else(|| e::MALFORMED_JSON.clone())?;
-                let off = tokio::task::block_in_place(|| self.eng.queue_commit(t, g, seq)).map_err(|err| match err {
+                let partition = match v.get("partition") {
+                    None => 0,
+                    Some(p) => p.as_u64().filter(|p| *p < MAX_PARTITIONS as u64).ok_or_else(|| e::MALFORMED_JSON.clone())? as i32,
+                };
+                let pname = part_name(t, partition);
+                let off = tokio::task::block_in_place(|| self.eng.queue_commit(&pname, g, seq)).map_err(|err| match err {
                     engine::Error::NoSuchKey => e::NO_SUCH_TOPIC.clone(),
                     engine::Error::InvalidPart => e::INVALID_ARGUMENT.clone(),
                     other => other.into(),
                 })?;
-                Ok(json_resp(StatusCode::OK, json!({"topic": t, "group": g, "offset": off})))
+                Ok(json_resp(StatusCode::OK, json!({"topic": t, "group": g, "partition": partition, "offset": off})))
             }
             _ => Err(e::ADMIN_NOT_FOUND.clone()),
         }
@@ -414,9 +591,20 @@ mod tests {
 
     #[test]
     fn message_framing() {
-        let raw = encode(&Header { t: 5, k: "order-1".into(), ct: "application/json".into() }, b"{\"a\":\n1}");
+        let raw = encode(&Header { t: 5, k: "order-1".into(), ct: "application/json".into(), ..Default::default() }, b"{\"a\":\n1}");
         let (h, v) = decode(&raw).unwrap();
         assert_eq!((h.t, h.k.as_str(), v), (5, "order-1", &b"{\"a\":\n1}"[..]));
         assert!(valid_topic("orders.v1") && !valid_topic("Orders") && !valid_topic(""));
+        let r = decode_record(&encode_record(9, Some(&[0xff, 0x00]), &[("h".into(), vec![1, 2])], b"v")).unwrap();
+        assert_eq!((r.key.as_deref(), r.headers[0].1.as_slice(), r.value.as_slice()), (Some(&[0xff, 0x00][..]), &[1u8, 2][..], &b"v"[..]));
+    }
+
+    #[test]
+    fn murmur2_matches_kafka() {
+        // Kafka's partitioner (toPositive(murmur2(key)) % n); murmur2("21") is -973932308 in Kafka's tests.
+        assert_eq!(key_partition(b"21", 1000), 340);
+        assert_eq!(key_partition(b"foobar", 1000), 166);
+        assert_eq!(key_partition(b"a-little-bit-long-string", 1000), 112);
+        assert_eq!(key_partition(b"abc", 1000), 107);
     }
 }

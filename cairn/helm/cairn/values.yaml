@@ -572,6 +572,17 @@ cairn:
       hostKeySecret: ""
       # Network policy peers allowed to connect (besides this release's pods), e.g. an ipBlock.
       ingressFrom: []
+    # The Kafka protocol on the store's message queues: Kafka producers, consumers and consumer groups
+    # sign in with SASL/PLAIN (an access key and its secret). Needs TLS (tlsSecret) unless allowPlaintext.
+    kafka:
+      enabled: false
+      port: 9092
+      # host:port clients connect to; empty: this release's kafka Service (in-cluster clients).
+      advertised: ""
+      allowPlaintext: false
+      serviceType: ClusterIP
+      # Network policy peers allowed to connect (besides this release's pods).
+      ingressFrom: []
     # CSI driver (csi.cairn.store): PersistentVolumeClaims become buckets (with their size as a quota),
     # or prefixes of one shared bucket, mounted into pods with FUSE. Runs privileged on every node.
     csi:
