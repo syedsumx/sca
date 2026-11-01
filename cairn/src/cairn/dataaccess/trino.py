@@ -299,6 +299,9 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None) 
             return lineage.handle_many([name_jobs_by_outputs(e) for e in events], LINEAGE_ACTOR)
         except OpenLineageError as e:
             raise HTTPException(422, str(e))
+        except Exception as e:  # the metadata store is down or refused the write
+            logger.warning("trino lineage could not be recorded: %s", e)
+            raise HTTPException(503, "lineage could not be recorded: the metadata store is unavailable")
 
     @router.post("/{given}/column-mask")
     async def column_mask(given: str, request: Request):

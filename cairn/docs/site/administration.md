@@ -832,6 +832,7 @@ A multi-table transaction changes every table or none.
   - **Authentication.** With a password in the URL (`trino://cairn:<password>@host:443/lakehouse`), the connection uses HTTPS and `cairn` impersonates the caller. Trino asks Cairn before allowing an impersonation, so grant that user `MANAGE_SYSTEM_OPERATIONS`.
   - **Requirements.** It needs the `trino` extra (`cairn-platform[trino]`, part of `all`).
   - **Row cap.** The editor's row cap now goes onto the query's own `LIMIT` (a smaller limit the query already has is kept), so `ORDER BY` holds on engines that drop the order of a subquery, as Trino does.
+- **When Cairn Core is down.** Lineage from Trino is answered with 503 and logged, and the query itself is unaffected. Trino does not resend the event, so that query's lineage is lost.
 - **Table locations.** Namespaces report a `location` (their place under the warehouse, unless they set one), and new tables go under it with a unique suffix. Trino builds its table locations from it.
 
 ## Backup and restore

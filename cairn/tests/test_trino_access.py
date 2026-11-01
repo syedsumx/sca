@@ -135,3 +135,14 @@ def test_lineage_jobs_are_named_by_what_they_write(client):
     assert r.status_code == 200 and r.json()["results"][0]["job"].endswith("trino:lake.sales.daily)")
     assert client.post("/v1/trino/wrong-key/lineage", json=ev).status_code == 404
     assert client.post(f"/v1/trino/{KEY}/lineage", json={"job": {}}).status_code == 422
+
+
+def test_lineage_reports_an_unavailable_metadata_store(client, graph, monkeypatch):
+    def down(_mcps):
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(graph, "emit", down)
+    ev = {"eventType": "COMPLETE", "job": {"namespace": "trino://t:8080", "name": "q"}, "run": {"runId": "r"},
+          "outputs": [{"namespace": "trino://t:8080", "name": "lake.s.t"}]}
+    r = client.post(f"/v1/trino/{KEY}/lineage", json=ev)
+    assert r.status_code == 503 and "metadata store" in r.json()["detail"]
