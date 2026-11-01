@@ -14,6 +14,7 @@ import { ContractPanel } from '../components/Contract';
 import { UsedByAi } from '../components/AiUsage';
 import { SendDocsToDbt } from '../components/GitDocs';
 import { KnowledgeDocs } from '../components/Knowledge';
+import { LineageGraphView } from '../components/LineageGraph';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TrustBadges } from '../components/TrustBadges';
@@ -352,7 +353,8 @@ export function AssetPage() {
                         label: t('asset.lineage'),
                         children: (
                             <Surface style={{ padding: 18 }}>
-                                <p>
+                                <LineageGraphView urn={urn} />
+                                <p style={{ marginTop: 18 }}>
                                     Something looks off? Get a plain-English explanation of upstream failures, schema changes and
                                     pipeline runs.
                                 </p>

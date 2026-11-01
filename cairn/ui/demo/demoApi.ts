@@ -484,6 +484,36 @@ function chat(message: string, conversation_id?: string) {
     };
 }
 
+/** The asset page's lineage graph, as GET /embed/v1/graph answers it: each asset within `depth` hops,
+ *  joined along its path, and the ones the viewer may not see counted. */
+const HIDDEN_LINEAGE: Record<string, number> = { [REV_DAILY]: 1 };  // a payroll cost table the demo user cannot see
+function lineageGraph(urn: string, depth: number) {
+    const downstreams = (u: string) => Object.entries(LINEAGE).filter(([, ups]) => ups.includes(u)).map(([d]) => d);
+    const node = (u: string) => {
+        const a = byUrn.get(u);
+        return { urn: u, name: a?.name ?? nameOf(u), type: a?.type ?? null, platform: a?.platform ?? null, quality_status: a?.quality ?? null };
+    };
+    const nodes = new Map([[urn, node(urn)]]);
+    const edges: { source: string; target: string; indirect: boolean }[] = [];
+    for (const [step, up] of [[(u: string) => LINEAGE[u] ?? [], true], [downstreams, false]] as const) {
+        let frontier = [urn];
+        for (let d = 1; d <= depth; d++) {
+            const next: string[] = [];
+            for (const from of frontier) {
+                for (const u of step(from)) {
+                    edges.push(up ? { source: u, target: from, indirect: false } : { source: from, target: u, indirect: false });
+                    if (!nodes.has(u)) {
+                        nodes.set(u, node(u));
+                        next.push(u);
+                    }
+                }
+            }
+            frontier = next;
+        }
+    }
+    return { nodes: [...nodes.values()], edges, hidden_count: HIDDEN_LINEAGE[urn] ?? 0 };
+}
+
 function explain(urn: string) {
     const ups = LINEAGE[urn] ?? [];
     const failing = urn === REV_DAILY || ups.includes(REV_DAILY) || urn === DASH_REV || urn === CHART_REV;
@@ -838,6 +868,7 @@ on('GET', '/context/ontology', () => {
 
 on('POST', '/ai/chat', (b) => chat(b.message, b.conversation_id));
 on('POST', '/ai/explain/lineage', (b) => explain(b.urn));
+on('GET', '/embed/v1/graph', (_b, q) => lineageGraph(q.get('urn') ?? '', Math.min(3, Math.max(1, Number(q.get('depth') ?? 2)))));
 on('POST', '/ai/docs/markdown', (b) => markdownDoc(b.urn));
 const EXTERNAL: Record<string, Json[]> = {
     [FCT_ORDERS]: [

@@ -1,5 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { CompiledPolicy, StoreCluster, StoreClusterNode } from './types';
+import type { CompiledPolicy, LineageGraph, StoreCluster, StoreClusterNode } from './types';
 import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
 import type {
     AIAssessment,
@@ -284,6 +284,11 @@ export class ConsumerClient extends CairnClient {
     aiAgentDatasets(id: string, all: boolean, opts?: RequestOptions) {
         const path = all ? `/admin/agents/${enc(id)}/datasets` : `/me/agents/${enc(id)}/datasets`;
         return this.request<AIDatasetRead[]>('GET', path, undefined, opts);
+    }
+
+    /** The lineage graph around an asset, without the assets the caller may not see (counted instead). */
+    lineageGraph(urn: string, depth = 2, opts?: RequestOptions) {
+        return this.request<LineageGraph>('GET', '/embed/v1/graph', undefined, { ...opts, query: { urn, depth: String(depth) } });
     }
 
     /** Which AI used a dataset lately (agents with their AI system, and MCP or assistant use). */

@@ -1309,3 +1309,19 @@ export interface StoreAuditVerify {
     head?: string | null;
     reason?: string;
 }
+
+/** GET /embed/v1/graph: the lineage around an asset for the signed-in user. */
+export interface LineageGraphNode {
+    urn: string;
+    name: string | null;
+    type: string | null;
+    platform: string | null;
+    quality_status: string | null;
+}
+
+export interface LineageGraph {
+    nodes: LineageGraphNode[];
+    /** source feeds target; indirect: more than one hop away (search across lineage gives degrees, not paths) */
+    edges: { source: string; target: string; indirect?: boolean }[];
+    hidden_count: number;
+}

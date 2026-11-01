@@ -68,6 +68,14 @@ def build_router(svc: EmbedService, current_principal, can_view) -> APIRouter:
         claims = _claims(request, token, urn, "lineage")
         return _json(request, _wrap(lambda: svc.lineage(claims, urn, depth)))
 
+    @router.get("/graph")
+    def graph(urn: str, depth: int = Query(2, ge=1, le=3), p: Principal = Depends(current_principal)):
+        """The lineage graph around an asset, for the signed-in user (the asset page's Lineage tab): the
+        same graph as the lineage embed, with the assets they may not see left out and counted."""
+        if not can_view(p)(urn):
+            raise HTTPException(403, "you cannot view this asset")
+        return _wrap(lambda: svc.lineage({"sub": p.urn}, urn, depth))
+
     @router.get("/lookup")
     def lookup(url: str, p: Principal = Depends(current_principal)):
         urn = svc.lookup(url)

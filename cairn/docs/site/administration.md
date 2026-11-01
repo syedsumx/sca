@@ -843,6 +843,11 @@ A multi-table transaction changes every table or none.
   - The job records the tables the query read and wrote, column-level lineage (which source columns feed which output columns), and the SQL.
   - Datasets carry the same URNs as access control, so lineage, policies and masking refer to the same datasets.
   - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
+- **Lineage on the asset page.** The Lineage tab draws the lineage around an asset: sources on the left, what uses it on the right, one to three hops (Trino's lineage included). Each asset shows its quality status and opens on selection.
+  - **Paths.** Edges follow Cairn Core's lineage paths, so a two-hop source joins the asset between rather than the asset itself.
+  - **Hidden assets.** Assets the viewer may not see are left out and counted. A path through one is joined around it with a dashed line, so the hidden asset is never named.
+  - **The API.** `GET /embed/v1/graph?urn=…&depth=1..3` serves the same graph for the signed-in user (the lineage embed serves it for embed tokens).
+  - **Tested** against a real Cairn Core: a Trino table's graph ran from the source table through the Trino job to the table.
 - **Who reads what (usage).** Trino's HTTP event listener (`deploy/trino/usage-listener.properties`, on in Compose and Helm next to the lineage listener) sends every finished query to Cairn: who ran it, and the tables and columns it read. OpenLineage events do not name the user, so lineage alone cannot say who read a table.
   - **What Cairn records.** Each dataset's usage statistics (`datasetUsageStatistics`, one bucket per day): the number of queries, the distinct users, each user's count and how often each column was read. The usage tab, popularity and the AI steward's evidence read them.
   - **What counts as a read.** Only finished queries count. A failed or refused query, `EXPLAIN` and `DESCRIBE` do not, and neither do reads of Trino's own metadata (`system`, `information_schema`). Each query counts once, even when Trino resends it. Reads by `INSERT ... SELECT` count for the tables read; the write is lineage.

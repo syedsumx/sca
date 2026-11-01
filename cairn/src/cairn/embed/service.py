@@ -199,7 +199,9 @@ class EmbedService:
         depth = max(1, min(depth, 3))
         nodes = {urn: {"urn": urn, "name": (self.catalog.summaries([urn]).get(urn) or {}).get("name", urn)
                        if self.catalog else urn, "type": None, "platform": None, "quality_status": self._status(urn)}}
-        edges, hidden = [], 0
+        edges: dict[tuple[str, str], bool] = {}
+        hidden = 0
+        found: list[tuple[str, dict]] = []
         for direction in ("UPSTREAM", "DOWNSTREAM"):
             for item in (self.catalog.lineage(urn, direction, depth, 50) if self.catalog else []):
                 if not check(item["urn"]):
@@ -208,12 +210,31 @@ class EmbedService:
                 nodes.setdefault(item["urn"], {"urn": item["urn"], "name": item.get("name"), "type": item.get("type"),
                                                "platform": item.get("platform"),
                                                "quality_status": self._status(item["urn"])})
-                # Search-across-lineage returns degrees, not paths: connect degree-1 nodes to the root and
-                # deeper nodes to the root with a dashed "indirect" hint the UI can render.
-                deg = int(item.get("degree") or 1)
+                found.append((direction, item))
+
+        def edge(a: str, b: str, indirect: bool) -> None:
+            edges[(a, b)] = edges.get((a, b), True) and indirect  # a direct edge wins over an indirect one
+
+        for direction, item in found:
+            paths = [p for p in item.get("paths") or [] if len(p) >= 2 and p[0] == urn and p[-1] == item["urn"]]
+            if not paths:
+                # No path: connect it to the asset, dashed when it is further than one hop.
                 a, b = (item["urn"], urn) if direction == "UPSTREAM" else (urn, item["urn"])
-                edges.append({"source": a, "target": b, "indirect": deg > 1})
-        return {"nodes": list(nodes.values()), "edges": edges, "hidden_count": hidden}
+                edge(a, b, int(item.get("degree") or 1) > 1)
+                continue
+            for path in paths:
+                # Along the path, from one asset the user may see to the next; what they may not see (or what
+                # the search did not return) is stepped over and the edge drawn dashed, never named.
+                prev, skipped = path[0], False
+                for step in path[1:]:
+                    if step not in nodes:
+                        skipped = True
+                        continue
+                    a, b = (step, prev) if direction == "UPSTREAM" else (prev, step)
+                    edge(a, b, skipped)
+                    prev, skipped = step, False
+        return {"nodes": list(nodes.values()), "hidden_count": hidden,
+                "edges": [{"source": a, "target": b, "indirect": ind} for (a, b), ind in edges.items()]}
 
     def lookup(self, url: str) -> Optional[str]:
         if self.catalog is None:

@@ -39,7 +39,7 @@ LINEAGE_QUERY = f"""
 query cairnLineage($input: SearchAcrossLineageInput!) {{
   searchAcrossLineage(input: $input) {{
     total
-    searchResults {{ degree entity {{ {_SUMMARY_FRAGMENT} }} }}
+    searchResults {{ degree entity {{ {_SUMMARY_FRAGMENT} }} paths {{ path {{ urn }} }} }}
   }}
 }}
 """
@@ -136,6 +136,8 @@ class Catalog:
         for r in ((data.get("searchAcrossLineage") or {}).get("searchResults")) or []:
             item = summarize(r["entity"])
             item["degree"] = r.get("degree")
+            # Each path runs from the asset asked about to this one, through what lies between.
+            item["paths"] = [[e["urn"] for e in (p.get("path") or []) if e and e.get("urn")] for p in r.get("paths") or []]
             out.append(item)
         return out
 
