@@ -76,10 +76,12 @@ impl Writer {
     }
 }
 
-/// A parsed element: name (without namespace prefix), text, children.
+/// A parsed element: name (without namespace prefix), its namespace URI, text, children.
 #[derive(Debug, Default)]
 pub struct Element {
     pub name: String,
+    /// The namespace URI the element's prefix (or the default namespace) stands for; empty if none.
+    pub ns: String,
     pub text: String,
     pub children: Vec<Element>,
 }
@@ -126,6 +128,33 @@ fn unescape(s: &str) -> Option<String> {
     Some(out)
 }
 
+/// `xmlns` and `xmlns:p` declarations of a start tag (prefix "" for the default namespace).
+fn declarations(tag: &str) -> Vec<(String, String)> {
+    let mut out = vec![];
+    let mut rest = tag;
+    while let Some(i) = rest.find("xmlns") {
+        let after = &rest[i + 5..];
+        let (prefix, after) = match after.strip_prefix(':') {
+            Some(a) => {
+                let end = a.find(|c: char| c == '=' || c.is_whitespace()).unwrap_or(a.len());
+                (a[..end].to_string(), &a[end..])
+            }
+            None => (String::new(), after),
+        };
+        let after = after.trim_start();
+        let Some(after) = after.strip_prefix('=') else {
+            rest = after;
+            continue;
+        };
+        let after = after.trim_start();
+        let Some(q) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else { break };
+        let Some(end) = after[1..].find(q) else { break };
+        out.push((prefix, unescape(&after[1..1 + end]).unwrap_or_default()));
+        rest = &after[1 + end..];
+    }
+    out
+}
+
 fn local(name: &str) -> String {
     name.rsplit(':').next().unwrap_or(name).to_string()
 }
@@ -133,6 +162,8 @@ fn local(name: &str) -> String {
 /// Parses a document into its root element. Returns None for malformed XML.
 pub fn parse(doc: &str) -> Option<Element> {
     let mut stack: Vec<Element> = vec![];
+    // Namespace scopes, one per open element: (prefix, uri) declared on it.
+    let mut scopes: Vec<Vec<(String, String)>> = vec![];
     let mut root = None;
     let mut rest = doc;
     while !rest.is_empty() {
@@ -150,6 +181,7 @@ pub fn parse(doc: &str) -> Option<Element> {
             let end = stripped.find('>')?;
             let name = local(stripped[..end].trim());
             let el = stack.pop()?;
+            scopes.pop();
             if el.name != name {
                 return None;
             }
@@ -163,8 +195,21 @@ pub fn parse(doc: &str) -> Option<Element> {
             let tag = &stripped[..end];
             let self_closing = tag.ends_with('/');
             let tag = tag.trim_end_matches('/');
-            let name = local(tag.split_whitespace().next()?);
-            let el = Element { name, ..Default::default() };
+            let qname = tag.split_whitespace().next()?;
+            let name = local(qname);
+            let decls = declarations(tag);
+            if decls.iter().any(|(p, u)| !p.is_empty() && u.is_empty()) {
+                return None; // xmlns:p="" is not allowed (Namespaces in XML 1.0)
+            }
+            let prefix = qname.rsplit_once(':').map(|(p, _)| p).unwrap_or("");
+            let ns = decls
+                .iter()
+                .rev()
+                .chain(scopes.iter().rev().flat_map(|s| s.iter().rev()))
+                .find(|(p, _)| p == prefix)
+                .map(|(_, u)| u.clone())
+                .unwrap_or_default();
+            let el = Element { name, ns, ..Default::default() };
             if self_closing {
                 match stack.last_mut() {
                     Some(parent) => parent.children.push(el),
@@ -172,6 +217,7 @@ pub fn parse(doc: &str) -> Option<Element> {
                 }
             } else {
                 stack.push(el);
+                scopes.push(decls);
             }
             rest = &stripped[end + 1..];
         } else {
@@ -197,6 +243,20 @@ pub fn parse(doc: &str) -> Option<Element> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_namespaces() {
+        let doc = r#"<D:propertyupdate xmlns:D="DAV:"><D:set><D:prop><Z:color xmlns:Z="http://ex/z">red</Z:color><plain xmlns="urn:x"/></D:prop></D:set></D:propertyupdate>"#;
+        let root = parse(doc).unwrap();
+        assert_eq!((root.name.as_str(), root.ns.as_str()), ("propertyupdate", "DAV:"));
+        let prop = root.child("set").unwrap().child("prop").unwrap();
+        assert_eq!(
+            (prop.children[0].name.as_str(), prop.children[0].ns.as_str(), prop.children[0].text.as_str()),
+            ("color", "http://ex/z", "red")
+        );
+        assert_eq!(prop.children[1].ns, "urn:x");
+        assert!(parse(r#"<a xmlns:b=""><b:c/></a>"#).is_none());
+    }
 
     #[test]
     fn parses_delete_document() {

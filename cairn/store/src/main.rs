@@ -77,6 +77,9 @@
 //! CAIRN_STORE_CLUSTER_ZONE / _RACK  where this node is (labels; copies are spread across zones, then racks)
 //! CAIRN_STORE_CLUSTER_SPREAD  the failure domain copies must not share: node (default), rack or zone
 //! CAIRN_STORE_CLUSTER_HEARTBEAT / _DEAD_AFTER / _REPAIR_INTERVAL  seconds (5 / 60 / 300)
+//! CAIRN_STORE_CLUSTER_ALLOW_HTTP  true allows http:// node URLs (default: https:// with CAIRN_STORE_TLS_CERT)
+//! CAIRN_STORE_CLUSTER_CA_FILE     mutual TLS between nodes: the CA that signs node certificates
+//! CAIRN_STORE_CLUSTER_TLS_CERT / _KEY  the certificate a node presents to the others (default: CAIRN_STORE_TLS_CERT/KEY)
 //! CAIRN_STORE_COMPRESSION    compress new object data: off or zstd (off; in 1 MiB chunks, ranges stay cheap)
 //! CAIRN_STORE_QUEUE_RETENTION_INTERVAL  seconds between retention passes over message queue topics (60)
 //! CAIRN_STORE_DISKS          more disks for blob files: /mnt/a:hdd,/mnt/b:ssd (off when empty)
@@ -237,6 +240,17 @@ fn cluster_config() -> Option<s3::cluster::ClusterConfig> {
     let cfg = s3::cluster::ClusterConfig {
         node,
         url: env("CAIRN_STORE_CLUSTER_URL", ""),
+        allow_http: env("CAIRN_STORE_CLUSTER_ALLOW_HTTP", "false") == "true",
+        mtls: Some(env("CAIRN_STORE_CLUSTER_CA_FILE", "")).filter(|v| !v.is_empty()).map(|ca| {
+            let cert =
+                Some(env("CAIRN_STORE_CLUSTER_TLS_CERT", "")).filter(|v| !v.is_empty()).unwrap_or_else(|| env("CAIRN_STORE_TLS_CERT", ""));
+            let key =
+                Some(env("CAIRN_STORE_CLUSTER_TLS_KEY", "")).filter(|v| !v.is_empty()).unwrap_or_else(|| env("CAIRN_STORE_TLS_KEY", ""));
+            if cert.is_empty() || key.is_empty() || env("CAIRN_STORE_TLS_CERT", "").is_empty() {
+                fail("CAIRN_STORE_CLUSTER_CA_FILE", "mutual TLS between nodes needs CAIRN_STORE_TLS_CERT and _KEY (the node serves TLS)");
+            }
+            (ca, cert, key)
+        }),
         secret: secret("CAIRN_STORE_CLUSTER_SECRET").unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_SECRET", e)),
         copies: env("CAIRN_STORE_CLUSTER_COPIES", "2").parse().unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_COPIES", e)),
         ec: s3::cluster::parse_ec(&env("CAIRN_STORE_CLUSTER_EC", "")).unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_EC", e)),
@@ -583,6 +597,7 @@ async fn serve(addr: String, data: String) {
                 cert: c.into(),
                 key: k.into(),
                 client_ca: Some(env("CAIRN_STORE_TLS_CLIENT_CA", "")).filter(|v| !v.is_empty()).map(Into::into),
+                cluster_ca: cluster.as_ref().and_then(|c| c.mtls.as_ref()).map(|m| m.0.clone().into()),
             };
             let r = tls::Reloading::new(files).unwrap_or_else(|e| fail("TLS", e));
             tokio::spawn(r.clone().watch());
@@ -625,17 +640,28 @@ async fn serve(addr: String, data: String) {
         tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
     });
     let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let node_ca = cluster
+        .as_ref()
+        .and_then(|c| c.mtls.as_ref())
+        .map(|m| tls::cluster_verifier(std::path::Path::new(&m.0)).unwrap_or_else(|e| fail("CAIRN_STORE_CLUSTER_CA_FILE", e)));
     loop {
         tokio::select! {
             accepted = listener.accept() => {
                 let Ok((stream, peer)) = accepted else { continue };
                 let server = server.clone();
-                let svc = service_fn(move |req| server.clone().handle_from(req, Some(peer.ip())));
+                let node_ca = node_ca.clone();
+                let svc_for = move |node: bool| {
+                    let server = server.clone();
+                    service_fn(move |mut req: hyper::Request<hyper::body::Incoming>| {
+                        req.extensions_mut().insert(s3::cluster::NodeCert(node));
+                        server.clone().handle_from(req, Some(peer.ip()))
+                    })
+                };
                 let mut builder = http1::Builder::new();
                 builder.timer(hyper_util::rt::TokioTimer::new()).header_read_timeout(Duration::from_secs(30)).keep_alive(true);
                 match &tls {
                     None => {
-                        let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), svc));
+                        let conn = graceful.watch(builder.serve_connection(TokioIo::new(stream), svc_for(false)));
                         tokio::spawn(async move {
                             if let Err(e) = conn.await {
                                 tracing::debug!(error = %e, "connection");
@@ -647,7 +673,8 @@ async fn serve(addr: String, data: String) {
                         tokio::spawn(async move {
                             match tokio::time::timeout(Duration::from_secs(10), acceptor.accept(stream)).await {
                                 Ok(Ok(s)) => {
-                                    if let Err(e) = watcher.watch(builder.serve_connection(TokioIo::new(s), svc)).await {
+                                    let node = node_ca.as_ref().is_some_and(|v| tls::is_node_cert(v.as_ref(), s.get_ref().1.peer_certificates()));
+                                    if let Err(e) = watcher.watch(builder.serve_connection(TokioIo::new(s), svc_for(node))).await {
                                         tracing::debug!(error = %e, "connection");
                                     }
                                 }

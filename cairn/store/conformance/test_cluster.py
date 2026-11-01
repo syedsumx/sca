@@ -24,7 +24,7 @@ pytestmark = pytest.mark.skipif(not ADMIN_URL, reason="needs CAIRN_STORE_TEST_ME
 SECRET = "cluster-secret-0123456789"
 MASTER = base64.b64encode(b"c" * 32).decode()
 FAST = {"CAIRN_STORE_CLUSTER_HEARTBEAT": "0.3", "CAIRN_STORE_CLUSTER_DEAD_AFTER": "1.5",
-        "CAIRN_STORE_CLUSTER_REPAIR_INTERVAL": "1"}
+        "CAIRN_STORE_CLUSTER_REPAIR_INTERVAL": "1", "CAIRN_STORE_CLUSTER_ALLOW_HTTP": "true"}  # loopback only
 
 
 class Cluster:
@@ -534,3 +534,122 @@ def test_conversion_runs_on_its_own(make_cluster):
     # Without erasure coding configured, conversion is refused, not skipped silently.
     plain = make_cluster(1, CAIRN_STORE_CLUSTER_COPIES="1")
     assert admin(plain["n0"], "POST", "cluster/encode", {})[0] == 501
+
+
+def make_pki(d):
+    """A cluster CA with a certificate per node (server and client use, for 127.0.0.1), and a rogue CA."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
+
+    now = datetime.datetime.now(datetime.timezone.utc)
+
+    def ca(name):
+        key = ec.generate_private_key(ec.SECP256R1())
+        subj = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+        cert = (x509.CertificateBuilder().subject_name(subj).issuer_name(subj).public_key(key.public_key())
+                .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
+                .not_valid_after(now + datetime.timedelta(days=1))
+                .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+                .add_extension(x509.KeyUsage(digital_signature=True, key_cert_sign=True, crl_sign=True, content_commitment=False,
+                                             key_encipherment=False, data_encipherment=False, key_agreement=False,
+                                             encipher_only=False, decipher_only=False), critical=True)
+                .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()), critical=False)
+                .sign(key, hashes.SHA256()))
+        return key, cert
+
+    def leaf(name, ca_key, ca_cert):
+        key = ec.generate_private_key(ec.SECP256R1())
+        import ipaddress
+        cert = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)]))
+                .issuer_name(ca_cert.subject).public_key(key.public_key()).serial_number(x509.random_serial_number())
+                .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
+                .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+                .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH, ExtendedKeyUsageOID.CLIENT_AUTH]), critical=False)
+                .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False)
+                .sign(ca_key, hashes.SHA256()))
+        return key, cert
+
+    def write(name, key, cert):
+        (d / f"{name}.pem").write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        (d / f"{name}.key").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                          serialization.NoEncryption()))
+
+    ck, cc = ca("Cairn cluster CA")
+    write("ca", ck, cc)
+    for n in ("n0", "n1"):
+        write(n, *leaf(n, ck, cc))
+    rk, rc = ca("Rogue CA")
+    write("rogue", *leaf("rogue", rk, rc))
+    return d
+
+
+def test_nodes_talk_over_mutual_tls(binary, tmp_path):
+    """With a cluster CA, nodes call each other over TLS with certificates: blobs are copied between them,
+    and the node-to-node API refuses callers without a node certificate, even with a valid signature."""
+    (tmp_path / "pki").mkdir()
+    pki = make_pki(tmp_path / "pki")
+    meta = new_database()
+    c = Cluster(binary, tmp_path, meta)
+    try:
+        for n in ("n0", "n1"):
+            port = _free_port()
+            st = Store(binary, str(tmp_path / n), port, env={
+                "CAIRN_STORE_META": meta, "CAIRN_STORE_CLUSTER_NODE": n, "CAIRN_STORE_CLUSTER_URL": f"https://127.0.0.1:{port}",
+                "CAIRN_STORE_CLUSTER_SECRET": SECRET, "CAIRN_STORE_MASTER_KEY": MASTER,
+                "CAIRN_STORE_TLS_CERT": str(pki / f"{n}.pem"), "CAIRN_STORE_TLS_KEY": str(pki / f"{n}.key"),
+                "CAIRN_STORE_CLUSTER_CA_FILE": str(pki / "ca.pem"),
+                **{k: v for k, v in FAST.items() if k != "CAIRN_STORE_CLUSTER_ALLOW_HTTP"}})
+            st.endpoint = st.endpoint.replace("http://", "https://")
+            c.nodes[n] = st.start()
+        import boto3
+        from botocore.config import Config
+
+        def s3(st):
+            return boto3.client("s3", endpoint_url=st.endpoint, aws_access_key_id=ADMIN[0], aws_secret_access_key=ADMIN[1],
+                                region_name="us-east-1", verify=str(pki / "ca.pem"), config=Config(s3={"addressing_style": "path"}))
+        # S3 clients need no certificate; the nodes see each other.
+        wait_for(lambda: requests.get(f"{c['n0'].endpoint}/-/ready", verify=str(pki / "ca.pem"), timeout=5).ok, what="ready")
+        s3(c["n0"]).create_bucket(Bucket="tls")
+        body = os.urandom(300_000)
+        wait_for(lambda: _put(s3(c["n0"]), body), timeout=30, what="a write with two copies")
+        # Both copies exist: with n0 gone, n1 still serves the object (its copy came over mutual TLS).
+        kill(c["n0"])
+        assert s3(c["n1"]).get_object(Bucket="tls", Key="k")["Body"].read() == body
+        # The node-to-node API: a valid signature is not enough without a node certificate.
+        ts = int(time.time())
+        sig = hmac.new(SECRET.encode(), f"GET\n/-/cluster/v1/ping\n{ts}\nn0".encode(), hashlib.sha256).hexdigest()
+        url = f"{c['n1'].endpoint}/-/cluster/v1/ping"
+        h = {"x-cairn-cluster": f"n0 {ts} {sig}"}
+        r = requests.get(url, headers=h, verify=str(pki / "ca.pem"), timeout=5)
+        assert r.status_code == 403 and "node certificate" in r.text
+        r = requests.get(url, headers=h, verify=str(pki / "ca.pem"), cert=(str(pki / "n0.pem"), str(pki / "n0.key")), timeout=5)
+        assert r.status_code == 200 and r.json() == {"node": "n1"}
+        # A certificate from another CA is refused in the handshake.
+        with pytest.raises(requests.exceptions.SSLError):
+            requests.get(url, headers=h, verify=str(pki / "ca.pem"), cert=(str(pki / "rogue.pem"), str(pki / "rogue.key")), timeout=5)
+    finally:
+        c.stop()
+
+
+def _put(client, body):
+    try:
+        client.put_object(Bucket="tls", Key="k", Body=body)
+        return True
+    except ClientError:
+        return False  # 503 until the second node is seen live
+
+
+def test_plain_http_between_nodes_is_refused(binary, tmp_path):
+    meta = new_database()
+    for extra in ({}, {"CAIRN_STORE_CLUSTER_CA_FILE": "/nonexistent/ca.pem", "CAIRN_STORE_CLUSTER_ALLOW_HTTP": "true"}):
+        port = _free_port()
+        st = Store(binary, str(tmp_path / f"h{port}"), port, env={
+            "CAIRN_STORE_META": meta, "CAIRN_STORE_CLUSTER_NODE": "n0", "CAIRN_STORE_CLUSTER_URL": f"http://127.0.0.1:{port}",
+            "CAIRN_STORE_CLUSTER_SECRET": SECRET, **extra})
+        with pytest.raises(RuntimeError):
+            st.start()
+        assert st.proc.wait(10) != 0

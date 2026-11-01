@@ -17,7 +17,10 @@
 //!
 //! Nodes talk over an internal API under `/-/cluster/v1/`, authenticated with an HMAC of each request
 //! under the cluster secret (`x-cairn-cluster: <node> <unix seconds> <hex mac>`, five minutes of clock skew
-//! allowed). Use HTTPS between nodes on untrusted networks (the MAC covers the request line, not bodies).
+//! allowed). Node URLs must be https:// unless `CAIRN_STORE_CLUSTER_ALLOW_HTTP=true` (the MAC covers the
+//! request line, not bodies). With a cluster CA (`CAIRN_STORE_CLUSTER_CA_FILE`) nodes also authenticate
+//! each other with certificates: each presents its own on every call and trusts only that CA, and the
+//! node-to-node API refuses connections without one (S3 clients on the same port need none).
 
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
@@ -67,6 +70,12 @@ pub struct ClusterConfig {
     pub rack: String,
     /// The failure domain copies must not share: "node" (default), "rack" or "zone".
     pub spread: String,
+    /// Node URLs over plain HTTP are refused unless this is set (the MAC does not cover bodies).
+    pub allow_http: bool,
+    /// Mutual TLS between nodes: (cluster CA, this node's certificate, its key). Nodes then present the
+    /// certificate on every call, trust only that CA, and the node-to-node API refuses callers without
+    /// a certificate it signed.
+    pub mtls: Option<(String, String, String)>,
 }
 
 impl ClusterConfig {
@@ -79,6 +88,16 @@ impl ClusterConfig {
         }
         if !self.url.starts_with("http://") && !self.url.starts_with("https://") {
             return Err("CAIRN_STORE_CLUSTER_URL: this node's http(s):// address for the other nodes".into());
+        }
+        if self.url.starts_with("http://") && (!self.allow_http || self.mtls.is_some()) {
+            return Err(if self.mtls.is_some() {
+                "CAIRN_STORE_CLUSTER_CA_FILE needs an https:// CAIRN_STORE_CLUSTER_URL (and CAIRN_STORE_TLS_CERT)".into()
+            } else {
+                "CAIRN_STORE_CLUSTER_URL is http://: blobs would cross the network unencrypted, and the node-to-node signature does \
+                 not cover them. Serve TLS (CAIRN_STORE_TLS_CERT) with an https:// URL, or set CAIRN_STORE_CLUSTER_ALLOW_HTTP=true \
+                 on a network you trust"
+                    .into()
+            });
         }
         if self.secret.len() < 16 {
             return Err("CAIRN_STORE_CLUSTER_SECRET: at least 16 characters, the same on every node".into());
@@ -216,6 +235,10 @@ fn mac(secret: &str, method: &str, path: &str, ts: i64, node: &str) -> String {
     hex::encode(m.finalize().into_bytes())
 }
 
+/// Set on each request: did its connection present a certificate the cluster's CA signed?
+#[derive(Clone, Copy, Debug)]
+pub struct NodeCert(pub bool);
+
 /// A local blob id as it may appear in a URL path (hex ids; anything else is refused by the engine).
 fn path_id(id: &str) -> Option<&str> {
     (!id.is_empty() && id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric())).then_some(id)
@@ -224,7 +247,11 @@ fn path_id(id: &str) -> Option<&str> {
 impl Cluster {
     pub fn new(cfg: ClusterConfig, eng: Arc<Engine>) -> Result<Arc<Cluster>, String> {
         cfg.validate()?;
-        let http = Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?);
+        let connector = match &cfg.mtls {
+            Some((ca, cert, key)) => crate::tls::cluster_connector(ca.as_ref(), cert.as_ref(), key.as_ref())?,
+            None => crate::tls::https_connector()?,
+        };
+        let http = Client::builder(TokioExecutor::new()).build(connector);
         let rt = tokio::runtime::Handle::current();
         let c = Arc::new_cyclic(|me| Cluster {
             cfg,
@@ -1510,6 +1537,9 @@ impl Server {
             r
         };
         let Some(c) = self.cluster.clone() else { return err(StatusCode::NOT_FOUND, "this store is not part of a cluster") };
+        if c.cfg.mtls.is_some() && !req.extensions().get::<NodeCert>().is_some_and(|n| n.0) {
+            return err(StatusCode::FORBIDDEN, "the node-to-node API needs a node certificate signed by the cluster CA");
+        }
         let path = req.uri().path().to_string();
         let ok = (|| {
             let h = req.headers().get("x-cairn-cluster")?.to_str().ok()?;

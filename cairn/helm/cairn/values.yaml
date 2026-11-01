@@ -568,6 +568,13 @@ cairn:
       # release; run a release per zone for multi-zone clusters). spread: node, rack (hosts) or zone.
       zone: ""
       spread: node   # rack once the nodes run on at least `copies` Kubernetes nodes
+      # Nodes copy blobs to each other over TLS (tlsSecret; its certificate must name every node,
+      # *.<release>-cairn-store-nodes.<namespace>.svc). Plain HTTP between nodes needs this set.
+      allowInsecureHttp: false
+      # Mutual TLS between nodes: each presents its certificate (tlsSecret, which then needs the
+      # clientAuth usage too) and trusts only the CA in the Secret's ca.crt, as cert-manager writes it;
+      # the node-to-node API refuses callers without such a certificate.
+      mutualTls: false
     # SFTP for file-transfer clients: the user name is an access key, signing in with its secret key or an
     # SSH public key (ssh_keys in the credentials file).
     sftp:

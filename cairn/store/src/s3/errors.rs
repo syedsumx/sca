@@ -103,6 +103,10 @@ errors! {
     DAV_BUCKET_ROOT = "InvalidRequest", 403, "Whole buckets cannot be deleted, copied or moved over WebDAV: use the S3 API.";
     DAV_BAD_GATEWAY = "InvalidRequest", 502, "The Destination is not on this server's WebDAV tree.";
     DAV_SAME = "InvalidRequest", 403, "The source and destination are the same.";
+    DAV_LOCKED = "Locked", 423, "The resource is locked: send the lock token in an If header (only the lock's holder can).";
+    DAV_LOCK_UNKNOWN = "PreconditionFailed", 412, "The If header names a lock token that is not held (unknown or expired).";
+    DAV_NOT_LOCKED = "InvalidRequest", 409, "No lock with this token is held by this key on this resource.";
+    DAV_LOCK_TYPE = "InvalidRequest", 412, "Only write locks are offered.";
     FILES_PARAMETER = "InvalidArgument", 400, "The file API takes only the parameters versionId (files), after and limit (directories); use the S3 API for anything else.";
     INVALID_STORAGE_CLASS = "InvalidStorageClass", 400, "The storage class you specified is not valid: objects are written as STANDARD, and a lifecycle transition may only name a storage class this store has a tier for.";
     LIFECYCLE_INVALID_DAYS = "InvalidArgument", 400, "Days, NoncurrentDays and DaysAfterInitiation must be positive integers.";

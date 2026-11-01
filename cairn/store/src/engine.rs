@@ -75,6 +75,8 @@ const QMSGS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("queue_m
 const QGROUPS: TableDefinition<(&str, &str), u64> = TableDefinition::new("queue_groups");
 /// Leases on cluster-wide background work (name -> JSON: holder, expiry), so one node runs each task.
 const LEASES: TableDefinition<&str, &[u8]> = TableDefinition::new("leases");
+/// WebDAV locks, by token (shared by every node that shares this metadata).
+const DAV_LOCKS: TableDefinition<&str, &[u8]> = TableDefinition::new("dav_locks");
 
 #[derive(Debug)]
 pub enum Error {
@@ -523,6 +525,34 @@ fn young(ent: &fs::DirEntry) -> bool {
 
 pub fn now_ms() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// A WebDAV write lock (exclusive or shared). `path` is a key, or a collection prefix ending in `/`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct DavLock {
+    pub token: String,
+    pub bucket: String,
+    pub path: String,
+    /// Depth infinity: the lock covers everything below a collection.
+    pub deep: bool,
+    /// A shared lock: other shared locks may be taken alongside it (never an exclusive one).
+    #[serde(default)]
+    pub shared: bool,
+    /// The access key that holds it: only its holder may use, refresh or remove it.
+    pub holder: String,
+    /// The client's `<D:owner>` XML, returned in lock discovery.
+    pub owner: String,
+    pub timeout_s: u64,
+    pub until: u64,
+}
+
+impl DavLock {
+    /// Does this lock cover `path` (the same resource, or below a collection locked to any depth)?
+    pub fn covers(&self, path: &str) -> bool {
+        let p = path.trim_end_matches('/');
+        let me = self.path.trim_end_matches('/');
+        p == me || (self.deep && self.path.ends_with('/') && path.starts_with(&self.path))
+    }
 }
 
 pub fn new_id() -> String {
@@ -993,6 +1023,7 @@ impl Engine {
         tx.open_table(KEYS)?;
         tx.open_table(NODES)?;
         tx.open_table(LEASES)?;
+        tx.open_table(DAV_LOCKS)?;
         tx.open_table(QTOPICS)?;
         tx.open_table(QMSGS)?;
         tx.open_table(QGROUPS)?;
@@ -1862,6 +1893,96 @@ impl Engine {
                 return Ok(false);
             }
             t.insert(name, serde_json::to_vec(&Lease { holder: holder.into(), until: now + ttl_ms })?.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(true)
+    }
+
+    /// Takes a WebDAV lock unless it conflicts with one held (on the path, on a collection above it that
+    /// is locked to any depth, or, for a lock to any depth, on anything below). Expired locks are
+    /// cleared on the way. Returns the conflicting lock, if any.
+    pub fn dav_lock(&self, lock: &DavLock) -> Result<Option<DavLock>> {
+        let now = now_ms();
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(DAV_LOCKS)?;
+            let mut expired = vec![];
+            let mut conflict = None;
+            for row in t.iter()? {
+                let (k, v) = row?;
+                let Ok(l) = serde_json::from_slice::<DavLock>(v.value()) else { continue };
+                if l.until <= now {
+                    expired.push(k.value().to_string());
+                } else if conflict.is_none()
+                    && l.bucket == lock.bucket
+                    && !(l.shared && lock.shared)
+                    && (l.covers(&lock.path) || lock.covers(&l.path))
+                {
+                    conflict = Some(l);
+                }
+            }
+            for k in expired {
+                t.remove(k.as_str())?;
+            }
+            if conflict.is_some() {
+                return Ok(conflict);
+            }
+            t.insert(lock.token.as_str(), serde_json::to_vec(lock)?.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(None)
+    }
+
+    /// The unexpired locks of a bucket that bind `path`: on it, on a collection above it locked to any
+    /// depth, on its own collection when `member` (the change adds or removes a member), and, when
+    /// `subtree`, on anything below it.
+    pub fn dav_locks_on(&self, bucket: &str, path: &str, member: bool, subtree: bool) -> Result<Vec<DavLock>> {
+        let now = now_ms();
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DAV_LOCKS)?;
+        let parent = path.trim_end_matches('/').rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
+        let mut out = vec![];
+        for row in t.iter()? {
+            let (_, v) = row?;
+            let Ok(l) = serde_json::from_slice::<DavLock>(v.value()) else { continue };
+            if l.until <= now || l.bucket != bucket {
+                continue;
+            }
+            let binds = l.covers(path)
+                || (member && l.path == parent)
+                || (subtree && (path.is_empty() || path.ends_with('/')) && l.path.starts_with(path));
+            if binds {
+                out.push(l);
+            }
+        }
+        Ok(out)
+    }
+
+    /// One lock by token (None: unknown or expired).
+    pub fn dav_lock_get(&self, token: &str) -> Result<Option<DavLock>> {
+        let r = self.db.begin_read()?;
+        let t = r.open_table(DAV_LOCKS)?;
+        let l: Option<DavLock> = t.get(token)?.and_then(|v| serde_json::from_slice(v.value()).ok());
+        Ok(l.filter(|l| l.until > now_ms()))
+    }
+
+    /// Refreshes (`until` Some) or removes (None) a lock held by `holder`. False: no such lock of theirs.
+    pub fn dav_lock_update(&self, token: &str, holder: &str, until: Option<u64>) -> Result<bool> {
+        let now = now_ms();
+        let tx = self.begin_write()?;
+        {
+            let mut t = tx.open_table(DAV_LOCKS)?;
+            let cur: Option<DavLock> = t.get(token)?.and_then(|v| serde_json::from_slice(v.value()).ok());
+            let Some(mut l) = cur.filter(|l| l.until > now && l.holder == holder) else { return Ok(false) };
+            match until {
+                Some(u) => {
+                    l.until = u;
+                    t.insert(token, serde_json::to_vec(&l)?.as_slice())?;
+                }
+                None => {
+                    t.remove(token)?;
+                }
+            }
         }
         tx.commit()?;
         Ok(true)

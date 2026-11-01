@@ -528,6 +528,8 @@ struct CairnFs {
     gid: u32,
     read_only: bool,
     staging: PathBuf,
+    /// --enforce-modes: owners matter, so new files record their creator.
+    enforce_modes: bool,
 }
 
 fn join(dir: &str, name: &OsStr) -> Result<String, Errno> {
@@ -811,14 +813,15 @@ impl CairnFs {
         Ok(())
     }
 
-    /// The metadata of something new: its type and mode, the creator as owner (unless that is the
-    /// mount's own user, which objects show by default), and the time.
+    /// The metadata of something new: its type and mode, and the time. With --enforce-modes the creator
+    /// is recorded as its owner (unless that is the mount's own user, which objects show by default);
+    /// otherwise new files show as the mount's user, as `--uid`/`--gid` ask.
     fn new_meta(&self, req: &Request, kind: u32, mode: u32) -> Meta {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
         Meta {
             mode: Some(kind | (mode & 0o7777)),
-            uid: Some(req.uid()).filter(|u| *u != self.uid),
-            gid: Some(req.gid()).filter(|g| *g != self.gid),
+            uid: Some(req.uid()).filter(|u| self.enforce_modes && *u != self.uid),
+            gid: Some(req.gid()).filter(|g| self.enforce_modes && *g != self.gid),
             mtime: Some(now),
             xattrs: Default::default(),
         }
@@ -1492,7 +1495,7 @@ pub fn run(args: &[String], endpoint: &str, ak: &str, sk: &str, region: &str) ->
     // Files show as owned by the directory's owner, or by --uid=N / --gid=N (for pods running as non-root).
     let id_flag = |name: &str| args.iter().find_map(|a| a.strip_prefix(&format!("--{name}="))?.parse::<u32>().ok());
     let (uid, gid) = (id_flag("uid").unwrap_or(meta.uid()), id_flag("gid").unwrap_or(meta.gid()));
-    let fs = CairnFs { s3, state: Mutex::new(State::default()), uid, gid, read_only, staging };
+    let fs = CairnFs { s3, state: Mutex::new(State::default()), uid, gid, read_only, staging, enforce_modes };
     let mut cfg = fuser::Config::default();
     cfg.mount_options =
         vec![MountOption::FSName(format!("cairn:{target}")), MountOption::Subtype("cairn".into()), MountOption::NoDev, MountOption::NoSuid];

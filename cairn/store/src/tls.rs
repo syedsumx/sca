@@ -1,5 +1,6 @@
-//! TLS for the store's listener (optionally requiring client certificates), certificate reloading, and
-//! HTTPS for outbound calls (webhooks, Cairn's policy decision point).
+//! TLS for the store's listener (optionally requiring client certificates), certificate reloading,
+//! HTTPS for outbound calls (webhooks, Cairn's policy decision point), and mutual TLS between cluster
+//! nodes (a cluster CA: nodes present their certificate and trust only that CA).
 //!
 //! The certificate and key files are re-read when they change (checked every 30 s), so renewed
 //! certificates (cert-manager, ACME) take effect without a restart; a broken new pair is refused and the
@@ -18,6 +19,9 @@ pub struct TlsFiles {
     pub key: PathBuf,
     /// Require client certificates signed by this CA (mutual TLS).
     pub client_ca: Option<PathBuf>,
+    /// Accept (without requiring) client certificates signed by the cluster's CA, so nodes can prove
+    /// who they are on the node-to-node API.
+    pub cluster_ca: Option<PathBuf>,
 }
 
 fn provider() -> Arc<rustls::crypto::CryptoProvider> {
@@ -41,18 +45,19 @@ pub fn server_config(f: &TlsFiles) -> Result<Arc<rustls::ServerConfig>, String> 
     let key = PrivateKeyDer::from_pem_file(&f.key).map_err(|e| format!("{}: {e}", f.key.display()))?;
     let builder =
         rustls::ServerConfig::builder_with_provider(provider()).with_safe_default_protocol_versions().map_err(|e| e.to_string())?;
-    let builder = match &f.client_ca {
-        Some(ca) => {
-            let mut roots = rustls::RootCertStore::empty();
+    let builder = if f.client_ca.is_none() && f.cluster_ca.is_none() {
+        builder.with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        for ca in [&f.client_ca, &f.cluster_ca].into_iter().flatten() {
             for c in load_certs(ca)? {
                 roots.add(c).map_err(|e| format!("{}: {e}", ca.display()))?;
             }
-            let v = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider())
-                .build()
-                .map_err(|e| e.to_string())?;
-            builder.with_client_cert_verifier(v)
         }
-        None => builder.with_no_client_auth(),
+        let v = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider());
+        // Only the cluster's CA: clients without a certificate (S3 clients) are still served.
+        let v = if f.client_ca.is_none() { v.allow_unauthenticated() } else { v };
+        builder.with_client_cert_verifier(v.build().map_err(|e| e.to_string())?)
     };
     let mut cfg = builder.with_single_cert(certs, key).map_err(|e| format!("certificate and key: {e}"))?;
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
@@ -66,7 +71,7 @@ pub struct Reloading {
 }
 
 fn mtimes(f: &TlsFiles) -> Vec<Option<SystemTime>> {
-    [Some(&f.cert), Some(&f.key), f.client_ca.as_ref()]
+    [Some(&f.cert), Some(&f.key), f.client_ca.as_ref(), f.cluster_ca.as_ref()]
         .iter()
         .map(|p| p.and_then(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()))
         .collect()
@@ -110,6 +115,96 @@ impl Reloading {
             self.check();
         }
     }
+}
+
+/// Checks a connection's client certificate against the cluster's CA (the node-to-node API's proof
+/// that the caller is a node).
+pub fn cluster_verifier(ca: &Path) -> Result<Arc<dyn rustls::server::danger::ClientCertVerifier>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in load_certs(ca)? {
+        roots.add(c).map_err(|e| format!("{}: {e}", ca.display()))?;
+    }
+    rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider()).build().map_err(|e| e.to_string())
+}
+
+/// Did the connection present a certificate the cluster's CA signed?
+pub fn is_node_cert(v: &dyn rustls::server::danger::ClientCertVerifier, chain: Option<&[CertificateDer<'static>]>) -> bool {
+    match chain {
+        Some([ee, rest @ ..]) => v.verify_client_cert(ee, rest, rustls::pki_types::UnixTime::now()).is_ok(),
+        _ => false,
+    }
+}
+
+type CurrentKey = (Vec<Option<SystemTime>>, Option<Arc<rustls::sign::CertifiedKey>>);
+
+/// A client certificate read from files, re-read when they change (renewals need no restart).
+#[derive(Debug)]
+struct ReloadingClientCert {
+    cert: PathBuf,
+    key: PathBuf,
+    current: RwLock<CurrentKey>,
+}
+
+impl ReloadingClientCert {
+    fn load(&self) -> Result<Arc<rustls::sign::CertifiedKey>, String> {
+        let certs = load_certs(&self.cert)?;
+        let key = PrivateKeyDer::from_pem_file(&self.key).map_err(|e| format!("{}: {e}", self.key.display()))?;
+        let signer = provider().key_provider.load_private_key(key).map_err(|e| format!("{}: {e}", self.key.display()))?;
+        Ok(Arc::new(rustls::sign::CertifiedKey::new(certs, signer)))
+    }
+
+    fn mtimes(&self) -> Vec<Option<SystemTime>> {
+        [&self.cert, &self.key].iter().map(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok()).collect()
+    }
+}
+
+impl rustls::client::ResolvesClientCert for ReloadingClientCert {
+    fn resolve(&self, _: &[&[u8]], _: &[rustls::SignatureScheme]) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let m = self.mtimes();
+        {
+            let cur = self.current.read().unwrap();
+            if cur.0 == m && cur.1.is_some() {
+                return cur.1.clone();
+            }
+        }
+        match self.load() {
+            Ok(k) => {
+                *self.current.write().unwrap() = (m, Some(k.clone()));
+                Some(k)
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "node certificate unreadable; keeping the current one");
+                self.current.read().unwrap().1.clone()
+            }
+        }
+    }
+
+    fn has_certs(&self) -> bool {
+        true
+    }
+}
+
+/// The node-to-node HTTPS client: trusts only the cluster's CA and presents this node's certificate.
+pub fn cluster_connector(
+    ca: &Path,
+    cert: &Path,
+    key: &Path,
+) -> Result<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, String> {
+    let mut roots = rustls::RootCertStore::empty();
+    for c in load_certs(ca)? {
+        roots.add(c).map_err(|e| format!("{}: {e}", ca.display()))?;
+    }
+    let resolver = ReloadingClientCert { cert: cert.into(), key: key.into(), current: RwLock::new((vec![], None)) };
+    resolver.load()?; // a node certificate that does not load stops the node at start-up
+    let cfg = rustls::ClientConfig::builder_with_provider(provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|e| e.to_string())?
+        .with_root_certificates(roots)
+        .with_client_cert_resolver(Arc::new(resolver));
+    let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
+    http.enforce_http(false);
+    http.set_connect_timeout(Some(Duration::from_secs(5)));
+    Ok(hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(cfg).https_only().enable_http1().wrap_connector(http))
 }
 
 /// An HTTP(S) client for outbound calls: public web roots plus `CAIRN_STORE_CA_FILE`.

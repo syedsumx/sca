@@ -86,8 +86,10 @@ jobs:
       - name: Hadoop S3A check (hadoop-aws 3.4)
         working-directory: cairn/store/hadoop-check
         run: ./gradlew --no-daemon -q installDist
-      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other)
-        run: grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
+        run: |
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+          sudo apt-get update -q && sudo apt-get install -y -q litmus  # the WebDAV protocol test suite (test_dav.py)
       - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, Hadoop S3A, crash safety)
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -120,8 +122,10 @@ jobs:
           python-version: "3.12"
       - name: Build
         run: cargo build --release --locked
-      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other)
-        run: grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+      - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
+        run: |
+          grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
+          sudo apt-get update -q && sudo apt-get install -y -q litmus  # the WebDAV protocol test suite (test_dav.py)
       - name: Conformance on PostgreSQL metadata
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -283,11 +287,15 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \
-              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true"; do
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
+              "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # A store cluster without TLS between its nodes is refused unless asked for explicitly.
+          ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.store.cluster.enabled=true \
+              --set cairn.store.metadata.secretName=cairn-store-meta >/dev/null 2>&1
           # Catalog replicas without a shared database are refused.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
               --set cairn.catalog.replicas=2 >/dev/null 2>&1

@@ -6,6 +6,8 @@
 {{- if not $u.metadata.secretName }}{{ fail "cairn.store.cluster needs cairn.store.metadata.secretName (the nodes share PostgreSQL metadata)" }}{{ end }}
 {{- if or $u.backups.enabled $u.backupSinks.secretName }}{{ fail "cairn.store.backups and backupSinks are not available in a cluster: back up the metadata database and keep copies across nodes" }}{{ end }}
 {{- if and (eq (toString $cl.spread) "zone") (not $cl.zone) }}{{ fail "cairn.store.cluster.spread=zone needs cairn.store.cluster.zone" }}{{ end }}
+{{- if and (not $u.tlsSecret) (not $cl.allowInsecureHttp) }}{{ fail "cairn.store.cluster needs cairn.store.tlsSecret (nodes copy blobs to each other), or cluster.allowInsecureHttp=true on a network you trust" }}{{ end }}
+{{- if and $cl.mutualTls (not $u.tlsSecret) }}{{ fail "cairn.store.cluster.mutualTls needs cairn.store.tlsSecret (with ca.crt)" }}{{ end }}
 {{- if lt (int $cl.replicas) (int $cl.copies) }}{{ fail "cairn.store.cluster.replicas must be at least cluster.copies" }}{{ end }}
 {{- if $cl.erasureCoding }}
 {{- $p := splitList "+" (toString $cl.erasureCoding) }}
@@ -68,6 +70,14 @@ spec:
                 fieldRef: { fieldPath: metadata.name }
             - name: CAIRN_STORE_CLUSTER_URL
               value: {{ printf "%s://$(CAIRN_STORE_CLUSTER_NODE).%s-nodes.%s.svc:%v" (ternary "https" "http" (not (empty $u.tlsSecret))) (include "cairn.componentName" $ctx) $.Release.Namespace $u.port | quote }}
+            {{- if not $u.tlsSecret }}
+            - name: CAIRN_STORE_CLUSTER_ALLOW_HTTP
+              value: "true"
+            {{- end }}
+            {{- if $cl.mutualTls }}
+            - name: CAIRN_STORE_CLUSTER_CA_FILE
+              value: /etc/cairn-store-tls/ca.crt
+            {{- end }}
             - name: CAIRN_STORE_CLUSTER_SECRET
               valueFrom:
                 secretKeyRef: { name: {{ $u.secret.name }}, key: {{ $cl.clusterSecretKey }} }
