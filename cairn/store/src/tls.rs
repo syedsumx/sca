@@ -114,6 +114,15 @@ impl Reloading {
 
 /// An HTTP(S) client for outbound calls: public web roots plus `CAIRN_STORE_CA_FILE`.
 pub fn https_connector() -> Result<hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>, String> {
+    let cfg = (*client_config()?).clone();
+    let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
+    http.enforce_http(false);
+    http.set_connect_timeout(Some(Duration::from_secs(5)));
+    Ok(hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(cfg).https_or_http().enable_http1().wrap_connector(http))
+}
+
+/// The TLS client configuration for outbound connections: public web roots plus `CAIRN_STORE_CA_FILE`.
+pub fn client_config() -> Result<Arc<rustls::ClientConfig>, String> {
     let mut roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
     if let Ok(ca) = std::env::var("CAIRN_STORE_CA_FILE") {
         if !ca.is_empty() {
@@ -127,10 +136,7 @@ pub fn https_connector() -> Result<hyper_rustls::HttpsConnector<hyper_util::clie
         .map_err(|e| e.to_string())?
         .with_root_certificates(roots)
         .with_no_client_auth();
-    let mut http = hyper_util::client::legacy::connect::HttpConnector::new();
-    http.enforce_http(false);
-    http.set_connect_timeout(Some(Duration::from_secs(5)));
-    Ok(hyper_rustls::HttpsConnectorBuilder::new().with_tls_config(cfg).https_or_http().enable_http1().wrap_connector(http))
+    Ok(Arc::new(cfg))
 }
 
 /// For the local health probe only: accepts the store's own certificate without checking it (the probe

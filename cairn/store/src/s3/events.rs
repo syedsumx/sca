@@ -1,5 +1,6 @@
 //! Event notifications: a bucket's notification configuration, and delivery of the events in the
-//! engine's outbox to the operator's targets (webhooks and Kafka topics).
+//! engine's outbox to the operator's targets (webhooks, Kafka topics, SQS queues, Pub/Sub topics and NATS
+//! subjects).
 //!
 //! Targets are defined by the operator (`CAIRN_STORE_EVENT_TARGETS_FILE`), never by bucket owners: a
 //! notification rule names a target by id (as the last part of the destination ARN, e.g.
@@ -69,12 +70,61 @@ pub enum Target {
         #[serde(default)]
         partition: i32,
     },
+    /// An Amazon SQS queue (or one that speaks its query API, such as ElasticMQ). FIFO queues (a URL
+    /// ending in .fifo) get the bucket as message group and the event's sequence as deduplication id.
+    Sqs {
+        id: String,
+        queue_url: String,
+        #[serde(default)]
+        region: String,
+        access_key: String,
+        #[serde(default)]
+        secret_key: String,
+        #[serde(default)]
+        secret_key_file: String,
+    },
+    /// A Google Cloud Pub/Sub topic (`projects/<p>/topics/<t>`), with the same sign-in as GCS remotes.
+    Pubsub {
+        id: String,
+        topic: String,
+        #[serde(default)]
+        endpoint: String,
+        #[serde(default)]
+        auth: String,
+        #[serde(default)]
+        credentials_file: String,
+        /// Publish with the bucket as ordering key (the subscription must enable message ordering).
+        #[serde(default)]
+        ordered: bool,
+    },
+    /// A NATS subject (`nats://` or `tls://` servers). Delivery counts once the server has processed
+    /// the message (a PING after the PUB is answered); bind a JetStream stream to the subject to keep
+    /// messages for consumers that are away.
+    Nats {
+        id: String,
+        url: String,
+        subject: String,
+        #[serde(default)]
+        user: String,
+        #[serde(default)]
+        password: String,
+        #[serde(default)]
+        password_file: String,
+        #[serde(default)]
+        token: String,
+        #[serde(default)]
+        token_file: String,
+    },
 }
 
 impl Target {
     pub fn id(&self) -> &str {
         match self {
-            Target::Webhook { id, .. } | Target::Kafka { id, .. } => id,
+            Target::Webhook { id, .. }
+            | Target::Kafka { id, .. }
+            | Target::Sqs { id, .. }
+            | Target::Pubsub { id, .. }
+            | Target::Nats { id, .. } => id,
         }
     }
 }
@@ -102,6 +152,65 @@ pub fn load_targets(text: &str) -> Result<Vec<Target>, String> {
             Target::Kafka { brokers, topic, id, .. } => {
                 if brokers.is_empty() || topic.is_empty() {
                     return Err(format!("target {id}: brokers and topic are required"));
+                }
+            }
+            Target::Sqs { id, queue_url, region, access_key, secret_key, secret_key_file } => {
+                if !queue_url.starts_with("http://") && !queue_url.starts_with("https://") {
+                    return Err(format!("target {id}: queue_url must be http:// or https://"));
+                }
+                if !secret_key_file.is_empty() {
+                    *secret_key =
+                        std::fs::read_to_string(&*secret_key_file).map_err(|e| format!("{secret_key_file}: {e}"))?.trim().to_string();
+                }
+                if access_key.is_empty() || secret_key.is_empty() {
+                    return Err(format!("target {id}: access_key and secret_key are required"));
+                }
+                if region.is_empty() {
+                    // https://sqs.<region>.amazonaws.com/<account>/<queue>
+                    *region = queue_url
+                        .split("://")
+                        .nth(1)
+                        .and_then(|h| h.strip_prefix("sqs."))
+                        .and_then(|h| h.split('.').next())
+                        .unwrap_or("")
+                        .to_string();
+                    if region.is_empty() {
+                        return Err(format!("target {id}: region is required for this queue_url"));
+                    }
+                }
+            }
+            Target::Pubsub { id, topic, endpoint, auth, credentials_file, .. } => {
+                let parts: Vec<&str> = topic.split('/').collect();
+                if parts.len() != 4 || parts[0] != "projects" || parts[2] != "topics" || parts[1].is_empty() || parts[3].is_empty() {
+                    return Err(format!("target {id}: topic is projects/<project>/topics/<topic>"));
+                }
+                if endpoint.is_empty() {
+                    *endpoint = "https://pubsub.googleapis.com".into();
+                }
+                if !endpoint.starts_with("http://") && !endpoint.starts_with("https://") {
+                    return Err(format!("target {id}: endpoint must be http:// or https://"));
+                }
+                *endpoint = endpoint.trim_end_matches('/').to_string();
+                super::remote::check_google_auth(auth, credentials_file, &format!("target {id}"))?;
+            }
+            Target::Nats { id, url, subject, user, password, password_file, token, token_file } => {
+                if !url.starts_with("nats://") && !url.starts_with("tls://") {
+                    return Err(format!("target {id}: url must be nats:// or tls://"));
+                }
+                let ok = |t: &str| !t.is_empty() && t.chars().all(|c| c.is_ascii_graphic() && c != '*' && c != '>');
+                if !subject.split('.').all(ok) {
+                    return Err(format!("target {id}: subject must be tokens separated by dots, without spaces or wildcards"));
+                }
+                for (v, f) in [(&mut *password, &*password_file), (&mut *token, &*token_file)] {
+                    if !f.is_empty() {
+                        *v = std::fs::read_to_string(f).map_err(|e| format!("{f}: {e}"))?.trim().to_string();
+                    }
+                }
+                if !token.is_empty() && !user.is_empty() {
+                    return Err(format!("target {id}: give a token or a user and password, not both"));
+                }
+                if user.is_empty() != password.is_empty() {
+                    return Err(format!("target {id}: user and password go together"));
                 }
             }
         }
@@ -151,13 +260,24 @@ pub struct Delivery {
     pub(crate) targets: HashMap<String, Target>,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
     kafka: Mutex<HashMap<String, Arc<rskafka::client::partition::PartitionClient>>>,
+    /// Pub/Sub targets' sign-in.
+    google: HashMap<String, super::remote::GoogleAuth>,
     pub(crate) max_age_ms: u64,
 }
 
 impl Delivery {
     pub fn new(targets: Vec<Target>, max_age_hours: u64) -> Result<Delivery, String> {
         let conn = crate::tls::https_connector()?;
+        let mut google = HashMap::new();
+        for t in &targets {
+            if let Target::Pubsub { id, auth, credentials_file, .. } = t {
+                let mut a = auth.clone();
+                let sa = super::remote::check_google_auth(&mut a, credentials_file, &format!("target {id}"))?;
+                google.insert(id.clone(), super::remote::GoogleAuth::new(&a, sa, id)?);
+            }
+        }
         Ok(Delivery {
+            google,
             targets: targets.into_iter().map(|t| (t.id().to_string(), t)).collect(),
             http: Client::builder(TokioExecutor::new()).build(conn),
             kafka: Mutex::new(HashMap::new()),
@@ -169,8 +289,79 @@ impl Delivery {
         self.targets.contains_key(id)
     }
 
+    /// Sends an HTTP request; a 2xx answer counts as delivered.
+    async fn post(&self, req: hyper::Request<Full<Bytes>>) -> Result<(), String> {
+        let resp = tokio::time::timeout(Duration::from_secs(10), self.http.request(req))
+            .await
+            .map_err(|_| "timed out".to_string())?
+            .map_err(|e| e.to_string())?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        let status = resp.status();
+        use http_body_util::BodyExt;
+        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        Err(format!("HTTP {status}: {}", String::from_utf8_lossy(&body).chars().take(200).collect::<String>()))
+    }
+
     async fn send(&self, t: &Target, seq: u64, body: Vec<u8>, key: &str) -> Result<(), String> {
         match t {
+            Target::Sqs { queue_url, region, access_key, secret_key, .. } => {
+                let mut form = vec![
+                    ("Action".to_string(), "SendMessage".to_string()),
+                    ("MessageBody".to_string(), String::from_utf8_lossy(&body).into_owned()),
+                    ("Version".to_string(), "2012-11-05".to_string()),
+                    ("MessageAttribute.1.Name".to_string(), "x-cairn-event-id".to_string()),
+                    ("MessageAttribute.1.Value.DataType".to_string(), "String".to_string()),
+                    ("MessageAttribute.1.Value.StringValue".to_string(), seq.to_string()),
+                ];
+                if queue_url.ends_with(".fifo") {
+                    form.push(("MessageGroupId".into(), key.split('/').next().unwrap_or("").to_string()));
+                    form.push(("MessageDeduplicationId".into(), seq.to_string()));
+                }
+                let doc =
+                    form.iter().map(|(k, v)| format!("{k}={}", super::auth::aws_encode(v.as_bytes(), false))).collect::<Vec<_>>().join("&");
+                let hash = super::auth::sha256_hex(doc.as_bytes());
+                let mut req = hyper::Request::post(queue_url.as_str()).header("content-type", "application/x-www-form-urlencoded");
+                for (k, v) in crate::admin_cli::sign_service(
+                    "POST",
+                    queue_url,
+                    "sqs",
+                    &hash,
+                    &[("content-type", "application/x-www-form-urlencoded")],
+                    access_key,
+                    secret_key,
+                    region,
+                    time::OffsetDateTime::now_utc(),
+                ) {
+                    req = req.header(k, v);
+                }
+                let req = req.body(Full::new(Bytes::from(doc))).map_err(|e| e.to_string())?;
+                self.post(req).await
+            }
+            Target::Pubsub { topic, endpoint, ordered, .. } => {
+                use base64::Engine;
+                let mut msg = json!({
+                    "data": base64::engine::general_purpose::STANDARD.encode(&body),
+                    "attributes": {"x-cairn-event-id": seq.to_string(), "key": key},
+                });
+                if *ordered {
+                    msg["orderingKey"] = json!(key.split('/').next().unwrap_or(""));
+                }
+                let doc = json!({"messages": [msg]}).to_string();
+                let mut req = hyper::Request::post(format!("{endpoint}/v1/{topic}:publish")).header("content-type", "application/json");
+                if let Some(t) = self.google.get(t.id()).ok_or("no sign-in")?.token().await.map_err(|e| e.to_string())? {
+                    req = req.header("authorization", format!("Bearer {t}"));
+                }
+                let req = req.body(Full::new(Bytes::from(doc))).map_err(|e| e.to_string())?;
+                self.post(req).await
+            }
+            Target::Nats { url, subject, user, password, token, .. } => {
+                tokio::time::timeout(Duration::from_secs(10), nats_publish(url, subject, user, password, token, seq, &body))
+                    .await
+                    .map_err(|_| "nats publish timed out".to_string())?
+            }
+
             Target::Webhook { url, secret, .. } => {
                 let sig = hex::encode(super::auth::hmac_sha256(secret.as_bytes(), &body));
                 let req = hyper::Request::post(url)
@@ -450,6 +641,73 @@ impl Server {
         }
     }
 }
+
+/// Publishes one message on a NATS server and waits until the server has processed it.
+async fn nats_publish(url: &str, subject: &str, user: &str, password: &str, token: &str, seq: u64, body: &[u8]) -> Result<(), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (tls, addr) = match url.strip_prefix("tls://") {
+        Some(a) => (true, a),
+        None => (false, url.strip_prefix("nats://").unwrap_or(url)),
+    };
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h).trim_start_matches('[').trim_end_matches(']').to_string();
+    let tcp = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("connect {addr}: {e}"))?;
+    let mut plain = BufReader::new(tcp);
+    let mut line = String::new();
+    plain.read_line(&mut line).await.map_err(|e| e.to_string())?;
+    let info: serde_json::Value = line
+        .strip_prefix("INFO ")
+        .and_then(|j| serde_json::from_str(j.trim()).ok())
+        .ok_or_else(|| format!("{addr} is not a NATS server"))?;
+    if info["tls_required"] == true && !tls {
+        return Err("the server requires TLS: use a tls:// URL".into());
+    }
+    let mut connect = json!({"verbose": false, "pedantic": false, "tls_required": tls, "name": "cairn-store", "lang": "rust",
+                             "version": env!("CARGO_PKG_VERSION"), "headers": true, "protocol": 1});
+    if !user.is_empty() {
+        connect["user"] = json!(user);
+        connect["pass"] = json!(password);
+    }
+    if !token.is_empty() {
+        connect["auth_token"] = json!(token);
+    }
+    // With headers, the event id goes as Nats-Msg-Id, which JetStream uses to drop duplicates.
+    let mut out = format!("CONNECT {connect}\r\n").into_bytes();
+    if info["headers"] == true {
+        let hdr = format!("NATS/1.0\r\nNats-Msg-Id: {seq}\r\n\r\n");
+        out.extend(format!("HPUB {subject} {} {}\r\n{hdr}", hdr.len(), hdr.len() + body.len()).into_bytes());
+    } else {
+        out.extend(format!("PUB {subject} {}\r\n", body.len()).into_bytes());
+    }
+    out.extend_from_slice(body);
+    out.extend_from_slice(b"\r\nPING\r\n");
+    let stream: Box<dyn NatsIo> = if tls {
+        let cfg = crate::tls::client_config()?;
+        let name = rustls::pki_types::ServerName::try_from(host).map_err(|e| e.to_string())?;
+        let s = tokio_rustls::TlsConnector::from(cfg).connect(name, plain.into_inner()).await.map_err(|e| format!("TLS: {e}"))?;
+        Box::new(s)
+    } else {
+        Box::new(plain.into_inner())
+    };
+    let mut s = BufReader::new(stream);
+    s.get_mut().write_all(&out).await.map_err(|e| e.to_string())?;
+    loop {
+        line.clear();
+        if s.read_line(&mut line).await.map_err(|e| e.to_string())? == 0 {
+            return Err("the server closed the connection".into());
+        }
+        let l = line.trim();
+        if l == "PONG" {
+            return Ok(());
+        } else if let Some(err) = l.strip_prefix("-ERR") {
+            return Err(format!("NATS: {}", err.trim().trim_matches('\'')));
+        } else if l == "PING" {
+            s.get_mut().write_all(b"PONG\r\n").await.map_err(|e| e.to_string())?;
+        }
+    }
+}
+
+trait NatsIo: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> NatsIo for T {}
 
 #[cfg(test)]
 mod tests {

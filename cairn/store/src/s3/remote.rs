@@ -64,7 +64,7 @@ pub struct RemoteSpec {
 
 /// A GCS service account key.
 #[derive(Clone, Debug)]
-struct ServiceAccount {
+pub struct ServiceAccount {
     email: String,
     token_uri: String,
     key_der: Vec<u8>,
@@ -95,6 +95,95 @@ fn service_account(path: &str) -> Result<ServiceAccount, String> {
     ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|e| format!("{path}: private_key is not an RSA PKCS#8 key: {e}"))?;
     let token_uri = if k.token_uri.is_empty() { "https://oauth2.googleapis.com/token".to_string() } else { k.token_uri };
     Ok(ServiceAccount { email: k.client_email, token_uri, key_der: der })
+}
+
+/// Checks a Google sign-in (`auth`: service_account, metadata or none; defaults to service_account when a
+/// credentials file is given) and reads the service account key.
+pub fn check_google_auth(auth: &mut String, credentials_file: &str, what: &str) -> Result<Option<ServiceAccount>, String> {
+    if auth.is_empty() && !credentials_file.is_empty() {
+        *auth = "service_account".into();
+    }
+    match auth.as_str() {
+        "service_account" if credentials_file.is_empty() => Err(format!("{what}: auth service_account needs credentials_file")),
+        "service_account" => Ok(Some(service_account(credentials_file)?)),
+        "metadata" | "none" if !credentials_file.is_empty() => Err(format!("{what}: credentials_file is only for auth service_account")),
+        "metadata" | "none" => Ok(None),
+        "" => Err(format!("{what}: auth is required (service_account, metadata or none)")),
+        a => Err(format!("{what}: auth {a:?} is not service_account, metadata or none")),
+    }
+}
+
+/// Google OAuth access tokens: from a service account key (a signed JWT grant), the metadata server, or
+/// none. Tokens are cached until a minute before they expire.
+pub struct GoogleAuth {
+    mode: String,
+    sa: Option<ServiceAccount>,
+    what: String,
+    http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
+    token: std::sync::Mutex<Option<(String, std::time::Instant)>>,
+}
+
+impl GoogleAuth {
+    pub fn new(mode: &str, sa: Option<ServiceAccount>, what: &str) -> Result<GoogleAuth, String> {
+        Ok(GoogleAuth {
+            mode: mode.to_string(),
+            sa,
+            what: what.to_string(),
+            http: Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?),
+            token: Default::default(),
+        })
+    }
+
+    pub async fn token(&self) -> std::io::Result<Option<String>> {
+        if self.mode == "none" {
+            return Ok(None);
+        }
+        if let Some((t, until)) = self.token.lock().unwrap().clone() {
+            if std::time::Instant::now() < until {
+                return Ok(Some(t));
+            }
+        }
+        let req = match self.mode.as_str() {
+            "metadata" => {
+                let host = std::env::var("GCE_METADATA_HOST").unwrap_or_else(|_| "metadata.google.internal".into());
+                hyper::Request::builder()
+                    .method("GET")
+                    .uri(format!("http://{host}/computeMetadata/v1/instance/service-accounts/default/token"))
+                    .header("metadata-flavor", "Google")
+                    .body(small(Bytes::new()))
+                    .map_err(err)?
+            }
+            _ => {
+                let sa = self.sa.as_ref().ok_or_else(|| err("no service account key"))?;
+                let jwt = gcs_jwt(sa)?;
+                let form = format!("grant_type={}&assertion={jwt}", aws_encode(b"urn:ietf:params:oauth:grant-type:jwt-bearer", false));
+                hyper::Request::builder()
+                    .method("POST")
+                    .uri(&sa.token_uri)
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header("content-length", form.len().to_string())
+                    .body(small(form))
+                    .map_err(err)?
+            }
+        };
+        let what = format!("access token for {}", self.what);
+        let resp = tokio::time::timeout(Duration::from_secs(30), self.http.request(req))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{what}: timed out")))?
+            .map_err(|e| err(format!("{what}: {e}")))?;
+        let resp = Remote::check(resp, &what).await?;
+        let body = resp.into_body().collect().await.map_err(err)?.to_bytes();
+        #[derive(Deserialize)]
+        struct Tok {
+            access_token: String,
+            #[serde(default)]
+            expires_in: u64,
+        }
+        let t: Tok = serde_json::from_slice(&body).map_err(|e| err(format!("{what}: {e}")))?;
+        let life = Duration::from_secs(t.expires_in.max(120) - 60);
+        *self.token.lock().unwrap() = Some((t.access_token.clone(), std::time::Instant::now() + life));
+        Ok(Some(t.access_token))
+    }
 }
 
 /// Checks one spec and fills in its defaults. `normalize_prefix` ends a non-empty prefix with `/`.
@@ -161,20 +250,7 @@ pub fn check_spec(s: &mut RemoteSpec, what: &str, normalize_prefix: bool) -> Res
             refuse("sas", !s.sas.is_empty())?;
             refuse("access_key", !s.access_key.is_empty())?;
             refuse("secret_key", !s.secret_key.is_empty())?;
-            if s.auth.is_empty() && !s.credentials_file.is_empty() {
-                s.auth = "service_account".into();
-            }
-            match s.auth.as_str() {
-                "service_account" => {
-                    if s.credentials_file.is_empty() {
-                        return Err(format!("{what} {name}: auth service_account needs credentials_file"));
-                    }
-                    s.service_account = Some(service_account(&s.credentials_file)?);
-                }
-                "metadata" | "none" => refuse("credentials_file", !s.credentials_file.is_empty())?,
-                "" => return Err(format!("{what} {name}: auth is required (service_account, metadata or none)")),
-                a => return Err(format!("{what} {name}: auth {a:?} is not service_account, metadata or none")),
-            }
+            s.service_account = check_google_auth(&mut s.auth, &s.credentials_file, &format!("{what} {name}"))?;
             if s.endpoint.is_empty() {
                 s.endpoint = "https://storage.googleapis.com".into();
             }
@@ -234,8 +310,8 @@ pub struct Remote {
     pub spec: RemoteSpec,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Body>,
     rt: tokio::runtime::Handle,
-    /// GCS: the access token and when it stops being used.
-    token: std::sync::Mutex<Option<(String, std::time::Instant)>>,
+    /// GCS: its sign-in.
+    google: Option<GoogleAuth>,
 }
 
 fn small(b: impl Into<Bytes>) -> Body {
@@ -362,11 +438,13 @@ impl Read for Share {
 
 impl Remote {
     pub fn new(spec: RemoteSpec) -> Result<Remote, String> {
+        let (spec_kind, spec_auth, spec_sa, spec_id) =
+            (spec.kind.clone(), spec.auth.clone(), spec.service_account.clone(), spec.id.clone());
         Ok(Remote {
             spec,
             http: Client::builder(TokioExecutor::new()).build(crate::tls::https_connector()?),
             rt: tokio::runtime::Handle::current(),
-            token: Default::default(),
+            google: (spec_kind == "gcs").then(|| GoogleAuth::new(&spec_auth, spec_sa, &spec_id)).transpose()?,
         })
     }
 
@@ -386,54 +464,10 @@ impl Remote {
 
     /// A GCS access token (cached until shortly before it expires).
     async fn gcs_token(&self) -> std::io::Result<Option<String>> {
-        if self.spec.auth == "none" {
-            return Ok(None);
+        match &self.google {
+            Some(g) => g.token().await,
+            None => Ok(None),
         }
-        if let Some((t, until)) = self.token.lock().unwrap().clone() {
-            if std::time::Instant::now() < until {
-                return Ok(Some(t));
-            }
-        }
-        let req = match self.spec.auth.as_str() {
-            "metadata" => {
-                let host = std::env::var("GCE_METADATA_HOST").unwrap_or_else(|_| "metadata.google.internal".into());
-                hyper::Request::builder()
-                    .method("GET")
-                    .uri(format!("http://{host}/computeMetadata/v1/instance/service-accounts/default/token"))
-                    .header("metadata-flavor", "Google")
-                    .body(small(Bytes::new()))
-                    .map_err(err)?
-            }
-            _ => {
-                let sa = self.spec.service_account.as_ref().ok_or_else(|| err("no service account key"))?;
-                let jwt = gcs_jwt(sa)?;
-                let form = format!("grant_type={}&assertion={jwt}", aws_encode(b"urn:ietf:params:oauth:grant-type:jwt-bearer", false));
-                hyper::Request::builder()
-                    .method("POST")
-                    .uri(&sa.token_uri)
-                    .header("content-type", "application/x-www-form-urlencoded")
-                    .header("content-length", form.len().to_string())
-                    .body(small(form))
-                    .map_err(err)?
-            }
-        };
-        let what = format!("access token for {}", self.spec.id);
-        let resp = tokio::time::timeout(Duration::from_secs(30), self.http.request(req))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, format!("{what}: timed out")))?
-            .map_err(|e| err(format!("{what}: {e}")))?;
-        let resp = Self::check(resp, &what).await?;
-        let body = resp.into_body().collect().await.map_err(err)?.to_bytes();
-        #[derive(Deserialize)]
-        struct Tok {
-            access_token: String,
-            #[serde(default)]
-            expires_in: u64,
-        }
-        let t: Tok = serde_json::from_slice(&body).map_err(|e| err(format!("{what}: {e}")))?;
-        let life = Duration::from_secs(t.expires_in.max(120) - 60);
-        *self.token.lock().unwrap() = Some((t.access_token.clone(), std::time::Instant::now() + life));
-        Ok(Some(t.access_token))
     }
 
     async fn send(

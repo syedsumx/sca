@@ -57,11 +57,27 @@ pub fn sign_with_payload(
     sign_full(method, url, payload, &[], ak, sk, region, now)
 }
 
-/// SigV4 headers, also signing `extra` headers (lower-case names, e.g. x-amz-copy-source, range).
+/// SigV4 headers for an S3 request, also signing `extra` headers (lower-case names, e.g. range).
 #[allow(clippy::too_many_arguments)]
 pub fn sign_full(
     method: &str,
     url: &str,
+    payload: &str,
+    extra: &[(&str, &str)],
+    ak: &str,
+    sk: &str,
+    region: &str,
+    now: time::OffsetDateTime,
+) -> Vec<(String, String)> {
+    sign_service(method, url, "s3", payload, extra, ak, sk, region, now)
+}
+
+/// SigV4 headers for a request to an AWS `service` (s3, sqs, ...), also signing `extra` headers.
+#[allow(clippy::too_many_arguments)]
+pub fn sign_service(
+    method: &str,
+    url: &str,
+    service: &str,
     payload: &str,
     extra: &[(&str, &str)],
     ak: &str,
@@ -94,10 +110,10 @@ pub fn sign_full(
     let lines: String = signed.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
     // The path as the URL carries it (encoded or not), in SigV4's encoding.
     let canonical = format!("{method}\n{}\n{cq}\n{lines}\n{names}\n{payload}", aws_encode(&crate::s3::auth::percent_decode(path), true));
-    let scope = format!("{date}/{region}/s3/aws4_request");
+    let scope = format!("{date}/{region}/{service}/aws4_request");
     let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
     let k = hmac_sha256(
-        &hmac_sha256(&hmac_sha256(&hmac_sha256(format!("AWS4{sk}").as_bytes(), date.as_bytes()), region.as_bytes()), b"s3"),
+        &hmac_sha256(&hmac_sha256(&hmac_sha256(format!("AWS4{sk}").as_bytes(), date.as_bytes()), region.as_bytes()), service.as_bytes()),
         b"aws4_request",
     );
     let sig = hex::encode(hmac_sha256(&k, to_sign.as_bytes()));

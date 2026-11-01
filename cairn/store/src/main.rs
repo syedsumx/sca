@@ -32,7 +32,7 @@
 //! CAIRN_STORE_ENCRYPT_BY_DEFAULT  with a keyring, encrypt new objects with SSE-S3 by default (true)
 //! CAIRN_STORE_SSE_C_ALLOW_HTTP  accept customer keys over plain HTTP, when TLS ends in front of the store (false)
 //! CAIRN_STORE_WEBSITE_DOMAIN    serve bucket websites at <bucket>.<domain> (public buckets only; off when empty)
-//! CAIRN_STORE_EVENT_TARGETS_FILE  event notification targets: [{"type": "webhook"|"kafka", "id": ..., ...}]
+//! CAIRN_STORE_EVENT_TARGETS_FILE  event notification targets: [{"type": "webhook"|"kafka"|"sqs"|"pubsub"|"nats", "id": ..., ...}]
 //! CAIRN_STORE_EVENT_MAX_AGE_HOURS  drop events still undeliverable after this long (168)
 //! CAIRN_STORE_LOG_REQUESTS      one JSON log line per request (false)
 //! CAIRN_STORE_ACCESS_LOG_FLUSH_SECONDS  how often server access logs are written to their target buckets (60)

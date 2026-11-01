@@ -522,7 +522,8 @@ cairn:
     # The Kubernetes service account the store pods run as, e.g. one bound to a Google service account
     # (GKE workload identity) for GCS remotes, sinks and tiers with "auth": "metadata".
     serviceAccountName: ""
-    # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka", "id": ...}]).
+    # Event notification targets: a Secret with a "targets.json" ([{"type": "webhook"|"kafka"|"sqs"|"pubsub"|"nats",
+    # "id": ...}]; see the administration guide). Its other keys are files next to it, for *_file settings.
     eventTargetsSecret: ""
     # Replication destinations: a Secret with a "targets.json" ([{"id", "endpoint", "access_key",
     # "secret_key", "region"}]); bucket replication rules name one as arn:cairn:store:::<id>.
