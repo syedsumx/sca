@@ -109,6 +109,7 @@ class Services:
     trino_tokens: Optional[Any] = None
     trino_outbox: Optional[Any] = None
     trino_usage: Optional[Any] = None
+    trino_catalog: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -352,6 +353,9 @@ class Services:
                     if self.trino_usage is not None:
                         self.trino_usage.flush()
                         self.trino_usage.prune()
+                    sync_every = float(os.environ.get("CAIRN_TRINO_CATALOG_SYNC_SECONDS", "3600"))
+                    if self.trino_catalog is not None and sync_every > 0:
+                        self.trino_catalog.run_due(sync_every)
                 except Exception:
                     logger.exception("held Trino lineage or usage could not be retried")
 
@@ -883,7 +887,9 @@ def _build_data_access(s: Services) -> None:
         return s.can_view(p)(urn) and s.authorize(p, "VIEW_DATASET_PROFILE", urn, raise_on_deny=False)
 
     def known(urn: str) -> bool:
-        return s.graph is not None and any(s.graph.get_aspect(urn, a) for a in ("schemaMetadata", "datasetProperties"))
+        if s.graph is None or (s.graph.get_aspect(urn, "status") or {}).get("removed"):
+            return False
+        return any(s.graph.get_aspect(urn, a) for a in ("schemaMetadata", "datasetProperties"))
 
     def on_read(actor: str, urns: list[str]) -> None:
         """Reads by AI (an MCP or assistant tool, or an agent's key) feed AI usage lineage."""
@@ -932,6 +938,9 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.trino_usage import TrinoUsage
 
             s.trino_usage = TrinoUsage(s.engine, s.graph, s.trino_access.urn)
+            from cairn.dataaccess.trino_catalog import TrinoCatalogSync
+
+            s.trino_catalog = TrinoCatalogSync(s.engine, s.graph, s.data_access, s.trino_access, s.audit)
 
     from cairn.dataaccess.ask import AskService
 

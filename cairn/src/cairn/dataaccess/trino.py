@@ -176,6 +176,11 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
     return null
 
 
+# Cairn's own catalog crawler (trino_catalog.py): it may see every table and column, and read no rows.
+# Only Cairn signs in as it; /v1/trino/token never issues a token for it.
+CRAWLER = "cairn-catalog"
+
+
 class TrinoAccess:
     """Turns Trino's access requests into Cairn decisions."""
 
@@ -186,11 +191,15 @@ class TrinoAccess:
         self.plan_for = plan_for
         self.catalogs = catalogs
 
-    def urn(self, catalog: str, schema: str, table: str) -> str:
+    def dataset_name(self, catalog: str, schema: str, table: str) -> tuple[str, str, str]:
+        """(platform, name, env) of a Trino table's dataset."""
         m = self.catalogs.get(catalog, CatalogMapping())
         db = catalog if m.database is None else m.database
-        name = ".".join(p for p in (db, schema, table) if p).lower()
-        return f"urn:li:dataset:(urn:li:dataPlatform:{m.platform},{name},{m.env})"
+        return m.platform, ".".join(p for p in (db, schema, table) if p).lower(), m.env
+
+    def urn(self, catalog: str, schema: str, table: str) -> str:
+        platform, name, env = self.dataset_name(catalog, schema, table)
+        return f"urn:li:dataset:(urn:li:dataPlatform:{platform},{name},{env})"
 
     @staticmethod
     def who(ctx: dict) -> tuple[str, list[str]]:
@@ -219,6 +228,10 @@ class TrinoAccess:
         user = actor.removeprefix("urn:li:corpuser:")
         if op in OPEN_OPS:
             return True
+        if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
+            t = res.get("table") or {}
+            meta = t.get("schemaName") == "information_schema" or t.get("catalogName") == "system"
+            return op in TABLE_OPS and (TABLE_OPS[op] == VIEW or (meta and TABLE_OPS[op] == READ))
         if op == "ImpersonateUser":
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
         if op in ("ViewQueryOwnedBy", "KillQueryOwnedBy"):
@@ -251,6 +264,9 @@ class TrinoAccess:
         user = actor.removeprefix("urn:li:corpuser:")
         if op in ("FilterCatalogs", "FilterSchemas", "FilterFunctions"):
             return list(range(len(items)))
+        if user == CRAWLER and op in ("FilterTables", "FilterColumns"):
+            t = (items[0] if items else {}).get("table") or {}
+            return list(range(len(t.get("columns") or []))) if op == "FilterColumns" else list(range(len(items)))
         if op == "FilterTables":
             return [i for i, r in enumerate(items) if r.get("table") and self.allowed(actor, groups, VIEW, self.table_urn(r["table"]))]
         if op == "FilterColumns":
@@ -320,7 +336,8 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
-                       current_principal=None, outbox=None, usage=None) -> APIRouter:
+                       current_principal=None, outbox=None, usage=None, catalog_sync=None,
+                       authorize=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -331,10 +348,30 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             """Trino's ``http-server.authentication.jwt.key-file``: the public key Cairn signs tokens with."""
             return tokens.jwks()
 
+        if catalog_sync is not None:
+            @router.post("/catalog-sync")
+            def catalog_sync_now(connection: str = Body(..., embed=True), p=Depends(current_principal)):
+                """Reads a Trino connection's tables into Cairn's catalog now."""
+                from cairn.dataaccess.service import DataAccessError
+                from cairn.dataaccess.trino_catalog import CatalogSyncError
+
+                authorize(p, "MANAGE_INGESTION", None)
+                try:
+                    return catalog_sync.sync(connection, p.urn)
+                except CatalogSyncError as e:
+                    raise HTTPException(e.status, str(e))
+                except DataAccessError as e:
+                    raise HTTPException(e.status if e.status != 403 else 502, f"Trino: {e}")
+
+            @router.get("/catalog-sync")
+            def catalog_sync_connections(p=Depends(current_principal)):
+                authorize(p, "MANAGE_INGESTION", None)
+                return {"connections": sorted(catalog_sync.connections())}
+
         @router.post("/token")
         def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):
             """A Trino sign-in token for the caller (BI tools, the Trino CLI, notebooks)."""
-            if p.is_service or p.via in ("agent", "extension"):
+            if p.is_service or p.via in ("agent", "extension") or p.urn == f"urn:li:corpuser:{CRAWLER}":
                 raise HTTPException(403, "Trino tokens are for people signed in to Cairn")
             try:
                 out = tokens.mint(p.urn, ttl_seconds)

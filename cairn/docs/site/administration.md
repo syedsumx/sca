@@ -838,6 +838,13 @@ A multi-table transaction changes every table or none.
   - **What counts as a read.** Only finished queries count. A failed or refused query, `EXPLAIN` and `DESCRIBE` do not, and neither do reads of Trino's own metadata (`system`, `information_schema`). Each query counts once, even when Trino resends it. Reads by `INSERT ... SELECT` count for the tables read; the write is lineage.
   - **Where counts live.** Cairn's database keeps them (`cairn_trino_usage`, 35 days), so a day's bucket adds up every API replica. A bucket Core cannot take now waits and is written by the retry loop, so a Core outage loses no usage.
   - **Tested** with Trino 476: ana's and bob's reads counted with their columns, and ana's refused read of `hr.salaries` not counted. Also tested against a real Cairn Core, including a query run while Core was stopped (counted once Core was back).
+- **Trino's tables in the catalog.** Cairn reads each Trino connection with `run_as_user` into its catalog, so the SQL editor and Ask-your-data can query those tables. (They serve only catalogued tables.)
+  - **How it reads.** Cairn reads `information_schema` and the table comments as its own crawler, `cairn-catalog`, signed in with a Cairn token. Cairn's access control lets the crawler see every table and column and read no rows. `/v1/trino/token` never issues a token for it.
+  - **What it writes.** Every table becomes a dataset: description, properties (`trino_catalog`, `trino_schema`, `trino_table`), schema with Trino's types and column comments, and subtype (`Table` or `View`). Datasets use the URNs that access control, lineage and usage use (`CAIRN_TRINO_CATALOGS`). Give the connection's `catalog` the same platform and database.
+  - **Dropped tables.** Tables gone since the last sync are marked removed, and the SQL editor then refuses them as not in the catalog.
+  - **When it runs.** Every `CAIRN_TRINO_CATALOG_SYNC_SECONDS` (3600; 0 turns it off), with each run claimed so one API replica does it. Run it now with `POST /v1/trino/catalog-sync {"connection": "lakehouse"}`, which needs `MANAGE_INGESTION`. Each run is audited (`trino.catalog_synced`).
+  - **The Trino connector in Ingestion.** It still works for a Trino Cairn does not sign in to; it needs the executor to install the `trino` plugin.
+  - **Tested** with Trino 476: typed columns, comments and views synced; the crawler refused `SELECT` on a hidden table; the SQL editor queried a synced table; a dropped table marked removed. Also tested against a real Cairn Core in Compose.
 - **The SQL editor and Ask-your-data on Trino.** Add a Trino connection with `run_as_user: true` (see `config/connections/connections.example.yml`):
 
   ```yaml

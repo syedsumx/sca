@@ -417,3 +417,44 @@ def test_numbers_and_dates_are_masked_for_the_caller(trino, cairn):
     assert rows[0]["t"] == "decimal(7,2)"
     admin = trino("SELECT CAST(salary AS varchar) AS salary FROM sales.people ORDER BY id")
     assert admin[0]["salary"] == "98765.43"
+
+
+def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
+    """Cairn reads the connection's tables as its crawler (structure only) and writes them to the catalog
+    under the URNs access control uses; dropped tables are marked removed; the SQL editor can then query
+    a table nobody catalogued by hand."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.returns (id BIGINT, reason VARCHAR, amount DECIMAL(10,2), day DATE) "
+          "COMMENT 'Customer returns'")
+    trino("INSERT INTO lake.sales.returns VALUES (1, 'damaged', 9.99, DATE '2026-10-01')")
+    trino("CREATE TABLE lake.sales.scratch AS SELECT 1 AS x")
+    out = s.trino_catalog.sync("lakehouse", "urn:li:corpuser:admin")
+    assert out["catalog"] == "lake" and out["tables"] >= 4 and out["removed"] == 0, out
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.returns,PROD)"
+    schema = s.graph.get_aspect(urn, "schemaMetadata")
+    assert [(f["fieldPath"], f["nativeDataType"]) for f in schema["fields"]] == [
+        ("id", "bigint"), ("reason", "varchar"), ("amount", "decimal(10,2)"), ("day", "date")]
+    assert schema["fields"][2]["type"] == {"type": {"com.linkedin.schema.NumberType": {}}}
+    props = s.graph.get_aspect(urn, "datasetProperties")
+    assert props["description"] == "Customer returns" and props["customProperties"]["trino_table"] == "returns"
+    assert s.graph.get_aspect(urn, "subTypes") == {"typeNames": ["Table"]}
+    # Hidden from ana, but the crawler saw it: structure is catalogued, its rows were never read.
+    assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)", "schemaMetadata")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="cairn-catalog", token=s.trino_tokens.mint("urn:li:corpuser:cairn-catalog")["token"])
+    # The SQL editor queries the synced table.
+    rows = s.data_access.query("urn:li:corpuser:ana", "SELECT id, reason FROM sales.returns", connection="lakehouse")["rows"]
+    assert rows == [[1, "damaged"]]
+    # A dropped table is marked removed on the next sync.
+    trino("DROP TABLE lake.sales.scratch")
+    again = s.trino_catalog.sync("lakehouse", "urn:li:corpuser:admin")
+    assert again["removed"] == 1
+    assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.scratch,PROD)", "status") == {"removed": True}
+    with pytest.raises(DataAccessError, match="not in the catalog"):  # Cairn refuses before Trino is asked
+        s.data_access.query("urn:li:corpuser:ana", "SELECT * FROM sales.scratch", connection="lakehouse")

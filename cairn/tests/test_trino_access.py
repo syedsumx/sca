@@ -317,3 +317,27 @@ def test_usage_waits_while_the_metadata_store_is_down(client, graph, monkeypatch
     monkeypatch.setattr(graph, "emit", real)
     assert client.app.state.services.trino_usage.flush() == 2  # the retry loop's call
     assert graph.get_timeseries(NATION, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] == 1
+
+
+def test_the_catalog_crawler_sees_structure_and_reads_no_rows(client):
+    c = client
+    assert ask(c, "allow", "cairn-catalog", "ShowColumns", table("salaries", "hr")) is True
+    assert ask(c, "allow", "cairn-catalog", "SelectFromColumns", table("tables", "information_schema", columns=["x"])) is True
+    assert ask(c, "allow", "cairn-catalog", "SelectFromColumns", table("salaries", "hr", columns=["salary"])) is False
+    assert ask(c, "allow", "cairn-catalog", "InsertIntoTable", table("orders")) is False
+    assert ask(c, "allow", "cairn-catalog", "CreateSchema", {"schema": {"catalogName": "lakehouse", "schemaName": "x"}}) is False
+    tables = [table("orders"), table("salaries", "hr")]
+    assert ask(c, "batch", "cairn-catalog", "FilterTables", filterResources=tables) == [0, 1]
+    assert ask(c, "batch", "cairn-catalog", "FilterColumns", filterResources=[table("salaries", "hr", columns=["a", "b"])]) == [0, 1]
+    # Nobody gets a token for the crawler: only Cairn signs in as it.
+    r = c.post("/v1/trino/token", headers={"X-Cairn-Actor": "urn:li:corpuser:cairn-catalog"})
+    assert r.status_code == 403
+
+
+def test_trino_types_become_catalog_types():
+    from cairn.dataaccess.trino_catalog import field_type
+
+    assert [field_type(t) for t in ("varchar(10)", "bigint", "decimal(10,2)", "boolean", "date",
+                                    "timestamp(6) with time zone", "array(integer)", "map(varchar, bigint)",
+                                    "row(a integer)", "varbinary", "json")] == [
+        "string", "number", "number", "boolean", "date", "time", "array", "map", "record", "bytes", "string"]

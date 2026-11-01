@@ -208,7 +208,12 @@ class DataAccessService:
 
     def _execute_as(self, definition: dict, sql: str, limit: int, actor: str) -> tuple[list[str], list[list[Any]], bool]:
         """Runs ``sql`` on Trino with the caller as the query's user (``run_as_user``)."""
-        from urllib.parse import unquote, urlsplit
+        return self.run_on_trino(definition, actor, sql, limit)
+
+    def run_on_trino(self, definition: dict, actor: str, sql: str, limit: int) -> tuple[list[str], list[list[Any]], bool]:
+        """Runs ``sql`` on a trino:// connection as ``actor``: signed in with a short Cairn token (or, with a
+        password in the URL, as that user impersonating ``actor``)."""
+        from urllib.parse import parse_qs, unquote, urlsplit
 
         try:
             import trino
@@ -222,8 +227,6 @@ class DataAccessService:
         user = actor.removeprefix("urn:li:corpuser:")
         if not user or user == actor:
             raise DataAccessError("queries on this connection run as a Cairn user", 403)
-        from urllib.parse import parse_qs
-
         opts = {k: v[-1] for k, v in parse_qs(url.query).items()}
         scheme = opts.get("protocol", "http")
         if scheme not in ("http", "https"):
