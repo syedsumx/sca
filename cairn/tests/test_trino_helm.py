@@ -29,7 +29,7 @@ def render(api_port, catalog_port, store_port):
     out = subprocess.run([HELM, "template", RELEASE, "helm/cairn", "--set", "cairn.store.enabled=true",
                           "--set", "cairn.catalog.enabled=true", "--set", "cairn.trino.enabled=true",
                           "--set", "cairn.trino.tls.secretName=trino-tls", "--set", "cairn.trino.workers=1",
-                          "--set", "cairn.trino.queryMaxMemory=1GB",
+                          "--set", "cairn.trino.queryMaxMemory=1GB", "--set", "cairn.trino.gracefulShutdownSeconds=5",
                           "--set", f"cairn.api.port={api_port}", "--set", f"cairn.catalog.port={catalog_port}",
                           "--set", f"cairn.store.port={store_port}"],
                          cwd=ROOT, capture_output=True, text=True, timeout=300)
@@ -104,6 +104,7 @@ def cluster(lake, cairn):  # noqa: F811
         out = []
         for m in container.get("volumeMounts") or []:
             src = {"config": f"{d}/{m.get('subPath', '')}", "tls": f"{d}/tls", "tls-src": f"{d}/tls-src"}[m["name"]]
+            assert m["name"] != "config" or m.get("subPath") in cm, f"{m.get('subPath')} is not in the ConfigMap"
             out += ["-v", f"{src}:{m['mountPath']}{':ro' if m.get('readOnly') else ''}"]
         return out
 
@@ -124,28 +125,35 @@ def cluster(lake, cairn):  # noqa: F811
         started.append(cname)
         return cname
 
-    coordinator = run("coordinator", coord, alias=f"{RELEASE}-cairn-trino")
-    run("worker", worker)
-    end = time.time() + 300
-    while True:
-        logs = subprocess.run(["docker", "logs", coordinator], capture_output=True, text=True).stderr
-        if "SERVER STARTED" in logs:
-            break
-        assert "Configuration errors" not in logs and "Error injecting" not in logs, logs[-4000:]
-        assert time.time() < end, "the coordinator did not start"
-        time.sleep(1)
+    def start_coordinator():
+        name = run(f"coordinator-{len(started)}", coord, alias=f"{RELEASE}-cairn-trino")
+        end = time.time() + 300
+        while True:
+            logs = subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr
+            if "SERVER STARTED" in logs:
+                return name
+            assert "Configuration errors" not in logs and "Error injecting" not in logs, logs[-4000:]
+            assert time.time() < end, "the coordinator did not start"
+            time.sleep(1)
+
     https = cm["config.properties"].split("http-server.https.port=")[1].split()[0]
 
-    def sql(statement, user="admin"):
+    def command(statement, user="admin", source=None):
         token = services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
-        out = subprocess.run(["docker", "exec", coordinator, "trino", "--server", f"https://localhost:{https}", "--insecure",
-                              "--access-token", token, "--user", user, "--catalog", "lakehouse", "--output-format", "JSON",
-                              "--execute", statement], capture_output=True, text=True, timeout=300)
+        return ["docker", "exec", sql.coordinator, "trino", "--server", f"https://localhost:{https}", "--insecure",
+                "--access-token", token, "--user", user, "--catalog", "lakehouse", "--output-format", "JSON",
+                *(["--source", source] if source else []), "--execute", statement]
+
+    def sql(statement, user="admin", source=None):
+        out = subprocess.run(command(statement, user, source), capture_output=True, text=True, timeout=300)
         if out.returncode != 0:
             raise RuntimeError(out.stderr.strip().splitlines()[-1] if out.stderr.strip() else out.stdout)
         return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
 
-    sql.coordinator = coordinator
+    sql.coordinator = start_coordinator()
+    sql.worker = run("worker-0", worker)
+    sql.command, sql.run, sql.start_coordinator = command, run, start_coordinator
+    sql.worker_spec, sql.started = worker, started
     yield sql
     for c in started:
         subprocess.run(["docker", "rm", "-f", c], capture_output=True, timeout=60)
@@ -188,3 +196,67 @@ def test_the_rendered_chart_runs_trino_with_sign_in_access_control_and_a_worker(
         time.sleep(0.5)
     usage = s.graph.get_timeseries(orders, "datasetUsageStatistics", 1)
     assert usage and "urn:li:corpuser:ana" in {u["user"] for u in usage[0]["userCounts"]}, usage
+
+
+
+def active_nodes(sql):
+    return sql("SELECT node_id, coordinator FROM system.runtime.nodes WHERE state = 'active'")
+
+
+def test_resource_groups_from_the_chart(cluster):
+    sql = cluster
+    # Compose runs the same groups as the chart.
+    deploy = json.load(open(os.path.join(ROOT, "deploy", "trino", "resource-groups.json")))
+    rendered = render(8800, 8181, 8333)[("ConfigMap", f"{RELEASE}-cairn-trino")]["data"]["resource-groups.json"]
+    assert deploy == json.loads(rendered)
+    sql("SELECT 1", source="cairn")
+    sql("SELECT 2", user="ana")
+    sql("SELECT 3", source="dbt-core")
+    rows = sql("SELECT query, array_join(resource_group_id, '.') AS resource_group_id FROM system.runtime.queries "
+               "WHERE query IN ('SELECT 1', 'SELECT 2', 'SELECT 3')")
+    groups = {r["query"]: r["resource_group_id"] for r in rows}
+    assert groups["SELECT 1"] == "global.cairn"
+    assert groups["SELECT 2"] == "global.adhoc.ana"
+    assert groups["SELECT 3"] == "global.pipelines"
+
+
+def test_a_worker_drains_before_it_leaves_and_a_new_coordinator_takes_over(cluster, cairn):  # noqa: F811
+    """Scaling in runs the worker's preStop hook: the worker stops taking work, finishes the running query
+    and leaves. Then the coordinator is replaced (as Kubernetes would after a crash): a new one starts from
+    the same spec, a worker joins it, and the lakehouse, sign-in and policies are all still there."""
+    sql = cluster
+    end = time.time() + 120
+    while len(active_nodes(sql)) < 2:
+        assert time.time() < end, "the worker did not join"
+        time.sleep(2)
+    # A query long enough to be running when the worker is told to go.
+    long = subprocess.Popen(sql.command("SELECT count(*) AS n FROM UNNEST(sequence(1, 10000)) AS a(x) "
+                                        "CROSS JOIN UNNEST(sequence(1, 10000)) AS b(y) CROSS JOIN UNNEST(sequence(1, 8)) AS c(z)"),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    end = time.time() + 60
+    while not sql("SELECT query_id FROM system.runtime.queries WHERE state = 'RUNNING' AND query LIKE '%sequence(1, 8)%'"):
+        assert time.time() < end and long.poll() is None, "the query did not start"
+        time.sleep(0.5)
+    hook = sql.worker_spec["containers"][0]["lifecycle"]["preStop"]["exec"]["command"]
+    drain = subprocess.Popen(["docker", "exec", sql.worker, *hook], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    out, err = long.communicate(timeout=300)
+    assert long.returncode == 0, err
+    assert json.loads(out.strip().splitlines()[-1]) == {"n": 800000000}  # finished on the draining worker
+    drain.wait(timeout=180)
+    end = time.time() + 120
+    while subprocess.run(["docker", "inspect", sql.worker], capture_output=True).returncode == 0:
+        if time.time() > end:
+            logs = subprocess.run(["docker", "logs", "--tail", "40", sql.worker], capture_output=True, text=True)
+            raise AssertionError(f"the drained worker did not leave: hook rc={drain.returncode} {drain.stdout.read()} "
+                                 f"{drain.stderr.read()}\n{logs.stdout}{logs.stderr}")
+        time.sleep(2)
+    # The coordinator goes; a new one comes up from the same spec and a new worker joins it.
+    subprocess.run(["docker", "rm", "-f", sql.coordinator], capture_output=True, timeout=60)
+    sql.coordinator = sql.start_coordinator()
+    sql.worker = sql.run("worker-1", sql.worker_spec)
+    end = time.time() + 120
+    while len(active_nodes(sql)) < 2:
+        assert time.time() < end, "no worker joined the new coordinator"
+        time.sleep(2)
+    # Tables live in Cairn Catalog and Cairn Store, sign-in and policies in Cairn: nothing was lost.
+    assert [r["email"] for r in sql("SELECT email FROM sales.orders ORDER BY id", user="ana")] == ["j•••@•••.com", "b•••@•••.org"]

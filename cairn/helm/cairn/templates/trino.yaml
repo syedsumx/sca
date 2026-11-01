@@ -30,6 +30,7 @@ data:
     query.max-memory={{ $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
     # Sign-in: tokens Cairn issues, checked against Cairn's public key.
     http-server.authentication.type=JWT
     http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
@@ -48,6 +49,20 @@ data:
     discovery.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+  {{- if $u.resourceGroups }}
+  resource-groups.properties: |
+    resource-groups.configuration-manager=file
+    resource-groups.config-file=/etc/trino/resource-groups.json
+  resource-groups.json: |
+    {{- toPrettyJson $u.resourceGroups | nindent 4 }}
+  {{- end }}
+  # Workers check no queries (the coordinator asks Cairn); their only rule lets the preStop hook drain them.
+  worker-access-control.properties: |
+    access-control.name=file
+    security.config-file=/etc/trino/worker-rules.json
+  worker-rules.json: |
+    {"system_information": [{"user": "cairn-drain", "allow": ["read", "write"]}]}
   access-control.properties: |
     access-control.name=opa
     opa.policy.uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/allow
@@ -94,7 +109,7 @@ spec:
       labels:
         {{- include "cairn.componentLabels" $ctx | nindent 8 }}
       annotations:
-        checksum/config: {{ printf "%s%s%s%s%v" $u.port $u.queryMaxMemory $s3 $tls $u.tokenIssuer | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%s%v%s%v" $u.port $u.queryMaxMemory $s3 $tls $u.tokenIssuer (toJson $u.resourceGroups) $u.gracefulShutdownSeconds | sha256sum }}
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.cairn.imagePullSecrets }}
@@ -178,6 +193,16 @@ spec:
               mountPath: /etc/trino/usage-listener.properties
               subPath: usage-listener.properties
               readOnly: true
+            {{- if $u.resourceGroups }}
+            - name: config
+              mountPath: /etc/trino/resource-groups.properties
+              subPath: resource-groups.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/resource-groups.json
+              subPath: resource-groups.json
+              readOnly: true
+            {{- end }}
             - name: config
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
@@ -214,7 +239,9 @@ metadata:
   labels:
     {{- include "cairn.componentLabels" $wctx | nindent 4 }}
 spec:
+  {{- if not $u.autoscaling.enabled }}
   replicas: {{ $u.workers }}
+  {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:
@@ -224,7 +251,7 @@ spec:
       labels:
         {{- include "cairn.componentLabels" $wctx | nindent 8 }}
       annotations:
-        checksum/config: {{ printf "%s%s%s" $u.port $u.queryMaxMemory $s3 | sha256sum }}
+        checksum/config: {{ printf "%s%s%s%v" $u.port $u.queryMaxMemory $s3 $u.gracefulShutdownSeconds | sha256sum }}
     spec:
       automountServiceAccountToken: false
       {{- with .Values.global.cairn.imagePullSecrets }}
@@ -235,6 +262,8 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      # Room to finish running work: Trino waits the grace period twice (before and after its tasks end).
+      terminationGracePeriodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}
       containers:
         - name: trino
           image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
@@ -252,6 +281,11 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+          lifecycle:
+            preStop:
+              # Stop taking work, finish what runs, then leave (Trino's graceful shutdown).
+              exec:
+                command: ["/bin/sh", "-c", "curl -sf -X PUT -H 'Content-Type: application/json' -H 'X-Trino-User: cairn-drain' -d '\"SHUTTING_DOWN\"' http://localhost:{{ $u.port }}/v1/info/state && while curl -sf http://localhost:{{ $u.port }}/v1/info >/dev/null; do sleep 2; done"]
           ports:
             - name: http
               containerPort: {{ $u.port }}
@@ -268,6 +302,14 @@ spec:
             - name: config
               mountPath: /etc/trino/config.properties
               subPath: worker.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/access-control.properties
+              subPath: worker-access-control.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/worker-rules.json
+              subPath: worker-rules.json
               readOnly: true
             - name: config
               mountPath: /etc/trino/catalog/lakehouse.properties
@@ -308,4 +350,50 @@ spec:
       targetPort: https
       protocol: TCP
     {{- end }}
+{{- if gt (int $u.workers) 0 }}
+---
+# Drains and upgrades take workers one at a time (each finishes its running work first).
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "cairn.componentName" $wctx }}
+  labels:
+    {{- include "cairn.componentLabels" $wctx | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $wctx | nindent 6 }}
+{{- end }}
+{{- if $u.autoscaling.enabled }}
+{{- if lt (int $u.workers) 1 }}{{ fail "cairn.trino.autoscaling needs workers (cairn.trino.workers >= 1)" }}{{ end }}
+{{- if lt (int $u.autoscaling.maxWorkers) (int $u.autoscaling.minWorkers) }}{{ fail "cairn.trino.autoscaling.maxWorkers is below minWorkers" }}{{ end }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "cairn.componentName" $wctx }}
+  labels:
+    {{- include "cairn.componentLabels" $wctx | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "cairn.componentName" $wctx }}
+  minReplicas: {{ $u.autoscaling.minWorkers }}
+  maxReplicas: {{ $u.autoscaling.maxWorkers }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $u.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    # Scale in slowly: each removed worker drains for up to gracefulShutdownSeconds.
+    scaleDown:
+      stabilizationWindowSeconds: 600
+      policies:
+        - {type: Pods, value: 1, periodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}}
+{{- end }}
 {{- end }}

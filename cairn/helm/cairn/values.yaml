@@ -672,6 +672,37 @@ cairn:
     queryMaxMemory: 2GB
     # Worker pods besides the coordinator (0: the coordinator runs queries itself).
     workers: 0
+    # Workers scale between minWorkers and maxWorkers on CPU (a HorizontalPodAutoscaler; set workers to
+    # at least minWorkers). A worker that is removed stops taking work and finishes what it runs first
+    # (gracefulShutdownSeconds), so scaling in fails no query.
+    autoscaling:
+      enabled: false
+      minWorkers: 1
+      maxWorkers: 10
+      targetCPUUtilizationPercentage: 70
+    gracefulShutdownSeconds: 120
+    # Resource groups: queues and limits per kind of work. Cairn's own queries (the SQL editor,
+    # Ask-your-data and the catalog crawler, source "cairn"), pipelines (source airflow, dbt or etl…)
+    # and everyone else, each person in their own group. Trino's resource-groups JSON; {} turns it off.
+    resourceGroups:
+      rootGroups:
+        - name: global
+          softMemoryLimit: 90%
+          hardConcurrencyLimit: 100
+          maxQueued: 1000
+          subGroups:
+            - {name: cairn, softMemoryLimit: 30%, hardConcurrencyLimit: 10, maxQueued: 200}
+            - {name: pipelines, softMemoryLimit: 60%, hardConcurrencyLimit: 20, maxQueued: 500}
+            - name: adhoc
+              softMemoryLimit: 50%
+              hardConcurrencyLimit: 50
+              maxQueued: 500
+              subGroups:
+                - {name: "${USER}", softMemoryLimit: 20%, hardConcurrencyLimit: 5, maxQueued: 50}
+      selectors:
+        - {source: "cairn", group: global.cairn}
+        - {source: "(?i)(airflow|dbt|etl|dagster|prefect).*", group: global.pipelines}
+        - {group: "global.adhoc.${USER}"}
     # Trino asks Cairn's policy engine before every action (Trino's OPA access-control plugin): a Secret
     # with the key both share (at least 24 characters). Required: Trino is not deployed without it.
     accessKeySecret:
