@@ -167,6 +167,9 @@ def trino(lake, cairn):
         f"openlineage-event-listener.transport.url={cairn_url}",
         f"openlineage-event-listener.transport.endpoint=/v1/trino/{KEY}/lineage",
         f"openlineage-event-listener.trino.uri=http://127.0.0.1:{tp}", ""]))
+    open(f"{d}/usage-listener.properties", "w").write("\n".join([
+        "event-listener.name=http", "http-event-listener.log-completed=true",
+        f"http-event-listener.connect-ingest-uri={cairn_url}/v1/trino/{KEY}/queries", ""]))
     # Clients sign in over TLS with Cairn's tokens; plain HTTP is only for Trino's own nodes.
     tls = port()
     write_tls(d)
@@ -176,13 +179,15 @@ def trino(lake, cairn):
         "http-server.https.keystore.path=/etc/trino/tls.pem", "http-server.authentication.type=JWT",
         f"http-server.authentication.jwt.key-file={cairn_url}/v1/trino/jwks.json",
         "http-server.authentication.jwt.required-issuer=cairn", "http-server.authentication.jwt.required-audience=trino",
-        "internal-communication.shared-secret=" + "s" * 32, ""]))
+        "internal-communication.shared-secret=" + "s" * 32,
+        "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                     "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
+                    "-v", f"{d}/usage-listener.properties:/etc/trino/usage-listener.properties:ro",
                     "-v", f"{d}/tls.pem:/etc/trino/tls.pem:ro", TRINO],
                    check=True, capture_output=True, timeout=600)
     end = time.time() + 240
@@ -326,3 +331,34 @@ def test_trino_only_believes_cairns_tokens(trino, cairn):
                           "-H", "X-Trino-User: ana", "-X", "POST", "-d", "SELECT 1", f"http://127.0.0.1:{trino.port}/v1/statement"],
                          capture_output=True, text=True, timeout=30)
     assert out.stdout in ("401", "403"), out.stdout
+
+
+def test_reads_become_usage(trino, cairn):
+    """Who read what, from Trino's HTTP event listener: each dataset's usage statistics count the queries,
+    the users and the columns read."""
+    _, s = cairn
+    trino("SELECT id, region FROM sales.orders", user="ana")
+    trino("SELECT region FROM sales.orders WHERE region = 'EU'", user="bob")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+    end = time.time() + 30
+    usage = {}
+    while time.time() < end:
+        rows = s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)
+        usage = rows[0] if rows else {}
+        users = {u["user"] for u in usage.get("userCounts") or []}
+        if {"urn:li:corpuser:ana", "urn:li:corpuser:bob"} <= users:
+            break
+        time.sleep(0.5)
+    users = {u["user"]: u["count"] for u in usage.get("userCounts") or []}
+    assert users.get("urn:li:corpuser:ana", 0) >= 1 and users.get("urn:li:corpuser:bob", 0) >= 1, usage
+    fields = {f["fieldPath"]: f["count"] for f in usage["fieldCounts"]}
+    assert fields["region"] >= 2 and "id" in fields
+    # A refused read is not usage.
+    before = usage["totalSqlQueries"]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM hr.salaries", user="ana")
+    time.sleep(3)
+    hr = "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
+    assert all(u["user"] != "urn:li:corpuser:ana" for r in s.graph.get_timeseries(hr, "datasetUsageStatistics", 5)
+               for u in r.get("userCounts") or [])
+    assert s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] >= before

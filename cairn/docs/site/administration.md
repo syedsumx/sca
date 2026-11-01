@@ -827,6 +827,11 @@ A multi-table transaction changes every table or none.
   - The job records the tables the query read and wrote, column-level lineage (which source columns feed which output columns), and the SQL.
   - Datasets carry the same URNs as access control, so lineage, policies and masking refer to the same datasets.
   - Tested with Trino 476: a `CREATE TABLE AS` and an `INSERT` recorded as two runs of one job, with `by_region.region` traced to `orders.region`.
+- **Who reads what (usage).** Trino's HTTP event listener (`deploy/trino/usage-listener.properties`, on in Compose and Helm next to the lineage listener) sends every finished query to Cairn: who ran it, and the tables and columns it read. OpenLineage events do not name the user, so lineage alone cannot say who read a table.
+  - **What Cairn records.** Each dataset's usage statistics (`datasetUsageStatistics`, one bucket per day): the number of queries, the distinct users, each user's count and how often each column was read. The usage tab, popularity and the AI steward's evidence read them.
+  - **What counts as a read.** Only finished queries count. A failed or refused query, `EXPLAIN` and `DESCRIBE` do not, and neither do reads of Trino's own metadata (`system`, `information_schema`). Each query counts once, even when Trino resends it. Reads by `INSERT ... SELECT` count for the tables read; the write is lineage.
+  - **Where counts live.** Cairn's database keeps them (`cairn_trino_usage`, 35 days), so a day's bucket adds up every API replica. A bucket Core cannot take now waits and is written by the retry loop, so a Core outage loses no usage.
+  - **Tested** with Trino 476: ana's and bob's reads counted with their columns, and ana's refused read of `hr.salaries` not counted. Also tested against a real Cairn Core, including a query run while Core was stopped (counted once Core was back).
 - **The SQL editor and Ask-your-data on Trino.** Add a Trino connection with `run_as_user: true` (see `config/connections/connections.example.yml`):
 
   ```yaml

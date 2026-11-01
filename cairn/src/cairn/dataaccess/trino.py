@@ -255,7 +255,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
-                       current_principal=None, outbox=None) -> APIRouter:
+                       current_principal=None, outbox=None, usage=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -333,6 +333,23 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                 except Exception as e2:
                     logger.error("trino lineage could not be held either: %s", e2)
             raise HTTPException(503, "lineage could not be recorded: the metadata store is unavailable")
+
+    @router.post("/{given}/queries")
+    async def queries(given: str, request: Request):
+        """Trino's HTTP event listener: each finished query, for usage statistics (who read what)."""
+        check(given)
+        if usage is None:
+            raise HTTPException(503, "usage is not available")
+        from cairn.dataaccess.trino_usage import UsageError
+
+        try:
+            event = await request.json()
+        except ValueError:
+            raise HTTPException(400, "the body is not JSON")
+        try:
+            return usage.record(event)
+        except UsageError as e:
+            raise HTTPException(422, str(e))
 
     @router.post("/{given}/column-mask")
     async def column_mask(given: str, request: Request):

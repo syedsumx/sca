@@ -108,6 +108,7 @@ class Services:
     trino_key: str = ""
     trino_tokens: Optional[Any] = None
     trino_outbox: Optional[Any] = None
+    trino_usage: Optional[Any] = None
     history: Optional[Any] = None
     history_consumer: Any = None
     traces: Optional[Any] = None
@@ -346,12 +347,16 @@ class Services:
             every = float(os.environ.get("CAIRN_TRINO_LINEAGE_RETRY_SECONDS", "15"))
             while not stop.wait(every):
                 try:
-                    self.trino_outbox.drain()
+                    if self.openlineage is not None:
+                        self.trino_outbox.drain()
+                    if self.trino_usage is not None:
+                        self.trino_usage.flush()
+                        self.trino_usage.prune()
                 except Exception:
-                    logger.exception("held Trino lineage could not be retried")
+                    logger.exception("held Trino lineage or usage could not be retried")
 
         targets = [policy_loop, workflow_loop, layers_loop]
-        if self.trino_outbox is not None and self.openlineage is not None:
+        if self.trino_outbox is not None:
             targets.append(trino_lineage_loop)
         if bootstrap_catalog:
             targets.append(lambda: self.bootstrap_catalog(stop))
@@ -923,6 +928,10 @@ def _build_data_access(s: Services) -> None:
 
         s.trino_outbox = LineageOutbox(s.engine, lambda events: s.openlineage.handle_many(events, LINEAGE_ACTOR),
                                        s.audit, int(os.environ.get("CAIRN_TRINO_LINEAGE_MAX_AGE_SECONDS", str(7 * 86400))))
+        if s.graph is not None:
+            from cairn.dataaccess.trino_usage import TrinoUsage
+
+            s.trino_usage = TrinoUsage(s.engine, s.graph, s.trino_access.urn)
 
     from cairn.dataaccess.ask import AskService
 

@@ -29,6 +29,7 @@ data:
     discovery.uri=http://localhost:{{ $u.port }}
     query.max-memory={{ $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     # Sign-in: tokens Cairn issues, checked against Cairn's public key.
     http-server.authentication.type=JWT
     http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
@@ -59,6 +60,10 @@ data:
     openlineage-event-listener.transport.url={{ $api }}
     openlineage-event-listener.transport.endpoint=/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/lineage
     openlineage-event-listener.trino.uri=http://{{ include "cairn.componentName" $ctx }}:{{ $u.port }}
+  usage-listener.properties: |
+    event-listener.name=http
+    http-event-listener.log-completed=true
+    http-event-listener.connect-ingest-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/queries
   lakehouse.properties: |
     connector.name=iceberg
     iceberg.catalog.type=rest
@@ -168,6 +173,10 @@ spec:
             - name: config
               mountPath: /etc/trino/event-listener.properties
               subPath: event-listener.properties
+              readOnly: true
+            - name: config
+              mountPath: /etc/trino/usage-listener.properties
+              subPath: usage-listener.properties
               readOnly: true
             - name: config
               mountPath: /etc/trino/catalog/lakehouse.properties

@@ -252,3 +252,62 @@ def test_every_replica_signs_with_the_one_key(settings, graph):
         TrinoTokens(engine, "another-key-" + "z" * 24, "cairn").jwks()
     with pytest.raises(ValueError):
         a.mint("urn:li:corpGroup:analysts")
+
+
+def _completed(**changes):
+    """A real QueryCompletedEvent from Trino 476's HTTP event listener (tests/data), with changes."""
+    import copy
+    import json
+    import os
+
+    e = json.load(open(os.path.join(os.path.dirname(__file__), "data", "trino_query_completed.json")))
+    e = copy.deepcopy(e)
+    for path, value in changes.items():
+        obj, *keys = path.split("__")
+        target = e[obj]
+        for k in keys[:-1]:
+            target = target[k]
+        target[keys[-1]] = value
+    return e
+
+
+NATION = "urn:li:dataset:(urn:li:dataPlatform:trino,tpch.tiny.nation,PROD)"
+
+
+def test_reads_become_usage_statistics(client, graph):
+    post = lambda e: client.post(f"/v1/trino/{KEY}/queries", json=e)  # noqa: E731
+    r = post(_completed())
+    assert r.status_code == 200 and r.json()["datasets"] == 2 and r.json()["written"] == 2, r.text
+    usage = graph.get_timeseries(NATION, "datasetUsageStatistics", 1)[0]
+    assert usage["totalSqlQueries"] == 1 and usage["uniqueUserCount"] == 1
+    assert usage["userCounts"] == [{"user": ANA, "count": 1}]
+    assert {f["fieldPath"] for f in usage["fieldCounts"]} == {"name", "regionkey"}
+    assert usage["eventGranularity"] == {"unit": "DAY", "multiple": 1}
+    # Trino resends an event it thinks was lost: counted once.
+    assert post(_completed()).json().get("duplicate") is True
+    # Bob reads it too, twice; the day's bucket adds up.
+    post(_completed(metadata__queryId="q-bob-1", context__user="bob"))
+    post(_completed(metadata__queryId="q-bob-2", context__user="bob"))
+    usage = graph.get_timeseries(NATION, "datasetUsageStatistics", 1)[0]
+    assert usage["totalSqlQueries"] == 3 and usage["uniqueUserCount"] == 2
+    assert usage["userCounts"][0] == {"user": BOB, "count": 2}
+    # Failed queries, EXPLAIN and Trino's own metadata are not reads.
+    assert post(_completed(metadata__queryId="q-f", metadata__queryState="FAILED")).json()["datasets"] == 0
+    assert post(_completed(metadata__queryId="q-e", context__queryType="EXPLAIN")).json()["datasets"] == 0
+    meta = _completed(metadata__queryId="q-i")
+    for i in meta["ioMetadata"]["inputs"]:
+        i["schema"] = "information_schema"
+    assert post(meta).json()["datasets"] == 0
+    assert post({"nope": 1}).status_code == 422
+    assert client.post("/v1/trino/wrong-key/queries", json=_completed()).status_code == 404
+
+
+def test_usage_waits_while_the_metadata_store_is_down(client, graph, monkeypatch):
+    real = graph.emit
+    monkeypatch.setattr(graph, "emit", lambda _m: (_ for _ in ()).throw(OSError("down")))
+    r = client.post(f"/v1/trino/{KEY}/queries", json=_completed(metadata__queryId="q-down"))
+    assert r.status_code == 200 and r.json()["written"] == 0
+    assert graph.get_timeseries(NATION, "datasetUsageStatistics", 1) == []
+    monkeypatch.setattr(graph, "emit", real)
+    assert client.app.state.services.trino_usage.flush() == 2  # the retry loop's call
+    assert graph.get_timeseries(NATION, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] == 1

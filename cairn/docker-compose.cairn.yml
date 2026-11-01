@@ -630,6 +630,7 @@ services:
       - ./deploy/trino/config.properties:/etc/trino/config.properties:ro
       - ./deploy/trino/access-control.properties:/etc/trino/access-control.properties:ro
       - ./deploy/trino/event-listener.properties:/etc/trino/event-listener.properties:ro
+      - ./deploy/trino/usage-listener.properties:/etc/trino/usage-listener.properties:ro
       - ./deploy/trino/catalog:/etc/trino/catalog:ro
     ports:
       # HTTPS with a Cairn token: get one with POST /v1/trino/token (or the SQL editor does it for you).

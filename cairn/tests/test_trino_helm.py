@@ -181,3 +181,10 @@ def test_the_rendered_chart_runs_trino_with_sign_in_access_control_and_a_worker(
     while time.time() < end and not s.graph.get_aspect(job, "dataJobInputOutput"):
         time.sleep(0.5)
     assert s.graph.get_aspect(job, "dataJobInputOutput"), [u for u, a in s.graph.aspects if "dataJob" in u]
+    # Usage through the chart's HTTP event listener: ana's read above is counted.
+    orders = "urn:li:dataset:(urn:li:dataPlatform:trino,lakehouse.sales.orders,PROD)"
+    end = time.time() + 30
+    while time.time() < end and not s.graph.get_timeseries(orders, "datasetUsageStatistics", 1):
+        time.sleep(0.5)
+    usage = s.graph.get_timeseries(orders, "datasetUsageStatistics", 1)
+    assert usage and "urn:li:corpuser:ana" in {u["user"] for u in usage[0]["userCounts"]}, usage
