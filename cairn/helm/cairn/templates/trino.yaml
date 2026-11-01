@@ -89,8 +89,13 @@ data:
     s3.endpoint={{ $s3 }}
     s3.region={{ $st.region }}
     s3.path-style-access=true
+    {{- if $cat.vendRole }}
+    # No store key: the catalog hands Trino temporary keys for one table at a time.
+    iceberg.rest-catalog.vended-credentials-enabled=true
+    {{- else }}
     s3.aws-access-key=${ENV:CAIRN_STORE_ACCESS_KEY}
     s3.aws-secret-key=${ENV:CAIRN_STORE_SECRET_KEY}
+    {{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -150,12 +155,14 @@ spec:
             - name: CAIRN_CATALOG_TOKEN
               valueFrom:
                 secretKeyRef: { name: {{ $cat.secret.name }}, key: {{ $cat.secret.tokenKey }} }
+            {{- if not $cat.vendRole }}
             - name: CAIRN_STORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            {{- end }}
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
@@ -272,12 +279,14 @@ spec:
             - name: CAIRN_CATALOG_TOKEN
               valueFrom:
                 secretKeyRef: { name: {{ $cat.secret.name }}, key: {{ $cat.secret.tokenKey }} }
+            {{- if not $cat.vendRole }}
             - name: CAIRN_STORE_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
             - name: CAIRN_STORE_SECRET_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.secretKeyKey }} }
+            {{- end }}
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }

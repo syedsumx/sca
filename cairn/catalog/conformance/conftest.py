@@ -46,8 +46,9 @@ def _wait(port: int):
 
 
 class Stack:
-    def __init__(self, tmp: str):
+    def __init__(self, tmp: str, store_env: dict | None = None, catalog_env: dict | None = None):
         self.tmp = tmp
+        self.store_env, self.catalog_env = store_env or {}, catalog_env or {}
         self.store_port, self.catalog_port = _port(), _port()
         self.store_url = f"http://127.0.0.1:{self.store_port}"
         self.uri = f"http://127.0.0.1:{self.catalog_port}"
@@ -57,7 +58,8 @@ class Stack:
         store = subprocess.Popen([_bin("CAIRN_STORE_BIN", "store")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
             **os.environ, "CAIRN_STORE_ACCESS_KEY": STORE_KEY[0], "CAIRN_STORE_SECRET_KEY": STORE_KEY[1],
             "CAIRN_STORE_DATA": f"{self.tmp}/store", "CAIRN_STORE_ADDR": f"127.0.0.1:{self.store_port}",
-            "CAIRN_STORE_BUCKETS": "lakehouse", "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_LOG_LEVEL": "warn"})
+            "CAIRN_STORE_BUCKETS": "lakehouse", "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_LOG_LEVEL": "warn",
+            **self.store_env})
         self.procs.append(store)
         _wait(self.store_port)
         tokens = Path(self.tmp, "tokens.json")
@@ -68,7 +70,7 @@ class Stack:
             "CAIRN_CATALOG_TOKEN": ADMIN_TOKEN, "CAIRN_CATALOG_TOKENS_FILE": str(tokens),
             "CAIRN_CATALOG_S3_ENDPOINT": self.store_url, "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
             "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
-            "CAIRN_CATALOG_FSYNC": "false", "CAIRN_CATALOG_LOG_LEVEL": "warn"})
+            "CAIRN_CATALOG_FSYNC": "false", "CAIRN_CATALOG_LOG_LEVEL": "warn", **self.catalog_env})
         self.procs.append(catalog)
         _wait(self.catalog_port)
         return self

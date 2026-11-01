@@ -74,9 +74,15 @@ impl Client {
     }
 
     fn request(&self, method: &str, bucket: &str, key: &str, body: &[u8], extra: &[(&str, &str)]) -> reqwest::RequestBuilder {
+        let path = format!("/{}/{}", uri_encode(bucket, false), uri_encode(key, true));
+        self.signed(method, &path, body, extra, "s3")
+    }
+
+    /// A request signed with SigV4 for `service` (s3, sts, iam).
+    fn signed(&self, method: &str, path: &str, body: &[u8], extra: &[(&str, &str)], service: &str) -> reqwest::RequestBuilder {
         let endpoint = self.cfg.endpoint.trim_end_matches('/');
         let host = endpoint.split("://").nth(1).unwrap_or(endpoint).split('/').next().unwrap_or("").to_string();
-        let path = format!("/{}/{}", uri_encode(bucket, false), uri_encode(key, true));
+        let path = path.to_string();
         let now = OffsetDateTime::now_utc();
         let amz_date = now.format(format_description!("[year][month][day]T[hour][minute][second]Z")).unwrap();
         let date = &amz_date[..8];
@@ -88,10 +94,10 @@ impl Client {
         let signed: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{}\n", v.trim())).collect();
         let canonical = format!("{method}\n{path}\n\n{canonical_headers}\n{}\n{payload}", signed.join(";"));
-        let scope = format!("{date}/{}/s3/aws4_request", self.cfg.region);
+        let scope = format!("{date}/{}/{service}/aws4_request", self.cfg.region);
         let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
         let key =
-            hmac(&hmac(&hmac(&hmac(format!("AWS4{}", self.cfg.secret_key).as_bytes(), date), &self.cfg.region), "s3"), "aws4_request");
+            hmac(&hmac(&hmac(&hmac(format!("AWS4{}", self.cfg.secret_key).as_bytes(), date), &self.cfg.region), service), "aws4_request");
         let sig = hex::encode(hmac(&key, &to_sign));
         let auth =
             format!("AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={}, Signature={sig}", self.cfg.access_key, signed.join(";"));
@@ -138,6 +144,50 @@ impl Client {
             s => Err(Error::Http(format!("DELETE {location}: HTTP {s}"))),
         }
     }
+
+    /// An STS or IAM Query API call (`POST /` with a form body). Returns the status and the XML.
+    pub async fn query_api(&self, service: &str, params: &[(&str, &str)]) -> Result<(u16, String), Error> {
+        let body: String =
+            params.iter().map(|(k, v)| format!("{}={}", uri_encode(k, false), uri_encode(v, false))).collect::<Vec<_>>().join("&");
+        let resp = self
+            .signed("POST", "/", body.as_bytes(), &[("content-type", "application/x-www-form-urlencoded")], service)
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        let status = resp.status().as_u16();
+        Ok((status, resp.text().await.unwrap_or_default()))
+    }
+
+    /// AssumeRole: temporary credentials for `role_arn`, narrowed by `policy`.
+    pub async fn assume_role(&self, role_arn: &str, session: &str, policy: &str, seconds: i64) -> Result<TempCreds, Error> {
+        let secs = seconds.to_string();
+        let (status, xml) = self
+            .query_api(
+                "sts",
+                &[
+                    ("Action", "AssumeRole"),
+                    ("Version", "2011-06-15"),
+                    ("RoleArn", role_arn),
+                    ("RoleSessionName", session),
+                    ("Policy", policy),
+                    ("DurationSeconds", &secs),
+                ],
+            )
+            .await?;
+        if status != 200 {
+            return Err(Error::Http(format!("AssumeRole {role_arn}: HTTP {status}: {}", xml_text(&xml, "Message").unwrap_or(&xml))));
+        }
+        let get = |t: &str| xml_text(&xml, t).map(str::to_string).ok_or_else(|| Error::Http(format!("AssumeRole: no {t} in the answer")));
+        let expires = time::OffsetDateTime::parse(&get("Expiration")?, &time::format_description::well_known::Rfc3339)
+            .map_err(|e| Error::Http(format!("AssumeRole: Expiration: {e}")))?;
+        Ok(TempCreds {
+            access_key: get("AccessKeyId")?,
+            secret_key: get("SecretAccessKey")?,
+            token: get("SessionToken")?,
+            expires_unix: expires.unix_timestamp(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -154,4 +204,20 @@ mod tests {
         assert!(parse_location("file:///tmp/x").is_err());
         assert!(parse_location("s3://lake").is_err());
     }
+}
+
+/// Temporary credentials from the store's STS.
+#[derive(Clone, Debug)]
+pub struct TempCreds {
+    pub access_key: String,
+    pub secret_key: String,
+    pub token: String,
+    pub expires_unix: i64,
+}
+
+/// The text of the first `<tag>...</tag>` in an XML document (the store's answers are simple).
+pub fn xml_text<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+    let start = xml.find(&format!("<{tag}>"))? + tag.len() + 2;
+    let end = start + xml[start..].find(&format!("</{tag}>"))?;
+    Some(&xml[start..end])
 }

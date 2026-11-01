@@ -656,6 +656,10 @@ cairn:
     # The store endpoint handed to engines with each table (empty = s3Endpoint).
     clientS3Endpoint: ""
     vendCredentials: true
+    # Scoped credentials: a store role name (created when missing) or ARN. Engines (Trino included) then
+    # get temporary keys for one table at a time and hold no store key; needs STS in the store
+    # (cairn.store.secret.stsSecretKey).
+    vendRole: ""
     persistence:
       size: 10Gi
       storageClassName: ""

@@ -49,8 +49,14 @@ spec:
               value: {{ default $endpoint $u.clientS3Endpoint | quote }}
             - name: CAIRN_CATALOG_S3_REGION
               value: {{ $st.region | quote }}
+            {{- if $u.vendRole }}
+            {{- if and $st.enabled (not $u.s3Endpoint) (not $st.secret.stsSecretKey) }}{{ fail "cairn.catalog.vendRole needs STS in the store: set cairn.store.secret.stsSecretKey" }}{{ end }}
+            - name: CAIRN_CATALOG_VEND_ROLE
+              value: {{ $u.vendRole | quote }}
+            {{- else }}
             - name: CAIRN_CATALOG_VEND_CREDENTIALS
               value: {{ $u.vendCredentials | quote }}
+            {{- end }}
             - name: CAIRN_CATALOG_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }

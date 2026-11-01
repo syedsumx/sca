@@ -777,7 +777,25 @@ Cairn Catalog is Cairn's Iceberg REST catalog. Engines that speak the Iceberg RE
 - **Docker Compose:** service `cairn-catalog`, at `http://cairn-catalog:8181` inside the stack and `http://localhost:8181` from the host. Set `CAIRN_CATALOG_TOKEN` in `.env`. The catalog writes to the store with the store's key, and new tables go under `s3://lakehouse/warehouse`.
 - **Kubernetes:** set `cairn.catalog.enabled=true` (with `cairn.store.enabled=true`, or point `cairn.catalog.s3Endpoint` at another store). Create the Secret named in `cairn.catalog.secret`. Engines in other namespaces need an entry in `cairn.networkPolicy.catalogIngressFrom`.
 
-**Connecting an engine.** Use the catalog URL and the token as a bearer token. For example, in pyiceberg: `RestCatalog("cairn", uri="http://cairn-catalog:8181", token="...")`. With each table the catalog also gives the engine the store's endpoint and key, so engines need no storage settings of their own. Set `CAIRN_CATALOG_VEND_CREDENTIALS=false` to turn that off. Set `CAIRN_CATALOG_CLIENT_S3_ENDPOINT` when engines reach the store at another address.
+**Connecting an engine.** Use the catalog URL and the token as a bearer token. For example, in pyiceberg: `RestCatalog("cairn", uri="http://cairn-catalog:8181", token="...")`. With each table the catalog also gives the engine the store's endpoint and keys, so engines need no storage settings of their own. Set `CAIRN_CATALOG_CLIENT_S3_ENDPOINT` when engines reach the store at another address.
+
+**Which keys engines get** (`CAIRN_CATALOG_VEND_CREDENTIALS`):
+- **`scoped`** (the default when `CAIRN_CATALOG_VEND_ROLE` is set; Compose turns it on). Each table comes with temporary keys from the store's STS that reach that table's location only. With a read-only catalog token they only read; otherwise they read, write and delete there.
+  - **What engines hold.** No store key, so an engine cannot touch another table's files or anything else in the store. Trino's lakehouse catalog then has no S3 keys at all (`iceberg.rest-catalog.vended-credentials-enabled=true`), and pyiceberg needs only the catalog token.
+  - **The role.** `CAIRN_CATALOG_VEND_ROLE` names a store role. When it is missing, the catalog creates it at start-up, trusted only by the catalog's key and allowed the warehouse bucket; each session's policy narrows it to one table. An ARN is used as given.
+  - **Lifetime.** Keys last `CAIRN_CATALOG_VEND_SECONDS` (3600; 900 to 43200) and are reused while at least a quarter of that is left.
+  - **Fails closed.** The store must have STS on (`CAIRN_STORE_STS_SECRET`). The catalog checks at start-up and refuses to start otherwise, rather than falling back to its own key.
+  - **In Helm,** set `cairn.catalog.vendRole`; the chart refuses it when this release's store has no `cairn.store.secret.stsSecretKey`.
+- **`static`** (the default otherwise): the catalog's own store key, which reaches the whole store.
+- **`off`**: engines bring their own storage keys.
+
+**Tested:**
+- **pyiceberg** wrote and read with vended keys only.
+- **A table's keys** listed and read their own table, were refused another table's files and the rest of the bucket, and were reused across loads.
+- **A read-only token's keys** could not write or delete.
+- **Start-up** was refused without STS.
+- **Trino 476** with no store key ran `CREATE TABLE AS`, `INSERT`, `UPDATE`, `DELETE` and `optimize`.
+- **Compose:** the catalog created its role, and Trino wrote and read the lakehouse with no key in its environment.
 
 **Tokens.** `CAIRN_CATALOG_TOKEN` is an admin token. `CAIRN_CATALOG_TOKENS_FILE` adds more tokens as a JSON list. Each token can be limited to namespaces (`"namespaces": ["sales", "sales.*"]`) or to reading (`"read_only": true`).
 

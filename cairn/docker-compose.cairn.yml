@@ -585,6 +585,8 @@ services:
       CAIRN_CATALOG_S3_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       # The store endpoint engines are told to use (in-stack engines reach cairn-store directly).
       CAIRN_CATALOG_CLIENT_S3_ENDPOINT: ${CAIRN_CATALOG_CLIENT_S3_ENDPOINT:-http://cairn-store:8333}
+      # Engines get temporary keys for one table at a time (the store's STS), never the store's key.
+      CAIRN_CATALOG_VEND_ROLE: ${CAIRN_CATALOG_VEND_ROLE:-cairn-catalog-tables}
     ports:
       - "${CAIRN_MAPPED_CATALOG_PORT:-8181}:8181"
     volumes:
@@ -620,8 +622,6 @@ services:
       CAIRN_CATALOG_URI: http://cairn-catalog:8181
       CAIRN_CATALOG_TOKEN: ${CAIRN_CATALOG_TOKEN:-cairn-catalog-dev-token}
       CAIRN_STORE_ENDPOINT: http://cairn-store:8333
-      CAIRN_STORE_ACCESS_KEY: ${CAIRN_STORE_ACCESS_KEY:-cairn-store}
-      CAIRN_STORE_SECRET_KEY: ${CAIRN_STORE_SECRET_KEY:-cairn-store-dev-secret}
       CAIRN_API_URL: http://cairn-api:8800
       CAIRN_TRINO_ACCESS_KEY: ${CAIRN_TRINO_ACCESS_KEY:-cairn-trino-dev-access-key-0001}
       CAIRN_TRINO_URI: http://cairn-trino:8080

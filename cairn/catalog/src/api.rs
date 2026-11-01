@@ -50,17 +50,46 @@ pub struct Config {
     pub warehouse: String,
     pub principals: Vec<Principal>,
     pub s3: s3::S3Config,
-    /// Hand the object store's endpoint and credentials to clients with each table (engines then need
-    /// no storage configuration of their own).
-    pub vend_credentials: bool,
+    /// What storage access clients get with each table (engines then need no storage keys of their own).
+    pub vend: Vend,
     /// The object store endpoint as clients reach it (defaults to the catalog's own).
     pub client_endpoint: String,
+}
+
+/// Credentials handed to engines with each table.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Vend {
+    /// None: engines bring their own storage keys.
+    Off,
+    /// The catalog's own store key (every engine can then reach the whole store).
+    Static,
+    /// Temporary keys for the one table (its location only; read-only for read-only tokens), from the
+    /// store's AssumeRole on `role_arn`.
+    Scoped { role_arn: String, seconds: i64 },
 }
 
 pub struct Catalog {
     db: Db,
     store: s3::Client,
     cfg: Config,
+    /// Scoped credentials by (table location, read-only), reused until shortly before they expire.
+    vended: std::sync::Mutex<HashMap<(String, bool), s3::TempCreds>>,
+}
+
+/// The session policy for a table's location: its objects, and listing under it.
+pub fn table_policy(location: &str, read_only: bool) -> Result<String, String> {
+    let (bucket, key) = s3::parse_location(&format!("{}/", location.trim_end_matches('/'))).map_err(|e| e.to_string())?;
+    let prefix = key.trim_end_matches('/');
+    let objects = if read_only {
+        json!(["s3:GetObject"])
+    } else {
+        json!(["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"])
+    };
+    Ok(json!({"Version": "2012-10-17", "Statement": [
+        {"Effect": "Allow", "Action": objects, "Resource": format!("arn:aws:s3:::{bucket}/{prefix}/*")},
+        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": format!("arn:aws:s3:::{bucket}"),
+         "Condition": {"StringLike": {"s3:prefix": [format!("{prefix}/*"), prefix.to_string()]}}}]})
+    .to_string())
 }
 
 /// A REST error: `{"error": {"message", "type", "code"}}`.
@@ -254,7 +283,7 @@ const ENDPOINTS: [&str; 17] = [
 
 impl Catalog {
     pub fn new(db: Db, cfg: Config) -> Catalog {
-        Catalog { db, store: s3::Client::new(cfg.s3.clone()), cfg }
+        Catalog { db, store: s3::Client::new(cfg.s3.clone()), cfg, vended: Default::default() }
     }
 
     fn authenticate(&self, auth: &str) -> Result<&Principal, ApiError> {
@@ -410,7 +439,9 @@ impl Catalog {
                         self.load_result(
                             &row.metadata_location,
                             serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?,
+                            principal.read_only,
                         )
+                        .await
                     }
                     Method::HEAD => {
                         self.db.table(&levels, &name)?;
@@ -468,22 +499,63 @@ impl Catalog {
         }
     }
 
-    fn load_result(&self, location: &str, metadata: Value) -> Result<Resp, ApiError> {
-        Ok(json_resp(StatusCode::OK, &json!({"metadata-location": location, "metadata": metadata, "config": self.client_config()})))
+    async fn load_result(&self, location: &str, metadata: Value, read_only: bool) -> Result<Resp, ApiError> {
+        let table_location = metadata["location"].as_str().unwrap_or("").to_string();
+        let config = self.client_config(&table_location, read_only).await?;
+        let mut out = json!({"metadata-location": location, "metadata": metadata, "config": config});
+        if matches!(self.cfg.vend, Vend::Scoped { .. }) {
+            out["storage-credentials"] = json!([{"prefix": table_location, "config": config}]);
+        }
+        Ok(json_resp(StatusCode::OK, &out))
     }
 
-    /// Storage settings for clients: the object store endpoint and, if vending is on, credentials.
-    fn client_config(&self) -> BTreeMap<String, String> {
+    /// Storage settings for clients: the object store endpoint and, if vending is on, credentials
+    /// (scoped: temporary keys for this table's location only).
+    async fn client_config(&self, table_location: &str, read_only: bool) -> Result<BTreeMap<String, String>, ApiError> {
         let mut c = BTreeMap::new();
-        if self.cfg.vend_credentials {
-            c.insert("s3.endpoint".into(), self.cfg.client_endpoint.clone());
-            c.insert("s3.region".into(), self.cfg.s3.region.clone());
-            c.insert("client.region".into(), self.cfg.s3.region.clone());
-            c.insert("s3.path-style-access".into(), "true".into());
-            c.insert("s3.access-key-id".into(), self.cfg.s3.access_key.clone());
-            c.insert("s3.secret-access-key".into(), self.cfg.s3.secret_key.clone());
+        let (ak, sk, token) = match &self.cfg.vend {
+            Vend::Off => return Ok(c),
+            Vend::Static => (self.cfg.s3.access_key.clone(), self.cfg.s3.secret_key.clone(), None),
+            Vend::Scoped { role_arn, seconds } => {
+                let t = self.scoped(role_arn, *seconds, table_location, read_only).await?;
+                c.insert("s3.session-token-expires-at-ms".into(), (t.expires_unix * 1000).to_string());
+                (t.access_key, t.secret_key, Some(t.token))
+            }
+        };
+        c.insert("s3.endpoint".into(), self.cfg.client_endpoint.clone());
+        c.insert("s3.region".into(), self.cfg.s3.region.clone());
+        c.insert("client.region".into(), self.cfg.s3.region.clone());
+        c.insert("s3.path-style-access".into(), "true".into());
+        c.insert("s3.access-key-id".into(), ak);
+        c.insert("s3.secret-access-key".into(), sk);
+        if let Some(t) = token {
+            c.insert("s3.session-token".into(), t);
         }
-        c
+        Ok(c)
+    }
+
+    async fn scoped(&self, role_arn: &str, seconds: i64, location: &str, read_only: bool) -> Result<s3::TempCreds, ApiError> {
+        if location.is_empty() {
+            return Err(bad_request("The table has no location"));
+        }
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let key = (location.to_string(), read_only);
+        if let Some(t) = self.vended.lock().unwrap().get(&key) {
+            // Reuse while at least a quarter of its life (or 5 minutes) is left.
+            if t.expires_unix - now > (seconds / 4).max(300) {
+                return Ok(t.clone());
+            }
+        }
+        let policy = table_policy(location, read_only).map_err(bad_request)?;
+        let t = self
+            .store
+            .assume_role(role_arn, "cairn-catalog", &policy, seconds)
+            .await
+            .map_err(|e| err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", format!("Scoped credentials: {e}")))?;
+        let mut cache = self.vended.lock().unwrap();
+        cache.retain(|_, v| v.expires_unix > now);
+        cache.insert(key, t.clone());
+        Ok(t)
     }
 
     /// A namespace's location: its own `location` property, else its place under the warehouse.
@@ -532,7 +604,8 @@ impl Catalog {
             self.db.stage(levels, &req.name, &json)?;
             return Ok(json_resp(
                 StatusCode::OK,
-                &json!({"metadata-location": null, "metadata": serde_json::from_str::<Value>(&json).unwrap(), "config": self.client_config()}),
+                &json!({"metadata-location": null, "metadata": serde_json::from_str::<Value>(&json).unwrap(),
+                        "config": self.client_config(&location, false).await?}),
             ));
         }
         let loc = MetadataLocation::new_with_metadata(metadata.location(), &metadata).to_string();
@@ -544,7 +617,7 @@ impl Catalog {
             new: TableRow { metadata_location: loc.clone(), metadata: json.clone() },
         };
         self.apply(vec![change]).await?;
-        self.load_result(&loc, serde_json::from_str(&json).unwrap())
+        self.load_result(&loc, serde_json::from_str(&json).unwrap(), false).await
     }
 
     async fn register(&self, levels: &[String], req: Register) -> Result<Resp, ApiError> {
@@ -562,7 +635,7 @@ impl Catalog {
             new: TableRow { metadata_location: req.metadata_location.clone(), metadata: json.clone() },
         };
         self.db.commit(&[change])?;
-        self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap())
+        self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap(), false).await
     }
 
     /// Checks requirements against the current metadata, applies the updates and writes the new
