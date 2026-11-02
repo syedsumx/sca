@@ -307,11 +307,11 @@ def test_fault_tolerant_execution_spill_and_cache(lake, cairn):  # noqa: F811
         assert cached, "nothing was cached"
         # A long query with a shuffle (a GROUP BY), so tasks on both workers hand data over the exchange.
         q = ("SELECT count(*) AS n FROM (SELECT a.x % 1000 AS k, count(*) AS c FROM UNNEST(sequence(1, 10000)) AS a(x) "
-             "CROSS JOIN UNNEST(sequence(1, 10000)) AS b(y) CROSS JOIN UNNEST(sequence(1, 12)) AS c(z) GROUP BY a.x % 1000)")
+             "CROSS JOIN UNNEST(sequence(1, 10000)) AS b(y) CROSS JOIN UNNEST(sequence(1, 24)) AS c(z) GROUP BY a.x % 1000)")
         long = subprocess.Popen(sql.command(q), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         end = time.time() + 60
         while not (running := sql("SELECT query_id FROM system.runtime.queries WHERE state = 'RUNNING' "
-                                  "AND query LIKE '%sequence(1, 12)%'")):
+                                  "AND query LIKE '%sequence(1, 24)%'")):
             assert time.time() < end and long.poll() is None, "the query did not start"
             time.sleep(0.3)
         # Kill a worker that is running some of its tasks (Trino names a node after its pod's hostname).
@@ -320,8 +320,11 @@ def test_fault_tolerant_execution_spill_and_cache(lake, cairn):  # noqa: F811
         end = time.time() + 60
         while not (busy := [r["node_id"] for r in sql(
                 f"SELECT node_id FROM system.runtime.tasks WHERE query_id = '{running[0]['query_id']}' "
-                "AND state = 'RUNNING'") if r["node_id"] in hosts]):
-            assert time.time() < end and long.poll() is None, "no task ran on a worker"
+                # With fault-tolerant execution tasks are short: any task not yet finished on a worker will do.
+                "AND state IN ('PLANNED', 'RUNNING', 'FLUSHING')") if r["node_id"] in hosts]):
+            assert time.time() < end and long.poll() is None, (
+                "no task ran on a worker", hosts, sql(f"SELECT node_id, state FROM system.runtime.tasks "
+                                                       f"WHERE query_id = '{running[0]['query_id']}'"))
             time.sleep(0.3)
         time.sleep(2)
         subprocess.run(["docker", "kill", hosts[busy[0]]], capture_output=True, timeout=60)
