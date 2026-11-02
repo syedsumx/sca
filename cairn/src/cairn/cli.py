@@ -83,6 +83,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.maintenance.run_due)  # lakehouse table maintenance
     if getattr(s, "pipes", None) is not None:
         sch.extra.append(s.pipes.run_due)        # pipes: files events missed
+    if getattr(s, "derived", None) is not None:
+        sch.extra.append(s.derived.run_due)      # derived tables: on schedule or upstream change
     sch.run_forever()
 
 

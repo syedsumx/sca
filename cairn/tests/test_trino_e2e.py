@@ -614,3 +614,76 @@ def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
     # It joins with the lakehouse in one query, both sides governed.
     j = trino("SELECT o.id, c.email FROM lake.sales.orders o JOIN crm.sales.customers c ON o.id = c.id ORDER BY o.id", user="ana")
     assert [r["email"] for r in j] == ["a•••@•••.com", "r•••@•••.org"]
+
+
+def test_derived_tables_refresh_incrementally_and_in_order(trino, cairn):
+    """Derived tables on real Trino and Cairn Catalog: append by watermark, a full rebuild chained on it,
+    and a merge by key; refreshed when the tables they read change, each run as its owner."""
+    from cairn.pipelines.changes import DatasetChanges
+    from cairn.pipelines.derived import DerivedError, DerivedTables
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(owner, sql):
+        return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
+    admin = "urn:li:corpuser:admin"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.shop",
+                 "CREATE TABLE lake.shop.orders (id integer, region varchar, amount double, seq integer)",
+                 "INSERT INTO lake.shop.orders VALUES (1, 'EU', 10.0, 1), (2, 'US', 5.0, 2), (3, 'EU', -1.0, 3)"]:
+        run(admin, stmt)
+    changes = DatasetChanges(s.engine)
+    dt = DerivedTables(s.engine, run, "lake", s.audit, changes)
+    clean = dt.create({"name": "orders_clean", "target": "shop.orders_clean", "mode": "append", "watermark": "seq",
+                       "on_change": True, "sql": "SELECT id, region, amount, seq FROM lake.shop.orders WHERE amount > 0"},
+                      admin, admin)
+    assert clean["upstreams"] == [dt.urn("shop", "orders")]
+    by_region = dt.create({"name": "by_region", "target": "shop.by_region", "mode": "full", "on_change": True,
+                           "sql": "SELECT region, sum(amount) AS total FROM shop.orders_clean GROUP BY region"}, admin, admin)
+    latest = dt.create({"name": "latest", "target": "shop.latest", "mode": "merge", "key": ["id"], "watermark": "seq",
+                        "every_minutes": 60, "sql": "SELECT id, region, amount, seq FROM lake.shop.orders"}, admin, admin)
+    assert [dt.refresh(d["id"])["kind"] for d in (clean, by_region, latest)] == ["create", "create", "create"]
+    assert sorted(r["id"] for r in trino("SELECT id FROM shop.orders_clean")) == [1, 2]
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM shop.by_region")} == {"EU": 10.0, "US": 5.0}
+
+    # New rows and an update upstream, written by someone who records the change (a pipe, a stream, dbt...).
+    run(admin, "INSERT INTO lake.shop.orders VALUES (4, 'US', 7.0, 4), (5, 'EU', 1.0, 5)")
+    run(admin, "UPDATE lake.shop.orders SET amount = 12.0, seq = 6 WHERE id = 1")
+    changes.record([dt.urn("shop", "orders")], "test")
+    n = dt.run_due()
+    assert n >= 2                              # orders_clean (its upstream changed), then by_region (it did)
+    assert dt.ordered()[0]["name"] == "latest" and [d["name"] for d in dt.ordered()].index("orders_clean") < \
+        [d["name"] for d in dt.ordered()].index("by_region")
+    assert sorted((r["id"], r["amount"]) for r in trino("SELECT id, amount FROM shop.orders_clean")) == \
+        [(1, 10.0), (1, 12.0), (2, 5.0), (4, 7.0), (5, 1.0)]       # append: rows above the watermark, none twice
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM shop.by_region")} == {"EU": 23.0, "US": 12.0}
+    time.sleep(3)                              # Trino's own lineage events (changes too) arrive
+    dt.run_due()
+    assert dt.run_due() == 0                   # nothing changed since; latest is not due for an hour
+    assert dt.refresh(latest["id"])["kind"] == "merge"
+    assert sorted((r["id"], r["amount"]) for r in trino("SELECT id, amount FROM shop.latest")) == \
+        [(1, 12.0), (2, 5.0), (3, -1.0), (4, 7.0), (5, 1.0)]       # merge: the update replaced, new rows inserted
+    assert {r["trigger"] for r in dt.runs(by_region["id"])} == {"change", "manual"}
+    assert dt.refresh(by_region["id"], full=True)["kind"] == "full"
+
+    # A run is its owner's: ana may not read hr.salaries, so her derived table's run fails, recorded.
+    ana = dt.create({"name": "pay", "target": "shop.pay", "every_minutes": 5, "sql": "SELECT * FROM lake.hr.salaries"},
+                    "urn:li:corpuser:ana", "urn:li:corpuser:ana")
+    r = dt.refresh(ana["id"])
+    assert r["status"] == "error" and "Access Denied" in r["error"], r
+    assert trino("SHOW TABLES FROM shop LIKE 'pay'") == []
+    # Bad definitions are refused.
+    for body, msg in [({"sql": "DROP TABLE lake.shop.orders"}, "one SELECT"),
+                      ({"sql": "SELECT 1; SELECT 2"}, "one SELECT"),
+                      ({"sql": "SELECT * FROM lake.shop.x2", "target": "shop.x2"}, "its own target"),
+                      ({"mode": "append"}, "watermark"), ({"mode": "merge"}, "key columns"),
+                      ({"every_minutes": None, "on_change": False}, "every_minutes, on_change"),
+                      ({"watermark": "seq; drop", "mode": "append"}, "column names")]:
+        with pytest.raises(DerivedError, match=msg):
+            dt.create({"name": "x", "target": "shop.x", "sql": "SELECT 1 AS one", "every_minutes": 5, **body}, admin, admin)
+    with pytest.raises(DerivedError, match="exists"):
+        dt.create({"name": "other", "target": "shop.latest", "sql": "SELECT 1 AS one", "every_minutes": 5}, admin, admin)

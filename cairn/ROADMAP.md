@@ -19,7 +19,7 @@ Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validate
 | Tables and catalog | Snowflake Iceberg tables / Unity Catalog | **Cairn Catalog** (Rust, Iceberg REST). Tables and views; commits via iceberg-rust; per-table credential vending; HA on PostgreSQL; Cairn identities governed per table | ✅ |
 | SQL warehouse | Virtual warehouses / Databricks SQL | **Trino 476** on the lakehouse. Cairn sign-in (JWT, OAuth2 SSO for the web UI and BI); access control through Cairn's policies (OPA protocol); query lineage and usage into Cairn; resource groups; fault-tolerant execution, spill and cache; workers with autoscaling | ✅ |
 | SQL in the product | Snowsight / SQL editor | Data preview and SQL editor on Trino; Ask-your-data (text-to-SQL) with the caller's permissions | ✅ |
-| Transformation | dbt Cloud on Snowflake / Databricks | **dbt-core 1.12** with dbt-trino (`cairn dbt`, `cairn/dbt`). Runs as a pipeline user; docs, tags, owners, lineage and tests recorded in Cairn; Helm CronJobs | ✅ |
+| Transformation | dbt Cloud on Snowflake / Databricks | **dbt-core 1.12** with dbt-trino (`cairn dbt`, `cairn/dbt`). Runs as a pipeline user; docs, tags, owners, lineage and tests recorded in Cairn; Helm CronJobs. Derived tables: a SELECT kept as a table, refreshed fully, by watermark or by merge, on a schedule or when what it reads changes, as its owner | ✅ |
 | Orchestration | Tasks / Databricks Workflows | **Apache Airflow 3.3** (`cairn/airflow`, `cairn-airflow-provider`). Cairn operators for Trino and dbt; OpenLineage to Cairn; UI sign-in through Cairn with group → role mapping; official chart values | ✅ |
 | Python and Spark | Snowpark / Databricks Spark | **Spark 4.0** with Iceberg 1.10 (`cairn/spark`, `cairn-spark`). Signed in as a Cairn identity; each table decided by Cairn; per-table credentials, read-only unless writable; column lineage to Cairn | ✅ |
 | Governance | Horizon / Unity Catalog | Policy decision point (RBAC with ABAC, deny-overrides, obligations), masking on every read path, row filters, personas and purposes, PII classification and propagation, certification workflows, compliance forms, hash-chained audit log | ✅ |
@@ -27,7 +27,7 @@ Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validate
 | Data quality | Data metric functions / Lakehouse Monitoring | Monitors (volume, freshness, schema, drift, learned thresholds), data contracts, profiling, incidents, results from dbt and other tools | ✅ |
 | AI | Cortex / Mosaic AI | Assistant, documentation drafts, context agents, governed metrics (semantic layer), MCP server, AI-system governance, usage and budgets; Claude or local models | ✅ |
 | Sharing and marketplace | Listings / Delta Sharing | Internal marketplace with access requests; publishing to Snowflake listings and Delta Sharing shares | ✅ |
-| Ingestion | Connectors / Lakeflow Connect | Source connectors and in-VPC remote agents (signed, sealed); the store's message queues and events | ✅ |
+| Ingestion | Connectors / Lakeflow Connect | Source connectors and in-VPC remote agents (signed, sealed); the store's message queues and events; pipes (files landing in the store, loaded once each); streams (Kafka and Debezium CDC into Iceberg, exactly once) | ✅ |
 | Operations | Managed service | Compose and Helm (HA, network policies, PDBs); SSO and SCIM; Alembic migrations; signed images with SBOMs; monitoring dashboards; hosting tenants | ✅ |
 
 ## Design decisions behind the lakehouse integration

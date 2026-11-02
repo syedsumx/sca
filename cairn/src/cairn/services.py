@@ -89,6 +89,7 @@ class Services:
     maintenance: Optional[Any] = None
     pipes: Optional[Any] = None
     streams: Optional[Any] = None
+    derived: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -535,6 +536,10 @@ def _build_pipeline_health(s: Services) -> None:
         s.pipes.changes = s.dataset_changes   # loaded tables are changes (data-aware schedules)
         if getattr(s, "lakehouse", None) is not None:
             s.pipes.urn = lambda ns, t: s.lakehouse.urn([ns], t)
+    if getattr(s, "derived", None) is not None:
+        s.derived.changes = s.dataset_changes  # refreshes follow upstream changes, and are changes
+        if getattr(s, "lakehouse", None) is not None:
+            s.derived.urn = lambda ns, t: s.lakehouse.urn([ns], t)
     if getattr(s, "streams", None) is not None:
         s.streams.changes = s.dataset_changes  # streamed tables are changes too
         if getattr(s, "lakehouse", None) is not None:
@@ -753,6 +758,15 @@ def _build_active_metadata(s: Services) -> None:
                 return s.data_access.run_on_trino(definition, maint_user, sql, 100_000)[1]
             s.maintenance = TableMaintenance(s.engine, run_maintenance,
                                              os.environ.get("CAIRN_MAINTENANCE_CATALOG", "lakehouse"), s.audit)
+        if os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
+            from cairn.pipelines.derived import DerivedTables
+
+            derived_conn = os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ["CAIRN_MAINTENANCE_CONNECTION"]
+
+            def run_derived(owner: str, sql: str) -> list:      # as the derived table's owner
+                definition = (s.data_access.registry.definitions() or {}).get(derived_conn) or {}
+                return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
+            s.derived = DerivedTables(s.engine, run_derived, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
         _build_data_access(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace

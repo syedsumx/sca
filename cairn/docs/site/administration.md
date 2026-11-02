@@ -1310,6 +1310,26 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
   - **Lineage.** The source was added to the target's lineage, merged with what was there. When Cairn Core failed, nothing was created.
   - **Checks.** Bad definitions were refused, and the API was for operators only.
 
+## Derived tables (incremental refresh)
+
+A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. Define it with `POST /v1/derived`: `name`, `sql` (one SELECT), `target` (`schema.table` in the lakehouse catalog), `mode`, and when it refreshes (`every_minutes`, `on_change`, or both).
+
+- **Modes.**
+  - `full`: `CREATE OR REPLACE TABLE … AS <sql>`, atomically.
+  - `append`: adds the rows whose `watermark` column is above the table's current maximum.
+  - `merge`: rows at or above the maximum `watermark` (all rows, without one) replace the rows with the same `key` columns; the others are inserted.
+
+  The first run, and `POST /v1/derived/{id}/refresh {"full": true}`, builds the table from the whole query. Use that after changing the query's columns.
+- **When.** The scheduler's leader refreshes each table every `every_minutes`. With `on_change`, it also refreshes when a table the query reads is recorded as changed: by pipes, streams, dbt, Spark, Trino writes or another derived table. Upstream derived tables refresh first, so chains finish in one tick. One refresh runs at a time per table (a lease in the database); another gets 409.
+- **As its owner.** A refresh runs on Trino as the table's owner, so their access, masks and row filters apply, and Trino's lineage records it. Anyone may define one that runs as themselves. Only operators (`MANAGE_SYSTEM_OPERATIONS`) may define one that runs as someone else, and see everyone's. Others see only their own.
+- **What happened.** Each run is recorded with its kind, trigger and outcome (`GET /v1/derived/{id}/runs`). Definitions are audited. Deleting a definition leaves the table itself.
+- **Settings.** `CAIRN_DERIVED_CONNECTION` is a run-as-user Trino connection (default: `CAIRN_MAINTENANCE_CONNECTION`). `CAIRN_DERIVED_CATALOG` is the lakehouse catalog's name in Trino (default `lakehouse`).
+- **Tested** on real Trino and Cairn Catalog (`tests/test_trino_e2e.py`; the logic in `tests/test_derived_tables.py`):
+  - **Chain.** An append table and a full rebuild chained on it both refreshed after their source changed, in order and in one tick. The append added only the new rows, none twice.
+  - **Merge.** A merge applied an update and inserted the new rows.
+  - **Owner.** A table owned by a user without access to its source failed its run, recorded, and nothing was created.
+  - **Checks.** Statements that are not one SELECT, a query reading its own target, and bad columns were refused. Owners saw and ran only their own. A running refresh blocked a second one.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:
