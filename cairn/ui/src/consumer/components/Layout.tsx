@@ -48,6 +48,7 @@ export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: st
     { to: '/discover', label: 'nav.discover' },
     { to: '/search', label: 'nav.search' },
     { to: '/sql', label: 'nav.sql' },
+    { to: '/dashboards', label: 'nav.dashboards' },
     { to: '/marketplace', label: 'nav.marketplace' },
     { to: '/requests', label: 'nav.requests', badge: true },
     { to: '/context', label: 'nav.context', feature: 'context' },

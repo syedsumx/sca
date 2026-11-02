@@ -743,6 +743,39 @@ export interface SchemaTable {
     columns: { name: string; type: string }[];
 }
 
+/** A dashboard: saved queries shown with their charts (GET /sql/dashboards). */
+export interface Dashboard {
+    id: string;
+    owner: string;
+    name: string;
+    description: string;
+    shared: boolean;
+    tiles: { query: string; title: string; width: 1 | 2 }[];
+    updated_ms: number;
+}
+
+/** A dashboard with every tile run as the viewer (GET /sql/dashboards/{id}/render). */
+export interface RenderedDashboard extends Omit<Dashboard, 'tiles'> {
+    tiles: { query: string; title: string; width: 1 | 2; chart?: ChartSpec; result?: DataResult; error?: string }[];
+}
+
+/** An alert on a saved query (GET /sql/alerts). */
+export interface SqlAlert {
+    id: string;
+    name: string;
+    query: string;
+    measure: string;
+    op: string;
+    value: number;
+    every_minutes: number;
+    recipients: string[];
+    state: 'ok' | 'triggered' | 'error' | 'unknown';
+    last_value: number | null;
+    last_error: string | null;
+    last_checked_ms: number | null;
+    enabled: boolean;
+}
+
 export interface AgentCall {
     id: string;
     agent: string | null;

@@ -76,7 +76,10 @@ def cmd_scheduler(a) -> None:
     s = _services(with_gateway=False, with_ai=False)
     s.start_background()
     serve_worker_metrics()
-    Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions).run_forever()
+    sch = Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions)
+    if getattr(s, "sql_boards", None) is not None:
+        sch.extra.append(s.sql_boards.run_due)   # SQL alerts
+    sch.run_forever()
 
 
 def cmd_core_proxy(a) -> None:

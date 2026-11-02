@@ -46,6 +46,7 @@ class Scheduler:
         self.partition = partition
         self.partitions = partitions
         self._stop = threading.Event()
+        self.extra: list = []   # callables the leader of partition 0 runs every tick
 
     auto_interval = float(os.environ.get("CAIRN_AUTO_MONITOR_INTERVAL_SECONDS", "600"))
 
@@ -103,6 +104,12 @@ class Scheduler:
                             self.sweep_auto_monitors()
                             last_sweep = started
                         self.run_once()
+                        if self.partition == 0:
+                            for job in self.extra:   # other scheduled work the leader runs (SQL alerts)
+                                try:
+                                    job()
+                                except Exception:
+                                    logger.exception("scheduled job failed")
                         if started - last_flush > 300:
                             self.engine.flush_unemitted()
                             last_flush = started

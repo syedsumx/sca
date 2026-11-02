@@ -85,6 +85,7 @@ class Services:
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
+    sql_boards: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -711,6 +712,13 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.reports.service import ReportService
         s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
         _build_costs(s, hub, Event)
+        if s.sql_workspace is not None:
+            from cairn.sqlworkspace.boards import Boards
+
+            def tell(type_, title, body, recipients, payload):
+                hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                                  url="/sql"))
+            s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
         _build_data_access(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace

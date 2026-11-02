@@ -327,6 +327,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             from cairn.sqlworkspace import build_router as sql_router
 
             app.include_router(sql_router(services.sql_workspace, cp, services.can_view))
+            if services.sql_boards is not None:
+                from cairn.sqlworkspace.boards import build_boards_router
+
+                app.include_router(build_boards_router(services.sql_boards, cp))
     if "governance" in modules and services.reports is not None:
         from cairn.reports.api import build_router as reports_router
 

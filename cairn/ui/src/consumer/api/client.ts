@@ -68,8 +68,11 @@ import type {
     CoverageFacet,
     CostTotal,
     JobCost,
+    Dashboard,
+    RenderedDashboard,
     SavedQuery,
     SchemaTable,
+    SqlAlert,
     SqlRun,
     AgentCall,
     AIDatasetRead,
@@ -987,6 +990,42 @@ export class ConsumerClient extends CairnClient {
 
     runSavedQuery(id: string) {
         return this.request<DataResult & { query: SavedQuery }>('POST', `/sql/saved/${enc(id)}/run`);
+    }
+
+    dashboards(opts?: RequestOptions) {
+        return this.request<Dashboard[]>('GET', '/sql/dashboards', undefined, opts);
+    }
+
+    saveDashboard(body: Partial<Dashboard>, id?: string) {
+        return id
+            ? this.request<Dashboard>('PUT', `/sql/dashboards/${enc(id)}`, body)
+            : this.request<Dashboard>('POST', '/sql/dashboards', body);
+    }
+
+    deleteDashboard(id: string) {
+        return this.request<void>('DELETE', `/sql/dashboards/${enc(id)}`);
+    }
+
+    renderDashboard(id: string, opts?: RequestOptions) {
+        return this.request<RenderedDashboard>('GET', `/sql/dashboards/${enc(id)}/render`, undefined, opts);
+    }
+
+    sqlAlerts(opts?: RequestOptions) {
+        return this.request<SqlAlert[]>('GET', '/sql/alerts', undefined, opts);
+    }
+
+    saveSqlAlert(body: Partial<SqlAlert>, id?: string) {
+        return id
+            ? this.request<SqlAlert>('PUT', `/sql/alerts/${enc(id)}`, body)
+            : this.request<SqlAlert>('POST', '/sql/alerts', body);
+    }
+
+    deleteSqlAlert(id: string) {
+        return this.request<void>('DELETE', `/sql/alerts/${enc(id)}`);
+    }
+
+    checkSqlAlert(id: string) {
+        return this.request<SqlAlert>('POST', `/sql/alerts/${enc(id)}/check`);
     }
 
     jobCosts(days = 30, opts?: RequestOptions) {

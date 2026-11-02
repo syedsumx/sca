@@ -246,10 +246,16 @@ the same way.
 - **History.** Each person's last 500 runs, including refused ones and why (`GET /sql/history`).
 - **Saved queries.** Private, or shared with everyone. A shared query runs as whoever opens it, never as its owner, so each person sees only what they may (`/sql/saved`, `POST /sql/saved/{id}/run`). Only its owner changes or deletes it. A saved query keeps its chart.
 - **Who.** People only: service, agent and extension tokens are refused.
+- **Dashboards** (**Dashboards**, `/sql/dashboards`). A named, optionally shared set of saved queries, shown as their charts or tables. Opening one runs every tile as the viewer. A tile the viewer may not see shows the refusal, not the data. Each tile must be a query its owner may open. Only the owner changes or deletes a dashboard.
+- **Alerts** (`/sql/alerts`). A saved query checked every `every_minutes` (5 minutes to a week), as its owner. The condition is `rows` (the number of rows) or a column of the first row, compared with a number (`>`, `>=`, `<`, `<=`, `==`, `!=`).
+  - **Who is told.** The owner and the alert's recipients are told when the condition starts to hold (`sql.alert_triggered`), when it stops (`sql.alert_resolved`), and once when the query fails. They hear about changes, not every check, on their notification channels.
+  - **Where checks run.** The scheduler's leader runs them (`cairn scheduler`), so there is one check per alert however many replicas run. **Check now** runs one at once.
 - **Tested** (`tests/test_sql_workspace.py`, and against Trino in `tests/test_trino_e2e.py`):
   - masking, refusals and history per person;
   - saving, sharing, running a shared query as another person (who got their own row filter), and owner-only changes;
-  - a schema browser that left out what the person may not see.
+  - a schema browser that left out what the person may not see;
+  - a shared dashboard rendered for its owner and for someone refused one of its tiles, who saw that tile's refusal and the other tile's data;
+  - an alert that stayed quiet on its first fine check, was told once (to its owner and recipient) when the condition began, again when it stopped, and once when its query failed. It was not checked before it was due.
 
 ## Reports
 

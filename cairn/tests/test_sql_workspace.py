@@ -112,3 +112,61 @@ def test_the_routes(ws):
     assert c.post("/sql/run", json={"sql": "SELECT 1 FROM main.orders", "connection": "wh"},
                   headers={"x-who": "urn:li:corpuser:svc", "x-via": "agent"}).status_code == 403   # for people
     assert c.delete(f"/sql/saved/{saved.json()['id']}", headers=h).status_code == 204
+
+
+def test_dashboards_render_each_tile_as_the_viewer(ws):
+    from cairn.sqlworkspace.boards import Boards
+
+    b = Boards(ws.engine, ws)
+    totals = ws.save(ANA, {"name": "Totals", "connection": "wh", "shared": True,
+                           "sql": "SELECT user_id, sum(amount) AS total FROM main.orders GROUP BY user_id ORDER BY user_id",
+                           "chart": {"type": "bar", "x": "user_id", "y": ["total"]}})
+    people = ws.save(ANA, {"name": "People", "connection": "wh", "shared": True, "sql": "SELECT count(*) AS n FROM main.users"})
+    board = b.save_dashboard(ANA, {"name": "Sales", "shared": True, "tiles": [{"query": totals["id"], "width": 2},
+                                                                              {"query": people["id"]}]})
+    mine = b.render(ANA, board["id"])
+    assert [t["title"] for t in mine["tiles"]] == ["Totals", "People"]
+    assert mine["tiles"][0]["result"]["rows"] == [[1, 12.5], [2, 7.0]] and mine["tiles"][0]["chart"]["type"] == "bar"
+    eves = b.render(EVE, board["id"])                     # shared: eve sees it, each tile as eve
+    assert eves["tiles"][0]["status"] == 403 and eves["tiles"][1]["result"]["rows"] == [[2]]
+    with pytest.raises(WorkspaceError):                   # a private query of someone else cannot be a tile
+        private = ws.save(ANA, {"name": "Private", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.users"})
+        b.save_dashboard(EVE, {"name": "x", "tiles": [{"query": private["id"]}]})
+    with pytest.raises(WorkspaceError):
+        b.delete_dashboard(EVE, board["id"])
+
+
+def test_alerts_tell_when_their_condition_starts_and_stops(ws):
+    from sqlalchemy import text as sqltext
+
+    from cairn.sqlworkspace.boards import Boards
+
+    told = []
+    b = Boards(ws.engine, ws, lambda *a: told.append(a))
+    q = ws.save(ANA, {"name": "Big orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders WHERE amount > 8"})
+    a = b.save_alert(ANA, {"query": q["id"], "measure": "n", "op": ">=", "value": 2, "every_minutes": 5,
+                           "recipients": ["urn:li:corpuser:bob"]})
+    assert b.run_due() == 1 and b.alert(ANA, a["id"])["state"] == "ok" and told == []   # first check: fine, quiet
+    assert b.run_due() == 0                                                               # not due again for 5 minutes
+    wh = ws.data.registry.engine("wh")
+    with wh.begin() as c:
+        c.execute(sqltext("INSERT INTO orders VALUES (4, 2, 20.0)"))
+    later = int(__import__("time").time() * 1000) + 6 * 60_000
+    assert b.run_due(later) == 1
+    st = b.alert(ANA, a["id"])
+    assert st["state"] == "triggered" and st["last_value"] == 2
+    assert told[-1][0] == "sql.alert_triggered" and told[-1][3] == [ANA, "urn:li:corpuser:bob"] and "n is 2" in told[-1][2]
+    b.check(a["id"])                                     # still triggered: told once
+    assert len(told) == 1
+    with wh.begin() as c:
+        c.execute(sqltext("DELETE FROM orders WHERE id = 4"))
+    b.check(a["id"])
+    assert told[-1][0] == "sql.alert_resolved" and len(told) == 2
+    bad = b.save_alert(ANA, {"query": q["id"], "measure": "nope", "op": ">", "value": 0, "every_minutes": 5})
+    assert b.check(bad["id"])["state"] == "error" and "no column" in told[-1][2]
+    for wrong in ({"query": q["id"], "op": "~", "value": 1}, {"query": q["id"], "op": ">", "value": "x"},
+                  {"query": q["id"], "op": ">", "value": 1, "every_minutes": 1}):
+        with pytest.raises(WorkspaceError):
+            b.save_alert(ANA, wrong)
+    with pytest.raises(WorkspaceError):
+        b.alert(EVE, a["id"])

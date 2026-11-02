@@ -21,6 +21,7 @@ const AssistantPage = React.lazy(() => import('./pages/AssistantPage').then((m) 
 const ContextInboxPage = React.lazy(() => import('./pages/ContextInboxPage').then((m) => ({ default: m.ContextInboxPage })));
 const ReportsPage = React.lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
 const PipelinesPage = React.lazy(() => import('./pages/PipelinesPage').then((m) => ({ default: m.PipelinesPage })));
+const DashboardsPage = React.lazy(() => import('./pages/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
 const SqlWorkspacePage = React.lazy(() => import('./pages/SqlWorkspacePage').then((m) => ({ default: m.SqlWorkspacePage })));
 const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
@@ -41,6 +42,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/reports', component: ReportsPage, exact: true },
     { path: '/pipelines', component: PipelinesPage, exact: true },
     { path: '/sql', component: SqlWorkspacePage, exact: true },
+    { path: '/dashboards', component: DashboardsPage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
     { path: '/extensions', component: ExtensionsPage, exact: true },
 ];
