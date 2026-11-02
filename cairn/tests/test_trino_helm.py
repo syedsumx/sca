@@ -305,26 +305,44 @@ def test_fault_tolerant_execution_spill_and_cache(lake, cairn):  # noqa: F811
             assert sql("SELECT sum(x) AS s FROM lakehouse.ft.nums") == [{"s": 200000 * 200001 // 2}]
         cached = [f for _, _, fs in os.walk(f"{sql.dir}/cache") for f in fs]
         assert cached, "nothing was cached"
-        # A long query with a shuffle (a GROUP BY), so tasks on both workers hand data over the exchange.
-        q = ("SELECT count(*) AS n FROM (SELECT a.x % 1000 AS k, count(*) AS c FROM UNNEST(sequence(1, 10000)) AS a(x) "
-             "CROSS JOIN UNNEST(sequence(1, 10000)) AS b(y) CROSS JOIN UNNEST(sequence(1, 24)) AS c(z) GROUP BY a.x % 1000)")
+        # A long query with a shuffle (a GROUP BY), so tasks on both workers hand data over the exchange. It
+        # scans a table: a query on constants alone runs on the coordinator, and no worker would have a task.
+        q = ("SELECT count(*) AS n FROM (SELECT t.x % 1000 AS k, count(*) AS c FROM lakehouse.ft.nums t "
+             "CROSS JOIN UNNEST(sequence(1, 4000)) AS c(z) GROUP BY t.x % 1000)")
         long = subprocess.Popen(sql.command(q), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         end = time.time() + 60
         while not (running := sql("SELECT query_id FROM system.runtime.queries WHERE state = 'RUNNING' "
-                                  "AND query LIKE '%sequence(1, 24)%'")):
+                                  "AND query LIKE '%sequence(1, 4000)%' AND query NOT LIKE '%system.runtime%'")):  # not this query itself
             assert time.time() < end and long.poll() is None, "the query did not start"
             time.sleep(0.3)
-        # Kill a worker that is running some of its tasks (Trino names a node after its pod's hostname).
+        # Kill a worker that is running some of its tasks (Trino names a node after its pod's hostname). The
+        # coordinator's query info lists every task with its node; system.runtime.tasks may not show them.
         hosts = {subprocess.run(["docker", "inspect", "-f", "{{.Config.Hostname}}", w], capture_output=True,
                                 text=True).stdout.strip(): w for w in workers}
+        token = cairn[1].trino_tokens.mint("urn:li:corpuser:admin")["token"]
+        https = cm["config.properties"].split("http-server.https.port=")[1].split()[0]
+
+        def query_info():
+            out = subprocess.run(["docker", "exec", sql.coordinator, "curl", "-sk", "-H", f"Authorization: Bearer {token}",
+                                  f"https://localhost:{https}/v1/query/{running[0]['query_id']}"],
+                                 capture_output=True, text=True, timeout=60).stdout
+            return json.loads(out) if out.strip().startswith("{") else {}
+
+        def live_tasks(doc, found):
+            if isinstance(doc, dict):
+                st = doc.get("taskStatus")
+                if isinstance(st, dict) and st.get("state") in ("PLANNED", "RUNNING", "FLUSHING"):
+                    found.append(st.get("nodeId"))
+                for v in doc.values():
+                    live_tasks(v, found)
+            elif isinstance(doc, list):
+                for v in doc:
+                    live_tasks(v, found)
+            return found
+
         end = time.time() + 60
-        while not (busy := [r["node_id"] for r in sql(
-                f"SELECT node_id FROM system.runtime.tasks WHERE query_id = '{running[0]['query_id']}' "
-                # With fault-tolerant execution tasks are short: any task not yet finished on a worker will do.
-                "AND state IN ('PLANNED', 'RUNNING', 'FLUSHING')") if r["node_id"] in hosts]):
-            assert time.time() < end and long.poll() is None, (
-                "no task ran on a worker", hosts, sql(f"SELECT node_id, state FROM system.runtime.tasks "
-                                                       f"WHERE query_id = '{running[0]['query_id']}'"))
+        while not (busy := [n for n in live_tasks(query_info(), []) if n in hosts]):
+            assert time.time() < end and long.poll() is None, ("no task ran on a worker", hosts, live_tasks(query_info(), []))
             time.sleep(0.3)
         time.sleep(2)
         subprocess.run(["docker", "kill", hosts[busy[0]]], capture_output=True, timeout=60)
@@ -342,12 +360,7 @@ def test_fault_tolerant_execution_spill_and_cache(lake, cairn):  # noqa: F811
         assert json.loads(out.strip().splitlines()[-1]) == {"n": 1000}
         assert staged, "nothing was staged in the exchange bucket"
         # It really lost tasks on the killed worker and ran them again.
-        token = cairn[1].trino_tokens.mint("urn:li:corpuser:admin")["token"]
-        https = cm["config.properties"].split("http-server.https.port=")[1].split()[0]
-        info = json.loads(subprocess.run(
-            ["docker", "exec", sql.coordinator, "curl", "-sk", "-H", f"Authorization: Bearer {token}",
-             f"https://localhost:{https}/v1/query/{running[0]['query_id']}"], capture_output=True, text=True, timeout=60).stdout)
-        stats = info["queryStats"]
+        stats = query_info()["queryStats"]
         assert stats["failedTasks"] > 0, {k: v for k, v in stats.items() if "ailed" in k}
     finally:
         for _ in gen:
