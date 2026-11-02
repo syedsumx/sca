@@ -102,7 +102,8 @@ def test_propfind(dav):
 
 def test_authorization(dav):
     st, b = dav
-    req(st, "PUT", f"{b}/keep/a.txt", data=b"a")
+    assert req(st, "MKCOL", f"{b}/keep/").status_code == 201
+    assert req(st, "PUT", f"{b}/keep/a.txt", data=b"a").status_code == 201
     req(st, "PUT", f"{b}/keep/b.txt", data=b"b")
     r = req(st, "PROPFIND", f"{b}/", key=None, headers={"Depth": "1"})
     assert r.status_code == 401 and r.headers["www-authenticate"].startswith("Basic")
@@ -111,9 +112,22 @@ def test_authorization(dav):
     assert req(st, "DELETE", f"{b}/keep/", key=READER).status_code == 403
     assert req(st, "MOVE", f"{b}/keep/", key=READER, headers={"Destination": f"/-/dav/{b}/moved/"}).status_code == 403
     keys = sorted(o["Key"] for o in st.client().list_objects_v2(Bucket=b)["Contents"])
-    assert keys == ["keep/a.txt", "keep/b.txt"]  # nothing changed
+    assert keys == ["keep/", "keep/a.txt", "keep/b.txt"]  # nothing changed
     assert req(st, "LOCK", f"{b}/keep/a.txt", key=READER, data=LOCKINFO).status_code == 403  # locking is writing
     assert req(st, "DELETE", f"{b}/").status_code == 403  # whole buckets: the S3 API
+
+
+def test_put_needs_its_parent_collection(dav):
+    """RFC 4918 9.7.1: a PUT whose parent collection is missing is a 409, and creates nothing."""
+    st, b = dav
+    assert req(st, "PUT", f"{b}/missing/a.txt", data=b"a").status_code == 409
+    assert "Contents" not in st.client().list_objects_v2(Bucket=b, Prefix="missing/")
+    assert req(st, "MKCOL", f"{b}/missing/deeper/").status_code == 409  # still no parent
+    assert req(st, "PUT", f"{b}/top.txt", data=b"t").status_code == 201  # the bucket is always a collection
+    assert req(st, "MKCOL", f"{b}/missing/").status_code == 201
+    assert req(st, "PUT", f"{b}/missing/a.txt", data=b"a").status_code == 201
+    # A reader is refused the write itself (403), whatever exists.
+    assert req(st, "PUT", f"{b}/nowhere/x.txt", key=READER, data=b"x").status_code == 403
 
 
 def test_copy_rules(dav):

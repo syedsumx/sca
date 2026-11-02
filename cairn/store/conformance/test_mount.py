@@ -127,7 +127,10 @@ def test_modes_owners_times_links_and_xattrs(s3, bucket, mounted):
         os.setxattr(m / "f.txt", "user.origin", b"x", os.XATTR_CREATE)
     with pytest.raises(OSError) as ei:
         os.setxattr(m / "f.txt", "trusted.x", b"x")
-    assert ei.value.errno == errno.EOPNOTSUPP
+    # Only user. attributes are kept: the mount refuses others (EOPNOTSUPP); for a caller other than
+    # root, the kernel refuses trusted. ones itself (EPERM). Either way nothing is stored.
+    assert ei.value.errno in ((errno.EOPNOTSUPP,) if os.geteuid() == 0 else (errno.EOPNOTSUPP, errno.EPERM))
+    assert "trusted.x" not in os.listxattr(m / "f.txt")
     with pytest.raises(OSError) as ei:
         os.setxattr(m / "f.txt", "user.big", b"x" * 4096)  # beyond S3's 2 KB of user metadata
     assert ei.value.errno == errno.E2BIG

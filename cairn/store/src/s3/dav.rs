@@ -387,6 +387,28 @@ impl Server {
         }
     }
 
+    /// A PUT that creates a resource needs its parent collection (RFC 4918 9.7.1): 409 otherwise. Checked
+    /// only when the caller may list that parent, so the answer reveals nothing they could not see.
+    async fn put_parent(&self, c: &Ctx) -> Result<(), ApiError> {
+        if c.method != Method::PUT {
+            return Ok(());
+        }
+        let Some((p, _)) = c.key.trim_start_matches('/').rsplit_once('/') else { return Ok(()) };
+        let parent = format!("{p}/");
+        // Callers who may not write get the PUT's own 403; write-only callers (a drop box) are not told
+        // what exists, and their PUT decides.
+        if self.may(c, "PutObject", &c.bucket, &c.key, None).await.is_err()
+            || self.may(c, "ListObjectsV2", &c.bucket, "", Some(&parent)).await.is_err()
+        {
+            return Ok(());
+        }
+        if self.collection_exists(&c.bucket, &parent)? {
+            Ok(())
+        } else {
+            Err(e::DAV_CONFLICT.clone())
+        }
+    }
+
     /// Does a collection exist at `prefix` (ending in '/')? A bucket root always does.
     pub(crate) fn collection_exists(&self, bucket: &str, prefix: &str) -> Result<bool, ApiError> {
         if prefix.is_empty() {
@@ -499,6 +521,12 @@ impl Server {
                 self.files_dir(&mut c, &k, "", 1000, true).await.map(|r| ("DavGetCollection", r))
             }
             "GET" | "HEAD" | "PUT" if !key.ends_with('/') && !bucket.is_empty() && !key.is_empty() => {
+                if let Err(err) = self.put_parent(&c).await {
+                    return {
+                        self.audit_denial(&c, &err);
+                        fail("DavPut", err, info)
+                    };
+                }
                 let mut x = c.clone();
                 x.query.retain(|k, _| super::files::presign_param(k));
                 let r = self.route(&mut x, body).await.map(|mut r| {
