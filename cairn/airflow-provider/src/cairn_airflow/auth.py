@@ -19,6 +19,10 @@ Environment:
     CAIRN_PUBLIC_URL             Cairn as people's browsers reach it (sign-in page), e.g. https://cairn.example.com
     CAIRN_AIRFLOW_OAUTH_SECRET   the client secret (the same value Cairn has)
     CAIRN_AIRFLOW_ROLES          Cairn group -> Airflow roles: data-platform=Admin;data-engineers=User (or JSON)
+    CAIRN_AIRFLOW_TEAM_ROLES     true: each Cairn group a person is in also gives them the Airflow role
+                                 team:<group> (no permissions of its own: DAGs grant it, with
+                                 access_control={"team:finance": {"DAGs": {"can_read", "can_edit"}}}), and the
+                                 role CairnMember (Viewer, without every DAG): people see the DAGs of their teams
     CAIRN_TOKEN_ISSUER           the tokens' issuer (cairn)
     CAIRN_CA_FILE                a CA for Cairn's certificate (default: the system's)
 """
@@ -70,6 +74,16 @@ def parse_roles(raw: str) -> dict[str, list[str]]:
     return out
 
 
+TEAM_PREFIX = "team:"
+MEMBER_ROLE = "CairnMember"
+# What a member may not do globally: see every DAG. DAGs grant their teams access (access_control).
+MEMBER_WITHHELD = {"DAGs"}
+
+
+def _teams_enabled() -> bool:
+    return os.environ.get("CAIRN_AIRFLOW_TEAM_ROLES", "").lower() in ("1", "true", "yes")
+
+
 def _security_manager_class():
     from airflow.providers.fab.auth_manager.security_manager.override import FabAirflowSecurityManagerOverride
 
@@ -78,6 +92,42 @@ def _security_manager_class():
             if provider != "cairn":
                 return {}
             return user_info(resp["access_token"])
+
+        def _member_role(self):
+            role = self.find_role(MEMBER_ROLE)
+            if role is None:
+                role = self.add_role(MEMBER_ROLE)
+                viewer = self.find_role("Viewer")
+                for perm in (viewer.permissions if viewer else []):
+                    resource = perm.resource.name
+                    if resource in MEMBER_WITHHELD or resource.startswith("DAG:"):
+                        continue
+                    self.add_permission_to_role(role, perm)
+            return role
+
+        def _team_role(self, group: str):
+            name = f"{TEAM_PREFIX}{group}"[:64]
+            return self.find_role(name) or self.add_role(name)
+
+        def sync_perm_for_dag(self, dag_id, access_control=None):
+            # A DAG may name its team before anyone in it has signed in: create the team's role.
+            if _teams_enabled():
+                for role in (access_control or {}):
+                    if str(role).startswith(TEAM_PREFIX):
+                        self._team_role(str(role)[len(TEAM_PREFIX):])
+            return super().sync_perm_for_dag(dag_id, access_control)
+
+        def _oauth_calculate_user_roles(self, userinfo) -> list:
+            roles = list(super()._oauth_calculate_user_roles(userinfo))
+            groups = [g for g in userinfo.get("role_keys") or [] if g]
+            if _teams_enabled() and groups:
+                roles += [self._member_role(), *(self._team_role(g) for g in groups)]
+            seen, out = set(), []
+            for r in roles:
+                if r is not None and r.name not in seen:
+                    seen.add(r.name)
+                    out.append(r)
+            return out
 
     return CairnSecurityManager
 

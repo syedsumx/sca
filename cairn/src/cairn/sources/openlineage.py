@@ -18,6 +18,7 @@ Dataset names follow OpenLineage's naming: the namespace's scheme names the plat
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -43,6 +44,8 @@ ACTOR = "urn:li:corpuser:cairn-openlineage"
 class OpenLineageError(ValueError):
     pass
 
+
+logger = logging.getLogger(__name__)
 
 def _ms(ts: Optional[str]) -> int:
     if not ts:
@@ -103,6 +106,9 @@ class OpenLineageReceiver:
         self.env = env
         # Renames datasets before they are recorded (lakehouse tables named by their storage paths).
         self.rewrite = None
+        # Called with (job_urn, state, outputs, run_id, message) for each run event (pipeline health,
+        # dataset changes).
+        self.on_run = None
 
     def _datasets(self, items: list[dict], mcps: list[dict]) -> list[str]:
         urns = []
@@ -200,6 +206,12 @@ class OpenLineageReceiver:
                     "timestampMillis": when, "status": "COMPLETE", "attempt": 1,
                     "result": {"type": RESULTS[state], "nativeResultType": "openlineage"}}))
         self.graph.emit(mcps)
+        if self.on_run is not None and state in ("COMPLETE", "FAIL"):
+            err = ((run.get("facets") or {}).get("errorMessage") or {}).get("message") or ""
+            try:
+                self.on_run(job_urn, state, outputs, run.get("runId"), str(err)[:500])
+            except Exception:  # noqa: BLE001 - lineage is recorded; health tracking must not reject it
+                logger.exception("pipeline health for %s failed", job_urn)
         return {"job": job_urn, "run": run_urn, "inputs": len(inputs), "outputs": len(outputs),
                 "column_lineage": len(io["fineGrainedLineages"]), "mcps": len(mcps)}
 

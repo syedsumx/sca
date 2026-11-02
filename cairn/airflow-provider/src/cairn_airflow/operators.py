@@ -49,6 +49,37 @@ class CairnTrinoOperator(BaseOperator):
         self.sql, self.schema, self.cairn_conn_id = sql, schema, cairn_conn_id
         self.token_ttl, self.return_rows = token_ttl, return_rows
 
+    def _lineage(self):
+        """The tables the SQL reads and writes, for OpenLineage (Cairn names them as Trino does), so a
+        failed run marks the datasets it writes as possibly stale."""
+        from airflow.providers.common.compat.openlineage.facet import Dataset
+        from airflow.providers.openlineage.extractors import OperatorLineage
+
+        try:
+            import openlineage_sql
+
+            hook = CairnHook(self.cairn_conn_id)
+            extra = hook.extra
+            catalog = extra.get("trino_catalog", "lakehouse")
+            ns = f"trino://{extra.get('trino_host', 'cairn-trino')}:{extra.get('trino_port', 8443)}"
+            meta = openlineage_sql.parse(split_statements(self.sql), dialect="trino", default_schema=self.schema)
+        except Exception as e:  # noqa: BLE001 - lineage is best effort; the task's own result is not
+            self.log.debug("no OpenLineage for this SQL: %s", e)
+            return OperatorLineage()
+
+        def ds(t) -> Dataset:
+            return Dataset(namespace=ns, name=".".join([t.database or catalog, t.schema or self.schema or "", t.name]))
+        return OperatorLineage(inputs=[ds(t) for t in meta.in_tables], outputs=[ds(t) for t in meta.out_tables])
+
+    def get_openlineage_facets_on_start(self):
+        return self._lineage()
+
+    def get_openlineage_facets_on_complete(self, task_instance):
+        return self._lineage()
+
+    def get_openlineage_facets_on_failure(self, task_instance):
+        return self._lineage()
+
     def execute(self, context) -> Any:
         hook = CairnHook(self.cairn_conn_id)
         conn, user = hook.trino_connection(self.schema, self.token_ttl)

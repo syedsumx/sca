@@ -44,6 +44,7 @@ def _owners(meta: dict) -> list[str]:
 class DbtRuns:
     def __init__(self, graph, external_quality, audit, urn_of: Optional[Callable[[str, str, str], str]] = None):
         self.graph, self.external, self.audit, self.urn_of = graph, external_quality, audit, urn_of
+        self.changes = None  # DatasetChanges: the datasets each run built
 
     def _urn(self, adapter: str, node: dict) -> str:
         table = node.get("alias") or node.get("identifier") or node.get("name")
@@ -67,6 +68,7 @@ class DbtRuns:
         mcps: list[dict] = []
         models = 0
         edges = 0
+        built: list[str] = []
         for uid, node in nodes.items():
             kind = uid.split(".")[0]
             if kind not in BUILT:
@@ -76,6 +78,8 @@ class DbtRuns:
             urn = self._urn(adapter, node)
             models += 1
             status = (results.get(uid) or {}).get("status")
+            if status == "success":
+                built.append(urn)
             mcps += self._docs(urn, node, uid, project, status)
             mcps += self._tags_and_owners(urn, node)
             ups = [self._urn(adapter, nodes[d]) for d in (node.get("depends_on") or {}).get("nodes") or []
@@ -84,6 +88,8 @@ class DbtRuns:
             edges += len(ups)
         if mcps:
             self.graph.emit(mcps)
+        if self.changes is not None and built:
+            self.changes.record(built, "dbt", f"dbt:{project}", meta.get("invocation_id"))
         tests = None
         if run_results and any(str(k).startswith("test.") for k in results):
             tests = self.external.ingest("dbt", {"run_results": run_results, "manifest": manifest}, adapter, None, actor,

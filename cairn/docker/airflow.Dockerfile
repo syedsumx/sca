@@ -29,7 +29,8 @@ RUN --mount=type=secret,id=extra_ca,required=false,uid=50000 \
  && src="$(mktemp -d)" && cp -r /mnt/cairn/pyproject.toml /mnt/cairn/src /mnt/cairn/airflow-provider "${src}/" \
  && constraints="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt" \
  && pip install --constraint "${constraints}" "apache-airflow==${AIRFLOW_VERSION}" \
-      apache-airflow-providers-fab apache-airflow-providers-openlineage apache-airflow-providers-cncf-kubernetes trino \
+      apache-airflow-providers-fab apache-airflow-providers-openlineage apache-airflow-providers-cncf-kubernetes \
+      apache-airflow-providers-trino apache-airflow-providers-common-sql trino \
  && pip install --no-deps "${src}/airflow-provider" \
  && python -m venv /opt/cairn-dbt \
  && /opt/cairn-dbt/bin/pip install "${src}" "dbt-core==${DBT_VERSION}" "dbt-trino==${DBT_TRINO_VERSION}" \

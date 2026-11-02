@@ -12,7 +12,7 @@ from a secrets backend.
 
 from __future__ import annotations
 
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import httpx
 
@@ -88,6 +88,33 @@ class CairnHook(BaseHook):
     @property
     def verify(self):
         return self.extra.get("ca_file") or True
+
+    def api(self, method: str, path: str, **kwargs) -> Any:
+        """A call to Cairn's API as the connection's user; CairnError unless it succeeds."""
+        with httpx.Client(timeout=30, verify=self.verify, trust_env=False) as c:
+            r = c.request(method, f"{self.url}{path}", headers={"Authorization": f"Bearer {self.token}"}, **kwargs)
+        if r.status_code >= 300:
+            raise CairnError(f"Cairn answered {r.status_code} to {method} {path}: {r.text[:300]}")
+        return r.json() if r.content else None
+
+    def dataset_urn(self, dataset: str) -> str:
+        """A dataset URN, or a lakehouse table (``catalog.schema.table``, as Trino names it) resolved by Cairn."""
+        if dataset.startswith("urn:li:"):
+            return dataset
+        return self.api("GET", "/v1/datasets/resolve", params={"name": dataset})["urn"]
+
+    def dataset_changes(self, datasets: Sequence[str], after: Optional[int] = None) -> dict:
+        """Changes to the datasets after the cursor ``after`` (None: just the current cursor)."""
+        params: list[tuple[str, Any]] = [("urn", d) for d in datasets]
+        if after is not None:
+            params.append(("after", after))
+        return self.api("GET", "/v1/datasets/changes", params=params)
+
+    def dataset_health(self, dataset: str) -> dict:
+        """Cairn's quality status for a dataset: its monitors, other tools' checks and open incidents."""
+        from urllib.parse import quote
+
+        return self.api("GET", f"/quality/datasets/{quote(self.dataset_urn(dataset), safe='')}/health")
 
     def trino_token(self, ttl: int = 3600) -> dict:
         """A short-lived Trino token for the connection's Cairn user."""

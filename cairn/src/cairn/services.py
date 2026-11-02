@@ -102,6 +102,8 @@ class Services:
     lakehouse: Optional[Any] = None
     lakehouse_sessions: Optional[Any] = None
     workload: Optional[Any] = None
+    dataset_changes: Optional[Any] = None
+    pipeline_health: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
@@ -515,7 +517,20 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
 
     watch_licence(services.licence)
     _build_active_metadata(services)
+    _build_pipeline_health(services)
     return services
+
+
+def _build_pipeline_health(s: Services) -> None:
+    """Dataset changes (for orchestrators) and incidents for failed pipelines, from OpenLineage and dbt."""
+    from cairn.pipelines.changes import DatasetChanges, PipelineHealth
+
+    s.dataset_changes = DatasetChanges(s.engine)
+    if s.dbt_runs is not None:
+        s.dbt_runs.changes = s.dataset_changes
+    if s.openlineage is not None and s.graph is not None:
+        s.pipeline_health = PipelineHealth(s.graph, getattr(s, "notify", None), s.dataset_changes)
+        s.openlineage.on_run = s.pipeline_health.on_run
 
 
 def _build_active_metadata(s: Services) -> None:
@@ -968,7 +983,10 @@ def _build_data_access(s: Services) -> None:
                                       os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse"),
                                       tuple(os.environ.get("CAIRN_LAKEHOUSE_CATALOG_URIS", "").split(",")))
         if s.openlineage is not None:
-            s.openlineage.rewrite = s.lakehouse.remap_lineage
+            # Datasets as the catalog names them, whoever sent the event: Spark (storage paths, renamed by
+            # their symlinks) and anything naming Trino tables (trino://host:port, catalog.schema.table).
+            lake, trino_access = s.lakehouse, s.trino_access
+            s.openlineage.rewrite = lambda e: trino_access.remap_lineage(lake.remap_lineage(e))
         if getattr(s, "trino_tokens", None) is not None:
             # Workload identity: pipelines exchange their platform's token (Kubernetes, CI) for a Cairn token.
             from cairn.identity.workload import from_env as workload_from_env

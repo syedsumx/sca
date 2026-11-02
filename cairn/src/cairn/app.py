@@ -223,6 +223,12 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if services.dataset_changes is not None:
+        from cairn.pipelines.changes import build_changes_router
+
+        ta = services.trino_access
+        app.include_router(build_changes_router(services.dataset_changes, cp, authz,
+                                                ta.urn if ta is not None else None))
     if services.workload is not None:
         from cairn.identity.workload import build_workload_router
 

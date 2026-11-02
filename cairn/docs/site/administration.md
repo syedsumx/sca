@@ -1053,6 +1053,27 @@ A multi-table transaction changes every table or none.
   - **Fails closed.** Anyone in no mapped group signs in with the `Public` role, which sees nothing. Roles are synced at every sign-in, so removing someone from a group removes their access at their next sign-in.
   - **Kept apart from Trino.** Airflow's tokens are refused by Trino (another audience), and a code issued to one client cannot be redeemed by the other. Sign-ins are audited (`airflow.sign_in`).
   - **On Cairn's side,** set `CAIRN_AIRFLOW_OAUTH_SECRET` and `CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS` (`https://<airflow>/auth/oauth-authorized/cairn`; plain HTTP only for `localhost`). This needs Trino's sign-in to be on (`CAIRN_TRINO_ACCESS_KEY`), whose signing key it uses.
+- **Runs when data changes.** `CairnDatasetChangedTrigger(["lakehouse.sales.orders"])`, in an Airflow 3 `AssetWatcher`, runs a DAG whenever one of its tables changes, whoever wrote it.
+  - **Where changes come from.** Cairn records each dataset a pipeline finished writing: completed OpenLineage runs (Spark, Airflow, Trino's own lineage) and the models of dbt runs. They are served at `GET /v1/datasets/changes`, in order by a cursor, only for datasets the caller may see, and kept 30 days.
+  - **Naming tables.** URNs, or tables as `catalog.schema.table`, which `GET /v1/datasets/resolve` turns into URNs.
+  - **No replay.** The trigger watches from when it starts.
+- **Quality gates.** Both read Cairn's status: monitors, plus other tools' checks such as dbt tests, Great Expectations and Soda.
+  - `CairnQualityGateOperator(datasets=[...])` fails the task, without retries, when a dataset is not good enough, and names what failed.
+  - `CairnQualitySensor` waits until the datasets are good, in reschedule mode.
+  - By default, PASS and WARN pass, unchecked datasets do not, and open incidents block.
+- **Failed pipelines.** When a run fails, every table its job writes gets an incident ("[Pipeline] … failed"), and the owners of the job and the tables are notified (`pipeline.run_failed`). The job's next successful run resolves it. One incident per job and table, however often it fails. `CairnTrinoOperator` reports the tables its SQL reads and writes, so its runs, failed ones too, are tied to them.
+- **Team access.** With `CAIRN_AIRFLOW_TEAM_ROLES=true`, each Cairn group a person is in also gives them the Airflow role `team:<group>`, plus `CairnMember`, which is Viewer without access to every DAG. A DAG grants its team access with `access_control={"team:finance": {"DAGs": {"can_read", "can_edit"}}}`, and people see only their teams' DAGs. A team's role is created when a DAG first names it.
+- **dbt, one task per model.** `CairnDbtTaskGroup(group_id=..., project_dir=...)` builds one task per model, seed and snapshot from the project's `manifest.json` (from `dbt parse`, ahead of time), wired as dbt's DAG. Each task runs `cairn dbt build --select fqn:<node>` and records its run, so a failed model is retried alone and its tests gate what depends on it.
+- **Airflow's own operators.** With `AIRFLOW__SECRETS__BACKEND=cairn_airflow.secrets.CairnSecretsBackend`, the connection `trino_lakehouse` gets a fresh Trino token for the pipeline user each time it is used. `SQLExecuteQueryOperator` and `TrinoOperator` then run under Cairn's policies with no stored password. The backend also serves `cairn_default`.
+- **Lineage without a stored key.** Set OpenLineage's transport `auth` to `{"type": "cairn_airflow.lineage.CairnTokenProvider", "workload_token_file": "/var/run/secrets/cairn/token"}`. Lineage is then sent with the pipeline user's Cairn token, exchanged from the pod's token and renewed before it expires.
+- **Tested** (`tests/test_airflow_more_e2e.py`, with the `cairn/airflow` image):
+  - **Quality gate.** It failed while a check failed, naming it, and passed once the check passed.
+  - **Failure incident.** A task refused by Cairn's policies raised an incident on the table it writes; the next good run resolved it and recorded a change.
+  - **Trigger.** It fired when the table was written.
+  - **Secrets backend.** Airflow's `SQLExecuteQueryOperator` read a table the pipeline user may see, and was refused one it may not.
+  - **dbt.** The example project ran as one task per model, each recorded.
+  - **Team access.** A person in `finance` got `team:finance` and `CairnMember` and could read the finance DAG but not HR's.
+  - **Lineage.** It reached Cairn through the token provider, with the task's tables.
 - **Compose:** `docker compose -f docker-compose.cairn.yml --profile trino --profile airflow up -d` starts Airflow's API server (`http://localhost:8090`), scheduler, DAG processor and triggerer. It uses LocalExecutor and an `airflow` database in Cairn's PostgreSQL, created by `airflow-init`. Tasks run with the token in `CAIRN_AIRFLOW_TOKEN`, on the DAGs in `CAIRN_AIRFLOW_DAGS` (default `examples/airflow/dags`) and the dbt projects in `examples/dbt`.
 - **Kubernetes:** use the official Apache Airflow chart (1.20+) with `deploy/airflow/values-cairn.yaml`. It sets the `cairn/airflow` image, KubernetesExecutor (each task in its own pod), external PostgreSQL, secrets for the Cairn connection, OpenLineage and the OAuth secret, sign-in through Cairn with no local admin account, and DAGs from git. The file lists the Secrets to create. CI renders the chart with it.
 - **Tested** (`tests/test_airflow_e2e.py`, in CI against the `cairn/airflow` image as built) with Airflow 3.3.2, Trino 476, Cairn Catalog and Cairn Store:

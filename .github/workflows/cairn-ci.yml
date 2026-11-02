@@ -282,7 +282,7 @@ jobs:
           CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
         run: |
           pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0"
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_airflow_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py \
             tests/test_spark_e2e.py tests/test_lakehouse_access.py tests/test_workload_identity_e2e.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"

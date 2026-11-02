@@ -106,6 +106,7 @@ def load_models() -> MetaData:
     from cairn.dataaccess import trino_oauth as _trino_oauth  # noqa: F401
     from cairn.dataaccess import lakehouse as _lakehouse  # noqa: F401
     from cairn.identity import workload as _workload  # noqa: F401
+    from cairn.pipelines import changes as _changes  # noqa: F401
 
     return metadata
 

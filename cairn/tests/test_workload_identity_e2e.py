@@ -147,6 +147,17 @@ def test_a_service_account_signs_in_as_its_pipeline_user(k8s, cairn, tmp_path): 
         assert cairn_spark._token(None, url).count(".") == 2
     finally:
         os.environ.pop("CAIRN_WORKLOAD_TOKEN_FILE")
+    # Airflow's OpenLineage token provider: exchanged once, then reused until near its expiry.
+    spec = importlib.util.spec_from_file_location("cairn_lineage", os.path.join(
+        os.path.dirname(__file__), "..", "airflow-provider", "src", "cairn_airflow", "lineage.py"))
+    lineage = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(lineage)
+    provider = lineage.CairnTokenProvider({"workload_token_file": str(f), "cairn_url": url})
+    first = provider.get_bearer()
+    assert first.startswith("Bearer ") and provider.get_bearer() == first
+    lineage_token = first[len("Bearer "):]
+    assert httpx.get(f"{url}/me", headers={"Authorization": f"Bearer {lineage_token}"}, timeout=10).json()["urn"] == \
+        "urn:li:corpuser:svc-dbt"
 
     # Refused: the cluster's default audience, an unbound service account, the same name in another
     # namespace, a token living longer than allowed is fine here (24 h) but not one Cairn cannot verify.
