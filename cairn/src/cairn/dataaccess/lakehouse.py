@@ -14,21 +14,171 @@ they sign in as, and refuses what they may not do:
   refuses it and the user queries it through Trino, which applies them. Any error decides nothing
   (everything false): the catalog then refuses.
 
+Long jobs keep their sessions without a long-lived token: a session's tokens last an hour
+(``CAIRN_LAKEHOUSE_TOKEN_TTL``) and the engine renews them at ``POST /v1/lakehouse/oauth/tokens``
+with the session credential (OAuth client credentials) or the current token (token exchange), which
+Iceberg's REST client does by itself before a token expires, on the driver and on every executor.
+Each renewal checks again that the session was not ended (``POST /v1/lakehouse/sessions/revoke``)
+and the user is not suspended, and a session ends after ``CAIRN_LAKEHOUSE_MAX_SESSION`` (7 days)
+whatever happens. Only a hash of the session credential is kept. Renewals are audited.
+
 Tables are the datasets Trino names for the lakehouse catalog (``CAIRN_LAKEHOUSE_TRINO_CATALOG``,
 default ``lakehouse``), so one policy governs a table in Trino and in Spark alike.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
+import os
+import secrets
+import time
+import uuid
 from typing import Callable, Optional
 
+from sqlalchemy import BigInteger, Column, String, Table, select
+from starlette.requests import Request  # a module global: FastAPI resolves the endpoints' annotations here
+
+from cairn.common.db import metadata
 from cairn.dataaccess.trino import MANAGE, READ, SYSTEM, VIEW, WRITE, TrinoAccess
 
 logger = logging.getLogger(__name__)
 
 AUDIENCE = "lakehouse"
 NOTHING = {"view": False, "read": False, "write": False, "manage": False, "restricted": True}
+TOKEN_EXCHANGE = "urn:ietf:params:oauth:grant-type:token-exchange"
+ACCESS_TOKEN = "urn:ietf:params:oauth:token-type:access_token"
+JWT = "urn:ietf:params:oauth:token-type:jwt"
+
+# A lakehouse session: a person or pipeline user signed in to Cairn Catalog from an engine, with a
+# session credential (only its hash is kept) the engine renews its token with.
+lakehouse_sessions = Table(
+    "cairn_lakehouse_sessions", metadata,
+    Column("sid", String(64), primary_key=True),
+    Column("user", String(256), nullable=False, index=True),
+    Column("secret_hash", String(64), nullable=False),
+    Column("started_s", BigInteger, nullable=False),
+    Column("ended_s", BigInteger, nullable=True),
+    Column("ended_by", String(256), nullable=True),
+)
+
+
+class SessionRefused(Exception):
+    """A lakehouse session cannot be renewed; ``error`` is the OAuth error code."""
+
+    def __init__(self, message: str, error: str = "invalid_grant"):
+        super().__init__(message)
+        self.error = error
+
+
+def _int_env(name: str, default: int, low: int, high: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    try:
+        v = int(raw) if raw else default
+    except ValueError:
+        raise ValueError(f"{name} must be a number of seconds")
+    if not low <= v <= high:
+        raise ValueError(f"{name} must be between {low} and {high} seconds")
+    return v
+
+
+def _hash(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+class LakehouseSessions:
+    """Lakehouse sessions: a token for an hour, renewed with the session credential (OAuth client
+    credentials) or the current token (token exchange) while the user may keep the session."""
+
+    def __init__(self, tokens, engine, audit=None, user_status: Optional[Callable[[str], str]] = None,
+                 ttl: Optional[int] = None, max_session: Optional[int] = None):
+        self.tokens, self.engine, self.audit = tokens, engine, audit
+        self.user_status = user_status  # urn -> "ACTIVE" | "SUSPENDED" | ...
+        self.ttl = ttl if ttl is not None else _int_env("CAIRN_LAKEHOUSE_TOKEN_TTL", 3600, 300, 43200)
+        self.max_session = (max_session if max_session is not None
+                            else _int_env("CAIRN_LAKEHOUSE_MAX_SESSION", 7 * 86400, 3600, 30 * 86400))
+
+    def issue(self, actor: str, ttl: Optional[int] = None) -> dict:
+        """A new session for ``actor``: its first token and the credential that renews it."""
+        if not actor.startswith("urn:li:corpuser:"):
+            raise ValueError("lakehouse sessions are for Cairn users")
+        now = int(time.time())
+        sid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
+        ttl = min(int(ttl or self.ttl), self.max_session)
+        out = self.tokens.mint(actor, ttl, audience=AUDIENCE, extra={"sid": sid, "sst": now})
+        with self.engine.begin() as conn:
+            conn.execute(lakehouse_sessions.insert().values(
+                sid=sid, user=actor.removeprefix("urn:li:corpuser:"), secret_hash=_hash(secret), started_s=now))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "lakehouse.token_issued", actor, None,
+                                  {"session": sid, "token_id": out["token_id"], "expires_at": out["expires_at"]}, conn=conn)
+        return {**out, "session": sid, "credential": f"{sid}:{secret}", "session_expires_at": now + self.max_session}
+
+    def _session(self, sid: str) -> Optional[dict]:
+        with self.engine.connect() as conn:
+            row = conn.execute(select(lakehouse_sessions).where(lakehouse_sessions.c.sid == sid)).first()
+        return dict(row._mapping) if row else None
+
+    def _renew(self, row: Optional[dict], how: str) -> dict:
+        if row is None:
+            raise SessionRefused("no such lakehouse session")
+        if row["ended_s"] is not None:
+            raise SessionRefused("the lakehouse session was ended (revoked)")
+        now = int(time.time())
+        if now >= row["started_s"] + self.max_session:
+            raise SessionRefused("the session reached its maximum length; sign in again")
+        urn = f"urn:li:corpuser:{row['user']}"
+        try:
+            status = self.user_status(urn) if self.user_status else "ACTIVE"
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("lakehouse: cannot check %s for a renewal: %s", urn, e)
+            raise SessionRefused("Cairn cannot check the user right now", "temporarily_unavailable")
+        if (status or "ACTIVE").upper() == "SUSPENDED":
+            raise SessionRefused("the user is suspended")
+        ttl = max(60, min(self.ttl, row["started_s"] + self.max_session - now))
+        out = self.tokens.mint(urn, ttl, audience=AUDIENCE, extra={"sid": row["sid"], "sst": row["started_s"]})
+        if self.audit is not None:
+            self.audit.record("lakehouse", "lakehouse.token_refreshed", urn, None,
+                              {"session": row["sid"], "with": how, "token_id": out["token_id"],
+                               "expires_at": out["expires_at"]})
+        return out
+
+    def refresh(self, subject_token: str) -> dict:
+        """Token exchange: a new token for the session ``subject_token`` belongs to."""
+        try:
+            claims = self.tokens.verify(subject_token, AUDIENCE, leeway=0)
+        except ValueError as e:
+            raise SessionRefused(str(e))
+        if not claims.get("sid"):
+            raise SessionRefused("this token cannot be renewed (no session); get a new one")
+        row = self._session(claims["sid"])
+        if row is not None and row["user"] != claims["sub"]:
+            raise SessionRefused("the token does not belong to this session")
+        return self._renew(row, "token")
+
+    def with_credential(self, client_id: str, client_secret: str) -> dict:
+        """Client credentials: a new token for the session the credential belongs to."""
+        row = self._session(client_id) if client_id else None
+        if row is None or not hmac.compare_digest(row["secret_hash"], _hash(client_secret or "")):
+            raise SessionRefused("unknown session credential", "invalid_client")
+        return self._renew(row, "credential")
+
+    def revoke(self, user: str, actor: str) -> dict:
+        """Ends every open lakehouse session of ``user``: none is renewed again (tokens already issued
+        last at most CAIRN_LAKEHOUSE_TOKEN_TTL)."""
+        user = user.removeprefix("urn:li:corpuser:")
+        if not user:
+            raise ValueError("name a user")
+        now = int(time.time())
+        with self.engine.begin() as conn:
+            ended = conn.execute(lakehouse_sessions.update()
+                                 .where(lakehouse_sessions.c.user == user, lakehouse_sessions.c.ended_s.is_(None))
+                                 .values(ended_s=now, ended_by=actor)).rowcount
+            if self.audit is not None:
+                self.audit.record("lakehouse", "lakehouse.sessions_revoked", actor, f"urn:li:corpuser:{user}",
+                                  {"sessions": ended}, conn=conn)
+        return {"user": user, "sessions_ended": ended, "tokens_last_at_most": self.ttl}
 
 
 class LakehouseAccess:
@@ -116,8 +266,13 @@ class LakehouseAccess:
         return bool(self.access.plan_for(actor, urn).active)
 
 
-def build_lakehouse_router(lake: LakehouseAccess, tokens, current_principal, audit=None):
-    from fastapi import APIRouter, Body, Depends, HTTPException
+def build_lakehouse_router(lake: LakehouseAccess, sessions: LakehouseSessions, current_principal, audit=None,
+                           authorize=None):
+    import base64
+    from urllib.parse import unquote
+
+    from fastapi import APIRouter, Body, Depends, Form, HTTPException
+    from fastapi.responses import JSONResponse
 
     from cairn.dataaccess.trino import CRAWLER
 
@@ -125,17 +280,60 @@ def build_lakehouse_router(lake: LakehouseAccess, tokens, current_principal, aud
 
     @router.post("/token")
     def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):
-        """A token for Cairn Catalog (Spark, pyiceberg) as the caller: a person, or a pipeline user."""
+        """A token for Cairn Catalog (Spark, pyiceberg) as the caller: a person, or a pipeline user. It is
+        renewed by token exchange at /v1/lakehouse/oauth/tokens for as long as the session may last."""
         if p.is_service or p.via in ("agent", "extension") or p.urn == f"urn:li:corpuser:{CRAWLER}":
             raise HTTPException(403, "lakehouse tokens are for people and pipeline users")
         try:
-            out = tokens.mint(p.urn, ttl_seconds, audience=AUDIENCE)
+            return sessions.issue(p.urn, ttl_seconds)
         except ValueError as e:
             raise HTTPException(422, str(e))
-        if audit is not None:
-            audit.record("lakehouse", "lakehouse.token_issued", p.urn, None,
-                         {"token_id": out["token_id"], "expires_at": out["expires_at"]})
-        return out
+
+    @router.post("/oauth/tokens")
+    def oauth_tokens(request: Request, grant_type: str = Form(""), subject_token: str = Form(""),
+                     subject_token_type: str = Form(""), client_id: str = Form(""), client_secret: str = Form(""),
+                     scope: str = Form(""), requested_token_type: str = Form("")):
+        """How Iceberg's REST client gets and renews its token: OAuth 2.0 client credentials (the session
+        credential) or token exchange (RFC 8693, the current token). The session is checked each time."""
+        def oauth_error(code: str, text: str, status: int = 400):
+            headers = {"Cache-Control": "no-store"}
+            if code == "invalid_client":
+                status, headers["WWW-Authenticate"] = 401, 'Basic realm="lakehouse"'
+            return JSONResponse({"error": code, "error_description": text}, status_code=status, headers=headers)
+
+        if requested_token_type not in ("", ACCESS_TOKEN):
+            return oauth_error("invalid_request", "only access tokens are issued")
+        try:
+            if grant_type == "client_credentials":
+                basic = request.headers.get("authorization", "")
+                if not client_id and basic[:6].lower() == "basic ":
+                    try:
+                        client_id, _, client_secret = base64.b64decode(basic[6:]).decode().partition(":")
+                    except ValueError:
+                        return oauth_error("invalid_client", "malformed client authentication")
+                out = sessions.with_credential(unquote(client_id), unquote(client_secret))
+            elif grant_type == TOKEN_EXCHANGE:
+                if subject_token_type not in (ACCESS_TOKEN, JWT) or not subject_token:
+                    return oauth_error("invalid_request", "subject_token must be a lakehouse access token")
+                out = sessions.refresh(subject_token)
+            else:
+                return oauth_error("unsupported_grant_type", "lakehouse tokens come from client credentials or token exchange")
+        except SessionRefused as e:
+            return oauth_error(e.error, str(e), 503 if e.error == "temporarily_unavailable" else 400)
+        return JSONResponse({"access_token": out["token"], "issued_token_type": ACCESS_TOKEN,
+                             "token_type": "Bearer", "expires_in": out["expires_in"]},
+                            headers={"Cache-Control": "no-store"})
+
+    @router.post("/sessions/revoke")
+    def revoke(user: str = Body(..., embed=True), p=Depends(current_principal)):
+        """Ends a user's lakehouse sessions: none is renewed again."""
+        if authorize is None:
+            raise HTTPException(403, "revoking sessions needs MANAGE_SYSTEM_OPERATIONS")
+        authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+        try:
+            return sessions.revoke(user, p.urn)
+        except ValueError as e:
+            raise HTTPException(422, str(e))
 
     @router.post("/decide")
     def decide(user: str = Body(...), tables: list[dict] = Body(default_factory=list), p=Depends(current_principal)):

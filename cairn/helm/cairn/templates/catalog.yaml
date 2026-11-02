@@ -75,6 +75,12 @@ spec:
             {{- if and $st.enabled (not $u.s3Endpoint) (not $st.secret.stsSecretKey) }}{{ fail "cairn.catalog.vendRole needs STS in the store: set cairn.store.secret.stsSecretKey" }}{{ end }}
             - name: CAIRN_CATALOG_VEND_ROLE
               value: {{ $u.vendRole | quote }}
+            - name: CAIRN_CATALOG_VEND_SECONDS
+              value: {{ $u.vendSeconds | quote }}
+            {{- with $u.vendRevalidateSeconds }}
+            - name: CAIRN_CATALOG_VEND_REVALIDATE_SECONDS
+              value: {{ . | quote }}
+            {{- end }}
             {{- else }}
             - name: CAIRN_CATALOG_VEND_CREDENTIALS
               value: {{ $u.vendCredentials | quote }}

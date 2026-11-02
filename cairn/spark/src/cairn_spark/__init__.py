@@ -10,6 +10,11 @@ SparkSession whose ``lakehouse`` catalog is Cairn Catalog (Iceberg REST):
 * Storage access is per table: the catalog hands Spark temporary credentials for one table's location
   (read-only unless the user may write), never a store key.
 * Lineage goes to Cairn through OpenLineage (the Spark listener), as the same user.
+* Long jobs keep going: the session's catalog tokens (an hour each) are renewed by Iceberg itself at
+  Cairn, with the session credential, on the driver and every executor; storage keys are renewed
+  through the catalog. Both are decided again each time. A session lasts at most what Cairn allows
+  (CAIRN_LAKEHOUSE_MAX_SESSION, 7 days by default), and ends early when the user is suspended or
+  their sessions are ended (POST /v1/lakehouse/sessions/revoke).
 
 Configuration (environment, or keyword arguments)::
 
@@ -17,7 +22,7 @@ Configuration (environment, or keyword arguments)::
     CAIRN_TOKEN[_FILE]    the caller's Cairn token
     CAIRN_CATALOG_URI     Cairn Catalog, e.g. https://catalog.example.com
     CAIRN_CA_FILE         a CA for Cairn's certificate (default: the system's)
-    CAIRN_SPARK_TOKEN_TTL seconds the catalog token lasts (14400; at most 43200): the longest job
+    CAIRN_SPARK_TOKEN_TTL seconds the first catalog token lasts (default: Cairn's, an hour); tokens are renewed
 """
 
 from __future__ import annotations
@@ -48,25 +53,35 @@ def _token(token: Optional[str]) -> str:
     return t
 
 
-def catalog_token(cairn_url: str, token: str, ttl: int, verify) -> dict:
+def catalog_token(cairn_url: str, token: str, ttl: Optional[int], verify) -> dict:
     """A Cairn Catalog token for the Cairn user ``token`` belongs to."""
-    r = httpx.post(f"{cairn_url.rstrip('/')}/v1/lakehouse/token", json={"ttl_seconds": ttl},
+    r = httpx.post(f"{cairn_url.rstrip('/')}/v1/lakehouse/token", json={"ttl_seconds": ttl} if ttl else {},
                    headers={"Authorization": f"Bearer {token}"}, timeout=30, verify=verify)
     if r.status_code != 200:
         raise CairnSparkError(f"Cairn refused a lakehouse token ({r.status_code}): {r.text[:300]}")
     return r.json()
 
 
-def lakehouse_conf(cairn_url: str, catalog_uri: str, catalog_tok: str, cairn_token: str, region: str = "us-east-1",
+def lakehouse_conf(cairn_url: str, catalog_uri: str, session: str, cairn_token: str, region: str = "us-east-1",
                    lineage: bool = True, app_name: str = "") -> dict[str, str]:
-    """The Spark settings for the lakehouse catalog and lineage (also usable with spark-submit --conf)."""
+    """The Spark settings for the lakehouse catalog and lineage (also usable with spark-submit --conf).
+
+    ``session`` is the lakehouse session credential (``<session>:<secret>``, from /v1/lakehouse/token):
+    Iceberg gets its token with it at Cairn and renews it before it expires, on the driver and on each
+    executor; Cairn checks the session every time."""
     c = f"spark.sql.catalog.{CATALOG}"
     conf = {
         "spark.sql.extensions": "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
         c: "org.apache.iceberg.spark.SparkCatalog",
         f"{c}.type": "rest",
         f"{c}.uri": catalog_uri,
-        f"{c}.token": catalog_tok,
+        f"{c}.rest.auth.type": "oauth2",
+        f"{c}.credential": session,
+        f"{c}.scope": "catalog",
+        f"{c}.oauth2-server-uri": f"{cairn_url.rstrip('/')}/v1/lakehouse/oauth/tokens",
+        f"{c}.token-refresh-enabled": "true",
+        # Keep the session credential (and Cairn's token, for lineage) out of the Spark UI and event logs.
+        "spark.redaction.regex": r"(?i)secret|password|token|access[.]key|credential|apikey|api[.]key",
         # Per-table temporary credentials from the catalog; Spark holds no store key.
         f"{c}.header.X-Iceberg-Access-Delegation": "vended-credentials",
         f"{c}.io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
@@ -100,11 +115,12 @@ def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = Non
         raise CairnSparkError("set CAIRN_URL (Cairn's API) and CAIRN_CATALOG_URI (Cairn Catalog)")
     tok = _token(token)
     verify = os.environ.get("CAIRN_CA_FILE") or True
-    ct = catalog_token(cairn_url, tok, int(ttl or os.environ.get("CAIRN_SPARK_TOKEN_TTL", "14400")), verify)
+    ttl = ttl or (int(os.environ["CAIRN_SPARK_TOKEN_TTL"]) if os.environ.get("CAIRN_SPARK_TOKEN_TTL") else None)
+    ct = catalog_token(cairn_url, tok, ttl, verify)
     b = SparkSession.builder.appName(app_name)
     if master:
         b = b.master(master)
-    for k, v in {**lakehouse_conf(cairn_url, catalog_uri, ct["token"], tok, lineage=lineage, app_name=app_name),
+    for k, v in {**lakehouse_conf(cairn_url, catalog_uri, ct["credential"], tok, lineage=lineage, app_name=app_name),
                  **(extra_conf or {})}.items():
         b = b.config(k, v)
     spark = b.getOrCreate()

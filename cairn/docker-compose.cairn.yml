@@ -429,6 +429,8 @@ services:
       CAIRN_TRINO_OAUTH_REDIRECT_URIS: ${CAIRN_TRINO_OAUTH_REDIRECT_URIS:-https://localhost:8443/oauth2/callback}
       # Cairn Catalog's addresses as engines name it in OpenLineage: Spark lineage lands on lakehouse tables.
       CAIRN_LAKEHOUSE_CATALOG_URIS: http://cairn-catalog:8181,${CAIRN_CATALOG_PUBLIC_URL:-http://localhost:8181}
+      CAIRN_LAKEHOUSE_TOKEN_TTL: ${CAIRN_LAKEHOUSE_TOKEN_TTL:-3600}
+      CAIRN_LAKEHOUSE_MAX_SESSION: ${CAIRN_LAKEHOUSE_MAX_SESSION:-604800}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
       # For `cairn sso check` (the web app does the actual sign-in).
       CAIRN_SSO_CLIENT_ID: ${CAIRN_SSO_CLIENT_ID:-}
@@ -633,6 +635,8 @@ services:
       CAIRN_CATALOG_CLIENT_S3_ENDPOINT: ${CAIRN_CATALOG_CLIENT_S3_ENDPOINT:-http://cairn-store:8333}
       # Engines get temporary keys for one table at a time (the store's STS), never the store's key.
       CAIRN_CATALOG_VEND_ROLE: ${CAIRN_CATALOG_VEND_ROLE:-cairn-catalog-tables}
+      # Clients come back for keys this often (each renewal decided again by Cairn).
+      CAIRN_CATALOG_VEND_REVALIDATE_SECONDS: ${CAIRN_CATALOG_VEND_REVALIDATE_SECONDS:-900}
       # People and pipeline users (Spark, pyiceberg) sign in with a Cairn-issued token (audience lakehouse);
       # the catalog asks Cairn about every table they touch, with the Cairn service token.
       CAIRN_CATALOG_JWKS_URL: http://cairn-api:8800/v1/trino/jwks.json

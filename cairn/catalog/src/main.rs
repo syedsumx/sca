@@ -152,7 +152,14 @@ async fn vend_mode(store: &s3::Client, warehouse: &str) -> api::Vend {
                 .assume_role(&role_arn, "cairn-catalog-check", &policy, 900)
                 .await
                 .unwrap_or_else(|e| fail("scoped credentials (is STS on in the store?)", e));
-            api::Vend::Scoped { role_arn, seconds }
+            // How often clients come back for keys, so access is decided again (at most `seconds`; more
+            // than 5 minutes, since Iceberg clients renew 5 minutes before the reported expiry).
+            let revalidate: i64 = env("CAIRN_CATALOG_VEND_REVALIDATE_SECONDS", &seconds.to_string())
+                .parse()
+                .ok()
+                .filter(|r| (360..=seconds).contains(r))
+                .unwrap_or_else(|| fail("CAIRN_CATALOG_VEND_REVALIDATE_SECONDS", format!("360 to {seconds} (CAIRN_CATALOG_VEND_SECONDS)")));
+            api::Vend::Scoped { role_arn, seconds, revalidate }
         }
         m => fail("CAIRN_CATALOG_VEND_CREDENTIALS", format!("{m:?}: scoped, static or off")),
     }

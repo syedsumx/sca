@@ -1051,7 +1051,14 @@ A multi-table transaction changes every table or none.
   - Reading needs read. Appending, overwriting and deleting rows needs write. Creating, dropping, renaming and changing schema or properties needs manage. Namespaces need Cairn's system privilege.
   - Vended credentials are read-only unless the user may write the table. They cover only that table's location.
 - **Fails closed.** The catalog refuses every Cairn-issued token when Cairn cannot answer (503), and any error in a decision decides nothing. It will not start with Cairn-issued tokens unless it vends scoped credentials (`CAIRN_CATALOG_VEND_ROLE`), since a store key would bypass the per-table decisions. Tokens are RS256, checked against Cairn's published key (`/v1/trino/jwks.json`) for issuer, audience `lakehouse`, expiry and not-before. Trino's and Airflow's tokens are refused (other audiences). The catalog's static tokens (`CAIRN_CATALOG_TOKEN`, for Trino and admin tools) work as before.
-- **Who a job is.** A person, or a pipeline user such as `svc-spark` with a personal access token. `POST /v1/lakehouse/token` exchanges it for a short-lived catalog token (`CAIRN_SPARK_TOKEN_TTL`, 4 hours by default, at most 12; it must outlast the job). Issuing one is audited (`lakehouse.token_issued`). Service and agent tokens get none.
+- **Who a job is.** A person, or a pipeline user such as `svc-spark` with a personal access token. `POST /v1/lakehouse/token` exchanges it for a **lakehouse session**: a first catalog token and a session credential. Opening a session is audited (`lakehouse.token_issued`). Service and agent tokens get no session.
+- **Long jobs.** A job runs as long as its session lasts, without a long-lived token.
+  - **Tokens.** Each catalog token lasts an hour (`CAIRN_LAKEHOUSE_TOKEN_TTL`). Iceberg gets and renews tokens at `POST /v1/lakehouse/oauth/tokens`, on the driver and on every executor. It uses the session credential (OAuth client credentials) or the current token (token exchange, RFC 8693).
+  - **Checks on every renewal.** The session must not have been ended, and the user must not be suspended. A session ends after `CAIRN_LAKEHOUSE_MAX_SESSION` (7 days) in any case. If Cairn cannot check, the renewal is refused. Renewals are audited (`lakehouse.token_refreshed`).
+  - **The credential.** Only its hash is kept. `cairn-spark` adds it to Spark's redaction, so it never shows in the Spark UI or event logs.
+  - **Storage keys** are renewed through the catalog (`GET …/tables/{table}/credentials`), with the table decided again each time. `CAIRN_CATALOG_VEND_REVALIDATE_SECONDS` (360 seconds up to the keys' lifetime, `CAIRN_CATALOG_VEND_SECONDS`) sets how often clients must come back. A permission removed then reaches running jobs within that time.
+- **Ending sessions.** `POST /v1/lakehouse/sessions/revoke` with `{"user": "..."}` (`MANAGE_SYSTEM_OPERATIONS`) ends all of a user's open sessions in one audited transaction (`lakehouse.sessions_revoked`). None is renewed again, so the job stops once its last token expires: within `CAIRN_LAKEHOUSE_TOKEN_TTL`, plus the catalog's minute of allowed clock skew. Suspending the user (SCIM) has the same effect at the next renewal. New sessions can still be opened.
+- **Iceberg's client.** Use the session credential, not a bare token. Iceberg 1.10's REST client renews a token it was given only once, so a job given a token alone stops after two token lifetimes. `cairn_spark` sets this up. For your own settings, see `lakehouse_conf(...)`.
 - **In a job.** `from cairn_spark import lakehouse_session; spark = lakehouse_session("my-job")` (package `cairn-spark`, `spark/`). It reads:
   - `CAIRN_URL`, Cairn's API;
   - `CAIRN_TOKEN` or `CAIRN_TOKEN_FILE`, the caller's Cairn token;
@@ -1075,7 +1082,10 @@ A multi-table transaction changes every table or none.
   - **Lineage.** It reached Cairn on the lakehouse dataset names, column by column.
   - **Row filters.** `bob`'s row filter kept the files away from him too.
   - **The example job.** It ran as `ana` and was refused as `bob`.
-  - **Tokens.** A forged signature, a malformed token and Trino's token were refused (401). A service token got no lakehouse token, and only a service token could ask for decisions. With Cairn unreachable the catalog answered 503. It would not start with Cairn-issued tokens but no scoped credentials.
+  - **Tokens.** A forged signature, a malformed token and Trino's token were refused (401). A service token got no lakehouse token, and only a service token could ask for decisions.
+  - **Long jobs.** A job running seven minutes on one-minute tokens kept reading and committing. Its storage keys were reported to expire after six minutes, so they had to be renewed. Every token renewal was in its one session, and its keys were renewed through the catalog, decided again: a reader's renewal stayed read-only, and someone the table is not for was refused.
+  - **Ending a session.** After `ana`'s sessions were ended mid-job, her commits failed once her last token expired. She could not end sessions herself, and could open a new one.
+  - **Renewals.** Token exchange and the session credential (form or HTTP Basic) worked; another service's token, a token with no session, a forged token and a wrong secret were refused. So were a suspended user and a session past its maximum length, and when Cairn could not check the user it answered 503. With Cairn unreachable the catalog answered 503. It would not start with Cairn-issued tokens but no scoped credentials.
 
 ## Backup and restore
 

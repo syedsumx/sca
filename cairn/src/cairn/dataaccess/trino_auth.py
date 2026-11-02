@@ -90,7 +90,8 @@ class TrinoTokens:
         return {"keys": [{"kty": "RSA", "use": "sig", "alg": "RS256", "kid": kid, "n": _int_b64(n.n), "e": _int_b64(n.e)}]}
 
     # ---- tokens -------------------------------------------------------------------------------
-    def mint(self, actor: str, ttl: int | None = None, audience: str = AUDIENCE, groups: tuple[str, ...] = ()) -> dict:
+    def mint(self, actor: str, ttl: int | None = None, audience: str = AUDIENCE, groups: tuple[str, ...] = (),
+             extra: dict | None = None) -> dict:
         """A signed token for ``actor``. ``audience`` names the one service that accepts it (Trino by default;
         another OAuth client's tokens are refused by Trino); ``groups`` go in a ``groups`` claim."""
         from cryptography.hazmat.primitives import hashes
@@ -109,8 +110,49 @@ class TrinoTokens:
                   "jti": uuid.uuid4().hex}
         if groups:
             claims["groups"] = [g.removeprefix("urn:li:corpGroup:") for g in groups]
+        for k, v in (extra or {}).items():
+            claims.setdefault(k, v)  # never the standard claims
         signing = _b64(json.dumps(header, separators=(",", ":")).encode()) + "." + \
             _b64(json.dumps(claims, separators=(",", ":")).encode())
         sig = key.sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256())
         return {"token": f"{signing}.{_b64(sig)}", "user": user, "expires_in": ttl, "expires_at": now + ttl,
                 "token_id": claims["jti"]}
+
+    def verify(self, token: str, audience: str, leeway: int = 30) -> dict:
+        """The claims of a token Cairn signed for ``audience``; ValueError if it is not one (signature,
+        issuer, audience, expiry, not-before)."""
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        try:
+            h, c, sig = token.split(".")
+            header = json.loads(_unb64(h))
+            claims = json.loads(_unb64(c))
+            signature = _unb64(sig)
+        except (ValueError, TypeError) as e:
+            raise ValueError("not a token Cairn issued") from e
+        key, kid = self._load()
+        if header.get("alg") != "RS256" or header.get("kid") != kid:
+            raise ValueError("not signed with Cairn's current key")
+        try:
+            key.public_key().verify(signature, f"{h}.{c}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        except InvalidSignature as e:
+            raise ValueError("bad signature") from e
+        now = int(time.time())
+        if claims.get("iss") != self.issuer:
+            raise ValueError("wrong issuer")
+        aud = claims.get("aud")
+        if audience not in (aud if isinstance(aud, list) else [aud]):
+            raise ValueError(f"not a token for {audience}")
+        if not isinstance(claims.get("exp"), int) or claims["exp"] + leeway < now:
+            raise ValueError("the token has expired")
+        if isinstance(claims.get("nbf"), int) and claims["nbf"] - leeway > now:
+            raise ValueError("the token is not valid yet")
+        if not claims.get("sub"):
+            raise ValueError("the token names no user")
+        return claims
+
+
+def _unb64(s: str) -> bytes:
+    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))

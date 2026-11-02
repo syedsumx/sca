@@ -94,7 +94,9 @@ pub enum Vend {
     Static,
     /// Temporary keys for the one table (its location only; read-only for read-only tokens), from the
     /// store's AssumeRole on `role_arn`.
-    Scoped { role_arn: String, seconds: i64 },
+    /// Clients are told the keys expire after `revalidate` seconds at most, so they come back for new
+    /// ones (GET .../credentials), and every renewal is decided again.
+    Scoped { role_arn: String, seconds: i64, revalidate: i64 },
 }
 
 pub struct Catalog {
@@ -316,6 +318,11 @@ fn decode(raw: &str) -> String {
     String::from_utf8_lossy(&percent_encoding::percent_decode_str(raw).collect::<Vec<u8>>()).into_owned()
 }
 
+/// A path segment, percent-encoded.
+fn encode(raw: &str) -> String {
+    percent_encoding::utf8_percent_encode(raw, percent_encoding::NON_ALPHANUMERIC).to_string()
+}
+
 fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.len() <= 255 && !s.contains(db::SEP) && !s.contains('/') && s.chars().all(|c| !c.is_control())
 }
@@ -326,7 +333,7 @@ struct Prepared {
     metadata: Value,
 }
 
-const ENDPOINTS: [&str; 23] = [
+const ENDPOINTS: [&str; 24] = [
     "GET /v1/{prefix}/namespaces",
     "POST /v1/{prefix}/namespaces",
     "GET /v1/{prefix}/namespaces/{namespace}",
@@ -349,6 +356,7 @@ const ENDPOINTS: [&str; 23] = [
     "DELETE /v1/{prefix}/namespaces/{namespace}/views/{view}",
     "POST /v1/{prefix}/views/rename",
     "POST /v1/{prefix}/transactions/commit",
+    "GET /v1/{prefix}/namespaces/{namespace}/tables/{table}/credentials",
     "GET /v1/config",
 ];
 
@@ -586,6 +594,21 @@ impl Catalog {
                 let _ = decode(t);
                 Ok(empty(StatusCode::NO_CONTENT))
             }
+            (Method::GET, ["v1", "namespaces", ns, "tables", t, "credentials"]) => {
+                // Iceberg clients renew a table's storage keys here before they expire: decided again.
+                let (levels, name) = (ns_param(ns), decode(t));
+                scope(&levels)?;
+                let d = self.need(&principal, &levels, &name, Need::Read).await?;
+                let row = self.db.table(&levels, &name)?;
+                let metadata: Value = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
+                let location = metadata["location"].as_str().unwrap_or("").to_string();
+                if !matches!(self.cfg.vend, Vend::Scoped { .. }) {
+                    return Err(err(StatusCode::NOT_FOUND, "NotFoundException", "This catalog vends no renewable credentials"));
+                }
+                let config = self.client_config(&location, principal.read_only || !d.write).await?;
+                tracing::info!(principal = %principal.name, table = %format!("{}.{}", levels.join("."), name), "storage credentials renewed");
+                Ok(json_resp(StatusCode::OK, &json!({"storage-credentials": [{"prefix": location, "config": config}]})))
+            }
             (m, ["v1", "namespaces", ns, "tables", t]) => {
                 let (levels, name) = (ns_param(ns), decode(t));
                 scope(&levels)?;
@@ -597,6 +620,7 @@ impl Catalog {
                             &row.metadata_location,
                             serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?,
                             principal.read_only || !d.write,
+                            (&levels, &name),
                         )
                         .await
                     }
@@ -720,13 +744,22 @@ impl Catalog {
         }
     }
 
-    async fn load_result(&self, location: &str, metadata: Value, read_only: bool) -> Result<Resp, ApiError> {
+    async fn load_result(&self, location: &str, metadata: Value, read_only: bool, ident: (&[String], &str)) -> Result<Resp, ApiError> {
         let table_location = metadata["location"].as_str().unwrap_or("").to_string();
-        let config = self.client_config(&table_location, read_only).await?;
-        let mut out = json!({"metadata-location": location, "metadata": metadata, "config": config});
+        let mut config = self.client_config(&table_location, read_only).await?;
+        let mut out = json!({"metadata-location": location, "metadata": metadata});
         if matches!(self.cfg.vend, Vend::Scoped { .. }) {
+            // Where clients renew the keys (relative to the catalog's URI), before they expire. Both in the
+            // table's config and in its storage credential: Iceberg builds a storage client per credential.
+            let ns: Vec<String> = ident.0.iter().map(|l| encode(l)).collect();
+            config.insert(
+                "client.refresh-credentials-endpoint".into(),
+                format!("v1/namespaces/{}/tables/{}/credentials", ns.join("%1F"), encode(ident.1)),
+            );
+            config.insert("client.refresh-credentials-enabled".into(), "true".into());
             out["storage-credentials"] = json!([{"prefix": table_location, "config": config}]);
         }
+        out["config"] = json!(config);
         Ok(json_resp(StatusCode::OK, &out))
     }
 
@@ -737,9 +770,12 @@ impl Catalog {
         let (ak, sk, token) = match &self.cfg.vend {
             Vend::Off => return Ok(c),
             Vend::Static => (self.cfg.s3.access_key.clone(), self.cfg.s3.secret_key.clone(), None),
-            Vend::Scoped { role_arn, seconds } => {
+            Vend::Scoped { role_arn, seconds, revalidate } => {
                 let t = self.scoped(role_arn, *seconds, table_location, read_only).await?;
-                c.insert("s3.session-token-expires-at-ms".into(), (t.expires_unix * 1000).to_string());
+                // Report an earlier expiry when access is to be decided again sooner than the keys expire.
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let told = t.expires_unix.min(now + *revalidate);
+                c.insert("s3.session-token-expires-at-ms".into(), (told * 1000).to_string());
                 (t.access_key, t.secret_key, Some(t.token))
             }
         };
@@ -838,7 +874,7 @@ impl Catalog {
             new: TableRow { metadata_location: loc.clone(), metadata: json.clone() },
         };
         self.apply(vec![change]).await?;
-        self.load_result(&loc, serde_json::from_str(&json).unwrap(), false).await
+        self.load_result(&loc, serde_json::from_str(&json).unwrap(), false, (levels, &req.name)).await
     }
 
     /// Writes a view's metadata file under its location and returns the file's location.
@@ -923,12 +959,13 @@ impl Catalog {
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         let change = Change {
             namespace: db::ns_key(levels),
-            name: req.name,
+            name: req.name.clone(),
             expected: None,
             new: TableRow { metadata_location: req.metadata_location.clone(), metadata: json.clone() },
         };
         self.db.commit(&[change])?;
-        self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap(), false).await
+        let name = req.name.clone();
+        self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap(), false, (levels, &name)).await
     }
 
     /// Checks requirements against the current metadata, applies the updates and writes the new

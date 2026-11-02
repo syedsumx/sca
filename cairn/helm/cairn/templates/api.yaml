@@ -21,6 +21,8 @@
 {{- $uris := list (printf "http://%s:%v" (include "cairn.componentName" $cat) .Values.cairn.catalog.port) }}
 {{- with .Values.cairn.catalog.identity.publicUrl }}{{ $uris = append $uris . }}{{ end }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_CATALOG_URIS" "value" (join "," $uris)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_TOKEN_TTL" "value" (toString .Values.cairn.catalog.identity.tokenTtlSeconds)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_MAX_SESSION" "value" (toString .Values.cairn.catalog.identity.maxSessionSeconds)) }}
 {{- end }}
 {{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
 {{- if .Values.cairn.store.enabled }}

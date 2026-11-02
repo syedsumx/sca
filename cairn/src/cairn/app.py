@@ -221,7 +221,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if services.lakehouse is not None and services.trino_tokens is not None:
         from cairn.dataaccess.lakehouse import build_lakehouse_router
 
-        app.include_router(build_lakehouse_router(services.lakehouse, services.trino_tokens, cp, services.audit))
+        app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
+                                                  authz))
     if services.dbt_runs is not None:
         from cairn.pipelines.dbt import build_dbt_router
 

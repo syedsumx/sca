@@ -233,3 +233,185 @@ def test_the_catalog_takes_only_cairns_lakehouse_tokens_and_fails_closed(cairn, 
            "CAIRN_CATALOG_VEND_ROLE": "", "CAIRN_CATALOG_VEND_CREDENTIALS": "static"}
     r = subprocess.run([os.environ["CAIRN_CATALOG_BIN"]], env=env, capture_output=True, text=True, timeout=30)
     assert r.returncode != 0 and "scoped credentials" in (r.stdout + r.stderr)
+
+
+LONG_JOB = textwrap.dedent('''
+    import json, sys, time
+    from cairn_spark import lakehouse_session
+
+    # One table handle for the whole job (the catalog is not asked again), so storage keys are renewed
+    # through the catalog's credentials endpoint and commits need a renewed catalog token.
+    spark = lakehouse_session("long-job", master="local[2]",
+                              extra_conf={"spark.sql.catalog.lakehouse.cache.expiration-interval-ms": "-1"})
+    rounds, pause = int(sys.argv[1]), float(sys.argv[2])
+    start = time.time()
+    for i in range(rounds):
+        row = {"i": i, "t": round(time.time() - start, 1)}
+        try:
+            row["read"] = spark.sql("SELECT count(*) AS n FROM lakehouse.analytics.products").collect()[0].n
+        except Exception as e:
+            row["read_error"] = str(e)[:300]
+        try:
+            spark.sql(f"INSERT INTO lakehouse.analytics.long_job VALUES ({i})")
+            row["wrote"] = True
+        except Exception as e:
+            row["write_error"] = str(e)[:300]
+        print("CAIRN-ROUND " + json.dumps(row), flush=True)
+        time.sleep(pause)
+    spark.stop()
+''')
+
+
+@pytest.fixture
+def renewing_catalog(cairn, lake, tmp_path):  # noqa: F811
+    """A catalog that tells clients their storage keys expire after 6 minutes (renewed after 1), and
+    Cairn lakehouse tokens that last a minute: a 3-minute job outlives both several times."""
+    _, s = cairn
+    cp = port()
+    log = open(tmp_path / "catalog.log", "w")
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": str(tmp_path / "c"),
+           "CAIRN_CATALOG_VEND_SECONDS": "900", "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS": "360"}
+    p = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=log, stderr=subprocess.STDOUT, env=env)
+    wait(cp)
+    from pyiceberg.catalog.rest import RestCatalog
+    import pyarrow as pa
+    admin = RestCatalog("admin", uri=f"http://127.0.0.1:{cp}", token=CATALOG_TOKEN)
+    admin.create_namespace("analytics")
+    prod = pa.table({"sku": ["a", "b", "c"], "price": pa.array([5, 7, 9], pa.int64())})
+    admin.create_table("analytics.products", schema=prod.schema).append(prod)
+    admin.create_table("analytics.long_job", schema=pa.schema([("i", pa.int64())]))
+    ttl = s.lakehouse_sessions.ttl
+    s.lakehouse_sessions.ttl = 60
+    yield {"uri": f"http://127.0.0.1:{cp}", "log": tmp_path / "catalog.log", "admin": admin}
+    s.lakehouse_sessions.ttl = ttl
+    p.terminate()
+    p.wait(15)
+
+
+def start_long_job(tmp_path, cairn_url, catalog_uri, token, rounds, pause):
+    job = tmp_path / "long.py"
+    job.write_text(LONG_JOB)
+    os.chmod(tmp_path, 0o755)
+    return subprocess.Popen(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/long.py:ro",
+                             "-e", f"CAIRN_URL={cairn_url}", "-e", f"CAIRN_TOKEN={token}", "-e", f"CAIRN_CATALOG_URI={catalog_uri}",
+                             IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                             "/job/long.py", str(rounds), str(pause)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+
+
+def rounds_of(output):
+    return [json.loads(ln.split("CAIRN-ROUND ", 1)[1]) for ln in output.splitlines() if "CAIRN-ROUND " in ln]
+
+
+def test_a_long_job_outlives_its_token_and_its_storage_keys(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    url, s = cairn
+    before = {e["id"] for e in s.audit.entries("lakehouse", limit=1000)}
+    # Past the keys' reported expiry (6 minutes; the AWS SDK renews them at a random time in their last 5),
+    # and many times the one-minute tokens.
+    p = start_long_job(tmp_path, url, renewing_catalog["uri"], ANA, rounds=27, pause=15)
+    out, _ = p.communicate(timeout=1200)
+    rounds = rounds_of(out)
+    assert len(rounds) == 27 and p.returncode == 0, out[-6000:]
+    assert rounds[-1]["t"] >= 380
+    bad = [r for r in rounds if "read" not in r or not r.get("wrote")]
+    assert not bad, (bad, out[-4000:])
+    assert renewing_catalog["admin"].load_table("analytics.long_job").scan().to_arrow().num_rows == 27
+    # Iceberg got and renewed its catalog tokens at Cairn, in one session (with the session credential,
+    # then by token exchange), and its storage keys through the catalog.
+    new = [e for e in s.audit.entries("lakehouse", limit=1000) if e["id"] not in before]
+    refreshed = [e for e in new if e["action"] == "lakehouse.token_refreshed" and e["actor"] == "urn:li:corpuser:ana"]
+    assert len([e for e in refreshed if e["details"]["with"] == "token"]) >= 2, [e["action"] for e in new]
+    assert len({e["details"]["session"] for e in refreshed}) == 1
+    renewed = [ln for ln in renewing_catalog["log"].read_text().splitlines() if "storage credentials renewed" in ln]
+    assert renewed and all('"principal":"user:ana"' in ln for ln in renewed), renewed[:3]
+
+
+def test_revoked_or_suspended_sessions_end_within_a_token_lifetime(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    url, s = cairn
+    p = start_long_job(tmp_path, url, renewing_catalog["uri"], ANA, rounds=14, pause=15)
+    lines = []
+    for ln in p.stdout:
+        lines.append(ln)
+        if sum("CAIRN-ROUND " in x for x in lines) == 2:
+            break
+    # Only administrators revoke: ana cannot end her own (or anyone's) sessions through the API.
+    r = httpx.post(f"{url}/v1/lakehouse/sessions/revoke", json={"user": "ana"},
+                   headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 403
+    revoked = s.lakehouse_sessions.revoke("ana", "urn:li:corpuser:admin")
+    assert revoked["user"] == "ana" and revoked["sessions_ended"] >= 1
+    t_revoke = rounds_of("".join(lines))[-1]["t"]
+    rest, _ = p.communicate(timeout=900)
+    rounds = rounds_of("".join(lines) + rest)
+    # Once the last token renewed before the revocation is gone: its 60 s, plus the catalog's minute of
+    # allowed clock skew.
+    after = [r for r in rounds if r["t"] > t_revoke + 60 + 60 + 15]
+    assert after and all(not r.get("wrote") for r in after), rounds
+    assert any(e["action"] == "lakehouse.sessions_revoked" for e in s.audit.entries("lakehouse", limit=200))
+    # A new session works again (revocation ends the sessions that existed, not the user).
+    r = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 200
+
+
+def test_token_exchange_is_strict(cairn, lake, renewing_catalog):  # noqa: F811
+    url, s = cairn
+    ex = f"{url}/v1/lakehouse/oauth/tokens"
+    grant = {"grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+             "subject_token_type": "urn:ietf:params:oauth:token-type:access_token"}
+    tok = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {BOB}"}, timeout=10).json()
+    r = httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10)
+    assert r.status_code == 200 and r.json()["issued_token_type"].endswith("access_token") and r.json()["access_token"] != tok["token"]
+    # The session credential, as form fields (Iceberg) or HTTP Basic; a wrong secret is an unknown client.
+    sid, secret = tok["credential"].split(":", 1)
+    assert httpx.post(ex, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": secret,
+                                "scope": "catalog"}, timeout=10).status_code == 200
+    assert httpx.post(ex, data={"grant_type": "client_credentials"}, auth=(sid, secret), timeout=10).status_code == 200
+    r = httpx.post(ex, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": "nope"}, timeout=10)
+    assert r.status_code == 401 and r.json()["error"] == "invalid_client"
+    # Not another service's token, not a token without a session, not a forged one, not another grant.
+    trino = s.trino_tokens.mint("urn:li:corpuser:bob")["token"]
+    sessionless = s.trino_tokens.mint("urn:li:corpuser:bob", audience="lakehouse")["token"]
+    for bad in (trino, sessionless, tok["token"][:-4] + "AAAA", "x.y.z"):
+        assert httpx.post(ex, data={**grant, "subject_token": bad}, timeout=10).json()["error"] == "invalid_grant"
+    assert httpx.post(ex, data={**grant, "grant_type": "password", "subject_token": tok["token"]},
+                      timeout=10).json()["error"] == "unsupported_grant_type"
+    # A suspended user's session is not renewed; Cairn unable to tell refuses too.
+    status = s.lakehouse_sessions.user_status
+    try:
+        s.lakehouse_sessions.user_status = lambda urn: "SUSPENDED"
+        assert httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10).json()["error"] == "invalid_grant"
+        s.lakehouse_sessions.user_status = lambda urn: (_ for _ in ()).throw(RuntimeError("graph down"))
+        r = httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10)
+        assert r.status_code == 503 and r.json()["error"] == "temporarily_unavailable"
+    finally:
+        s.lakehouse_sessions.user_status = status
+    # A session ends at its maximum length.
+    m = s.lakehouse_sessions.max_session
+    try:
+        s.lakehouse_sessions.max_session = 1
+        import time
+        time.sleep(1.5)
+        assert httpx.post(ex, data={**grant, "subject_token": tok["token"]}, timeout=10).json()["error"] == "invalid_grant"
+    finally:
+        s.lakehouse_sessions.max_session = m
+    # Storage keys are renewed through the catalog, decided again each time: read-only for a reader,
+    # refused to someone the table is not for, and reported to expire within the revalidation interval.
+    import time
+    cat = renewing_catalog["uri"]
+    path = "/v1/namespaces/analytics/tables/products/credentials"
+    ana = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10).json()["token"]
+    r = httpx.get(cat + path, headers={"Authorization": f"Bearer {ana}"}, timeout=10)
+    assert r.status_code == 200, r.text
+    cfg = r.json()["storage-credentials"][0]["config"]
+    assert cfg["s3.session-token"] and int(cfg["s3.session-token-expires-at-ms"]) <= (time.time() + 360 + 5) * 1000
+    # Loading the table tells the client where to renew (in its config and its storage credential).
+    loaded = httpx.get(cat + "/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {ana}"}, timeout=10).json()
+    endpoint = loaded["config"]["client.refresh-credentials-endpoint"]
+    assert endpoint == "v1/namespaces/analytics/tables/products/credentials"
+    assert loaded["storage-credentials"][0]["config"]["client.refresh-credentials-endpoint"] == endpoint
+    bob = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {BOB}"}, timeout=10).json()["token"]
+    assert httpx.get(cat + path, headers={"Authorization": f"Bearer {bob}"}, timeout=10).status_code == 403
+    # The catalog refuses a revalidation interval Iceberg clients could not honour.
+    env = {**lake["env"], "CAIRN_CATALOG_ADDR": f"0.0.0.0:{port()}", "CAIRN_CATALOG_DATA": f"{lake['dir']}/c9",
+           "CAIRN_CATALOG_VEND_SECONDS": "900", "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS": "120"}
+    r = subprocess.run([os.environ["CAIRN_CATALOG_BIN"]], env=env, capture_output=True, text=True, timeout=30)
+    assert r.returncode != 0 and "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS" in (r.stdout + r.stderr)

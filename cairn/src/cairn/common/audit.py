@@ -61,7 +61,10 @@ class AuditLog:
         actor: str,
         subject: Optional[str] = None,
         details: Optional[dict[str, Any]] = None,
+        conn=None,
     ) -> str:
+        """Appends an entry. With ``conn``, inside the caller's transaction, so a change and its audit
+        entry commit (or roll back) together."""
         from cairn.identity.agents import current_agent
 
         agent = current_agent.get()
@@ -77,16 +80,21 @@ class AuditLog:
             "details": details or {},
         }
         metrics.AUDIT_EVENTS.labels(category).inc()
-        with self._lock, self.engine.begin() as conn:
-            if conn.dialect.name == "postgresql":
-                conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")
-            head = conn.execute(
-                select(audit_log.c.hash).order_by(audit_log.c.seq.desc()).limit(1)
-            ).scalar()
-            prev = head or GENESIS
-            digest = _entry_hash(prev, body)
-            conn.execute(audit_log.insert().values(**body, prev_hash=prev, hash=digest))
+        if conn is not None:
+            with self._lock:
+                self._append(conn, body)
+            return body["id"]
+        with self._lock, self.engine.begin() as c:
+            self._append(c, body)
         return body["id"]
+
+    @staticmethod
+    def _append(conn, body: dict) -> None:
+        if conn.dialect.name == "postgresql":
+            conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")
+        head = conn.execute(select(audit_log.c.hash).order_by(audit_log.c.seq.desc()).limit(1)).scalar()
+        prev = head or GENESIS
+        conn.execute(audit_log.insert().values(**body, prev_hash=prev, hash=_entry_hash(prev, body)))
 
     def entries(self, category: Optional[str] = None, limit: int = 100) -> list[dict]:
         stmt = select(audit_log).order_by(audit_log.c.seq.desc()).limit(limit)

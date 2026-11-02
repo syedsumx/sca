@@ -100,6 +100,7 @@ class Services:
     external_quality: Optional[Any] = None
     dbt_runs: Optional[Any] = None
     lakehouse: Optional[Any] = None
+    lakehouse_sessions: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
@@ -967,6 +968,14 @@ def _build_data_access(s: Services) -> None:
                                       tuple(os.environ.get("CAIRN_LAKEHOUSE_CATALOG_URIS", "").split(",")))
         if s.openlineage is not None:
             s.openlineage.rewrite = s.lakehouse.remap_lineage
+        if getattr(s, "trino_tokens", None) is not None:
+            from cairn.dataaccess.lakehouse import LakehouseSessions
+
+            graph = s.graph
+            s.lakehouse_sessions = LakehouseSessions(
+                s.trino_tokens, s.engine, s.audit,
+                user_status=(lambda urn: (graph.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE"))
+                if graph is not None else None)
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.
