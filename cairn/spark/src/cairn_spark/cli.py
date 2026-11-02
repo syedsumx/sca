@@ -14,7 +14,8 @@ spark-submit would store its settings in a ConfigMap. It submits the application
 a driver pod template mounting a projected service-account token, and the driver's Cairn settings; the
 driver (a Python program calling ``lakehouse_session()``) signs in itself. The driver's service account
 is ``--conf spark.kubernetes.authenticate.driver.serviceAccountName=...`` or CAIRN_SPARK_SERVICE_ACCOUNT.
-JVM applications are refused in cluster mode; run them in client mode. See cairn_spark.kubernetes.
+A JVM application's driver pod runs cairn-spark-driver, which signs in the same way before Spark
+starts. See cairn_spark.kubernetes and cairn_spark.driver.
 """
 
 from __future__ import annotations
@@ -83,11 +84,9 @@ def _cluster_on_kubernetes(rest: list[str]) -> bool:
 
 def _submit_cluster(rest: list[str], extra: str | None) -> int:
     main = _primary(rest) or ""
-    if _opt(rest, "--class") or not main.endswith(".py"):
-        print("cairn-spark: a JVM application cannot run in cluster mode on Kubernetes without its credential in "
-              "a ConfigMap; run it with --deploy-mode client (the driver in this pod, signed in by its workload "
-              "identity), or as a Python program that calls lakehouse_session()", file=sys.stderr)
-        return 2
+    # A JVM program: its driver pod signs in before Spark starts (cairn-spark-driver); a Python program
+    # signs in itself when it calls lakehouse_session().
+    jvm = bool(_opt(rest, "--class")) or not main.endswith(".py")
     sa = _conf_value(rest, "spark.kubernetes.authenticate.driver.serviceAccountName") or \
         os.environ.get("CAIRN_SPARK_SERVICE_ACCOUNT", "")
     url, catalog = os.environ.get("CAIRN_URL", ""), os.environ.get("CAIRN_CATALOG_URI", "")
@@ -99,7 +98,7 @@ def _submit_cluster(rest: list[str], extra: str | None) -> int:
 
     fd, template = tempfile.mkstemp(prefix="cairn-spark-driver-", suffix=".json")
     with os.fdopen(fd, "w") as f:
-        json.dump(k8s.driver_pod_template(os.environ.get("CAIRN_WORKLOAD_AUDIENCE", "cairn")), f)
+        json.dump(k8s.driver_pod_template(os.environ.get("CAIRN_WORKLOAD_AUDIENCE", "cairn"), jvm=jvm), f)
     props = _properties(k8s.cluster_conf(url, catalog, sa, template), extra)
     print(f"cairn-spark: submitting {main} to Kubernetes; its driver signs in as service account {sa}", file=sys.stderr)
     try:

@@ -12,6 +12,7 @@ dependencies = ["httpx>=0.27"]
 
 [project.scripts]
 cairn-spark = "cairn_spark.cli:main"
+cairn-spark-driver = "cairn_spark.driver:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

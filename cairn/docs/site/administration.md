@@ -1145,12 +1145,12 @@ A multi-table transaction changes every table or none.
   - The driver, a Python program calling `lakehouse_session()`, exchanges that token at Cairn (workload identity) and signs in as the pipeline user its service account is bound to.
   - Executors get no token. Their settings come from the driver over Spark's RPC, and their storage keys come with the tables.
   - The service account is `--conf spark.kubernetes.authenticate.driver.serviceAccountName=…` or `CAIRN_SPARK_SERVICE_ACCOUNT`.
-  - **JVM programs** are refused in cluster mode: their catalog settings must exist before they start, so they would have to be in that ConfigMap. Run them with `--deploy-mode client`, where the driver runs in the submitting pod, which signs in with its own workload identity. Executors get their settings over RPC there too.
+  - **JVM programs** (`--class`) run in cluster mode too. Their catalog settings must exist before the program starts, so their driver pod's command is `cairn-spark-driver`. It signs in with the pod's projected token, opens the lakehouse session, merges its settings into a private copy of the driver's properties file (mode 0600, inside the pod) and then starts Spark's own driver. Nothing secret reaches the cluster's API. Client mode works as before.
 - **The Spark Operator.** `cairn_spark.kubernetes.spark_application(name, image=…, main="/jobs/orders.py", service_account="svc-spark", cairn_url=…, catalog_uri=…)` builds the same application as a `SparkApplication` (`sparkoperator.k8s.io/v1beta2`, for `kubectl apply`):
   - a Python driver with the projected token and the driver environment;
   - executors with no identity.
 
-  It refuses JVM programs, and any `spark_conf` key that looks like a secret.
+  With `main_class`, it builds a JVM application whose driver template runs `cairn-spark-driver`. It refuses any `spark_conf` key that looks like a secret.
 - **From Airflow.** `cairn_airflow.spark.CairnSparkApplicationOperator(task_id=…, name=…, namespace=…, service_account=…, image=…, main=…, cairn_url=…, catalog_uri=…)`:
   - creates one `SparkApplication` per task try, labelled with its DAG and task;
   - follows it to `COMPLETED`;
@@ -1204,10 +1204,11 @@ A multi-table transaction changes every table or none.
   - **pyiceberg and DuckDB** (`tests/test_lakehouse_client_e2e.py`). Both were governed like Spark: listing, a refused masked table, writes only where allowed.
 - **Tested on Kubernetes** (`tests/test_spark_k8s_e2e.py`, against a real Kubernetes 1.31 API server and the `cairn/spark` image; no kubelet, so what is checked is what Spark and the operator write to the cluster):
   - **Cluster mode.** `cairn-spark submit --deploy-mode cluster`, run by a submitter with a Cairn token in its environment, created a driver pod. The pod had the `svc-spark` service account, the projected `cairn` token and the driver environment.
-  - **No secret stored.** Nothing secret was in the namespace's pods, ConfigMaps, Secrets or services, including the driver's `spark.properties`. A JVM program was refused in cluster mode, and nothing was created.
+  - **No secret stored.** Nothing secret was in the namespace's pods, ConfigMaps, Secrets or services, including the driver's `spark.properties`. A JVM program (SparkPi) submitted in cluster mode got a driver pod running `cairn-spark-driver`, again with no secret stored.
+  - **A JVM driver signs itself in.** `cairn-spark-driver`, run with that pod's environment, a cluster-issued token and Spark's own driver arguments, ran `spark-sql` (a JVM program) as `ana` and counted the governed table.
   - **The driver signs itself in.** Run with that pod's environment and a token the cluster issued for `svc-spark`, it signed in as `ana` through workload identity. It read and wrote governed tables, and was refused one `ana` may not read.
   - **The run was priced.** It was charged at 2 cores for its wall-clock time, all to the table it wrote.
-  - **The Spark Operator.** Its own `sparkapplications` CRD (v2.2.1) accepted the `SparkApplication` that `cairn_spark` builds (server-side, strict validation). A JVM program and a secret-looking setting were refused.
+  - **The Spark Operator.** Its own `sparkapplications` CRD (v2.2.1) accepted the Python and JVM `SparkApplication`s that `cairn_spark` builds (server-side, strict validation). A jar without its main class, and a secret-looking setting, were refused.
   - **Teams** (`tests/test_spark_teams_k8s.py`, with the API server's quota controller). The chart's team objects were applied. A pod stating nothing got the team's default requests. A pod over the per-container cap was refused, and so were pods past the team's CPU and pod quotas. The drivers' account could manage pods and ConfigMaps in its namespace, not in another, and could not read Secrets.
   - **Airflow.** `CairnSparkApplicationOperator`, in the `cairn/airflow` image, created an application and followed it to `COMPLETED`, and failed on `FAILED` with the driver's error message. Executors had no identity.
 

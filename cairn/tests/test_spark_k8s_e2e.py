@@ -19,7 +19,7 @@ import time
 import httpx
 import pytest
 
-from test_spark_e2e import ANA, IMAGE, JOB, lake, people  # noqa: F401  (fixtures)
+from test_spark_e2e import ANA, DEV, IMAGE, JOB, lake, people  # noqa: F401  (fixtures)
 from test_trino_e2e import _ready, cairn, port, wait  # noqa: F401  (fixtures)
 from test_workload_identity_e2e import BIN, k8s  # noqa: F401  (fixtures)
 
@@ -99,10 +99,36 @@ def test_cluster_mode_puts_no_secret_in_the_cluster_and_the_driver_signs_in_itse
     for leak in (".credential", "apiKey", "auth.apiKey", "oauth2", "CAIRN_TOKEN"):
         assert leak not in props, leak
 
-    # A JVM program is refused in cluster mode (its credential would have to be in that ConfigMap).
-    r = cairn_spark(*submit, "--class", "org.apache.spark.examples.SparkPi", "local:///opt/spark/examples/jars/e.jar")
-    assert r.returncode == 2 and "--deploy-mode client" in r.stderr, r.stderr[-2000:]
-    assert len(json.loads(k8s["kubectl"]("-n", "pipelines", "get", "pods", "-o", "json"))["items"]) == len(pods)
+    # A JVM program: its driver pod runs cairn-spark-driver, which signs in inside the pod; still no secret.
+    r = cairn_spark(*submit, "--class", "org.apache.spark.examples.SparkPi", "local:///opt/spark/examples/jars/spark-examples.jar")
+    assert r.returncode == 0, (r.stdout + r.stderr)[-4000:]
+    after = json.loads(k8s["kubectl"]("-n", "pipelines", "get", "pods", "-o", "json"))["items"]
+    jvm = [p for p in after if p["metadata"]["labels"].get("spark-role") == "driver"
+           and p["metadata"]["name"] not in {d["metadata"]["name"] for d in driver}]
+    assert len(jvm) == 1, [p["metadata"]["name"] for p in after]
+    assert jvm[0]["spec"]["containers"][0]["command"] == ["cairn-spark-driver"]
+    assert ANA not in k8s["kubectl"]("-n", "pipelines", "get", "pods,configmaps,secrets", "-o", "json")
+
+    # That driver, as its pod runs it: cairn-spark-driver with the pod's environment, the token the
+    # kubelet projects and Spark's own driver arguments. A JVM program (spark-sql) reads as ana.
+    sa_token = k8s["kubectl"]("-n", "pipelines", "create", "token", "svc-spark", "--audience", "cairn", "--duration", "1h")
+    (tmp_path / "jvm").mkdir()
+    (tmp_path / "jvm" / "token").write_text(sa_token)
+    (tmp_path / "jvm" / "spark.properties").write_text("spark.master=local[1]\nspark.app.name=jvm-on-k8s\nspark.ui.enabled=false\n")
+    for f in ("", "token", "spark.properties"):
+        os.chmod(tmp_path / "jvm" / f if f else tmp_path / "jvm", 0o755 if not f else 0o644)
+    jenv = {e["name"]: e.get("value") for e in jvm[0]["spec"]["containers"][0]["env"] if e["name"].startswith("CAIRN_")}
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{tmp_path / 'jvm'}:/var/run/secrets/cairn:ro",
+                        "-v", f"{tmp_path / 'jvm' / 'spark.properties'}:/opt/spark/conf/spark.properties:ro",
+                        "-e", "SPARK_DRIVER_BIND_ADDRESS=127.0.0.1", *DEV,
+                        *[a for k, v in jenv.items() for a in ("-e", f"{k}={v}")],
+                        "--entrypoint", "cairn-spark-driver", IMAGE, "driver", "--properties-file",
+                        "/opt/spark/conf/spark.properties", "--class",
+                        "org.apache.spark.sql.hive.thriftserver.SparkSQLCLIDriver", "spark-internal",
+                        "-e", "SELECT count(*) FROM lakehouse.analytics.products"],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0 and r.stdout.strip().splitlines()[-1] == "3", (r.stdout + r.stderr)[-4000:]
+    assert "the driver runs as ana" in r.stderr
 
     # The driver, as its pod would run it: the env above and the token the kubelet projects (the cluster
     # issues it: TokenRequest). It signs in as ana, reads and writes governed tables, and its run is priced.
@@ -171,6 +197,14 @@ def test_spark_applications_from_airflow_through_the_spark_operator(k8s, tmp_pat
     out = json.loads(kubectl("create", "--dry-run=server", "--validate=strict", "-o", "json", "-f", str(tmp_path / "app.json")))
     assert out["spec"]["driver"]["serviceAccount"] == "svc-spark" and out["spec"]["executor"]["instances"] == 3
     assert set(out["spec"]["sparkConf"]) == {"spark.redaction.regex"}   # no credential, no token
+    # A JVM program: its driver's command is cairn-spark-driver (the operator's schema takes the template).
+    jvm = spark_application("check-jvm", image=IMAGE, main="local:///jobs/orders.jar", main_class="com.acme.Orders",
+                            service_account="svc-spark", cairn_url="https://cairn.example.com/api",
+                            catalog_uri="https://catalog.example.com", namespace="pipelines")
+    (tmp_path / "jvm.json").write_text(json.dumps(jvm))
+    out = json.loads(kubectl("create", "--dry-run=server", "--validate=strict", "-o", "json", "-f", str(tmp_path / "jvm.json")))
+    assert out["spec"]["type"] == "Scala" and out["spec"]["mainClass"] == "com.acme.Orders"
+    assert out["spec"]["driver"]["template"]["spec"]["containers"][0]["command"] == ["cairn-spark-driver"]
     with pytest.raises(ValueError):
         spark_application("bad", image=IMAGE, main="/jobs/x.jar", service_account="s", cairn_url="u", catalog_uri="c")
     with pytest.raises(ValueError):

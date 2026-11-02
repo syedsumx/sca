@@ -9,9 +9,9 @@ program calls :func:`cairn_spark.lakehouse_session` (workload identity: the toke
 for the bound pipeline user's token). Executors need no identity: they get their settings from the
 driver over Spark's RPC, and the catalog's storage credentials come with the tables.
 
-That needs the driver to be a Python program. A JVM program's catalog settings must be there before it
-starts, so JVM applications run in client mode (the driver in the submitting pod, which has its own
-workload identity) and ``cairn-spark submit`` refuses them in cluster mode rather than leak.
+A JVM program's catalog settings must be there before it starts, so its driver container runs
+``cairn-spark-driver`` first: it signs in the same way, inside the pod, and starts Spark's driver with
+the session's settings in a private file (cairn_spark.driver).
 
 * :func:`driver_pod_template` and :func:`cluster_conf`: what ``cairn-spark submit --deploy-mode
   cluster`` adds.
@@ -49,11 +49,15 @@ def driver_env(cairn_url: str, catalog_uri: str, extra: Optional[dict] = None) -
     return {**env, **(extra or {})}
 
 
-def driver_pod_template(audience: str = "cairn", expiration_seconds: int = 3600) -> dict:
-    """A driver pod template: the projected token, mounted read-only where the driver looks for it."""
+def driver_pod_template(audience: str = "cairn", expiration_seconds: int = 3600, jvm: bool = False) -> dict:
+    """A driver pod template: the projected token, mounted read-only where the driver looks for it.
+    For a JVM program (``jvm``), the driver's command is ``cairn-spark-driver``, which signs in and
+    gives Spark the session's settings inside the pod (see cairn_spark.driver)."""
+    container = {"name": "spark-kubernetes-driver", "volumeMounts": [identity_mount()]}
+    if jvm:
+        container["command"] = ["cairn-spark-driver"]
     return {"apiVersion": "v1", "kind": "Pod", "spec": {
-        "volumes": [identity_volume(audience, expiration_seconds)],
-        "containers": [{"name": "spark-kubernetes-driver", "volumeMounts": [identity_mount()]}]}}
+        "volumes": [identity_volume(audience, expiration_seconds)], "containers": [container]}}
 
 
 def cluster_conf(cairn_url: str, catalog_uri: str, service_account: str, template_path: str) -> dict:
@@ -74,12 +78,13 @@ def spark_application(name: str, *, image: str, main: str, service_account: str,
                       namespace: str = "default", arguments: Sequence[str] = (), executors: int = 2,
                       executor_cores: int = 1, executor_memory: str = "2g", driver_cores: int = 1,
                       driver_memory: str = "1g", spark_version: str = "4.0.1", audience: str = "cairn",
-                      spark_conf: Optional[dict] = None, labels: Optional[dict] = None) -> dict:
-    """A Spark Operator SparkApplication running the Python program ``main`` (a path in the image, or
-    a URL) as the Cairn user ``service_account`` is bound to."""
-    if not main.endswith(".py"):
-        raise ValueError("cluster-mode applications on Cairn are Python programs that call lakehouse_session() "
-                         "(a JVM driver would need its credential in a ConfigMap); run JVM programs in client mode")
+                      spark_conf: Optional[dict] = None, labels: Optional[dict] = None,
+                      main_class: Optional[str] = None) -> dict:
+    """A Spark Operator SparkApplication running ``main`` (a path in the image, or a URL) as the Cairn
+    user ``service_account`` is bound to: a Python program that calls lakehouse_session(), or with
+    ``main_class`` a JVM program, whose driver pod signs in first (cairn-spark-driver)."""
+    if not main_class and not main.endswith(".py"):
+        raise ValueError("a JVM program needs its main_class; a Python program is a .py file")
     for k in (spark_conf or {}):
         if any(w in k.lower() for w in ("credential", "token", "secret", "password", "apikey")):
             raise ValueError(f"{k}: no secrets in a SparkApplication (they are stored in the cluster)")
@@ -94,14 +99,19 @@ def spark_application(name: str, *, image: str, main: str, service_account: str,
         "metadata": {"name": name, "namespace": namespace, "labels": {"app.kubernetes.io/managed-by": "cairn",
                                                                      **(labels or {})}},
         "spec": {
-            "type": "Python", "pythonVersion": "3", "mode": "cluster", "image": image, "imagePullPolicy": "IfNotPresent",
+            **({"type": "Scala", "mainClass": main_class} if main_class else {"type": "Python", "pythonVersion": "3"}),
+            "mode": "cluster", "image": image, "imagePullPolicy": "IfNotPresent",
             "mainApplicationFile": main if "://" in main else f"local://{main}", "arguments": list(arguments),
             "sparkVersion": spark_version, "sparkConf": conf,
             "restartPolicy": {"type": "Never"},
             "volumes": [identity_volume(audience)],
             "driver": {"cores": driver_cores, "memory": driver_memory, "serviceAccount": service_account,
                        "env": env, "volumeMounts": [identity_mount()],
-                       "labels": {"cairn.io/role": "driver"}},
+                       "labels": {"cairn.io/role": "driver"},
+                       # A JVM driver signs in before Spark starts, inside its pod.
+                       **({"template": {"spec": {"containers": [{"name": "spark-kubernetes-driver",
+                                                                 "command": ["cairn-spark-driver"]}]}}}
+                          if main_class else {})},
             # Executors get no token: their settings come from the driver, their storage keys with the tables.
             "executor": {"instances": executors, "cores": executor_cores, "memory": executor_memory,
                          "labels": {"cairn.io/role": "executor"}},
