@@ -99,7 +99,8 @@ const OPS: [&str; 22] = [
 ];
 
 /// Condition keys the store fills in. Tag keys are prefixes (`s3:ExistingObjectTag/<key>`).
-const KEYS: [&str; 21] = [
+const KEYS: [&str; 22] = [
+    "cairn:user",
     "s3:x-amz-server-side-encryption-aws-kms-key-id",
     "s3:object-lock-mode",
     "s3:object-lock-retain-until-date",
@@ -123,6 +124,34 @@ const KEYS: [&str; 21] = [
     "s3:x-amz-server-side-encryption",
 ];
 const KEY_PREFIXES: [&str; 2] = ["s3:existingobjecttag/", "s3:requestobjecttag/"];
+
+/// Policy variables in a resource (`${aws:username}`, `${cairn:user}`, any condition key) replaced by the
+/// request's values. A variable the request has no single value for leaves nothing to match (AWS
+/// semantics: the statement does not apply), so a variable can only narrow what a statement grants.
+pub fn substitute(pat: &str, ctx: &BTreeMap<String, Vec<String>>) -> Option<String> {
+    if !pat.contains("${") {
+        return Some(pat.to_string());
+    }
+    let mut out = String::with_capacity(pat.len());
+    let mut rest = pat;
+    while let Some(i) = rest.find("${") {
+        out.push_str(&rest[..i]);
+        let end = rest[i..].find('}')? + i;
+        let name = rest[i + 2..end].to_ascii_lowercase();
+        let v = match ctx.get(&name) {
+            Some(vs) if vs.len() == 1 && !vs[0].is_empty() => &vs[0],
+            _ => return None,
+        };
+        // A value cannot widen the pattern: no wildcards, no path escapes.
+        if v.contains(['*', '?', '/']) || v == ".." {
+            return None;
+        }
+        out.push_str(v);
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
+}
 
 /// `*` matches any run of characters (including `/`), `?` any one character.
 pub fn glob(pat: &str, s: &str) -> bool {
@@ -335,7 +364,7 @@ impl Statement {
         if (!self.action.is_empty() && !act(&self.action)) || (!self.not_action.is_empty() && act(&self.not_action)) {
             return false;
         }
-        let res = |pats: &[String]| pats.iter().any(|p| glob(p, r.resource));
+        let res = |pats: &[String]| pats.iter().any(|p| substitute(p, r.context).is_some_and(|p| glob(&p, r.resource)));
         if (!self.resource.is_empty() && !res(&self.resource)) || (!self.not_resource.is_empty() && res(&self.not_resource)) {
             return false;
         }
@@ -433,6 +462,29 @@ mod tests {
         assert!(glob("s3:get*", "s3:getobject"));
         assert!(glob("a?c", "abc") && !glob("a?c", "ac"));
         assert!(glob("*", ""));
+    }
+
+    #[test]
+    fn policy_variables_narrow_to_the_caller() {
+        let doc = br#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:PutObject","s3:GetObject"],"Resource":"arn:aws:s3:::spark-events/${cairn:user}/*"}
+        ]}"#;
+        let p = Policy::parse(doc, None).unwrap();
+        let ana = ctx(&[("cairn:user", "ana")]);
+        fn put(p: &Policy, res: &str, c: &BTreeMap<String, Vec<String>>) -> Option<Effect> {
+            p.evaluate(&req("s3:PutObject", res, "ASIAX", c))
+        }
+        assert_eq!(put(&p, "arn:aws:s3:::spark-events/ana/app-1/events_1", &ana), Some(Effect::Allow));
+        assert_eq!(put(&p, "arn:aws:s3:::spark-events/bob/app-2/events_1", &ana), None);
+        let nobody = ctx(&[]);
+        assert_eq!(put(&p, "arn:aws:s3:::spark-events/ana/x", &nobody), None); // no identity: nothing
+        // A value cannot widen the pattern.
+        for v in ["*", "a/b", "..", "?"] {
+            let c = ctx(&[("cairn:user", v)]);
+            assert_eq!(put(&p, "arn:aws:s3:::spark-events/*/x", &c), None, "{v}");
+        }
+        assert_eq!(substitute("a/${aws:username}/b", &ctx(&[("aws:username", "k1")])).as_deref(), Some("a/k1/b"));
+        assert_eq!(substitute("a/${aws:username", &ctx(&[("aws:username", "k1")])), None);
     }
 
     #[test]

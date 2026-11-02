@@ -74,7 +74,7 @@ subjects:
 {{- end }}
 {{- if $sp.historyServer.enabled }}
 {{- $claim := $sp.eventLog.existingClaim | default (printf "%s-spark-events" (include "cairn.fullname" $)) }}
-{{- if not $sp.eventLog.existingClaim }}
+{{- if not (or $sp.eventLog.existingClaim $sp.eventLog.store.enabled) }}
 ---
 # Event logs: drivers write them (CAIRN_SPARK_EVENT_LOG_DIR=file:///opt/spark-events, this claim mounted
 # there), the history server reads them. Many writers: ReadWriteMany.
@@ -130,13 +130,29 @@ spec:
           image: {{ $sp.image | default (include "cairn.namedImage" (dict "root" $ "name" "spark")) | quote }}
           imagePullPolicy: IfNotPresent
           command: [/opt/spark/bin/spark-class, org.apache.spark.deploy.history.HistoryServer]
+          {{- $st := $sp.eventLog.store }}
           env:
             - name: SPARK_HISTORY_OPTS
               value: >-
+                {{- if $st.enabled }}
+                -Dspark.history.fs.logDirectory={{ required "cairn.spark.eventLog.store.dir (s3a://bucket/prefix)" $st.dir }}
+                -Dspark.hadoop.fs.s3a.endpoint={{ printf "http%s://%s-store:%v" (ternary "s" "" (not (empty $.Values.cairn.store.tlsSecret))) (include "cairn.fullname" $) $.Values.cairn.store.port }}
+                -Dspark.hadoop.fs.s3a.path.style.access=true -Dspark.hadoop.fs.s3a.endpoint.region=us-east-1
+                -Dspark.hadoop.fs.s3a.aws.credentials.provider=software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider
+                {{- else }}
                 -Dspark.history.fs.logDirectory=file:///opt/spark-events
+                {{- end }}
                 -Dspark.history.fs.cleaner.enabled=true
                 -Dspark.history.fs.cleaner.maxAge={{ $sp.historyServer.maxAge | default "30d" }}
+                -Dspark.ui.proxyBase={{ $sp.historyServer.proxyBase | default "/cairn/api/v1/spark/history" }}
                 -Djava.io.tmpdir=/tmp
+            {{- if $st.enabled }}
+            # A read-only store key for the event-log prefix (the history server only reads).
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.spark.eventLog.store.readerSecret" $st.readerSecret }}, key: access_key } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ $st.readerSecret }}, key: secret_key } }
+            {{- end }}
           ports:
             - { name: http, containerPort: 18080 }
           readinessProbe:
@@ -147,11 +163,15 @@ spec:
           securityContext:
             {{- toYaml $.Values.cairn.containerSecurityContext | nindent 12 }}
           volumeMounts:
+            {{- if not $st.enabled }}
             - { name: events, mountPath: /opt/spark-events, readOnly: true }
+            {{- end }}
             - { name: tmp, mountPath: /tmp }
       volumes:
+        {{- if not $st.enabled }}
         - name: events
           persistentVolumeClaim: { claimName: {{ $claim }}, readOnly: true }
+        {{- end }}
         - name: tmp
           emptyDir: {}
 ---

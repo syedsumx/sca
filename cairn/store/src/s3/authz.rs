@@ -267,6 +267,10 @@ impl Server {
             let cred = &c.auth.cred;
             put("aws:username", if cred.user.is_empty() { cred.access_key.clone() } else { cred.user.clone() });
             put("aws:userid", cred.access_key.clone());
+            // The Cairn identity a temporary key carries (web identity sessions), for `${cairn:user}`.
+            if let Some(user) = cred.actor.strip_prefix("urn:li:corpuser:") {
+                put("cairn:user", user.to_string());
+            }
             put("s3:signatureversion", if c.auth.scope.is_empty() { "AWS" } else { "AWS4-HMAC-SHA256" }.into());
             put("s3:authtype", if c.headers.contains_key("authorization") { "REST-HEADER" } else { "REST-QUERY-STRING" }.into());
         }

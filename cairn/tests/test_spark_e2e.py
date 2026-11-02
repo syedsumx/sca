@@ -49,6 +49,10 @@ def people(cairn):  # noqa: F811
     s.identity._me_lookup, s.identity.service_token = real, real_service
 
 
+def s_issuer(cairn):  # noqa: F811
+    return cairn[1].trino_tokens.issuer
+
+
 @pytest.fixture(scope="module")
 def lake(cairn, people):  # noqa: F811
     """Cairn Store with STS, and Cairn Catalog taking Cairn-issued tokens (decided by the test API)."""
@@ -58,7 +62,10 @@ def lake(cairn, people):  # noqa: F811
     store = subprocess.Popen([os.environ["CAIRN_STORE_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
         **os.environ, "CAIRN_STORE_ACCESS_KEY": STORE_KEY[0], "CAIRN_STORE_SECRET_KEY": STORE_KEY[1],
         "CAIRN_STORE_DATA": f"{d}/s", "CAIRN_STORE_ADDR": f"0.0.0.0:{sp}", "CAIRN_STORE_BUCKETS": "lakehouse",
-        "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_META": "", "CAIRN_STORE_STS_SECRET": STS})
+        "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_META": "", "CAIRN_STORE_STS_SECRET": STS,
+        # Lakehouse tokens may be exchanged for roles' temporary credentials (Spark's event logs).
+        "CAIRN_STORE_STS_PROVIDERS": json.dumps([{"issuer": s_issuer(cairn), "audiences": ["lakehouse"],
+                                                  "jwks_url": f"{url}/v1/trino/jwks.json"}])})
     wait(sp)
     env = {**os.environ, "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": f"{d}/c", "CAIRN_CATALOG_TOKEN": CATALOG_TOKEN,
            "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
@@ -487,42 +494,75 @@ def test_structured_streaming_into_iceberg_outlives_its_tokens(cairn, lake, rene
 
 
 def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, tmp_path):  # noqa: F811
-    """Event logs (CAIRN_SPARK_EVENT_LOG_DIR) read by Spark's history server: the run is there, its
-    session credential and Cairn token are not, neither in the API nor in the event log on disk."""
+    """Event logs in Cairn Store, written with the event-log role's temporary credentials (exchanged
+    for the job's lakehouse token: no store key in the job), read by Spark's history server and shown
+    through Cairn's sign-in: each person their own runs. Secrets are redacted on disk and in the API."""
+    import boto3
+    from fastapi import FastAPI, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.dataaccess.spark_history import SparkHistory, build_spark_history_router
+
     url, s = cairn
     s.lakehouse.catalog_uris = (lake["catalog"],)
-    events = tmp_path / "events"
-    events.mkdir()
-    os.chmod(events, 0o777)
+    store = lake["store"]
+    kw = dict(endpoint_url=store, aws_access_key_id=STORE_KEY[0], aws_secret_access_key=STORE_KEY[1], region_name="us-east-1")
+    s3, iam = boto3.client("s3", **kw), boto3.client("iam", **kw)
+    s3.create_bucket(Bucket="spark-events")
+    iam.create_role(RoleName="spark-event-logs", MaxSessionDuration=43200, AssumeRolePolicyDocument=json.dumps({"Statement": [{
+        "Effect": "Allow", "Principal": {"Federated": s_issuer(cairn)}, "Action": "sts:AssumeRoleWithWebIdentity"}]}))
+    iam.put_role_policy(RoleName="spark-event-logs", PolicyName="write-event-logs", PolicyDocument=json.dumps({
+        "Statement": [{"Effect": "Allow", "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"],
+                       # S3A looks at the directory's own key too (logs), not only what is in it.
+                       "Resource": ["arn:aws:s3:::spark-events/logs", "arn:aws:s3:::spark-events/logs/*"]},
+                      {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": "arn:aws:s3:::spark-events"}]}))
     job = tmp_path / "job.py"
     job.write_text(JOB)
     os.chmod(tmp_path, 0o755)
-    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", "-v", f"{events}:/events",
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV,
                         "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
-                        "-e", "CAIRN_SPARK_EVENT_LOG_DIR=file:///events", IMAGE, "/opt/spark/bin/spark-submit",
-                        "--master", "local[1]", "--conf", "spark.ui.enabled=false",
-                        # Uncompressed, so the test can read what is on disk (redaction happens before writing).
+                        "-e", "CAIRN_SPARK_EVENT_LOG_DIR=s3a://spark-events/logs", "-e", f"CAIRN_STORE_URL={store}",
+                        "-e", "CAIRN_SPARK_EVENT_LOG_ROLE=arn:aws:iam::000000000000:role/spark-event-logs",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[1]", "--conf", "spark.ui.enabled=false",
+                        # Uncompressed, so the test can read what is in the store (redaction happens before writing).
                         "--conf", "spark.eventLog.compress=false", "/job/job.py", "count=analytics.products"],
                        capture_output=True, text=True, timeout=900)
-    assert "CAIRN-RESULT" in r.stdout, (r.stdout + r.stderr)[-4000:]
-    # Spark writes them for its own user (0770); let the test (another user, in CI) read them.
-    subprocess.run(["docker", "run", "--rm", "-v", f"{events}:/events", "--entrypoint", "find", IMAGE, "/events", "-mindepth", "1",
-                    "-user", "spark", "-exec", "chmod", "a+rX", "{}", "+"],
-                   check=True, capture_output=True)
-    logs = [f for f in events.rglob("*") if f.is_file() and not f.name.startswith(".")]
-    assert logs, list(events.rglob("*"))
-    raw = "".join(f.read_text() for f in logs)
+    assert "CAIRN-RESULT" in r.stdout, "\n".join(ln for ln in (r.stdout + r.stderr).splitlines()
+                                               if ("s3a" in ln.lower() or "Exception" in ln) and "\tat " not in ln)[:6000]
+    keys = [o["Key"] for o in s3.list_objects_v2(Bucket="spark-events", Prefix="logs/").get("Contents", [])]
+    files = [k for k in keys if "/events_" in k]
+    assert files, keys
+    raw = "".join(s3.get_object(Bucket="spark-events", Key=k)["Body"].read().decode() for k in files)
     assert ANA not in raw
     env = next(json.loads(ln) for ln in raw.splitlines() if '"SparkListenerEnvironmentUpdate"' in ln)
     props = dict(env["Spark Properties"]) if isinstance(env["Spark Properties"], list) else env["Spark Properties"]
-    assert props["spark.sql.catalog.lakehouse.credential"] == "*********(redacted)"
-    assert props["spark.openlineage.transport.auth.apiKey"] == "*********(redacted)"
+    for k in ("spark.sql.catalog.lakehouse.credential", "spark.openlineage.transport.auth.apiKey",
+              "spark.hadoop.fs.s3a.secret.key", "spark.hadoop.fs.s3a.session.token"):
+        assert props[k] == "*********(redacted)", k
+    assert props["spark.cairn.user"] == "ana"
+    # The role writes event logs and nothing else.
+    sts = boto3.client("sts", endpoint_url=store, region_name="us-east-1", aws_access_key_id="x", aws_secret_access_key="x")
+    tok = s.lakehouse_sessions.issue("urn:li:corpuser:ana")["token"]
+    c = sts.assume_role_with_web_identity(RoleArn="arn:aws:iam::000000000000:role/spark-event-logs",
+                                          RoleSessionName="probe", WebIdentityToken=tok)["Credentials"]
+    temp = boto3.client("s3", endpoint_url=store, region_name="us-east-1", aws_access_key_id=c["AccessKeyId"],
+                        aws_secret_access_key=c["SecretAccessKey"], aws_session_token=c["SessionToken"])
+    import botocore
+    with pytest.raises(botocore.exceptions.ClientError):
+        temp.list_objects_v2(Bucket="lakehouse")
 
     hp = port()
     name = f"cairn-history-{hp}"
-    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-v", f"{events}:/events:ro",
-                    "-e", f"SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=file:///events -Dspark.history.ui.port={hp} "
-                          "-Dspark.history.fs.update.interval=2s",
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cairn_spark_eventlog", os.path.join(SRC, "cairn_spark", "eventlog.py"))
+    eventlog = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(eventlog)
+    history_server_opts = eventlog.history_server_opts
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
+                    "-e", f"AWS_ACCESS_KEY_ID={STORE_KEY[0]}", "-e", f"AWS_SECRET_ACCESS_KEY={STORE_KEY[1]}",
+                    "-e", "SPARK_HISTORY_OPTS=" + history_server_opts("s3a://spark-events/logs", store)
+                    + f" -Dspark.history.ui.port={hp} -Dspark.history.fs.update.interval=2s",
                     IMAGE, "/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"],
                    check=True, capture_output=True)
     try:
@@ -537,8 +577,25 @@ def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, 
             time.sleep(1)
         assert apps and apps[0]["name"] == "governed-job", apps
         environment = httpx.get(f"http://127.0.0.1:{hp}/api/v1/applications/{apps[0]['id']}/environment", timeout=10).json()
-        shown = dict(environment["sparkProperties"])
-        assert shown["spark.sql.catalog.lakehouse.credential"] == "*********(redacted)"
+        assert dict(environment["sparkProperties"])["spark.cairn.user"] == "ana"
         assert ANA not in json.dumps(environment)
+
+        # Through Cairn: ana sees her run; bob sees nothing of it; an operator sees everything.
+        app = FastAPI()
+
+        def who(request: Request):
+            return Principal(request.headers["x-who"], "token")
+        app.include_router(build_spark_history_router(SparkHistory(f"http://127.0.0.1:{hp}"), who,
+                                                      lambda p: p.urn == "urn:li:corpuser:admin"))
+        c = TestClient(app)
+        get = lambda path, u: c.get(f"/v1/spark/history/{path}", headers={"x-who": f"urn:li:corpuser:{u}"})  # noqa: E731
+        app_id = apps[0]["id"]
+        assert [a["id"] for a in get("api/v1/applications", "ana").json()] == [app_id]
+        assert get("api/v1/applications", "bob").json() == []
+        assert get(f"api/v1/applications/{app_id}/jobs", "ana").status_code == 200
+        assert get(f"api/v1/applications/{app_id}/jobs", "bob").status_code == 404
+        assert get(f"history/{app_id}/jobs/", "bob").status_code == 404
+        assert get(f"history/{app_id}/jobs/", "ana").status_code == 200
+        assert [a["id"] for a in get("api/v1/applications", "admin").json()] == [app_id]
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)

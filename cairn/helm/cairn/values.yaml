@@ -907,8 +907,16 @@ cairn:
       existingClaim: ""             # a ReadWriteMany claim drivers mount at /opt/spark-events
       storageClassName: ""
       size: 20Gi
+      # Or in Cairn Store: jobs write with the event-log role's temporary credentials
+      # (CAIRN_SPARK_EVENT_LOG_DIR=<dir>, CAIRN_SPARK_EVENT_LOG_ROLE), the history server reads with a
+      # read-only key (a Secret with access_key and secret_key).
+      store:
+        enabled: false
+        dir: ""                     # s3a://spark-events/logs
+        readerSecret: ""
     historyServer:
-      enabled: false                # no sign-in of its own: ClusterIP only
+      enabled: false                # no sign-in of its own: ClusterIP only, served through Cairn
+      proxyBase: /cairn/api/v1/spark/history   # Cairn's public path to it (its pages link back through it)
       maxAge: 30d                   # event logs older than this are removed
       resources:
         requests: { cpu: 100m, memory: 1Gi }

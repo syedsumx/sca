@@ -429,6 +429,8 @@ services:
       CAIRN_TRINO_OAUTH_REDIRECT_URIS: ${CAIRN_TRINO_OAUTH_REDIRECT_URIS:-https://localhost:8443/oauth2/callback}
       # Cairn Catalog's addresses as engines name it in OpenLineage: Spark lineage lands on lakehouse tables.
       CAIRN_LAKEHOUSE_CATALOG_URIS: http://cairn-catalog:8181,${CAIRN_CATALOG_PUBLIC_URL:-http://localhost:8181}
+      # Spark's history server (profile spark), served behind Cairn's sign-in at /v1/spark/history/.
+      CAIRN_SPARK_HISTORY_URL: http://cairn-spark-history:18080
       CAIRN_LAKEHOUSE_TOKEN_TTL: ${CAIRN_LAKEHOUSE_TOKEN_TTL:-3600}
       CAIRN_LAKEHOUSE_MAX_SESSION: ${CAIRN_LAKEHOUSE_MAX_SESSION:-604800}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
@@ -767,7 +769,8 @@ services:
     networks: [catalog]
 
   # Spark's history server over the jobs' event logs (secrets in them are redacted). It has no sign-in of
-  # its own, so it listens on this host's loopback only: http://127.0.0.1:18080.
+  # its own: people use it through Cairn (/cairn/api/v1/spark/history/, each their own runs); its port is
+  # on this host's loopback only, for operators.
   cairn-spark-history:
     image: ${CAIRN_REGISTRY:-cairn}/spark:${CAIRN_VERSION:-0.1.0}
     profiles: [spark]
@@ -779,6 +782,7 @@ services:
       SPARK_HISTORY_OPTS: >-
         -Dspark.history.fs.logDirectory=file:///opt/spark-events -Dspark.history.fs.cleaner.enabled=true
         -Dspark.history.fs.cleaner.maxAge=${CAIRN_SPARK_HISTORY_MAX_AGE:-30d}
+        -Dspark.ui.proxyBase=${CAIRN_SPARK_HISTORY_PROXY_BASE:-/cairn/api/v1/spark/history}
     volumes:
       - spark-events:/opt/spark-events:ro
     ports:

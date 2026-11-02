@@ -27,6 +27,11 @@
 {{- with .Values.cairn.workloadIdentity.issuers }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WORKLOAD_ISSUERS" "value" (toJson .)) }}
 {{- end }}
+{{- /* Spark's history server, served behind Cairn's sign-in at /v1/spark/history/. */ -}}
+{{- if and .Values.cairn.spark.enabled .Values.cairn.spark.historyServer.enabled }}
+{{- $hs := dict "root" $ "component" "spark-history" "cfg" .Values.cairn.spark.historyServer }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SPARK_HISTORY_URL" "value" (printf "http://%s.%s:18080" (include "cairn.componentName" $hs) (.Values.cairn.spark.namespace | default .Release.Namespace))) }}
+{{- end }}
 {{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
 {{- if .Values.cairn.store.enabled }}
 {{- $s := .Values.cairn.store.secret }}

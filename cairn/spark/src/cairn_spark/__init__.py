@@ -134,9 +134,11 @@ def session_conf(app_name: str = "cairn", *, cairn_url: Optional[str] = None, to
     ttl = ttl or (int(os.environ["CAIRN_SPARK_TOKEN_TTL"]) if os.environ.get("CAIRN_SPARK_TOKEN_TTL") else None)
     ct = catalog_token(cairn_url, tok, ttl, verify)
     conf = lakehouse_conf(cairn_url, catalog_uri, ct["credential"], tok, lineage=lineage, app_name=app_name)
-    if os.environ.get("CAIRN_SPARK_EVENT_LOG_DIR"):  # for the history server (secrets are redacted in it)
-        conf["spark.eventLog.enabled"] = "true"
-        conf["spark.eventLog.dir"] = os.environ["CAIRN_SPARK_EVENT_LOG_DIR"]
+    from cairn_spark.eventlog import event_log_conf
+
+    # For the history server (secrets are redacted in event logs): a directory, or Cairn Store with
+    # temporary credentials for the event-log role.
+    conf.update(event_log_conf(ct["token"], ct["user"], verify))
     return conf, ct["user"]
 
 

@@ -237,6 +237,18 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.dbt import build_dbt_router
 
         app.include_router(build_dbt_router(services.dbt_runs, cp, authz))
+    if os.environ.get("CAIRN_SPARK_HISTORY_URL"):
+        from cairn.dataaccess.spark_history import SparkHistory, build_spark_history_router
+
+        def is_operator(p) -> bool:
+            try:
+                authz(p, "MANAGE_SYSTEM_OPERATIONS", None)
+                return True
+            except HTTPException:
+                return False
+
+        app.include_router(build_spark_history_router(SparkHistory(os.environ["CAIRN_SPARK_HISTORY_URL"]), cp,
+                                                      is_operator))
     if services.openlineage is not None:
         from cairn.sources.api import build_openlineage_router
 
