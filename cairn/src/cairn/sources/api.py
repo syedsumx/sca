@@ -94,22 +94,40 @@ def build_router(svc: SourceService, current_principal, authorize) -> APIRouter:
     return router
 
 
-def build_openlineage_router(receiver, current_principal, authorize) -> APIRouter:
+def build_openlineage_router(receiver, current_principal, authorize, session_user=None) -> APIRouter:
     """``POST /openlineage/api/v1/lineage``: point an OpenLineage HTTP transport at
-    ``https://<cairn>/cairn/api/openlineage`` with a Cairn API key (``EDIT_LINEAGE``)."""
+    ``https://<cairn>/cairn/api/openlineage`` with a Cairn API key (``EDIT_LINEAGE``).
+
+    A lakehouse session credential (``<session>:<secret>``) is accepted here too, and only here: Spark
+    reports lineage with it, so a job's lineage lasts as long as its session (``session_user``)."""
+    import re
+
+    from starlette.concurrency import run_in_threadpool
+
     from cairn.sources.openlineage import OpenLineageError
 
     router = APIRouter(prefix="/openlineage", tags=["lineage"])
+    session_credential = re.compile(r"^[0-9a-f]{32}:[A-Za-z0-9_-]{20,}$")
+
+    def principal(request: Request) -> Principal:
+        auth = request.headers.get("authorization") or ""
+        token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        if session_user is not None and session_credential.match(token):
+            try:
+                return Principal(session_user(token), "lakehouse-session")
+            except Exception as e:  # SessionRefused: the session ended, the user is suspended, …
+                raise HTTPException(401, f"lakehouse session: {e}", headers={"WWW-Authenticate": "Bearer"})
+        return current_principal(request)
 
     @router.post("/api/v1/lineage")
-    async def lineage(request: Request, p: Principal = Depends(current_principal)):
+    async def lineage(request: Request, p: Principal = Depends(principal)):
         authorize(p, "EDIT_LINEAGE", None)
         try:
             body = await request.json()
         except ValueError:
             raise HTTPException(400, "the body is not JSON")
         try:
-            return receiver.handle_many(body, p.urn)
+            return await run_in_threadpool(receiver.handle_many, body, p.urn)
         except OpenLineageError as e:
             raise HTTPException(422, str(e))
 

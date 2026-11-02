@@ -205,3 +205,50 @@ def test_the_token_endpoint_speaks_oauth(tmp_path):
     r = c.post(url, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": secret,
                           "requested_token_type": "urn:ietf:params:oauth:token-type:refresh_token"})
     assert r.json()["error"] == "invalid_request"
+
+
+def test_spark_reports_lineage_with_its_session_for_as_long_as_the_session_lasts(tmp_path):
+    """The session credential is a lineage key that outlives every token, and ends with the session."""
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.sources.api import build_openlineage_router
+
+    status = {"urn:li:corpuser:ana": "ACTIVE"}
+    s, _, _ = _sessions(tmp_path, user_status=lambda u: status.get(u, "ACTIVE"), ttl=300, max_session=3600)
+    cred = s.issue("urn:li:corpuser:ana")["credential"]
+    received = []
+
+    class Receiver:
+        def handle_many(self, body, actor):
+            received.append(actor)
+            return {"accepted": 1}
+
+    def cp(request: Request):  # every other credential is refused here
+        raise HTTPException(401, "Missing or invalid credentials")
+
+    app = FastAPI()
+    app.include_router(build_openlineage_router(Receiver(), cp, lambda p, priv, urn: None, s.lineage_user))
+    c = TestClient(app)
+    post = lambda token: c.post("/openlineage/api/v1/lineage", json={"eventType": "COMPLETE"},  # noqa: E731
+                                headers={"Authorization": f"Bearer {token}"})
+    assert post(cred).status_code == 200 and received == ["urn:li:corpuser:ana"]
+    sid, secret = cred.split(":", 1)
+    assert post(f"{sid}:{secret[:-1]}x").status_code == 401           # a wrong secret
+    status["urn:li:corpuser:ana"] = "SUSPENDED"
+    r = post(cred)
+    assert r.status_code == 401 and "suspended" in r.text
+    status["urn:li:corpuser:ana"] = "ACTIVE"
+    assert post(cred).status_code == 200
+    s.revoke("ana", "urn:li:corpuser:admin")
+    r = post(cred)
+    assert r.status_code == 401 and "ended" in r.text
+    assert received == ["urn:li:corpuser:ana"] * 2
+    # It is a lineage key only: the API's own sign-in does not know it.
+    from cairn.common.security import AuthenticationError, IdentityResolver
+    try:
+        IdentityResolver("http://127.0.0.1:9", None, None, me_lookup=lambda *a: None).resolve(
+            {"authorization": f"Bearer {s.issue('urn:li:corpuser:ana')['credential']}"}, {})
+        raise AssertionError("a session credential signed in to the API")
+    except AuthenticationError:
+        pass

@@ -1126,7 +1126,7 @@ A multi-table transaction changes every table or none.
   - `CAIRN_CA_FILE`, if needed.
 
   The `lakehouse` catalog is the default, so `spark.sql("SELECT … FROM analytics.products")` works. For `spark-submit --conf` settings instead, see `cairn_spark.lakehouse_conf(...)`.
-- **Lineage.** The OpenLineage Spark listener sends each job's runs, with table and column lineage, to Cairn as the same user. Spark names tables by their storage paths, so Cairn renames the tables of Cairn Catalog (`CAIRN_LAKEHOUSE_CATALOG_URIS`: the catalog's addresses as engines reach it) to the datasets Trino and the catalog crawler name. Lineage from Trino, dbt and Spark then meets on one dataset.
+- **Lineage.** The OpenLineage Spark listener sends each job's runs, with table and column lineage, to Cairn as the same user. It authenticates with the lakehouse session credential, which Cairn accepts at the OpenLineage endpoint only. So a job's lineage lasts as long as its session, not one token's hour, and stops when the session is ended or the user is suspended. Spark names tables by their storage paths, so Cairn renames the tables of Cairn Catalog (`CAIRN_LAKEHOUSE_CATALOG_URIS`: the catalog's addresses as engines reach it) to the datasets Trino and the catalog crawler name. Lineage from Trino, dbt and Spark then meets on one dataset.
 - **The image.** `cairn/spark` (`docker/spark.Dockerfile`) is the official Apache Spark 4.0 image with:
   - Apache Iceberg 1.10 (Spark runtime and AWS bundle, for S3FileIO);
   - OpenLineage for Spark 1.55;

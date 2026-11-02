@@ -106,7 +106,9 @@ def lakehouse_conf(cairn_url: str, catalog_uri: str, session: str, cairn_token: 
             "spark.openlineage.transport.url": cairn_url.rstrip("/"),
             "spark.openlineage.transport.endpoint": "/openlineage/api/v1/lineage",
             "spark.openlineage.transport.auth.type": "api_key",
-            "spark.openlineage.transport.auth.apiKey": cairn_token,
+            # The session credential, not a token: lineage then lasts as long as the session (a token
+            # given here would never be renewed, and a job's lineage would stop when it expired).
+            "spark.openlineage.transport.auth.apiKey": session,
             "spark.openlineage.namespace": os.environ.get("CAIRN_SPARK_NAMESPACE", "spark"),
             # What Cairn prices a run by (cores reserved x wall-clock time).
             "spark.openlineage.capturedProperties": ",".join(CAPTURED),

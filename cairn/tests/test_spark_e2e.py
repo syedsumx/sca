@@ -115,11 +115,18 @@ JOB = textwrap.dedent('''
 ''')
 
 
+SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "spark", "src")
+# CAIRN_SPARK_DEV_SRC=1: run cairn_spark from the source tree (while developing), not the image's copy.
+DEV = ["-v", f"{os.path.abspath(SRC)}:/opt/cairn-spark:ro", "-e",
+       "PYTHONPATH=/opt/cairn-spark:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip"] \
+    if os.environ.get("CAIRN_SPARK_DEV_SRC") == "1" else []
+
+
 def run_job(tmp_path, cairn_url, lake, token, *steps):
     job = tmp_path / "job.py"
     job.write_text(JOB)
     os.chmod(tmp_path, 0o755)
-    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro",
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV,
                         "-e", f"CAIRN_URL={cairn_url}", "-e", f"CAIRN_TOKEN={token}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
                         IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
                         "/job/job.py", *steps], capture_output=True, text=True, timeout=900)

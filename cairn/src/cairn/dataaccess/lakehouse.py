@@ -164,6 +164,28 @@ class LakehouseSessions:
             raise SessionRefused("unknown session credential", "invalid_client")
         return self._renew(row, "credential")
 
+    def lineage_user(self, credential: str) -> str:
+        """The user a session credential (``<session>:<secret>``) reports lineage as: valid exactly as
+        long as the session may be renewed (not ended, not past its maximum, the user not suspended),
+        so a job's lineage outlives any one token and stops when its session is ended."""
+        sid, _, secret = credential.partition(":")
+        row = self._session(sid) if sid and secret else None
+        if row is None or not hmac.compare_digest(row["secret_hash"], _hash(secret)):
+            raise SessionRefused("unknown session credential", "invalid_client")
+        if row["ended_s"] is not None:
+            raise SessionRefused("the lakehouse session was ended (revoked)")
+        if int(time.time()) >= row["started_s"] + self.max_session:
+            raise SessionRefused("the session reached its maximum length")
+        urn = f"urn:li:corpuser:{row['user']}"
+        try:
+            status = self.user_status(urn) if self.user_status else "ACTIVE"
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("lakehouse: cannot check %s for lineage: %s", urn, e)
+            raise SessionRefused("Cairn cannot check the user right now", "temporarily_unavailable")
+        if (status or "ACTIVE").upper() == "SUSPENDED":
+            raise SessionRefused("the user is suspended")
+        return urn
+
     def revoke(self, user: str, actor: str) -> dict:
         """Ends every open lakehouse session of ``user``: none is renewed again (tokens already issued
         last at most CAIRN_LAKEHOUSE_TOKEN_TTL)."""

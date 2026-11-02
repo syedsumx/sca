@@ -240,7 +240,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if services.openlineage is not None:
         from cairn.sources.api import build_openlineage_router
 
-        app.include_router(build_openlineage_router(services.openlineage, cp, authz))
+        sessions = getattr(services, "lakehouse_sessions", None)
+        app.include_router(build_openlineage_router(services.openlineage, cp, authz,
+                                                    sessions.lineage_user if sessions is not None else None))
     if services.git is not None:
         from cairn.sources.api import build_git_router
 
