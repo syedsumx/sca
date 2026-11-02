@@ -476,8 +476,9 @@ mod tests {
         }
         assert_eq!(put(&p, "arn:aws:s3:::spark-events/ana/app-1/events_1", &ana), Some(Effect::Allow));
         assert_eq!(put(&p, "arn:aws:s3:::spark-events/bob/app-2/events_1", &ana), None);
+        // No identity: nothing.
         let nobody = ctx(&[]);
-        assert_eq!(put(&p, "arn:aws:s3:::spark-events/ana/x", &nobody), None); // no identity: nothing
+        assert_eq!(put(&p, "arn:aws:s3:::spark-events/ana/x", &nobody), None);
         // A value cannot widen the pattern.
         for v in ["*", "a/b", "..", "?"] {
             let c = ctx(&[("cairn:user", v)]);

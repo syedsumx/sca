@@ -15,7 +15,7 @@ Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validate
 
 | Layer | Snowflake / Databricks | Cairn | Status |
 |---|---|---|---|
-| Object storage | Managed storage / cloud object stores | **Cairn Store** (Rust, S3 API). Clusters with replicas, erasure coding and racks/zones; versioning and object lock; SSE; STS temporary credentials; lifecycle and tiering; backups, continuous backup and two-way sync; WebDAV, SFTP, FUSE, CSI and Hadoop S3A; node TLS | ✅ |
+| Object storage | Managed storage / cloud object stores | **Cairn Store** (Rust, S3 API). Clusters with replicas, erasure coding and racks/zones; versioning and object lock; SSE, with customer-managed keys in Vault Transit; STS temporary credentials; lifecycle and tiering; backups, continuous backup and two-way sync; WebDAV, SFTP, FUSE, CSI and Hadoop S3A; node TLS | ✅ |
 | Tables and catalog | Snowflake Iceberg tables / Unity Catalog | **Cairn Catalog** (Rust, Iceberg REST). Tables and views; commits via iceberg-rust; per-table credential vending; HA on PostgreSQL; Cairn identities governed per table | ✅ |
 | SQL warehouse | Virtual warehouses / Databricks SQL | **Trino 476** on the lakehouse. Cairn sign-in (JWT, OAuth2 SSO for the web UI and BI); access control through Cairn's policies (OPA protocol); query lineage and usage into Cairn; resource groups; fault-tolerant execution, spill and cache; workers with autoscaling | ✅ |
 | SQL in the product | Snowsight / SQL editor | Data preview and SQL editor on Trino; Ask-your-data (text-to-SQL) with the caller's permissions | ✅ |

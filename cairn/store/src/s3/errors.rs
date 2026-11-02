@@ -135,7 +135,7 @@ errors! {
     SSE_C_WRONG_KEY = "AccessDenied", 403, "The provided encryption key does not match the key the object was stored with.";
     KMS_KEY_REQUIRED = "InvalidArgument", 400, "aws:kms encryption needs a key id (x-amz-server-side-encryption-aws-kms-key-id or the bucket's default).";
     KMS_NOT_FOUND = "KMS.NotFoundException", 400, "The key id is not in the store's keyring.";
-    KMS_KEY_UNAVAILABLE = "KMS.DisabledException", 500, "The key that encrypted this object is not available in the store's keyring.";
+    KMS_KEY_UNAVAILABLE = "KMS.DisabledException", 500, "The key that encrypted this object is not available (not in the store's keyring, or refused by its key manager).";
     NO_SUCH_ENCRYPTION = "ServerSideEncryptionConfigurationNotFoundError", 404, "The server side encryption configuration was not found";
     MALFORMED_POST = "MalformedPOSTRequest", 400, "The body of your POST request is not well-formed multipart/form-data.";
     POST_POLICY = "InvalidPolicyDocument", 400, "The policy document is missing, malformed or not signed.";

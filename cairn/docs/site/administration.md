@@ -706,6 +706,20 @@ The store will not start with a field that does not apply to its kind (a `region
 - **Bucket defaults.** `PutBucketEncryption` sets a bucket's default encryption.
 - **Key rotation.** Add a key to the keyring and point `sse_s3_key` at it. Existing objects keep the key they were written with, so keep old keys until those objects are rewritten or deleted. An object whose key has been removed can no longer be read.
 - **Back up the keyring.** Without it, encrypted objects cannot be recovered.
+- **Customer-managed keys (HashiCorp Vault or OpenBao Transit).** A key the store never holds goes under `"external"` in the keyring file:
+
+  ```json
+  {"external": {"customer-a": {"type": "vault-transit", "addr": "https://vault:8200", "key": "cairn-a",
+     "mount": "transit", "token_file": "/etc/cairn-store-keyring/vault-token", "cache_seconds": 60}}}
+  ```
+
+  It is used like any keyring key, by id: `aws:kms` with `customer-a`, a bucket default, or `sse_s3_key`. Each object's data key is encrypted by Vault when the object is written and decrypted by Vault when it is read. The object's name is bound in, so a wrapped key moved to another object does not open.
+  - **The customer stays in control.** Revoke the store's token or policy and the objects can no longer be read or written. Restore it and they can. Delete the key in Vault and the data is gone for good (crypto-shredding). Changes take effect after `cache_seconds`: how long a decrypted data key stays in memory.
+  - **Rotation.** Rotate the key in Vault; nothing is needed from the store. Old objects still open, and new ones use the latest version.
+  - **The token.** Give the store a token whose policy allows only `update` on `transit/encrypt/<key>` and `transit/decrypt/<key>`. The token file is read on each call, so it can be renewed in place. In Helm, put `vault-token` in the same Secret as `keyring.json` (`cairn.store.secret.keyringSecret`). `namespace` sets Vault Enterprise's namespace.
+  - **Not covered.** Access-key secrets stay wrapped by a local keyring key, since they are needed when the store starts.
+  - **Fails closed.** A keyring whose external key does not load stops the store at start-up. When Vault refuses or cannot be reached, the request fails with `KMS.DisabledException`; nothing is written in the clear.
+  - **Tested** with a real Vault (`store/conformance/test_kms_vault.py`): encryption, copies, rotation, revocation and restore, crypto-shredding, a token scoped to another key, and bad keyrings.
 
 Objects written before a key was set stay unencrypted. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 

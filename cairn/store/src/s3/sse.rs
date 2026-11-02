@@ -2,7 +2,8 @@
 //! bucket default encryption, and the store default (encrypt every new object when a keyring is set).
 //!
 //! Keyring: `CAIRN_STORE_KEYRING_FILE` (`{"keys": {"<id>": "<base64 32 bytes>"}, "sse_s3_key": "<id>"}`) or
-//! `CAIRN_STORE_MASTER_KEY` (one base64 key, id "default"). Rotation: add a key, point `sse_s3_key` at it;
+//! `CAIRN_STORE_MASTER_KEY` (one base64 key, id "default"). Customer-managed keys that stay in the
+//! customer's key manager go under `"external"` (see `kms`); they are used like the others, by id. Rotation: add a key, point `sse_s3_key` at it;
 //! objects keep the key they were written with, so old keys stay in the keyring until those are gone.
 //! Customer keys arrive in request headers, so SSE-C is refused over plain HTTP unless the deployment
 //! terminates TLS in front of the store and says so (`CAIRN_STORE_SSE_C_ALLOW_HTTP=true`).
@@ -34,13 +35,18 @@ fn blocking<T>(f: impl FnOnce() -> T) -> T {
 #[derive(Clone, Default)]
 pub struct Keyring {
     pub keys: BTreeMap<String, Key>,
+    /// Keys held by an external key manager (customer-managed keys).
+    pub external: BTreeMap<String, std::sync::Arc<super::kms::Transit>>,
     /// The key SSE-S3 (and the store default) uses; empty: SSE-S3 is not available.
     pub sse_s3_key: String,
 }
 
 #[derive(Deserialize)]
 struct KeyringFile {
+    #[serde(default)]
     keys: BTreeMap<String, String>,
+    #[serde(default)]
+    external: BTreeMap<String, super::kms::ExternalConfig>,
     #[serde(default)]
     sse_s3_key: String,
 }
@@ -52,15 +58,59 @@ impl Keyring {
         for (id, v) in f.keys {
             keys.insert(id.clone(), decode_key(&v).map_err(|e| format!("key {id:?}: {e}"))?);
         }
-        if !f.sse_s3_key.is_empty() && !keys.contains_key(&f.sse_s3_key) {
-            return Err(format!("sse_s3_key {:?} is not in keys", f.sse_s3_key));
+        let mut external = BTreeMap::new();
+        for (id, c) in f.external {
+            if keys.contains_key(&id) {
+                return Err(format!("key {id:?} is both a local and an external key"));
+            }
+            let t = super::kms::Transit::new(&id, c).map_err(|e| format!("external key {id:?}: {e}"))?;
+            external.insert(id, std::sync::Arc::new(t));
         }
-        Ok(Keyring { keys, sse_s3_key: f.sse_s3_key })
+        let r = Keyring { keys, external, sse_s3_key: f.sse_s3_key };
+        if !r.sse_s3_key.is_empty() && !r.has(&r.sse_s3_key) {
+            return Err(format!("sse_s3_key {:?} is not in keys or external", r.sse_s3_key));
+        }
+        Ok(r)
+    }
+
+    pub fn has(&self, id: &str) -> bool {
+        self.keys.contains_key(id) || self.external.contains_key(id)
+    }
+
+    /// `dek` wrapped by key `id`, bound to `aad`: base64 (local keys) or the key manager's ciphertext.
+    fn wrap(&self, id: &str, dek: &Key, aad: &[u8]) -> Result<String, ApiError> {
+        if let Some(t) = self.external.get(id) {
+            return blocking(|| t.wrap(dek, aad)).map_err(|err| {
+                tracing::error!(key_id = %t.id(), error = %err, "the key manager did not encrypt a data key");
+                e::KMS_KEY_UNAVAILABLE.clone()
+            });
+        }
+        let kek = self.keys.get(id).ok_or_else(|| e::KMS_NOT_FOUND.clone())?;
+        Ok(B64.encode(crypt::wrap(kek, dek, aad)))
+    }
+
+    /// The data key of `wrapped` (by key `id`, bound to `aad`); None: that key is not available.
+    fn unwrap(&self, id: &str, wrapped: &str, aad: &[u8]) -> Result<Key, ApiError> {
+        if let Some(t) = self.external.get(id) {
+            return blocking(|| t.unwrap(wrapped, aad)).map_err(|err| {
+                tracing::error!(key_id = %t.id(), error = %err, "the key manager did not decrypt a data key");
+                e::KMS_KEY_UNAVAILABLE.clone()
+            });
+        }
+        let kek = self.keys.get(id).ok_or_else(|| {
+            tracing::error!(key_id = %id, "the key that encrypted this object is not in the keyring");
+            e::KMS_KEY_UNAVAILABLE.clone()
+        })?;
+        let raw = B64.decode(wrapped).map_err(|_| e::INTERNAL.clone())?;
+        crypt::unwrap(kek, &raw, aad).ok_or_else(|| {
+            tracing::error!(key_id = %id, "data key failed to unwrap");
+            e::KMS_KEY_UNAVAILABLE.clone()
+        })
     }
 
     pub fn single(b64: &str) -> Result<Keyring, String> {
         let k = decode_key(b64)?;
-        Ok(Keyring { keys: [("default".to_string(), k)].into(), sse_s3_key: "default".into() })
+        Ok(Keyring { keys: [("default".to_string(), k)].into(), sse_s3_key: "default".into(), ..Default::default() })
     }
 }
 
@@ -123,9 +173,11 @@ impl Server {
         if id.is_empty() {
             return Err(e::KMS_KEY_REQUIRED.clone());
         }
-        let kek = self.keyring.keys.get(&id).ok_or_else(|| e::KMS_NOT_FOUND.clone())?;
+        if !self.keyring.has(&id) {
+            return Err(e::KMS_NOT_FOUND.clone());
+        }
         let dek = crypt::random_key();
-        let wrapped = B64.encode(crypt::wrap(kek, &dek, &aad(bucket, key)));
+        let wrapped = self.keyring.wrap(&id, &dek, &aad(bucket, key))?;
         Ok((Sse { alg: alg.into(), key_id: id, wrapped, ..Default::default() }, dek))
     }
 
@@ -185,10 +237,8 @@ impl Server {
         if s.alg == "SSE-C" {
             return Ok(Some(s.clone()));
         }
-        let kek = self.keyring.keys.get(&s.key_id).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
-        let wrapped = B64.decode(&s.wrapped).map_err(|_| e::INTERNAL.clone())?;
-        let dek = crypt::unwrap(kek, &wrapped, &aad(bucket, from)).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
-        Ok(Some(Sse { wrapped: B64.encode(crypt::wrap(kek, &dek, &aad(bucket, to))), ..s.clone() }))
+        let dek = self.keyring.unwrap(&s.key_id, &s.wrapped, &aad(bucket, from))?;
+        Ok(Some(Sse { wrapped: self.keyring.wrap(&s.key_id, &dek, &aad(bucket, to))?, ..s.clone() }))
     }
 
     /// The data key to read a version encrypted as `sse` (`copy`: the request's copy source).
@@ -202,15 +252,7 @@ impl Server {
             }
             return Ok(Some(k));
         }
-        let kek = self.keyring.keys.get(&sse.key_id).ok_or_else(|| {
-            tracing::error!(key_id = %sse.key_id, bucket, key, "the key that encrypted this object is not in the keyring");
-            e::KMS_KEY_UNAVAILABLE.clone()
-        })?;
-        let wrapped = B64.decode(&sse.wrapped).map_err(|_| e::INTERNAL.clone())?;
-        crypt::unwrap(kek, &wrapped, &aad(bucket, key)).map(Some).ok_or_else(|| {
-            tracing::error!(key_id = %sse.key_id, bucket, key, "data key failed to unwrap");
-            e::KMS_KEY_UNAVAILABLE.clone()
-        })
+        self.keyring.unwrap(&sse.key_id, &sse.wrapped, &aad(bucket, key)).map(Some)
     }
 
     /// The data key of a version encrypted with a keyring key (None: not encrypted). SSE-C keys are not
@@ -219,11 +261,7 @@ impl Server {
         match &obj.sse {
             None => Ok(None),
             Some(s) if s.alg == "SSE-C" => Err(e::SSE_C_REQUIRED.clone()),
-            Some(s) => {
-                let kek = self.keyring.keys.get(&s.key_id).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())?;
-                let wrapped = B64.decode(&s.wrapped).map_err(|_| e::INTERNAL.clone())?;
-                crypt::unwrap(kek, &wrapped, &aad(bucket, &obj.key)).map(Some).ok_or_else(|| e::KMS_KEY_UNAVAILABLE.clone())
-            }
+            Some(s) => self.keyring.unwrap(&s.key_id, &s.wrapped, &aad(bucket, &obj.key)).map(Some),
         }
     }
 
@@ -268,7 +306,7 @@ impl Server {
                 }
             }
             "aws:kms" => {
-                if !self.keyring.keys.contains_key(&cfg.key_id) {
+                if !self.keyring.has(&cfg.key_id) {
                     return Err(if cfg.key_id.is_empty() { e::KMS_KEY_REQUIRED.clone() } else { e::KMS_NOT_FOUND.clone() });
                 }
             }

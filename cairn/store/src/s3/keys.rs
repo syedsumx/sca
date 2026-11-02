@@ -259,7 +259,9 @@ impl Server {
     /// A new secret, set (wrapped when possible) on `k`; returns the secret.
     pub(crate) fn new_secret(&self, k: &mut StoredKey) -> String {
         let raw: [u8; 32] = rand::random();
-        let kek_id = if !self.keyring.sse_s3_key.is_empty() {
+        // Access-key secrets are wrapped by a local keyring key (they are needed at start-up, before
+        // any external key manager might answer).
+        let kek_id = if self.keyring.keys.contains_key(&self.keyring.sse_s3_key) {
             Some(self.keyring.sse_s3_key.clone())
         } else {
             self.keyring.keys.keys().next().cloned()

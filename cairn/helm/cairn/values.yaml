@@ -507,6 +507,8 @@ cairn:
       # per-table credentials.
       stsSecretKey: ""
       # Optional: a Secret with a "keyring.json" ({"keys": {...}, "sse_s3_key": ...}) instead, for key rotation.
+      # Customer-managed keys in Vault Transit go under "external" in keyring.json; put the store's Vault
+      # token in the same Secret as "vault-token" (token_file: /etc/cairn-store-keyring/vault-token).
       keyringSecret: ""
     # OIDC issuers whose tokens AssumeRoleWithWebIdentity accepts, e.g.
     #   [{issuer: cairn, audiences: [cairn-store], jwks_url: "http://<release>-cairn-api:8800/v1/trino/jwks.json"}]
