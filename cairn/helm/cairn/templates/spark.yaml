@@ -189,4 +189,114 @@ spec:
   ports:
     - { name: http, port: 18080, targetPort: http }
 {{- end }}
+{{- /* ---------------------------------------------------------------- teams: a namespace each */ -}}
+{{- range $t := $sp.teams }}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$" (toString $t.name)) }}{{ fail (printf "cairn.spark.teams: name %q is 1-32 lowercase letters, digits and -" (toString $t.name)) }}{{ end }}
+{{- $tns := $t.namespace | default (printf "spark-%s" $t.name) }}
+{{- $tsa := $t.driverServiceAccount | default (printf "svc-spark-%s" $t.name) }}
+{{- $q := $t.quota | default dict }}
+{{- if $t.createNamespace | default true }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+    cairn.io/spark-team: {{ $t.name }}
+{{- end }}
+---
+# Team {{ $t.name }}: its drivers' service account (bind it to the team's pipeline user in Cairn).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $tsa }}
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+    cairn.io/spark-team: {{ $t.name }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-driver
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, persistentvolumeclaims]
+    verbs: [create, get, list, watch, delete, deletecollection, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-driver
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: spark-driver }
+subjects:
+  - { kind: ServiceAccount, name: {{ $tsa }}, namespace: {{ $tns }} }
+---
+# What team {{ $t.name }}'s Spark applications may use, all together.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: spark
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  hard:
+    requests.cpu: {{ $q.cpu | default "16" | quote }}
+    requests.memory: {{ $q.memory | default "64Gi" | quote }}
+    limits.memory: {{ $q.memoryLimit | default ($q.memory | default "64Gi") | quote }}
+    pods: {{ $q.pods | default "40" | quote }}
+    persistentvolumeclaims: {{ $q.volumeClaims | default "20" | quote }}
+---
+# Defaults for pods that state no requests (so the quota can count them) and a cap per container.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: spark
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest: { cpu: {{ $t.defaultCpu | default "1" | quote }}, memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
+      default: { memory: {{ $t.defaultMemory | default "2Gi" | quote }} }
+      max: { cpu: {{ $t.maxCpu | default "8" | quote }}, memory: {{ $t.maxMemory | default "32Gi" | quote }} }
+{{- with $t.submitters }}
+---
+# Who may run SparkApplications in team {{ $t.name }}'s namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: spark-submit
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications]
+    verbs: [create, get, list, watch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: spark-submit
+  namespace: {{ $tns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: spark-submit }
+subjects:
+  {{- range . }}
+  - { kind: ServiceAccount, name: {{ required "cairn.spark.teams[].submitters[].name" .name }}, namespace: {{ .namespace | default $.Release.Namespace }} }
+  {{- end }}
+{{- end }}
+{{- end }}
 {{- end }}

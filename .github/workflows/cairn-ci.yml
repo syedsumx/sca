@@ -265,17 +265,20 @@ jobs:
       - name: Kubernetes API server, etcd and kubectl (workload identity)
         run: |
           mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
-          for b in kube-apiserver kubectl; do
+          for b in kube-apiserver kube-controller-manager kubectl; do
             curl -fsSL -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
             echo "$(curl -fsSL "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
           done
           curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
             | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
-          chmod +x kube-apiserver kubectl etcd
+          chmod +x kube-apiserver kube-controller-manager kubectl etcd
           # The Spark Operator's SparkApplication CRD, pinned (what SparkApplications are validated against).
           curl -fsSL -o sparkapplications.yaml \
             https://raw.githubusercontent.com/kubeflow/spark-operator/v2.2.1/charts/spark-operator-chart/crds/sparkoperator.k8s.io_sparkapplications.yaml
           echo "50d3eeb2d5a58e162ed06e9a6d849227ed3522b0887a51b705dc1af8a0d53371  sparkapplications.yaml" | sha256sum -c -
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
       - name: dbt, Airflow and Spark end to end
         working-directory: cairn
         env:
@@ -291,7 +294,7 @@ jobs:
           pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
-            tests/test_workload_identity_e2e.py | tee "$RUNNER_TEMP/pipelines.log"
+            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
 
@@ -359,7 +362,7 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.catalog.identity.enabled=true --set cairn.catalog.identity.publicUrl=https://catalog.example.com --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.workloadIdentity.issuers[0].name=k8s --set cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc --set cairn.workloadIdentity.issuers[0].audience=cairn --set cairn.workloadIdentity.issuers[0].jwks_url=https://kubernetes.default.svc/openid/v1/jwks --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].workloadIdentity.serviceAccount=svc-dbt" \
-              "--set cairn.workloadIdentity.issuers[0].name=k8s --set cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc --set cairn.workloadIdentity.issuers[0].audience=cairn --set cairn.workloadIdentity.issuers[0].jwks_url=https://kubernetes.default.svc/openid/v1/jwks --set cairn.spark.enabled=true --set cairn.spark.historyServer.enabled=true --set cairn.spark.submitters[0].name=airflow-worker --set cairn.spark.submitters[0].namespace=airflow" \
+              "--set cairn.workloadIdentity.issuers[0].name=k8s --set cairn.workloadIdentity.issuers[0].issuer=https://kubernetes.default.svc --set cairn.workloadIdentity.issuers[0].audience=cairn --set cairn.workloadIdentity.issuers[0].jwks_url=https://kubernetes.default.svc/openid/v1/jwks --set cairn.spark.enabled=true --set cairn.spark.historyServer.enabled=true --set cairn.spark.submitters[0].name=airflow-worker --set cairn.spark.submitters[0].namespace=airflow --set cairn.spark.teams[0].name=finance --set cairn.spark.teams[0].quota.cpu=32 --set cairn.spark.teams[1].name=marketing --set cairn.store.enabled=true --set cairn.spark.eventLog.store.enabled=true --set cairn.spark.eventLog.store.dir=s3a://spark-events/logs --set cairn.spark.eventLog.store.readerSecret=spark-history-reader" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls"; do

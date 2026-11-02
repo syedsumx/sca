@@ -903,6 +903,19 @@ cairn:
     # Service accounts that may run SparkApplications here (create/watch/delete), e.g. Airflow's workers.
     submitters: []
     #  - { name: airflow-worker, namespace: airflow }
+    # A namespace per team, each with its drivers' service account, a quota on what all its Spark
+    # applications use together, and default requests for pods that state none.
+    teams: []
+    #  - name: finance
+    #    namespace: spark-finance          # default: spark-<name>
+    #    createNamespace: true
+    #    driverServiceAccount: svc-spark-finance
+    #    quota: { cpu: "32", memory: 128Gi, pods: "60" }
+    #    defaultCpu: "1"
+    #    defaultMemory: 2Gi
+    #    maxCpu: "8"
+    #    maxMemory: 32Gi
+    #    submitters: [{ name: airflow-worker, namespace: airflow }]
     eventLog:
       existingClaim: ""             # a ReadWriteMany claim drivers mount at /opt/spark-events
       storageClassName: ""

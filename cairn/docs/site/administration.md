@@ -1162,6 +1162,13 @@ A multi-table transaction changes every table or none.
   - the drivers' service account (`driverServiceAccount`, default `svc-spark`; bind it to a pipeline user in Cairn);
   - a Role letting it start and stop its executors (pods, services, ConfigMaps, volume claims; nothing on Secrets);
   - with `submitters: [{name: airflow-worker, namespace: airflow}]`, a Role letting those accounts run `SparkApplication`s.
+- **Teams.** `cairn.spark.teams` gives each team its own namespace (`spark-<team>` by default):
+  - its drivers' service account (`svc-spark-<team>`; bind it to the team's pipeline user in Cairn), with a Role to manage its executors there and nowhere else, and nothing on Secrets;
+  - a ResourceQuota on what all its Spark pods use together (`quota: {cpu, memory, pods}`);
+  - a LimitRange: default requests for pods that state none (so the quota counts them), and a cap per container (`maxCpu`, `maxMemory`);
+  - with `submitters`, a Role letting those accounts (e.g. Airflow's workers) run `SparkApplication`s there.
+
+  Run a team's jobs with `--conf spark.kubernetes.namespace=spark-<team>` and its service account, or `namespace` and `service_account` on `CairnSparkApplicationOperator`.
 - **History server.** Set `CAIRN_SPARK_EVENT_LOG_DIR`, and `lakehouse_session`, `cairn-spark` and the Kubernetes helpers turn on Spark's event logs there. The session credential, Cairn's token and store keys are redacted in them (`*********(redacted)`), as in the Spark UI. Each application records its Cairn user (`spark.cairn.user`).
   - **Signed in through Cairn.** Spark's history server has no sign-in of its own, so it is never exposed. Cairn serves it at `/v1/spark/history/` (`CAIRN_SPARK_HISTORY_URL`: where Cairn reaches it). Each person sees the applications they ran, and nothing about others' (404). People with `MANAGE_SYSTEM_OPERATIONS` see every application. Only reads are passed on. Run the history server with `-Dspark.ui.proxyBase=<Cairn's public API path>/v1/spark/history`, so its pages link back through Cairn.
   - **Event logs in Cairn Store.** Set `CAIRN_SPARK_EVENT_LOG_DIR=s3a://spark-events/logs`, `CAIRN_STORE_URL` (the store's S3 endpoint) and `CAIRN_SPARK_EVENT_LOG_ROLE`. The job trades its lakehouse token for the role's temporary credentials at the store's STS (`AssumeRoleWithWebIdentity`), for `CAIRN_SPARK_EVENT_LOG_SECONDS` (default 12 hours, or the role's maximum). So no store key is in any job. Set up the role once, with the store's IAM API:
@@ -1201,6 +1208,7 @@ A multi-table transaction changes every table or none.
   - **The driver signs itself in.** Run with that pod's environment and a token the cluster issued for `svc-spark`, it signed in as `ana` through workload identity. It read and wrote governed tables, and was refused one `ana` may not read.
   - **The run was priced.** It was charged at 2 cores for its wall-clock time, all to the table it wrote.
   - **The Spark Operator.** Its own `sparkapplications` CRD (v2.2.1) accepted the `SparkApplication` that `cairn_spark` builds (server-side, strict validation). A JVM program and a secret-looking setting were refused.
+  - **Teams** (`tests/test_spark_teams_k8s.py`, with the API server's quota controller). The chart's team objects were applied. A pod stating nothing got the team's default requests. A pod over the per-container cap was refused, and so were pods past the team's CPU and pod quotas. The drivers' account could manage pods and ConfigMaps in its namespace, not in another, and could not read Secrets.
   - **Airflow.** `CairnSparkApplicationOperator`, in the `cairn/airflow` image, created an application and followed it to `COMPLETED`, and failed on `FAILED` with the driver's error message. Executors had no identity.
 
 ## Backup and restore
