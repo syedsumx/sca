@@ -236,6 +236,21 @@ Any `CAIRN_*` secret can be given as a file instead: `CAIRN_DB_PASSWORD_FILE=/ru
 Setting both forms is an error, so a stale value cannot hide the file. `ANTHROPIC_API_KEY_FILE` works
 the same way.
 
+## SQL workspace
+
+**SQL** (`/sql`) is where people write and run read-only SQL against any connection that serves catalog datasets, as themselves.
+
+- **The same checks as a dataset's page.** Queries go through Cairn's data access service. Every table is checked for the person, masked columns are masked, and on a Trino connection with `run_as_user`, Trino's row filters apply too. A query that writes, or reads a table the person may not query, is refused.
+- **Schema browser.** Lists the connection's datasets the person may see, with their columns. Double-click a table to insert its name.
+- **Results.** A table, a bar or line chart (x column, one or more numeric y columns) and a CSV download. Ctrl+Enter runs the query.
+- **History.** Each person's last 500 runs, including refused ones and why (`GET /sql/history`).
+- **Saved queries.** Private, or shared with everyone. A shared query runs as whoever opens it, never as its owner, so each person sees only what they may (`/sql/saved`, `POST /sql/saved/{id}/run`). Only its owner changes or deletes it. A saved query keeps its chart.
+- **Who.** People only: service, agent and extension tokens are refused.
+- **Tested** (`tests/test_sql_workspace.py`, and against Trino in `tests/test_trino_e2e.py`):
+  - masking, refusals and history per person;
+  - saving, sharing, running a shared query as another person (who got their own row filter), and owner-only changes;
+  - a schema browser that left out what the person may not see.
+
 ## Reports
 
 **Reports** in the workspace answers the two questions that fund a catalog: is it used, and is the estate getting governed? It has four sections:

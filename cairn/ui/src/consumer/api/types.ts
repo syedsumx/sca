@@ -703,6 +703,46 @@ export interface DataResult {
     tables: string[];
 }
 
+/** A chart over a query's result: a table, or bars or lines of columns ``y`` against column ``x``. */
+export interface ChartSpec {
+    type: 'table' | 'bar' | 'line';
+    x?: string;
+    y?: string[];
+}
+
+/** A query in the SQL workspace history (GET /sql/history). */
+export interface SqlRun {
+    id: string;
+    connection: string;
+    sql: string;
+    status: 'ok' | 'error';
+    rows: number | null;
+    ms: number | null;
+    error: string | null;
+    at_ms: number;
+}
+
+/** A saved query: its owner's, or shared with everyone (GET /sql/saved). */
+export interface SavedQuery {
+    id: string;
+    owner: string;
+    name: string;
+    description: string;
+    connection: string;
+    sql: string;
+    shared: boolean;
+    chart: ChartSpec;
+    created_ms: number;
+    updated_ms: number;
+}
+
+/** A table the caller may query, with its columns (GET /sql/schema). */
+export interface SchemaTable {
+    urn: string;
+    name: string;
+    columns: { name: string; type: string }[];
+}
+
 export interface AgentCall {
     id: string;
     agent: string | null;

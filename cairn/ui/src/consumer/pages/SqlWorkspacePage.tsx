@@ -1,0 +1,286 @@
+import { Alert, Button, Checkbox, Collapse, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+
+import { useConsumerApi, useDheQuery } from '../api/hooks';
+import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun } from '../api/types';
+import { ResultChart, toCsv } from '../components/ResultChart';
+import { Muted, Page, Surface } from '../components/tokens';
+
+const ago = (ms: number) => new Date(ms).toLocaleString();
+
+/** The SQL workspace: browse what you may query, run read-only SQL as yourself, chart and download the
+ * result, keep a history, and save queries for yourself or everyone. */
+export function SqlWorkspacePage() {
+    const { client } = useConsumerApi();
+    const conns = useDheQuery('/data/sources', (c, signal) => c.dataConnections({ signal }));
+    const [connection, setConnection] = useState<string | undefined>();
+    const [sql, setSql] = useState('');
+    const [limit, setLimit] = useState(200);
+    const [result, setResult] = useState<DataResult | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [running, setRunning] = useState(false);
+    const [chart, setChart] = useState<ChartSpec>({ type: 'table' });
+    const [current, setCurrent] = useState<SavedQuery | null>(null);
+    const [saving, setSaving] = useState(false);
+    const [form, setForm] = useState({ name: '', description: '', shared: false });
+    const [tick, setTick] = useState(0);
+
+    useEffect(() => {
+        if (!connection && conns.data?.length) setConnection(conns.data[0].connection);
+    }, [conns.data, connection]);
+
+    const schema = useDheQuery<SchemaTable[]>(`/sql/schema?${connection ?? ''}`, (c, signal) =>
+        connection ? c.sqlSchema(connection, { signal }) : Promise.resolve([]),
+    );
+    const history = useDheQuery<SqlRun[]>(`/sql/history#${tick}`, (c, signal) => c.sqlHistory({ signal }));
+    const saved = useDheQuery<SavedQuery[]>(`/sql/saved#${tick}`, (c, signal) => c.savedQueries({ signal }));
+
+    const run = useCallback(async () => {
+        if (!connection || !sql.trim()) return;
+        setRunning(true);
+        setError(null);
+        try {
+            setResult(await client.runSql(sql, connection, limit));
+        } catch (e) {
+            setResult(null);
+            setError((e as Error).message);
+        } finally {
+            setRunning(false);
+            setTick((t) => t + 1);
+        }
+    }, [client, connection, sql, limit]);
+
+    const download = () => {
+        if (!result) return;
+        const blob = new Blob([toCsv(result.columns, result.rows)], { type: 'text/csv' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `${current?.name || 'query'}.csv`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+    };
+
+    const save = async () => {
+        if (!connection) return;
+        try {
+            const q = await client.saveQuery({ ...form, sql, connection, chart }, current?.id);
+            setCurrent(q);
+            setSaving(false);
+            setTick((t) => t + 1);
+            message.success(form.shared ? 'Saved and shared' : 'Saved');
+        } catch (e) {
+            message.error((e as Error).message);
+        }
+    };
+
+    const open = (q: { sql: string; connection: string }, s?: SavedQuery) => {
+        setSql(q.sql);
+        setConnection(q.connection);
+        setCurrent(s ?? null);
+        if (s) {
+            setChart(s.chart?.type ? s.chart : { type: 'table' });
+            setForm({ name: s.name, description: s.description, shared: s.shared });
+        }
+    };
+
+    const numeric = useMemo(
+        () => (result ? result.columns.filter((_, i) => result.rows.some((r) => typeof r[i] === 'number')) : []),
+        [result],
+    );
+
+    return (
+        <Page>
+            <h1 style={{ marginBottom: 0 }}>SQL</h1>
+            <Muted>Read-only SQL as you: every table is checked and masked for you, as on its page.</Muted>
+            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) 3fr', gap: 16, marginTop: 16 }}>
+                <Surface>
+                    <Select
+                        style={{ width: '100%', marginBottom: 8 }}
+                        aria-label="Connection"
+                        value={connection}
+                        onChange={setConnection}
+                        options={(conns.data ?? []).map((c) => ({ value: c.connection, label: `${c.connection} (${c.platform})` }))}
+                    />
+                    {schema.data && !schema.data.length && <Muted>No tables you may query here.</Muted>}
+                    <Collapse>
+                        {(schema.data ?? []).map((t) => (
+                            <Collapse.Panel
+                                key={t.urn}
+                                header={
+                                    <span
+                                        onDoubleClick={() => setSql((s) => `${s}${s && !s.endsWith(' ') ? ' ' : ''}${t.name}`)}
+                                        title="Double-click to insert">
+                                        {t.name}
+                                    </span>
+                                }>
+                                <ul style={{ margin: 0, paddingLeft: 16 }}>
+                                    {t.columns.map((c) => (
+                                        <li key={c.name}>
+                                            {c.name} <Muted>{c.type}</Muted>
+                                        </li>
+                                    ))}
+                                </ul>
+                            </Collapse.Panel>
+                        ))}
+                    </Collapse>
+                </Surface>
+                <div>
+                    <Surface>
+                        {current && (
+                            <div style={{ marginBottom: 8 }}>
+                                <strong>{current.name}</strong> {current.shared && <Tag color="blue">shared</Tag>}
+                            </div>
+                        )}
+                        <Input.TextArea
+                            aria-label="SQL"
+                            value={sql}
+                            onChange={(e) => setSql(e.target.value)}
+                            onKeyDown={(e) => {
+                                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void run();
+                            }}
+                            autoSize={{ minRows: 6, maxRows: 20 }}
+                            style={{ fontFamily: 'ui-monospace, Menlo, monospace' }}
+                            placeholder="SELECT region, count(*) AS orders FROM sales.orders GROUP BY region"
+                        />
+                        <Space style={{ marginTop: 8 }} wrap>
+                            <Button type="primary" onClick={() => void run()} loading={running} disabled={!connection || !sql.trim()}>
+                                Run
+                            </Button>
+                            <span>
+                                Rows <InputNumber min={1} max={1000} value={limit} onChange={(v) => setLimit(Number(v) || 200)} />
+                            </span>
+                            <Button onClick={() => setSaving(true)} disabled={!sql.trim()}>
+                                {current ? 'Save changes' : 'Save'}
+                            </Button>
+                            <Button onClick={download} disabled={!result}>
+                                Download CSV
+                            </Button>
+                            <Muted>Ctrl+Enter runs</Muted>
+                        </Space>
+                    </Surface>
+                    {error && <Alert style={{ marginTop: 12 }} type="error" message={error} showIcon />}
+                    {result && (
+                        <Surface style={{ marginTop: 12 }}>
+                            <Muted>
+                                {result.rows.length} row(s){result.truncated ? ' (more not shown)' : ''} in {result.elapsed_ms} ms
+                                {result.masked_columns.length ? ` · masked for you: ${result.masked_columns.join(', ')}` : ''}
+                            </Muted>
+                            <Tabs
+                                items={[
+                                    {
+                                        key: 'table',
+                                        label: 'Table',
+                                        children: (
+                                            <Table
+                                                size="small"
+                                                rowKey="__row"
+                                                scroll={{ x: true }}
+                                                pagination={{ pageSize: 50, hideOnSinglePage: true }}
+                                                dataSource={result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(result.columns.map((c, i) => [c, r[i]])) }))}
+                                                columns={result.columns.map((c) => ({
+                                                    title: c,
+                                                    dataIndex: c,
+                                                    render: (v: unknown) => (v === null ? <Muted>null</Muted> : String(v)),
+                                                }))}
+                                            />
+                                        ),
+                                    },
+                                    {
+                                        key: 'chart',
+                                        label: 'Chart',
+                                        children: (
+                                            <>
+                                                <Space wrap style={{ marginBottom: 8 }}>
+                                                    <Select aria-label="Chart type" value={chart.type} style={{ width: 100 }}
+                                                        onChange={(type) => setChart({ ...chart, type })}
+                                                        options={['table', 'bar', 'line'].map((v) => ({ value: v, label: v }))} />
+                                                    <Select aria-label="x" placeholder="x" value={chart.x} style={{ width: 160 }}
+                                                        onChange={(x) => setChart({ ...chart, x })}
+                                                        options={result.columns.map((c) => ({ value: c, label: c }))} />
+                                                    <Select aria-label="y" placeholder="y" mode="multiple" value={chart.y} style={{ minWidth: 200 }}
+                                                        onChange={(y) => setChart({ ...chart, y })}
+                                                        options={numeric.map((c) => ({ value: c, label: c }))} />
+                                                </Space>
+                                                <ResultChart columns={result.columns} rows={result.rows} chart={chart} />
+                                            </>
+                                        ),
+                                    },
+                                ]}
+                            />
+                        </Surface>
+                    )}
+                    <Surface style={{ marginTop: 12 }}>
+                        <Tabs
+                            items={[
+                                {
+                                    key: 'saved',
+                                    label: 'Saved',
+                                    children: saved.data?.length ? (
+                                        <Table<SavedQuery>
+                                            size="small"
+                                            rowKey="id"
+                                            pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                                            dataSource={saved.data}
+                                            columns={[
+                                                {
+                                                    title: 'Name',
+                                                    render: (_, q) => (
+                                                        <a onClick={() => open(q, q)}>{q.name}</a>
+                                                    ),
+                                                },
+                                                { title: 'Owner', render: (_, q) => q.owner.replace('urn:li:corpuser:', '') },
+                                                { title: '', render: (_, q) => (q.shared ? <Tag color="blue">shared</Tag> : null) },
+                                                { title: 'Changed', render: (_, q) => ago(q.updated_ms) },
+                                            ]}
+                                        />
+                                    ) : (
+                                        <Empty description="No saved queries yet" />
+                                    ),
+                                },
+                                {
+                                    key: 'history',
+                                    label: 'History',
+                                    children: (
+                                        <Table<SqlRun>
+                                            size="small"
+                                            rowKey="id"
+                                            pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                                            dataSource={history.data ?? []}
+                                            columns={[
+                                                {
+                                                    title: 'Query',
+                                                    render: (_, h) => (
+                                                        <a onClick={() => open(h)} style={{ fontFamily: 'monospace' }}>
+                                                            {h.sql.slice(0, 80)}
+                                                        </a>
+                                                    ),
+                                                },
+                                                {
+                                                    title: 'Result',
+                                                    render: (_, h) =>
+                                                        h.status === 'ok' ? <Tag color="green">{h.rows} row(s)</Tag> : <Tag color="red" title={h.error ?? ''}>error</Tag>,
+                                                },
+                                                { title: 'When', render: (_, h) => ago(h.at_ms) },
+                                            ]}
+                                        />
+                                    ),
+                                },
+                            ]}
+                        />
+                    </Surface>
+                </div>
+            </div>
+            <Modal title={current ? 'Save changes' : 'Save query'} open={saving} onOk={() => void save()} onCancel={() => setSaving(false)}
+                okText="Save" okButtonProps={{ disabled: !form.name.trim() }}>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                    <Input aria-label="Name" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+                    <Input.TextArea aria-label="Description" placeholder="What it answers" value={form.description}
+                        onChange={(e) => setForm({ ...form, description: e.target.value })} />
+                    <Checkbox checked={form.shared} onChange={(e) => setForm({ ...form, shared: e.target.checked })}>
+                        Share with everyone (each person runs it as themselves)
+                    </Checkbox>
+                </Space>
+            </Modal>
+        </Page>
+    );
+}

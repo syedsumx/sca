@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 
+import httpx
 import pytest
 
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
@@ -310,6 +311,23 @@ def test_the_sql_editor_runs_on_trino_as_the_signed_in_user(trino, cairn):
     # The admin sees the values as they are.
     adm = s.data_access.query("urn:li:corpuser:admin", q, connection="lakehouse")
     assert adm["rows"][0][1] == "jane@acme.com" and adm["masked_columns"] == []
+
+    # The SQL workspace runs the same way, over HTTP: masked for ana, filtered by Trino for bob, refused
+    # where Cairn knows better; each person's history, and a shared query each runs as themselves.
+    url, _ = cairn
+    ana_h, bob_h = {"X-Cairn-Actor": "urn:li:corpuser:ana"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    r = httpx.post(f"{url}/sql/run", json={"sql": q, "connection": "lakehouse"}, headers=ana_h, timeout=60)
+    assert r.status_code == 200 and "email" in r.json()["masked_columns"], r.text
+    assert httpx.post(f"{url}/sql/run", json={"sql": "SELECT * FROM hr.salaries", "connection": "lakehouse"},
+                      headers=ana_h, timeout=60).status_code == 403
+    assert [h["status"] for h in httpx.get(f"{url}/sql/history", headers=ana_h, timeout=10).json()][:2] == ["error", "ok"]
+    saved = httpx.post(f"{url}/sql/saved", json={"name": "orders", "connection": "lakehouse", "sql": q, "shared": True},
+                       headers=ana_h, timeout=10).json()
+    bob_run = httpx.post(f"{url}/sql/saved/{saved['id']}/run", headers=bob_h, timeout=60).json()
+    assert {r[2] for r in bob_run["rows"]} == {"EU"}            # bob's row filter, though ana saved it
+    names = [t["name"] for t in httpx.get(f"{url}/sql/schema", params={"connection": "lakehouse"}, headers=ana_h,
+                                          timeout=10).json()]
+    assert "lake.hr.salaries" not in names, names
 
 
 def test_trino_only_believes_cairns_tokens(trino, cairn):

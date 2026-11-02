@@ -68,6 +68,9 @@ import type {
     CoverageFacet,
     CostTotal,
     JobCost,
+    SavedQuery,
+    SchemaTable,
+    SqlRun,
     AgentCall,
     AIDatasetRead,
     AIReader,
@@ -949,6 +952,41 @@ export class ConsumerClient extends CairnClient {
 
     expensiveTables(days = 30, opts?: RequestOptions) {
         return this.request<CostTotal[]>('GET', '/reports/costs/expensive', undefined, { ...opts, query: { days } });
+    }
+
+    dataConnections(opts?: RequestOptions) {
+        return this.request<{ connection: string; platform: string; database: string | null }[]>(
+            'GET', '/data/sources', undefined, opts);
+    }
+
+    runSql(sql: string, connection: string, limit = 200) {
+        return this.request<DataResult>('POST', '/sql/run', { sql, connection, limit });
+    }
+
+    sqlHistory(opts?: RequestOptions) {
+        return this.request<SqlRun[]>('GET', '/sql/history', undefined, opts);
+    }
+
+    sqlSchema(connection: string, opts?: RequestOptions) {
+        return this.request<SchemaTable[]>('GET', '/sql/schema', undefined, { ...opts, query: { connection } });
+    }
+
+    savedQueries(opts?: RequestOptions) {
+        return this.request<SavedQuery[]>('GET', '/sql/saved', undefined, opts);
+    }
+
+    saveQuery(body: Partial<SavedQuery>, id?: string) {
+        return id
+            ? this.request<SavedQuery>('PUT', `/sql/saved/${enc(id)}`, body)
+            : this.request<SavedQuery>('POST', '/sql/saved', body);
+    }
+
+    deleteSavedQuery(id: string) {
+        return this.request<void>('DELETE', `/sql/saved/${enc(id)}`);
+    }
+
+    runSavedQuery(id: string) {
+        return this.request<DataResult & { query: SavedQuery }>('POST', `/sql/saved/${enc(id)}/run`);
     }
 
     jobCosts(days = 30, opts?: RequestOptions) {

@@ -84,6 +84,7 @@ class Services:
     reports: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
+    sql_workspace: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -712,6 +713,9 @@ def _build_active_metadata(s: Services) -> None:
         _build_costs(s, hub, Event)
         _build_data_access(s)
         s.privacy.data = s.data_access
+        from cairn.sqlworkspace import SqlWorkspace
+
+        s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
