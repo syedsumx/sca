@@ -110,6 +110,7 @@ def load_models() -> MetaData:
     from cairn.pipelines import dbt as _dbt  # noqa: F401
     from cairn.sqlworkspace import workspace as _sqlworkspace  # noqa: F401
     from cairn.sqlworkspace import boards as _sqlboards  # noqa: F401
+    from cairn.pipelines import maintenance as _maintenance  # noqa: F401
 
     return metadata
 

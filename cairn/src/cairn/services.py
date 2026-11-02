@@ -86,6 +86,7 @@ class Services:
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
     sql_boards: Optional[Any] = None
+    maintenance: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -719,6 +720,17 @@ def _build_active_metadata(s: Services) -> None:
                 hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                                   url="/sql"))
             s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
+        if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
+            from cairn.pipelines.maintenance import TableMaintenance
+
+            conn_name = os.environ["CAIRN_MAINTENANCE_CONNECTION"]
+            maint_user = "urn:li:corpuser:" + os.environ.get("CAIRN_MAINTENANCE_USER", "svc-maintenance")
+
+            def run_maintenance(sql: str) -> list:
+                definition = (s.data_access.registry.definitions() or {}).get(conn_name) or {}
+                return s.data_access.run_on_trino(definition, maint_user, sql, 100_000)[1]
+            s.maintenance = TableMaintenance(s.engine, run_maintenance,
+                                             os.environ.get("CAIRN_MAINTENANCE_CATALOG", "lakehouse"), s.audit)
         _build_data_access(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace

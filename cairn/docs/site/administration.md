@@ -1233,6 +1233,22 @@ A multi-table transaction changes every table or none.
   - **Teams** (`tests/test_spark_teams_k8s.py`, with the API server's quota controller). The chart's team objects were applied. A pod stating nothing got the team's default requests. A pod over the per-container cap was refused, and so were pods past the team's CPU and pod quotas. The drivers' account could manage pods and ConfigMaps in its namespace, not in another, and could not read Secrets.
   - **Airflow.** `CairnSparkApplicationOperator`, in the `cairn/airflow` image, created an application and followed it to `COMPLETED`, and failed on `FAILED` with the driver's error message. Executors had no identity.
 
+## Table maintenance
+
+Cairn keeps lakehouse tables healthy with Iceberg's own procedures, run through Trino on a schedule:
+- **Compaction** (`optimize`): rewrites files smaller than `optimize_threshold` (default `128MB`) into bigger ones.
+- **Snapshot expiry** (`expire_snapshots`): snapshots older than `expire_days`, so the data files only they referenced can go.
+- **Orphan cleanup** (`remove_orphan_files`): files no snapshot references, older than `orphan_days`.
+
+- **Policies** (`PUT /maintenance/policies/{scope}`, `MANAGE_SYSTEM_OPERATIONS`). `scope` is `*`, a schema or `schema.table`. The most specific one applies. Each has `optimize`, `optimize_threshold`, `expire_days`, `orphan_days` (null: skip), `every_hours` and `enabled`. Changes are audited (`maintenance.policy_set`).
+- **Who runs it.** It runs on a run-as-user Trino connection (`CAIRN_MAINTENANCE_CONNECTION`, a named connection), as the Cairn user `CAIRN_MAINTENANCE_USER` (default `svc-maintenance`). Cairn's policy decides for it as for anyone, so give that user manage on the tables it maintains.
+- **When.** The scheduler's leader (`cairn scheduler`) maintains each table whose policy is due. `POST /maintenance/run {"schema", "table"}` runs one now.
+- **What happened.** Each operation is recorded with its outcome (`GET /maintenance/runs?table=`). One failing (say, refused) does not stop the next.
+- **Trino's floors.** Trino refuses retention under `iceberg.expire-snapshots.min-retention` and `iceberg.remove-orphan-files.min-retention` (7 days by default). Keep them unless you mean to allow less.
+- **Tested** (`tests/test_table_maintenance.py`; against Trino and Cairn Catalog in `tests/test_trino_e2e.py`):
+  - **Real tables.** Five small inserts became one file. Snapshots were expired to one. A stray file in the table's location was deleted. The rows were unchanged, every step was recorded, and the table was not maintained again before it was due.
+  - **Logic.** The table-level policy beat the schema's, and the schema's beat `*`. A refused step was recorded and the others ran. Bad scopes, names and values were refused, and only operators could set policies.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:

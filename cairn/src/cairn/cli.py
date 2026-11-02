@@ -79,6 +79,8 @@ def cmd_scheduler(a) -> None:
     sch = Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions)
     if getattr(s, "sql_boards", None) is not None:
         sch.extra.append(s.sql_boards.run_due)   # SQL alerts
+    if getattr(s, "maintenance", None) is not None:
+        sch.extra.append(s.maintenance.run_due)  # lakehouse table maintenance
     sch.run_forever()
 
 

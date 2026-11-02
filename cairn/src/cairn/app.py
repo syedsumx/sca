@@ -237,6 +237,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.dbt import build_dbt_router
 
         app.include_router(build_dbt_router(services.dbt_runs, cp, authz))
+    if services.maintenance is not None:
+        from cairn.pipelines.maintenance import build_maintenance_router
+
+        app.include_router(build_maintenance_router(services.maintenance, cp, authz))
     if os.environ.get("CAIRN_SPARK_HISTORY_URL"):
         from cairn.dataaccess.spark_history import SparkHistory, build_spark_history_router
 

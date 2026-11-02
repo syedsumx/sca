@@ -163,7 +163,9 @@ def trino(lake, cairn):
         "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={lake['catalog']}",
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
         "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
-        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
+        # Table maintenance is tested with no retention floor (production keeps Trino's 7 days).
+        "iceberg.expire-snapshots.min-retention=0s", "iceberg.remove-orphan-files.min-retention=0s", ""]))
     base = f"{cairn_url}/v1/trino/{KEY}"
     open(f"{d}/access-control.properties", "w").write("\n".join([
         "access-control.name=opa", f"opa.policy.uri={base}/allow", f"opa.policy.batched-uri={base}/batch",
@@ -532,3 +534,46 @@ def test_trino_web_ui_and_clients_sign_in_through_cairn(trino, cairn):
     assert trino("SELECT current_user AS u", user="ana", token=token) == [{"u": "ana"}]
     with pytest.raises(RuntimeError, match="Access Denied"):
         trino("SELECT * FROM hr.salaries", user="ana", token=token)
+
+
+def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, lake):
+    """Cairn's table maintenance on real Trino and Cairn Catalog: five small inserts become one file, old
+    snapshots expire, a stray file in the table's location is deleted, and each step is recorded."""
+    import boto3
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):  # as the maintenance user (here the admin), the way Cairn runs it
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.maint", "CREATE TABLE lake.maint.events (x integer)"] + \
+            [f"INSERT INTO lake.maint.events VALUES ({i})" for i in range(5)]:
+        execute(stmt)
+    files = trino('SELECT file_path FROM lake.maint."events$files"')
+    assert len(files) == 5 and len(trino('SELECT snapshot_id FROM lake.maint."events$snapshots"')) >= 5
+    bucket, key = files[0]["file_path"].removeprefix("s3://").split("/", 1)
+    stray = key.rsplit("/", 1)[0] + "/stray-0000.parquet"
+    s3 = boto3.client("s3", endpoint_url=lake["store"], aws_access_key_id=STORE_KEY[0], aws_secret_access_key=STORE_KEY[1],
+                      region_name="us-east-1")
+    s3.put_object(Bucket=bucket, Key=stray, Body=b"not referenced by any snapshot")
+    time.sleep(2)
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit)
+    m.set_policy("maint", {"optimize": True, "expire_days": 0, "orphan_days": 0, "every_hours": 24}, "urn:li:corpuser:admin")
+    assert m.policy_for("maint", "events")["scope"] == "maint"
+    done = m.maintain("maint", "events")
+    assert [(r["operation"], r["status"]) for r in done] == [("optimize", "ok"), ("expire_snapshots", "ok"),
+                                                               ("remove_orphan_files", "ok")], done
+    assert len(trino('SELECT file_path FROM lake.maint."events$files"')) == 1
+    assert len(trino('SELECT snapshot_id FROM lake.maint."events$snapshots"')) == 1
+    assert sorted(r["x"] for r in trino("SELECT x FROM lake.maint.events")) == [0, 1, 2, 3, 4]
+    left = [o["Key"] for o in s3.list_objects_v2(Bucket=bucket, Prefix=key.rsplit("/", 1)[0]).get("Contents", [])]
+    assert stray not in left, left
+    assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
+    assert m.run_due() == 0            # just done: not due for 24 hours
+    assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
