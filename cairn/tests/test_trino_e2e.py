@@ -794,3 +794,50 @@ def test_delta_lake_tables_are_governed_like_the_lakehouse(trino):
     assert trino("SHOW TABLES FROM delta.dsales") == []
     trino(f"CALL delta.system.register_table('dsales', 'orders', '{loc}')")
     assert [r["email"] for r in trino("SELECT email FROM delta.dsales.orders WHERE id = 5", user="ana")] == ["k•••@•••.com"]
+
+
+def test_notebooks_query_as_the_person_signed_in(trino, cairn, monkeypatch):
+    """%%sql in a notebook (cairn_lakehouse.notebook) runs on Trino as the notebook's Cairn user, with a
+    short Trino token from Cairn: ana's cells see her masks, bob's his row filter, neither what is hidden."""
+    import sys
+
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "lakehouse-client", "src"))
+    from IPython.core.interactiveshell import InteractiveShell
+
+    import cairn_lakehouse.notebook as nb
+
+    url, s = cairn
+    pats = {"pat-nb-ana-" + "a" * 16: "urn:li:corpuser:ana", "pat-nb-bob-" + "b" * 16: "urn:li:corpuser:bob"}
+    real = s.identity._me_lookup
+    monkeypatch.setattr(s.identity, "_me_lookup", lambda u, h, c: pats.get((h.get("Authorization") or "")[7:]) or real(u, h, c))
+    for k, v in {"CAIRN_URL": url, "CAIRN_TRINO_URL": f"https://127.0.0.1:{trino.tls}", "CAIRN_TRINO_CATALOG": "lake",
+                 "CAIRN_CA_FILE": f"{trino.dir}/ca.pem"}.items():
+        monkeypatch.setenv(k, v)
+
+    def shell_as(pat):
+        monkeypatch.setenv("CAIRN_TOKEN", pat)
+        nb._session = None
+        sh = InteractiveShell.instance()
+        sh.run_line_magic("load_ext", "cairn_lakehouse.notebook")
+        return sh
+    ana, bob = list(pats)
+    sh = shell_as(ana)
+    assert sh.run_line_magic("cairn", "whoami") == "ana"
+    sh.run_cell_magic("sql", "--to rows", "SELECT id, email FROM sales.orders WHERE id <= 3 ORDER BY id")
+    got = sh.user_ns["rows"]
+    got = got.to_dict("records") if hasattr(got, "to_dict") else got.to_dicts()
+    assert [r["email"] for r in got] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com"]
+    with pytest.raises(Exception, match="Access Denied"):
+        sh.run_cell_magic("sql", "", "SELECT * FROM hr.salaries")
+    capped = nb.sql("SELECT id FROM sales.orders", limit=1)
+    assert len(capped) == 1 and capped.truncated and "<table>" in capped._repr_html_()
+    sh = shell_as(bob)
+    sh.run_cell_magic("sql", "--to rows", "SELECT id FROM sales.orders WHERE id <= 3 ORDER BY id")
+    got = sh.user_ns["rows"]
+    got = got.to_dict("records") if hasattr(got, "to_dict") else got.to_dicts()
+    assert [r["id"] for r in got] == [1, 3]                       # his row filter
+    # Not signed in, or a token Cairn does not know: no Trino token, no query.
+    monkeypatch.setenv("CAIRN_TOKEN", "not-a-token")
+    nb._session = None
+    with pytest.raises(nb.CairnLakehouseError, match="refused a Trino token"):
+        nb.sql("SELECT 1")

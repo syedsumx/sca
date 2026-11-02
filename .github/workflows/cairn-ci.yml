@@ -221,7 +221,7 @@ jobs:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
-          pip install -e ".[server,test,trino]"
+          pip install -e ".[server,test,trino]" "ipython>=8.20"   # ipython: the notebook test
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.

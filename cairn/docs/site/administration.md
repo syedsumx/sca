@@ -1403,6 +1403,24 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
   - **Owner.** A table owned by a user without access to its source failed its run, recorded, and nothing was created.
   - **Checks.** Statements that are not one SELECT, a query reading its own target, and bad columns were refused. Owners saw and ran only their own. A running refresh blocked a second one.
 
+## Notebooks
+
+Notebooks (Jupyter, JupyterHub, VS Code) work on the lakehouse as the person signed in, with `cairn-lakehouse` (`lakehouse-client/`).
+
+- **`%load_ext cairn_lakehouse.notebook`** adds:
+  - `%%sql`: the cell runs on Trino as the notebook's Cairn user, with their masks, row filters and refusals. The result shows as a table, a pandas DataFrame when pandas is installed. `--to df` keeps it in a variable. `--limit N` caps the rows (default 10000), and says when the cap was hit.
+  - `%cairn whoami`, and `%cairn spark`: a SparkSession on the lakehouse as the same user.
+
+  Without magics: `from cairn_lakehouse.notebook import sql`.
+- **Sign-in.** The notebook's Cairn token is `CAIRN_TOKEN`, `CAIRN_TOKEN_FILE` or `CAIRN_WORKLOAD_TOKEN_FILE`. For Trino it gets a short Trino token from Cairn, renewed before expiry, so nothing long-lived reaches Trino. In JupyterHub, pass each person's Cairn token to their server as `CAIRN_TOKEN` (for example from the authenticator's auth state).
+- **Settings.** `CAIRN_URL`, `CAIRN_TRINO_URL` (https), `CAIRN_TRINO_CATALOG` (default `lakehouse`) and `CAIRN_CA_FILE`, which is used as given, whatever `REQUESTS_CA_BUNDLE` says.
+- **Lineage and usage** come from Trino, as for any client.
+- **Not yet.**
+  - A JupyterHub deployment in the chart with Cairn sign-in.
+  - Notebooks as catalog assets.
+  - MLflow behind Cairn sign-in, with models in the catalog (roadmap L4 and L7).
+- **Tested** with Trino (`tests/test_trino_e2e.py`, an IPython shell). `ana`'s cells saw her masked emails and were refused a hidden table. `bob`'s saw only his rows. The cap was reported, and a token Cairn does not know got no Trino token.
+
 ## Infrastructure as code
 
 Pipes, streams, derived tables and maintenance policies can live in git, reviewed like code.
