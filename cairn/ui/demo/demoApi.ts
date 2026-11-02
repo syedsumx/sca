@@ -1028,6 +1028,35 @@ on('GET', '/reports/costs/idle', () => [costRow(INVENTORY, 'inventory_levels', '
 on('GET', '/reports/costs/expensive', () => [costRow(FCT_ORDERS, 'fct_orders', 'dbt', 96.0, 1240.5, 412),
     costRow(ORDERS, 'orders', 'snowflake', 210.3, 688.0, 2903), costRow(REV_DAILY, 'revenue_daily', 'snowflake', 12.2, 140.7, 1866)]);
 on('POST', '/reports/costs/propose-deprecation', () => ({ proposed: true }));
+// dbt runs recorded by `cairn dbt` (the Pipelines page), newest first.
+const dbtRun = (inv: string, project: string, env: string, command: string, agoMin: number, secs: number, failed: string[] = []) => {
+    const nodes = [
+        { node: `model.${project}.stg_orders`, status: 'success', seconds: 4.1 },
+        { node: `model.${project}.fct_orders`, status: failed.includes('fct_orders') ? 'error' : 'success', seconds: 18.7 },
+        { node: `test.${project}.not_null_fct_orders_order_id`, status: failed.includes('test') ? 'fail' : 'pass', seconds: 1.2 },
+        { node: `model.${project}.orders_by_region`, status: failed.length ? 'skipped' : 'success', seconds: failed.length ? 0 : 6.3 },
+    ];
+    return {
+        invocation: inv, project, environment: env, command, status: failed.length ? 'error' : 'success',
+        actor: 'urn:li:corpuser:svc-dbt', started_ms: now - agoMin * 60_000 - secs * 1000, finished_ms: now - agoMin * 60_000,
+        elapsed_s: secs, nodes: nodes.length, errors: failed.includes('fct_orders') ? 1 : 0,
+        tests_failed: failed.includes('test') ? 1 : 0, detail: nodes,
+    };
+};
+const DBT_RUNS = [
+    dbtRun('9f2c41a0', 'shop', 'prod', 'build', 35, 31),
+    dbtRun('8e1b30f9', 'shop', 'ci', 'build', 160, 12),
+    dbtRun('7d0a2fe8', 'shop', 'prod', 'source freshness', 220, 3),
+    dbtRun('6c9f1ed7', 'shop', 'prod', 'build', 1475, 44, ['test']),
+    dbtRun('5b8e0dc6', 'finance', 'prod', 'build', 300, 58),
+    dbtRun('4a7dfcb5', 'finance', 'prod', 'build', 1740, 21, ['fct_orders']),
+];
+on('GET', '/pipelines/dbt/runs', (_b, q) => DBT_RUNS.filter((r) => !q.get('project') || r.project === q.get('project')));
+// What each Spark application cost, priced from its runs (cores x wall-clock time).
+on('GET', '/reports/costs/jobs', () => [
+    { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,orders_nightly,PROD),orders_nightly)', engine: 'spark', runs: 30, seconds: 41_220, usd: 80.15 },
+    { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,clickstream_stream,PROD),clickstream_stream)', engine: 'spark', runs: 1, seconds: 2_592_000, usd: 504.0 },
+]);
 
 // ------------------------------------------------------------------------------- compliance forms
 const tally = (assets: number, pending: number, completed: number, verified: number) =>
