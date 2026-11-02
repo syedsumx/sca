@@ -14,7 +14,7 @@ import tempfile
 import textwrap
 
 import pytest
-import requests
+import httpx
 
 from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, cairn, port, wait  # noqa: F401  (fixtures)
 
@@ -193,21 +193,21 @@ def test_row_filters_also_keep_files_away_and_others_see_less(cairn, lake, tmp_p
 def test_the_catalog_takes_only_cairns_lakehouse_tokens_and_fails_closed(cairn, lake):  # noqa: F811
     url, s = cairn
     cat = lake["catalog"]
-    good = requests.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10).json()["token"]
-    ok = requests.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {good}"}, timeout=10)
+    good = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {ANA}"}, timeout=10).json()["token"]
+    ok = httpx.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {good}"}, timeout=10)
     assert ok.status_code == 200
     creds = ok.json()["storage-credentials"][0]["config"]
     assert creds["s3.access-key-id"] != STORE_KEY[0] and creds.get("s3.session-token")  # temporary, never the store key
     # A Trino token (another audience), a forged token and garbage are refused.
     trino_tok = s.trino_tokens.mint("urn:li:corpuser:ana")["token"]
     for bad in (trino_tok, good[:-4] + "AAAA", "x.y.z"):
-        r = requests.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {bad}"}, timeout=10)
+        r = httpx.get(f"{cat}/v1/namespaces/analytics/tables/products", headers={"Authorization": f"Bearer {bad}"}, timeout=10)
         assert r.status_code == 401, (bad[:20], r.text)
     # Service and agent credentials get no lakehouse token.
-    r = requests.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {SERVICE}"}, timeout=10)
+    r = httpx.post(f"{url}/v1/lakehouse/token", headers={"Authorization": f"Bearer {SERVICE}"}, timeout=10)
     assert r.status_code == 403
     # Only Cairn Catalog (a service token) may ask for decisions.
-    r = requests.post(f"{url}/v1/lakehouse/decide", json={"user": "ana", "tables": []},
+    r = httpx.post(f"{url}/v1/lakehouse/decide", json={"user": "ana", "tables": []},
                       headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
     assert r.status_code == 403
     # A catalog that cannot reach Cairn refuses rather than guessing.
@@ -217,12 +217,12 @@ def test_the_catalog_takes_only_cairns_lakehouse_tokens_and_fails_closed(cairn, 
     p = subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
     try:
         wait(dead)
-        requests.post(f"http://127.0.0.1:{dead}/v1/namespaces", json={"namespace": ["analytics"]},
+        httpx.post(f"http://127.0.0.1:{dead}/v1/namespaces", json={"namespace": ["analytics"]},
                       headers={"Authorization": f"Bearer {CATALOG_TOKEN}"}, timeout=10)
-        r = requests.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables", headers={"Authorization": f"Bearer {good}"},
+        r = httpx.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables", headers={"Authorization": f"Bearer {good}"},
                          timeout=30)
         assert r.status_code in (200, 503)  # an empty namespace needs no decision
-        r = requests.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables/products",
+        r = httpx.get(f"http://127.0.0.1:{dead}/v1/namespaces/analytics/tables/products",
                          headers={"Authorization": f"Bearer {good}"}, timeout=30)
         assert r.status_code == 503, r.text
     finally:

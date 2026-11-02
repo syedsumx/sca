@@ -1124,12 +1124,22 @@ impl Server {
             return Err(e::DAV_BUCKET_ROOT.clone());
         }
         let overwrite = !c.header("overwrite").eq_ignore_ascii_case("F");
+        // Depth (RFC 4918 9.8.3, 9.9.2): a COPY of a collection takes 0 (the collection alone) or
+        // infinity; a MOVE always moves everything.
+        let shallow = match c.header("depth").trim() {
+            "" => false,
+            d if d.eq_ignore_ascii_case("infinity") => false,
+            "0" if !mv => true,
+            _ => return Err(e::INVALID_ARGUMENT.clone()),
+        };
         // The destination's parent collection must exist (RFC 4918 9.8.5: 409 Conflict otherwise).
         let parent = dk.trim_end_matches('/').rsplit_once('/').map(|(p, _)| format!("{p}/")).unwrap_or_default();
         if !self.collection_exists(&db, &parent)? {
             return Err(e::DAV_CONFLICT.clone());
         }
         let (objs, prefix) = self.resolve(c).await?;
+        // A shallow COPY of a collection makes an empty collection: its marker, without members.
+        let mut new_marker: Option<String> = None;
         // (source key, destination key)
         let pairs: Vec<(String, String)> = match &prefix {
             None => vec![(objs[0].key.clone(), dk.trim_end_matches('/').to_string())],
@@ -1138,20 +1148,41 @@ impl Server {
                 if db == c.bucket && dp.starts_with(p.as_str()) {
                     return Err(e::DAV_CONFLICT.clone()); // into itself
                 }
-                objs.iter().map(|o| (o.key.clone(), format!("{dp}{}", &o.key[p.len()..]))).collect()
+                if shallow {
+                    if objs.iter().any(|o| &o.key == p) {
+                        vec![(p.clone(), dp)] // the marker, with its properties
+                    } else {
+                        new_marker = Some(dp); // a collection only by its members: a new marker
+                        vec![]
+                    }
+                } else {
+                    objs.iter().map(|o| (o.key.clone(), format!("{dp}{}", &o.key[p.len()..]))).collect()
+                }
             }
         };
         if db == c.bucket && pairs.iter().any(|(s, d)| s == d) {
             return Err(e::DAV_SAME.clone());
         }
         let mut existed = false;
-        for (_, d) in &pairs {
+        for d in pairs.iter().map(|(_, d)| d).chain(new_marker.iter()) {
             if self.object(&db, d)?.is_some() {
                 existed = true;
             }
         }
         if existed && !overwrite {
             return Err(e::PRECONDITION.clone());
+        }
+        if let Some(m) = &new_marker {
+            let mut x = c.clone();
+            x.method = Method::PUT;
+            x.bucket = db.clone();
+            x.key = m.clone();
+            x.query.retain(|k, _| super::files::presign_param(k));
+            for h in ["content-type", "destination", "overwrite", "depth"] {
+                x.headers.remove(h);
+            }
+            x.headers.insert("content-length", HeaderValue::from_static("0")); // the marker is empty
+            self.route(&mut x, Empty::<Bytes>::new()).await?;
         }
         for (s, d) in &pairs {
             self.may(c, "GetObject", &c.bucket, s, None).await?;

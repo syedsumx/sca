@@ -130,6 +130,32 @@ def test_put_needs_its_parent_collection(dav):
     assert req(st, "PUT", f"{b}/nowhere/x.txt", key=READER, data=b"x").status_code == 403
 
 
+def test_copy_depth(dav):
+    """RFC 4918 9.8.3: COPY Depth 0 copies the collection alone; other depths than 0 and infinity are
+    refused, and a MOVE always moves everything."""
+    st, b = dav
+    assert req(st, "MKCOL", f"{b}/src/").status_code == 201
+    assert req(st, "PUT", f"{b}/src/foo", data=b"f").status_code == 201
+    r = req(st, "COPY", f"{b}/src/", headers={"Destination": f"{st.endpoint}/-/dav/{b}/shallow/", "Depth": "0"})
+    assert r.status_code == 201
+    keys = sorted(o["Key"] for o in st.client().list_objects_v2(Bucket=b, Prefix="shallow")["Contents"])
+    assert keys == ["shallow/"]  # the collection, empty
+    assert req(st, "DELETE", f"{b}/shallow/foo").status_code == 404
+    r = req(st, "COPY", f"{b}/src/", headers={"Destination": f"{st.endpoint}/-/dav/{b}/deep/"})
+    assert r.status_code == 201 and req(st, "GET", f"{b}/deep/foo").content == b"f"
+    # A collection that exists only by its members still copies shallowly, as an empty collection.
+    st.client().put_object(Bucket=b, Key="implicit/x", Body=b"x")
+    r = req(st, "COPY", f"{b}/implicit/", headers={"Destination": f"{st.endpoint}/-/dav/{b}/imp2/", "Depth": "0"})
+    assert r.status_code == 201
+    assert [o["Key"] for o in st.client().list_objects_v2(Bucket=b, Prefix="imp2")["Contents"]] == ["imp2/"]
+    for bad in ("1", "2", "zero"):
+        r = req(st, "COPY", f"{b}/src/", headers={"Destination": f"{st.endpoint}/-/dav/{b}/x{bad}/", "Depth": bad})
+        assert r.status_code == 400, bad
+    r = req(st, "MOVE", f"{b}/src/", headers={"Destination": f"{st.endpoint}/-/dav/{b}/moved/", "Depth": "0"})
+    assert r.status_code == 400
+    assert req(st, "GET", f"{b}/src/foo").content == b"f"  # nothing moved
+
+
 def test_copy_rules(dav):
     st, b = dav
     req(st, "PUT", f"{b}/a.txt", data=b"a")
