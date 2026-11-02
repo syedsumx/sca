@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import tempfile
 import textwrap
+import time
 
 import pytest
 import httpx
@@ -415,3 +416,121 @@ def test_token_exchange_is_strict(cairn, lake, renewing_catalog):  # noqa: F811
            "CAIRN_CATALOG_VEND_SECONDS": "900", "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS": "120"}
     r = subprocess.run([os.environ["CAIRN_CATALOG_BIN"]], env=env, capture_output=True, text=True, timeout=30)
     assert r.returncode != 0 and "CAIRN_CATALOG_VEND_REVALIDATE_SECONDS" in (r.stdout + r.stderr)
+
+
+def test_jvm_programs_and_sql_run_through_cairn_spark(cairn, lake, tmp_path):  # noqa: F811
+    """cairn-spark: spark-sql (a JVM program, no Python session) as a Cairn identity, governed the same way."""
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+
+    def sql(token, q):
+        return subprocess.run(["docker", "run", "--rm", "--network", "host", "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={token}",
+                               "-e", f"CAIRN_CATALOG_URI={lake['catalog']}", IMAGE, "cairn-spark", "sql",
+                               "--master", "local[1]", "--conf", "spark.ui.enabled=false", "-e", q],
+                              capture_output=True, text=True, timeout=600)
+    r = sql(ANA, "SELECT count(*) FROM lakehouse.analytics.products")
+    assert r.returncode == 0 and r.stdout.strip().splitlines()[-1] == "3", (r.stdout + r.stderr)[-4000:]
+    assert "running spark-sql as ana" in r.stderr
+    assert "credential" not in r.stdout + r.stderr.replace("credential flow", "")  # never printed
+    r = sql(ANA, "SELECT count(*) FROM lakehouse.sales.orders")
+    assert "Masks or row filters apply" in r.stdout + r.stderr, (r.stdout + r.stderr)[-4000:]
+    r = sql(BOB, "SELECT count(*) FROM lakehouse.analytics.products")
+    assert r.returncode != 0 or "Forbidden" in r.stdout + r.stderr
+
+
+STREAM_JOB = textwrap.dedent('''
+    import json, time
+    from cairn_spark import lakehouse_session
+
+    spark = lakehouse_session("stream-job", master="local[2]")
+    q = (spark.readStream.format("rate").option("rowsPerSecond", 5).load()
+         .selectExpr("value AS v", "timestamp AS at")
+         .writeStream.format("iceberg").outputMode("append").trigger(processingTime="10 seconds")
+         .option("checkpointLocation", "/tmp/stream-checkpoint").toTable("lakehouse.analytics.stream_sink"))
+    q.awaitTermination(150)
+    q.stop()
+    print("CAIRN-STREAM " + json.dumps({"batches": q.lastProgress and q.lastProgress.get("batchId")}), flush=True)
+    spark.stop()
+''')
+
+
+def test_structured_streaming_into_iceberg_outlives_its_tokens(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811
+    """A stream committing every 10 s for 2.5 minutes on one-minute tokens: every batch lands."""
+    import pyarrow as pa
+
+    url, s = cairn
+    renewing_catalog["admin"].create_table("analytics.stream_sink", schema=pa.schema(
+        [pa.field("v", pa.int64(), nullable=True), pa.field("at", pa.timestamp("us", tz="UTC"), nullable=True)]))
+    job = tmp_path / "stream.py"
+    job.write_text(STREAM_JOB)
+    os.chmod(tmp_path, 0o755)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/stream.py:ro",
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={renewing_catalog['uri']}",
+                        IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
+                        "/job/stream.py"], capture_output=True, text=True, timeout=900)
+    log = r.stdout + r.stderr
+    assert r.returncode == 0 and "CAIRN-STREAM" in log, log[-6000:]
+    table = renewing_catalog["admin"].load_table("analytics.stream_sink")
+    snaps = list(table.snapshots())
+    rows = table.scan().to_arrow()
+    assert len(snaps) >= 12, len(snaps)  # a commit per 10 s batch, through several token renewals
+    spread = (max(rows["at"].to_pylist()) - min(rows["at"].to_pylist())).total_seconds()
+    assert rows.num_rows >= 500 and spread >= 120, (rows.num_rows, spread)
+    assert "token has expired" not in log
+
+
+def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, tmp_path):  # noqa: F811
+    """Event logs (CAIRN_SPARK_EVENT_LOG_DIR) read by Spark's history server: the run is there, its
+    session credential and Cairn token are not, neither in the API nor in the event log on disk."""
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+    events = tmp_path / "events"
+    events.mkdir()
+    os.chmod(events, 0o777)
+    job = tmp_path / "job.py"
+    job.write_text(JOB)
+    os.chmod(tmp_path, 0o755)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", "-v", f"{events}:/events",
+                        "-e", f"CAIRN_URL={url}", "-e", f"CAIRN_TOKEN={ANA}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
+                        "-e", "CAIRN_SPARK_EVENT_LOG_DIR=file:///events", IMAGE, "/opt/spark/bin/spark-submit",
+                        "--master", "local[1]", "--conf", "spark.ui.enabled=false",
+                        # Uncompressed, so the test can read what is on disk (redaction happens before writing).
+                        "--conf", "spark.eventLog.compress=false", "/job/job.py", "count=analytics.products"],
+                       capture_output=True, text=True, timeout=900)
+    assert "CAIRN-RESULT" in r.stdout, (r.stdout + r.stderr)[-4000:]
+    # Spark writes them for its own user (0770); let the test (another user, in CI) read them.
+    subprocess.run(["docker", "run", "--rm", "-v", f"{events}:/events", "--entrypoint", "chmod", IMAGE, "-R", "a+rX", "/events"],
+                   check=True, capture_output=True)
+    logs = [f for f in events.rglob("*") if f.is_file() and not f.name.startswith(".")]
+    assert logs, list(events.rglob("*"))
+    raw = "".join(f.read_text() for f in logs)
+    assert ANA not in raw
+    env = next(json.loads(ln) for ln in raw.splitlines() if '"SparkListenerEnvironmentUpdate"' in ln)
+    props = dict(env["Spark Properties"]) if isinstance(env["Spark Properties"], list) else env["Spark Properties"]
+    assert props["spark.sql.catalog.lakehouse.credential"] == "*********(redacted)"
+    assert props["spark.openlineage.transport.auth.apiKey"] == "*********(redacted)"
+
+    hp = port()
+    name = f"cairn-history-{hp}"
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-v", f"{events}:/events:ro",
+                    "-e", f"SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=file:///events -Dspark.history.ui.port={hp} "
+                          "-Dspark.history.fs.update.interval=2s",
+                    IMAGE, "/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"],
+                   check=True, capture_output=True)
+    try:
+        apps = []
+        for _ in range(90):
+            try:
+                apps = httpx.get(f"http://127.0.0.1:{hp}/api/v1/applications", timeout=5).json()
+            except (httpx.HTTPError, ValueError):
+                apps = []
+            if apps:
+                break
+            time.sleep(1)
+        assert apps and apps[0]["name"] == "governed-job", apps
+        environment = httpx.get(f"http://127.0.0.1:{hp}/api/v1/applications/{apps[0]['id']}/environment", timeout=10).json()
+        shown = dict(environment["sparkProperties"])
+        assert shown["spark.sql.catalog.lakehouse.credential"] == "*********(redacted)"
+        assert ANA not in json.dumps(environment)
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)

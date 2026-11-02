@@ -283,6 +283,14 @@ Daily figures per table come from warehouse collectors, which run once a day for
 - **Redshift** (`platform: redshift`) splits the day's compute across queries by elapsed time (`SYS_QUERY_HISTORY`), then across the tables each query scanned (`SYS_QUERY_DETAIL`):
   - the day's compute is the cluster's cost per day (`daily_compute_usd`);
   - for Serverless (`serverless: true`), it's RPU-seconds from `SYS_SERVERLESS_USAGE`, at `usd_per_rpu_hour` (default 0.375).
+- **Spark** has no bill to read, so Cairn prices each application from its OpenLineage events when `CAIRN_COST_SPARK_USD_PER_CORE_HOUR` is set:
+  - **The price.** The cores it reserved, times its wall-clock time from start to finish, at that rate.
+  - **The cores.** `spark.driver.cores` plus `spark.executor.instances` × `spark.executor.cores`. With dynamic allocation, `maxExecutors` (an upper bound); N for `local[N]`. Otherwise `CAIRN_COST_SPARK_DEFAULT_CORES` (default 4). `cairn_spark` sends these settings with the events.
+  - **Who pays.** Producing data is what the job is for, so the cost is split evenly across the tables its queries wrote, on the day it finished.
+  - **Charged once.** Each application is charged once in `cairn_run_costs`, however often its events are delivered.
+  - **Per job.** `GET /reports/costs/jobs?days=30` lists what each application cost.
+
+  It is an estimate of what was reserved, not a bill. For the exact figure from your cloud, post daily rows to `POST /reports/costs`.
 
   Storage is the `SVV_TABLE_INFO` size, at `storage_usd_per_gb_month` (default 0.024). The connection's user needs to see every user's queries (`SYSLOG ACCESS UNRESTRICTED`).
 
@@ -1127,7 +1135,47 @@ A multi-table transaction changes every table or none.
   - **Compose:** on by default (`CAIRN_CATALOG_JWKS_URL` and `CAIRN_CATALOG_CAIRN_URL` on `cairn-catalog`). `docker compose -f docker-compose.cairn.yml --profile spark run --rm cairn-spark /jobs/lakehouse_products.py` runs a job from `CAIRN_SPARK_JOBS` (default `examples/spark`) with the token in `CAIRN_SPARK_TOKEN`.
   - **Helm:** set `cairn.catalog.identity.enabled: true`. This needs `cairn.catalog.vendRole` and `cairn.trino.enabled`, or the chart refuses to render. Set `identity.publicUrl` to the catalog's address outside the cluster, if engines use one.
   - **Network policy:** Spark's pods need to reach the API (`cairn.networkPolicy.apiIngressFrom`), the catalog (`catalogIngressFrom`) and the store.
-  - **Running jobs:** run `cairn/spark` (or `FROM cairn/spark` with your code) with the Spark operator, `spark-submit --master k8s://…`, or Airflow's KubernetesPodOperator.
+  - **Running jobs:** run `cairn/spark` (or `FROM cairn/spark` with your code) with `cairn-spark submit`, the Spark Operator, or Airflow (below).
+- **JVM programs and SQL.** `cairn-spark {submit|sql|shell|pyspark} [Spark arguments]` runs any Spark program as a Cairn identity: Scala and Java jobs (`--class`), the `spark-sql` shell, Python files.
+  - It opens the lakehouse session (the same variables as `lakehouse_session`) and passes the settings to Spark in a private properties file: mode 0600, removed afterwards. The session credential never appears on a command line.
+  - The caller's `--properties-file` and `--conf` still apply.
+- **Spark on Kubernetes, with no secret in the cluster.** In cluster mode, spark-submit stores the application's settings in a ConfigMap that the driver mounts. A credential given at submit time would be readable by anyone who may read ConfigMaps in the namespace. So a cluster-mode application gets no credential at all:
+  - `cairn-spark submit --master k8s://… --deploy-mode cluster job.py` submits only the driver's Cairn settings (`CAIRN_URL`, `CAIRN_CATALOG_URI`, `CAIRN_WORKLOAD_TOKEN_FILE`), plus a driver pod template.
+  - The template mounts a projected service-account token for audience `cairn` at `/var/run/secrets/cairn/token`. The kubelet rotates it.
+  - The driver, a Python program calling `lakehouse_session()`, exchanges that token at Cairn (workload identity) and signs in as the pipeline user its service account is bound to.
+  - Executors get no token. Their settings come from the driver over Spark's RPC, and their storage keys come with the tables.
+  - The service account is `--conf spark.kubernetes.authenticate.driver.serviceAccountName=…` or `CAIRN_SPARK_SERVICE_ACCOUNT`.
+  - **JVM programs** are refused in cluster mode: their catalog settings must exist before they start, so they would have to be in that ConfigMap. Run them with `--deploy-mode client`, where the driver runs in the submitting pod, which signs in with its own workload identity. Executors get their settings over RPC there too.
+- **The Spark Operator.** `cairn_spark.kubernetes.spark_application(name, image=…, main="/jobs/orders.py", service_account="svc-spark", cairn_url=…, catalog_uri=…)` builds the same application as a `SparkApplication` (`sparkoperator.k8s.io/v1beta2`, for `kubectl apply`):
+  - a Python driver with the projected token and the driver environment;
+  - executors with no identity.
+
+  It refuses JVM programs, and any `spark_conf` key that looks like a secret.
+- **From Airflow.** `cairn_airflow.spark.CairnSparkApplicationOperator(task_id=…, name=…, namespace=…, service_account=…, image=…, main=…, cairn_url=…, catalog_uri=…)`:
+  - creates one `SparkApplication` per task try, labelled with its DAG and task;
+  - follows it to `COMPLETED`;
+  - fails the task with the application's error message on `FAILED` or `SUBMISSION_FAILED`;
+  - deletes the application when the task is killed.
+
+  The worker's service account needs `create`, `get`, `watch` and `delete` on `sparkapplications`, and nothing on Secrets. The `cairn/airflow` image ships `cairn-spark` for it.
+- **Helm.** `cairn.spark.enabled: true` (needs `cairn.workloadIdentity.issuers`) creates:
+  - the drivers' service account (`driverServiceAccount`, default `svc-spark`; bind it to a pipeline user in Cairn);
+  - a Role letting it start and stop its executors (pods, services, ConfigMaps, volume claims; nothing on Secrets);
+  - with `submitters: [{name: airflow-worker, namespace: airflow}]`, a Role letting those accounts run `SparkApplication`s.
+- **History server.** Set `CAIRN_SPARK_EVENT_LOG_DIR`, and `lakehouse_session`, `cairn-spark` and the Kubernetes helpers turn on Spark's event logs there. The session credential and Cairn's token are redacted in them (`*********(redacted)`), as in the Spark UI.
+  - Spark's history server has no sign-in of its own, so it is never exposed:
+    - **Compose:** `cairn-spark-history` (profile `spark`), on the `spark-events` volume, at `http://127.0.0.1:18080` on the host only.
+    - **Helm:** `cairn.spark.historyServer.enabled: true` gives a ClusterIP service on a ReadWriteMany claim (`cairn.spark.eventLog`), which drivers mount at `/opt/spark-events`. Reach it with `kubectl port-forward` or behind your SSO proxy.
+  - Logs older than `maxAge` (default 30 days; `CAIRN_SPARK_HISTORY_MAX_AGE` in Compose) are removed.
+- **Streaming.** Structured Streaming into Iceberg works the same way (`writeStream.format("iceberg").toTable("lakehouse.…")`). A stream runs past its token lifetimes because its session renews them, and it stops when the session is ended.
+- **pyiceberg and DuckDB.** The package `cairn-lakehouse` (`lakehouse-client/`) gives Python engines the same governed access:
+  - `cairn_lakehouse.catalog()` opens a lakehouse session (the same variables as Spark) and returns a pyiceberg catalog on Cairn Catalog, with per-table storage keys and renewal through the session credential.
+  - `duckdb_connection(["analytics.products"])` registers each table as a DuckDB view, read through pyiceberg, so DuckDB needs no extension and no store key. Install it with `pip install "cairn-lakehouse[duckdb]"`.
+  - Tables with masks or row filters are refused, as for Spark.
+- **What Spark costs.** Set `CAIRN_COST_SPARK_USD_PER_CORE_HOUR` and Cairn prices each Spark application from its OpenLineage events (see **Cost per asset**).
+- **Not supported, on purpose.**
+  - **Shared multi-tenant Spark Connect servers.** A Spark Connect server holds one catalog session for everyone it serves. Cairn's per-table decisions and storage keys would be those of the server's identity, not each user's. Run one Spark application per identity (the pattern above), or query shared data through Trino, which applies each user's policies itself.
+  - **dbt Python models.** On dbt-trino they don't exist: Trino runs SQL only. Running them on Spark through dbt would put a session credential in dbt's profile on every developer's machine and CI runner. Use SQL models on Trino, and Spark jobs (above) for Python transformations, scheduled next to dbt in Airflow.
 - **Tested** (`tests/test_spark_e2e.py`, in CI against the `cairn/spark` image as built) with Spark 4.0.1, Iceberg 1.10.0 and OpenLineage 1.55.0, on Cairn Catalog with the store's STS:
   - **Reads.** `ana` listed only what she may see. A table with her masked column was refused, and so was one she may not read.
   - **Writes.** She read, built a table (CTAS) and inserted into it in a schema she manages, and was refused an insert into one she may only read.
@@ -1138,6 +1186,17 @@ A multi-table transaction changes every table or none.
   - **Long jobs.** A job running seven minutes on one-minute tokens kept reading and committing. Its storage keys were reported to expire after six minutes, so they had to be renewed. Every token renewal was in its one session, and its keys were renewed through the catalog, decided again: a reader's renewal stayed read-only, and someone the table is not for was refused.
   - **Ending a session.** After `ana`'s sessions were ended mid-job, her commits failed once her last token expired. She could not end sessions herself, and could open a new one.
   - **Renewals.** Token exchange and the session credential (form or HTTP Basic) worked; another service's token, a token with no session, a forged token and a wrong secret were refused. So were a suspended user and a session past its maximum length, and when Cairn could not check the user it answered 503. With Cairn unreachable the catalog answered 503. It would not start with Cairn-issued tokens but no scoped credentials.
+  - **JVM and SQL.** `cairn-spark sql` (a JVM program, no Python session) counted a table as `ana`, was refused a masked table, and refused `bob` the table. The session credential was never printed.
+  - **Streaming.** A rate-source stream into Iceberg kept committing micro-batches for 150 seconds on one-minute tokens.
+  - **History server.** A job's event log and the history server's REST API showed the run with its session credential and lineage key redacted, and had no Cairn token in them.
+  - **pyiceberg and DuckDB** (`tests/test_lakehouse_client_e2e.py`). Both were governed like Spark: listing, a refused masked table, writes only where allowed.
+- **Tested on Kubernetes** (`tests/test_spark_k8s_e2e.py`, against a real Kubernetes 1.31 API server and the `cairn/spark` image; no kubelet, so what is checked is what Spark and the operator write to the cluster):
+  - **Cluster mode.** `cairn-spark submit --deploy-mode cluster`, run by a submitter with a Cairn token in its environment, created a driver pod. The pod had the `svc-spark` service account, the projected `cairn` token and the driver environment.
+  - **No secret stored.** Nothing secret was in the namespace's pods, ConfigMaps, Secrets or services, including the driver's `spark.properties`. A JVM program was refused in cluster mode, and nothing was created.
+  - **The driver signs itself in.** Run with that pod's environment and a token the cluster issued for `svc-spark`, it signed in as `ana` through workload identity. It read and wrote governed tables, and was refused one `ana` may not read.
+  - **The run was priced.** It was charged at 2 cores for its wall-clock time, all to the table it wrote.
+  - **The Spark Operator.** Its own `sparkapplications` CRD (v2.2.1) accepted the `SparkApplication` that `cairn_spark` builds (server-side, strict validation). A JVM program and a secret-looking setting were refused.
+  - **Airflow.** `CairnSparkApplicationOperator`, in the `cairn/airflow` image, created an application and followed it to `COMPLETED`, and failed on `FAILED` with the driver's error message. Executors had no identity.
 
 ## Backup and restore
 

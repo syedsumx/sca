@@ -533,6 +533,8 @@ def _build_pipeline_health(s: Services) -> None:
     if s.openlineage is not None and s.graph is not None:
         s.pipeline_health = PipelineHealth(s.graph, getattr(s, "notify", None), s.dataset_changes)
         s.openlineage.on_run = s.pipeline_health.on_run
+    if s.openlineage is not None and getattr(s, "costs", None) is not None:
+        s.openlineage.on_finished = s.costs.on_lineage_run  # Spark compute, priced per run
 
 
 def _build_active_metadata(s: Services) -> None:

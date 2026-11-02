@@ -755,14 +755,35 @@ services:
       CAIRN_URL: http://cairn-api:8800
       CAIRN_TOKEN: ${CAIRN_SPARK_TOKEN:-}
       CAIRN_CATALOG_URI: http://cairn-catalog:8181
+      CAIRN_SPARK_EVENT_LOG_DIR: file:///opt/spark-events
     volumes:
       - ${CAIRN_SPARK_JOBS:-./examples/spark}:/jobs:ro
+      - spark-events:/opt/spark-events
     depends_on:
       cairn-catalog:
         condition: service_started
       cairn-api:
         condition: service_healthy
     networks: [catalog]
+
+  # Spark's history server over the jobs' event logs (secrets in them are redacted). It has no sign-in of
+  # its own, so it listens on this host's loopback only: http://127.0.0.1:18080.
+  cairn-spark-history:
+    image: ${CAIRN_REGISTRY:-cairn}/spark:${CAIRN_VERSION:-0.1.0}
+    profiles: [spark]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.history.HistoryServer"]
+    environment:
+      SPARK_HISTORY_OPTS: >-
+        -Dspark.history.fs.logDirectory=file:///opt/spark-events -Dspark.history.fs.cleaner.enabled=true
+        -Dspark.history.fs.cleaner.maxAge=${CAIRN_SPARK_HISTORY_MAX_AGE:-30d}
+    volumes:
+      - spark-events:/opt/spark-events:ro
+    ports:
+      - "127.0.0.1:18080:18080"
+    restart: unless-stopped
 
   airflow-init:
     <<: *airflow
@@ -933,6 +954,7 @@ networks:
 
 volumes:
   storedata:
+  spark-events:
   catalogdata:
   trinotls:
   mysqldata:

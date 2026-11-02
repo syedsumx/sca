@@ -29,6 +29,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     python3 -m pip install --no-cache-dir "$src/spark"; \
     python3 -c "import cairn_spark, httpx"; \
     rm -rf "$src"
+# Event logs for the history server (a volume mounted here keeps this ownership).
+RUN mkdir -p /opt/spark-events && chown spark /opt/spark-events
 USER spark
 ENV PYTHONPATH="/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip" \
     PYSPARK_PYTHON=python3

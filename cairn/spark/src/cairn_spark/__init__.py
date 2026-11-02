@@ -108,17 +108,21 @@ def lakehouse_conf(cairn_url: str, catalog_uri: str, session: str, cairn_token: 
             "spark.openlineage.transport.auth.type": "api_key",
             "spark.openlineage.transport.auth.apiKey": cairn_token,
             "spark.openlineage.namespace": os.environ.get("CAIRN_SPARK_NAMESPACE", "spark"),
+            # What Cairn prices a run by (cores reserved x wall-clock time).
+            "spark.openlineage.capturedProperties": ",".join(CAPTURED),
             **({"spark.openlineage.parentJobName": app_name} if app_name else {}),
         })
     return conf
 
 
-def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = None, token: Optional[str] = None,
-                      catalog_uri: Optional[str] = None, ttl: Optional[int] = None, lineage: bool = True,
-                      master: Optional[str] = None, extra_conf: Optional[dict] = None):
-    """A SparkSession on the lakehouse as the Cairn user of ``token`` (or CAIRN_TOKEN)."""
-    from pyspark.sql import SparkSession
+CAPTURED = ("spark.master", "spark.app.name", "spark.driver.cores", "spark.executor.instances",
+            "spark.executor.cores", "spark.dynamicAllocation.enabled", "spark.dynamicAllocation.maxExecutors")
 
+
+def session_conf(app_name: str = "cairn", *, cairn_url: Optional[str] = None, token: Optional[str] = None,
+                 catalog_uri: Optional[str] = None, ttl: Optional[int] = None, lineage: bool = True) -> tuple[dict, str]:
+    """Opens a lakehouse session at Cairn and returns its Spark settings and the Cairn user, for any
+    Spark program (Python, Scala, Java, SQL): ``lakehouse_session`` and ``cairn-spark`` use it."""
     cairn_url = cairn_url or os.environ.get("CAIRN_URL", "")
     catalog_uri = catalog_uri or os.environ.get("CAIRN_CATALOG_URI", "")
     if not cairn_url or not catalog_uri:
@@ -127,12 +131,25 @@ def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = Non
     tok = _token(token, cairn_url, verify)
     ttl = ttl or (int(os.environ["CAIRN_SPARK_TOKEN_TTL"]) if os.environ.get("CAIRN_SPARK_TOKEN_TTL") else None)
     ct = catalog_token(cairn_url, tok, ttl, verify)
+    conf = lakehouse_conf(cairn_url, catalog_uri, ct["credential"], tok, lineage=lineage, app_name=app_name)
+    if os.environ.get("CAIRN_SPARK_EVENT_LOG_DIR"):  # for the history server (secrets are redacted in it)
+        conf["spark.eventLog.enabled"] = "true"
+        conf["spark.eventLog.dir"] = os.environ["CAIRN_SPARK_EVENT_LOG_DIR"]
+    return conf, ct["user"]
+
+
+def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = None, token: Optional[str] = None,
+                      catalog_uri: Optional[str] = None, ttl: Optional[int] = None, lineage: bool = True,
+                      master: Optional[str] = None, extra_conf: Optional[dict] = None):
+    """A SparkSession on the lakehouse as the Cairn user of ``token`` (or CAIRN_TOKEN)."""
+    from pyspark.sql import SparkSession
+
+    conf, user = session_conf(app_name, cairn_url=cairn_url, token=token, catalog_uri=catalog_uri, ttl=ttl, lineage=lineage)
     b = SparkSession.builder.appName(app_name)
     if master:
         b = b.master(master)
-    for k, v in {**lakehouse_conf(cairn_url, catalog_uri, ct["credential"], tok, lineage=lineage, app_name=app_name),
-                 **(extra_conf or {})}.items():
+    for k, v in {**conf, **(extra_conf or {})}.items():
         b = b.config(k, v)
     spark = b.getOrCreate()
-    spark.sparkContext.setLocalProperty("cairn.user", ct["user"])
+    spark.sparkContext.setLocalProperty("cairn.user", user)
     return spark

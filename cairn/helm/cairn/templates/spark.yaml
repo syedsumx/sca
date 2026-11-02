@@ -1,0 +1,172 @@
+{{- $sp := .Values.cairn.spark }}
+{{- if $sp.enabled }}
+{{- $ctx := dict "root" $ "component" "spark-history" "cfg" $sp.historyServer }}
+{{- $ns := $sp.namespace | default .Release.Namespace }}
+{{- $sa := $sp.driverServiceAccount | default "svc-spark" }}
+{{- if not .Values.cairn.workloadIdentity.issuers }}{{ fail "cairn.spark: Spark drivers sign in by workload identity; set cairn.workloadIdentity.issuers" }}{{ end }}
+---
+# Spark drivers' service account: bind it to a pipeline user in Cairn (/v1/workload-identity/bindings).
+# Its token is projected into the driver pod by cairn-spark / the SparkApplication; no Secret holds it.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $sa }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+automountServiceAccountToken: false
+---
+# What a Spark driver does on Kubernetes: start and stop its executors (pods, their service and
+# ConfigMap, and their volume claims). Nothing on Secrets.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.fullname" $ }}-spark-driver
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, configmaps, persistentvolumeclaims]
+    verbs: [create, get, list, watch, delete, deletecollection, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.fullname" $ }}-spark-driver
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "cairn.fullname" $ }}-spark-driver }
+subjects:
+  - { kind: ServiceAccount, name: {{ $sa }}, namespace: {{ $ns }} }
+{{- with $sp.submitters }}
+---
+# Who may run SparkApplications (the Spark Operator's resource) in {{ $ns }}: e.g. Airflow's workers,
+# for CairnSparkApplicationOperator.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.fullname" $ }}-spark-submit
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+rules:
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications]
+    verbs: [create, get, list, watch, delete]
+  - apiGroups: [sparkoperator.k8s.io]
+    resources: [sparkapplications/status]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.fullname" $ }}-spark-submit
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: {{ include "cairn.fullname" $ }}-spark-submit }
+subjects:
+  {{- range . }}
+  - { kind: ServiceAccount, name: {{ required "cairn.spark.submitters[].name" .name }}, namespace: {{ .namespace | default $.Release.Namespace }} }
+  {{- end }}
+{{- end }}
+{{- if $sp.historyServer.enabled }}
+{{- $claim := $sp.eventLog.existingClaim | default (printf "%s-spark-events" (include "cairn.fullname" $)) }}
+{{- if not $sp.eventLog.existingClaim }}
+---
+# Event logs: drivers write them (CAIRN_SPARK_EVENT_LOG_DIR=file:///opt/spark-events, this claim mounted
+# there), the history server reads them. Many writers: ReadWriteMany.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $claim }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  accessModes: [ReadWriteMany]
+  {{- with $sp.eventLog.storageClassName }}
+  storageClassName: {{ . }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $sp.eventLog.size | default "20Gi" }}
+{{- end }}
+---
+# Spark's history server. It has no sign-in of its own: a ClusterIP service only (reach it with
+# kubectl port-forward, or behind your SSO proxy); secrets in event logs are redacted by cairn-spark.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 185
+        runAsGroup: 185
+        fsGroup: 185
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: history
+          image: {{ $sp.image | default (include "cairn.namedImage" (dict "root" $ "name" "spark")) | quote }}
+          imagePullPolicy: IfNotPresent
+          command: [/opt/spark/bin/spark-class, org.apache.spark.deploy.history.HistoryServer]
+          env:
+            - name: SPARK_HISTORY_OPTS
+              value: >-
+                -Dspark.history.fs.logDirectory=file:///opt/spark-events
+                -Dspark.history.fs.cleaner.enabled=true
+                -Dspark.history.fs.cleaner.maxAge={{ $sp.historyServer.maxAge | default "30d" }}
+                -Djava.io.tmpdir=/tmp
+          ports:
+            - { name: http, containerPort: 18080 }
+          readinessProbe:
+            httpGet: { path: /api/v1/version, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml ($sp.historyServer.resources | default dict) | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - { name: events, mountPath: /opt/spark-events, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: events
+          persistentVolumeClaim: { claimName: {{ $claim }}, readOnly: true }
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - { name: http, port: 18080, targetPort: http }
+{{- end }}
+{{- end }}

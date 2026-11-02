@@ -892,6 +892,28 @@ cairn:
     # A private mirror of the dbt package hub (dbt deps), e.g. https://dbt-hub.example.com/
     packageHubUrl: ""
 
+  # Spark on Kubernetes (cairn-spark submit --deploy-mode cluster, or Spark Operator SparkApplications
+  # built by cairn_spark.kubernetes / CairnSparkApplicationOperator). Drivers sign in by workload identity
+  # (needs cairn.workloadIdentity.issuers): bind driverServiceAccount to a pipeline user in Cairn.
+  spark:
+    enabled: false
+    namespace: ""                   # where applications run; empty: the release's
+    driverServiceAccount: svc-spark # gets a Role to manage its executors; nothing on Secrets
+    image: ""                       # empty: <global.cairn.registry>/spark:<tag>
+    # Service accounts that may run SparkApplications here (create/watch/delete), e.g. Airflow's workers.
+    submitters: []
+    #  - { name: airflow-worker, namespace: airflow }
+    eventLog:
+      existingClaim: ""             # a ReadWriteMany claim drivers mount at /opt/spark-events
+      storageClassName: ""
+      size: 20Gi
+    historyServer:
+      enabled: false                # no sign-in of its own: ClusterIP only
+      maxAge: 30d                   # event logs older than this are removed
+      resources:
+        requests: { cpu: 100m, memory: 1Gi }
+        limits: { memory: 2Gi }
+
   # Workload identity: pipelines (dbt, Airflow, Spark) sign in with the token their platform gives them
   # (a Kubernetes service account's projected token, a CI job's OIDC token) instead of a stored personal
   # access token. Each issuer Cairn trusts: its iss, the audience its tokens must be for (one of their own,

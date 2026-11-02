@@ -109,6 +109,8 @@ class OpenLineageReceiver:
         # Called with (job_urn, state, outputs, run_id, message) for each run event (pipeline health,
         # dataset changes).
         self.on_run = None
+        # Called with (event, job_urn, outputs, start_ms, end_ms) when a run finishes (run costs).
+        self.on_finished = None
 
     def _datasets(self, items: list[dict], mcps: list[dict]) -> list[str]:
         urns = []
@@ -184,9 +186,13 @@ class OpenLineageReceiver:
         run = event.get("run") or {}
         state = str(event.get("eventType") or "").upper()
         run_urn = None
+        start_ms = when
         if run.get("runId"):
             run_urn = "urn:li:dataProcessInstance:" + hashlib.sha256(f"{job_urn}|{run['runId']}".encode()).hexdigest()[:32]
-            if state in ("START", "") or self.graph.get_aspect(run_urn, "dataProcessInstanceProperties") is None:
+            seen = self.graph.get_aspect(run_urn, "dataProcessInstanceProperties")
+            if seen:
+                start_ms = int(((seen.get("created") or {}).get("time")) or when)
+            if state in ("START", "") or seen is None:
                 parent = ((run.get("facets") or {}).get("parent") or {}).get("run", {}).get("runId")
                 mcps.append(make_mcp(run_urn, "dataProcessInstanceProperties", {
                     "name": str(run["runId"])[:200], "type": "BATCH_SCHEDULED",
@@ -212,6 +218,11 @@ class OpenLineageReceiver:
                 self.on_run(job_urn, state, outputs, run.get("runId"), str(err)[:500])
             except Exception:  # noqa: BLE001 - lineage is recorded; health tracking must not reject it
                 logger.exception("pipeline health for %s failed", job_urn)
+        if self.on_finished is not None and state in ("COMPLETE", "FAIL", "ABORT") and run_urn:
+            try:
+                self.on_finished(event, job_urn, outputs, start_ms, when)
+            except Exception:  # noqa: BLE001 - as above: costs must not reject lineage
+                logger.exception("run cost for %s failed", job_urn)
         return {"job": job_urn, "run": run_urn, "inputs": len(inputs), "outputs": len(outputs),
                 "column_lineage": len(io["fineGrainedLineages"]), "mcps": len(mcps)}
 

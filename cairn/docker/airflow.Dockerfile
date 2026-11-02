@@ -26,12 +26,12 @@ USER airflow
 RUN --mount=type=secret,id=extra_ca,required=false,uid=50000 \
     --mount=type=bind,target=/mnt/cairn \
     if [ -f /run/secrets/extra_ca ]; then export PIP_CERT=/run/secrets/extra_ca SSL_CERT_FILE=/run/secrets/extra_ca; fi \
- && src="$(mktemp -d)" && cp -r /mnt/cairn/pyproject.toml /mnt/cairn/src /mnt/cairn/airflow-provider "${src}/" \
+ && src="$(mktemp -d)" && cp -r /mnt/cairn/pyproject.toml /mnt/cairn/src /mnt/cairn/airflow-provider /mnt/cairn/spark "${src}/" \
  && constraints="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt" \
  && pip install --constraint "${constraints}" "apache-airflow==${AIRFLOW_VERSION}" \
       apache-airflow-providers-fab apache-airflow-providers-openlineage apache-airflow-providers-cncf-kubernetes \
       apache-airflow-providers-trino apache-airflow-providers-common-sql trino \
- && pip install --no-deps "${src}/airflow-provider" \
+ && pip install --no-deps "${src}/airflow-provider" "${src}/spark" \
  && python -m venv /opt/cairn-dbt \
  && /opt/cairn-dbt/bin/pip install "${src}" "dbt-core==${DBT_VERSION}" "dbt-trino==${DBT_TRINO_VERSION}" \
  && rm -rf "${src}"

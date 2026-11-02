@@ -24,6 +24,12 @@ Collectors are configured in ``CAIRN_COST_SOURCES`` (YAML)::
 * **Redshift** compute is the cluster's daily cost (``daily_compute_usd``), or Serverless RPU-seconds
   (``SYS_SERVERLESS_USAGE``) at ``usd_per_rpu_hour``, split across the day's queries by elapsed time and
   then across the tables each one scanned; storage is ``SVV_TABLE_INFO`` size at ``storage_usd_per_gb_month``.
+* **Spark** (and any engine that reports runs over OpenLineage) has no bill to read, so a run is priced
+  from what it reserved: its cores (``spark.driver.cores`` plus ``spark.executor.instances`` x
+  ``spark.executor.cores``, or N for ``local[N]``) times its wall-clock time, at
+  ``CAIRN_COST_SPARK_USD_PER_CORE_HOUR``. The cost of producing data belongs to what it produced, so a
+  run's cost is split evenly across the tables it wrote. Each run is charged once, in
+  ``cairn_run_costs``, however often its events are delivered.
 """
 
 from __future__ import annotations
@@ -52,6 +58,19 @@ asset_costs = Table(
     Column("compute_usd", Float, nullable=False, default=0.0),
     Column("reads", BigInteger, nullable=False, default=0),
     Column("source", String(32), nullable=False),
+)
+
+run_costs = Table(
+    "cairn_run_costs", metadata,
+    Column("run", String(128), primary_key=True),          # the OpenLineage runId
+    Column("parent", String(128), nullable=True, index=True),  # the application run a query ran in
+    Column("job", String(512), nullable=False, index=True),
+    Column("engine", String(32), nullable=False),
+    Column("day", String(10), nullable=False, index=True),
+    Column("cores", Float, nullable=False),
+    Column("seconds", Float, nullable=False),
+    Column("usd", Float, nullable=False),
+    Column("outputs", String(4000), nullable=False),       # JSON list of the dataset urns charged
 )
 
 DAY_MS = 86_400_000
@@ -89,6 +108,29 @@ class CostSource(BaseModel):
     serverless: bool = False                                     # Redshift Serverless
     usd_per_rpu_hour: float = 0.375
     storage_usd_per_gb_month: float = 0.024                      # Redshift managed storage
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        n = float(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def spark_cores(properties: dict, default: float = 4.0) -> float:
+    """Cores a Spark application reserved, from the properties its OpenLineage events carry."""
+    master = str(properties.get("spark.master") or "")
+    if master.startswith("local"):
+        inner = master[master.find("[") + 1:master.find("]")] if "[" in master else "1"
+        return float(os.cpu_count() or 1) if inner.split(",")[0] == "*" else (_num(inner.split(",")[0]) or 1.0)
+    driver = _num(properties.get("spark.driver.cores")) or 1.0
+    instances = _num(properties.get("spark.executor.instances"))
+    if instances is None and str(properties.get("spark.dynamicAllocation.enabled")).lower() == "true":
+        instances = _num(properties.get("spark.dynamicAllocation.maxExecutors"))
+    if instances is None:
+        return default
+    return driver + instances * (_num(properties.get("spark.executor.cores")) or 1.0)
 
 
 def load_sources(path: Optional[str] = None) -> list[CostSource]:
@@ -313,6 +355,68 @@ class CostService:
                     storage_bytes=r.storage_bytes, storage_usd=r.storage_usd, compute_usd=r.compute_usd,
                     reads=r.reads, source=source))
         return len(rows)
+
+    def record_run(self, run: str, parent: Optional[str], job: str, engine: str, start_ms: int, end_ms: int,
+                   outputs: list[str], cores: float = 0.0, usd_per_core_hour: float = 0.0) -> Optional[dict]:
+        """Record one finished run, once. An application run (no ``parent``) is charged: its cores times
+        its wall-clock time, split across what it and the queries that ran in it wrote, on the day it
+        ended. A query inside an application (``parent`` set) costs nothing on its own; it records what
+        it wrote, for its application to be charged to."""
+        import json
+
+        seconds = max(0.0, (end_ms - start_ms) / 1000)
+        usd = 0.0 if parent else round(cores * seconds / 3600 * usd_per_core_hour, 6)
+        day = _day(end_ms)
+        mine = {o for o in outputs if o.startswith("urn:li:dataset:(")}
+        with self.engine.begin() as conn:
+            if conn.execute(select(run_costs.c.run).where(run_costs.c.run == run)).first() is not None:
+                return None                                 # already recorded (a redelivered event)
+            charged = set(mine)
+            if not parent:
+                for (o,) in conn.execute(select(run_costs.c.outputs).where(run_costs.c.parent == run)):
+                    charged |= set(json.loads(o))
+            charged_list = sorted(charged)
+            conn.execute(run_costs.insert().values(run=run, parent=parent, job=job, engine=engine, day=day,
+                                                   cores=0.0 if parent else cores, seconds=seconds, usd=usd,
+                                                   outputs=json.dumps(charged_list)[:4000]))
+            share = round(usd / len(charged_list), 6) if charged_list and usd else 0.0
+            for urn in charged_list if share else []:
+                key = and_(asset_costs.c.urn == urn, asset_costs.c.day == day)
+                row = conn.execute(select(asset_costs.c.compute_usd).where(key)).first()
+                if row is None:
+                    conn.execute(asset_costs.insert().values(
+                        urn=urn, day=day, platform=urn.split("dataPlatform:", 1)[1].split(",", 1)[0],
+                        storage_bytes=None, storage_usd=0.0, compute_usd=share, reads=0, source=engine))
+                else:
+                    conn.execute(asset_costs.update().where(key).values(compute_usd=row.compute_usd + share))
+        return {"run": run, "job": job, "day": day, "cores": cores, "seconds": seconds, "usd": usd,
+                "outputs": charged_list}
+
+    def on_lineage_run(self, event: dict, job_urn: str, outputs: list[str], start_ms: int, end_ms: int) -> None:
+        """OpenLineage hook: price the Spark runs (``CAIRN_COST_SPARK_USD_PER_CORE_HOUR``; unset, off)."""
+        rate = _num(os.environ.get("CAIRN_COST_SPARK_USD_PER_CORE_HOUR"))
+        run = event.get("run") or {}
+        facets = run.get("facets") or {}
+        if rate is None or not run.get("runId"):
+            return
+        if str((facets.get("processing_engine") or {}).get("name") or "").lower() != "spark":
+            return
+        parent = ((facets.get("parent") or {}).get("run") or {}).get("runId")
+        props = (facets.get("spark_properties") or {}).get("properties") or {}
+        cores = spark_cores(props, _num(os.environ.get("CAIRN_COST_SPARK_DEFAULT_CORES")) or 4.0)
+        self.record_run(str(run["runId"]), str(parent) if parent else None, job_urn, "spark", start_ms, end_ms,
+                        outputs, cores, rate)
+
+    def jobs(self, days: int = 30, now_ms: Optional[int] = None, limit: int = 200) -> list[dict]:
+        """What each application's runs cost over the last ``days``, most expensive first."""
+        since = _day((now_ms or int(time.time() * 1000)) - days * DAY_MS)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(run_costs.c.job, run_costs.c.engine, func.count(), func.sum(run_costs.c.seconds),
+                                       func.sum(run_costs.c.usd))
+                                .where(run_costs.c.day >= since, run_costs.c.parent.is_(None)).group_by(run_costs.c.job, run_costs.c.engine)
+                                .order_by(func.sum(run_costs.c.usd).desc()).limit(limit)).all()
+        return [{"job": j, "engine": e, "runs": int(n), "seconds": round(sec or 0, 1), "usd": round(u or 0, 4)}
+                for j, e, n, sec, u in rows]
 
     def collect_day(self, day: str) -> dict[str, Any]:
         out: dict[str, Any] = {}

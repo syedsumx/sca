@@ -1,0 +1,109 @@
+"""Spark on Kubernetes without a secret in any Kubernetes object.
+
+In cluster mode spark-submit writes the application's settings into a ConfigMap the driver pod mounts,
+so a lakehouse credential (or a Cairn token, for lineage) given at submit time would be stored in the
+cluster's API, readable by anyone who may read ConfigMaps in the namespace. So a cluster-mode
+application is submitted with no credential at all: its driver pod gets a projected service-account
+token for Cairn (audience ``cairn``, rotated by the kubelet), and the driver signs in itself, when the
+program calls :func:`cairn_spark.lakehouse_session` (workload identity: the token is exchanged at Cairn
+for the bound pipeline user's token). Executors need no identity: they get their settings from the
+driver over Spark's RPC, and the catalog's storage credentials come with the tables.
+
+That needs the driver to be a Python program. A JVM program's catalog settings must be there before it
+starts, so JVM applications run in client mode (the driver in the submitting pod, which has its own
+workload identity) and ``cairn-spark submit`` refuses them in cluster mode rather than leak.
+
+* :func:`driver_pod_template` and :func:`cluster_conf`: what ``cairn-spark submit --deploy-mode
+  cluster`` adds.
+* :func:`spark_application`: the same application as a Spark Operator ``SparkApplication``
+  (``sparkoperator.k8s.io/v1beta2``), for ``kubectl apply`` or
+  :class:`cairn_airflow.spark.CairnSparkApplicationOperator`.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Optional, Sequence
+
+TOKEN_DIR = "/var/run/secrets/cairn"
+TOKEN_FILE = f"{TOKEN_DIR}/token"
+VOLUME = "cairn-identity"
+
+
+def identity_volume(audience: str = "cairn", expiration_seconds: int = 3600) -> dict:
+    return {"name": VOLUME, "projected": {"sources": [{"serviceAccountToken": {
+        "audience": audience, "expirationSeconds": int(expiration_seconds), "path": "token"}}]}}
+
+
+def identity_mount() -> dict:
+    return {"name": VOLUME, "mountPath": TOKEN_DIR, "readOnly": True}
+
+
+def driver_env(cairn_url: str, catalog_uri: str, extra: Optional[dict] = None) -> dict:
+    """What the driver needs to sign in by itself. Nothing secret."""
+    env = {"CAIRN_URL": cairn_url.rstrip("/"), "CAIRN_CATALOG_URI": catalog_uri.rstrip("/"),
+           "CAIRN_WORKLOAD_TOKEN_FILE": TOKEN_FILE}
+    for k in ("CAIRN_SPARK_NAMESPACE", "CAIRN_SPARK_TOKEN_TTL", "CAIRN_SPARK_EVENT_LOG_DIR"):
+        if os.environ.get(k):
+            env[k] = os.environ[k]
+    return {**env, **(extra or {})}
+
+
+def driver_pod_template(audience: str = "cairn", expiration_seconds: int = 3600) -> dict:
+    """A driver pod template: the projected token, mounted read-only where the driver looks for it."""
+    return {"apiVersion": "v1", "kind": "Pod", "spec": {
+        "volumes": [identity_volume(audience, expiration_seconds)],
+        "containers": [{"name": "spark-kubernetes-driver", "volumeMounts": [identity_mount()]}]}}
+
+
+def cluster_conf(cairn_url: str, catalog_uri: str, service_account: str, template_path: str) -> dict:
+    conf = {"spark.kubernetes.driver.podTemplateFile": template_path,
+            "spark.kubernetes.driver.podTemplateContainerName": "spark-kubernetes-driver",
+            "spark.kubernetes.authenticate.driver.serviceAccountName": service_account,
+            # The driver's settings are stored in the cluster: keep anything secret-looking out of logs too.
+            "spark.redaction.regex": r"(?i)secret|password|token|access[.]key|credential|apikey|api[.]key"}
+    for k, v in driver_env(cairn_url, catalog_uri).items():
+        conf[f"spark.kubernetes.driverEnv.{k}"] = v
+    if os.environ.get("CAIRN_SPARK_EVENT_LOG_DIR"):
+        conf["spark.eventLog.enabled"] = "true"
+        conf["spark.eventLog.dir"] = os.environ["CAIRN_SPARK_EVENT_LOG_DIR"]
+    return conf
+
+
+def spark_application(name: str, *, image: str, main: str, service_account: str, cairn_url: str, catalog_uri: str,
+                      namespace: str = "default", arguments: Sequence[str] = (), executors: int = 2,
+                      executor_cores: int = 1, executor_memory: str = "2g", driver_cores: int = 1,
+                      driver_memory: str = "1g", spark_version: str = "4.0.1", audience: str = "cairn",
+                      spark_conf: Optional[dict] = None, labels: Optional[dict] = None) -> dict:
+    """A Spark Operator SparkApplication running the Python program ``main`` (a path in the image, or
+    a URL) as the Cairn user ``service_account`` is bound to."""
+    if not main.endswith(".py"):
+        raise ValueError("cluster-mode applications on Cairn are Python programs that call lakehouse_session() "
+                         "(a JVM driver would need its credential in a ConfigMap); run JVM programs in client mode")
+    for k in (spark_conf or {}):
+        if any(w in k.lower() for w in ("credential", "token", "secret", "password", "apikey")):
+            raise ValueError(f"{k}: no secrets in a SparkApplication (they are stored in the cluster)")
+    env = [{"name": k, "value": v} for k, v in driver_env(cairn_url, catalog_uri).items()]
+    conf = {"spark.redaction.regex": r"(?i)secret|password|token|access[.]key|credential|apikey|api[.]key",
+            **(spark_conf or {})}
+    if os.environ.get("CAIRN_SPARK_EVENT_LOG_DIR"):
+        conf.setdefault("spark.eventLog.enabled", "true")
+        conf.setdefault("spark.eventLog.dir", os.environ["CAIRN_SPARK_EVENT_LOG_DIR"])
+    return {
+        "apiVersion": "sparkoperator.k8s.io/v1beta2", "kind": "SparkApplication",
+        "metadata": {"name": name, "namespace": namespace, "labels": {"app.kubernetes.io/managed-by": "cairn",
+                                                                     **(labels or {})}},
+        "spec": {
+            "type": "Python", "pythonVersion": "3", "mode": "cluster", "image": image, "imagePullPolicy": "IfNotPresent",
+            "mainApplicationFile": main if "://" in main else f"local://{main}", "arguments": list(arguments),
+            "sparkVersion": spark_version, "sparkConf": conf,
+            "restartPolicy": {"type": "Never"},
+            "volumes": [identity_volume(audience)],
+            "driver": {"cores": driver_cores, "memory": driver_memory, "serviceAccount": service_account,
+                       "env": env, "volumeMounts": [identity_mount()],
+                       "labels": {"cairn.io/role": "driver"}},
+            # Executors get no token: their settings come from the driver, their storage keys with the tables.
+            "executor": {"instances": executors, "cores": executor_cores, "memory": executor_memory,
+                         "labels": {"cairn.io/role": "executor"}},
+        },
+    }

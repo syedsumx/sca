@@ -101,6 +101,12 @@ def build_router(reports: ReportService, current_principal, authorize, can_view,
         _reader(p)
         return _named(costs.expensive(days, min_cost_usd=min_cost_usd), p)
 
+    @router.get("/costs/jobs")
+    def job_costs(days: int = Query(30, ge=1, le=365), p: Principal = Depends(current_principal)):
+        """What each Spark application cost, priced from its runs (cores x wall-clock time)."""
+        _reader(p)
+        return costs.jobs(days)
+
     @router.get("/costs/asset")
     def asset_cost(urn: str, p: Principal = Depends(current_principal)):
         if not can_view(p)(urn):
