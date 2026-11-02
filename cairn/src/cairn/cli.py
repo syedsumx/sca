@@ -88,6 +88,13 @@ def cmd_scheduler(a) -> None:
     sch.run_forever()
 
 
+def cmd_bundle(a) -> None:
+    """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
+    from cairn.iac.bundle import main
+
+    raise SystemExit(main(a))
+
+
 def cmd_streams(a) -> None:
     """Kafka topics into lakehouse tables: one worker per enabled stream; replicas share the partitions."""
     from cairn.common.metrics import serve_worker_metrics
@@ -645,6 +652,17 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--partition", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITION", 0)))
     sch.add_argument("--partitions", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITIONS", 1)))
     sch.set_defaults(fn=cmd_scheduler)
+
+    bd = sub.add_parser("bundle", help="validate, plan or apply a bundle of declared resources (YAML in git)")
+    bd.add_argument("action", choices=["validate", "plan", "apply"])
+    bd.add_argument("file")
+    bd.add_argument("--var", action="append", help="NAME=value for ${NAME} in the file (else the environment)")
+    bd.add_argument("--url", help="Cairn's API (default CAIRN_URL)")
+    bd.add_argument("--token", help="a Cairn token (default CAIRN_TOKEN or CAIRN_TOKEN_FILE)")
+    bd.add_argument("--prune", action="store_true", help="delete what this bundle created before and no longer declares")
+    bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
+    bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")
+    bd.set_defaults(fn=cmd_bundle)
 
     st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
     st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")

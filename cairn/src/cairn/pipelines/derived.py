@@ -47,6 +47,7 @@ derived_tables = Table(
     Column("seen_change", BigInteger, nullable=False, default=0),    # the change log position last refreshed from
     Column("last_run_ms", BigInteger, nullable=True),
     Column("lease_until", BigInteger, nullable=False, default=0),
+    Column("full_next", Boolean, nullable=False, default=False),     # the query changed: rebuild next time
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
 )
@@ -120,6 +121,40 @@ class DerivedTables:
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, owner: str, actor: str) -> dict:
+        row = self._values(body, owner, actor)
+        target, parts = row["target"], row["target"].split(".")
+        with self.engine.begin() as conn:
+            if conn.execute(select(derived_tables.c.id).where(or_(derived_tables.c.name == row["name"],
+                                                                  derived_tables.c.target == target))).first():
+                raise DerivedError("a derived table with that name or target exists", 409)
+            conn.execute(derived_tables.insert().values(**row))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "derived.created", actor, self.urn(*parts),
+                                  {k: v for k, v in row.items() if k != "lease_until"}, conn=conn)
+        return self.get(row["id"])
+
+    def update(self, did: str, body: dict, actor: str) -> dict:
+        """Changes a definition in place (same owner, same id). A changed query, mode, watermark or key
+        rebuilds the table from the whole query on the next refresh; a new target is created there."""
+        cur = self.get(did)
+        row = self._values(body, cur["owner"], actor)
+        changed = any(row[k] != (",".join(cur[k]) if k == "key" else cur[k]) for k in ("sql", "mode", "watermark", "key", "target"))
+        keep = ("id", "seen_change", "last_run_ms", "lease_until", "created_by", "created_ms", "owner")
+        values = {k: v for k, v in row.items() if k not in keep}
+        if changed:
+            values["full_next"] = True
+        with self.engine.begin() as conn:
+            if conn.execute(select(derived_tables.c.id).where(or_(derived_tables.c.name == row["name"],
+                                                                  derived_tables.c.target == row["target"]),
+                                                              derived_tables.c.id != did)).first():
+                raise DerivedError("a derived table with that name or target exists", 409)
+            conn.execute(update(derived_tables).where(derived_tables.c.id == did).values(**values))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "derived.updated", actor, self.urn(*row["target"].split(".")),
+                                  {**values, "id": did}, conn=conn)
+        return self.get(did)
+
+    def _values(self, body: dict, owner: str, actor: str) -> dict:
         name, sql, target = str(body.get("name") or "").strip(), str(body.get("sql") or "").strip().rstrip(";"), \
             str(body.get("target") or "")
         mode, wm = str(body.get("mode") or "full"), body.get("watermark") or None
@@ -149,18 +184,10 @@ class DerivedTables:
                "key": ",".join(key), "every_minutes": every, "on_change": on_change,
                "upstreams": json.dumps([self.urn(s, t) for s, t in read]), "owner": owner,
                "enabled": bool(body.get("enabled", True)), "seen_change": 0, "last_run_ms": None, "lease_until": 0,
-               "created_by": actor, "created_ms": _now()}
+               "created_by": actor, "created_ms": _now(), "full_next": False}
         if self.changes is not None:
             row["seen_change"] = self.changes.head()
-        with self.engine.begin() as conn:
-            if conn.execute(select(derived_tables.c.id).where(or_(derived_tables.c.name == row["name"],
-                                                                  derived_tables.c.target == target))).first():
-                raise DerivedError("a derived table with that name or target exists", 409)
-            conn.execute(derived_tables.insert().values(**row))
-            if self.audit is not None:
-                self.audit.record("lakehouse", "derived.created", actor, self.urn(*parts),
-                                  {k: v for k, v in row.items() if k != "lease_until"}, conn=conn)
-        return self.get(row["id"])
+        return row
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
@@ -234,6 +261,8 @@ class DerivedTables:
             self.get(did)                                  # 404 when it does not exist
             raise DerivedError("a refresh of this table is running", 409)
         d = self.get(did)
+        with self.engine.connect() as conn:
+            full = full or bool(conn.execute(select(derived_tables.c.full_next).where(derived_tables.c.id == did)).scalar())
         kind, error = d["mode"], None
         try:
             kind, stmts = self.statements(d, full)
@@ -249,6 +278,7 @@ class DerivedTables:
             values: dict[str, Any] = {"lease_until": 0, "last_run_ms": now}
             if not error:
                 values["seen_change"] = head
+                values["full_next"] = False
             conn.execute(update(derived_tables).where(derived_tables.c.id == did).values(**values))
         if not error and self.changes is not None:
             self.changes.record([self.urn(*d["target"].split("."))], "derived", f"derived:{d['name']}")
@@ -346,6 +376,11 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
     @router.get("/{did}")
     def get(did: str, p=Depends(current_principal)):
         return mine(p, did)
+
+    @router.put("/{did}")
+    def update_derived(did: str, body: dict = Body(...), p=Depends(current_principal)):
+        mine(p, did)
+        return wrap(lambda: dt.update(did, body, p.urn))
 
     @router.delete("/{did}", status_code=204)
     def remove(did: str, p=Depends(current_principal)):

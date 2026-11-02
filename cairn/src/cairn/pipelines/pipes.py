@@ -138,6 +138,28 @@ class Pipes:
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
+        row = self._values(body, actor)
+        with self.engine.begin() as conn:
+            if conn.execute(select(pipes.c.id).where(pipes.c.name == row["name"])).first():
+                raise PipeError("a pipe with that name exists", 409)
+            conn.execute(pipes.insert().values(**row))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "pipe.created", actor, self.urn(*row["target"].split(".")), row, conn=conn)
+        return row
+
+    def update(self, pid: str, body: dict, actor: str) -> dict:
+        """Changes a pipe in place: files already loaded stay loaded."""
+        cur = self.get(pid)
+        row = {**self._values(body, actor), "id": pid, "created_by": cur["created_by"], "created_ms": cur["created_ms"]}
+        with self.engine.begin() as conn:
+            if conn.execute(select(pipes.c.id).where(pipes.c.name == row["name"], pipes.c.id != pid)).first():
+                raise PipeError("a pipe with that name exists", 409)
+            conn.execute(pipes.update().where(pipes.c.id == pid).values(**row))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "pipe.updated", actor, self.urn(*row["target"].split(".")), row, conn=conn)
+        return row
+
+    def _values(self, body: dict, actor: str) -> dict:
         name, bucket = str(body.get("name") or "").strip(), str(body.get("bucket") or "")
         prefix, fmt, target = str(body.get("prefix") or ""), str(body.get("format") or ""), str(body.get("target") or "")
         if not name or not BUCKET.match(bucket):
@@ -151,12 +173,6 @@ class Pipes:
         row = {"id": uuid.uuid4().hex, "name": name[:256], "bucket": bucket, "prefix": prefix, "format": fmt, "target": target,
                "create_table": bool(body.get("create_table")), "enabled": bool(body.get("enabled", True)),
                "created_by": actor, "created_ms": _now()}
-        with self.engine.begin() as conn:
-            if conn.execute(select(pipes.c.id).where(pipes.c.name == row["name"])).first():
-                raise PipeError("a pipe with that name exists", 409)
-            conn.execute(pipes.insert().values(**row))
-            if self.audit is not None:
-                self.audit.record("lakehouse", "pipe.created", actor, self.urn(*target.split(".")), row, conn=conn)
         return row
 
     def list(self) -> list[dict]:
@@ -336,6 +352,10 @@ def build_pipes_router(p: Pipes, current_principal, authorize) -> Any:
     @router.post("", status_code=201)
     def create(body: dict = Body(...), pr=Depends(current_principal)):
         return wrap(lambda: p.create(body, admin(pr)))
+
+    @router.put("/{pid}")
+    def update(pid: str, body: dict = Body(...), pr=Depends(current_principal)):
+        return wrap(lambda: p.update(pid, body, admin(pr)))
 
     @router.delete("/{pid}", status_code=204)
     def remove(pid: str, pr=Depends(current_principal)):

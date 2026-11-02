@@ -90,6 +90,7 @@ class Services:
     pipes: Optional[Any] = None
     streams: Optional[Any] = None
     derived: Optional[Any] = None
+    bundle_state: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -740,6 +741,9 @@ def _build_active_metadata(s: Services) -> None:
 
             s.pipes = Pipes(s.engine, _settings("CAIRN_PIPES_STORE"), _settings("CAIRN_PIPES_CATALOG"), s.audit,
                             webhook_secret=os.environ.get("CAIRN_PIPES_WEBHOOK_SECRET", ""))
+        from cairn.iac.state import BundleState
+
+        s.bundle_state = BundleState(s.engine, s.audit)
         if os.environ.get("CAIRN_STREAMS_KAFKA") or os.environ.get("CAIRN_STREAMS_ENABLED", "").lower() == "true":
             from cairn.pipelines.pipes import _settings
             from cairn.pipelines.streams import Streams
@@ -1004,7 +1008,8 @@ def _build_data_access(s: Services) -> None:
                                                  resource=ResourceRef(type="dataset", urn=urn) if urn else None,
                                                  environment={"channel": "trino"}))
 
-        s.trino_access = TrinoAccess(decide, masking.plan, catalogs)
+        ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
+        s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs)
         s.trino_key = trino_key
         # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
         from cairn.dataaccess.trino_auth import TrinoTokens

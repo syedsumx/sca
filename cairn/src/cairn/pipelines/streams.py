@@ -179,6 +179,34 @@ class Streams:
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
+        row = self._values(body, actor)
+        target, source = row["target"], row["source"]
+        with self.engine.begin() as conn:
+            if conn.execute(select(streams.c.id).where(streams.c.name == row["name"])).first():
+                raise StreamError("a stream with that name exists", 409)
+            conn.execute(streams.insert().values(**row))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "stream.created", actor, self.urn(*target.split(".")), row, conn=conn)
+            if source:
+                self._lineage(self.urn(*target.split(".")), source, actor)   # fails: nothing is created
+        return _stream(type("R", (), row))
+
+    def update(self, sid: str, body: dict, actor: str) -> dict:
+        """Changes a stream in place, keeping its id: its offsets (in the table's snapshots) carry on. A new
+        target table starts from ``start``. Running workers pick the change up within their interval."""
+        cur = self.get(sid)
+        row = {**self._values(body, actor), "id": sid, "created_by": cur["created_by"], "created_ms": cur["created_ms"]}
+        with self.engine.begin() as conn:
+            if conn.execute(select(streams.c.id).where(streams.c.name == row["name"], streams.c.id != sid)).first():
+                raise StreamError("a stream with that name exists", 409)
+            conn.execute(update(streams).where(streams.c.id == sid).values(**row))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "stream.updated", actor, self.urn(*row["target"].split(".")), row, conn=conn)
+            if row["source"] and (row["source"] != cur["source"] or row["target"] != cur["target"]):
+                self._lineage(self.urn(*row["target"].split(".")), row["source"], actor)
+        return self.get(sid)
+
+    def _values(self, body: dict, actor: str) -> dict:
         name, topic = str(body.get("name") or "").strip(), str(body.get("topic") or "")
         fmt, target = str(body.get("format") or "json"), str(body.get("target") or "")
         mode = "upsert" if fmt == "debezium" else str(body.get("mode") or "append")
@@ -211,15 +239,7 @@ class Streams:
                "key": ",".join(key), "target": target, "create_table": bool(body.get("create_table")),
                "evolve": bool(body.get("evolve")), "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
                "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now()}
-        with self.engine.begin() as conn:
-            if conn.execute(select(streams.c.id).where(streams.c.name == row["name"])).first():
-                raise StreamError("a stream with that name exists", 409)
-            conn.execute(streams.insert().values(**row))
-            if self.audit is not None:
-                self.audit.record("lakehouse", "stream.created", actor, self.urn(*target.split(".")), row, conn=conn)
-            if source:
-                self._lineage(self.urn(*target.split(".")), source, actor)   # fails: nothing is created
-        return _stream(type("R", (), row))
+        return row
 
     def _lineage(self, urn: str, source: str, actor: str) -> None:
         from cairn.common.proposals import make_mcp
@@ -544,6 +564,10 @@ def build_streams_router(s: Streams, current_principal, authorize) -> Any:
     @router.post("", status_code=201)
     def create(body: dict = Body(...), pr=Depends(current_principal)):
         return wrap(lambda: s.create(body, admin(pr)))
+
+    @router.put("/{sid}")
+    def update_stream(sid: str, body: dict = Body(...), pr=Depends(current_principal)):
+        return wrap(lambda: s.update(sid, body, admin(pr)))
 
     @router.post("/{sid}/enabled")
     def enabled(sid: str, body: dict = Body(...), pr=Depends(current_principal)):

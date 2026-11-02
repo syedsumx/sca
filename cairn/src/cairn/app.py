@@ -241,6 +241,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.pipes import build_pipes_router
 
         app.include_router(build_pipes_router(services.pipes, cp, authz))
+    if services.bundle_state is not None:
+        from cairn.iac.state import build_bundles_router
+
+        app.include_router(build_bundles_router(services.bundle_state, cp, authz))
     if services.derived is not None:
         from cairn.pipelines.derived import build_derived_router
 

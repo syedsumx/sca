@@ -230,6 +230,34 @@ jobs:
   # dbt, Airflow 3 and Spark 4 on the lakehouse, as shipped (the cairn/dbt, cairn/airflow and cairn/spark
   # images), against a real Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies,
   # run recording, lineage, Airflow sign-in through Cairn and Spark governed table by table.
+  # The Terraform provider (terraform-provider-cairn), built from source and run by real Terraform
+  # against the Cairn API (tests/test_terraform_provider.py). Bundles (cairn bundle) run in the python job.
+  terraform:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          cache-dependency-path: cairn/terraform-provider-cairn/go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Vet
+        working-directory: cairn/terraform-provider-cairn
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+      - name: Terraform against Cairn
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test]"
+          docker pull -q hashicorp/terraform:1.13.4
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py | tee "$RUNNER_TEMP/tf.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
+
   pipelines:
     runs-on: ubuntu-latest
     steps:

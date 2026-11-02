@@ -257,6 +257,40 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - an HR table was refused;
   - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
 
+## Delta Lake tables
+
+Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).
+
+- **Governed like the lakehouse.** A Delta table `delta.<schema>.<table>` is the `delta-lake` dataset `<schema>.<table>`. Cairn's access, masks, row filters and write rights apply to it, as to any Trino table.
+- **Delta's own features.** History (`"orders$history"`), time travel (`FOR VERSION AS OF`), `CREATE TABLE AS`, inserts, updates, deletes and `MERGE`.
+- **Tables other engines wrote.** Spark and Databricks Delta tables, for example. Register one by its location: `CALL delta.system.register_table('schema', 'table', 's3://…/table')`. `unregister_table` forgets one and leaves its files.
+- **Helm.** Set `cairn.trino.delta.enabled`, and `credentialsSecret` (`access-key`, `secret-key`) with a store key that can reach only the Delta prefix. The chart sets the catalog's mapping on the API. One coordinator writes at a time (`delta.enable-non-concurrent-writes`), which suits the chart's single coordinator.
+- **Tested** with Trino and Cairn Store (`tests/test_trino_e2e.py`). A Delta table was created from the lakehouse and written. Masks, row filters and a refused write applied. History and time travel worked. After the table was unregistered, it was registered again by its location and still governed.
+
+## Functions in SQL: AI and Python
+
+Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
+
+- **AI functions.** Trino's `ai` connector, as the catalog `llm`: `llm.ai.ai_gen`, `ai_classify`, `ai_analyze_sentiment`, `ai_extract`, `ai_mask`, `ai_translate` and `ai_fix_grammar`. For example: `SELECT llm.ai.ai_classify(comment, ARRAY['bug', 'praise']) FROM support.tickets`.
+  - **Who may call them.** They send rows to a model outside the lakehouse, so calling one needs Cairn's `USE_AI_FUNCTIONS`, granted like any privilege. Others are refused before anything is sent. The catalog crawler never calls them. `CAIRN_TRINO_AI_CATALOGS` names the AI catalogs (default `llm`).
+  - **What the model sees.** What the caller sees: masks and row filters apply before any function runs, so a masked column reaches the model masked.
+  - **Helm.** Set `cairn.trino.ai`: `enabled`, `provider` (`anthropic`, or `openai` for any OpenAI-compatible endpoint such as Ollama or vLLM), `model`, an optional `endpoint`, and `apiKeySecret`.
+- **Python functions.** Inline, per query, sandboxed in WebAssembly by Trino:
+
+  ```sql
+  WITH FUNCTION domain(e varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'domain')
+  AS $$
+  def domain(e):
+      return e.split('@')[-1]
+  $$
+  SELECT domain(email) FROM sales.orders
+  ```
+
+  They run on the caller's rows, after masks and filters, and cannot reach files or the network.
+- **Tested** with Trino (`tests/test_trino_e2e.py`, against a stand-in for the model's API; the decisions in `tests/test_trino_access.py`):
+  - **AI functions.** A user without `USE_AI_FUNCTIONS` was refused and nothing was sent. With it, the model was sent her masked email, never the raw one.
+  - **Python functions.** One ran on masked values for her, and on real values for the admin.
+
 ## SQL workspace
 
 **SQL** (`/sql`) is where people write and run read-only SQL against any connection that serves catalog datasets, as themselves.
@@ -1163,6 +1197,11 @@ A multi-table transaction changes every table or none.
 - **Why this is different from Trino.** Trino applies Cairn's masks and row filters inside each query. Spark reads a table's data files itself, and those files hold what a mask or filter would hide. So for these engines:
   - Cairn Catalog asks Cairn about each table, as the user (`POST /v1/lakehouse/decide`, with Cairn's service token; decisions are cached for 15 seconds).
   - A table with a mask or row filter for that user is **refused**: "Masks or row filters apply to this table for you. Query it through Trino." The user queries it through Trino, or through a view a data owner builds in Trino.
+  - **Reading it anyway, governed.** `cairn_spark.governed_read(spark, "sales.orders")` reads such a table through Trino, as the same user, with Spark's JDBC reader. Trino applies their masks and row filters, so Spark gets what they may see and never the files. Spark pushes column choices and filters down to Trino.
+    - **Parallel reads.** Give `partition_column` with `lower_bound`, `upper_bound` and `num_partitions`, or `predicates`: one WHERE clause per partition.
+    - **Settings.** Set `CAIRN_TRINO_URL` (https) and `CAIRN_TRINO_CATALOG` (default `lakehouse`). Set `CAIRN_CA_FILE` at the same path on the driver and the executors. The image includes Trino's JDBC driver.
+    - **The token.** The read signs in with a short Trino token from Cairn (`POST /v1/trino/token`), passed in the read's properties so Spark redacts it. The read must start within the token's life. Trino tokens are for people, so pipeline users read through Trino directly or through a derived table.
+    - **Tested** with Spark, Trino and Cairn Catalog (`tests/test_spark_e2e.py`). Through Trino, `ana` saw her masked emails, also in a two-partition read with a pushed-down filter; `bob` saw only his rows; a table hidden from `ana` was refused. The catalog still refused Spark the files.
   - Tables the user may not see are not listed. Their namespaces show only what is visible.
   - Reading needs read. Appending, overwriting and deleting rows needs write. Creating, dropping, renaming and changing schema or properties needs manage. Namespaces need Cairn's system privilege.
   - Vended credentials are read-only unless the user may write the table. They cover only that table's location.
@@ -1343,6 +1382,23 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
   - **Merge.** A merge applied an update and inserted the new rows.
   - **Owner.** A table owned by a user without access to its source failed its run, recorded, and nothing was created.
   - **Checks.** Statements that are not one SELECT, a query reading its own target, and bad columns were refused. Owners saw and ran only their own. A running refresh blocked a second one.
+
+## Infrastructure as code
+
+Pipes, streams, derived tables and maintenance policies can live in git, reviewed like code.
+
+- **Bundles** (`cairn bundle`). Resources are declared in YAML (`examples/bundles/cairn.yaml`) under a `bundle:` name.
+  - **Commands.** `cairn bundle validate FILE` checks the file alone. `plan` shows what would be created, updated and, with `--prune`, deleted; `--detailed-exitcode` exits 2 when there are changes. `apply` does it.
+  - **Variables.** `${NAME}` comes from `--var NAME=value` or the environment, so one file serves several environments. A missing one is an error.
+  - **Prune.** Cairn keeps each bundle's state: what it manages, versioned (`GET` and `PUT /v1/bundles/{name}`, `MANAGE_SYSTEM_OPERATIONS`). `--prune` deletes only what the bundle created, never resources made by hand or by other bundles.
+  - **Adoption and concurrency.** An existing resource with a declared name is adopted. Two applies from one plan cannot both win: the second is told to plan again.
+  - **Partial failures.** Changes go through Cairn's API as the token's user, so its permissions and audit apply. State is recorded after each change, so a failure halfway leaves an accurate record and the next apply finishes the job.
+- **In place.** Changes keep each resource's id (`PUT /v1/pipes/{id}`, `/v1/streams/{id}`, `/v1/derived/{id}`), so a stream keeps its offsets. A derived table whose query changes is rebuilt from the whole query on its next refresh.
+- **In CI.** On a pull request, run `cairn bundle plan cairn.yaml --var ENV=prod` with a read token. On merge, run `cairn bundle apply cairn.yaml --var ENV=prod --prune` with a pipeline user's token (`CAIRN_URL`, `CAIRN_TOKEN`).
+- **Terraform and OpenTofu** (`terraform-provider-cairn`). The resources `cairn_pipe`, `cairn_stream`, `cairn_derived_table` and `cairn_maintenance_policy` work through the same API. Changes are made in place. Something deleted outside Terraform is created again, and import uses the id (a maintenance policy's is its scope). See the provider's README.
+- **Tested.**
+  - **Bundles** (`tests/test_bundles.py`, against the real API). Plan, apply and re-plan with no changes. An update kept the ids. Prune left a hand-made pipe alone. An existing pipe was adopted. A stale plan was refused. A bad resource stopped the apply with Cairn's reason, after recording what was done.
+  - **Terraform** (`tests/test_terraform_provider.py`, Terraform 1.13 and the provider built from source). Create, then no drift. An in-place change kept the ids. A resource deleted outside was recreated. Cairn's refusal surfaced as a Terraform error. Import, then destroy, which left a hand-made pipe.
 
 ## Backup and restore
 

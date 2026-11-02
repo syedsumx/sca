@@ -1,0 +1,20 @@
+# A bundle: Cairn resources kept in git. `cairn bundle plan examples/bundles/cairn.yaml --var ENV=prod`
+# on a pull request, `cairn bundle apply ... --prune` on merge (see the "Infrastructure as code" docs).
+bundle: sales-${ENV}
+maintenance:
+  - {scope: "*", optimize: true, expire_days: 7, orphan_days: 7, every_hours: 24}
+pipes:
+  - {name: orders-files, bucket: landing, prefix: orders/, format: csv, target: raw.orders, create_table: true}
+streams:
+  - name: customers-cdc
+    topic: pg.public.customers
+    format: debezium
+    key: [id]
+    target: cdc.customers
+    create_table: true
+derived:
+  - name: revenue-by-region
+    target: marts.revenue_by_region
+    mode: full
+    on_change: true
+    sql: SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region
