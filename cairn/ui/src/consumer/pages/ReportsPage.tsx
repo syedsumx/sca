@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { CostTotal, CoverageFacet, CoverageRow, ReportAsset, ReportSnapshot } from '../api/types';
+import type { CostTotal, JobCost, CoverageFacet, CoverageRow, ReportAsset, ReportSnapshot } from '../api/types';
 import { assetPath } from '../components/Assets';
 import { download } from '../components/BulkEdit';
 import { SloDashboard } from '../components/Slos';
@@ -124,6 +124,42 @@ function CoverageTable({
 const usd = (v: number) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 const size = (b: number | null) =>
     b === null ? '–' : b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${(b / 1e9).toFixed(1)} GB`;
+
+/** The job's name: the last part of its dataJob urn (`urn:li:dataJob:(<flow>,<name>)`). */
+function jobName(urn: string): string {
+    const m = /,([^,()]+)\)$/.exec(urn);
+    return m ? m[1] : urn;
+}
+
+/** What each Spark application cost: the cores it reserved times its running time. */
+function JobCostTable() {
+    const q = useDheQuery<JobCost[]>('/reports/costs/jobs', (c, signal) => c.jobCosts(30, { signal }));
+    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.data && !q.data.length)
+        return <Muted>No Spark runs priced yet. Set CAIRN_COST_SPARK_USD_PER_CORE_HOUR to price them.</Muted>;
+    return (
+        <>
+            <Muted>
+                Estimated from what each application reserved (cores x running time); the cost is shared out to the
+                tables it wrote.
+            </Muted>
+            <Table<JobCost>
+                size="small"
+                rowKey="job"
+                loading={q.loading}
+                dataSource={q.data ?? []}
+                pagination={{ pageSize: 15, hideOnSinglePage: true, showSizeChanger: false }}
+                columns={[
+                    { title: 'Job', render: (_, j) => <Link to={assetPath(j.job)}>{jobName(j.job)}</Link> },
+                    { title: 'Engine', dataIndex: 'engine' },
+                    { title: 'Runs', dataIndex: 'runs' },
+                    { title: 'Running time', render: (_, j) => hours(j.seconds / 3600) },
+                    { title: 'Cost, 30 days', render: (_, j) => usd(j.usd) },
+                ]}
+            />
+        </>
+    );
+}
 
 function CostTable({ kind }: { kind: 'idle' | 'expensive' }) {
     const { client } = useConsumerApi();
@@ -296,6 +332,7 @@ export function ReportsPage() {
                         items={[
                             { key: 'idle', label: 'Idle tables', children: <CostTable kind="idle" /> },
                             { key: 'expensive', label: 'Expensive per read', children: <CostTable kind="expensive" /> },
+                            { key: 'jobs', label: 'Spark jobs', children: <JobCostTable /> },
                         ]}
                     />
                     {s.governance.personas !== undefined && (

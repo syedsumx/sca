@@ -104,3 +104,29 @@ it('shows the figures and drills into the assets behind one', async () => {
     expect(proposal.reason).toMatch(/costs \$70.00 a month/);
     expect(Object.fromEntries(drill.url.searchParams)).toEqual({ missing: 'owner', domain: 'none' });
 });
+
+it('shows what each Spark job cost', async () => {
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /reports': SNAP,
+        'GET /reports/costs/idle': [],
+        'GET /reports/costs/expensive': [],
+        'GET /reports/costs/jobs': [
+            { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,orders,PROD),orders_nightly)', engine: 'spark', runs: 30,
+              seconds: 36000, usd: 80.15 },
+        ],
+    });
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <ReportsPage />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('tab', { name: 'Spark jobs' }));
+    const link = await screen.findByRole('link', { name: 'orders_nightly' });
+    const row = link.closest('tr')!;
+    expect(within(row).getByText('10.0 h')).toBeTruthy();
+    expect(within(row).getByText('30')).toBeTruthy();
+    expect(within(row).getByText(/80/)).toBeTruthy();
+});

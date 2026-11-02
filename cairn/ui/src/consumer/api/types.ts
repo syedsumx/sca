@@ -685,6 +685,15 @@ export interface CostTotal {
     cost_per_read_usd?: number;
 }
 
+/** What one Spark application (job) cost over a period, priced from its runs (GET /reports/costs/jobs). */
+export interface JobCost {
+    job: string;
+    engine: string;
+    runs: number;
+    seconds: number;
+    usd: number;
+}
+
 export interface DataResult {
     columns: string[];
     rows: unknown[][];

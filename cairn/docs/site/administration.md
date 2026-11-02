@@ -288,7 +288,7 @@ Daily figures per table come from warehouse collectors, which run once a day for
   - **The cores.** `spark.driver.cores` plus `spark.executor.instances` × `spark.executor.cores`. With dynamic allocation, `maxExecutors` (an upper bound); N for `local[N]`. Otherwise `CAIRN_COST_SPARK_DEFAULT_CORES` (default 4). `cairn_spark` sends these settings with the events.
   - **Who pays.** Producing data is what the job is for, so the cost is split evenly across the tables its queries wrote, on the day it finished.
   - **Charged once.** Each application is charged once in `cairn_run_costs`, however often its events are delivered.
-  - **Per job.** `GET /reports/costs/jobs?days=30` lists what each application cost.
+  - **Per job.** **Reports → Cost → Spark jobs** (`GET /reports/costs/jobs?days=30`) lists what each application cost over 30 days: its runs, running time and dollars.
 
   It is an estimate of what was reserved, not a bill. For the exact figure from your cloud, post daily rows to `POST /reports/costs`.
 

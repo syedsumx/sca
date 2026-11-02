@@ -67,6 +67,7 @@ import type {
     PastAnswer,
     CoverageFacet,
     CostTotal,
+    JobCost,
     AgentCall,
     AIDatasetRead,
     AIReader,
@@ -948,6 +949,10 @@ export class ConsumerClient extends CairnClient {
 
     expensiveTables(days = 30, opts?: RequestOptions) {
         return this.request<CostTotal[]>('GET', '/reports/costs/expensive', undefined, { ...opts, query: { days } });
+    }
+
+    jobCosts(days = 30, opts?: RequestOptions) {
+        return this.request<JobCost[]>('GET', '/reports/costs/jobs', undefined, { ...opts, query: { days } });
     }
 
     proposeDeprecation(urn: string, reason: string) {
