@@ -36,6 +36,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Request
+from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
@@ -453,8 +454,8 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                 if form.get("grant_type") != "authorization_code":
                     return JSONResponse({"error": "unsupported_grant_type"}, 400)
                 try:
-                    out = oauth.exchange(form.get("code", ""), form.get("redirect_uri", ""), cid, secret,
-                                         form.get("code_verifier", ""))
+                    out = await run_in_threadpool(oauth.exchange, form.get("code", ""), form.get("redirect_uri", ""), cid,
+                                                  secret, form.get("code_verifier", ""))
                 except OAuthError as e:
                     return JSONResponse({"error": e.error, "error_description": str(e)}, e.status)
                 return JSONResponse(out, headers={"Cache-Control": "no-store"})
@@ -487,17 +488,17 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
     @router.post("/{given}/allow")
     async def allow(given: str, request: Request):
         check(given)
-        return {"result": access.allow(await body(request))}
+        return {"result": await run_in_threadpool(access.allow, await body(request))}
 
     @router.post("/{given}/batch")
     async def batch(given: str, request: Request):
         check(given)
-        return {"result": access.batch(await body(request))}
+        return {"result": await run_in_threadpool(access.batch, await body(request))}
 
     @router.post("/{given}/row-filters")
     async def row_filters(given: str, request: Request):
         check(given)
-        return {"result": access.row_filters(await body(request))}
+        return {"result": await run_in_threadpool(access.row_filters, await body(request))}
 
     @router.post("/{given}/lineage")
     async def lineage_events(given: str, request: Request):
@@ -513,7 +514,7 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         # Jobs are named by what they write (as Trino names it), then datasets as Cairn names them.
         events = [access.remap_lineage(name_jobs_by_outputs(e)) for e in (body if isinstance(body, list) else [body])]
         try:
-            return lineage.handle_many(events, LINEAGE_ACTOR)
+            return await run_in_threadpool(lineage.handle_many, events, LINEAGE_ACTOR)
         except OpenLineageError as e:
             raise HTTPException(422, str(e))
         except Exception as e:  # the metadata store is down or refused the write
@@ -541,13 +542,13 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         except ValueError:
             raise HTTPException(400, "the body is not JSON")
         try:
-            return usage.record(event)
+            return await run_in_threadpool(usage.record, event)
         except UsageError as e:
             raise HTTPException(422, str(e))
 
     @router.post("/{given}/column-mask")
     async def column_mask(given: str, request: Request):
         check(given)
-        return {"result": access.column_mask(await body(request))}
+        return {"result": await run_in_threadpool(access.column_mask, await body(request))}
 
     return router
