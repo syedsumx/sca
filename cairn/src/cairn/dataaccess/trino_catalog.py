@@ -89,8 +89,10 @@ class TrinoCatalogSync:
         return rows
 
     def _keep_dbt_docs(self, mcp: dict) -> dict:
-        """Keeps what dbt wrote (``cairn.pipelines.dbt``) across syncs: a description where Trino has no
-        comment, column descriptions likewise, and ``dbt.*`` properties."""
+        """Keeps what others wrote across syncs: dbt's (``cairn.pipelines.dbt``) description where Trino has
+        no comment, column descriptions likewise, and ``dbt.*`` properties; and each column's glossary
+        terms and tags (classifications such as PII), which masks and row filters are decided on: a sync
+        must never unlabel a column."""
         import json
 
         name = mcp.get("aspectName")
@@ -106,10 +108,14 @@ class TrinoCatalogSync:
             kept = {k: v for k, v in (before.get("customProperties") or {}).items() if k.startswith("dbt.")}
             new["customProperties"] = {**kept, **(new.get("customProperties") or {})}
         else:
-            old_docs = {f.get("fieldPath"): f.get("description") for f in before.get("fields") or [] if f.get("description")}
+            old = {f.get("fieldPath"): f for f in before.get("fields") or []}
             for f in new.get("fields") or []:
-                if not f.get("description") and old_docs.get(f.get("fieldPath")):
-                    f["description"] = old_docs[f["fieldPath"]]
+                prev = old.get(f.get("fieldPath")) or {}
+                if not f.get("description") and prev.get("description"):
+                    f["description"] = prev["description"]
+                for k in ("glossaryTerms", "globalTags"):
+                    if prev.get(k) and not f.get(k):
+                        f[k] = prev[k]
         mcp = dict(mcp)
         mcp["aspect"] = {**mcp["aspect"], "value": json.dumps(new, sort_keys=True, separators=(",", ":"))}
         return mcp

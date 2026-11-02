@@ -393,9 +393,9 @@ def test_token_exchange_is_strict(cairn, lake, renewing_catalog):  # noqa: F811
     r = httpx.post(ex, data={"grant_type": "client_credentials", "client_id": sid, "client_secret": "nope"}, timeout=10)
     assert r.status_code == 401 and r.json()["error"] == "invalid_client"
     # Not another service's token, not a token without a session, not a forged one, not another grant.
-    trino = s.trino_tokens.mint("urn:li:corpuser:bob")["token"]
+    trino_tok = s.trino_tokens.mint("urn:li:corpuser:bob")["token"]
     sessionless = s.trino_tokens.mint("urn:li:corpuser:bob", audience="lakehouse")["token"]
-    for bad in (trino, sessionless, tok["token"][:-4] + "AAAA", "x.y.z"):
+    for bad in (trino_tok, sessionless, tok["token"][:-4] + "AAAA", "x.y.z"):
         assert httpx.post(ex, data={**grant, "subject_token": bad}, timeout=10).json()["error"] == "invalid_grant"
     assert httpx.post(ex, data={**grant, "grant_type": "password", "subject_token": tok["token"]},
                       timeout=10).json()["error"] == "unsupported_grant_type"

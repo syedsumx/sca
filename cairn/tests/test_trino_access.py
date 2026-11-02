@@ -439,3 +439,21 @@ def test_airflow_signs_in_through_cairn_with_its_own_client(client, graph):
     assert out.json()["error"] == "invalid_grant"
     entries = client.app.state.services.audit.entries(category="identity")
     assert any(e["action"] == "airflow.sign_in" and e["actor"] == ANA for e in entries)
+
+
+def test_ai_functions_need_their_privilege(client):
+    """Trino's AI functions send rows to a model outside the lakehouse: USE_AI_FUNCTIONS, granted like any
+    privilege. Built-in and inline functions (SQL, Python) stay open."""
+    c = client
+    fn = lambda cat, name="ai_gen": {"function": {"catalogName": cat, "schemaName": "ai", "functionName": name}}  # noqa: E731
+    assert ask(c, "allow", "admin", "ExecuteFunction", fn("llm")) is True       # "*" covers it
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("llm")) is False
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("system", "abs")) is True
+    assert ask(c, "allow", "cairn-catalog", "ExecuteFunction", fn("llm")) is False   # the crawler never calls models
+    from cairn.governance.abac import Policy, PolicyBundle
+    s = c.app.state.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(id="ana-ai", effect="allow", actions=["USE_AI_FUNCTIONS"],
+                                                                 condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("llm")) is True
+    assert ask(c, "allow", "eve", "ExecuteFunction", fn("llm")) is False

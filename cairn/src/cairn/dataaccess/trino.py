@@ -14,6 +14,9 @@ masking plans and row filters that govern the catalog and its SQL editor:
   - Changing rows (``INSERT``, ``UPDATE``, ``DELETE``, ``MERGE``, ``TRUNCATE``) needs ``WRITE_DATASET``.
   - Changing tables, views, schemas and running table procedures (``optimize``) needs ``MANAGE_DATASET``.
   - Other users' queries and system information need ``MANAGE_SYSTEM_OPERATIONS``.
+  - AI functions (the catalogs in ``CAIRN_TRINO_AI_CATALOGS``, default ``llm``: Trino's ``ai`` connector)
+    send rows to a model outside the lakehouse, so calling one needs ``USE_AI_FUNCTIONS``. They see
+    what the caller sees: masks and row filters apply before any function runs.
   - An action Cairn does not know is refused.
 - **Masks and filters.** Columns the caller's masking plan covers get a Trino mask with the plan's strategy
   (``partial``, ``hash``, ``redact`` or ``null``). ``row_filter`` obligations (``{"expression": "region =
@@ -40,6 +43,7 @@ from starlette.concurrency import run_in_threadpool
 
 logger = logging.getLogger(__name__)
 
+AI = "USE_AI_FUNCTIONS"
 VIEW, READ, WRITE, MANAGE, SYSTEM = ("VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET",
                                      "MANAGE_SYSTEM_OPERATIONS")
 
@@ -59,7 +63,7 @@ TABLE_OPS: dict[str, str] = {
 }
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
-            "ShowFunctions", "FilterFunctions", "ExecuteFunction", "SetSystemSessionProperty",
+            "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
             "SetCatalogSessionProperty", "ShowCurrentRoles", "ShowRoleGrants", "ShowRoles"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
 SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization", "CreateFunction", "DropFunction"}
@@ -186,9 +190,11 @@ class TrinoAccess:
     """Turns Trino's access requests into Cairn decisions."""
 
     def __init__(self, decide: Callable[[str, list[str], str, Optional[str]], Any],
-                 plan_for: Callable[[str, str], Any], catalogs: dict[str, CatalogMapping]):
+                 plan_for: Callable[[str, str], Any], catalogs: dict[str, CatalogMapping],
+                 ai_catalogs: Optional[set[str]] = None):
         # decide(actor, groups, privilege, urn) -> Decision (pdp)
         self.decide = decide
+        self.ai_catalogs = {"llm"} if ai_catalogs is None else set(ai_catalogs)
         self.plan_for = plan_for
         self.catalogs = catalogs
 
@@ -257,6 +263,11 @@ class TrinoAccess:
         res = action.get("resource") or {}
         user = actor.removeprefix("urn:li:corpuser:")
         if op in OPEN_OPS:
+            return True
+        if op == "ExecuteFunction":   # built-in and inline functions are open; AI functions need USE_AI_FUNCTIONS
+            f = res.get("function") or {}
+            if str(f.get("catalogName") or "") in self.ai_catalogs:
+                return user != CRAWLER and self.allowed(actor, groups, AI, None)
             return True
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}

@@ -27,6 +27,7 @@ EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
 ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
 CUSTOMERS = "urn:li:dataset:(urn:li:dataPlatform:postgres,crm.sales.customers,PROD)"
 SALARIES = "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
+DELTA_ORDERS = "urn:li:dataset:(urn:li:dataPlatform:delta-lake,dsales.orders,PROD)"
 
 
 def _ready():
@@ -91,12 +92,15 @@ def cairn(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("cairn")
     os.environ["CAIRN_TRINO_ACCESS_KEY"] = KEY
     os.environ["CAIRN_TRINO_CATALOGS"] = json.dumps({"lake": {"platform": "iceberg", "database": ""},
+                                                     "delta": {"platform": "delta-lake", "database": ""},
                                                      "crm": {"platform": "postgres", "database": "crm"}})
     os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
     os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
     try:
         graph = InMemoryGraph()
         graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+        graph.aspects[(DELTA_ORDERS, "schemaMetadata")] = {"fields": [
             {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
         graph.aspects[(SALARIES, "schemaMetadata")] = {"fields": [{"fieldPath": "name"}, {"fieldPath": "salary"}]}
         graph.aspects[(CUSTOMERS, "schemaMetadata")] = {"fields": [
@@ -157,12 +161,54 @@ def write_tls(d):
     os.chmod(f"{d}/tls.pem", 0o644)
 
 
+class ModelStub:
+    """An OpenAI-compatible chat endpoint that records what it is sent (for Trino's AI functions)."""
+
+    def __init__(self):
+        import http.server
+
+        stub = self
+        self.prompts: list[str] = []
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
+                text = " ".join(str(m.get("content")) for m in body.get("messages") or [])
+                stub.prompts.append(text)
+                out = json.dumps({"id": "c1", "object": "chat.completion", "created": 0, "model": body.get("model", ""),
+                                  "choices": [{"index": 0, "finish_reason": "stop",
+                                               "message": {"role": "assistant", "content": "positive"}}],
+                                  "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}).encode()
+                self.send_response(200 if self.path == "/v1/chat/completions" else 404)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(out)))
+                self.end_headers()
+                self.wfile.write(out)
+
+            def log_message(self, *a):
+                pass
+        self.port = port()
+        self.server = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+
 @pytest.fixture(scope="module")
 def trino(lake, cairn):
     cairn_url, services = cairn
     d = tempfile.mkdtemp(prefix="trino-")
     os.makedirs(f"{d}/catalog")
     tp = port()
+    # Delta Lake tables in Cairn Store, their metastore beside them (a file metastore in the store).
+    open(f"{d}/catalog/delta.properties", "w").write("\n".join([
+        "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
+        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
+        "delta.register-table-procedure.enabled=true", "delta.enable-non-concurrent-writes=true", ""]))
+    # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
+    model = ModelStub()
+    open(f"{d}/catalog/llm.properties", "w").write("\n".join([
+        "connector.name=ai", "ai.provider=openai", "ai.model=stub-model", f"ai.openai.endpoint=http://127.0.0.1:{model.port}",
+        "ai.openai.api-key=${ENV:CAIRN_AI_API_KEY}", ""]))
     open(f"{d}/catalog/lake.properties", "w").write("\n".join([
         "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={lake['catalog']}",
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
@@ -223,6 +269,7 @@ def trino(lake, cairn):
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
+                    "-e", "CAIRN_AI_API_KEY=stub-key",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                     "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
@@ -245,12 +292,13 @@ def trino(lake, cairn):
             raise RuntimeError(why[0] if why else out.stderr.strip()[-500:] or out.stdout)
         return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
 
-    sql("CREATE SCHEMA lake.sales")
-    sql("CREATE SCHEMA lake.hr")
-    sql("CREATE TABLE lake.sales.orders AS SELECT * FROM (VALUES (1, 'jane@acme.com', 'EU'), (2, 'bo@example.org', 'US'), "
+    # IF NOT EXISTS: the Spark tests bring their own lake with these tables in it.
+    sql("CREATE SCHEMA IF NOT EXISTS lake.sales")
+    sql("CREATE SCHEMA IF NOT EXISTS lake.hr")
+    sql("CREATE TABLE IF NOT EXISTS lake.sales.orders AS SELECT * FROM (VALUES (1, 'jane@acme.com', 'EU'), (2, 'bo@example.org', 'US'), "
         "(3, 'li@acme.com', 'EU')) AS t(id, email, region)")
-    sql("CREATE TABLE lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
-    sql.port, sql.tls, sql.dir = tp, tls, d
+    sql("CREATE TABLE IF NOT EXISTS lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
+    sql.port, sql.tls, sql.dir, sql.model = tp, tls, d, model
     yield sql
     subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)
     shutil.rmtree(d, ignore_errors=True)
@@ -501,6 +549,10 @@ def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
     props = s.graph.get_aspect(urn, "datasetProperties")
     assert props["description"] == "Customer returns" and props["customProperties"]["trino_table"] == "returns"
     assert s.graph.get_aspect(urn, "subTypes") == {"typeNames": ["Table"]}
+    # A column's classification survives the sync (its mask is decided on it).
+    email = next(f for f in s.graph.get_aspect(ORDERS, "schemaMetadata")["fields"] if f["fieldPath"] == "email")
+    assert email["glossaryTerms"]["terms"] == [{"urn": EMAIL}], email
+    assert trino("SELECT email FROM sales.orders WHERE id = 1", user="ana") == [{"email": "j•••@•••.com"}]
     # Hidden from ana, but the crawler saw it: structure is catalogued, its rows were never read.
     assert s.graph.get_aspect("urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)", "schemaMetadata")
     with pytest.raises(RuntimeError, match="Access Denied"):
@@ -687,3 +739,58 @@ def test_derived_tables_refresh_incrementally_and_in_order(trino, cairn):
             dt.create({"name": "x", "target": "shop.x", "sql": "SELECT 1 AS one", "every_minutes": 5, **body}, admin, admin)
     with pytest.raises(DerivedError, match="exists"):
         dt.create({"name": "other", "target": "shop.latest", "sql": "SELECT 1 AS one", "every_minutes": 5}, admin, admin)
+
+
+def test_ai_and_python_functions_run_in_sql_under_cairns_policies(trino, cairn):
+    """Trino's AI functions call a model only for people Cairn allows (USE_AI_FUNCTIONS), and the model
+    is sent what the caller sees: masked values stay masked. Python functions run inline, sandboxed,
+    on the same masked values."""
+    from cairn.governance.abac import Policy, PolicyBundle
+
+    _, s = cairn
+    q = "SELECT llm.ai.ai_analyze_sentiment(email) AS s FROM sales.orders WHERE id = 1"
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+    assert trino.model.prompts == []                                  # refused before any call
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(id="ana-ai", effect="allow", actions=["USE_AI_FUNCTIONS"],
+                                                                 condition={"attr": "subject.urn", "op": "eq",
+                                                                            "value": "urn:li:corpuser:ana"})]))
+    try:
+        assert trino(q, user="ana") == [{"s": "positive"}]
+        assert any("j•••@•••.com" in p for p in trino.model.prompts), trino.model.prompts
+        assert not any("jane@acme.com" in p for p in trino.model.prompts), trino.model.prompts   # the raw value never left
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(q, user="bob")
+    finally:
+        s.pdp.set_bundle(b)
+    py = ("WITH FUNCTION domain(e varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'domain') "
+          "AS $$\ndef domain(e):\n    return e.split('@')[-1]\n$$ "
+          "SELECT id, domain(email) AS d FROM sales.orders WHERE id IN (1, 2) ORDER BY id")
+    assert trino(py, user="ana") == [{"id": 1, "d": "•••.com"}, {"id": 2, "d": "•••.org"}]
+    assert trino(py) == [{"id": 1, "d": "acme.com"}, {"id": 2, "d": "example.org"}]   # the admin's unmasked rows
+
+
+def test_delta_lake_tables_are_governed_like_the_lakehouse(trino):
+    """Delta Lake in Cairn Store through Trino's delta catalog: tables are created, written and read under
+    Cairn's policies (masks, row filters, refusals), and a Delta table another engine wrote is registered."""
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dsales")
+    trino("CREATE TABLE delta.dsales.orders AS SELECT * FROM lake.sales.orders WHERE id <= 3")
+    trino("INSERT INTO delta.dsales.orders VALUES (5, 'kim@acme.com', 'US')")
+    assert [r["email"] for r in trino("SELECT email FROM delta.dsales.orders ORDER BY id")] == \
+        ["jane@acme.com", "bo@example.org", "li@acme.com", "kim@acme.com"]
+    rows = trino("SELECT id, email FROM delta.dsales.orders ORDER BY id", user="ana")
+    assert [r["email"] for r in rows] == ["j•••@•••.com", "b•••@•••.org", "l•••@•••.com", "k•••@•••.com"]
+    assert [r["id"] for r in trino("SELECT id FROM delta.dsales.orders ORDER BY id", user="bob")] == [1, 3]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("INSERT INTO delta.dsales.orders VALUES (6, 'x@y.z', 'EU')", user="ana")
+    # Delta's own history and time travel.
+    assert len(trino('SELECT version FROM delta.dsales."orders$history"')) >= 2
+    assert len(trino("SELECT id FROM delta.dsales.orders FOR VERSION AS OF 0")) == 3
+    # A Delta table written elsewhere (here: forgotten by the metastore, its files left in place) is
+    # registered by its location and governed the same.
+    loc = trino("SELECT \"$path\" AS p FROM delta.dsales.orders LIMIT 1")[0]["p"].rsplit("/", 1)[0]
+    trino("CALL delta.system.unregister_table('dsales', 'orders')")
+    assert trino("SHOW TABLES FROM delta.dsales") == []
+    trino(f"CALL delta.system.register_table('dsales', 'orders', '{loc}')")
+    assert [r["email"] for r in trino("SELECT email FROM delta.dsales.orders WHERE id = 5", user="ana")] == ["k•••@•••.com"]

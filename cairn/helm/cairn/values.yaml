@@ -730,6 +730,25 @@ cairn:
     # Other databases queried through Trino, in place (federation). Cairn decides their tables like the
     # lakehouse's (platform/database: how Cairn's catalog names them, e.g. postgres datasets crm.<schema>.<table>).
     # Credentials come from a Secret (user, password keys); never put them in properties.
+    # AI functions in SQL (Trino's ai connector, catalog "llm": llm.ai.ai_gen, ai_classify, ai_analyze_sentiment,
+    # ai_extract, ai_mask, ai_translate, ai_fix_grammar). Calling one needs Cairn's USE_AI_FUNCTIONS; masks
+    # and row filters apply first. provider: openai (or any OpenAI-compatible endpoint, e.g. Ollama or vLLM)
+    # or anthropic. The API key comes from a Secret.
+    # Delta Lake tables (catalog "delta") in Cairn Store, their metastore files beside them
+    # (s3://<bucket>/<prefix>/), governed by Cairn like the lakehouse (datasets on the delta-lake platform).
+    # A store key that can reach only that prefix, from a Secret (access-key, secret-key). One coordinator
+    # writes at a time; register tables other engines wrote with CALL delta.system.register_table.
+    delta:
+      enabled: false
+      bucket: lakehouse
+      prefix: delta
+      credentialsSecret: { name: "", accessKeyKey: access-key, secretKeyKey: secret-key }
+    ai:
+      enabled: false
+      provider: anthropic
+      model: claude-haiku-5-5
+      endpoint: ""
+      apiKeySecret: { name: "", key: api-key }
     federation: []
     #  - name: crm
     #    connector: postgresql
