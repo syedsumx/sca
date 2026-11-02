@@ -87,6 +87,7 @@ class Services:
     sql_workspace: Optional[Any] = None
     sql_boards: Optional[Any] = None
     maintenance: Optional[Any] = None
+    pipes: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -529,6 +530,10 @@ def _build_pipeline_health(s: Services) -> None:
     from cairn.pipelines.changes import DatasetChanges, PipelineHealth
 
     s.dataset_changes = DatasetChanges(s.engine)
+    if getattr(s, "pipes", None) is not None:
+        s.pipes.changes = s.dataset_changes   # loaded tables are changes (data-aware schedules)
+        if getattr(s, "lakehouse", None) is not None:
+            s.pipes.urn = lambda ns, t: s.lakehouse.urn([ns], t)
     if s.dbt_runs is not None:
         s.dbt_runs.changes = s.dataset_changes
         s.dbt_runs.engine = s.engine  # runs, state (Slim CI) and docs
@@ -720,6 +725,11 @@ def _build_active_metadata(s: Services) -> None:
                 hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                                   url="/sql"))
             s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
+        if os.environ.get("CAIRN_PIPES_STORE") and os.environ.get("CAIRN_PIPES_CATALOG"):
+            from cairn.pipelines.pipes import Pipes, _settings
+
+            s.pipes = Pipes(s.engine, _settings("CAIRN_PIPES_STORE"), _settings("CAIRN_PIPES_CATALOG"), s.audit,
+                            webhook_secret=os.environ.get("CAIRN_PIPES_WEBHOOK_SECRET", ""))
         if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.maintenance import TableMaintenance
 

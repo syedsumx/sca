@@ -81,6 +81,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.sql_boards.run_due)   # SQL alerts
     if getattr(s, "maintenance", None) is not None:
         sch.extra.append(s.maintenance.run_due)  # lakehouse table maintenance
+    if getattr(s, "pipes", None) is not None:
+        sch.extra.append(s.pipes.run_due)        # pipes: files events missed
     sch.run_forever()
 
 

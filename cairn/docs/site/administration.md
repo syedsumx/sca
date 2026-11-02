@@ -1270,6 +1270,23 @@ Cairn keeps lakehouse tables healthy with Iceberg's own procedures, run through 
   - **Real tables.** Five small inserts became one file. Snapshots were expired to one. A stray file in the table's location was deleted. The rows were unchanged, every step was recorded, and the table was not maintained again before it was due.
   - **Logic.** The table-level policy beat the schema's, and the schema's beat `*`. A refused step was recorded and the others ran. Bad scopes, names and values were refused, and only operators could set policies.
 
+## Pipes (automatic file loading)
+
+A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines or `parquet`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.
+
+- **Create** with `POST /v1/pipes` (`MANAGE_SYSTEM_OPERATIONS`). List, delete, and see each file's outcome (`GET /v1/pipes/{id}/files`). Changes are audited.
+- **As files arrive.** Point a store event target (a webhook) at `POST /v1/pipes/events`, with the secret in `CAIRN_PIPES_WEBHOOK_SECRET`. Then add the bucket's `s3:ObjectCreated:*` rule for the prefix. Cairn takes only bodies the store signed with that secret (`X-Cairn-Signature`); anything else gets 401.
+- **Sweep.** The scheduler's leader also lists each prefix, and `POST /v1/pipes/{id}/sweep` does it now. This loads anything no event announced.
+- **Once each.** A file (key, size, modification time) is loaded once. It is recorded with its outcome. A file that fails, such as one with columns the table lacks, is recorded as an error; the next file still loads. A failed file is retried when it changes. Markers such as `_SUCCESS` are skipped.
+- **Downstream.** Loaded tables are recorded as changed, so data-aware schedules (Airflow, dbt) see the new data.
+- **Settings.** `CAIRN_PIPES_STORE` holds `{"endpoint", "access_key", "secret_key", "region"}`; give it a key that can only read the pipes' prefixes. `CAIRN_PIPES_CATALOG` holds the pyiceberg REST catalog properties: `uri`, `token`, and the warehouse's `s3.*` settings. Each is JSON, or a path to a JSON file.
+- **Tested** with real Cairn Stores and Cairn Catalog (`tests/test_pipes_e2e.py`):
+  - **Events.** Files loaded as the store's signed events arrived.
+  - **Failures.** A file that did not fit was recorded as failed, and the next file still loaded.
+  - **Once only.** A sweep afterwards loaded nothing again.
+  - **Sweep.** Files under a prefix with no event rule were loaded by the sweep, and the markers were skipped.
+  - **Signature.** A bad signature got 401.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:
