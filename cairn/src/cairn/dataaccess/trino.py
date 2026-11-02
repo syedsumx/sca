@@ -17,6 +17,9 @@ masking plans and row filters that govern the catalog and its SQL editor:
   - AI functions (the catalogs in ``CAIRN_TRINO_AI_CATALOGS``, default ``llm``: Trino's ``ai`` connector)
     send rows to a model outside the lakehouse, so calling one needs ``USE_AI_FUNCTIONS``. They see
     what the caller sees: masks and row filters apply before any function runs.
+  - A warehouse (a Trino of a team's own, ``cairn.dataaccess.warehouses``) asks as itself
+    (``/v1/trino/<key>/warehouse/<name>/...``): running a query there needs ``USE_WAREHOUSE`` on
+    ``urn:li:warehouse:<name>``, granted to the team like any policy.
   - An action Cairn does not know is refused.
 - **Masks and filters.** Columns the caller's masking plan covers get a Trino mask with the plan's strategy
   (``partial``, ``hash``, ``redact`` or ``null``). ``row_filter`` obligations (``{"expression": "region =
@@ -44,6 +47,7 @@ from starlette.concurrency import run_in_threadpool
 logger = logging.getLogger(__name__)
 
 AI = "USE_AI_FUNCTIONS"
+WAREHOUSE = "USE_WAREHOUSE"
 VIEW, READ, WRITE, MANAGE, SYSTEM = ("VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET",
                                      "MANAGE_SYSTEM_OPERATIONS")
 
@@ -256,12 +260,14 @@ class TrinoAccess:
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
-    def allow(self, inp: dict) -> bool:
+    def allow(self, inp: dict, warehouse: Optional[str] = None) -> bool:
         actor, groups = self.who(inp.get("context"))
         action = inp.get("action") or {}
         op = action.get("operation", "")
         res = action.get("resource") or {}
         user = actor.removeprefix("urn:li:corpuser:")
+        if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
+            return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if op in OPEN_OPS:
             return True
         if op == "ExecuteFunction":   # built-in and inline functions are open; AI functions need USE_AI_FUNCTIONS
@@ -501,6 +507,31 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         check(given)
         return {"result": await run_in_threadpool(access.allow, await body(request))}
 
+    import re as _re
+
+    def wh_name(name: str) -> str:
+        if not _re.match(r"^[a-z][a-z0-9-]{0,40}$", name):
+            raise HTTPException(404)
+        return name
+
+    @router.post("/{given}/warehouse/{warehouse}/allow")
+    async def warehouse_allow(given: str, warehouse: str, request: Request):
+        check(given)
+        name = wh_name(warehouse)
+        return {"result": await run_in_threadpool(access.allow, await body(request), name)}
+
+    @router.post("/{given}/warehouse/{warehouse}/batch")
+    async def warehouse_batch(given: str, warehouse: str, request: Request):
+        check(given)
+        wh_name(warehouse)
+        return {"result": await run_in_threadpool(access.batch, await body(request))}
+
+    @router.post("/{given}/warehouse/{warehouse}/row-filters")
+    async def warehouse_row_filters(given: str, warehouse: str, request: Request):
+        check(given)
+        wh_name(warehouse)
+        return {"result": await run_in_threadpool(access.row_filters, await body(request))}
+
     @router.post("/{given}/batch")
     async def batch(given: str, request: Request):
         check(given)
@@ -560,6 +591,12 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
     @router.post("/{given}/column-mask")
     async def column_mask(given: str, request: Request):
         check(given)
+        return {"result": await run_in_threadpool(access.column_mask, await body(request))}
+
+    @router.post("/{given}/warehouse/{warehouse}/column-mask")
+    async def warehouse_column_mask(given: str, warehouse: str, request: Request):
+        check(given)
+        wh_name(warehouse)
         return {"result": await run_in_threadpool(access.column_mask, await body(request))}
 
     return router

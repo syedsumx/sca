@@ -734,6 +734,23 @@ cairn:
     # ai_extract, ai_mask, ai_translate, ai_fix_grammar). Calling one needs Cairn's USE_AI_FUNCTIONS; masks
     # and row filters apply first. provider: openai (or any OpenAI-compatible endpoint, e.g. Ollama or vLLM)
     # or anthropic. The API key comes from a Secret.
+    # Warehouses: a Trino per team (same catalogs and policies), behind the warehouse proxy (cairn
+    # warehouses), which stops one after idleMinutes without queries and starts it on the next (clients
+    # wait for the start). Running a query on one needs Cairn's USE_WAREHOUSE on urn:li:warehouse:<name>.
+    # Clients connect to the proxy's Service, port = the warehouse's port (TLS from cairn.trino.tls).
+    warehouses:
+      idleMinutes: 10
+      startTimeoutSeconds: 300
+      proxy:
+        resources:
+          requests: { cpu: 50m, memory: 128Mi }
+          limits: { memory: 512Mi }
+      list: []
+      #  - name: sales
+      #    port: 8443
+      #    idleMinutes: 15            # default: warehouses.idleMinutes (0: never stopped)
+      #    queryMaxMemory: 4GB
+      #    resources: { requests: { cpu: "2", memory: 8Gi }, limits: { memory: 8Gi } }
     # Delta Lake tables (catalog "delta") in Cairn Store, their metastore files beside them
     # (s3://<bucket>/<prefix>/), governed by Cairn like the lakehouse (datasets on the delta-lake platform).
     # A store key that can reach only that prefix, from a Secret (access-key, secret-key). One coordinator

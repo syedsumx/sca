@@ -242,6 +242,54 @@ spec:
         {{- if .Values.cairn.trino.tls.secretName }}
         - port: https
         {{- end }}
+{{- range $wh := .Values.cairn.trino.warehouses.list }}
+---
+# A team's warehouse: reached only through the warehouse proxy (sign-in tokens cross this hop).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" $ }}-trino-wh-{{ $wh.name }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: trino-wh-{{ $wh.name }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: warehouses
+      ports:
+        - port: http
+{{- end }}
+{{- if .Values.cairn.trino.warehouses.list }}
+---
+# The warehouse proxy: the same clients as Trino.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" . }}-warehouses
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: warehouses
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+        {{- with .Values.cairn.networkPolicy.trinoIngressFrom }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- end }}
 {{- end }}
 {{- if .Values.cairn.notifier.enabled }}
 ---

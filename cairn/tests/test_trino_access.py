@@ -457,3 +457,25 @@ def test_ai_functions_need_their_privilege(client):
                                                                  condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
     assert ask(c, "allow", "ana", "ExecuteFunction", fn("llm")) is True
     assert ask(c, "allow", "eve", "ExecuteFunction", fn("llm")) is False
+
+
+def test_a_warehouse_takes_queries_from_its_team(client):
+    """A team's warehouse asks as itself: running a query there needs USE_WAREHOUSE on it; what the query
+    may read is decided as everywhere else."""
+    c = client
+    s = c.app.state.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="analysts-sales-wh", effect="allow", actions=["USE_WAREHOUSE"], target=Target(resource_urns=["urn:li:warehouse:sales"]),
+        condition={"attr": "subject.groups", "op": "contains", "value": "urn:li:corpGroup:analysts"})]))
+    assert ask(c, "warehouse/sales/allow", "ana", "ExecuteQuery") is False
+    assert ask(c, "warehouse/sales/allow", "ana", "ExecuteQuery", groups=["analysts"]) is True
+    assert ask(c, "warehouse/finance/allow", "ana", "ExecuteQuery", groups=["analysts"]) is False   # not their warehouse
+    assert ask(c, "warehouse/finance/allow", "admin", "ExecuteQuery") is True                       # operators
+    assert ask(c, "allow", "ana", "ExecuteQuery") is True                                           # the shared Trino
+    # Inside the warehouse, tables are decided as anywhere.
+    assert ask(c, "warehouse/sales/allow", "ana", "SelectFromColumns", table("salaries", "hr", columns=["salary"]),
+               groups=["analysts"]) is False
+    assert ask(c, "warehouse/sales/allow", "eve", "ExecuteQuery", groups=["analysts"]) is False     # deny wins
+    r = c.post(f"/v1/trino/{KEY}/warehouse/Bad_Name/allow", json={"input": {}})
+    assert r.status_code == 404

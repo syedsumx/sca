@@ -1,0 +1,131 @@
+{{- if and .Values.cairn.trino.enabled .Values.cairn.trino.warehouses.list }}
+{{- /* The warehouse proxy (cairn warehouses): one port per team warehouse; it starts a stopped warehouse
+       on the first query and scales it to 0 after idleMinutes. Its account may only read and scale
+       the warehouse Deployments. */}}
+{{- $u := .Values.cairn.trino }}
+{{- $w := $u.warehouses }}
+{{- $pctx := dict "root" $ "component" "warehouses" "cfg" $w.proxy }}
+{{- $tls := $u.tls.secretName }}
+{{- $list := list }}
+{{- $names := list }}
+{{- $ports := list }}
+{{- range $wh := $w.list }}
+{{- $dctx := dict "root" $ "component" (printf "trino-wh-%s" $wh.name) "cfg" $u }}
+{{- $port := int (required (printf "cairn.trino.warehouses.list[%s].port" $wh.name) $wh.port) }}
+{{- if has $port $ports }}{{ fail (printf "cairn.trino.warehouses.list[%s]: port %d is taken" $wh.name $port) }}{{ end }}
+{{- $ports = append $ports $port }}
+{{- $names = append $names (include "cairn.componentName" $dctx) }}
+{{- $one := dict "name" $wh.name "port" $port "upstream" (printf "http://%s:%v" (include "cairn.componentName" $dctx) $u.port)
+    "idle_minutes" (ternary $wh.idleMinutes $w.idleMinutes (hasKey $wh "idleMinutes")) "start_timeout_seconds" $w.startTimeoutSeconds
+    "kubernetes" (dict "namespace" $.Release.Namespace "deployment" (include "cairn.componentName" $dctx)) }}
+{{- if $tls }}{{ $_ := set $one "tls" (dict "cert" "/etc/cairn/tls/tls.crt" "key" "/etc/cairn/tls/tls.key") }}{{ end }}
+{{- $list = append $list $one }}
+{{- end }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "cairn.componentName" $pctx }}
+  labels:
+    {{- include "cairn.componentLabels" $pctx | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $pctx }}
+  labels:
+    {{- include "cairn.componentLabels" $pctx | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: {{ toJson $names }}
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: {{ toJson $names }}
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $pctx }}
+  labels:
+    {{- include "cairn.componentLabels" $pctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $pctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.componentName" $pctx }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $pctx }}
+  labels:
+    {{- include "cairn.componentLabels" $pctx | nindent 4 }}
+spec:
+  replicas: 1          # one proxy decides when a warehouse is idle
+  strategy: { type: Recreate }
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $pctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $pctx | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "cairn.componentName" $pctx }}
+      automountServiceAccountToken: true
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: warehouses
+          image: {{ include "cairn.image" $ }}
+          imagePullPolicy: {{ .Values.global.cairn.image.pullPolicy }}
+          args: ["warehouses"]
+          env:
+            - name: CAIRN_WAREHOUSES
+              value: {{ toJson (dict "warehouses" $list) | quote }}
+          ports:
+            {{- range $one := $list }}
+            - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }
+            {{- end }}
+          readinessProbe:
+            tcpSocket: { port: {{ (index $list 0).port }} }
+            periodSeconds: 10
+          resources:
+            {{- toYaml $w.proxy.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          {{- if $tls }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/cairn/tls, readOnly: true }
+          {{- end }}
+      {{- if $tls }}
+      volumes:
+        - name: tls
+          secret: { secretName: {{ $tls }} }
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $pctx }}
+  labels:
+    {{- include "cairn.componentLabels" $pctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $pctx | nindent 4 }}
+  ports:
+    {{- range $one := $list }}
+    - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
+    {{- end }}
+{{- end }}

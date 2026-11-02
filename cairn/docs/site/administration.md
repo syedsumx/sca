@@ -257,6 +257,26 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - an HR table was refused;
   - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
 
+## Warehouses: a Trino per team, stopped when idle
+
+A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.
+
+- **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. `idleMinutes: 0` keeps a warehouse up.
+- **Who may use one.** Each warehouse asks Cairn as itself. Running a query there needs `USE_WAREHOUSE` on `urn:li:warehouse:<name>`, granted to the team like any policy; operators may use any. What a query may read is decided as everywhere else, masks and row filters included.
+- **Helm.** List the warehouses in `cairn.trino.warehouses.list` (`name`, `port`, optional `idleMinutes`, `queryMaxMemory`, `resources`). The chart deploys:
+  - each warehouse's Trino, whose replica count Helm leaves to the proxy;
+  - the proxy, with TLS from `cairn.trino.tls.secretName`, and a Service with a port per warehouse;
+  - a Role that lets the proxy read and scale only those Deployments;
+  - NetworkPolicies, so a warehouse is reached only through the proxy.
+
+  Clients connect to the proxy's Service on the warehouse's port, with their usual Cairn token.
+- **Compose.** Use the Docker scaler (`"docker": {"container": "…"}` in `CAIRN_WAREHOUSES`). The proxy then needs the Docker socket; prefer Kubernetes in production.
+- **What it reports.** `GET /cairn/warehouse` on a warehouse's port shows whether it is ready, and how often it was started and stopped.
+- **Tested.**
+  - **Docker** (`tests/test_warehouses_e2e.py`, with real Trino). Three queries to a stopped warehouse started it once, and all were answered. Trino's follow-up URLs pointed back at the proxy. A long query kept it awake. When idle it stopped, and the next query started it again.
+  - **Kubernetes** (`tests/test_warehouses_k8s.py`, with a real API server and the chart's RBAC). The proxy scaled its warehouse to 1 and back to 0, and was refused (403) on any other Deployment.
+  - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
+
 ## Delta Lake tables
 
 Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).

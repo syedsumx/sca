@@ -88,6 +88,19 @@ def cmd_scheduler(a) -> None:
     sch.run_forever()
 
 
+def cmd_warehouses(a) -> None:
+    """The warehouse proxy: one port per team warehouse, started on demand and stopped when idle."""
+    import asyncio
+
+    from cairn.dataaccess.warehouses import WarehouseError, load, serve
+
+    try:
+        warehouses = load()
+    except WarehouseError as e:
+        raise SystemExit(f"cairn warehouses: {e}")
+    asyncio.run(serve(warehouses, a.host, a.reap_every))
+
+
 def cmd_bundle(a) -> None:
     """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
     from cairn.iac.bundle import main
@@ -652,6 +665,11 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--partition", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITION", 0)))
     sch.add_argument("--partitions", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITIONS", 1)))
     sch.set_defaults(fn=cmd_scheduler)
+
+    wh = sub.add_parser("warehouses", help="the warehouse proxy: team Trinos started on demand, stopped when idle")
+    wh.add_argument("--host", default="0.0.0.0")
+    wh.add_argument("--reap-every", type=float, default=30.0, help="seconds between idle checks")
+    wh.set_defaults(fn=cmd_warehouses)
 
     bd = sub.add_parser("bundle", help="validate, plan or apply a bundle of declared resources (YAML in git)")
     bd.add_argument("action", choices=["validate", "plan", "apply"])

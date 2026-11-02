@@ -222,7 +222,7 @@ jobs:
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino]"
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
@@ -323,7 +323,7 @@ jobs:
           pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
-            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
+            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
 
@@ -386,6 +386,7 @@ jobs:
               "--set cairn.serviceMonitor.enabled=true --set cairn.prometheusRule.enabled=true --set cairn.grafanaDashboard.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.networkPolicy.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.allowInsecureHttp=true" \
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true --set cairn.trino.warehouses.list[0].name=sales --set cairn.trino.warehouses.list[0].port=8443 --set cairn.trino.warehouses.list[1].name=finance --set cairn.trino.warehouses.list[1].port=8444 --set cairn.trino.warehouses.list[1].idleMinutes=0 --set cairn.trino.ai.enabled=true --set cairn.trino.ai.apiKeySecret.name=llm --set cairn.trino.delta.enabled=true --set cairn.trino.delta.credentialsSecret.name=delta" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.autoscaling.enabled=true" \
               "--set cairn.store.enabled=true --set cairn.store.secret.stsSecretKey=sts --set cairn.catalog.enabled=true --set cairn.catalog.vendRole=cairn-catalog-tables --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.faultTolerance.enabled=true --set cairn.trino.spill.enabled=true --set cairn.trino.cache.enabled=true" \

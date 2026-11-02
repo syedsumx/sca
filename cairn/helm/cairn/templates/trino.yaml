@@ -184,28 +184,39 @@ data:
     s3.aws-access-key=${ENV:CAIRN_STORE_ACCESS_KEY}
     s3.aws-secret-key=${ENV:CAIRN_STORE_SECRET_KEY}
     {{- end }}
+{{- /* The shared coordinator, then each team's warehouse (cairn.trino.warehouses): the same Trino,
+       its own component, config (forwarded headers, its own access-control path) and size. */}}
+{{- range $wh := prepend ($u.warehouses.list | default list) (dict "name" "") }}
+{{- $dctx := $ctx }}
+{{- if $wh.name }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,20}$" (toString $wh.name)) }}{{ fail (printf "cairn.trino.warehouses.list: name %q is lowercase letters, digits and '-'" (toString $wh.name)) }}{{ end }}
+{{- $dctx = dict "root" $ "component" (printf "trino-wh-%s" $wh.name) "cfg" $u }}
+{{- end }}
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "cairn.componentName" $ctx }}
+  name: {{ include "cairn.componentName" $dctx }}
   labels:
-    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
 spec:
+  {{- if not $wh.name }}
   replicas: 1
+  {{- end }}
+  {{- /* A warehouse's replicas belong to the warehouse proxy (scaled to 0 when idle): Helm leaves them. */}}
   revisionHistoryLimit: 5
   selector:
     matchLabels:
-      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+      {{- include "cairn.selectorLabels" $dctx | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+        {{- include "cairn.componentLabels" $dctx | nindent 8 }}
       annotations:
         checksum/config: {{ printf "%s%s%s%s%v%s%v" $u.port $u.queryMaxMemory $s3 $tls $u.tokenIssuer (toJson $u.resourceGroups) $u.gracefulShutdownSeconds | sha256sum }}
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.global.cairn.imagePullSecrets }}
+      {{- with $.Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -303,11 +314,11 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 30
           volumeMounts:
-            - name: config
+            - name: {{ if $wh.name }}whconfig{{ else }}config{{ end }}
               mountPath: /etc/trino/config.properties
               subPath: config.properties
               readOnly: true
-            - name: config
+            - name: {{ if $wh.name }}whconfig{{ else }}config{{ end }}
               mountPath: /etc/trino/access-control.properties
               subPath: access-control.properties
               readOnly: true
@@ -367,7 +378,7 @@ spec:
             - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
             {{- end }}
           resources:
-            {{- toYaml $u.resources | nindent 12 }}
+            {{- toYaml ($wh.resources | default $u.resources) | nindent 12 }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
@@ -375,6 +386,11 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $wh.name }}
+        - name: whconfig
+          configMap:
+            name: {{ include "cairn.componentName" $dctx }}
+        {{- end }}
         {{- if $u.spill.enabled }}
         - name: spill
           emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
@@ -393,6 +409,51 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- if $wh.name }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.componentName" $dctx }}
+  labels:
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://localhost:{{ $u.port }}
+    query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    # Clients reach it only through the warehouse proxy, which says what URL they used.
+    http-server.process-forwarded=true
+    http-server.authentication.type=JWT
+    http-server.authentication.jwt.key-file={{ $api }}/v1/trino/jwks.json
+    http-server.authentication.jwt.required-issuer={{ $u.tokenIssuer }}
+    http-server.authentication.jwt.required-audience=trino
+    http-server.authentication.allow-insecure-over-http=true
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/allow
+    opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/batch
+    opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/row-filters
+    opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/column-mask
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $dctx }}
+  labels:
+    {{- include "cairn.componentLabels" $dctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $dctx | nindent 4 }}
+  ports:
+    - { name: http, port: {{ $u.port }}, targetPort: http }
+{{- end }}
+{{- end }}
 {{- if gt (int $u.workers) 0 }}
 ---
 # Trino workers: they run query stages for the coordinator; access control and lineage stay on it.
