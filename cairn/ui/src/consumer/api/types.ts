@@ -1325,3 +1325,20 @@ export interface LineageGraph {
     edges: { source: string; target: string; indirect?: boolean }[];
     hidden_count: number;
 }
+
+/** A dbt run recorded by `cairn dbt` (GET /pipelines/dbt/runs). */
+export interface DbtRun {
+    invocation: string;
+    project: string;
+    environment: string;
+    command: string;
+    status: 'success' | 'error';
+    actor: string;
+    started_ms: number | null;
+    finished_ms: number;
+    elapsed_s: number | null;
+    nodes: number;
+    errors: number;
+    tests_failed: number;
+    detail: { node: string; status: string; seconds: number }[];
+}

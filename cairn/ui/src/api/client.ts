@@ -114,6 +114,11 @@ export class CairnClient {
         this.fetchImpl = f.bind(globalThis) as typeof fetch;
     }
 
+    /** The full URL of an API path (for links the browser opens itself, such as a docs site). */
+    href(path: string): string {
+        return `${this.baseUrl}${path}`;
+    }
+
     async request<T>(method: Method, path: string, body?: unknown, opts: RequestOptions = {}): Promise<T> {
         const url = `${this.baseUrl}${path}${buildQuery(opts.query)}`;
         const headers: Record<string, string> = { Accept: 'application/json' };

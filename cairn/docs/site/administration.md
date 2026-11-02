@@ -1016,6 +1016,17 @@ A multi-table transaction changes every table or none.
   - **Lineage.** Each model's upstream models and sources. dbt's lineage is replaced on every run, so a removed `ref` disappears, and lineage from elsewhere is kept. Trino's own query lineage still arrives as well.
   - **Tests.** Each dbt test becomes a check on the model it tests (pass, warn, fail or error), on its Quality tab, and a newly failing test tells the model's owners.
   - The run is audited (`dbt.run_recorded`).
+- **Governance and the whole project** (from the manifest, on every run):
+  - **Model properties.** A model's contract (enforced or not), access (public, protected, private), group (and the group's owner) and version become `dbt.*` properties.
+  - **Deprecation.** A `deprecation_date` deprecates the dataset in Cairn, with its decommission date. Lifting it in dbt lifts only dbt's deprecation.
+  - **Exposures** become dashboards (or the exposure's other type) downstream of the models they use, owned by their owner.
+  - **Metrics.** MetricFlow semantic models and metrics arrive in the Context inbox as metric definitions, mapped to their datasets, for a steward to approve.
+  - **Unit tests** are checks on their model, named `unit test: <name>`.
+  - **Source freshness.** `cairn dbt source freshness` records a `source freshness` check on each source, PASS, WARN or FAIL, with its age and limits.
+- **Run history.** Each run is kept: command, environment (`CAIRN_DBT_ENVIRONMENT`, `prod` by default), status, timing, and each node's result. They are served at `GET /pipelines/dbt/runs` and on the **Pipelines** page. Operators (`MANAGE_INGESTION`) see every run, and a pipeline user sees its own.
+- **Slim CI.** A successful `run` or `build` saves its manifest as its environment's state (`GET /pipelines/dbt/state`). With `CAIRN_DBT_DEFER_TO=prod`, `cairn dbt` fetches prod's state and adds `--state … --defer`, so `cairn dbt build --select state:modified+` builds only what changed and defers the rest to prod. CI runs record their own environment (`CAIRN_DBT_ENVIRONMENT=ci`) and never become prod's state.
+- **Docs site.** `cairn dbt docs generate` publishes dbt's docs site to Cairn, at `/cairn/api/pipelines/dbt/docs/<project>/`. Each viewer's manifest and catalog hold only the models, sources and tests of datasets they may see, with exposures and metrics limited to those. Publishing is audited (`dbt.docs_published`).
+- **Packages from a private mirror.** `CAIRN_DBT_PACKAGE_HUB_URL` (Helm `cairn.dbt.packageHubUrl`) points `dbt deps` at a mirror of the dbt package hub, so builds need no internet access. Installing packages when the project's image is built works too.
 - **Exit codes.** `cairn dbt` exits with dbt's code. If dbt succeeded but the run could not be recorded, it exits 3, so a scheduler notices; set `CAIRN_DBT_RECORD=optional` to only warn.
 - **The image.** `cairn/dbt` (`docker/dbt.Dockerfile`) has dbt-core 1.12 and dbt-trino 1.11 and runs as a non-root user. It works with a read-only root filesystem and a read-only project: dbt writes only under `/tmp/cairn`, artifacts in `/tmp/cairn/target`. A project's own image adds its code: `FROM cairn/dbt` and `COPY . /project`.
 - **Compose:** `docker compose -f docker-compose.cairn.yml --profile trino --profile dbt run --rm cairn-dbt build` runs `CAIRN_DBT_PROJECT` (default `examples/dbt/lakehouse`) with the token in `CAIRN_DBT_TOKEN`.
@@ -1035,6 +1046,7 @@ A multi-table transaction changes every table or none.
   - **The example project.** It built, and with `persist_docs` its docs were in the Iceberg table and its columns, as Trino shows them.
   - **Policies.** `svc-dbt` was refused tables outside its grants and saw masked PII.
   - **Recording.** It was refused without the rights to record.
+  - **The governed project** (`tests/test_dbt_more_e2e.py`): contract, access, group owner and deprecation landed on the datasets. The exposure became a dashboard over its model, the unit test a check and the metric an inbox finding. Source freshness passed while fresh and failed once stale. Runs were listed, and a CI build of one changed model deferred to prod's state without replacing it. The docs site showed `svc-dbt` its models and hid them from `bob`, and a package came from a stub private hub.
 
 **Airflow.** Airflow 3 (3.3) orchestrates pipelines on the lakehouse: its tasks run as a Cairn identity, its runs and lineage go to Cairn, and people sign in to its UI through Cairn.
 

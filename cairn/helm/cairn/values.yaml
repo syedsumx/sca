@@ -883,10 +883,14 @@ cairn:
     #    caSecret: { name: cairn-trino-tls, key: ca.crt }   # Trino's CA; empty: the system's
     #    timeoutSeconds: 7200
     #    threads: 4
+    #    environment: prod                  # runs are recorded in it; its last successful run is its state
+    #    deferTo: ""                        # e.g. prod: --state/--defer to that environment (Slim CI)
     #    extraEnv: []
     resources:
       requests: { cpu: 200m, memory: 512Mi }
       limits: { memory: 2Gi }
+    # A private mirror of the dbt package hub (dbt deps), e.g. https://dbt-hub.example.com/
+    packageHubUrl: ""
 
   # Workload identity: pipelines (dbt, Airflow, Spark) sign in with the token their platform gives them
   # (a Kubernetes service account's projected token, a CI job's OIDC token) instead of a stored personal

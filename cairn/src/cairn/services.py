@@ -528,6 +528,8 @@ def _build_pipeline_health(s: Services) -> None:
     s.dataset_changes = DatasetChanges(s.engine)
     if s.dbt_runs is not None:
         s.dbt_runs.changes = s.dataset_changes
+        s.dbt_runs.engine = s.engine  # runs, state (Slim CI) and docs
+        s.dbt_runs.semantic = getattr(s, "semantic_layer", None)
     if s.openlineage is not None and s.graph is not None:
         s.pipeline_health = PipelineHealth(s.graph, getattr(s, "notify", None), s.dataset_changes)
         s.openlineage.on_run = s.pipeline_health.on_run

@@ -73,6 +73,17 @@ spec:
                   value: {{ $job.schema | default "analytics" | quote }}
                 - name: CAIRN_DBT_THREADS
                   value: {{ $job.threads | default 4 | quote }}
+                # The environment runs are recorded in (its last successful run is its state).
+                - name: CAIRN_DBT_ENVIRONMENT
+                  value: {{ $job.environment | default "prod" | quote }}
+                {{- with $job.deferTo }}
+                - name: CAIRN_DBT_DEFER_TO
+                  value: {{ . | quote }}
+                {{- end }}
+                {{- with $.Values.cairn.dbt.packageHubUrl }}
+                - name: CAIRN_DBT_PACKAGE_HUB_URL
+                  value: {{ . | quote }}
+                {{- end }}
                 {{- if $job.caSecret }}
                 - name: CAIRN_CA_FILE
                   value: /etc/cairn-dbt-ca/ca.crt

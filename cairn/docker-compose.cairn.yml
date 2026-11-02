@@ -724,6 +724,9 @@ services:
       CAIRN_TRINO_PORT: "8443"
       CAIRN_TRINO_CATALOG: lakehouse
       CAIRN_DBT_SCHEMA: ${CAIRN_DBT_SCHEMA:-analytics}
+      CAIRN_DBT_ENVIRONMENT: ${CAIRN_DBT_ENVIRONMENT:-prod}
+      CAIRN_DBT_DEFER_TO: ${CAIRN_DBT_DEFER_TO:-}
+      CAIRN_DBT_PACKAGE_HUB_URL: ${CAIRN_DBT_PACKAGE_HUB_URL:-}
     volumes:
       - ${CAIRN_DBT_PROJECT:-./examples/dbt/lakehouse}:/project:ro
       - ${CAIRN_TRINO_TLS_DIR:-trinotls}:/etc/trino/tls:ro

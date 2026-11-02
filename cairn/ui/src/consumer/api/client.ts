@@ -1,5 +1,11 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { CompiledPolicy, LineageGraph, StoreCluster, StoreClusterNode } from './types';
+import type {
+    CompiledPolicy,
+    DbtRun,
+    LineageGraph,
+    StoreCluster,
+    StoreClusterNode,
+} from './types';
 import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
 import type {
     AIAssessment,
@@ -908,6 +914,13 @@ export class ConsumerClient extends CairnClient {
 
     undoAutomationRun(runId: string) {
         return this.request<AutomationRun>('POST', `/governance/automations/runs/${enc(runId)}/undo`);
+    }
+
+    dbtRuns(project?: string, opts?: RequestOptions) {
+        return this.request<DbtRun[]>('GET', '/pipelines/dbt/runs', undefined, {
+            ...opts,
+            query: { ...(project ? { project } : {}), limit: 200 },
+        });
     }
 
     report(opts?: RequestOptions) {

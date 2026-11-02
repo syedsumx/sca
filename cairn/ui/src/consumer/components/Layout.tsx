@@ -52,6 +52,7 @@ export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: st
     { to: '/context', label: 'nav.context', feature: 'context' },
     { to: '/governance', label: 'nav.governance', feature: 'governance' },
     { to: '/reports', label: 'nav.reports', feature: 'governance' },
+    { to: '/pipelines', label: 'nav.pipelines' },
     { to: '/settings', label: 'nav.settings' },
 ];
 

@@ -82,31 +82,57 @@ def _dataset(platform: str, name: str, env: str = "PROD") -> str:
 
 
 # ---- parsers: each returns [{dataset, name, column, status, message, url, ts}] -------------------------
+FRESHNESS = {"pass": "PASS", "warn": "WARN", "error": "FAIL", "runtime error": "ERROR"}
+
+
 def parse_dbt(body: dict, platform: str, urn_of=None) -> list[dict]:
-    rr, manifest = body.get("run_results") or {}, body.get("manifest") or {}
-    if not rr.get("results"):
-        raise ExternalError("dbt: send {\"run_results\": <run_results.json>, \"manifest\": <manifest.json>}")
-    nodes = {**(manifest.get("nodes") or {}), **(manifest.get("sources") or {})}
+    """dbt's results: data tests and unit tests (``run_results.json``), and source freshness
+    (``sources.json``), each a check on the dataset it is about."""
+    rr, manifest, fresh = body.get("run_results") or {}, body.get("manifest") or {}, body.get("sources") or {}
+    if not rr.get("results") and not fresh.get("results"):
+        raise ExternalError("dbt: send {\"run_results\": <run_results.json>, \"manifest\": <manifest.json>} "
+                            "or {\"sources\": <sources.json>, \"manifest\": ...}")
+    nodes = {**(manifest.get("nodes") or {}), **(manifest.get("sources") or {}), **(manifest.get("unit_tests") or {})}
     adapter = ((manifest.get("metadata") or {}).get("adapter_type")) or platform
-    ts = (rr.get("metadata") or {}).get("generated_at")
+
+    def dataset_of(model: dict) -> str:
+        table = model.get("alias") or model.get("identifier") or model.get("name")
+        name = ".".join(p for p in (model.get("database"), model.get("schema"), table) if p)
+        return urn_of(model.get("database"), model.get("schema"), table) if urn_of else _dataset(adapter, name)
+
     out = []
-    for r in rr["results"]:
+    for r in fresh.get("results") or []:
+        src = nodes.get(r.get("unique_id") or "")
+        status = FRESHNESS.get(str(r.get("status") or "").lower())
+        if not src or not status:
+            continue
+        crit = r.get("criteria") or {}
+        limits = ", ".join(f"{k.split('_')[0]} after {(v or {}).get('count')} {(v or {}).get('period')}"
+                           for k, v in crit.items() if k in ("warn_after", "error_after") and (v or {}).get("count"))
+        age = r.get("max_loaded_at_time_ago_in_s")
+        out.append({"dataset": dataset_of(src), "name": "source freshness", "column": None, "status": status,
+                    "message": (f"last loaded {int(age)} s ago" if isinstance(age, (int, float)) else
+                                (r.get("error") or r.get("message") or "")) + (f" ({limits})" if limits else ""),
+                    "url": None, "ts": r.get("snapshotted_at") or (fresh.get("metadata") or {}).get("generated_at")})
+    ts = (rr.get("metadata") or {}).get("generated_at")
+    for r in rr.get("results") or []:
         uid = r.get("unique_id") or ""
-        if not uid.startswith("test."):
+        if not uid.startswith(("test.", "unit_test.")):
             continue
         test = nodes.get(uid) or {}
         model = next((nodes[d] for d in (test.get("depends_on") or {}).get("nodes") or []
                       if d in nodes and d.split(".")[0] in ("model", "source", "snapshot", "seed")), None)
         if model is None:
             continue
-        table = model.get("alias") or model.get("identifier") or model.get("name")
-        name = ".".join(p for p in (model.get("database"), model.get("schema"), table) if p)
         status = _status(r.get("status")) or ("PASS" if r.get("status") == "skipped" else "ERROR")
         if r.get("status") == "skipped":
             continue
         meta = test.get("test_metadata") or {}
-        dataset = urn_of(model.get("database"), model.get("schema"), table) if urn_of else _dataset(adapter, name)
-        out.append({"dataset": dataset, "name": test.get("name") or uid.split(".")[2],
+        dataset = dataset_of(model)
+        name = test.get("name") or uid.split(".")[2]
+        if uid.startswith("unit_test."):
+            name = f"unit test: {name}"  # the model's logic, on fixed inputs (not its data)
+        out.append({"dataset": dataset, "name": name,
                     "column": test.get("column_name") or (meta.get("kwargs") or {}).get("column_name"),
                     "status": status, "message": (r.get("message") or "")[:2000] or
                     (f"{r.get('failures')} failing rows" if r.get("failures") else ""), "url": None, "ts": ts})
