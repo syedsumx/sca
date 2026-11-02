@@ -86,6 +86,18 @@ def cmd_scheduler(a) -> None:
     sch.run_forever()
 
 
+def cmd_streams(a) -> None:
+    """Kafka topics into lakehouse tables: one worker per enabled stream; replicas share the partitions."""
+    from cairn.common.metrics import serve_worker_metrics
+    from cairn.pipelines.streams import StreamRunner
+
+    s = _services(with_gateway=False, with_ai=False)
+    if getattr(s, "streams", None) is None or not s.streams.kafka.get("bootstrap_servers"):
+        raise SystemExit("cairn streams: set CAIRN_STREAMS_KAFKA (bootstrap_servers ...) and CAIRN_STREAMS_CATALOG")
+    serve_worker_metrics()
+    StreamRunner(s.streams, a.interval).run_forever()
+
+
 def cmd_core_proxy(a) -> None:
     """Masking reverse proxy in the cairn-web → Cairn Core path."""
     from cairn.coreproxy.proxy import MaskingService, ProxyIdentity, create_proxy_app
@@ -631,6 +643,10 @@ def build_parser() -> argparse.ArgumentParser:
     sch.add_argument("--partition", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITION", 0)))
     sch.add_argument("--partitions", type=int, default=int(os.environ.get("CAIRN_SCHEDULER_PARTITIONS", 1)))
     sch.set_defaults(fn=cmd_scheduler)
+
+    st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
+    st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")
+    st.set_defaults(fn=cmd_streams)
 
     gp = http("core-proxy", 8890, cmd_core_proxy, "PII-masking reverse proxy between cairn-web and Cairn Core")
     gp.add_argument("--upstream", default=os.environ.get("CAIRN_CORE_URL", "http://localhost:8080"))

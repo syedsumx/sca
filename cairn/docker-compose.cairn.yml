@@ -431,6 +431,7 @@ services:
       CAIRN_LAKEHOUSE_CATALOG_URIS: http://cairn-catalog:8181,${CAIRN_CATALOG_PUBLIC_URL:-http://localhost:8181}
       # Spark's history server (profile spark), served behind Cairn's sign-in at /v1/spark/history/.
       CAIRN_SPARK_HISTORY_URL: http://cairn-spark-history:18080
+      CAIRN_STREAMS_ENABLED: ${CAIRN_STREAMS_ENABLED:-false}   # true with the streams profile: /v1/streams
       CAIRN_LAKEHOUSE_TOKEN_TTL: ${CAIRN_LAKEHOUSE_TOKEN_TTL:-3600}
       CAIRN_LAKEHOUSE_MAX_SESSION: ${CAIRN_LAKEHOUSE_MAX_SESSION:-604800}
       CAIRN_SCIM_CORE_TOKEN_FILE: /run/cairn-provisioner/provisioner_token
@@ -557,6 +558,20 @@ services:
     <<: *cairn-service
     hostname: cairn-notifier
     command: ["notifier", "--interval", "10"]
+    depends_on:
+      <<: *cairn-depends
+
+  # Streams: Kafka topics (CDC included) into lakehouse tables. Settings in CAIRN_STREAMS_KAFKA and
+  # CAIRN_STREAMS_CATALOG (JSON); define streams with POST /v1/streams on cairn-api.
+  cairn-streams:
+    <<: *cairn-service
+    hostname: cairn-streams
+    command: ["streams"]
+    profiles: [streams]
+    environment:
+      <<: *cairn-env
+      CAIRN_STREAMS_KAFKA: '{"bootstrap_servers": "broker:29092"}'
+      CAIRN_STREAMS_CATALOG: ${CAIRN_STREAMS_CATALOG:-}
     depends_on:
       <<: *cairn-depends
 

@@ -92,6 +92,40 @@ def _pipe(r) -> dict:
             "created_ms": r.created_ms}
 
 
+def open_table(cat, target: str, schema, create: bool):
+    """The Iceberg table ``namespace.table``; created with ``schema`` (arrow) when missing and ``create``."""
+    from pyiceberg.exceptions import NoSuchTableError
+
+    ns, name = target.split(".")
+    try:
+        return cat.load_table((ns, name))
+    except NoSuchTableError:
+        if not create:
+            raise PipeError(f"{target} does not exist (create it, or let Cairn create it)")
+        try:
+            cat.create_namespace(ns)
+        except Exception:  # noqa: BLE001 - it exists
+            pass
+        return cat.create_table((ns, name), schema=schema)
+
+
+def fit(table, data, target: str):
+    """``data`` (arrow) as the table's columns and types; refuses columns the table lacks (they would be
+    dropped silently) and missing required ones."""
+    import pyarrow as pa
+
+    want = table.schema().as_arrow()
+    unknown = [c for c in data.column_names if c not in want.names]
+    if unknown:
+        raise PipeError(f"the data has columns {target} does not: {', '.join(unknown)}")
+    missing = [f.name for f in want if f.name not in data.column_names and not f.nullable]
+    if missing:
+        raise PipeError(f"the data has no {', '.join(missing)}")
+    cols = [data.column(f.name).cast(f.type) if f.name in data.column_names else pa.nulls(len(data), f.type)
+            for f in want]
+    return pa.Table.from_arrays(cols, schema=want)
+
+
 class Pipes:
     def __init__(self, engine, store: dict, catalog: dict, audit=None, changes=None,
                  urn: Optional[Callable[[str, str], str]] = None, webhook_secret: str = ""):
@@ -177,32 +211,8 @@ class Pipes:
         return RestCatalog("cairn-pipes", **self.catalog_props)
 
     def _append(self, pipe: dict, data) -> int:
-        import pyarrow as pa
-        from pyiceberg.exceptions import NoSuchTableError
-
-        cat = self._catalog()
-        ns, name = pipe["target"].split(".")
-        try:
-            table = cat.load_table((ns, name))
-        except NoSuchTableError:
-            if not pipe["create_table"]:
-                raise PipeError(f"{pipe['target']} does not exist (create it, or let the pipe create it)")
-            try:
-                cat.create_namespace(ns)
-            except Exception:  # noqa: BLE001 - it exists
-                pass
-            table = cat.create_table((ns, name), schema=data.schema)
-        want = table.schema().as_arrow()
-        # Columns the table does not have: the file does not fit (its data would be dropped silently).
-        unknown = [c for c in data.column_names if c not in want.names]
-        if unknown:
-            raise PipeError(f"the file has columns {pipe['target']} does not: {', '.join(unknown)}")
-        missing = [f.name for f in want if f.name not in data.column_names and not f.nullable]
-        if missing:
-            raise PipeError(f"the file has no {', '.join(missing)}")
-        cols = [data.column(f.name).cast(f.type) if f.name in data.column_names else pa.nulls(len(data), f.type)
-                for f in want]
-        table.append(pa.Table.from_arrays(cols, schema=want))
+        table = open_table(self._catalog(), pipe["target"], data.schema, pipe["create_table"])
+        table.append(fit(table, data, pipe["target"]))
         return len(data)
 
     def load(self, pipe: dict, key: str, version: str) -> Optional[dict]:

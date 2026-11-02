@@ -88,6 +88,7 @@ class Services:
     sql_boards: Optional[Any] = None
     maintenance: Optional[Any] = None
     pipes: Optional[Any] = None
+    streams: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -534,6 +535,10 @@ def _build_pipeline_health(s: Services) -> None:
         s.pipes.changes = s.dataset_changes   # loaded tables are changes (data-aware schedules)
         if getattr(s, "lakehouse", None) is not None:
             s.pipes.urn = lambda ns, t: s.lakehouse.urn([ns], t)
+    if getattr(s, "streams", None) is not None:
+        s.streams.changes = s.dataset_changes  # streamed tables are changes too
+        if getattr(s, "lakehouse", None) is not None:
+            s.streams.urn = lambda ns, t: s.lakehouse.urn([ns], t)
     if s.dbt_runs is not None:
         s.dbt_runs.changes = s.dataset_changes
         s.dbt_runs.engine = s.engine  # runs, state (Slim CI) and docs
@@ -730,6 +735,13 @@ def _build_active_metadata(s: Services) -> None:
 
             s.pipes = Pipes(s.engine, _settings("CAIRN_PIPES_STORE"), _settings("CAIRN_PIPES_CATALOG"), s.audit,
                             webhook_secret=os.environ.get("CAIRN_PIPES_WEBHOOK_SECRET", ""))
+        if os.environ.get("CAIRN_STREAMS_KAFKA") or os.environ.get("CAIRN_STREAMS_ENABLED", "").lower() == "true":
+            from cairn.pipelines.pipes import _settings
+            from cairn.pipelines.streams import Streams
+
+            s.streams = Streams(s.engine, _settings("CAIRN_STREAMS_KAFKA"),
+                                _settings("CAIRN_STREAMS_CATALOG") or _settings("CAIRN_PIPES_CATALOG"), s.audit,
+                                graph=getattr(s, "graph", None))
         if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.maintenance import TableMaintenance
 

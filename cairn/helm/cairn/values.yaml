@@ -458,6 +458,21 @@ cairn:
     affinity: {}
 
   # Notification hub fan-out to Slack / Teams / email / in-app.
+  # Streams (`cairn streams`): Kafka topics, Debezium change events included, written into lakehouse
+  # tables. existingSecret holds kafka.json (kafka-python consumer settings: bootstrap_servers,
+  # security_protocol, sasl_*) and catalog.json (Iceberg REST catalog properties). Replicas share the
+  # partitions; define streams with POST /v1/streams.
+  streams:
+    enabled: false
+    existingSecret: ""
+    replicas: 1
+    intervalSeconds: 15
+    resources:
+      requests: { cpu: 100m, memory: 384Mi }
+      limits: { memory: 1Gi }
+    nodeSelector: {}
+    tolerations: []
+
   notifier:
     enabled: true
     replicas: 1

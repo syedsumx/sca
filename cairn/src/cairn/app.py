@@ -241,6 +241,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.pipes import build_pipes_router
 
         app.include_router(build_pipes_router(services.pipes, cp, authz))
+    if services.streams is not None:
+        from cairn.pipelines.streams import build_streams_router
+
+        app.include_router(build_streams_router(services.streams, cp, authz))
     if services.maintenance is not None:
         from cairn.pipelines.maintenance import build_maintenance_router
 

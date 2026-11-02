@@ -51,6 +51,9 @@
 {{- $mounts = append $mounts (dict "name" "scim-token" "mountPath" "/run/cairn-scim" "readOnly" true) }}
 {{- $vols = append $vols (dict "name" "scim-token" "secret" (dict "secretName" .name "items" (list (dict "key" .key "path" "token")))) }}
 {{- end }}
+{{- if .Values.cairn.streams.enabled }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STREAMS_ENABLED" "value" "true") }}
+{{- end }}
 {{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}
 ---

@@ -1287,6 +1287,29 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - **Sweep.** Files under a prefix with no event rule were loaded by the sweep, and the markers were skipped.
   - **Signature.** A bad signature got 401.
 
+## Streams (Kafka and change data capture)
+
+A stream writes a Kafka topic into a lakehouse table continuously. Define it with `POST /v1/streams` (`MANAGE_SYSTEM_OPERATIONS`): `name`, `topic`, `format`, `target` (`namespace.table`), and optionally `mode`, `key`, `create_table`, `evolve`, `start` (`earliest` or `latest`), `batch_rows` and `batch_seconds`.
+
+- **Formats.**
+  - `json`: one JSON object per message, one row. In `append` mode, rows are added. In `upsert` mode, a row replaces the row with the same `key` columns; a tombstone whose Kafka key is a JSON object of the key columns deletes that row.
+  - `debezium`: Debezium change events, with or without the schema envelope. Creates, updates and snapshot reads write the `after` image; deletes remove the row. The table follows the source database. Always `upsert`.
+- **Exactly once.** Each batch is one Iceberg commit, and its snapshot records the next Kafka offset of each partition. A worker taking over a partition starts from there. So if a worker dies between the table commit and the Kafka offset commit, nothing is written twice. Kafka's own committed offsets are the fallback once those snapshots have been expired.
+- **Bad messages.** A message that cannot be a row is set aside with its offset and the reason (`GET /v1/streams/{id}/rejects`), and the stream goes on. Examples: not JSON, an unknown operation, no key, or a column the table lacks. With `evolve`, new columns are added to the table instead.
+- **Failures.** A batch the table refuses, such as a value that does not convert, stops the stream. The error shows on its status and the batch is retried with back-off. Nothing is skipped silently.
+- **Lineage.** Give `source` (the dataset URN the topic carries, such as the Postgres table) and Cairn adds it to the target's upstream lineage, merged with what is there. If that write fails, the stream is not created.
+- **Status.** `GET /v1/streams` shows each stream's status, rows written, lag and last commit. `POST /v1/streams/{id}/enabled` pauses or resumes a stream. Changes are audited. Written tables are recorded as changed, for data-aware schedules.
+- **Workers.** `cairn streams` runs every enabled stream. Several replicas share each stream's partitions, through one Kafka consumer group per stream.
+  - **Settings.** `CAIRN_STREAMS_KAFKA` holds the kafka-python consumer settings: `bootstrap_servers`, `security_protocol`, `sasl_*`, `ssl_cafile`. `CAIRN_STREAMS_CATALOG` holds the Iceberg REST catalog properties (default: `CAIRN_PIPES_CATALOG`). Each is JSON, or a path to a JSON file.
+  - **Helm.** Set `cairn.streams.enabled`, with `existingSecret` holding `kafka.json` and `catalog.json`.
+  - **Compose.** Use the `streams` profile, with `CAIRN_STREAMS_ENABLED=true` on the API.
+- **Tested** with a real Kafka broker, Cairn Store and Cairn Catalog (`tests/test_streams_e2e.py`):
+  - **CDC.** Debezium snapshot reads, creates, updates and deletes kept the table equal to the source, through later changes too. A message that was not JSON was set aside, and tombstones were ignored.
+  - **Exactly once.** A worker whose Kafka offsets were deleted resumed from the table's snapshots: 8 rows, not 13.
+  - **Columns.** A column the table lacked was set aside, and with `evolve` it was added.
+  - **Lineage.** The source was added to the target's lineage, merged with what was there. When Cairn Core failed, nothing was created.
+  - **Checks.** Bad definitions were refused, and the API was for operators only.
+
 ## Backup and restore
 
 Docker Compose deployments are backed up with one script:
