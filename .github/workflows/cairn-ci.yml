@@ -219,6 +219,7 @@ jobs:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
+          set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino]"
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py \
             | tee "$RUNNER_TEMP/trino.log"
@@ -286,6 +287,7 @@ jobs:
           CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
           CAIRN_SPARK_OPERATOR_CRD: ${{ runner.temp }}/k8s/sparkapplications.yaml
         run: |
+          set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \

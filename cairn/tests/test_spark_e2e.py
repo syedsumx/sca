@@ -499,7 +499,8 @@ def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, 
                        capture_output=True, text=True, timeout=900)
     assert "CAIRN-RESULT" in r.stdout, (r.stdout + r.stderr)[-4000:]
     # Spark writes them for its own user (0770); let the test (another user, in CI) read them.
-    subprocess.run(["docker", "run", "--rm", "-v", f"{events}:/events", "--entrypoint", "chmod", IMAGE, "-R", "a+rX", "/events"],
+    subprocess.run(["docker", "run", "--rm", "-v", f"{events}:/events", "--entrypoint", "find", IMAGE, "/events", "-mindepth", "1",
+                    "-user", "spark", "-exec", "chmod", "a+rX", "{}", "+"],
                    check=True, capture_output=True)
     logs = [f for f in events.rglob("*") if f.is_file() and not f.name.startswith(".")]
     assert logs, list(events.rglob("*"))
