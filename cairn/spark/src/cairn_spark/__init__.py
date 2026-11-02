@@ -7,6 +7,9 @@ SparkSession whose ``lakehouse`` catalog is Cairn Catalog (Iceberg REST):
 * Cairn Catalog asks Cairn about every table the session touches, for that user: tables they may not
   see are not listed, and reading a table a mask or row filter applies to is refused (query it through
   Trino, which applies them). Writes need Cairn's write or manage privilege on the table.
+* ``governed_read(spark, "sales.orders")`` reads such a table through Trino instead, as the same user:
+  Trino applies the masks and row filters, and Spark never gets the files. Use it where Spark would be
+  refused (or always, for tables you know are restricted).
 * Storage access is per table: the catalog hands Spark temporary credentials for one table's location
   (read-only unless the user may write), never a store key.
 * Lineage goes to Cairn through OpenLineage (the Spark listener), as the same user.
@@ -24,6 +27,8 @@ Configuration (environment, or keyword arguments)::
     CAIRN_CATALOG_URI     Cairn Catalog, e.g. https://catalog.example.com
     CAIRN_CA_FILE         a CA for Cairn's certificate (default: the system's)
     CAIRN_SPARK_TOKEN_TTL seconds the first catalog token lasts (default: Cairn's, an hour); tokens are renewed
+    CAIRN_TRINO_URL       Trino, for governed_read, e.g. https://trino.example.com:8443
+    CAIRN_TRINO_CATALOG   the lakehouse catalog's name in Trino (default: lakehouse)
 """
 
 from __future__ import annotations
@@ -157,3 +162,61 @@ def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = Non
     spark = b.getOrCreate()
     spark.sparkContext.setLocalProperty("cairn.user", user)
     return spark
+
+
+_NAME = __import__("re").compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+def trino_token(cairn_url: str, token: str, verify=True, ttl: Optional[int] = None) -> str:
+    """A short Trino sign-in token for the Cairn user of ``token`` (POST /v1/trino/token)."""
+    r = httpx.post(f"{cairn_url.rstrip('/')}/v1/trino/token", json={"ttl_seconds": ttl} if ttl else {},
+                   headers={"Authorization": f"Bearer {token}"}, verify=verify, timeout=30)
+    if r.status_code != 200:
+        raise CairnSparkError(f"Cairn refused a Trino token ({r.status_code}): {r.text[:300]}")
+    return r.json()["token"]
+
+
+def governed_read(spark, table: str, *, cairn_url: Optional[str] = None, token: Optional[str] = None,
+                  trino_url: Optional[str] = None, catalog: Optional[str] = None, num_partitions: Optional[int] = None,
+                  partition_column: Optional[str] = None, lower_bound=None, upper_bound=None,
+                  predicates: Optional[list[str]] = None, ttl: Optional[int] = None):
+    """``schema.table`` as a DataFrame read through Trino as the Cairn user of ``token`` (or CAIRN_TOKEN):
+    Trino applies that user's masks and row filters, so Spark sees what they may see and never the
+    files. Spark pushes column choices and filters down to Trino. For parallel reads give
+    ``partition_column`` (numeric or date) with ``lower_bound``, ``upper_bound`` and ``num_partitions``, or
+    ``predicates`` (one WHERE clause per partition). The token lasts ``ttl`` seconds (Cairn's default
+    otherwise): the read must start within it."""
+    from urllib.parse import quote, urlsplit
+
+    parts = table.split(".")
+    if len(parts) != 2 or not all(_NAME.match(p) for p in parts):
+        raise CairnSparkError("table is schema.table")
+    cairn_url = cairn_url or os.environ.get("CAIRN_URL", "")
+    trino_url = trino_url or os.environ.get("CAIRN_TRINO_URL", "")
+    if not cairn_url or not trino_url:
+        raise CairnSparkError("set CAIRN_URL (Cairn's API) and CAIRN_TRINO_URL (Trino)")
+    catalog = catalog or os.environ.get("CAIRN_TRINO_CATALOG", CATALOG)
+    if not _NAME.match(catalog):
+        raise CairnSparkError("catalog is a name")
+    ca = os.environ.get("CAIRN_CA_FILE")
+    verify = ca or True
+    u = urlsplit(trino_url)
+    if u.scheme != "https":
+        raise CairnSparkError("CAIRN_TRINO_URL must be https: Trino takes sign-in tokens only over TLS")
+    jdbc = f"jdbc:trino://{u.hostname}:{u.port or 443}/{catalog}?SSL=true"
+    if ca:
+        jdbc += f"&SSLTrustStorePath={quote(ca)}"   # PEM is detected; the same path on every executor
+    access = trino_token(cairn_url, _token(token, cairn_url, verify), verify, ttl)
+    # In the read's properties, not its URL: Spark redacts options whose names hold "token".
+    props = {"driver": "io.trino.jdbc.TrinoDriver", "accessToken": access}
+    dbtable = ".".join(f'"{p}"' for p in parts)
+    reader = spark.read
+    if predicates:
+        return reader.jdbc(jdbc, dbtable, predicates=predicates, properties=props)
+    if partition_column:
+        if not _NAME.match(partition_column) or None in (lower_bound, upper_bound) or not num_partitions:
+            raise CairnSparkError("partition_column needs lower_bound, upper_bound and num_partitions")
+        return reader.jdbc(jdbc, dbtable, column=f'"{partition_column}"', lowerBound=lower_bound,
+                           upperBound=upper_bound, numPartitions=num_partitions, properties=props)
+    return reader.jdbc(jdbc, dbtable, properties=props)
+

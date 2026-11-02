@@ -17,7 +17,7 @@ import time
 import pytest
 import httpx
 
-from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, cairn, port, wait  # noqa: F401  (fixtures)
+from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, cairn, port, trino, wait  # noqa: F401  (fixtures)
 
 IMAGE = os.environ.get("CAIRN_SPARK_IMAGE", "")
 pytestmark = pytest.mark.skipif(not (_ready() and IMAGE), reason="needs docker, CAIRN_SPARK_IMAGE and the binaries")
@@ -117,6 +117,16 @@ JOB = textwrap.dedent('''
             attempt(step, lambda: spark.sql(f"SELECT count(*) AS n FROM lakehouse.{arg}").collect()[0].n)
         elif kind == "sql":
             attempt(step, lambda: [list(r) for r in spark.sql(arg).collect()])
+        elif kind == "governed":         # through Trino, as the same user
+            from cairn_spark import governed_read
+            attempt(step, lambda: [list(r) for r in governed_read(spark, arg).orderBy("id").collect()])
+        elif kind == "governed-eu":      # in two partitions, with a filter Spark pushes down
+            from cairn_spark import governed_read
+            def eu():
+                df = governed_read(spark, arg, partition_column="id", lower_bound=1, upper_bound=4, num_partitions=2)
+                return [df.rdd.getNumPartitions(),
+                        [list(r) for r in df.filter("region = 'EU'").select("id", "email").orderBy("id").collect()]]
+            attempt(step, eu)
     print("CAIRN-RESULT " + json.dumps(out))
     spark.stop()
 ''')
@@ -129,16 +139,16 @@ DEV = ["-v", f"{os.path.abspath(SRC)}:/opt/cairn-spark:ro", "-e",
     if os.environ.get("CAIRN_SPARK_DEV_SRC") == "1" else []
 
 
-def run_job(tmp_path, cairn_url, lake, token, *steps):
+def run_job(tmp_path, cairn_url, lake, token, *steps, docker_args=()):
     job = tmp_path / "job.py"
     job.write_text(JOB)
     os.chmod(tmp_path, 0o755)
-    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV,
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{job}:/job/job.py:ro", *DEV, *docker_args,
                         "-e", f"CAIRN_URL={cairn_url}", "-e", f"CAIRN_TOKEN={token}", "-e", f"CAIRN_CATALOG_URI={lake['catalog']}",
                         IMAGE, "/opt/spark/bin/spark-submit", "--master", "local[2]", "--conf", "spark.ui.enabled=false",
                         "/job/job.py", *steps], capture_output=True, text=True, timeout=900)
     line = next((ln for ln in r.stdout.splitlines() if ln.startswith("CAIRN-RESULT ")), None)
-    assert line, (r.stdout + r.stderr)[-6000:]
+    assert line, "\n".join(ln for ln in (r.stdout + r.stderr).splitlines() if " INFO " not in ln)[-6000:]
     return json.loads(line[len("CAIRN-RESULT "):]), r.stdout + r.stderr
 
 
@@ -599,3 +609,22 @@ def test_the_history_server_shows_runs_with_their_secrets_redacted(cairn, lake, 
         assert [a["id"] for a in get("api/v1/applications", "admin").json()] == [app_id]
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_restricted_tables_are_read_through_trino_with_the_users_masks_and_filters(cairn, lake, trino, tmp_path):  # noqa: F811
+    """governed_read: where the catalog refuses Spark the files (a mask or row filter applies), Spark reads
+    through Trino as the same user, and gets what that user may see."""
+    url, s = cairn
+    s.lakehouse.catalog_uris = (lake["catalog"],)
+    via = ["-v", f"{trino.dir}/ca.pem:/etc/cairn-ca.pem:ro", "-e", "CAIRN_CA_FILE=/etc/cairn-ca.pem",
+           "-e", f"CAIRN_TRINO_URL=https://127.0.0.1:{trino.tls}", "-e", "CAIRN_TRINO_CATALOG=lake"]
+    res, log = run_job(tmp_path, url, lake, ANA, "count=sales.orders", "governed=sales.orders", "governed-eu=sales.orders",
+                       "governed=hr.salaries", docker_args=via)
+    assert "Masks or row filters apply" in res["count=sales.orders"]["error"], res      # still no files
+    assert res["governed=sales.orders"] == {"ok": [[1, "j•••@•••.com", "EU"], [2, "b•••@•••.org", "US"],
+                                                   [3, "l•••@•••.com", "EU"]]}, res   # her mask
+    assert res["governed-eu=sales.orders"] == {"ok": [2, [[1, "j•••@•••.com"], [3, "l•••@•••.com"]]]}, res
+    assert "Access Denied" in res["governed=hr.salaries"]["error"], res                 # not hers to see
+    assert "accessToken" not in log or "eyJ" not in log.split("accessToken", 1)[1][:200]  # the token stays out of logs
+    res, _ = run_job(tmp_path, url, lake, BOB, "governed=sales.orders", docker_args=via)
+    assert [r[0] for r in res["governed=sales.orders"]["ok"]] == [1, 3], res            # his row filter
