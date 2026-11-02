@@ -25,6 +25,7 @@ STORE_KEY = ("cairn-catalog", "catalog-store-secret")
 CATALOG_TOKEN = "admin-" + "x" * 24
 EMAIL = "urn:li:glossaryTerm:Classification.PII.Email"
 ORDERS = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
+CUSTOMERS = "urn:li:dataset:(urn:li:dataPlatform:postgres,crm.sales.customers,PROD)"
 SALARIES = "urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.salaries,PROD)"
 
 
@@ -89,7 +90,8 @@ def cairn(tmp_path_factory):
 
     tmp = tmp_path_factory.mktemp("cairn")
     os.environ["CAIRN_TRINO_ACCESS_KEY"] = KEY
-    os.environ["CAIRN_TRINO_CATALOGS"] = json.dumps({"lake": {"platform": "iceberg", "database": ""}})
+    os.environ["CAIRN_TRINO_CATALOGS"] = json.dumps({"lake": {"platform": "iceberg", "database": ""},
+                                                     "crm": {"platform": "postgres", "database": "crm"}})
     os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
     os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
     try:
@@ -97,6 +99,8 @@ def cairn(tmp_path_factory):
         graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
             {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
         graph.aspects[(SALARIES, "schemaMetadata")] = {"fields": [{"fieldPath": "name"}, {"fieldPath": "salary"}]}
+        graph.aspects[(CUSTOMERS, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
         settings = Settings(database_url=f"sqlite:///{tmp}/cairn.db", service_token="svc-secret", dev_trust_actor_header=True,
                             gateway={"key_dir": str(tmp / "keys")})
         s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
@@ -198,9 +202,27 @@ def trino(lake, cairn):
         "http-server.authentication.oauth2.client-id=trino", f"http-server.authentication.oauth2.client-secret={OAUTH_SECRET}",
         "http-server.authentication.oauth2.scopes=trino",
         "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
+    # Another database through Trino (federation): PostgreSQL, its password from the environment.
+    pg, pgp = f"cairn-trino-pg-{os.getpid()}", port()
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", pg, "-e", "POSTGRES_PASSWORD=crm-secret", "-e", "POSTGRES_DB=crm",
+                    "-p", f"127.0.0.1:{pgp}:5432", "postgres:16-alpine"], check=True, capture_output=True, timeout=300)
+    end = time.time() + 90
+    while subprocess.run(["docker", "exec", pg, "pg_isready", "-U", "postgres", "-d", "crm"], capture_output=True).returncode:
+        assert time.time() < end, "PostgreSQL did not start"
+        time.sleep(1)
+    time.sleep(2)
+    subprocess.run(["docker", "exec", pg, "psql", "-U", "postgres", "-d", "crm", "-v", "ON_ERROR_STOP=1", "-c",
+                    "CREATE SCHEMA sales; CREATE SCHEMA hr; "
+                    "CREATE TABLE sales.customers (id int, email text, region text); "
+                    "INSERT INTO sales.customers VALUES (1, 'ann@acme.com', 'EU'), (2, 'raj@example.org', 'US'); "
+                    "CREATE TABLE hr.pay (name text, salary int); INSERT INTO hr.pay VALUES ('ann', 100);"],
+                   check=True, capture_output=True, timeout=60)
+    open(f"{d}/catalog/crm.properties", "w").write("\n".join([
+        "connector.name=postgresql", f"connection-url=jdbc:postgresql://127.0.0.1:{pgp}/crm",
+        "connection-user=postgres", "connection-password=${ENV:CAIRN_FED_CRM_PASSWORD}", ""]))
     os.chmod(d, 0o755)
     name = f"cairn-trino-acl-{os.getpid()}"
-    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                     "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
@@ -230,7 +252,7 @@ def trino(lake, cairn):
     sql("CREATE TABLE lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
     sql.port, sql.tls, sql.dir = tp, tls, d
     yield sql
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
+    subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)
     shutil.rmtree(d, ignore_errors=True)
 
 
@@ -577,3 +599,18 @@ def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, la
     assert {r["operation"] for r in m.runs("maint.events")} == {"optimize", "expire_snapshots", "remove_orphan_files"}
     assert m.run_due() == 0            # just done: not due for 24 hours
     assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
+
+
+def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
+    """Federation: a PostgreSQL catalog in Trino, named to Cairn as postgres datasets (CAIRN_TRINO_CATALOGS).
+    Cairn decides its tables like the lakehouse's: masks, row filters and refusals apply in place."""
+    assert [r["email"] for r in trino("SELECT email FROM crm.sales.customers ORDER BY id")] == ["ann@acme.com", "raj@example.org"]
+    ana = trino("SELECT id, email, region FROM crm.sales.customers ORDER BY id", user="ana")
+    assert [r["email"] for r in ana] == ["a•••@•••.com", "r•••@•••.org"], ana
+    bob = trino("SELECT id, region FROM crm.sales.customers ORDER BY id", user="bob")
+    assert [r["region"] for r in bob] == ["EU"]
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("SELECT * FROM crm.hr.pay", user="ana")
+    # It joins with the lakehouse in one query, both sides governed.
+    j = trino("SELECT o.id, c.email FROM lake.sales.orders o JOIN crm.sales.customers c ON o.id = c.id ORDER BY o.id", user="ana")
+    assert [r["email"] for r in j] == ["a•••@•••.com", "r•••@•••.org"]

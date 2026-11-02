@@ -10,6 +10,12 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.accessKeySecret.key))) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_TOKEN_ISSUER" "value" .Values.cairn.trino.tokenIssuer) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_TOKEN_TTL" "value" (printf "%v" .Values.cairn.trino.tokenTtlSeconds)) }}
+{{- /* Other databases' catalogs in Trino, named to Cairn as their platform's datasets. */ -}}
+{{- with .Values.cairn.trino.federation }}
+{{- $map := dict }}
+{{- range . }}{{ $_ := set $map .name (dict "platform" (required "cairn.trino.federation[].platform" .platform) "database" (.database | default "")) }}{{ end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_CATALOGS" "value" (toJson $map)) }}
+{{- end }}
 {{- if .Values.cairn.trino.sso.enabled }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_SECRET" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.sso.clientSecretKey))) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_REDIRECT_URIS" "value" (printf "%s/oauth2/callback" (trimSuffix "/" .Values.cairn.trino.sso.publicUrl))) }}

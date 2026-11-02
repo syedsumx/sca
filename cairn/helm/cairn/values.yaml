@@ -710,6 +710,16 @@ cairn:
   trino:
     enabled: false
     port: 8080
+    # Other databases queried through Trino, in place (federation). Cairn decides their tables like the
+    # lakehouse's (platform/database: how Cairn's catalog names them, e.g. postgres datasets crm.<schema>.<table>).
+    # Credentials come from a Secret (user, password keys); never put them in properties.
+    federation: []
+    #  - name: crm
+    #    connector: postgresql
+    #    properties: { connection-url: "jdbc:postgresql://crm-db:5432/crm" }
+    #    credentialsSecret: { name: crm-trino, userKey: user, passwordKey: password }
+    #    platform: postgres
+    #    database: crm
     image:
       repository: trinodb/trino
       tag: "476"

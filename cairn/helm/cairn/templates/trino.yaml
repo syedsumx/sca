@@ -123,6 +123,20 @@ data:
     event-listener.name=http
     http-event-listener.log-completed=true
     http-event-listener.connect-ingest-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/queries
+  {{- range $f := $u.federation }}
+  {{- if not (regexMatch "^[a-z][a-z0-9_]{0,30}$" (toString $f.name)) }}{{ fail (printf "cairn.trino.federation: name %q is a lowercase catalog name" (toString $f.name)) }}{{ end }}
+  {{- if eq (toString $f.name) "lakehouse" }}{{ fail "cairn.trino.federation: lakehouse is Cairn's own catalog" }}{{ end }}
+  {{ $f.name }}.properties: |
+    connector.name={{ required "cairn.trino.federation[].connector" $f.connector }}
+    {{- range $k, $v := $f.properties }}
+    {{- if regexMatch "(?i)password|secret|token" (toString $k) }}{{ fail (printf "cairn.trino.federation[%s]: put %s in credentialsSecret, not properties" $f.name $k) }}{{ end }}
+    {{ $k }}={{ $v }}
+    {{- end }}
+    {{- with $f.credentialsSecret }}
+    connection-user=${ENV:CAIRN_FED_{{ upper $f.name }}_USER}
+    connection-password=${ENV:CAIRN_FED_{{ upper $f.name }}_PASSWORD}
+    {{- end }}
+  {{- end }}
   lakehouse.properties: |
     connector.name=iceberg
     iceberg.catalog.type=rest
@@ -215,6 +229,14 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- range $f := $u.federation }}
+            {{- with $f.credentialsSecret }}
+            - name: CAIRN_FED_{{ upper $f.name }}_USER
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .userKey | default "user" }} } }
+            - name: CAIRN_FED_{{ upper $f.name }}_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
+            {{- end }}
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
               valueFrom:
@@ -276,6 +298,12 @@ spec:
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
               readOnly: true
+            {{- range $f := $u.federation }}
+            - name: config
+              mountPath: /etc/trino/catalog/{{ $f.name }}.properties
+              subPath: {{ $f.name }}.properties
+              readOnly: true
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: config
               mountPath: /etc/trino/exchange-manager.properties
@@ -372,6 +400,14 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- range $f := $u.federation }}
+            {{- with $f.credentialsSecret }}
+            - name: CAIRN_FED_{{ upper $f.name }}_USER
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .userKey | default "user" }} } }
+            - name: CAIRN_FED_{{ upper $f.name }}_PASSWORD
+              valueFrom: { secretKeyRef: { name: {{ .name }}, key: {{ .passwordKey | default "password" }} } }
+            {{- end }}
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: CAIRN_TRINO_EXCHANGE_ACCESS_KEY
               valueFrom:
@@ -414,6 +450,12 @@ spec:
               mountPath: /etc/trino/catalog/lakehouse.properties
               subPath: lakehouse.properties
               readOnly: true
+            {{- range $f := $u.federation }}
+            - name: config
+              mountPath: /etc/trino/catalog/{{ $f.name }}.properties
+              subPath: {{ $f.name }}.properties
+              readOnly: true
+            {{- end }}
             {{- if $u.faultTolerance.enabled }}
             - name: config
               mountPath: /etc/trino/exchange-manager.properties

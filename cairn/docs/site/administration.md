@@ -236,6 +236,27 @@ Any `CAIRN_*` secret can be given as a file instead: `CAIRN_DB_PASSWORD_FILE=/ru
 Setting both forms is an error, so a stale value cannot hide the file. `ANTHROPIC_API_KEY_FILE` works
 the same way.
 
+## Other databases through Trino (federation)
+
+Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, Hive, and its other connectors), and Cairn governs them like the lakehouse.
+
+- **How it is governed.** Trino asks Cairn about every table in every catalog. Cairn names a federated catalog's tables as datasets of their platform: `CAIRN_TRINO_CATALOGS`, e.g. `{"crm": {"platform": "postgres", "database": "crm"}}` names `crm.sales.customers` as the `postgres` dataset `crm.sales.customers`. Policies, masks, row filters and refusals then apply in place, and across joins with lakehouse tables.
+- **Helm:** `cairn.trino.federation`. Each entry has:
+  - `name`: the Trino catalog;
+  - `connector`;
+  - `properties`, such as `connection-url`;
+  - `credentialsSecret`: a Secret with `user` and `password` keys, passed to Trino as environment variables. The chart refuses passwords, secrets and tokens in `properties`;
+  - `platform` and `database`: how Cairn names its tables.
+
+  The chart writes the catalog files on the coordinator and workers, and sets `CAIRN_TRINO_CATALOGS` on the API.
+- **Catalog the source too.** Add the database as a source in Cairn, so its tables have owners, labels (for masks) and lineage under the same names.
+- **Tested** (`tests/test_trino_e2e.py`, Trino 476 with PostgreSQL 16 as catalog `crm`, its password from the environment):
+  - the admin saw the rows as they are;
+  - `ana` got the labelled email column masked;
+  - `bob` got his row filter;
+  - an HR table was refused;
+  - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
+
 ## SQL workspace
 
 **SQL** (`/sql`) is where people write and run read-only SQL against any connection that serves catalog datasets, as themselves.
