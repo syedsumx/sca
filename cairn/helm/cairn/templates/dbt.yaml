@@ -3,7 +3,11 @@
 {{- if not $.Values.cairn.trino.enabled }}{{ fail "cairn.dbt.jobs run on Trino: set cairn.trino.enabled" }}{{ end }}
 {{- if not $.Values.cairn.trino.tls.secretName }}{{ fail "cairn.dbt.jobs sign in to Trino over TLS: set cairn.trino.tls.secretName" }}{{ end }}
 {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,30}[a-z0-9])?$" (toString $job.name)) }}{{ fail (printf "cairn.dbt.jobs: name %q is 1-32 lowercase letters, digits and -" (toString $job.name)) }}{{ end }}
-{{- $tok := required (printf "cairn.dbt.jobs[%s].tokenSecret: the pipeline user's Cairn token" $job.name) $job.tokenSecret }}
+{{- $wi := $job.workloadIdentity }}
+{{- if and $wi $job.tokenSecret }}{{ fail (printf "cairn.dbt.jobs[%s]: tokenSecret or workloadIdentity, not both" $job.name) }}{{ end }}
+{{- if and $wi (not $.Values.cairn.workloadIdentity.issuers) }}{{ fail (printf "cairn.dbt.jobs[%s].workloadIdentity needs cairn.workloadIdentity.issuers" $job.name) }}{{ end }}
+{{- $tok := $job.tokenSecret }}
+{{- if not $wi }}{{ $tok = required (printf "cairn.dbt.jobs[%s].tokenSecret (the pipeline user's Cairn token) or workloadIdentity" $job.name) $job.tokenSecret }}{{ end }}
 {{- $api := dict "root" $ "component" "api" "cfg" $.Values.cairn.api }}
 {{- $trino := dict "root" $ "component" "trino" "cfg" $.Values.cairn.trino }}
 ---
@@ -30,6 +34,9 @@ spec:
         spec:
           restartPolicy: Never
           automountServiceAccountToken: false
+          {{- with $wi }}
+          serviceAccountName: {{ required (printf "cairn.dbt.jobs[%s].workloadIdentity.serviceAccount" $job.name) .serviceAccount | quote }}
+          {{- end }}
           {{- with $.Values.global.cairn.imagePullSecrets }}
           imagePullSecrets:
             {{- toYaml . | nindent 12 }}
@@ -47,9 +54,15 @@ spec:
               env:
                 - name: CAIRN_URL
                   value: {{ printf "http://%s:%v" (include "cairn.componentName" $api) $.Values.cairn.api.port | quote }}
+                {{- if $wi }}
+                # The service account's token (for audience cairn, rotated by the kubelet), exchanged at Cairn.
+                - name: CAIRN_WORKLOAD_TOKEN_FILE
+                  value: /var/run/secrets/cairn/token
+                {{- else }}
                 - name: CAIRN_TOKEN
                   valueFrom:
                     secretKeyRef: { name: {{ $tok.name }}, key: {{ $tok.key | default "token" }} }
+                {{- end }}
                 - name: CAIRN_TRINO_HOST
                   value: {{ include "cairn.componentName" $trino | quote }}
                 - name: CAIRN_TRINO_PORT
@@ -74,6 +87,11 @@ spec:
               volumeMounts:
                 - name: tmp
                   mountPath: /tmp/cairn
+                {{- if $wi }}
+                - name: cairn-identity
+                  mountPath: /var/run/secrets/cairn
+                  readOnly: true
+                {{- end }}
                 {{- if $job.caSecret }}
                 - name: ca
                   mountPath: /etc/cairn-dbt-ca
@@ -83,6 +101,15 @@ spec:
             - name: tmp
               emptyDir:
                 sizeLimit: 2Gi
+            {{- with $wi }}
+            - name: cairn-identity
+              projected:
+                sources:
+                  - serviceAccountToken:
+                      audience: {{ .audience | default "cairn" | quote }}
+                      expirationSeconds: {{ .expirationSeconds | default 3600 }}
+                      path: token
+            {{- end }}
             {{- if $job.caSecret }}
             - name: ca
               secret:

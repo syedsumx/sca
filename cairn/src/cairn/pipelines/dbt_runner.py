@@ -18,6 +18,7 @@ Configuration::
 
     CAIRN_URL              Cairn's API, e.g. https://cairn.example.com/cairn/api
     CAIRN_TOKEN[_FILE]     the pipeline's Cairn token
+    CAIRN_WORKLOAD_TOKEN_FILE  instead: the workload's platform token (Kubernetes, CI), exchanged at Cairn
     CAIRN_CA_FILE          a CA for Cairn's and Trino's certificates (default: the system's)
     CAIRN_TRINO_HOST       Trino (cairn-trino); CAIRN_TRINO_PORT (8443)
     CAIRN_TRINO_CATALOG    the dbt "database" (lakehouse)
@@ -52,7 +53,25 @@ def _env(name: str, default: Optional[str] = None) -> str:
     return v or (default or "")
 
 
+def exchange_workload_token(base: str, path: str, verify) -> str:
+    """A Cairn token for the workload whose platform token is in ``path`` (a Kubernetes projected
+    service-account token, a CI OIDC token): read afresh each time, since the platform rotates it."""
+    subject = Path(path).read_text().strip()
+    with httpx.Client(timeout=30, verify=verify, trust_env=False) as c:
+        r = c.post(f"{base.rstrip('/')}/v1/auth/workload-token", data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange", "subject_token": subject,
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"})
+    if r.status_code != 200:
+        raise RunnerError(f"Cairn refused the workload token ({r.status_code}): {r.text[:300]}")
+    return r.json()["access_token"]
+
+
 def _token() -> str:
+    """The pipeline's Cairn token: a workload token exchanged at Cairn (CAIRN_WORKLOAD_TOKEN_FILE), or a
+    personal access token (CAIRN_TOKEN_FILE, CAIRN_TOKEN)."""
+    workload = os.environ.get("CAIRN_WORKLOAD_TOKEN_FILE")
+    if workload:
+        return exchange_workload_token(_env("CAIRN_URL"), workload, _verify())
     path = os.environ.get("CAIRN_TOKEN_FILE")
     if path:
         return Path(path).read_text().strip()
@@ -151,6 +170,8 @@ def run(args: list[str]) -> int:
         if sub not in ("run", "build", "test", "seed", "snapshot"):
             return code
         try:
+            if os.environ.get("CAIRN_WORKLOAD_TOKEN_FILE"):
+                token = _token()  # a fresh one: a long run can outlive the first
             out = record(client, base, token, target_path)
             print(f"cairn dbt: recorded {out.get('models')} models, {out.get('lineage_edges')} lineage edges"
                   + (f", {(out.get('tests') or {}).get('checks', 0)} tests" if out.get("tests") else ""), file=sys.stderr)

@@ -20,6 +20,7 @@ Configuration (environment, or keyword arguments)::
 
     CAIRN_URL             Cairn's API, e.g. https://cairn.example.com/cairn/api
     CAIRN_TOKEN[_FILE]    the caller's Cairn token
+    CAIRN_WORKLOAD_TOKEN_FILE  instead: the workload's platform token (Kubernetes, CI), exchanged at Cairn
     CAIRN_CATALOG_URI     Cairn Catalog, e.g. https://catalog.example.com
     CAIRN_CA_FILE         a CA for Cairn's certificate (default: the system's)
     CAIRN_SPARK_TOKEN_TTL seconds the first catalog token lasts (default: Cairn's, an hour); tokens are renewed
@@ -41,9 +42,18 @@ class CairnSparkError(Exception):
     pass
 
 
-def _token(token: Optional[str]) -> str:
+def _token(token: Optional[str], cairn_url: str = "", verify=True) -> str:
     if token:
         return token
+    workload = os.environ.get("CAIRN_WORKLOAD_TOKEN_FILE")
+    if workload:  # the workload's platform token (Kubernetes, CI), exchanged at Cairn
+        r = httpx.post(f"{cairn_url.rstrip('/')}/v1/auth/workload-token", data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+            "subject_token": Path(workload).read_text().strip(),
+            "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"}, timeout=30, verify=verify)
+        if r.status_code != 200:
+            raise CairnSparkError(f"Cairn refused the workload token ({r.status_code}): {r.text[:300]}")
+        return r.json()["access_token"]
     path = os.environ.get("CAIRN_TOKEN_FILE")
     if path:
         return Path(path).read_text().strip()
@@ -113,8 +123,8 @@ def lakehouse_session(app_name: str = "cairn", *, cairn_url: Optional[str] = Non
     catalog_uri = catalog_uri or os.environ.get("CAIRN_CATALOG_URI", "")
     if not cairn_url or not catalog_uri:
         raise CairnSparkError("set CAIRN_URL (Cairn's API) and CAIRN_CATALOG_URI (Cairn Catalog)")
-    tok = _token(token)
     verify = os.environ.get("CAIRN_CA_FILE") or True
+    tok = _token(token, cairn_url, verify)
     ttl = ttl or (int(os.environ["CAIRN_SPARK_TOKEN_TTL"]) if os.environ.get("CAIRN_SPARK_TOKEN_TTL") else None)
     ct = catalog_token(cairn_url, tok, ttl, verify)
     b = SparkSession.builder.appName(app_name)

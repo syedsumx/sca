@@ -11,9 +11,12 @@
 #   airflow-jwt          jwt-secret: <random>
 #   airflow-cairn        oauth-secret:  the secret Cairn has for client "airflow" (CAIRN_AIRFLOW_OAUTH_SECRET)
 #                        connection:    {"conn_type": "cairn", "host": "https://cairn.example.com/cairn/api",
-#                                        "password": "<svc-airflow's Cairn token>",
-#                                        "extra": {"trino_host": "cairn-trino.cairn.svc", "trino_port": 8443,
+#                                        "extra": {"workload_token_file": "/var/run/secrets/cairn/token",
+#                                                  "trino_host": "cairn-trino.cairn.svc", "trino_port": 8443,
 #                                                  "trino_catalog": "lakehouse", "ca_file": "/etc/cairn/ca.crt"}}
+#                        (tasks sign in as Airflow's service account, bound in Cairn to svc-airflow: see
+#                        workload identity in Cairn's administration guide; or put svc-airflow's Cairn token
+#                        in "password" instead of workload_token_file)
 #                        openlineage:   {"type": "http", "url": "https://cairn.example.com/cairn/api",
 #                                        "endpoint": "openlineage/api/v1/lineage",
 #                                        "auth": {"type": "api_key", "apiKey": "<svc-airflow's Cairn token>"}}
@@ -71,9 +74,21 @@ volumes:
   - name: cairn-ca
     secret:
       secretName: cairn-trino-ca
+  # The pod's service-account token for audience cairn (rotated by the kubelet): exchanged at Cairn for
+  # svc-airflow's token by the cairn connection (workload_token_file).
+  - name: cairn-identity
+    projected:
+      sources:
+        - serviceAccountToken:
+            audience: cairn
+            expirationSeconds: 3600
+            path: token
 volumeMounts:
   - name: cairn-ca
     mountPath: /etc/cairn
+    readOnly: true
+  - name: cairn-identity
+    mountPath: /var/run/secrets/cairn
     readOnly: true
 
 apiServer:

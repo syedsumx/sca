@@ -63,6 +63,25 @@ A SCIM user's `userName` is the Cairn user name, so it must match what single si
 membership changes take effect on policy decisions within seconds. When groups come from SCIM, set
 `CAIRN_SSO_EXTRACT_GROUPS=false` so sign-in does not also rewrite them.
 
+## Workload identity
+
+Pipelines (dbt, Airflow, Spark) can sign in with the identity their platform already gives them, instead of a stored personal access token. That identity is a Kubernetes service account's projected token, or a CI job's OIDC token. Cairn exchanges it for a short-lived Cairn token of the pipeline user an administrator bound it to, so there is no token to store, copy or rotate.
+
+- **Trusted issuers** (`CAIRN_WORKLOAD_ISSUERS`, a JSON list; Helm `cairn.workloadIdentity.issuers`). Each issuer has:
+  - `name`;
+  - `issuer`: the tokens' `iss`, exactly;
+  - `audience`: one of its own, such as `cairn`. The cluster's default audience is refused, so ordinary service-account tokens never qualify;
+  - its keys: `jwks_url` (HTTPS, with `ca_file` if needed) or `jwks_file`. Managed Kubernetes services publish their OIDC issuer and keys, and so does GitHub Actions. On your own cluster, bind `system:service-account-issuer-discovery` so the keys can be read.
+
+  Two limits apply. `max_token_lifetime` (24 hours) refuses long-lived tokens, such as Kubernetes' legacy secret tokens, which never expire. `token_ttl` (an hour) is the Cairn token's lifetime.
+- **Bindings** (`/v1/workload-identity/bindings`, `MANAGE_SYSTEM_OPERATIONS`). A binding maps an issuer and a token subject (`system:serviceaccount:pipelines:svc-dbt`, a CI `sub`) to one Cairn user. Optional claims must match too, for example `{"kubernetes.io.namespace": "pipelines"}` or `{"ref": "refs/heads/main"}`. Creating and deleting a binding is audited in the same transaction (`workload.binding_created`, `workload.binding_deleted`).
+- **The exchange** (`POST /v1/auth/workload-token`, OAuth 2.0 token exchange). Cairn checks the token's signature, issuer, audience, expiry and lifetime. Exactly one user must be bound, and that user must not be suspended. The Cairn token then works wherever a personal access token does, as that user: Trino tokens, lakehouse sessions, dbt run records. Each exchange is audited (`workload.token_issued`). Anything else is refused. If the issuer's keys cannot be fetched, the exchange answers 503.
+- **In the pipelines.** Set `CAIRN_WORKLOAD_TOKEN_FILE` to the token's path (`cairn dbt`, `cairn-spark`), or put `workload_token_file` in the Airflow `cairn` connection's extra. The file is read again at each exchange, since the kubelet rotates it. `cairn dbt` exchanges again before recording a run, so a long build never records with an expired token. Helm's `cairn.dbt.jobs[].workloadIdentity: {serviceAccount: svc-dbt}` runs the job as that service account with a projected token for audience `cairn`. `deploy/airflow/values-cairn.yaml` mounts one in every Airflow pod.
+- **Tested** (`tests/test_workload_identity_e2e.py`, against a real Kubernetes API server):
+  - **The exchange.** A token the cluster issued for `pipelines/svc-dbt` (audience `cairn`) was exchanged for `svc-dbt`'s Cairn token. With it, `svc-dbt` got a Trino token and a lakehouse session, and `cairn dbt`'s and `cairn-spark`'s exchanges worked.
+  - **Refusals.** These were refused: the cluster's default audience, an unbound service account, the same name in another namespace, a forged token, a 48-hour token, a suspended user, and a deleted binding.
+  - **Admin only.** Non-administrators could not bind.
+
 ## AI agents
 
 AI agents act on behalf of a person, never with permissions of their own. What an agent may do is

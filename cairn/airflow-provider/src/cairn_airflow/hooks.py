@@ -66,8 +66,23 @@ class CairnHook(BaseHook):
 
     @property
     def token(self) -> str:
+        """The pipeline user's Cairn token: exchanged at Cairn from the workload's platform token (extra
+        ``workload_token_file``, e.g. a Kubernetes projected service-account token; read afresh each time),
+        or the connection's password (a personal access token)."""
+        path = self.extra.get("workload_token_file")
+        if path:
+            with open(path) as f:
+                subject = f.read().strip()
+            with httpx.Client(timeout=30, verify=self.verify, trust_env=False) as c:
+                r = c.post(f"{self.url}/v1/auth/workload-token", data={
+                    "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange", "subject_token": subject,
+                    "subject_token_type": "urn:ietf:params:oauth:token-type:jwt"})
+            if r.status_code != 200:
+                raise CairnError(f"Cairn refused the workload token ({r.status_code}): {r.text[:300]}")
+            return r.json()["access_token"]
         if not self.conn.password:
-            raise CairnError(f"connection {self.cairn_conn_id}: set password to the pipeline user's Cairn token")
+            raise CairnError(f"connection {self.cairn_conn_id}: set password to the pipeline user's Cairn token, "
+                             "or extra workload_token_file")
         return self.conn.password
 
     @property
@@ -102,7 +117,9 @@ class CairnHook(BaseHook):
 
     def env(self) -> dict[str, str]:
         """The environment ``cairn dbt`` signs in with."""
-        out = {"CAIRN_URL": self.url, "CAIRN_TOKEN": self.token,
+        auth = ({"CAIRN_WORKLOAD_TOKEN_FILE": self.extra["workload_token_file"]} if self.extra.get("workload_token_file")
+                else {"CAIRN_TOKEN": self.token})
+        out = {"CAIRN_URL": self.url, **auth,
                "CAIRN_TRINO_HOST": str(self.extra.get("trino_host", "cairn-trino")),
                "CAIRN_TRINO_PORT": str(self.extra.get("trino_port", 8443)),
                "CAIRN_TRINO_CATALOG": str(self.extra.get("trino_catalog", "lakehouse"))}

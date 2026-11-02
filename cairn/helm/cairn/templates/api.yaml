@@ -24,6 +24,9 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_TOKEN_TTL" "value" (toString .Values.cairn.catalog.identity.tokenTtlSeconds)) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_MAX_SESSION" "value" (toString .Values.cairn.catalog.identity.maxSessionSeconds)) }}
 {{- end }}
+{{- with .Values.cairn.workloadIdentity.issuers }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WORKLOAD_ISSUERS" "value" (toJson .)) }}
+{{- end }}
 {{- /* Cairn Store administration (Settings → Storage): the store's admin key, from the store's Secret. */ -}}
 {{- if .Values.cairn.store.enabled }}
 {{- $s := .Values.cairn.store.secret }}

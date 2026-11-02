@@ -101,6 +101,7 @@ class Services:
     dbt_runs: Optional[Any] = None
     lakehouse: Optional[Any] = None
     lakehouse_sessions: Optional[Any] = None
+    workload: Optional[Any] = None
     knowledge: Optional[Any] = None
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
@@ -969,6 +970,15 @@ def _build_data_access(s: Services) -> None:
         if s.openlineage is not None:
             s.openlineage.rewrite = s.lakehouse.remap_lineage
         if getattr(s, "trino_tokens", None) is not None:
+            # Workload identity: pipelines exchange their platform's token (Kubernetes, CI) for a Cairn token.
+            from cairn.identity.workload import from_env as workload_from_env
+
+            g = s.graph
+            s.workload = workload_from_env(
+                s.engine, s.trino_tokens, s.audit,
+                (lambda urn: (g.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE")) if g is not None else None)
+            if s.workload is not None and s.identity is not None:
+                s.identity.workload_lookup = s.workload.principal_of
             from cairn.dataaccess.lakehouse import LakehouseSessions
 
             graph = s.graph

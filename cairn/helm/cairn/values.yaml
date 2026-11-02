@@ -877,6 +877,9 @@ cairn:
     #    args: [build]                      # dbt's arguments
     #    schema: analytics                  # the default schema models are built in
     #    tokenSecret: { name: svc-dbt-token, key: token }
+    #    # or, with no stored token: sign in as the pod's service account (bound to svc-dbt in Cairn,
+    #    # see cairn.workloadIdentity); the kubelet rotates its token.
+    #    workloadIdentity: { serviceAccount: svc-dbt, audience: cairn, expirationSeconds: 3600 }
     #    caSecret: { name: cairn-trino-tls, key: ca.crt }   # Trino's CA; empty: the system's
     #    timeoutSeconds: 7200
     #    threads: 4
@@ -884,6 +887,25 @@ cairn:
     resources:
       requests: { cpu: 200m, memory: 512Mi }
       limits: { memory: 2Gi }
+
+  # Workload identity: pipelines (dbt, Airflow, Spark) sign in with the token their platform gives them
+  # (a Kubernetes service account's projected token, a CI job's OIDC token) instead of a stored personal
+  # access token. Each issuer Cairn trusts: its iss, the audience its tokens must be for (one of their own,
+  # e.g. cairn), and its keys (jwks_url over HTTPS, ca_file if needed, or jwks_file). Bind workloads to
+  # pipeline users at /v1/workload-identity/bindings. For this cluster, the issuer is the API server's
+  # --service-account-issuer (EKS, GKE and AKS publish their OIDC issuer URL and keys).
+  workloadIdentity:
+    issuers: []
+    #  - name: this-cluster
+    #    issuer: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE
+    #    audience: cairn
+    #    jwks_url: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE/keys
+    #    max_token_lifetime: 86400        # refuse longer-lived tokens (legacy secret tokens never expire)
+    #    token_ttl: 3600                  # the Cairn token
+    #  - name: ci
+    #    issuer: https://token.actions.githubusercontent.com
+    #    audience: cairn
+    #    jwks_url: https://token.actions.githubusercontent.com/.well-known/jwks
 
   licence:
     # true: Cairn is read-only until a valid licence is installed (hosted tenants). false: without a
