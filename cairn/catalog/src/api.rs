@@ -177,6 +177,74 @@ impl From<s3::Error> for ApiError {
 }
 
 /// Requirement failures are commit conflicts; anything else iceberg-rust rejects is a bad request.
+/// Properties the catalog keeps itself (clones, dropped tables); clients may not set or remove them.
+const KEPT: &str = "cairn.";
+/// A clone's: the snapshots it shares with its source (comma-separated ids), and its source.
+const CLONE_INHERITED: &str = "cairn.clone.inherited";
+const CLONE_SOURCE: &str = "cairn.clone.source";
+/// A source's: {"<namespace>.<clone>": [snapshot ids that clone shares]}.
+const CLONES: &str = "cairn.clones";
+/// A namespace's dropped tables: cairn.dropped.<name> = {"metadata-location", "dropped-ms", "by"}.
+const DROPPED: &str = "cairn.dropped.";
+
+/// Snapshots a table may not expire: those it shares with a clone, or as a clone with its source.
+/// Expiring one would delete data files the other still reads.
+fn protected_snapshots(md: &TableMetadata) -> std::collections::HashSet<i64> {
+    let mut out = std::collections::HashSet::new();
+    if let Some(v) = md.properties().get(CLONE_INHERITED) {
+        out.extend(v.split(',').filter_map(|x| x.trim().parse::<i64>().ok()));
+    }
+    if let Some(v) = md.properties().get(CLONES) {
+        if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(v) {
+            for ids in m.values() {
+                out.extend(ids.as_array().into_iter().flatten().filter_map(|x| x.as_i64()));
+            }
+        }
+    }
+    out
+}
+
+/// What clients may not do in a commit: change the catalog's own properties, or expire shared snapshots.
+fn guard(md: &TableMetadata, updates: &[TableUpdate]) -> Result<(), ApiError> {
+    for u in updates {
+        match u {
+            TableUpdate::SetProperties { updates } if updates.keys().any(|k| k.starts_with(KEPT)) => {
+                return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* table properties are kept by the catalog"));
+            }
+            TableUpdate::RemoveProperties { removals } if removals.iter().any(|k| k.starts_with(KEPT)) => {
+                return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* table properties are kept by the catalog"));
+            }
+            TableUpdate::RemoveSnapshots { snapshot_ids } => {
+                let kept = protected_snapshots(md);
+                if let Some(id) = snapshot_ids.iter().find(|id| kept.contains(id)) {
+                    return Err(err(
+                        StatusCode::CONFLICT,
+                        "CommitFailedException",
+                        format!("Snapshot {id} is shared with a clone; it is kept until the clone is dropped"),
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn undrop_days() -> i64 {
+    std::env::var("CAIRN_CATALOG_UNDROP_DAYS").ok().and_then(|v| v.parse().ok()).unwrap_or(7)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+}
+
+#[derive(Deserialize)]
+struct CloneTable {
+    #[serde(default)]
+    namespace: Option<Vec<String>>,
+    name: String,
+}
+
 fn iceberg_err(e: iceberg::Error) -> ApiError {
     if e.kind() == iceberg::ErrorKind::CatalogCommitConflicts {
         err(StatusCode::CONFLICT, "CommitFailedException", e.message().to_string())
@@ -536,6 +604,7 @@ impl Catalog {
                 match m {
                     Method::GET => {
                         let mut props = self.db.namespace(&levels)?;
+                        props.retain(|k, _| !k.starts_with(KEPT));
                         // Where its tables go unless they name a location (engines such as Trino build
                         // table locations from it).
                         props.entry("location".into()).or_insert_with(|| self.namespace_location(&levels));
@@ -557,6 +626,9 @@ impl Catalog {
                 let levels = ns_param(ns);
                 scope(&levels)?;
                 let req: UpdateNamespace = parse(&body)?;
+                if req.removals.iter().chain(req.updates.keys()).any(|k| k.starts_with(KEPT)) {
+                    return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "cairn.* namespace properties are kept by the catalog"));
+                }
                 if req.removals.iter().any(|k| req.updates.contains_key(k)) {
                     return Err(err(
                         StatusCode::UNPROCESSABLE_ENTITY,
@@ -609,6 +681,44 @@ impl Catalog {
                 tracing::info!(principal = %principal.name, table = %format!("{}.{}", levels.join("."), name), "storage credentials renewed");
                 Ok(json_resp(StatusCode::OK, &json!({"storage-credentials": [{"prefix": location, "config": config}]})))
             }
+            (Method::POST, ["v1", "namespaces", ns, "tables", t, "clone"]) => {
+                let (levels, name) = (ns_param(ns), decode(t));
+                scope(&levels)?;
+                let req: CloneTable = parse(&body)?;
+                let target = req.namespace.clone().unwrap_or_else(|| levels.clone());
+                scope(&target)?;
+                self.need(&principal, &levels, &name, Need::Read).await?;
+                self.need(&principal, &target, &req.name, Need::Manage).await?;
+                self.clone_table(&levels, &name, &target, &req.name).await
+            }
+            (Method::POST, ["v1", "namespaces", ns, "tables", t, "undrop"]) => {
+                let (levels, name) = (ns_param(ns), decode(t));
+                scope(&levels)?;
+                self.need(&principal, &levels, &name, Need::Manage).await?;
+                self.undrop(&levels, &name).await
+            }
+            (Method::GET, ["v1", "namespaces", ns, "dropped"]) => {
+                let levels = ns_param(ns);
+                scope(&levels)?;
+                let props = self.db.namespace(&levels)?;
+                let cutoff = now_ms() - undrop_days() * 86_400_000;
+                let mut found: Vec<(String, Value)> = vec![];
+                for (k, v) in &props {
+                    if let Some(n) = k.strip_prefix(DROPPED) {
+                        let rec: Value = serde_json::from_str(v).unwrap_or(Value::Null);
+                        if rec["dropped-ms"].as_i64().unwrap_or(0) >= cutoff {
+                            found.push((n.to_string(), rec));
+                        }
+                    }
+                }
+                let names = self.visible(&principal, &levels, found.iter().map(|(n, _)| n.clone()).collect()).await?;
+                let out: Vec<Value> = found
+                    .into_iter()
+                    .filter(|(n, _)| names.contains(n))
+                    .map(|(n, r)| json!({"name": n, "dropped-ms": r["dropped-ms"], "by": r["by"]}))
+                    .collect();
+                Ok(json_resp(StatusCode::OK, &json!({"dropped": out, "retention-days": undrop_days()})))
+            }
             (m, ["v1", "namespaces", ns, "tables", t]) => {
                 let (levels, name) = (ns_param(ns), decode(t));
                 scope(&levels)?;
@@ -638,15 +748,22 @@ impl Catalog {
                                 return Err(bad_request("The identifier in the body differs from the path"));
                             }
                         }
-                        let p = self.prepare(&levels, &name, req.requirements, req.updates).await?;
+                        let p = self.prepare(&levels, &name, req.requirements, req.updates, true).await?;
                         let location = p.change.new.metadata_location.clone();
                         self.apply(vec![p.change]).await?;
                         Ok(json_resp(StatusCode::OK, &json!({"metadata-location": location, "metadata": p.metadata})))
                     }
                     Method::DELETE => {
                         self.need(&principal, &levels, &name, Need::Manage).await?;
+                        let purge = query.get("purgeRequested").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                        let current = self.db.table(&levels, &name)?;
+                        if !purge {
+                            // Kept for undrop: the last metadata stays in the store.
+                            self.remember_drop(&levels, &name, &current.metadata_location, &principal.name)?;
+                        }
                         let row = self.db.drop_table(&levels, &name)?;
-                        if query.get("purgeRequested").is_some_and(|v| v == "true") {
+                        self.forget_clone(&levels, &name, &row).await;
+                        if purge {
                             // Data files are left for the store's lifecycle tooling; the current metadata goes now.
                             let _ = self.store.delete(&row.metadata_location).await;
                         }
@@ -734,7 +851,7 @@ impl Catalog {
                     scope(&id.namespace)?;
                     let need = if data_only(&c.updates) { Need::Write } else { Need::Manage };
                     self.need(&principal, &id.namespace, &id.name, need).await?;
-                    prepared.push(self.prepare(&id.namespace, &id.name, c.requirements, c.updates).await?);
+                    prepared.push(self.prepare(&id.namespace, &id.name, c.requirements, c.updates, true).await?);
                 }
                 self.apply(prepared.into_iter().map(|p| p.change).collect()).await?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -949,6 +1066,165 @@ impl Catalog {
         ))
     }
 
+    /// A new table on the same data files (no data is copied): its own location for new writes, and the
+    /// source's snapshots, which both tables then keep until the clone is dropped.
+    async fn clone_table(&self, levels: &[String], name: &str, target: &[String], new_name: &str) -> Result<Resp, ApiError> {
+        if !valid_name(new_name) {
+            return Err(bad_request("Invalid table name"));
+        }
+        self.db.namespace(target)?;
+        if self.db.table(target, new_name).is_ok() {
+            return Err(db::Error::TableExists.into());
+        }
+        let src = self.db.table(levels, name)?;
+        let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
+        let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
+        let location = self.default_location(target, new_name);
+        let mut props = HashMap::new();
+        props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
+        props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
+        let metadata = md
+            .clone()
+            .into_builder(None)
+            .assign_uuid(uuid::Uuid::new_v4())
+            .set_location(location.clone())
+            .remove_properties(&[CLONES.to_string()])
+            .map_err(iceberg_err)?
+            .set_properties(props)
+            .map_err(iceberg_err)?
+            .build()
+            .map_err(iceberg_err)?
+            .metadata;
+        let clone_loc = MetadataLocation::new_with_metadata(metadata.location(), &metadata).to_string();
+        let clone_json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
+        self.store.put_new(&clone_loc, clone_json.as_bytes().to_vec(), "application/json").await?;
+        // The source records what the clone shares, in the same commit.
+        let mut clones: serde_json::Map<String, Value> =
+            md.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+        clones.insert(format!("{}.{}", target.join("."), new_name), json!(ids));
+        let mut upd = HashMap::new();
+        upd.insert(CLONES.to_string(), Value::Object(clones).to_string());
+        let src_change = match self.prepare(levels, name, vec![], vec![TableUpdate::SetProperties { updates: upd }], false).await {
+            Ok(p) => p.change,
+            Err(e) => {
+                let _ = self.store.delete(&clone_loc).await;
+                return Err(e);
+            }
+        };
+        let clone_change = Change {
+            namespace: db::ns_key(target),
+            name: new_name.to_string(),
+            expected: None,
+            new: TableRow { metadata_location: clone_loc.clone(), metadata: clone_json.clone() },
+        };
+        self.apply(vec![src_change, clone_change]).await?;
+        tracing::info!(source = %format!("{}.{}", levels.join("."), name), clone = %format!("{}.{}", target.join("."), new_name), "table cloned");
+        self.load_result(&clone_loc, serde_json::from_str(&clone_json).unwrap(), false, (target, new_name)).await
+    }
+
+    fn remember_drop(&self, levels: &[String], name: &str, metadata_location: &str, by: &str) -> Result<(), ApiError> {
+        let props = self.db.namespace(levels)?;
+        let cutoff = now_ms() - undrop_days() * 86_400_000;
+        let stale: Vec<String> = props
+            .iter()
+            .filter(|(k, v)| {
+                k.starts_with(DROPPED) && serde_json::from_str::<Value>(v).ok().and_then(|r| r["dropped-ms"].as_i64()).unwrap_or(0) < cutoff
+            })
+            .map(|(k, _)| k.clone())
+            .collect();
+        let mut add = HashMap::new();
+        add.insert(
+            format!("{DROPPED}{name}"),
+            json!({"metadata-location": metadata_location, "dropped-ms": now_ms(), "by": by}).to_string(),
+        );
+        let stale: Vec<String> = stale.into_iter().filter(|k| !add.contains_key(k)).collect();
+        self.db.update_namespace(levels, &stale, &add.into_iter().collect())?;
+        Ok(())
+    }
+
+    /// A dropped clone no longer holds its source's snapshots.
+    async fn forget_clone(&self, levels: &[String], name: &str, row: &TableRow) {
+        let Ok(md) = serde_json::from_str::<TableMetadata>(&row.metadata) else { return };
+        let Some(source) = md.properties().get(CLONE_SOURCE).cloned() else { return };
+        let Some((sns, sname)) = source.rsplit_once('.') else { return };
+        let slevels: Vec<String> = sns.split('.').map(String::from).collect();
+        let Ok(srow) = self.db.table(&slevels, sname) else { return };
+        let Ok(smd) = serde_json::from_str::<TableMetadata>(&srow.metadata) else { return };
+        let mut clones: serde_json::Map<String, Value> =
+            smd.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+        if clones.remove(&format!("{}.{}", levels.join("."), name)).is_none() {
+            return;
+        }
+        let update = if clones.is_empty() {
+            TableUpdate::RemoveProperties { removals: vec![CLONES.to_string()] }
+        } else {
+            let mut m = HashMap::new();
+            m.insert(CLONES.to_string(), Value::Object(clones).to_string());
+            TableUpdate::SetProperties { updates: m }
+        };
+        match self.prepare(&slevels, sname, vec![], vec![update], false).await {
+            Ok(p) => {
+                if let Err(e) = self.apply(vec![p.change]).await {
+                    tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record");
+                }
+            }
+            Err(e) => tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record"),
+        }
+    }
+
+    /// Brings a dropped table back (within the retention), as it was when dropped.
+    async fn undrop(&self, levels: &[String], name: &str) -> Result<Resp, ApiError> {
+        let props = self.db.namespace(levels)?;
+        let key = format!("{DROPPED}{name}");
+        let rec: Value = props
+            .get(&key)
+            .and_then(|v| serde_json::from_str(v).ok())
+            .ok_or_else(|| err(StatusCode::NOT_FOUND, "NoSuchTableException", "No dropped table by that name"))?;
+        if rec["dropped-ms"].as_i64().unwrap_or(0) < now_ms() - undrop_days() * 86_400_000 {
+            return Err(err(StatusCode::NOT_FOUND, "NoSuchTableException", "Dropped longer ago than the catalog keeps tables"));
+        }
+        if self.db.table(levels, name).is_ok() {
+            return Err(db::Error::TableExists.into());
+        }
+        let location = rec["metadata-location"].as_str().unwrap_or("").to_string();
+        let bytes = self.store.get(&location).await?;
+        let md: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
+        // A clone comes back only if its source still holds every snapshot they share: once the source has
+        // expired one, the data files the clone reads may be gone.
+        let mut hold = None;
+        if let (Some(source), Some(inh)) = (md.properties().get(CLONE_SOURCE), md.properties().get(CLONE_INHERITED)) {
+            let gone = || {
+                err(
+                    StatusCode::CONFLICT,
+                    "CommitFailedException",
+                    format!("This clone's source {source} no longer holds the snapshots it shares, so its data may be gone"),
+                )
+            };
+            let (sns, sname) = source.rsplit_once('.').ok_or_else(gone)?;
+            let slevels: Vec<String> = sns.split('.').map(String::from).collect();
+            let srow = self.db.table(&slevels, sname).map_err(|_| gone())?;
+            let smd: TableMetadata = serde_json::from_str(&srow.metadata).map_err(|_| gone())?;
+            let ids: Vec<i64> = inh.split(',').filter_map(|x| x.parse().ok()).collect();
+            if ids.iter().any(|id| smd.snapshot_by_id(*id).is_none()) {
+                return Err(gone());
+            }
+            let mut clones: serde_json::Map<String, Value> =
+                smd.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+            clones.insert(format!("{}.{}", levels.join("."), name), json!(ids));
+            let mut m = HashMap::new();
+            m.insert(CLONES.to_string(), Value::Object(clones).to_string());
+            hold = Some(self.prepare(&slevels, sname, vec![], vec![TableUpdate::SetProperties { updates: m }], false).await?);
+        }
+        // The source holds the shared snapshots again before the clone is back.
+        if let Some(p) = hold {
+            self.apply(vec![p.change]).await?;
+        }
+        let resp = self.register(levels, Register { name: name.to_string(), metadata_location: location }).await?;
+        self.db.update_namespace(levels, &[key], &BTreeMap::new())?;
+        tracing::info!(table = %format!("{}.{}", levels.join("."), name), "table undropped");
+        Ok(resp)
+    }
+
     async fn register(&self, levels: &[String], req: Register) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid table name"));
@@ -976,6 +1252,7 @@ impl Catalog {
         name: &str,
         requirements: Vec<TableRequirement>,
         updates: Vec<TableUpdate>,
+        client: bool,
     ) -> Result<Prepared, ApiError> {
         let current = match self.db.table(levels, name) {
             Ok(row) => Some(row),
@@ -987,6 +1264,9 @@ impl Catalog {
                 let md: TableMetadata = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
                 for r in &requirements {
                     r.check(Some(&md)).map_err(iceberg_err)?;
+                }
+                if client {
+                    guard(&md, &updates)?;
                 }
                 (md.into_builder(Some(row.metadata_location.clone())), Some(row.metadata_location.clone()))
             }

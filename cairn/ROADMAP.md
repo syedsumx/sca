@@ -55,6 +55,7 @@ Ordered by what an enterprise needs first to retire a Snowflake or Databricks co
 | L9 | **Disaster recovery across regions.** Store replication, catalog and Cairn database replicas, and a tested failover runbook with measured recovery point and recovery time objectives | A region is lost in a test. The standby serves the lakehouse with the recorded RPO and RTO | 🟡 store sync, backups and continuous backup exist |
 | L10 | **Scale and assurance.** Load tests: PDP p99 under 5 ms cached at 2k rps, catalog decisions on 1k-table jobs, store throughput. Chaos tests. An external penetration test. KMS or HSM for gateway keys | Published results in CI, and pentest findings closed | ⬜ |
 | L11 | **Upgrade matrix.** Pin-and-test against new Trino, Iceberg, Spark, dbt and Airflow releases | A version bump is merged only after CI passes with the new engine version | ⬜ |
+| L12 | **Zero-copy clones, undrop, branches and tags.** Clone a table without copying its data; bring back a dropped table; write-audit-publish on Iceberg branches | A clone reads the source's files and writes its own; neither can expire what they share; a dropped table comes back within the retention, a purged one does not | ✅ `POST …/tables/{t}/clone`, `…/undrop`, `GET …/dropped` in Cairn Catalog; branches and tags kept by the catalog, tested with pyiceberg (`catalog/conformance/test_clones.py`) |
 
 ## History: the metadata platform (M0–M6)
 

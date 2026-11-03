@@ -1019,6 +1019,26 @@ A multi-table transaction changes every table or none.
 
   The replicas start with scoped credentials on, so they also race to create the store role.
 
+**Zero-copy clones.** `POST /v1/namespaces/{ns}/tables/{table}/clone` with `{"name": "dev_orders"}` (and optionally `"namespace": ["dev"]`) makes a new table on the same data files. Nothing is copied. The clone has its own id and location, so its new writes go to its own location, and the two tables change independently. The caller needs read access to the source and manage access to the target namespace.
+
+- Neither table may expire a snapshot they share, because expiring it would delete data files the other still reads. Such a commit is refused with 409 ("shared with a clone"). Once the clone is dropped, the source may expire those snapshots again.
+- The catalog records shared snapshots in `cairn.*` table properties. Clients may not set or remove `cairn.*` properties, on tables or on namespaces (403).
+
+**Undrop.** A table dropped without `purge` can be brought back for `CAIRN_CATALOG_UNDROP_DAYS` days (default 7):
+
+- `GET /v1/namespaces/{ns}/dropped` lists the tables that can be brought back.
+- `POST /v1/namespaces/{ns}/tables/{table}/undrop` brings one back with its history.
+
+A purged table cannot be brought back. Undrop fails with 409 if a new table now has the name. A dropped clone stops holding its source's snapshots, so the source may expire them. The clone can then no longer be brought back, because its data files may be gone (409).
+
+**Branches and tags.** The catalog keeps Iceberg branches and tags, so you can work in write-audit-publish order: write to a branch, check it, then publish it to `main`. Engines create and use them:
+
+- pyiceberg: `manage_snapshots().create_branch(…)`, `append(…, branch="audit")` and `set_current_snapshot(…)`.
+- Spark: `ALTER TABLE … CREATE BRANCH` and `spark.wap.branch`.
+- Trino reads a tag or branch with `FOR VERSION AS OF 'release-1'`.
+
+Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/conformance/test_clones.py`.
+
 **Limits.** Dropping a table with `purge` removes its current metadata file. Data files are left in the store.
 
 **Trino.** Trino is the SQL engine for the lakehouse, through its Iceberg connector. It runs on Cairn Catalog's tables, and their data stays in Cairn Store.
