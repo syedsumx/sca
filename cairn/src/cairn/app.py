@@ -282,6 +282,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         gf = getattr(services, "git_folders", None)
         app.include_router(build_notebooks_router(services.notebooks, services.notebook_catalog, cp,
                                                   gf.notebook_saved if gf is not None else None))
+    if getattr(services, "ml_monitoring", None) is not None:   # before the MLflow pass-through, which takes /v1/ml/*
+        from cairn.ml.monitoring import build_monitoring_router
+
+        app.include_router(build_monitoring_router(services.ml_monitoring, cp))
     if getattr(services, "ml", None) is not None:
         from cairn.ml.mlflow_gateway import build_ml_router
 

@@ -123,6 +123,7 @@ class Services:
     clean_rooms: Optional[Any] = None
     feature_tables: Optional[Any] = None
     online_features: Optional[Any] = None
+    ml_monitoring: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1202,6 +1203,38 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+    # Model monitoring: every call to a served model logged; drift from a baseline, accuracy from labels.
+    if s.ml is not None:
+        from cairn.ml.monitoring import ModelMonitoring
+
+        mon_catalog = os.environ.get("CAIRN_ML_MONITOR_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
+        read_table = None
+        if mon_catalog:
+            from cairn.pipelines.pipes import _settings as _mon_settings
+
+            mon_props = _mon_settings("CAIRN_ML_MONITOR_CATALOG" if os.environ.get("CAIRN_ML_MONITOR_CATALOG")
+                                      else "CAIRN_PIPES_CATALOG")
+
+            def read_table(table: str, columns):
+                from pyiceberg.catalog.rest import RestCatalog
+
+                from cairn.ml.monitoring import MAX_BASELINE
+
+                t = RestCatalog("cairn-ml-monitor", **mon_props).load_table(tuple(table.split(".")))
+                scan = t.scan(selected_fields=tuple(columns), limit=MAX_BASELINE) if columns else t.scan(limit=MAX_BASELINE)
+                return scan.to_arrow().to_pylist()
+
+        def tell_ml(type_, title, body, recipients, payload):
+            from cairn.notify.hub import Event as _Event
+
+            if s.notify is not None:
+                s.notify.publish(_Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                                        url=f"/ml/models/{payload.get('model', '')}"))
+        gw = s.ml
+        s.ml_monitoring = ModelMonitoring(
+            s.engine, lambda p, m: gw.may_view(p, m), lambda p, m: gw.may_manage(p, m), gw.owner, read_table,
+            tell_ml, s.audit)
+        gw.monitoring = s.ml_monitoring
     # Feature tables: lakehouse tables declared as ML features, in the catalog with their lineage.
     if s.graph is not None:
         from cairn.ml.features import FeatureTables

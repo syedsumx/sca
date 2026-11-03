@@ -83,6 +83,7 @@ class MlflowGateway:
         self.allowed = allowed or (lambda p, priv, urn: False)
         self.serving = {str(k): str(v).rstrip("/") for k, v in (serving or {}).items()}
         self.http = http
+        self.monitoring = None          # cairn.ml.monitoring.ModelMonitoring, when wired
 
     @classmethod
     def from_env(cls, engine, audit, graph, table_urn, allowed) -> Optional["MlflowGateway"]:
@@ -286,18 +287,28 @@ class MlflowGateway:
         if not self.may_use(p, name):
             raise MlError(f"using model {name} needs {USE_ML_MODEL} on it", 403)
         import httpx
+        from starlette.concurrency import run_in_threadpool
 
         client = self.http or httpx.AsyncClient(timeout=120)
+        started = time.monotonic()
         try:
             r = await client.post(f"{url}/invocations", content=body, headers={"content-type": content_type or "application/json"})
         except httpx.HTTPError as e:
+            if self.monitoring is not None:
+                await run_in_threadpool(self.monitoring.record, name, p.urn, 502,
+                                        int((time.monotonic() - started) * 1000), body, b"")
             raise MlError(f"the model server is not reachable: {e}", 502)
         finally:
             if self.http is None:
                 await client.aclose()
+        latency = int((time.monotonic() - started) * 1000)
+        headers = {"content-type": r.headers.get("content-type", "application/json")}
+        if self.monitoring is not None:      # every call is logged; the payloads only for a monitored model
+            headers["x-cairn-inference-id"] = await run_in_threadpool(
+                self.monitoring.record, name, p.urn, r.status_code, latency, body, r.content)
         if self.audit is not None:
             self.audit.record("ml", "ml.model_invoked", p.urn, group_urn(name), {"name": name, "status": r.status_code})
-        return r.status_code, {"content-type": r.headers.get("content-type", "application/json")}, r.content
+        return r.status_code, headers, r.content
 
 
 USE_ML_MODEL = USE

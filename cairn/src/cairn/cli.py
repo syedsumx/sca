@@ -93,6 +93,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.vectors.run_due)      # vector indexes kept in step with their tables
     if getattr(s, "online_features", None) is not None:
         sch.extra.append(s.online_features.run_due)   # online features: synced when their table changes
+    if getattr(s, "ml_monitoring", None) is not None:
+        sch.extra.append(s.ml_monitoring.run_due)     # model monitors: drift and accuracy checks, retention
     sch.run_forever()
 
 

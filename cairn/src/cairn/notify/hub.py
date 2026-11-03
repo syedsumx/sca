@@ -44,6 +44,7 @@ EVENT_TYPES = [
     "access.provisioning_failed", "quality.external_failed", "privacy.deletion_requested",
     "privacy.request_completed", "privacy.retention_breach", "product.slo_changed", "pipeline.run_failed",
     "sql.alert_triggered", "sql.alert_resolved", "sql.workflow_failed", "sql.workflow_finished",
+    "ml.drift_detected", "ml.drift_resolved",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 
