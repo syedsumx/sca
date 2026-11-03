@@ -1,5 +1,6 @@
-// The Cairn Terraform (and OpenTofu) provider: pipes, streams, derived tables and table maintenance
-// policies, managed through Cairn's API as the token's user.
+// The Cairn Terraform (and OpenTofu) provider: Cairn's resources (pipes, streams, derived tables,
+// maintenance, vector indexes, SQL resources, policies, connections), managed through Cairn's API as the
+// token's user.
 package main
 
 import (

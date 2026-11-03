@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cairn.common.audit import AuditLog
 from cairn.common.security import Principal
-from cairn.governance.abac import PolicyBundle
+from cairn.governance.abac import Policy, PolicyBundle
 from cairn.governance.certification import (
     CreateWorkflowRequest,
     TransitionRequest,
@@ -115,6 +115,63 @@ def build_router(
         version = repo.save(bundle, p.urn) if repo else None
         pdp.set_bundle(bundle)
         return {"version": version, "policies": len(bundle.policies)}
+
+    # One policy at a time (bundles, Terraform): the rest of the bundle is left as it is. Only Cairn's own
+    # policies (source "cairn"); personas, purposes, workspaces and native policies have their own owners.
+    def _one(pid: str) -> Optional[Policy]:
+        return next((x for x in pdp.bundle.policies if x.id == pid), None)
+
+    def _change(fn, p: Principal, detail: dict) -> PolicyBundle:
+        if repo is None:
+            new = PolicyBundle.model_validate(fn(pdp.bundle).model_dump(mode="json"))
+        else:
+            _, new = repo.change(fn, p.urn, base=pdp.bundle, detail=detail)
+        pdp.set_bundle(new)
+        return new
+
+    @router.get("/policies/{pid}")
+    def get_policy(pid: str, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        one = _one(pid)
+        if one is None:
+            raise HTTPException(404, "no such policy")
+        return one.model_dump(mode="json")
+
+    @router.put("/policies/{pid}")
+    def put_policy(pid: str, policy: Policy, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+        if policy.id != pid:
+            raise HTTPException(422, f"the policy's id is {policy.id!r}, the path says {pid!r}")
+        if policy.source != "cairn":
+            raise HTTPException(422, "only Cairn's own policies (source cairn) are set here")
+
+        def upsert(b: PolicyBundle) -> PolicyBundle:
+            old = next((x for x in b.policies if x.id == pid), None)
+            if old is not None and old.source != "cairn":
+                raise HTTPException(409, f"policy {pid} is managed by {old.source}")
+            rest = [x for x in b.policies if x.id != pid]
+            at = next((i for i, x in enumerate(b.policies) if x.id == pid), len(rest))
+            return PolicyBundle(policies=rest[:at] + [policy] + rest[at:])
+
+        try:
+            new = _change(upsert, p, {"changed": pid, "change": "set"})
+        except ValidationError as e:
+            raise HTTPException(422, str(e))
+        return next(x for x in new.policies if x.id == pid).model_dump(mode="json")
+
+    @router.delete("/policies/{pid}", status_code=204)
+    def delete_policy(pid: str, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_POLICIES", None)
+
+        def drop(b: PolicyBundle) -> PolicyBundle:
+            old = next((x for x in b.policies if x.id == pid), None)
+            if old is None:
+                raise HTTPException(404, "no such policy")
+            if old.source != "cairn":
+                raise HTTPException(409, f"policy {pid} is managed by {old.source}")
+            return PolicyBundle(policies=[x for x in b.policies if x.id != pid])
+
+        _change(drop, p, {"changed": pid, "change": "deleted"})
 
     # ---- PII -----------------------------------------------------------------------
     @router.post("/pii/classify")

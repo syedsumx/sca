@@ -259,6 +259,12 @@ jobs:
         run: |
           test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
           go vet ./...
+      - name: Release build (goreleaser check and an unsigned snapshot of every platform)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          workdir: cairn/terraform-provider-cairn
+          args: release --snapshot --clean --skip=sign,publish
       - name: Terraform against Cairn
         run: |
           set -o pipefail

@@ -20,10 +20,23 @@ type kindData struct {
 var _ datasource.DataSourceWithConfigure = (*kindData)(nil)
 
 func (d *kindData) lookup() string {
-	if d.k.byScope {
+	switch {
+	case d.k.lookup != "":
+		return d.k.lookup
+	case d.k.byScope:
 		return "scope"
 	}
 	return "name"
+}
+
+// lookupKey is Cairn's name for the lookup attribute.
+func (d *kindData) lookupKey() string {
+	for _, f := range d.k.fields {
+		if f.name == d.lookup() {
+			return f.key()
+		}
+	}
+	return d.lookup()
 }
 
 func (d *kindData) Metadata(_ context.Context, req datasource.MetadataRequest, resp *datasource.MetadataResponse) {
@@ -68,8 +81,8 @@ func (d *kindData) Read(ctx context.Context, req datasource.ReadRequest, resp *d
 		return
 	}
 	var found []map[string]any
-	for _, x := range res.([]any) {
-		if m, ok := x.(map[string]any); ok && fmt.Sprint(m[d.lookup()]) == want.ValueString() {
+	for _, m := range d.k.items(res) {
+		if fmt.Sprint(m[d.lookupKey()]) == want.ValueString() {
 			found = append(found, m)
 		}
 	}

@@ -263,3 +263,93 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     assert [x["name"] for x in s.sql_workspace.saved(ADMIN)] == ["by-hand"]
     assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
     assert s.vectors.list() == []
+
+
+ACCESS_CONFIG = """
+terraform {
+  required_providers {
+    cairn = { source = "cairn/cairn" }
+  }
+}
+provider "cairn" {}
+
+resource "cairn_policy" "analysts" {
+  policy_id = "analysts-read"
+  effect    = "allow"
+  priority  = PRIORITY
+  actions   = ["VIEW_DATASET_PROFILE", "USE_WAREHOUSE"]
+  target    = jsonencode({resource_types = ["dataset", "warehouse"]})
+  condition = jsonencode({attr = "subject.groups", op = "contains", value = "analysts"})
+}
+
+resource "cairn_connection" "finance" {
+  name      = "finance-db"
+  connector = "postgres"
+  values    = jsonencode({host_port = "finance-db:5432", database = "DATABASE", username = "reader", password = "FINANCE_PG_PASSWORD"})
+  schedule  = jsonencode({interval = "0 2 * * *", timezone = "UTC"})
+}
+
+data "cairn_policy" "admin" {
+  policy_id = "admin"
+}
+
+data "cairn_connection" "finance" {
+  name       = "finance-db"
+  depends_on = [cairn_connection.finance]
+}
+
+output "admin_actions" {
+  value = data.cairn_policy.admin.actions
+}
+
+output "finance_urn" {
+  value = data.cairn_connection.finance.id
+}
+"""
+
+
+def test_terraform_manages_policies_and_connections(world):
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from test_sources import FakeCore
+
+    from cairn.governance.abac import PolicyBundle
+
+    w, s = world, world["s"]
+    core = FakeCore()
+    s.graph.graphql_handler = core
+    for f in w["work"].glob("*.tf"):
+        f.unlink()
+
+    def config(priority=10, database="finance"):
+        (w["work"] / "main.tf").write_text(ACCESS_CONFIG.replace("PRIORITY", str(priority)).replace("DATABASE", database))
+
+    config()
+    out = tf(w, "apply", "-auto-approve").stdout
+    assert '"*"' in out and "urn:li:dataHubIngestionSource:" in out, out       # both data sources read
+    pol = next(x for x in s.pdp.bundle.policies if x.id == "analysts-read")
+    assert pol.priority == 10 and pol.target.resource_types == ["dataset", "warehouse"]
+    assert [x.id for x in s.pdp.bundle.policies] == ["admin", "analysts-read"]           # the rest stays
+    src = next(iter(core.sources.values()))
+    assert json.loads(src["config"]["recipe"])["source"]["config"]["password"] == "${FINANCE_PG_PASSWORD}"
+    tf(w, "plan", "-detailed-exitcode")                                                  # Cairn's defaults are not drift
+    # Changed in place: the policy keeps its id, the connection its URN.
+    config(priority=20, database="finance_v2")
+    out = tf(w, "apply", "-auto-approve").stdout
+    assert "0 added, 2 changed, 0 destroyed" in out, out
+    assert next(x for x in s.pdp.bundle.policies if x.id == "analysts-read").priority == 20
+    assert list(core.sources) == [src["urn"]]
+    assert json.loads(core.sources[src["urn"]]["config"]["recipe"])["source"]["config"]["database"] == "finance_v2"
+    # Deleted outside Terraform: put back. Imported by id: no change.
+    s.pdp.set_bundle(PolicyBundle(policies=[x for x in s.pdp.bundle.policies if x.id != "analysts-read"]))
+    s.policy_repo.save(s.pdp.bundle, ADMIN)
+    tf(w, "plan", "-detailed-exitcode", ok=(2,))
+    tf(w, "apply", "-auto-approve")
+    assert any(x.id == "analysts-read" for x in s.pdp.bundle.policies)
+    tf(w, "state", "rm", "cairn_policy.analysts")
+    tf(w, "import", "cairn_policy.analysts", "analysts-read")
+    tf(w, "plan", "-detailed-exitcode")
+    tf(w, "destroy", "-auto-approve")
+    assert [x.id for x in s.pdp.bundle.policies] == ["admin"] and core.sources == {}
+

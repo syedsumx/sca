@@ -14,8 +14,13 @@ permissions and audit apply:
 | `cairn_dashboard` | Saved queries shown together (`tiles = jsonencode([{query = cairn_saved_query.x.id}])`) |
 | `cairn_sql_alert` | A saved query checked on a schedule, telling its owner when a condition starts and stops |
 | `cairn_sql_workflow` | Steps that depend on each other (refreshes, checks, reports) on a cron schedule |
+| `cairn_policy` | One of Cairn's own access policies, set on its own (`policy_id`, `effect`, `actions`, `target`, `condition`) |
+| `cairn_connection` | An ingestion source: `connector`, `values` (secret fields name a Cairn secret), `schedule`, `executor` |
 
-Each is also a data source, read by its name (a maintenance policy by its scope):
+Warehouses are part of the deployment (Helm values `cairn.trino.warehouses`, or Terraform's `helm_release`);
+who may use one is a `cairn_policy` granting `USE_WAREHOUSE` on `urn:li:warehouse:<name>`.
+
+Each is also a data source, read by its name (a maintenance policy by its scope, a policy by its `policy_id`):
 `data "cairn_saved_query" "q" { name = "weekly-revenue" }`. Saved queries, dashboards, alerts and
 workflows are the token user's own; when others share one of the same name, the caller's own wins.
 JSON attributes are compared by what you declare, so what Cairn adds (ids, default titles) is not drift.
@@ -42,3 +47,21 @@ again on the next apply. Import with the resource's id (for maintenance policies
 Build: `go build -o terraform-provider-cairn .`, then point Terraform at the directory with a
 `dev_overrides` block for `cairn/cairn` (or publish it to your registry). Tested by
 `tests/test_terraform_provider.py` with Terraform 1.13.
+
+## Publishing
+
+The Terraform Registry (and OpenTofu's) publishes providers from a public GitHub repository named
+`terraform-provider-<name>` whose releases carry signed checksums. This folder holds everything for that
+repository: `.goreleaser.yml`, `terraform-registry-manifest.json` and `.github/workflows/release.yml`.
+
+1. Make the repository from this folder, with its history:
+   `git subtree split --prefix=cairn/terraform-provider-cairn -b provider-release` in the Cairn repository,
+   then push that branch as `main` of `<owner>/terraform-provider-cairn`.
+2. Create a GPG key for signing; add its secret key and passphrase to that repository's secrets as
+   `GPG_PRIVATE_KEY` and `PASSPHRASE`, and its public key to your registry account.
+3. Sign in to registry.terraform.io with GitHub and publish the repository as a provider.
+4. Tag a release there: `git tag v0.1.0 && git push --tags`. The workflow builds every platform, signs the
+   checksums and makes the GitHub release the registry reads.
+
+Users then write `source = "<owner>/cairn"`. The Cairn repository's CI checks `.goreleaser.yml` and runs
+an unsigned snapshot release on every push, so a release tag does not find a broken build.

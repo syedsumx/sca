@@ -2,6 +2,14 @@
 
 ```yaml
 bundle: sales-lakehouse            # what this bundle is called (its state is kept under this name)
+policies:                          # Cairn's own access policies, one by one (the rest of the bundle in force stays)
+  - {id: analysts-read-sales, effect: allow, actions: [VIEW_DATASET_PROFILE, USE_WAREHOUSE], priority: 10,
+     target: {resource_types: [dataset, warehouse]},
+     condition: {attr: subject.groups, op: contains, value: analysts}}
+connections:                       # ingestion sources; secret fields name a Cairn secret, never its value
+  - {name: finance-db, connector: postgres, executor: finance,
+     values: {host_port: "finance-db:5432", database: finance, username: reader, password: FINANCE_PG_PASSWORD},
+     schedule: {interval: "0 2 * * *", timezone: UTC}}
 pipes:
   - {name: orders-files, bucket: landing, prefix: orders/, format: csv, target: raw.orders, create_table: true}
 streams:
@@ -32,7 +40,9 @@ Dashboards, alerts and workflow steps name their saved queries (``query: <name>`
 saved queries, this bundle's or not; Cairn's ids are looked up at apply time.
 
 ``${NAME}`` is replaced from ``--var NAME=value``, then from the environment (a missing one is an error),
-so one file serves several environments. ``cairn bundle validate`` checks the file alone; ``plan`` shows
+so one file serves several environments; ``$${NAME}`` stays a literal ``${NAME}`` (a custom recipe's secret).
+Warehouses are part of the deployment (Helm values ``cairn.trino.warehouses``); who may use one is a policy
+(``USE_WAREHOUSE`` on ``urn:li:warehouse:<name>``). ``cairn bundle validate`` checks the file alone; ``plan`` shows
 what ``apply`` would create, update and (with ``--prune``) delete; ``apply`` does it. A resource is known by
 its name (``scope`` for maintenance policies). Prune deletes only what this bundle created before (kept by
 Cairn under the bundle's name), never resources made by hand or by other bundles. Each change is made
@@ -51,6 +61,14 @@ from typing import Any, Optional
 from urllib.parse import quote
 
 KINDS: dict[str, dict] = {
+    # Cairn's own policies (source cairn), set and deleted one at a time; compared exactly, as Cairn holds them.
+    "policies": {"path": "/governance/policies", "key": "id", "required": ("id", "effect", "actions"), "defaults": {},
+                 "optional": ("description", "priority", "target", "condition", "obligations", "enabled"),
+                 "list_key": "policies", "upsert": True, "exact": True},
+    # Ingestion sources (connector + form values; secrets by name). Owners are kept when not declared.
+    "connections": {"path": "/sources", "key": "name", "id": "urn", "item": "/sources/{id}/detail",
+                    "required": ("name", "connector"), "optional": ("owners", "recipe"),
+                    "defaults": {"values": {}, "advanced": {}, "executor": "default", "schedule": None}},
     "pipes": {"path": "/v1/pipes", "key": "name", "required": ("name", "bucket", "format", "target"),
               "defaults": {"prefix": "", "create_table": False, "enabled": True}},
     "streams": {"path": "/v1/streams", "key": "name", "required": ("name", "topic", "target"),
@@ -74,9 +92,10 @@ KINDS: dict[str, dict] = {
     "workflows": {"path": "/v1/sql-workflows", "key": "name", "required": ("name", "steps"), "mine": True,
                   "defaults": {"cron": None, "recipients": [], "notify": "failure", "enabled": True}},
 }
-# Created and changed in this order (derived tables may read the others' tables; dashboards, alerts and
-# workflows name saved queries); deleted in the reverse order.
-ORDER = ("maintenance", "pipes", "streams", "derived", "vectors", "queries", "dashboards", "alerts", "workflows")
+# Created and changed in this order (policies first, so what follows is reachable as declared; derived tables
+# may read the others' tables; dashboards, alerts and workflows name saved queries); deleted in the reverse
+# order, so access goes last.
+ORDER = ("policies", "connections", "maintenance", "pipes", "streams", "derived", "vectors", "queries", "dashboards", "alerts", "workflows")
 CHART = {"type": "table", "x": "", "y": []}
 STEP = {"after": [], "retries": 0}
 VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -104,8 +123,13 @@ class Change:
         return out
 
 
+ESCAPED = "\x00cairn-dollar-brace\x00"
+
+
 def _subst(v: Any, vars_: dict) -> Any:
     if isinstance(v, str):
+        v = v.replace("$${", ESCAPED)
+
         def one(m):
             name = m.group(1)
             if name in vars_:
@@ -113,7 +137,7 @@ def _subst(v: Any, vars_: dict) -> Any:
             if name in os.environ:
                 return os.environ[name]
             raise BundleError(f"${{{name}}} is not set (--var {name}=... or the environment)")
-        return VAR.sub(one, v)
+        return VAR.sub(one, v).replace(ESCAPED, "${")
     if isinstance(v, list):
         return [_subst(x, vars_) for x in v]
     if isinstance(v, dict):
@@ -143,7 +167,8 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
         items = raw.get(kind) or []
         if not isinstance(items, list):
             raise BundleError(f"{kind}: a list")
-        allowed = set(cfg["required"]) | set(cfg["defaults"]) | ({"owner"} if kind == "derived" else set())
+        allowed = (set(cfg["required"]) | set(cfg["defaults"]) | set(cfg.get("optional", ()))
+                   | ({"owner"} if kind == "derived" else set()))
         seen: dict[str, dict] = {}
         for i, it in enumerate(items):
             if not isinstance(it, dict):
@@ -165,6 +190,16 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
 def desired(kind: str, spec: dict) -> dict:
     """A spec with Cairn's defaults filled in, normalized the way Cairn returns it."""
     d = {**KINDS[kind]["defaults"], **spec}
+    if kind == "policies":
+        from pydantic import ValidationError
+
+        from cairn.governance.abac import Policy
+
+        try:
+            return Policy.model_validate({**d, "source": "cairn"}).model_dump(mode="json")
+        except ValidationError as e:
+            raise BundleError(f"policies/{d.get('id')}: " + "; ".join(
+                f"{'.'.join(str(x) for x in err['loc']) or 'policy'}: {err['msg']}" for err in e.errors()))
     if kind in ("streams", "derived") and "key" in d and isinstance(d["key"], str):
         d["key"] = [k.strip() for k in d["key"].split(",") if k.strip()]
     if kind == "streams" and d.get("format") == "debezium":
@@ -214,6 +249,10 @@ def _same(want: Any, have: Any) -> bool:
         return isinstance(have, list) and len(want) == len(have) and all(_same(a, b) for a, b in zip(want, have))
     if isinstance(want, (int, float)) and not isinstance(want, bool) and isinstance(have, (int, float)):
         return float(want) == float(have)
+    return want == have
+
+
+def _equal(want: Any, have: Any) -> bool:
     return want == have
 
 
@@ -293,6 +332,13 @@ def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change
         if cfg.get("mine") and me is None:
             continue
         rows = client.call("GET", cfg["path"])
+        if cfg.get("list_key"):
+            rows = rows[cfg["list_key"]]
+        if kind == "policies":
+            for r in rows:
+                if r.get("source") != "cairn" and r["id"] in bundle[kind]:
+                    raise BundleError(f"policies/{r['id']}: that id is a {r.get('source')} policy, managed there")
+            rows = [r for r in rows if r.get("source") == "cairn"]
         if cfg.get("mine"):
             rows = [r for r in rows if r.get("owner") == me]          # shared ones of others are not this bundle's
         current: dict[str, dict] = {}
@@ -315,7 +361,8 @@ def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change
                 changes.append(Change("create", kind, key, desired=want))
                 continue
             seen = _as_declared(kind, have, names)
-            diff = {k: [seen.get(k), v] for k, v in want.items() if k != "owner" and not _same(v, seen.get(k))}
+            same = _equal if cfg.get("exact") else _same
+            diff = {k: [seen.get(k), v] for k, v in want.items() if k != "owner" and not same(v, seen.get(k))}
             if kind == "derived" and want.get("owner") and want["owner"] != have.get("owner"):
                 raise BundleError(f"derived/{key}: its owner is {have.get('owner')}; delete it to change the owner")
             for f in cfg.get("fixed", ()):
@@ -363,6 +410,21 @@ def apply(client: Client, bundle: dict, changes: list[Change], state: dict, log=
                 client.call("DELETE", path)
             else:
                 client.call("PUT", path, {k: v for k, v in body.items() if k != "scope"})
+        elif cfg.get("upsert"):                         # policies: known by the id the bundle gives them
+            path = f"{cfg['path']}/{quote(c.key, safe='')}"
+            if c.action == "delete":
+                client.call("DELETE", path)
+            else:
+                client.call("PUT", path, body)
+        elif cfg.get("item"):                           # connections: their own item path, by Cairn's id
+            if c.action == "create":
+                client.call("POST", cfg["path"], body)
+            else:
+                item = cfg["item"].format(id=quote(str(c.current[cfg["id"]]), safe=":"))
+                if c.action == "update":
+                    client.call("PUT", item, {**body, "owners": body.get("owners") or c.current.get("owners") or []})
+                else:
+                    client.call("DELETE", item)
         elif c.action == "create":
             made = client.call("POST", cfg["path"], body)
             if c.kind == "queries":

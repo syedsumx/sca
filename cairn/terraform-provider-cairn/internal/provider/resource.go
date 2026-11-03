@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/url"
 	"reflect"
+	"strings"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -16,6 +17,7 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listdefault"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listplanmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -32,6 +34,7 @@ type field struct {
 	def      any // a static default; nil: null when not given
 	desc     string
 	api      string // Cairn's name for it, when Terraform reserves the name (e.g. connection)
+	onlySet  bool   // a JSON document Cairn always returns: kept in state only when the configuration sets it
 }
 
 // key is the field's name in Cairn's API.
@@ -45,11 +48,72 @@ func (f field) key() string {
 // kind is one resource type and its API.
 type kind struct {
 	typeName, path, desc string
-	byScope              bool // maintenance policies: known by their scope, created and changed with PUT
+	byScope              bool   // maintenance policies: known by their scope, created and changed with PUT
+	putKey               string // created and changed with PUT path/<this field's value> (policies: their id)
+	idKey                string // the field of Cairn's records that is the Terraform id (default "id")
+	item                 string // the item's path, "{id}" replaced (default path/{id})
+	listKey              string // the list answer wraps the items under this key
+	lookup               string // the data source's lookup attribute (default name)
 	fields               []field
 }
 
+func (k kind) idField() string {
+	switch {
+	case k.idKey != "":
+		return k.idKey
+	case k.byScope:
+		return "scope"
+	}
+	return "id"
+}
+
+func (k kind) itemPath(id string) string {
+	if k.item != "" {
+		return strings.ReplaceAll(k.item, "{id}", url.PathEscape(id))
+	}
+	return k.path + "/" + url.PathEscape(id)
+}
+
+// items is a list answer as records.
+func (k kind) items(res any) []map[string]any {
+	if k.listKey != "" {
+		m, _ := res.(map[string]any)
+		res = m[k.listKey]
+	}
+	var out []map[string]any
+	xs, _ := res.([]any)
+	for _, x := range xs {
+		if m, ok := x.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
 var kinds = []kind{
+	{typeName: "policy", path: "/governance/policies", putKey: "id", listKey: "policies", lookup: "policy_id",
+		desc: "One of Cairn's own access policies (source cairn), set and deleted on its own: the rest of the policy bundle stays as it is. Who may use a warehouse is such a policy (USE_WAREHOUSE on urn:li:warehouse:<name>).", fields: []field{
+			{name: "policy_id", api: "id", typ: "string", required: true, forceNew: true, desc: "the policy's id (letters, digits, _ . : -)"},
+			{name: "description", typ: "string", def: ""},
+			{name: "effect", typ: "string", required: true, desc: "allow, deny or obligation"},
+			{name: "priority", typ: "int", def: int64(0), desc: "higher is decided first"},
+			{name: "actions", typ: "list", required: true, desc: "privileges, e.g. VIEW_DATASET_PROFILE, USE_WAREHOUSE, or *"},
+			{name: "target", typ: "json", computed: true, desc: `jsonencode({resource_types = ["dataset"], resource_urns = [...]})`},
+			{name: "condition", typ: "json", desc: `jsonencode({attr = "subject.groups", op = "contains", value = "analysts"})`},
+			{name: "obligations", typ: "json", computed: true, desc: `jsonencode([{type = "mask_columns", ...}])`},
+			{name: "enabled", typ: "bool", def: true},
+		}},
+	{typeName: "connection", path: "/sources", idKey: "urn", item: "/sources/{id}/detail",
+		desc: "An ingestion source: a connector, its form values (secret fields name a Cairn secret, never its value), where it runs and when.", fields: []field{
+			{name: "name", typ: "string", required: true},
+			{name: "connector", typ: "string", required: true, forceNew: true, desc: "a gallery connector id (postgres, snowflake, ...), or custom"},
+			{name: "values", typ: "json", required: true, desc: `jsonencode({host_port = "db:5432", database = "finance", username = "reader", password = "FINANCE_PG_PASSWORD"})`},
+			{name: "advanced", typ: "json", computed: true, desc: "connector options beyond the form, as JSON"},
+			{name: "recipe", typ: "json", onlySet: true, desc: "custom connector only: the whole recipe, as JSON"},
+			{name: "schedule", typ: "json", desc: `jsonencode({interval = "0 2 * * *", timezone = "UTC"})`},
+			{name: "executor", typ: "string", def: "default", desc: "default, or an agent pool"},
+			{name: "owners", typ: "list", computed: true, desc: "user URNs; the token's user when not given"},
+		}},
 	{typeName: "pipe", path: "/v1/pipes", desc: "Files landing in a Cairn Store prefix, loaded into a lakehouse table once each.", fields: []field{
 		{name: "name", typ: "string", required: true},
 		{name: "bucket", typ: "string", required: true},
@@ -192,7 +256,7 @@ func (r *kindResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 		case "json":
 			a := schema.StringAttribute{Required: f.required, Optional: opt, Computed: comp, Description: f.desc}
 			if f.computed {
-				a.PlanModifiers = append(a.PlanModifiers, stringplanmodifier.UseStateForUnknown())
+				a.PlanModifiers = append(a.PlanModifiers, stringplanmodifier.UseStateForUnknown(), subsetOfState{})
 			}
 			attrs[f.name] = a
 		case "list":
@@ -203,6 +267,9 @@ func (r *kindResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 					vals[i] = types.StringValue(s)
 				}
 				a.Default = listdefault.StaticValue(types.ListValueMust(types.StringType, vals))
+			}
+			if f.computed {
+				a.PlanModifiers = append(a.PlanModifiers, listplanmodifier.UseStateForUnknown())
 			}
 			attrs[f.name] = a
 		}
@@ -278,11 +345,7 @@ type setter func(context.Context, path.Path, any) diag.Diagnostics
 // a JSON document Cairn holds everything of is kept as written, so Cairn's own additions are not drift.
 func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter, prior getter) diag.Diagnostics {
 	var diags diag.Diagnostics
-	id := fmt.Sprint(obj["id"])
-	if r.k.byScope {
-		id = fmt.Sprint(obj["scope"])
-	}
-	diags.Append(set(ctx, path.Root("id"), types.StringValue(id))...)
+	diags.Append(set(ctx, path.Root("id"), types.StringValue(fmt.Sprint(obj[r.k.idField()])))...)
 	for _, f := range r.k.fields {
 		v, present := obj[f.key()]
 		p := path.Root(f.name)
@@ -316,6 +379,10 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			if prior != nil {
 				var was types.String
 				prior(ctx, p, &was)
+				if f.onlySet && (was.IsNull() || was.IsUnknown()) {
+					diags.Append(set(ctx, p, types.StringNull())...)
+					continue
+				}
 				var doc any
 				if !was.IsNull() && !was.IsUnknown() && json.Unmarshal([]byte(was.ValueString()), &doc) == nil && subset(doc, v) {
 					diags.Append(set(ctx, p, was)...)
@@ -335,6 +402,30 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 		}
 	}
 	return diags
+}
+
+// subsetOfState plans the state's JSON when it holds everything the configuration declares: Cairn's own
+// additions (defaults, empty lists) are not a change, also after an import, when there is no earlier plan.
+type subsetOfState struct{}
+
+func (subsetOfState) Description(context.Context) string {
+	return "Cairn's additions to the declared JSON are not a change"
+}
+
+func (m subsetOfState) MarkdownDescription(ctx context.Context) string { return m.Description(ctx) }
+
+func (subsetOfState) PlanModifyString(_ context.Context, req planmodifier.StringRequest, resp *planmodifier.StringResponse) {
+	if req.StateValue.IsNull() || req.StateValue.IsUnknown() || req.ConfigValue.IsNull() || req.ConfigValue.IsUnknown() {
+		return
+	}
+	var want, have any
+	if json.Unmarshal([]byte(req.ConfigValue.ValueString()), &want) != nil ||
+		json.Unmarshal([]byte(req.StateValue.ValueString()), &have) != nil {
+		return
+	}
+	if subset(want, have) {
+		resp.PlanValue = req.StateValue
+	}
 }
 
 // subset: does Cairn's “have“ hold everything “want“ declares (ids and defaults Cairn adds aside)?
@@ -373,12 +464,8 @@ func (r *kindResource) find(ctx context.Context, id string) (map[string]any, err
 	if err != nil {
 		return nil, err
 	}
-	key := "id"
-	if r.k.byScope {
-		key = "scope"
-	}
-	for _, x := range res.([]any) {
-		if m, ok := x.(map[string]any); ok && fmt.Sprint(m[key]) == id {
+	for _, m := range r.k.items(res) {
+		if fmt.Sprint(m[r.k.idField()]) == id {
 			return m, nil
 		}
 	}
@@ -393,10 +480,12 @@ func (r *kindResource) write(ctx context.Context, id string, body map[string]any
 		scope := fmt.Sprint(body["scope"])
 		delete(body, "scope")
 		res, err = r.c.call(ctx, "PUT", r.k.path+"/"+url.PathEscape(scope), body)
+	case r.k.putKey != "":
+		res, err = r.c.call(ctx, "PUT", r.k.itemPath(fmt.Sprint(body[r.k.putKey])), body)
 	case id == "":
 		res, err = r.c.call(ctx, "POST", r.k.path, body)
 	default:
-		res, err = r.c.call(ctx, "PUT", r.k.path+"/"+url.PathEscape(id), body)
+		res, err = r.c.call(ctx, "PUT", r.k.itemPath(id), body)
 	}
 	if err != nil {
 		return nil, err
@@ -407,7 +496,7 @@ func (r *kindResource) write(ctx context.Context, id string, body map[string]any
 	}
 	if !r.k.byScope {
 		// Read back what Cairn keeps (create answers vary in shape between kinds).
-		return r.find(ctx, fmt.Sprint(m["id"]))
+		return r.find(ctx, fmt.Sprint(m[r.k.idField()]))
 	}
 	return m, nil
 }
@@ -466,7 +555,7 @@ func (r *kindResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	if resp.Diagnostics.HasError() {
 		return
 	}
-	_, err := r.c.call(ctx, "DELETE", r.k.path+"/"+url.PathEscape(id.ValueString()), nil)
+	_, err := r.c.call(ctx, "DELETE", r.k.itemPath(id.ValueString()), nil)
 	var ae *apiError
 	if err != nil && !(errors.As(err, &ae) && ae.status == 404) {
 		resp.Diagnostics.AddError("cairn: delete "+r.k.typeName, err.Error())

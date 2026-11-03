@@ -298,6 +298,16 @@ def load_bundle_from_dir(policy_dir: Optional[str]) -> tuple[PolicyBundle, RbacM
     return PolicyBundle.model_validate({"policies": policies}), RbacModel.model_validate(rbac)
 
 
+# Serializes read-modify-write changes to the policy bundle: in this process (all databases) and across
+# processes and replicas on PostgreSQL (a transaction-scoped advisory lock).
+_CHANGE_LOCK = threading.Lock()
+_PG_LOCK_KEY = 0x6361_6972_6e70  # "cairnp"
+
+
+class PolicyConflict(Exception):
+    pass
+
+
 class PolicyRepository:
     """Versioned policy bundles in the Cairn database; every change is audited."""
 
@@ -305,13 +315,37 @@ class PolicyRepository:
         self.engine = engine
         self.audit = audit
 
+    def change(self, fn: Callable[[PolicyBundle], PolicyBundle], actor: str, base: Optional[PolicyBundle] = None,
+               detail: Optional[dict] = None) -> tuple[int, PolicyBundle]:
+        """Apply ``fn`` to the newest bundle and save the result as the next version, with no other change in
+        between (two editors never lose each other's work). ``base``: the bundle in force when none is saved."""
+        from sqlalchemy import text
+
+        with _CHANGE_LOCK, self.engine.begin() as conn:
+            if conn.dialect.name == "postgresql":
+                conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_LOCK_KEY})
+            row = conn.execute(select(policy_bundles).order_by(policy_bundles.c.version.desc()).limit(1)).first()
+            current = PolicyBundle.model_validate(row._mapping["bundle"]) if row else (base or PolicyBundle())
+            new = PolicyBundle.model_validate(fn(current).model_dump(mode="json"))     # validated as a whole
+            res = conn.execute(policy_bundles.insert().values(
+                created_at=datetime.now(timezone.utc).isoformat(), created_by=actor, bundle=new.model_dump(mode="json")))
+            version = int(res.inserted_primary_key[0])
+        if self.audit:
+            self.audit.record("governance", "policies.updated", actor, f"bundle:v{version}",
+                              {"policy_ids": [p.id for p in new.policies], **(detail or {})})
+        return version, new
+
     def latest(self) -> Optional[PolicyBundle]:
         with self.engine.connect() as conn:
             row = conn.execute(select(policy_bundles).order_by(policy_bundles.c.version.desc()).limit(1)).first()
         return PolicyBundle.model_validate(row._mapping["bundle"]) if row else None
 
     def save(self, bundle: PolicyBundle, actor: str) -> int:
-        with self.engine.begin() as conn:
+        from sqlalchemy import text
+
+        with _CHANGE_LOCK, self.engine.begin() as conn:
+            if conn.dialect.name == "postgresql":
+                conn.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": _PG_LOCK_KEY})
             res = conn.execute(policy_bundles.insert().values(
                 created_at=datetime.now(timezone.utc).isoformat(), created_by=actor,
                 bundle=bundle.model_dump(mode="json")))

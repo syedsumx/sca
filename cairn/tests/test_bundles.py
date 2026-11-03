@@ -236,3 +236,83 @@ def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_p
     assert [x["name"] for x in s.sql_workspace.saved(ADMIN) if x["owner"] == ADMIN] == ["revenue-by-region"]
     assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
     assert [x["name"] for x in s.sql_workspace.saved(ANA) if x["owner"] == ANA] == ["revenue-by-region"]   # ana's stays
+
+
+ACCESS = """
+    bundle: access
+    policies:
+      - id: analysts-read
+        effect: allow
+        actions: [VIEW_DATASET_PROFILE, USE_WAREHOUSE]
+        priority: 10
+        target: {resource_types: [dataset, warehouse]}
+        condition: {attr: subject.groups, op: contains, value: analysts}
+    connections:
+      - name: finance-db
+        connector: postgres
+        values: {host_port: "finance-db:5432", database: finance, username: reader, password: FINANCE_PG_PASSWORD}
+        schedule: {interval: "0 2 * * *", timezone: UTC}
+"""
+
+
+def test_policies_and_connections(api, tmp_path, graph):
+    from test_sources import FakeCore
+
+    core = FakeCore()
+    graph.graphql_handler = core
+    s, admin, _ = api
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies,
+                                            Policy(id="persona-x", effect="allow", actions=["*"], source="persona")]))
+    c = b.Client("", "unused", http=admin)
+    spec = b.load(write(tmp_path, ACCESS))
+    changes, state = b.plan(c, spec)
+    assert [(x.action, x.kind, x.key) for x in changes] == [("create", "policies", "analysts-read"),
+                                                             ("create", "connections", "finance-db")]
+    b.apply(c, spec, changes, state, log=lambda _: None)
+    pol = next(x for x in s.pdp.bundle.policies if x.id == "analysts-read")
+    assert pol.priority == 10 and pol.condition["value"] == "analysts"
+    assert [x.id for x in s.pdp.bundle.policies] == ["admin", "persona-x", "analysts-read"]   # the rest stays
+    src = next(iter(core.sources.values()))
+    recipe = json.loads(src["config"]["recipe"])
+    assert recipe["source"]["config"]["password"] == "${FINANCE_PG_PASSWORD}"     # a secret by name, never a value
+    assert src["schedule"]["interval"] == "0 2 * * *"
+    assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}                      # applied: no drift
+    # Changed in git: updated in place. Removing a declared field (the condition) is a change too.
+    changed = ACCESS.replace("priority: 10", "priority: 20").replace(
+        "        condition: {attr: subject.groups, op: contains, value: analysts}\n", "").replace(
+        "database: finance,", "database: finance_v2,")
+    spec = b.load(write(tmp_path, changed))
+    changes, state = b.plan(c, spec)
+    assert {(x.kind, x.action): sorted(x.diff) for x in changes} == {
+        ("policies", "update"): ["condition", "priority"], ("connections", "update"): ["values"]}
+    owners_before = s.sources.get(src["urn"])["owners"]
+    b.apply(c, spec, changes, state, log=lambda _: None)
+    pol = next(x for x in s.pdp.bundle.policies if x.id == "analysts-read")
+    assert (pol.priority, pol.condition) == (20, None)
+    assert json.loads(core.sources[src["urn"]]["config"]["recipe"])["source"]["config"]["database"] == "finance_v2"
+    assert s.sources.get(src["urn"])["owners"] == owners_before                    # owners kept when not declared
+    # A persona's policy cannot be taken over by a bundle.
+    with pytest.raises(b.BundleError, match="persona policy"):
+        b.plan(c, b.load(write(tmp_path, "bundle: grab\npolicies:\n  - {id: persona-x, effect: deny, actions: ['*']}\n")))
+    # An invalid policy is caught when the file is read, before Cairn is asked.
+    with pytest.raises(b.BundleError, match="policies/bad"):
+        b.load(write(tmp_path, "bundle: bad\npolicies:\n  - {id: bad, effect: maybe, actions: ['*']}\n"))
+    # Pruned: both go, the policy last.
+    gone = b.load(write(tmp_path, "bundle: access\n"))
+    changes, state = b.plan(c, gone, prune=True)
+    assert [(x.action, x.kind) for x in changes] == [("delete", "connections"), ("delete", "policies")]
+    b.apply(c, gone, changes, state, log=lambda _: None)
+    assert [x.id for x in s.pdp.bundle.policies] == ["admin", "persona-x"] and core.sources == {}
+
+
+def test_a_literal_dollar_brace_survives(tmp_path):
+    escaped = "$" + "${MYSQL_PASSWORD}"
+    spec = b.load(write(tmp_path, f"""
+        bundle: custom
+        connections:
+          - name: custom-src
+            connector: custom
+            recipe: {{source: {{type: mysql, config: {{password: "{escaped}", host_port: "${{HOST}}"}}}}}}
+    """), {"HOST": "db:3306"})
+    cfg = spec["connections"]["custom-src"]["recipe"]["source"]["config"]
+    assert cfg == {"password": "${MYSQL_PASSWORD}", "host_port": "db:3306"}
