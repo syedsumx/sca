@@ -114,6 +114,7 @@ class Services:
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
     vectors: Optional[Any] = None
+    delta_convert: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -737,13 +738,6 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.reports.service import ReportService
         s.reports = ReportService(s.engine, s.graph, s.quality.store, s.personas)
         _build_costs(s, hub, Event)
-        if s.sql_workspace is not None:
-            from cairn.sqlworkspace.boards import Boards
-
-            def tell(type_, title, body, recipients, payload):
-                hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
-                                  url="/sql"))
-            s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
         if os.environ.get("CAIRN_PIPES_STORE") and os.environ.get("CAIRN_PIPES_CATALOG"):
             from cairn.pipelines.pipes import Pipes, _settings
 
@@ -784,6 +778,12 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # Dashboards and alerts, over saved queries.
+        from cairn.sqlworkspace.boards import Boards
+
+        def tell(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql"))
+        s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
         # SQL workflows: derived-table refreshes, checks and reports, scheduled, run as their owner.
         from cairn.sqlworkspace.workflows import Workflows
 
@@ -1131,6 +1131,11 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+
+    # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
+    from cairn.pipelines.delta_convert import from_env as delta_from_env
+
+    s.delta_convert = delta_from_env(s.audit)
 
     # Vector search on lakehouse tables (the pipes' catalog, or CAIRN_VECTORS_CATALOG).
     vec_catalog = os.environ.get("CAIRN_VECTORS_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")

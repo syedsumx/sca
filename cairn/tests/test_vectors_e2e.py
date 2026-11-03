@@ -55,7 +55,7 @@ def test_an_index_finds_rows_by_meaning_and_keeps_in_step(ix):
     assert top[0]["key"] == "t1" and top[0]["score"] > top[1]["score"]
     assert ix.search(ana, "articles", "forgot password login", k=1)["results"][0]["key"] == "t3"
     # The vectors are a lakehouse table of their own.
-    vt = ix._catalog().load_table(("support", "articles__vectors")).scan().to_arrow()
+    vt = ix._catalog().load_table(("support", "articles__articles_vectors")).scan().to_arrow()
     assert vt.num_rows == 4 and len(vt.column("embedding")[0].as_py()) == ix.embedder.dim
     # Unchanged: nothing embedded again. One row changed, one removed, one added: only those.
     assert ix.refresh("articles")["embedded"] == 0
@@ -88,3 +88,24 @@ def test_long_text_is_chunked_with_overlap():
     assert len(parts) > 5 and all(len(p) <= 500 for p in parts)
     assert parts[0].split()[-1] in parts[1]                                      # overlap
     assert " ".join(parts).count("word999") >= 1 and chunks("", 500) == []
+
+
+def test_an_index_is_changed_and_removed_with_its_vectors(ix):
+    from cairn.pipelines.pipes import PipeError
+    from pyiceberg.exceptions import NoSuchTableError
+
+    ix.create({"name": "short", "source": "support.articles", "key": "id", "text": "body", "chunk_chars": 400},
+              "urn:li:corpuser:admin")
+    with pytest.raises(PipeError, match="delete it and create one"):
+        ix.update("short", {"source": "support.other"}, "urn:li:corpuser:admin")
+    with pytest.raises(PipeError, match="every_minutes"):
+        ix.update("short", {"every_minutes": 1}, "urn:li:corpuser:admin")
+    got = ix.update("short", {"chunk_chars": 200, "every_minutes": 60, "enabled": False}, "urn:li:corpuser:admin")
+    assert (got["chunk_chars"], got["every_minutes"], got["enabled"], got["key"], got["text"]) == (200, 60, False, "id", "body")
+    assert ix.get(got["id"])["name"] == "short"                      # by its id too
+    # Its vectors are a table of their own; removing the index removes them (they hold the raw text).
+    ix.delete("articles", "urn:li:corpuser:admin")
+    with pytest.raises(NoSuchTableError):
+        ix._catalog().load_table(("support", "articles__articles_vectors"))
+    with pytest.raises(PipeError, match="no such"):
+        ix.get("articles")

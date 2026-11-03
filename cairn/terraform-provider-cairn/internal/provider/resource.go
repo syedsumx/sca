@@ -2,9 +2,11 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 
 	"github.com/hashicorp/terraform-plugin-framework/attr"
 	"github.com/hashicorp/terraform-plugin-framework/diag"
@@ -23,12 +25,21 @@ import (
 // field is one attribute of a resource, as Cairn's API names it.
 type field struct {
 	name     string
-	typ      string // string | bool | int | list
+	typ      string // string | bool | int | float | list | json (a JSON document, e.g. jsonencode([...]))
 	required bool
 	computed bool // Cairn decides it when not given (e.g. a debezium stream's mode)
 	forceNew bool
 	def      any // a static default; nil: null when not given
 	desc     string
+	api      string // Cairn's name for it, when Terraform reserves the name (e.g. connection)
+}
+
+// key is the field's name in Cairn's API.
+func (f field) key() string {
+	if f.api != "" {
+		return f.api
+	}
+	return f.name
 }
 
 // kind is one resource type and its API.
@@ -84,6 +95,48 @@ var kinds = []kind{
 		{name: "every_hours", typ: "int", def: int64(24)},
 		{name: "enabled", typ: "bool", def: true},
 	}},
+	{typeName: "vector_index", path: "/v1/vectors", desc: "Vector search over a lakehouse table's text, kept in step with the table and searched under Cairn's policies.", fields: []field{
+		{name: "name", typ: "string", required: true, forceNew: true},
+		{name: "source", typ: "string", required: true, forceNew: true, desc: "namespace.table"},
+		{name: "key", typ: "string", required: true, desc: "the source's key column"},
+		{name: "text", typ: "string", required: true, desc: "the source's text column"},
+		{name: "chunk_chars", typ: "int", def: int64(1500)},
+		{name: "every_minutes", typ: "int"},
+		{name: "enabled", typ: "bool", def: true},
+	}},
+	// The token user's own: saved queries, dashboards, alerts and SQL workflows.
+	{typeName: "saved_query", path: "/sql/saved", desc: "A saved SQL query (read-only), with its chart; the token user's own.", fields: []field{
+		{name: "name", typ: "string", required: true},
+		{name: "sql", typ: "string", required: true},
+		{name: "connection_name", api: "connection", typ: "string", required: true, desc: "the SQL connection it runs on (connection is a word Terraform keeps for itself)"},
+		{name: "description", typ: "string", def: ""},
+		{name: "shared", typ: "bool", def: false},
+		{name: "chart", typ: "json", computed: true, desc: `jsonencode({type = "bar", x = "region", y = ["total"]})`},
+	}},
+	{typeName: "dashboard", path: "/sql/dashboards", desc: "Saved queries shown together, each run as its viewer.", fields: []field{
+		{name: "name", typ: "string", required: true},
+		{name: "description", typ: "string", def: ""},
+		{name: "shared", typ: "bool", def: false},
+		{name: "tiles", typ: "json", required: true, desc: `jsonencode([{query = cairn_saved_query.x.id, title = "...", width = 1 or 2}])`},
+	}},
+	{typeName: "sql_alert", path: "/sql/alerts", desc: "A saved query checked on a schedule as its owner; its owner and recipients are told when the condition starts and stops holding.", fields: []field{
+		{name: "name", typ: "string", required: true},
+		{name: "query", typ: "string", required: true, desc: "the saved query's id"},
+		{name: "measure", typ: "string", def: "rows", desc: "rows, or a column of the first row"},
+		{name: "op", typ: "string", required: true, desc: "> >= < <= == !="},
+		{name: "value", typ: "float", required: true},
+		{name: "every_minutes", typ: "int", def: int64(60)},
+		{name: "recipients", typ: "list", def: []string{}},
+		{name: "enabled", typ: "bool", def: true},
+	}},
+	{typeName: "sql_workflow", path: "/v1/sql-workflows", desc: "Steps that depend on each other (derived-table refreshes, checks, report queries), on a schedule, run as their owner.", fields: []field{
+		{name: "name", typ: "string", required: true},
+		{name: "steps", typ: "json", required: true, desc: `jsonencode([{name = "refresh", type = "derived", table = "revenue"}, {name = "check", type = "check", query = cairn_saved_query.x.id, op = ">", value = 0, after = ["refresh"]}])`},
+		{name: "cron", typ: "string", desc: "five fields, UTC"},
+		{name: "recipients", typ: "list", def: []string{}},
+		{name: "notify", typ: "string", def: "failure", desc: "failure or always"},
+		{name: "enabled", typ: "bool", def: true},
+	}},
 }
 
 type kindResource struct {
@@ -134,6 +187,14 @@ func (r *kindResource) Schema(_ context.Context, _ resource.SchemaRequest, resp 
 				a.Default = int64default.StaticInt64(d)
 			}
 			attrs[f.name] = a
+		case "float":
+			attrs[f.name] = schema.Float64Attribute{Required: f.required, Optional: opt, Computed: comp, Description: f.desc}
+		case "json":
+			a := schema.StringAttribute{Required: f.required, Optional: opt, Computed: comp, Description: f.desc}
+			if f.computed {
+				a.PlanModifiers = append(a.PlanModifiers, stringplanmodifier.UseStateForUnknown())
+			}
+			attrs[f.name] = a
 		case "list":
 			a := schema.ListAttribute{ElementType: types.StringType, Required: f.required, Optional: opt, Computed: comp, Description: f.desc}
 			if d, ok := f.def.([]string); ok {
@@ -168,19 +229,35 @@ func (r *kindResource) body(ctx context.Context, get getter) (map[string]any, di
 			var v types.String
 			diags.Append(get(ctx, p, &v)...)
 			if !v.IsNull() && !v.IsUnknown() {
-				out[f.name] = v.ValueString()
+				out[f.key()] = v.ValueString()
 			}
 		case "bool":
 			var v types.Bool
 			diags.Append(get(ctx, p, &v)...)
 			if !v.IsNull() && !v.IsUnknown() {
-				out[f.name] = v.ValueBool()
+				out[f.key()] = v.ValueBool()
 			}
 		case "int":
 			var v types.Int64
 			diags.Append(get(ctx, p, &v)...)
 			if !v.IsNull() && !v.IsUnknown() {
-				out[f.name] = v.ValueInt64()
+				out[f.key()] = v.ValueInt64()
+			}
+		case "float":
+			var v types.Float64
+			diags.Append(get(ctx, p, &v)...)
+			if !v.IsNull() && !v.IsUnknown() {
+				out[f.key()] = v.ValueFloat64()
+			}
+		case "json":
+			var v types.String
+			diags.Append(get(ctx, p, &v)...)
+			if !v.IsNull() && !v.IsUnknown() {
+				var doc any
+				if err := json.Unmarshal([]byte(v.ValueString()), &doc); err != nil {
+					diags.AddAttributeError(p, "not JSON", err.Error())
+				}
+				out[f.key()] = doc
 			}
 		case "list":
 			var v types.List
@@ -188,7 +265,7 @@ func (r *kindResource) body(ctx context.Context, get getter) (map[string]any, di
 			if !v.IsNull() && !v.IsUnknown() {
 				var ss []string
 				diags.Append(v.ElementsAs(ctx, &ss, false)...)
-				out[f.name] = ss
+				out[f.key()] = ss
 			}
 		}
 	}
@@ -197,8 +274,9 @@ func (r *kindResource) body(ctx context.Context, get getter) (map[string]any, di
 
 type setter func(context.Context, path.Path, any) diag.Diagnostics
 
-// store writes what Cairn returned into the state.
-func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter) diag.Diagnostics {
+// store writes what Cairn returned into the state. “prior“ is the plan (or the state being refreshed):
+// a JSON document Cairn holds everything of is kept as written, so Cairn's own additions are not drift.
+func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter, prior getter) diag.Diagnostics {
 	var diags diag.Diagnostics
 	id := fmt.Sprint(obj["id"])
 	if r.k.byScope {
@@ -206,7 +284,7 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 	}
 	diags.Append(set(ctx, path.Root("id"), types.StringValue(id))...)
 	for _, f := range r.k.fields {
-		v, present := obj[f.name]
+		v, present := obj[f.key()]
 		p := path.Root(f.name)
 		switch f.typ {
 		case "string":
@@ -224,6 +302,28 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			} else {
 				diags.Append(set(ctx, p, types.Int64Null())...)
 			}
+		case "float":
+			if n, ok := v.(float64); ok {
+				diags.Append(set(ctx, p, types.Float64Value(n))...)
+			} else {
+				diags.Append(set(ctx, p, types.Float64Null())...)
+			}
+		case "json":
+			if !present || v == nil {
+				diags.Append(set(ctx, p, types.StringNull())...)
+				continue
+			}
+			if prior != nil {
+				var was types.String
+				prior(ctx, p, &was)
+				var doc any
+				if !was.IsNull() && !was.IsUnknown() && json.Unmarshal([]byte(was.ValueString()), &doc) == nil && subset(doc, v) {
+					diags.Append(set(ctx, p, was)...)
+					continue
+				}
+			}
+			b, _ := json.Marshal(v)
+			diags.Append(set(ctx, p, types.StringValue(string(b)))...)
 		case "list":
 			vals := []attr.Value{}
 			if xs, ok := v.([]any); ok {
@@ -235,6 +335,36 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 		}
 	}
 	return diags
+}
+
+// subset: does Cairn's “have“ hold everything “want“ declares (ids and defaults Cairn adds aside)?
+func subset(want, have any) bool {
+	switch w := want.(type) {
+	case map[string]any:
+		h, ok := have.(map[string]any)
+		if !ok {
+			return false
+		}
+		for k, v := range w {
+			if !subset(v, h[k]) {
+				return false
+			}
+		}
+		return true
+	case []any:
+		h, ok := have.([]any)
+		if !ok || len(h) != len(w) {
+			return false
+		}
+		for i := range w {
+			if !subset(w[i], h[i]) {
+				return false
+			}
+		}
+		return true
+	default:
+		return reflect.DeepEqual(want, have)
+	}
 }
 
 // find reads one resource by id (Cairn lists them); nil: it is gone.
@@ -293,7 +423,7 @@ func (r *kindResource) Create(ctx context.Context, req resource.CreateRequest, r
 		resp.Diagnostics.AddError("cairn: create "+r.k.typeName, err.Error())
 		return
 	}
-	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute)...)
+	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute)...)
 }
 
 func (r *kindResource) Read(ctx context.Context, req resource.ReadRequest, resp *resource.ReadResponse) {
@@ -311,7 +441,7 @@ func (r *kindResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 		resp.State.RemoveResource(ctx) // deleted outside Terraform: it will be created again
 		return
 	}
-	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute)...)
+	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.State.GetAttribute)...)
 }
 
 func (r *kindResource) Update(ctx context.Context, req resource.UpdateRequest, resp *resource.UpdateResponse) {
@@ -327,7 +457,7 @@ func (r *kindResource) Update(ctx context.Context, req resource.UpdateRequest, r
 		resp.Diagnostics.AddError("cairn: update "+r.k.typeName, err.Error())
 		return
 	}
-	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute)...)
+	resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute)...)
 }
 
 func (r *kindResource) Delete(ctx context.Context, req resource.DeleteRequest, resp *resource.DeleteResponse) {

@@ -164,3 +164,102 @@ def test_terraform_manages_cairn_resources(world):
     tf(w, "destroy", "-auto-approve")
     assert [p["name"] for p in s.pipes.list()] == ["by-hand"]
     assert s.streams.list() == [] and s.derived.list() == [] and s.maintenance.policies() == []
+
+
+SQL_CONFIG = """
+terraform {
+  required_providers {
+    cairn = { source = "cairn/cairn" }
+  }
+}
+provider "cairn" {}
+
+data "cairn_saved_query" "by_hand" {
+  name = "by-hand"
+}
+
+resource "cairn_derived_table" "revenue" {
+  name      = "revenue"
+  target    = "marts.revenue"
+  on_change = true
+  sql       = "SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region"
+}
+
+resource "cairn_saved_query" "revenue" {
+  name       = "revenue-by-region"
+  connection_name = "lakehouse"
+  sql        = "SELECT * FROM marts.revenue"
+  chart      = jsonencode({ type = "bar", x = "region", y = ["total"] })
+}
+
+resource "cairn_dashboard" "sales" {
+  name   = "sales"
+  shared = true
+  tiles  = jsonencode([{ query = cairn_saved_query.revenue.id, width = 2 }, { query = data.cairn_saved_query.by_hand.id, title = "TITLE" }])
+}
+
+resource "cairn_sql_alert" "drop" {
+  name  = "revenue-drop"
+  query = cairn_saved_query.revenue.id
+  measure = "total"
+  op    = "<"
+  value = VALUE
+}
+
+resource "cairn_sql_workflow" "nightly" {
+  name = "nightly"
+  cron = "0 2 * * *"
+  steps = jsonencode([
+    { name = "refresh", type = "derived", table = cairn_derived_table.revenue.name },
+    { name = "not-empty", type = "check", query = cairn_saved_query.revenue.id, op = ">", value = 0, after = ["refresh"] },
+  ])
+}
+
+resource "cairn_vector_index" "articles" {
+  name          = "articles"
+  source        = "support.articles"
+  key           = "id"
+  text          = "body"
+  every_minutes = 60
+}
+"""
+
+
+def test_terraform_manages_sql_resources_and_vector_indexes(world):
+    from pyiceberg.exceptions import NoSuchTableError
+
+    w, s = world, world["s"]
+    for f in w["work"].glob("*.tf"):
+        f.unlink()
+    hand = s.sql_workspace.save(ADMIN, {"name": "by-hand", "connection": "lakehouse", "sql": "SELECT 1"})
+
+    def config2(value=1000, title="Hand"):
+        (w["work"] / "main.tf").write_text(SQL_CONFIG.replace("VALUE", str(value)).replace("TITLE", title))
+
+    config2()
+    tf(w, "apply", "-auto-approve")
+    q = next(x for x in s.sql_workspace.saved(ADMIN) if x["name"] == "revenue-by-region")
+    assert q["chart"] == {"type": "bar", "x": "region", "y": ["total"]}
+    board = s.sql_boards.dashboards(ADMIN)[0]
+    assert [(t["query"], t["title"], t["width"]) for t in board["tiles"]] == [
+        (q["id"], "revenue-by-region", 2), (hand["id"], "Hand", 1)]           # the data source found the hand-made query
+    assert s.sql_boards.alerts(ADMIN)[0]["value"] == 1000
+    wf = s.sql_workflows.list(ADMIN)[0]
+    assert [x["name"] for x in wf["steps"]] == ["refresh", "not-empty"] and wf["cron"] == "0 2 * * *"
+    assert s.vectors.get("articles")["every_minutes"] == 60
+    # Cairn's additions to the JSON (ids, default titles, measures) are not drift.
+    tf(w, "plan", "-detailed-exitcode")
+    config2(value=500, title="By hand")
+    out = tf(w, "apply", "-auto-approve").stdout
+    assert "0 added, 2 changed, 0 destroyed" in out, out
+    assert s.sql_boards.dashboards(ADMIN)[0]["id"] == board["id"] and s.sql_boards.alerts(ADMIN)[0]["value"] == 500
+    # Destroy removes what Terraform made; the hand-made query stays. (This world has no catalog: the
+    # index's vectors table, which destroy also drops, was never built.)
+    class NoCatalog:
+        def purge_table(self, ident):
+            raise NoSuchTableError(ident)
+    s.vectors._catalog = NoCatalog
+    tf(w, "destroy", "-auto-approve")
+    assert [x["name"] for x in s.sql_workspace.saved(ADMIN)] == ["by-hand"]
+    assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
+    assert s.vectors.list() == []

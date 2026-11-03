@@ -374,8 +374,17 @@ Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metasto
 - **Governed like the lakehouse.** A Delta table `delta.<schema>.<table>` is the `delta-lake` dataset `<schema>.<table>`. Cairn's access, masks, row filters and write rights apply to it, as to any Trino table.
 - **Delta's own features.** History (`"orders$history"`), time travel (`FOR VERSION AS OF`), `CREATE TABLE AS`, inserts, updates, deletes and `MERGE`.
 - **Tables other engines wrote.** Spark and Databricks Delta tables, for example. Register one by its location: `CALL delta.system.register_table('schema', 'table', 's3://…/table')`. `unregister_table` forgets one and leaves its files.
-- **Helm.** Set `cairn.trino.delta.enabled`, and `credentialsSecret` (`access-key`, `secret-key`) with a store key that can reach only the Delta prefix. The chart sets the catalog's mapping on the API. One coordinator writes at a time (`delta.enable-non-concurrent-writes`), which suits the chart's single coordinator.
+- **Helm.** Set `cairn.trino.delta.enabled`, and `credentialsSecret` (`access-key`, `secret-key`) with a store key that can reach only the Delta prefix. The chart sets the catalog's mapping on the API.
+- **Several writers.** Each commit writes the next log entry only if it does not exist yet (`If-None-Match: *`, `s3.exclusive-create`), which Cairn Store checks atomically. Several coordinators, clusters or other engines that commit the same way can write one table at once: a writer that loses the race retries at the next version, and nothing is lost or overwritten. Engines that cannot write conditionally (older Spark Delta releases on S3) must not write the same tables.
+- **Converting to Iceberg, in place.** `POST /v1/delta/convert` (`MANAGE_SYSTEM_OPERATIONS`) with `location` (the Delta table's `s3://…` location) and `target` (`namespace.table`) makes an Iceberg table in Cairn Catalog **at the same location**, with the Delta table's live Parquet files at its latest version. No data is copied, and the catalog's per-table credentials cover the files.
+  - `GET /v1/delta/inspect?location=…` first says what would be converted, or why it cannot be.
+  - Cairn reads the Delta log from the store: the latest checkpoint, then the commits after it. The table records `cairn.converted-from` and `cairn.delta-version`.
+  - **One way.** The files now belong to the Iceberg table, and its maintenance may delete them as it changes. Retire the Delta table first: `CALL delta.system.unregister_table('schema', 'table')`. If the Delta log moves during conversion, the new table is dropped and the request refused.
+  - **Refused:** partitioned tables (Delta keeps partition values in paths, not in files), deletion vectors and column mapping. Copy those with a derived table (`SELECT * FROM delta.<schema>.<table>`).
+  - **Settings.** `CAIRN_DELTA_STORE` (a key that reads the Delta tables) and `CAIRN_DELTA_CATALOG`, defaulting to the pipes' store and catalog.
 - **Tested** with Trino and Cairn Store (`tests/test_trino_e2e.py`). A Delta table was created from the lakehouse and written. Masks, row filters and a refused write applied. History and time travel worked. After the table was unregistered, it was registered again by its location and still governed.
+  - **Two clusters at once.** Two Trino clusters inserted into one Delta table concurrently, twelve inserts in all. Every row arrived, and the log had one version per insert after the table's creation.
+  - **Conversion.** A Delta table with a checkpoint, an insert, an update and a delete was unregistered and converted. Trino read the same rows from the Iceberg table, which then took an insert. Converting again to the same name, a partitioned Delta table and a location with no Delta log were refused.
 
 ## Functions in SQL: AI and Python
 
@@ -1523,12 +1532,13 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
 A vector index lets people search a lakehouse table's text by meaning: support articles, tickets, product descriptions, or the text of a files pipe.
 
 - **Define** an index with `POST /v1/vectors` (`MANAGE_INGESTION`): `name`, `source` (`namespace.table`), `key` and `text` (the key and text columns), optional `chunk_chars` (1,500) and `every_minutes`.
-- **Embedding.** Cairn splits each row's text into overlapping chunks and embeds them with the deployment's embedding model, the same one search by meaning uses (`CAIRN_EMBEDDINGS`; Ollama in your VPC, or the built-in hashing embedder). The vectors are kept in a lakehouse table of their own, `<source>__vectors` (key, chunk, text, hash, embedding, model).
+- **Embedding.** Cairn splits each row's text into overlapping chunks and embeds them with the deployment's embedding model, the same one search by meaning uses (`CAIRN_EMBEDDINGS`; Ollama in your VPC, or the built-in hashing embedder). The vectors are kept in a lakehouse table of their own, `<source>__<index>_vectors` (key, chunk, text, hash, embedding, model).
 - **Kept in step.** Run `POST /v1/vectors/<name>/refresh`, or let the scheduler run it every `every_minutes`. Changed rows are embedded again, new ones added and removed ones dropped. Unchanged rows are not re-embedded; a model change re-embeds everything. Each refresh is one commit.
 - **Search.** `GET /v1/vectors/<name>/search?q=...&k=10` returns the closest chunks with their row key, text and cosine score.
   - The caller needs read access to the source table.
   - It is refused when a mask or row filter applies to them there, because the index holds the raw text.
   - Each API replica keeps one index in memory per table version.
+- **Change or remove** an index with `PUT /v1/vectors/<name>` (key, text, chunking, schedule, enabled; a changed key, text or chunking is embedded again on the next refresh) and `DELETE /v1/vectors/<name>`, which also drops its vectors table, since it holds the raw text. An index keeps its source: to index another table, create another index.
 - **Settings.** `CAIRN_VECTORS_CATALOG` (default: the pipes' catalog, `CAIRN_PIPES_CATALOG`).
 - **Tested** in `tests/test_vectors_e2e.py`, with the real store and catalog. Questions found the right articles. A refresh re-embedded only the changed and new rows and dropped the removed one. Someone without read access, and someone with a row filter, were refused.
 
@@ -1604,7 +1614,7 @@ Notebooks (Jupyter, JupyterHub, VS Code) work on the lakehouse as the person sig
 
 ## Infrastructure as code
 
-Pipes, streams, derived tables and maintenance policies can live in git, reviewed like code.
+Pipes, streams, derived tables, maintenance policies, vector indexes, saved queries, dashboards, SQL alerts and SQL workflows can live in git, reviewed like code.
 
 - **Bundles** (`cairn bundle`). Resources are declared in YAML (`examples/bundles/cairn.yaml`) under a `bundle:` name.
   - **Commands.** `cairn bundle validate FILE` checks the file alone. `plan` shows what would be created, updated and, with `--prune`, deleted; `--detailed-exitcode` exits 2 when there are changes. `apply` does it.
@@ -1612,12 +1622,19 @@ Pipes, streams, derived tables and maintenance policies can live in git, reviewe
   - **Prune.** Cairn keeps each bundle's state: what it manages, versioned (`GET` and `PUT /v1/bundles/{name}`, `MANAGE_SYSTEM_OPERATIONS`). `--prune` deletes only what the bundle created, never resources made by hand or by other bundles.
   - **Adoption and concurrency.** An existing resource with a declared name is adopted. Two applies from one plan cannot both win: the second is told to plan again.
   - **Partial failures.** Changes go through Cairn's API as the token's user, so its permissions and audit apply. State is recorded after each change, so a failure halfway leaves an accurate record and the next apply finishes the job.
+- **Saved queries, dashboards, alerts and workflows** are the token user's own (`queries`, `dashboards`, `alerts`, `workflows`). Dashboard tiles, alerts and workflow steps name their saved query (`query: revenue-by-region`); Cairn's ids are looked up at apply time, and a name that is not one of the user's saved queries is refused at plan. Others' shared queries and dashboards of the same name are never touched. Prune deletes dashboards, alerts and workflows before the queries they name.
+- **Drift.** A resource drifts only when something the bundle declares differs. What Cairn adds (ids, timestamps, alert states, a tile's default title) does not count.
+- **A vector index keeps its source.** To index another table, delete the index and declare a new one; plan says so.
 - **In place.** Changes keep each resource's id (`PUT /v1/pipes/{id}`, `/v1/streams/{id}`, `/v1/derived/{id}`), so a stream keeps its offsets. A derived table whose query changes is rebuilt from the whole query on its next refresh.
 - **In CI.** On a pull request, run `cairn bundle plan cairn.yaml --var ENV=prod` with a read token. On merge, run `cairn bundle apply cairn.yaml --var ENV=prod --prune` with a pipeline user's token (`CAIRN_URL`, `CAIRN_TOKEN`).
-- **Terraform and OpenTofu** (`terraform-provider-cairn`). The resources `cairn_pipe`, `cairn_stream`, `cairn_derived_table` and `cairn_maintenance_policy` work through the same API. Changes are made in place. Something deleted outside Terraform is created again, and import uses the id (a maintenance policy's is its scope). See the provider's README.
+- **Terraform and OpenTofu** (`terraform-provider-cairn`). The resources `cairn_pipe`, `cairn_stream`, `cairn_derived_table`, `cairn_maintenance_policy`, `cairn_vector_index`, `cairn_saved_query`, `cairn_dashboard`, `cairn_sql_alert` and `cairn_sql_workflow` work through the same API. Changes are made in place. Something deleted outside Terraform is created again, and import uses the id (a maintenance policy's is its scope). See the provider's README.
+  - **References.** Dashboards, alerts and workflow steps take saved query ids (`cairn_saved_query.x.id`). Dashboard `tiles`, workflow `steps` and a query's `chart` are JSON (`jsonencode(...)`), compared like a bundle's: what Cairn adds is not drift. A saved query's connection is `connection_name`, since Terraform keeps `connection` for itself.
+  - **Data sources.** Each resource type is also a data source, read by its name (a maintenance policy by its scope), for what is managed by hand, by a bundle or by another workspace: `data "cairn_saved_query" "q" { name = "by-hand" }`. When others share one of the same name, the caller's own wins.
+  - **Not yet.** Policies, connections and warehouses are not resources yet: policies are a signed bundle (`PUT /governance/policies`), and connections and warehouses are set in Helm values. The provider is not in a public registry; build it from source or publish it to your own.
 - **Tested.**
   - **Bundles** (`tests/test_bundles.py`, against the real API). Plan, apply and re-plan with no changes. An update kept the ids. Prune left a hand-made pipe alone. An existing pipe was adopted. A stale plan was refused. A bad resource stopped the apply with Cairn's reason, after recording what was done.
   - **Terraform** (`tests/test_terraform_provider.py`, Terraform 1.13 and the provider built from source). Create, then no drift. An in-place change kept the ids. A resource deleted outside was recreated. Cairn's refusal surfaced as a Terraform error. Import, then destroy, which left a hand-made pipe.
+  - **SQL resources and vector indexes.** A bundle (`tests/test_bundles.py`) created saved queries, a dashboard, an alert, a workflow and a vector index, with query names turned into ids. A second plan had nothing to do, even after someone else shared a query of the same name. Changes kept the ids. A new source for an index and an unknown query name were refused at plan. Prune deleted the dashboard, alert and workflow before their query, and left another person's query alone. Terraform did the same with ids, read a hand-made query through a data source, showed no drift on the JSON attributes, changed two resources in place and destroyed only what it made.
 
 ## Backup and restore
 

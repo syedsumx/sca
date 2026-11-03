@@ -161,3 +161,78 @@ def test_the_cli(api, tmp_path, monkeypatch, capsys):
     monkeypatch.delenv("CAIRN_URL", raising=False)
     monkeypatch.delenv("CAIRN_TOKEN", raising=False)
     assert b.main(args) == 1 and "set CAIRN_URL" in capsys.readouterr().out
+
+
+SQL_BUNDLE = """
+    bundle: reports
+    derived:
+      - {name: revenue, target: marts.revenue, on_change: true, sql: "SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region"}
+    vectors:
+      - {name: articles, source: support.articles, key: id, text: body, every_minutes: 60}
+    queries:
+      - {name: revenue-by-region, connection: lakehouse, sql: "SELECT * FROM marts.revenue", chart: {type: bar, x: region, y: [total]}}
+      - {name: big-orders, connection: lakehouse, sql: "SELECT * FROM raw.orders WHERE amount > 100"}
+    dashboards:
+      - {name: sales, shared: true, tiles: [{query: revenue-by-region, width: 2}, {query: big-orders, title: Big}]}
+    alerts:
+      - {name: revenue-drop, query: revenue-by-region, measure: total, op: "<", value: 1000}
+    workflows:
+      - name: nightly
+        cron: "0 2 * * *"
+        steps:
+          - {name: refresh, type: derived, table: revenue}
+          - {name: not-empty, type: check, query: revenue-by-region, op: ">", value: 0, after: refresh}
+"""
+
+
+def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_path):
+    s, admin, ana = api
+    c = b.Client("", "unused", http=admin)
+    spec = b.load(write(tmp_path, SQL_BUNDLE))
+    changes, state = b.plan(c, spec)
+    assert [(x.action, x.kind, x.key) for x in changes] == [
+        ("create", "derived", "revenue"), ("create", "vectors", "articles"),
+        ("create", "queries", "revenue-by-region"), ("create", "queries", "big-orders"),
+        ("create", "dashboards", "sales"), ("create", "alerts", "revenue-drop"), ("create", "workflows", "nightly")]
+    assert b.apply(c, spec, changes, state, log=lambda _: None)["changed"] == 7
+    q = {x["name"]: x for x in s.sql_workspace.saved(ADMIN)}
+    board = s.sql_boards.dashboards(ADMIN)[0]
+    assert [t["query"] for t in board["tiles"]] == [q["revenue-by-region"]["id"], q["big-orders"]["id"]]   # names -> ids
+    assert [t["title"] for t in board["tiles"]] == ["revenue-by-region", "Big"] and board["shared"]
+    assert s.sql_boards.alerts(ADMIN)[0]["query"] == q["revenue-by-region"]["id"]
+    wf = s.sql_workflows.list(ADMIN)[0]
+    assert wf["steps"][1]["query"] == q["revenue-by-region"]["id"] and wf["steps"][1]["after"] == ["refresh"]
+    assert s.vectors.get("articles")["every_minutes"] == 60
+    # Cairn's ids, timestamps and states are not drift: applying again changes nothing.
+    changes, state = b.plan(c, spec)
+    assert {x.action for x in changes} == {"keep"}, [x.line() for x in changes if x.action != "keep"]
+    # Someone else's shared dashboard of the same name is not this bundle's.
+    ana.post("/sql/saved", json={"name": "revenue-by-region", "connection": "lakehouse", "sql": "SELECT 1", "shared": True})
+    assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}
+    # Changes in git: updated in place, references followed.
+    v2 = (SQL_BUNDLE.replace("{query: big-orders, title: Big}", "{query: big-orders, title: Large}")
+          .replace('value: 1000}', 'value: 500}').replace("every_minutes: 60}", "every_minutes: 30}"))
+    spec2 = b.load(write(tmp_path, v2, "v2.yaml"))
+    changes, state = b.plan(c, spec2)
+    upd = {(x.kind, x.key): x.diff for x in changes if x.action == "update"}
+    assert set(upd) == {("dashboards", "sales"), ("alerts", "revenue-drop"), ("vectors", "articles")}, upd
+    assert upd[("alerts", "revenue-drop")] == {"value": [1000.0, 500.0]}
+    b.apply(c, spec2, changes, state, log=lambda _: None)
+    assert s.sql_boards.dashboards(ADMIN)[0]["id"] == board["id"]
+    assert s.sql_boards.dashboards(ADMIN)[0]["tiles"][1]["title"] == "Large"
+    assert s.sql_boards.alerts(ADMIN)[0]["value"] == 500 and s.vectors.get("articles")["every_minutes"] == 30
+    # A vector index keeps its source; a reference to a saved query nobody declared is refused at plan.
+    with pytest.raises(b.BundleError, match="delete it to change the source"):
+        b.plan(c, b.load(write(tmp_path, v2.replace("support.articles", "support.other"), "v3.yaml")))
+    with pytest.raises(b.BundleError, match="no saved query of yours named 'nope'"):
+        b.plan(c, b.load(write(tmp_path, v2.replace("query: revenue-by-region, measure", "query: nope, measure"), "v4.yaml")))
+    # Pruned: the dashboard, alert and workflow go before the query they name.
+    v5 = v2.split("    dashboards:")[0].replace(
+        "      - {name: big-orders, connection: lakehouse, sql: \"SELECT * FROM raw.orders WHERE amount > 100\"}\n", "")
+    changes, state = b.plan(c, b.load(write(tmp_path, v5, "v5.yaml")), prune=True)
+    assert [(x.kind, x.key) for x in changes if x.action == "delete"] == [
+        ("workflows", "nightly"), ("alerts", "revenue-drop"), ("dashboards", "sales"), ("queries", "big-orders")]
+    b.apply(c, b.load(write(tmp_path, v5, "v5.yaml")), changes, state, log=lambda _: None)
+    assert [x["name"] for x in s.sql_workspace.saved(ADMIN) if x["owner"] == ADMIN] == ["revenue-by-region"]
+    assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
+    assert [x["name"] for x in s.sql_workspace.saved(ANA) if x["owner"] == ANA] == ["revenue-by-region"]   # ana's stays

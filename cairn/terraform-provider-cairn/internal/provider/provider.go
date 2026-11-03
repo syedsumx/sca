@@ -104,7 +104,14 @@ func (p *cairnProvider) Resources(_ context.Context) []func() resource.Resource 
 	return out
 }
 
-func (p *cairnProvider) DataSources(_ context.Context) []func() datasource.DataSource { return nil }
+func (p *cairnProvider) DataSources(_ context.Context) []func() datasource.DataSource {
+	out := []func() datasource.DataSource{}
+	for _, k := range kinds {
+		k := k
+		out = append(out, func() datasource.DataSource { return &kindData{k: k} })
+	}
+	return out
+}
 
 type client struct {
 	base, token string

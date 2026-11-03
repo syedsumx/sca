@@ -4,7 +4,7 @@ A vector index names a lakehouse ``source`` table (``namespace.table``), its ``k
 column (the text of a files pipe, product descriptions, support tickets...). Cairn splits each row's text
 into chunks (``chunk_chars``, 1,500, with a little overlap), embeds them with the deployment's embedding
 model (the same as Cairn's search by meaning: ``CAIRN_EMBEDDINGS``), and keeps them in a lakehouse table of
-its own (``<source>__vectors``: key, chunk, text, hash, embedding), so the vectors live in the lakehouse too.
+its own (``<source>__<index>_vectors``: key, chunk, text, hash, embedding), so the vectors live in the lakehouse too.
 
 * **Kept in step.** ``POST /v1/vectors/<name>/refresh``, and the scheduler every ``every_minutes``: rows
   whose text changed are embedded again, new rows added, removed rows dropped; unchanged rows are not
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
 import time
 import uuid
@@ -49,6 +50,11 @@ vector_indexes = Table(
     Column("chunks", Integer, nullable=True),
     Column("error", String(2000), nullable=True),
 )
+
+
+def _public(r) -> dict:
+    d = dict(r._mapping)
+    return {**d, "key": d["key_column"], "text": d["text_column"]}       # as they are given
 
 
 def chunks(text: str, size: int) -> list[str]:
@@ -86,16 +92,9 @@ class VectorIndexes:
     # ---- definitions --------------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
         name, source = str(body.get("name") or "").strip(), str(body.get("source") or "")
-        key, text = str(body.get("key") or ""), str(body.get("text") or "")
-        size, every = int(body.get("chunk_chars") or 1500), body.get("every_minutes")
         if not name or len(name) > 128 or not TARGET.match(source):
             raise PipeError("an index needs a name and a source table (namespace.table)")
-        if not key or not text:
-            raise PipeError("key and text are the source's key column and text column")
-        if not 200 <= size <= 20000:
-            raise PipeError("chunk_chars is 200-20000")
-        if every is not None and (not isinstance(every, int) or not 5 <= every <= 10080):
-            raise PipeError("every_minutes is 5-10080")
+        key, text, size, every = self._check(body)
         row = {"id": uuid.uuid4().hex, "name": name, "source": source, "key_column": key, "text_column": text,
                "chunk_chars": size, "every_minutes": every, "enabled": True, "created_by": actor,
                "created_ms": int(time.time() * 1000)}
@@ -110,19 +109,75 @@ class VectorIndexes:
             raise PipeError("an index with that name exists", 409)
         return self.get(name)
 
+    @staticmethod
+    def _check(body: dict) -> tuple[str, str, int, Optional[int]]:
+        key, text = str(body.get("key") or ""), str(body.get("text") or "")
+        try:
+            size = int(body.get("chunk_chars") or 1500)
+        except (TypeError, ValueError):
+            raise PipeError("chunk_chars is 200-20000")
+        every = body.get("every_minutes")
+        if not key or not text:
+            raise PipeError("key and text are the source's key column and text column")
+        if not 200 <= size <= 20000:
+            raise PipeError("chunk_chars is 200-20000")
+        if every is not None and (isinstance(every, bool) or not isinstance(every, int) or not 5 <= every <= 10080):
+            raise PipeError("every_minutes is 5-10080")
+        return key, text, size, every
+
     def get(self, name: str) -> dict:
+        """An index by its name (or its id)."""
         with self.engine.connect() as conn:
             r = conn.execute(select(vector_indexes).where(vector_indexes.c.name == name)).first()
+            if r is None:
+                r = conn.execute(select(vector_indexes).where(vector_indexes.c.id == name)).first()
         if r is None:
             raise PipeError("no such vector index", 404)
-        return dict(r._mapping)
+        return _public(r)
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
-            return [dict(r._mapping) for r in conn.execute(select(vector_indexes).order_by(vector_indexes.c.name))]
+            return [_public(r) for r in conn.execute(select(vector_indexes).order_by(vector_indexes.c.name))]
+
+    def update(self, ref: str, body: dict, actor: str) -> dict:
+        """Changes an index's key, text, chunking, schedule or enabled state (its source stays: a new
+        source is a new index). A changed key, text or chunking is embedded again on the next refresh."""
+        ix = self.get(ref)
+        if body.get("source") not in (None, ix["source"]):
+            raise PipeError(f"{ix['name']} indexes {ix['source']}: delete it and create one to index another table", 409)
+        if body.get("name") not in (None, ix["name"]):
+            raise PipeError("an index keeps its name", 409)
+        merged = {"name": ix["name"], "source": ix["source"], "key": body.get("key", ix["key_column"]),
+                  "text": body.get("text", ix["text_column"]), "chunk_chars": body.get("chunk_chars", ix["chunk_chars"]),
+                  "every_minutes": body.get("every_minutes", ix["every_minutes"])}
+        key, text, size, every = self._check(merged)
+        values = {"key_column": key, "text_column": text, "chunk_chars": size, "every_minutes": every,
+                  "enabled": bool(body.get("enabled", ix["enabled"]))}
+        with self.engine.begin() as conn:
+            conn.execute(update(vector_indexes).where(vector_indexes.c.id == ix["id"]).values(**values))
+            if self.audit is not None:
+                self.audit.record("lakehouse", "vector_index.updated", actor, None, {"name": ix["name"], **values}, conn=conn)
+        self._cache.pop(ix["id"], None)
+        return self.get(ix["name"])
+
+    def delete(self, ref: str, actor: str) -> None:
+        """Removes the index and its vectors table (it holds the source's raw text)."""
+        from pyiceberg.exceptions import NoSuchTableError
+
+        ix = self.get(ref)
+        with self._locks.setdefault(ix["id"], threading.Lock()):
+            try:
+                self._catalog().purge_table(tuple(self.target(ix).split(".")))
+            except NoSuchTableError:
+                pass
+            with self.engine.begin() as conn:
+                conn.execute(vector_indexes.delete().where(vector_indexes.c.id == ix["id"]))
+                if self.audit is not None:
+                    self.audit.record("lakehouse", "vector_index.deleted", actor, None, {"name": ix["name"]}, conn=conn)
+        self._cache.pop(ix["id"], None)
 
     def target(self, ix: dict) -> str:
-        return f"{ix['source']}__vectors"
+        return f"{ix['source']}__{re.sub(r'[^a-z0-9_]', '_', ix['name'].lower())}_vectors"     # one per index
 
     # ---- keeping it in step ---------------------------------------------------------------------
     def refresh(self, name: str) -> dict:
@@ -252,12 +307,22 @@ def build_vectors_router(ix: VectorIndexes, current_principal, authorize) -> Any
 
     @router.get("")
     def list_indexes(p=Depends(current_principal)):
-        return [{k: v for k, v in i.items() if k != "id"} for i in ix.list()]
+        return ix.list()
 
     @router.post("", status_code=201)
     def create(body: dict = Body(...), p=Depends(current_principal)):
         authorize(p, "MANAGE_INGESTION", None)
         return wrap(lambda: ix.create(body, p.urn))
+
+    @router.put("/{ref}")
+    def change(ref: str, body: dict = Body(...), p=Depends(current_principal)):
+        authorize(p, "MANAGE_INGESTION", None)
+        return wrap(lambda: ix.update(ref, body, p.urn))
+
+    @router.delete("/{ref}", status_code=204)
+    def remove(ref: str, p=Depends(current_principal)):
+        authorize(p, "MANAGE_INGESTION", None)
+        wrap(lambda: ix.delete(ref, p.urn))
 
     @router.post("/{name}/refresh")
     def refresh(name: str, p=Depends(current_principal)):

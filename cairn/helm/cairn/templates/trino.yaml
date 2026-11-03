@@ -152,7 +152,7 @@ data:
     s3.aws-access-key=${ENV:CAIRN_DELTA_ACCESS_KEY}
     s3.aws-secret-key=${ENV:CAIRN_DELTA_SECRET_KEY}
     delta.register-table-procedure.enabled=true
-    delta.enable-non-concurrent-writes=true
+    s3.exclusive-create=true
   {{- end }}
   {{- range $f := $u.federation }}
   {{- if not (regexMatch "^[a-z][a-z0-9_]{0,30}$" (toString $f.name)) }}{{ fail (printf "cairn.trino.federation: name %q is a lowercase catalog name" (toString $f.name)) }}{{ end }}

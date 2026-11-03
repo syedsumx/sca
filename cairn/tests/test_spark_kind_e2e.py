@@ -116,6 +116,11 @@ def test_a_cluster_mode_job_runs_in_pods_signed_in_by_its_service_account(kind, 
     assert r.status_code == 201, r.text
     server = credentials(kind["dir"])
     kubectl("-n", "pipelines", "create", "configmap", "job", f"--from-literal=job.py={JOB}")
+    open(f"{kind['dir']}/kube/driver.yaml", "w").write(yaml.safe_dump({
+        "apiVersion": "v1", "kind": "Pod",
+        "spec": {"volumes": [{"name": "job", "configMap": {"name": "job"}}],
+                 "containers": [{"name": "spark-kubernetes-driver", "volumeMounts": [{"name": "job", "mountPath": "/job"}]}]}}))
+    os.chmod(f"{kind['dir']}/kube/driver.yaml", 0o644)
 
     submit = ["--master", f"k8s://{server}", "--deploy-mode", "cluster", "--name", "orders",
               "--conf", "spark.kubernetes.namespace=pipelines", "--conf", f"spark.kubernetes.container.image={IMAGE}",
@@ -124,8 +129,9 @@ def test_a_cluster_mode_job_runs_in_pods_signed_in_by_its_service_account(kind, 
               "--conf", "spark.executor.instances=1", "--conf", "spark.kubernetes.executor.deleteOnTermination=false",
               "--conf", "spark.driver.memory=1g", "--conf", "spark.executor.memory=1g",
               "--conf", "spark.kubernetes.driver.request.cores=0.5", "--conf", "spark.kubernetes.executor.request.cores=0.5",
-              "--conf", "spark.kubernetes.driver.volumes.configMap.job.mount.path=/job",
-              "--conf", "spark.kubernetes.driver.volumes.configMap.job.options.name=job",
+              # The job's file comes from a config map (Spark's volume confs do not take config maps; a pod template does).
+              "--conf", "spark.kubernetes.driver.podTemplateFile=/kube/driver.yaml",
+              "--conf", "spark.kubernetes.driver.podTemplateContainerName=spark-kubernetes-driver",
               "--conf", "spark.kubernetes.submission.waitAppCompletion=true",
               "--conf", "spark.kubernetes.authenticate.submission.caCertFile=/kube/ca.crt",
               "--conf", "spark.kubernetes.authenticate.submission.clientCertFile=/kube/admin.crt",

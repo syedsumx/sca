@@ -213,7 +213,7 @@ def trino(lake, cairn):
         "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
         "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
-        "delta.register-table-procedure.enabled=true", "delta.enable-non-concurrent-writes=true", ""]))
+        "delta.register-table-procedure.enabled=true", "s3.exclusive-create=true", ""]))
     # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
     model = services.model_stub
     open(f"{d}/catalog/llm.properties", "w").write("\n".join([
@@ -927,3 +927,92 @@ def test_notebooks_query_as_the_person_signed_in(trino, cairn, monkeypatch):
     nb._session = None
     with pytest.raises(nb.CairnLakehouseError, match="refused a Trino token"):
         nb.sql("SELECT 1")
+
+
+def test_delta_tables_take_writes_from_several_clusters_at_once(trino, lake):
+    """Two Trino clusters write one Delta table at the same time. Each commit is a put-if-absent of the next
+    log entry in Cairn Store (If-None-Match), so none is lost and none overwrites another."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconc")
+    trino("CREATE TABLE delta.dconc.events (id bigint, src varchar)")
+    d = tempfile.mkdtemp(prefix="trino2-")
+    os.makedirs(f"{d}/catalog")
+    tp = port()
+    open(f"{d}/catalog/delta.properties", "w").write("\n".join([
+        "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
+        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", "s3.exclusive-create=true", ""]))
+    open(f"{d}/config.properties", "w").write("\n".join([
+        "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
+        f"discovery.uri=http://127.0.0.1:{tp}", ""]))
+    os.chmod(d, 0o755)
+    other = f"cairn-trino-delta2-{os.getpid()}"
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", other, "--network", "host",
+                    "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
+                    TRINO], check=True, capture_output=True, timeout=600)
+    try:
+        end = time.time() + 240
+        while "SERVER STARTED" not in subprocess.run(["docker", "logs", other], capture_output=True, text=True).stderr:
+            assert time.time() < end, "the second Trino did not start"
+            time.sleep(1)
+
+        def second(statement):
+            out = subprocess.run(["docker", "exec", other, "trino", "--server", f"http://127.0.0.1:{tp}", "--user", "writer",
+                                  "--execute", statement], capture_output=True, text=True, timeout=300)
+            assert out.returncode == 0, out.stderr[-2000:]
+
+        jobs = [(lambda i=i: trino(f"INSERT INTO delta.dconc.events VALUES ({i}, 'a')")) for i in range(6)]
+        jobs += [(lambda i=i: second(f"INSERT INTO delta.dconc.events VALUES ({100 + i}, 'b')")) for i in range(6)]
+        with ThreadPoolExecutor(12) as pool:
+            for f in [pool.submit(j) for j in jobs]:
+                f.result()
+        rows = trino("SELECT id, src FROM delta.dconc.events ORDER BY id")
+        assert [r["id"] for r in rows] == list(range(6)) + list(range(100, 106))
+        versions = sorted(r["version"] for r in trino('SELECT version FROM delta.dconc."events$history"'))
+        assert versions == list(range(13)), versions                  # the table's creation, then one per insert
+    finally:
+        subprocess.run(["docker", "rm", "-f", other], capture_output=True)
+
+
+def test_a_delta_table_is_converted_to_iceberg_in_place(trino, lake):
+    """A Delta table Trino wrote (with a checkpoint, an update and a delete) becomes an Iceberg table at the
+    same location, its live files added without copying; what Iceberg cannot read the same way is refused."""
+    from cairn.pipelines.delta_convert import DeltaConversions
+    from cairn.pipelines.pipes import PipeError
+
+    conv = DeltaConversions({"endpoint": lake["store"], "access_key": STORE_KEY[0], "secret_key": STORE_KEY[1]},
+                            {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                             "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                             "s3.path-style-access": "true"})
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconv")
+    trino("CREATE TABLE delta.dconv.items WITH (checkpoint_interval = 2) AS "
+          "SELECT * FROM (VALUES (1, 'a'), (2, 'b'), (3, 'c')) t(id, name)")
+    trino("INSERT INTO delta.dconv.items VALUES (4, 'd'), (6, 'f')")
+    trino("UPDATE delta.dconv.items SET name = 'B' WHERE id = 2")
+    trino("DELETE FROM delta.dconv.items WHERE id = 6")
+    loc = trino("SELECT \"$path\" AS p FROM delta.dconv.items LIMIT 1")[0]["p"].rsplit("/", 1)[0]
+    seen = conv.inspect(loc)
+    assert seen["problems"] == [] and seen["version"] == 3 and seen["files"] >= 2, seen
+    with pytest.raises(PipeError, match="namespace.table"):
+        conv.convert(loc, "nope", "urn:li:corpuser:admin")
+    trino("CALL delta.system.unregister_table('dconv', 'items')")           # retired: nothing writes to it now
+    out = conv.convert(loc, "converted.items", "urn:li:corpuser:admin")
+    assert out["delta_version"] == 3 and out["location"] == loc
+    rows = trino("SELECT id, name FROM lake.converted.items ORDER BY id")
+    assert [(r["id"], r["name"]) for r in rows] == [(1, "a"), (2, "B"), (3, "c"), (4, "d")]
+    props = conv._catalog().load_table("converted.items").properties
+    assert props["cairn.converted-from"] == loc and props["cairn.delta-version"] == "3"
+    # It is an ordinary lakehouse table now: written and read like any other.
+    trino("INSERT INTO lake.converted.items VALUES (5, 'e')")
+    assert trino("SELECT count(*) AS n FROM lake.converted.items")[0]["n"] == 5
+    with pytest.raises(PipeError, match="exists"):
+        conv.convert(loc, "converted.items", "urn:li:corpuser:admin")
+    # Partitioned tables keep values in paths, not files: refused (copy them with a derived table).
+    trino("CREATE TABLE delta.dconv.parts (id bigint, region varchar) WITH (partitioned_by = ARRAY['region'])")
+    trino("INSERT INTO delta.dconv.parts VALUES (1, 'EU')")
+    ploc = trino("SELECT \"$path\" AS p FROM delta.dconv.parts LIMIT 1")[0]["p"].rsplit("/", 2)[0]
+    with pytest.raises(PipeError, match="partitioned by region"):
+        conv.convert(ploc, "converted.parts", "urn:li:corpuser:admin")
+    with pytest.raises(PipeError, match="no Delta log"):
+        conv.inspect(loc + "-missing")

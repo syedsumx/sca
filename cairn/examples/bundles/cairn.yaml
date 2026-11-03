@@ -18,3 +18,22 @@ derived:
     mode: full
     on_change: true
     sql: SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region
+vectors:
+  - {name: support-articles, source: support.articles, key: id, text: body, every_minutes: 60}
+# The token user's own: saved queries, and the dashboards, alerts and workflows that name them.
+queries:
+  - name: revenue-by-region
+    connection: lakehouse
+    sql: SELECT * FROM marts.revenue_by_region
+    shared: true
+    chart: {type: bar, x: region, y: [total]}
+dashboards:
+  - {name: sales, shared: true, tiles: [{query: revenue-by-region, width: 2}]}
+alerts:
+  - {name: revenue-drop, query: revenue-by-region, measure: total, op: "<", value: 1000, every_minutes: 60}
+workflows:
+  - name: nightly
+    cron: "0 2 * * *"
+    steps:
+      - {name: refresh, type: derived, table: revenue-by-region}
+      - {name: not-empty, type: check, query: revenue-by-region, op: ">", value: 0, after: [refresh]}

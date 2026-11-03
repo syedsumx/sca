@@ -26,7 +26,7 @@ bundles = Table(
 )
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
-KINDS = ("pipes", "streams", "derived", "maintenance")
+KINDS = ("pipes", "streams", "derived", "maintenance", "vectors", "queries", "dashboards", "alerts", "workflows")
 
 
 class BundleStateError(Exception):

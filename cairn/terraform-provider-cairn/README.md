@@ -9,6 +9,16 @@ permissions and audit apply:
 | `cairn_stream` | A Kafka topic (Debezium change events included) written into a lakehouse table, exactly once |
 | `cairn_derived_table` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
 | `cairn_maintenance_policy` | Compaction, snapshot expiry and orphan cleanup for `*`, a schema or a table |
+| `cairn_vector_index` | Vector search over a table's text, kept in step with it, searched under Cairn's policies |
+| `cairn_saved_query` | A saved read-only query and its chart (`connection_name`, `chart = jsonencode({...})`) |
+| `cairn_dashboard` | Saved queries shown together (`tiles = jsonencode([{query = cairn_saved_query.x.id}])`) |
+| `cairn_sql_alert` | A saved query checked on a schedule, telling its owner when a condition starts and stops |
+| `cairn_sql_workflow` | Steps that depend on each other (refreshes, checks, reports) on a cron schedule |
+
+Each is also a data source, read by its name (a maintenance policy by its scope):
+`data "cairn_saved_query" "q" { name = "weekly-revenue" }`. Saved queries, dashboards, alerts and
+workflows are the token user's own; when others share one of the same name, the caller's own wins.
+JSON attributes are compared by what you declare, so what Cairn adds (ids, default titles) is not drift.
 
 ```hcl
 terraform {

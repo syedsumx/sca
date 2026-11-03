@@ -12,7 +12,24 @@ derived:
      sql: "SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region"}
 maintenance:
   - {scope: "*", optimize: true, expire_days: 7, orphan_days: 7, every_hours: 24}
+vectors:
+  - {name: articles, source: support.articles, key: id, text: body, every_minutes: 60}
+queries:                           # saved queries, dashboards, alerts and SQL workflows are the token user's own
+  - {name: revenue-by-region, connection: lakehouse, sql: "SELECT * FROM marts.revenue", chart: {type: bar, x: region, y: [total]}}
+dashboards:
+  - {name: sales, shared: true, tiles: [{query: revenue-by-region, width: 2}]}
+alerts:
+  - {name: revenue-drop, query: revenue-by-region, measure: total, op: "<", value: 1000, every_minutes: 60}
+workflows:
+  - name: nightly
+    cron: "0 2 * * *"
+    steps:
+      - {name: refresh, type: derived, table: revenue}
+      - {name: not-empty, type: check, query: revenue-by-region, op: ">", value: 0, after: [refresh]}
 ```
+
+Dashboards, alerts and workflow steps name their saved queries (``query: <name>``): any of the token user's
+saved queries, this bundle's or not; Cairn's ids are looked up at apply time.
 
 ``${NAME}`` is replaced from ``--var NAME=value``, then from the environment (a missing one is an error),
 so one file serves several environments. ``cairn bundle validate`` checks the file alone; ``plan`` shows
@@ -45,8 +62,23 @@ KINDS: dict[str, dict] = {
     "maintenance": {"path": "/maintenance/policies", "key": "scope", "required": ("scope",),
                     "defaults": {"optimize": True, "optimize_threshold": "128MB", "expire_days": None, "orphan_days": None,
                                  "every_hours": 24, "enabled": True}},
+    "vectors": {"path": "/v1/vectors", "key": "name", "required": ("name", "source", "key", "text"),
+                "defaults": {"chunk_chars": 1500, "every_minutes": None, "enabled": True}, "fixed": ("source",)},
+    # The token user's own: saved queries, dashboards, alerts and SQL workflows.
+    "queries": {"path": "/sql/saved", "key": "name", "required": ("name", "sql", "connection"), "mine": True,
+                "defaults": {"description": "", "shared": False, "chart": {}}},
+    "dashboards": {"path": "/sql/dashboards", "key": "name", "required": ("name", "tiles"), "mine": True,
+                   "defaults": {"description": "", "shared": False}},
+    "alerts": {"path": "/sql/alerts", "key": "name", "required": ("name", "query", "op", "value"), "mine": True,
+               "defaults": {"measure": "rows", "every_minutes": 60, "recipients": [], "enabled": True}},
+    "workflows": {"path": "/v1/sql-workflows", "key": "name", "required": ("name", "steps"), "mine": True,
+                  "defaults": {"cron": None, "recipients": [], "notify": "failure", "enabled": True}},
 }
-ORDER = ("maintenance", "pipes", "streams", "derived")     # derived tables last: they may read the others' tables
+# Created and changed in this order (derived tables may read the others' tables; dashboards, alerts and
+# workflows name saved queries); deleted in the reverse order.
+ORDER = ("maintenance", "pipes", "streams", "derived", "vectors", "queries", "dashboards", "alerts", "workflows")
+CHART = {"type": "table", "x": "", "y": []}
+STEP = {"after": [], "retries": 0}
 VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 BUNDLE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
 
@@ -133,13 +165,95 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
 def desired(kind: str, spec: dict) -> dict:
     """A spec with Cairn's defaults filled in, normalized the way Cairn returns it."""
     d = {**KINDS[kind]["defaults"], **spec}
-    if "key" in d and isinstance(d["key"], str):
+    if kind in ("streams", "derived") and "key" in d and isinstance(d["key"], str):
         d["key"] = [k.strip() for k in d["key"].split(",") if k.strip()]
     if kind == "streams" and d.get("format") == "debezium":
         d["mode"] = "upsert"
     if kind == "derived":
         d["sql"] = str(d["sql"]).strip().rstrip(";")
+    if kind == "queries":
+        d["chart"] = {**CHART, **(d.get("chart") or {})}
+    if kind == "dashboards":
+        if not isinstance(d["tiles"], list) or not all(isinstance(t, dict) and t.get("query") for t in d["tiles"]):
+            raise BundleError(f"dashboards/{d['name']}: tiles is a list of {{query: <saved query>, title, width}}")
+        d["tiles"] = [{"title": t.get("title") or str(t["query"]), "width": 2 if t.get("width") == 2 else 1,
+                       "query": str(t["query"])} for t in d["tiles"]]
+    if kind == "alerts":
+        d["value"] = _number(d["value"], f"alerts/{d['name']}: value")
+    if kind == "workflows":
+        if not isinstance(d["steps"], list) or not all(isinstance(x, dict) and x.get("name") for x in d["steps"]):
+            raise BundleError(f"workflows/{d['name']}: steps is a list of steps, each with a name")
+        steps = []
+        for x in d["steps"]:
+            x = {**STEP, **x}
+            if isinstance(x["after"], str):
+                x["after"] = [x["after"]]
+            if x.get("type") == "check":
+                x.setdefault("measure", "rows")
+                x["value"] = _number(x.get("value"), f"workflows/{d['name']}: step {x['name']}: value")
+            if x.get("type") == "derived":
+                x.setdefault("full", False)
+            steps.append(x)
+        d["steps"] = steps
     return d
+
+
+def _number(v: Any, what: str) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        raise BundleError(f"{what} is a number")
+
+
+def _same(want: Any, have: Any) -> bool:
+    """Does Cairn's ``have`` hold everything the bundle declares? Fields Cairn adds (ids, timestamps, state)
+    are not drift."""
+    if isinstance(want, dict):
+        return isinstance(have, dict) and all(_same(v, have.get(k)) for k, v in want.items())
+    if isinstance(want, list):
+        return isinstance(have, list) and len(want) == len(have) and all(_same(a, b) for a, b in zip(want, have))
+    if isinstance(want, (int, float)) and not isinstance(want, bool) and isinstance(have, (int, float)):
+        return float(want) == float(have)
+    return want == have
+
+
+def _as_declared(kind: str, r: dict, names: dict[str, str]) -> dict:
+    """Cairn's record as a bundle declares it: saved queries by name, not id (``names``: id -> name)."""
+    if kind == "dashboards":
+        r = {**r, "tiles": [{**t, "query": names.get(t["query"], t["query"])} for t in r.get("tiles") or []]}
+    elif kind == "alerts":
+        r = {**r, "query": names.get(r.get("query"), r.get("query"))}
+    elif kind == "workflows":
+        r = {**r, "steps": [{**{k: v for k, v in x.items() if k != "derived_id"},
+                             **({"query": names.get(x["query"], x["query"])} if x.get("query") else {})}
+                            for x in r.get("steps") or []]}
+    return r
+
+
+def _with_ids(kind: str, body: dict, ids: dict[str, str]) -> dict:
+    """The API body: saved query names replaced by Cairn's ids (``ids``: name -> id)."""
+    def one(name: str) -> str:
+        if name not in ids:
+            raise BundleError(f"{kind}/{body['name']}: no saved query of yours named {name!r}")
+        return ids[name]
+
+    if kind == "dashboards":
+        return {**body, "tiles": [{**t, "query": one(t["query"])} for t in body["tiles"]]}
+    if kind == "alerts":
+        return {**body, "query": one(body["query"])}
+    if kind == "workflows":
+        return {**body, "steps": [{**x, "query": one(x["query"])} if x.get("query") else x for x in body["steps"]]}
+    return body
+
+
+def _refs(kind: str, spec: dict) -> list[str]:
+    if kind == "dashboards":
+        return [t["query"] for t in spec["tiles"]]
+    if kind == "alerts":
+        return [spec["query"]]
+    if kind == "workflows":
+        return [x["query"] for x in spec["steps"] if x.get("query")]
+    return []
 
 
 def digest(bundle: dict) -> str:
@@ -168,24 +282,51 @@ def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change
     """What applying ``bundle`` would do, and the bundle's recorded state."""
     state = client.call("GET", f"/v1/bundles/{bundle['bundle']}")
     owned = {k: set(v) for k, v in (state.get("resources") or {}).items()}
+    me = None
+    if any(bundle[k] or (prune and owned.get(k)) for k in KINDS if KINDS[k].get("mine")):
+        me = client.call("GET", "/me")["urn"]
     changes: list[Change] = []
+    deletes: list[Change] = []
+    names: dict[str, str] = {}
     for kind in ORDER:
         cfg = KINDS[kind]
-        current = {str(r[cfg["key"]]): r for r in client.call("GET", cfg["path"])}
+        if cfg.get("mine") and me is None:
+            continue
+        rows = client.call("GET", cfg["path"])
+        if cfg.get("mine"):
+            rows = [r for r in rows if r.get("owner") == me]          # shared ones of others are not this bundle's
+        current: dict[str, dict] = {}
+        for r in rows:
+            key = str(r[cfg["key"]])
+            if key in current and (key in bundle[kind] or key in owned.get(kind, set())):
+                raise BundleError(f"{kind}/{key}: you have two of that name; rename or delete one")
+            current[key] = r
+        if kind == "queries":
+            names = {r["id"]: str(r["name"]) for r in current.values()}
+            known = set(current) | set(bundle["queries"])
+            for k2 in ("dashboards", "alerts", "workflows"):
+                for key, spec in bundle[k2].items():
+                    missing = [q for q in _refs(k2, spec) if q not in known]
+                    if missing:
+                        raise BundleError(f"{k2}/{key}: no saved query of yours named {missing[0]!r}")
         for key, want in bundle[kind].items():
             have = current.get(key)
             if have is None:
                 changes.append(Change("create", kind, key, desired=want))
                 continue
-            diff = {k: [have.get(k), v] for k, v in want.items() if k != "owner" and have.get(k) != v}
+            seen = _as_declared(kind, have, names)
+            diff = {k: [seen.get(k), v] for k, v in want.items() if k != "owner" and not _same(v, seen.get(k))}
             if kind == "derived" and want.get("owner") and want["owner"] != have.get("owner"):
                 raise BundleError(f"derived/{key}: its owner is {have.get('owner')}; delete it to change the owner")
+            for f in cfg.get("fixed", ()):
+                if f in diff:
+                    raise BundleError(f"{kind}/{key}: its {f} is {have.get(f)}; delete it to change the {f}")
             changes.append(Change("update" if diff else "keep", kind, key, diff, want, have))
         if prune:
             for key in sorted(owned.get(kind, set()) - set(bundle[kind])):
                 if key in current:
-                    changes.append(Change("delete", kind, key, current=current[key]))
-    return changes, state
+                    deletes.append(Change("delete", kind, key, current=current[key]))
+    return changes + deletes[::-1], state
 
 
 def apply(client: Client, bundle: dict, changes: list[Change], state: dict, log=print) -> dict:
@@ -207,9 +348,13 @@ def apply(client: Client, bundle: dict, changes: list[Change], state: dict, log=
         for kind, key in adopted:
             owned[kind].add(key)
         record()
+    ids = {str(c.current["name"]): c.current["id"] for c in changes if c.kind == "queries" and c.current}
+    if any(KINDS[c.kind].get("mine") for c in changes):
+        me = client.call("GET", "/me")["urn"]
+        ids = {**{str(r["name"]): r["id"] for r in client.call("GET", "/sql/saved") if r.get("owner") == me}, **ids}
     for c in changes:
         cfg = KINDS[c.kind]
-        body = {k: v for k, v in (c.desired or {}).items()}
+        body = _with_ids(c.kind, dict(c.desired or {}), ids) if c.action != "delete" else {}
         if c.action == "keep":
             continue
         if c.kind == "maintenance":
@@ -219,7 +364,9 @@ def apply(client: Client, bundle: dict, changes: list[Change], state: dict, log=
             else:
                 client.call("PUT", path, {k: v for k, v in body.items() if k != "scope"})
         elif c.action == "create":
-            client.call("POST", cfg["path"], body)
+            made = client.call("POST", cfg["path"], body)
+            if c.kind == "queries":
+                ids[c.key] = made["id"]
         elif c.action == "update":
             client.call("PUT", f"{cfg['path']}/{c.current['id']}", {k: v for k, v in body.items() if k != "owner"})
         else:
