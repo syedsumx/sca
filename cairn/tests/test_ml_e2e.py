@@ -1,0 +1,184 @@
+"""Machine learning through Cairn, end to end, with a real MLflow server, the real MLflow client and a real
+model server: a person trains a scikit-learn model on a lakehouse table and registers it through Cairn
+(MLFLOW_TRACKING_URI=<cairn>/v1/ml, their Cairn token). The run is theirs whatever the client claims;
+the model belongs to them and appears in the catalog with lineage from its training table; others
+neither see nor change it without a policy; predictions go through Cairn for those allowed.
+
+Needs CAIRN_MLFLOW_PYTHON: a Python with mlflow (3.x) and scikit-learn."""
+
+import json
+import os
+import socket
+import subprocess
+import tempfile
+import textwrap
+import threading
+import time
+
+import httpx
+import pytest
+
+PY = os.environ.get("CAIRN_MLFLOW_PYTHON", "")
+pytestmark = pytest.mark.skipif(not (PY and os.path.exists(PY)), reason="needs CAIRN_MLFLOW_PYTHON (mlflow, scikit-learn)")
+
+TOKENS = {"tok-ana": "urn:li:corpuser:ana", "tok-bob": "urn:li:corpuser:bob"}
+
+
+def port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def wait(url, seconds=90):
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            if httpx.get(url, timeout=2).status_code < 500:
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"{url} did not come up")
+
+
+@pytest.fixture(scope="module")
+def ml():
+    import uvicorn
+    from fastapi import FastAPI, HTTPException
+    from sqlalchemy import create_engine
+    from starlette.requests import Request
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.core import InMemoryGraph
+    from cairn.common.db import init_db
+    from cairn.common.security import Principal
+    from cairn.ml.mlflow_gateway import MlflowGateway, build_ml_router
+
+    d = tempfile.mkdtemp(prefix="ml-")
+    mp = port()
+    bindir = os.path.dirname(PY)
+    server = subprocess.Popen([f"{bindir}/mlflow", "server", "--backend-store-uri", f"sqlite:///{d}/mlflow.db",
+                               "--artifacts-destination", f"{d}/artifacts", "--serve-artifacts",
+                               "--host", "127.0.0.1", "--port", str(mp), "--workers", "1"],
+                              stdout=open(f"{d}/mlflow.log", "w"), stderr=subprocess.STDOUT)
+    wait(f"http://127.0.0.1:{mp}/health")
+    engine = create_engine(f"sqlite:///{d}/cairn.db")
+    init_db(engine)
+    grants: set = set()
+    graph = InMemoryGraph()
+    gw = MlflowGateway(f"http://127.0.0.1:{mp}", engine, AuditLog(engine), graph,
+                       lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)",
+                       lambda p, priv, urn: (p.urn, priv, urn) in grants)
+
+    def who(request: Request) -> Principal:
+        urn = TOKENS.get(request.headers.get("authorization", "").removeprefix("Bearer "))
+        if urn is None:
+            raise HTTPException(401, "sign in")
+        return Principal(urn, "token")
+    app = FastAPI()
+    app.include_router(build_ml_router(gw, who))
+    cp = port()
+    api = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cp, log_level="warning"))
+    threading.Thread(target=api.run, daemon=True).start()
+    wait(f"http://127.0.0.1:{cp}/docs")
+    yield {"cairn": f"http://127.0.0.1:{cp}", "mlflow": f"http://127.0.0.1:{mp}", "gw": gw, "graph": graph,
+           "grants": grants, "engine": engine, "dir": d}
+    api.should_exit = True
+    server.terminate()
+    server.wait(15)
+
+
+TRAIN = textwrap.dedent('''
+    import json, mlflow, pandas as pd
+    from sklearn.linear_model import LogisticRegression
+    df = pd.DataFrame({"tenure": [1, 2, 3, 20, 30, 40], "spend": [5, 7, 6, 50, 60, 70], "churned": [1, 1, 1, 0, 0, 0]})
+    mlflow.set_experiment("churn")
+    with mlflow.start_run(tags={"mlflow.user": "mallory"}) as run:          # a claim Cairn overrides
+        mlflow.log_input(mlflow.data.from_pandas(df, source="lakehouse.sales.customers", name="customers"),
+                         context="training")
+        model = LogisticRegression().fit(df[["tenure", "spend"]], df["churned"])
+        mlflow.log_metric("accuracy", float(model.score(df[["tenure", "spend"]], df["churned"])))
+        mlflow.sklearn.log_model(model, name="model", registered_model_name="churn",
+                                 input_example=df[["tenure", "spend"]].head(2))
+    print("CAIRN-RUN " + json.dumps({"run_id": run.info.run_id}))
+''')
+
+
+def client(ml, token, script, extra_env=None):
+    env = {**os.environ, "MLFLOW_TRACKING_URI": f"{ml['cairn']}/v1/ml", "MLFLOW_TRACKING_TOKEN": token,
+           "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "0", **(extra_env or {})}
+    r = subprocess.run([PY, "-c", script], env=env, capture_output=True, text=True, timeout=300, cwd=ml["dir"])
+    return r
+
+
+def call(ml, token, method, path, **kw):
+    return httpx.request(method, f"{ml['cairn']}/v1/ml/{path}", headers={"Authorization": f"Bearer {token}"}, timeout=30, **kw)
+
+
+def test_a_model_trained_through_cairn_is_owned_governed_and_in_the_catalog(ml):
+    r = client(ml, "tok-ana", TRAIN)
+    assert r.returncode == 0, r.stderr[-3000:]
+    run_id = json.loads(r.stdout.split("CAIRN-RUN ", 1)[1])["run_id"]
+    # The run is ana's, not what the client claimed.
+    run = httpx.get(f"{ml['mlflow']}/api/2.0/mlflow/runs/get", params={"run_id": run_id}).json()["run"]
+    assert {t["key"]: t["value"] for t in run["data"]["tags"]}["mlflow.user"] == "ana"
+    assert call(ml, "tok-ana", "POST", "api/2.0/mlflow/runs/set-tag",
+                json={"run_id": run_id, "key": "mlflow.user", "value": "mallory"}).status_code == 403
+    assert ml["gw"].owner("churn") == "urn:li:corpuser:ana"
+
+    # In the catalog: the model, its group (owned by ana), and lineage from the training table.
+    g = ml["graph"]
+    props = g.get_aspect("urn:li:mlModel:(urn:li:dataPlatform:mlflow,churn.v1,PROD)", "mlModelProperties")
+    assert props["groups"] == ["urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,churn,PROD)"]
+    (job,) = props["trainingJobs"]
+    assert g.get_aspect(job, "dataJobInputOutput")["inputDatasets"] == \
+        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.customers,PROD)"]
+    owners = g.get_aspect("urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,churn,PROD)", "ownership")["owners"]
+    assert [o["owner"] for o in owners] == ["urn:li:corpuser:ana"]
+
+    # bob neither sees nor changes it; his search lists nothing; he cannot take the name.
+    assert call(ml, "tok-bob", "GET", "api/2.0/mlflow/registered-models/get", params={"name": "churn"}).status_code == 403
+    assert call(ml, "tok-bob", "GET", "api/2.0/mlflow/registered-models/search").json().get("registered_models", []) == []
+    assert [m["name"] for m in call(ml, "tok-ana", "GET", "api/2.0/mlflow/registered-models/search").json()["registered_models"]] \
+        == ["churn"]
+    alias = {"name": "churn", "alias": "champion", "version": "1"}
+    assert call(ml, "tok-bob", "POST", "api/2.0/mlflow/registered-models/alias", json=alias).status_code == 403
+    assert call(ml, "tok-bob", "POST", "api/2.0/mlflow/registered-models/create", json={"name": "churn"}).status_code == 403
+    assert call(ml, "tok-bob", "DELETE", "api/2.0/mlflow/registered-models/delete", json={"name": "churn"}).status_code == 403
+    # The owner may; and with a policy, so may bob.
+    assert call(ml, "tok-ana", "POST", "api/2.0/mlflow/registered-models/alias", json=alias).status_code == 200
+    ml["grants"].add(("urn:li:corpuser:bob", "VIEW_ENTITY_PAGE", "urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,churn,PROD)"))
+    got = call(ml, "tok-bob", "GET", "api/2.0/mlflow/registered-models/get", params={"name": "churn"})
+    assert got.status_code == 200 and got.json()["registered_model"]["aliases"][0]["alias"] == "champion"
+    assert call(ml, "tok-bob", "POST", "api/2.0/mlflow/registered-models/alias",
+                json={**alias, "alias": "mine"}).status_code == 403          # seeing is not changing
+    # Without a token: nothing.
+    assert httpx.get(f"{ml['cairn']}/v1/ml/api/2.0/mlflow/experiments/search").status_code == 401
+    # Audited.
+    from cairn.common.audit import AuditLog
+    actions = {e["action"] for e in AuditLog(ml["engine"]).entries(category="ml", limit=50)}
+    assert {"ml.model_created", "ml.model_versions.create", "ml.registered_models.alias"} <= actions
+
+
+def test_predictions_go_through_cairn_for_those_allowed(ml):
+    sp = port()
+    # The model server runs uvicorn from PATH: the MLflow Python's own.
+    env = {**os.environ, "MLFLOW_TRACKING_URI": ml["mlflow"], "PATH": f"{os.path.dirname(PY)}:{os.environ['PATH']}"}
+    server = subprocess.Popen([f"{os.path.dirname(PY)}/mlflow", "models", "serve", "-m", "models:/churn@champion",
+                               "--env-manager", "local", "--host", "127.0.0.1", "-p", str(sp)],
+                              env=env, stdout=open(f"{ml['dir']}/serve.log", "w"), stderr=subprocess.STDOUT)
+    try:
+        wait(f"http://127.0.0.1:{sp}/ping", 120)
+        ml["gw"].serving["churn"] = f"http://127.0.0.1:{sp}"
+        rows = {"dataframe_split": {"columns": ["tenure", "spend"], "data": [[2, 6], [35, 65]]}}
+        r = call(ml, "tok-ana", "POST", "serve/churn/invocations", json=rows)
+        assert r.status_code == 200, r.text
+        assert r.json()["predictions"] == [1, 0]
+        assert call(ml, "tok-bob", "POST", "serve/churn/invocations", json=rows).status_code == 403
+        ml["grants"].add(("urn:li:corpuser:bob", "USE_ML_MODEL", "urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,churn,PROD)"))
+        assert call(ml, "tok-bob", "POST", "serve/churn/invocations", json=rows).status_code == 200
+        assert call(ml, "tok-ana", "POST", "serve/nope/invocations", json=rows).status_code == 404
+    finally:
+        server.terminate()
+        server.wait(15)

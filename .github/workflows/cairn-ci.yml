@@ -259,6 +259,26 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py | tee "$RUNNER_TEMP/tf.log"
           ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
 
+  ml:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: MLflow through Cairn (tracking, governed registry, catalog lineage, serving)
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test]"
+          # MLflow in its own environment, as it is deployed (its own image).
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py | tee "$RUNNER_TEMP/ml.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
+
   pipelines:
     runs-on: ubuntu-latest
     steps:

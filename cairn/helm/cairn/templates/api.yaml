@@ -72,6 +72,14 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_RPM" "value" (toString $ai.callsPerMinute)) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_USER_DAILY_QUERIES" "value" (toString $ai.userDailyQueries)) }}
 {{- end }}
+{{- /* MLflow behind Cairn (/v1/ml). */ -}}
+{{- if .Values.cairn.mlflow.enabled }}
+{{- $mlCtx := dict "root" $ "component" "mlflow" "cfg" .Values.cairn.mlflow }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_MLFLOW_URL" "value" (printf "http://%s:5000" (include "cairn.componentName" $mlCtx))) }}
+{{- with .Values.cairn.mlflow.serving }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING" "value" (toJson .)) }}
+{{- end }}
+{{- end }}
 {{- /* Warehouse status (GET /v1/warehouses): the warehouse proxy and each warehouse's port. */ -}}
 {{- if and .Values.cairn.trino.enabled .Values.cairn.trino.warehouses.list }}
 {{- $whPorts := dict }}

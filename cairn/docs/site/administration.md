@@ -294,6 +294,36 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
     With Kubernetes (`tests/test_warehouses_k8s.py`), the proxy's account scaled the workers Deployment 0 → 3 → 1 → 0 with the load.
   - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
 
+## Machine learning: MLflow behind Cairn
+
+MLflow keeps experiments, runs and the model registry. People and pipelines reach it only through Cairn, at `<cairn>/v1/ml`, with their usual Cairn token:
+
+```bash
+export MLFLOW_TRACKING_URI=https://cairn.example.com/cairn/api/v1/ml
+export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline user's
+```
+
+- **Runs are the caller's.** Cairn sets `mlflow.user` on a new run to the person or pipeline user signed in, whatever the client says, and refuses changes to it. Experiments, runs and artifacts are open to signed-in people, like a shared workspace.
+- **The registry is governed.** A registered model belongs to whoever created it, and a name someone else owns is refused. The model's catalog asset is `urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)`:
+  - reading a model needs `VIEW_ENTITY_PAGE` on it, or being its owner;
+  - changing it (versions, aliases, stages, tags, rename, delete) needs `MANAGE_ML_MODEL` on it, or being its owner;
+  - searches list only the models the caller may see.
+
+  Creating a model and every change are audited (category `ml`).
+- **Models are catalog assets.** Each new version appears in the catalog as an ML model in its model group, owned by its creator. The run that trained it is recorded as a job. Its inputs are the run's datasets (`mlflow.log_input`): a dataset whose source or name is a lakehouse table (`lakehouse.<ns>.<table>` or `iceberg://<ns>.<table>`) becomes lineage from that table, so the model shows up downstream of the data it was trained on.
+- **Serving.** Run `mlflow models serve` for a model (for example `models:/churn@champion`). List it in `cairn.mlflow.serving` (`CAIRN_ML_SERVING`: `{"churn": "http://churn-serving:5000"}`), and callers send predictions to `POST <cairn>/v1/ml/serve/churn/invocations`. Calling a model needs `USE_ML_MODEL` on it, or being its owner. Each call is audited.
+- **Helm.** `cairn.mlflow.enabled: true` deploys MLflow (`ghcr.io/mlflow/mlflow`). It needs:
+  - a PostgreSQL URL in a Secret (`cairn.mlflow.database.secretName`);
+  - artifacts in Cairn Store (`cairn.mlflow.artifacts`), with a store key for that prefix only.
+
+  A NetworkPolicy lets only Cairn's API reach it. The chart points the API at it (`CAIRN_MLFLOW_URL`).
+- **Tested** (`tests/test_ml_e2e.py`, with a real MLflow 3.5 server, the MLflow client and `mlflow models serve`):
+  - a person trained a scikit-learn model on a lakehouse table and registered it through Cairn;
+  - the run was theirs although the client claimed another user;
+  - the model was theirs, and appeared in the catalog with lineage from the training table;
+  - another person could neither see, change nor take the model until a policy let them see it, and seeing still did not let them change it;
+  - predictions went through Cairn only for the owner, or with `USE_ML_MODEL`.
+
 ## Delta Lake tables
 
 Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).

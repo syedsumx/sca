@@ -1,0 +1,103 @@
+{{- if .Values.cairn.mlflow.enabled }}
+{{- /* MLflow tracking and model registry. People and pipelines reach it only through Cairn
+       (<cairn>/v1/ml, with their Cairn token): a NetworkPolicy lets only the API in. Runs and the
+       registry live in PostgreSQL; artifacts in Cairn Store (s3://<bucket>/<prefix>). */}}
+{{- $ml := .Values.cairn.mlflow }}
+{{- $ctx := dict "root" $ "component" "mlflow" "cfg" $ml }}
+{{- $storeUrl := printf "http%s://%s-store:%v" (ternary "s" "" (not (empty .Values.cairn.store.tlsSecret))) (include "cairn.fullname" $) .Values.cairn.store.port }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $ml.replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mlflow
+          image: {{ printf "%s:%s" $ml.image.repository $ml.image.tag | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000",
+                    "--backend-store-uri", "$(MLFLOW_BACKEND_STORE_URI)",
+                    "--artifacts-destination", {{ printf "s3://%s/%s" $ml.artifacts.bucket $ml.artifacts.prefix | quote }},
+                    "--serve-artifacts", "--workers", {{ toString ($ml.workers | default 2) | quote }}]
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              valueFrom:
+                secretKeyRef: { name: {{ required "cairn.mlflow.database.secretName" $ml.database.secretName }}, key: {{ $ml.database.key | default "url" }} }
+            - name: MLFLOW_S3_ENDPOINT_URL
+              value: {{ $storeUrl | quote }}
+            # A store key for the artifacts prefix only.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.mlflow.artifacts.credentialsSecret" $ml.artifacts.credentialsSecret }}, key: access-key } }
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ $ml.artifacts.credentialsSecret }}, key: secret-key } }
+            - name: HOME
+              value: /tmp
+          ports:
+            - { name: http, containerPort: 5000 }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml ($ml.resources | default dict) | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - { name: http, port: 5000, targetPort: http }
+{{- if .Values.cairn.networkPolicy.enabled }}
+---
+# Only Cairn's API reaches MLflow: everyone else goes through Cairn's sign-in and policies.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "cairn.selectorLabels" (dict "root" $ "component" "api" "cfg" .Values.cairn.api) | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- end }}

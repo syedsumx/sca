@@ -979,6 +979,24 @@ cairn:
   # Spark on Kubernetes (cairn-spark submit --deploy-mode cluster, or Spark Operator SparkApplications
   # built by cairn_spark.kubernetes / CairnSparkApplicationOperator). Drivers sign in by workload identity
   # (needs cairn.workloadIdentity.issuers): bind driverServiceAccount to a pipeline user in Cairn.
+  # MLflow tracking and model registry, reached only through Cairn (<cairn>/v1/ml with a Cairn token):
+  # runs are the caller's, registered models are owned and governed (VIEW_ENTITY_PAGE, MANAGE_ML_MODEL,
+  # USE_ML_MODEL on urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)), and each version
+  # appears in the catalog with lineage from its training tables.
+  mlflow:
+    enabled: false
+    image: { repository: ghcr.io/mlflow/mlflow, tag: v3.5.0 }
+    workers: 2
+    # A Secret with the PostgreSQL URL (key `url`), e.g. postgresql://mlflow:...@db:5432/mlflow
+    database: { secretName: "", key: url }
+    # Artifacts in Cairn Store, with a store key (Secret: access-key, secret-key) for that prefix only.
+    artifacts: { bucket: ml, prefix: artifacts, credentialsSecret: "" }
+    # Model servers (mlflow models serve) Cairn forwards predictions to: {"<model>": "http://..."}.
+    serving: {}
+    resources:
+      requests: { cpu: 100m, memory: 512Mi }
+      limits: { memory: 2Gi }
+
   spark:
     enabled: false
     namespace: ""                   # where applications run; empty: the release's

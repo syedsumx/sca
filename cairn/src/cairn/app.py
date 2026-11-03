@@ -223,6 +223,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if getattr(services, "ml", None) is not None:
+        from cairn.ml.mlflow_gateway import build_ml_router
+
+        app.include_router(build_ml_router(services.ml, cp))
     if getattr(services, "shares", None) is not None:
         from cairn.dataaccess.shares import build_shares_router
 

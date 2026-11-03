@@ -110,6 +110,7 @@ class Services:
     lakehouse: Optional[Any] = None
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
+    ml: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
     pipeline_health: Optional[Any] = None
@@ -1086,6 +1087,16 @@ def _build_data_access(s: Services) -> None:
 
             s.shares = Shares(s.engine, s.trino_tokens, s.lakehouse, s.audit)
             s.lakehouse.shares = s.shares
+
+    # MLflow behind Cairn sign-in, with models in the catalog (CAIRN_MLFLOW_URL).
+    from cairn.ml.mlflow_gateway import MlflowGateway
+
+    lake = getattr(s, "lakehouse", None)
+    s.ml = MlflowGateway.from_env(
+        s.engine, s.audit, s.graph,
+        lake.urn if lake is not None else
+        (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
+        lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.
