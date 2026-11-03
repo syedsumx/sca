@@ -1,0 +1,3 @@
+name            = "cairn"
+location        = "fsn1"
+node_public_ips = ["203.0.113.11", "203.0.113.12", "203.0.113.13"]

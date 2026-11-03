@@ -28,7 +28,7 @@ Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validate
 | AI | Cortex / Mosaic AI | Assistant, documentation drafts, context agents, governed metrics (semantic layer), MCP server, AI-system governance, usage and budgets; Claude or local models | ✅ |
 | Sharing and marketplace | Listings / Delta Sharing | Internal marketplace with access requests; publishing to Snowflake listings and Delta Sharing shares | ✅ |
 | Ingestion | Connectors / Lakeflow Connect | Source connectors and in-VPC remote agents (signed, sealed); the store's message queues and events; pipes (files landing in the store, loaded once each); streams (Kafka and Debezium CDC into Iceberg, exactly once) | ✅ |
-| Operations | Managed service | Compose and Helm (HA, network policies, PDBs); infrastructure as code (`cairn bundle` from git, a Terraform provider); SSO and SCIM; Alembic migrations; signed images with SBOMs; monitoring dashboards; hosting tenants | ✅ |
+| Operations | Managed service | Compose and Helm (HA, network policies, PDBs); infrastructure as code (`cairn bundle` from git, a Terraform provider); SSO and SCIM; Alembic migrations; signed images with SBOMs; monitoring dashboards; hosting tenants, with a ready Hetzner setup (`deploy/hetzner`: k3s on dedicated servers, shared PostgreSQL with backups, per-tenant search and Kafka, tenant isolation, tested in CI) | ✅ |
 
 ## Design decisions behind the lakehouse integration
 

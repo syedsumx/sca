@@ -1,0 +1,10 @@
+  backup:
+    retentionPolicy: "30d"
+    barmanObjectStore:
+      destinationPath: s3://@PG_BUCKET@/
+      endpointURL: @OBJECT_STORAGE_ENDPOINT@
+      s3Credentials:
+        accessKeyId: { name: cairn-pg-backup, key: ACCESS_KEY_ID }
+        secretAccessKey: { name: cairn-pg-backup, key: ACCESS_SECRET_KEY }
+      wal: { compression: gzip, maxParallel: 4 }
+      data: { compression: gzip, jobs: 2 }

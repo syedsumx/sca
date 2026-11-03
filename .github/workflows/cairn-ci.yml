@@ -475,6 +475,44 @@ jobs:
           cache: gradle
       - run: ./gradlew --no-daemon test jar
 
+  # The Hetzner hosting setup (deploy/hetzner) for real on the runner: its firewall, k3s config, platform
+  # services and a tenant with its isolation (deploy/hetzner/ci/k3s-smoke.sh), plus the Terraform.
+  hetzner:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Lint the scripts
+        run: shellcheck -S warning deploy/hetzner/*.sh deploy/hetzner/ci/*.sh deploy/hosting/tenant.sh
+      - name: Terraform
+        working-directory: cairn/deploy/hetzner/terraform
+        run: |
+          terraform fmt -check -recursive
+          terraform init -backend=false -input=false
+          terraform validate
+      - name: Cluster, platform and a tenant on k3s
+        run: |
+          pip install -q cryptography sqlalchemy    # tenant.sh checks the licence with cairn.common.licence
+          sudo apt-get install -y -q nftables >/dev/null
+          deploy/hetzner/ci/k3s-smoke.sh
+      - name: Cluster state, on failure
+        if: failure()
+        run: |
+          export KUBECONFIG=$RUNNER_TEMP/cairn-hetzner-ci/state/kubeconfig
+          kubectl get pods -A -o wide || true
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
+          kubectl -n cairn-platform describe cluster.postgresql.cnpg.io cairn-pg | tail -40 || true
+          for ns in cairn-ci-acme ingress-nginx; do kubectl -n $ns describe pods | tail -60 || true; done
+          sudo journalctl -u k3s --no-pager | tail -80 || true
+
   helm:
     runs-on: ubuntu-latest
     steps:

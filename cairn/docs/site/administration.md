@@ -629,6 +629,43 @@ deploy/hosting/tenant.sh list
 
 The tenant's licence must name its id. The release runs with `cairn.licence.required: true`, so a tenant without a valid licence can't change anything. Add `--dry-run` to `create` to render the manifests without touching a cluster.
 
+**Optional settings for `tenant.sh`:**
+
+| Setting | Effect |
+|---|---|
+| `CAIRN_TENANT_SERVICES=1` | Each tenant gets its own OpenSearch and Kafka in its namespace (`deploy/hosting/tenant-services.yaml`). Only its own release reaches them. `CAIRN_SEARCH_HOST` and `CAIRN_KAFKA_TEMPLATE` are then not needed. |
+| `CAIRN_INGRESS_NAMESPACE` | The ingress controller's namespace. Turns on namespace isolation (`deploy/hosting/isolation.yaml`): nothing in another tenant's namespace reaches this one. Add `CAIRN_MONITORING_NAMESPACE` to let Prometheus scrape it. |
+| `CAIRN_PG_KUBECTL=<namespace>/<cluster>` | Administer a CloudNativePG cluster through its primary's local socket (`kubectl exec`), instead of `CAIRN_PG_ADMIN_URL`. |
+| `CAIRN_TLS_ISSUER` | A cert-manager ClusterIssuer. Each tenant's host gets its certificate from it. |
+| `CAIRN_POD_SECURITY` | The Pod Security level enforced in tenant namespaces (`baseline` or `restricted`). |
+
+Every tenant's databases are closed to other roles: `CONNECT` is revoked from `PUBLIC`. `tenant.sh render-services <id>` prints the isolation policies and services that `create` would apply.
+
+### Hosting on Hetzner
+
+`deploy/hetzner/` builds a hosting cluster on Hetzner dedicated servers. Its README is the full runbook.
+
+**What it sets up:**
+
+- **Servers:** three nodes on a private vSwitch.
+- **Firewall:** SSH and the Kubernetes API only from your addresses; the ingress only from the load balancer.
+- **Kubernetes:** k3s with an embedded etcd, a WireGuard-encrypted pod network, secrets encrypted at rest and an API audit log.
+- **Load balancer:** a Hetzner one, with the PROXY protocol (Terraform).
+- **Shared services:** ingress-nginx, cert-manager (Let's Encrypt), CloudNativePG (a primary and two replicas with WAL archiving and nightly backups to Hetzner Object Storage), and kube-prometheus-stack.
+- **Tenants:** created with `tenant.sh` and every option above. Each gets its own OpenSearch and Kafka.
+
+```bash
+deploy/hetzner/cluster.sh ~/cairn-hetzner/cluster.env prepare     # then: buckets, k3s, platform
+deploy/hosting/tenant.sh create acme --licence acme.licence --values deploy/hetzner/platform-values.yaml
+```
+
+Three AX42 servers (about €200–260 a month with the load balancer and backups) take 5–8 small tenants. CI (job `hetzner`) runs the whole setup on a real machine and checks tenant isolation: the firewall, k3s, the platform services, and a tenant created by `tenant.sh`.
+
+**Known limits:**
+
+- **ingress-nginx:** Kubernetes retired the project in March 2026. It stays pinned because Cairn's chart uses its annotations.
+- **Tenant OpenSearch and Kafka:** each runs on one node and doesn't fail over to another.
+
 ## Monitoring
 
 Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an HTTP API (notifier, scheduler, context miner) serve them on `CAIRN_METRICS_PORT`; Helm sets it to 9108.

@@ -1,0 +1,136 @@
+# A tenant's own OpenSearch and Kafka, in its namespace (tenant.sh with CAIRN_TENANT_SERVICES=1 fills
+# @...@). Only the tenant's Cairn release reaches them; data stays on the node's local disk. Neither is
+# replicated: if their node is down the tenant waits for it, and the search index can be rebuilt from
+# the database (see "Hosting on Hetzner" in docs/site/administration.md).
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+spec:
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+  ports: [{ name: http, port: 9200 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
+spec:
+  serviceName: opensearch
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.19.3
+          env:
+            - { name: discovery.type, value: single-node }
+            - { name: DISABLE_SECURITY_PLUGIN, value: "true" }     # reached only by the tenant's own pods
+            - { name: DISABLE_INSTALL_DEMO_CONFIG, value: "true" }
+            - { name: bootstrap.memory_lock, value: "false" }
+            - { name: OPENSEARCH_JAVA_OPTS, value: "-Xms1g -Xmx1g -Dlog4j2.formatMsgNoLookups=true" }
+          ports: [{ name: http, containerPort: 9200 }]
+          readinessProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: 1536Mi }
+            limits: { memory: 2Gi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /usr/share/opensearch/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: @SEARCH_STORAGE@ } }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+spec:
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+  ports: [{ name: kafka, port: 9092 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
+    spec:
+      automountServiceAccountToken: false
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.1
+          env:
+            - { name: CLUSTER_ID, value: "@KAFKA_CLUSTER_ID@" }
+            - { name: KAFKA_NODE_ID, value: "1" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "1@localhost:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://localhost:9093" }
+            - { name: KAFKA_ADVERTISED_LISTENERS, value: "PLAINTEXT://kafka.@NS@.svc:9092" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: PLAINTEXT }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "1" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "1" }
+            - { name: KAFKA_MESSAGE_MAX_BYTES, value: "5242880" }
+            - { name: KAFKA_REPLICA_FETCH_MAX_BYTES, value: "5242880" }
+            - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data }
+            - { name: KAFKA_LOG_RETENTION_HOURS, value: "168" }
+            - { name: KAFKA_HEAP_OPTS, value: "-Xms512m -Xmx512m" }
+          ports: [{ name: kafka, containerPort: 9092 }]
+          readinessProbe:
+            tcpSocket: { port: kafka }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: 768Mi }
+            limits: { memory: 1Gi }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/kafka/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: @KAFKA_STORAGE@ } }
+---
+# Only the tenant's own release reaches its search and Kafka (not its Spark jobs or other workloads).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cairn-tenant-services
+  namespace: @NS@
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [opensearch, kafka] }
+      - { key: app.kubernetes.io/part-of, operator: In, values: [cairn-tenant] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cairn, app.kubernetes.io/instance: @RELEASE@ }

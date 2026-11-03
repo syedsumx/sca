@@ -1,0 +1,20 @@
+# Cairn release values for tenants on the Hetzner cluster: deploy/hosting/tenant.sh ... --values
+# deploy/hetzner/platform-values.yaml (on top of values.yaml, values-ha.yaml and values-tenant.yaml).
+core:
+  ingress:
+    className: nginx
+    annotations:
+      nginx.ingress.kubernetes.io/proxy-body-size: 512m
+cairn:
+  networkPolicy:
+    # The ingress controller reaches the API through the tenant's host.
+    apiIngressFrom:
+      - namespaceSelector:
+          matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+    # The tenant's Spark jobs read and write its lakehouse.
+    storeIngressFrom:
+      - podSelector:
+          matchExpressions: [{ key: spark-role, operator: In, values: [driver, executor] }]
+    catalogIngressFrom:
+      - podSelector:
+          matchExpressions: [{ key: spark-role, operator: In, values: [driver, executor] }]

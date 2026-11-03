@@ -1,0 +1,11 @@
+# A base backup every night (the WAL is archived continuously in between: point-in-time recovery).
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: cairn-pg-nightly
+  namespace: cairn-platform
+spec:
+  schedule: "0 30 2 * * *"
+  backupOwnerReference: self
+  cluster: { name: cairn-pg }
+  method: barmanObjectStore
