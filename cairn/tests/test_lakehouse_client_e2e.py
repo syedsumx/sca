@@ -47,3 +47,32 @@ def test_pyiceberg_and_duckdb_are_governed_like_spark(cairn, lake, client, monke
     with pytest.raises(ForbiddenError):
         client.catalog().load_table("analytics.products")
     assert importlib.util.find_spec("duckdb")
+
+
+def test_every_commit_is_a_change_cairn_sees(cairn, lake):  # noqa: F811
+    """Cairn Catalog tells Cairn of each commit, whoever wrote it (here pyiceberg, which neither Trino nor
+    OpenLineage sees), so derived tables and materialized views on the table refresh."""
+    import time
+
+    import pyarrow as pa
+
+    from cairn.pipelines.changes import DatasetChanges
+
+    url, s = cairn
+    changes = DatasetChanges(s.engine)
+    urn = s.lakehouse.urn(["analytics"], "products")
+    before = changes.head()
+    lake["admin"].load_table("analytics.products").append(
+        pa.table({"sku": ["d"], "price": pa.array([11], pa.int64())}))
+    end = time.time() + 30
+    got = []
+    while time.time() < end and not got:
+        got = [c for c in changes.since([urn], before) if c["source"] == "catalog"]
+        time.sleep(0.3)
+    assert got and got[0]["job"] == "cairn-catalog", changes.since([urn], before)
+    # Only Cairn Catalog may report changes.
+    import httpx
+
+    r = httpx.post(f"{url}/v1/lakehouse/changes", json={"tables": [{"namespace": ["analytics"], "name": "products"}]},
+                   headers={"Authorization": f"Bearer {ANA}"}, timeout=10)
+    assert r.status_code == 403

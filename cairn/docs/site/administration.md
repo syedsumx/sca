@@ -1300,7 +1300,7 @@ A multi-table transaction changes every table or none.
 **Views.** The catalog serves Iceberg views (the REST spec's views API: list, create, load, replace, rename, drop), so `CREATE VIEW`, `CREATE OR REPLACE VIEW`, `ALTER VIEW … RENAME`, `COMMENT ON VIEW` and `DROP VIEW` work in Trino, and pyiceberg lists them.
 - **How they are kept.** A view's metadata file is written under its location, and every replace adds a version, checked with `assert-view-uuid`. A view and a table cannot share a name.
 - **Who may change them.** Read-only tokens read views but change none; namespace-scoped tokens see only their namespaces.
-- **Materialized views** are a Trino limitation for REST catalogs (`createMaterializedView is not supported`). Use a table refreshed by a scheduled `CREATE OR REPLACE TABLE … AS`.
+- **Materialized views.** Trino has none on REST catalogs (`createMaterializedView is not supported`), so Cairn keeps them; see [Materialized views](#materialized-views).
 - **Tested:** the REST API (create, conflict, load, replace, stale replace, list, scope, drop), and Trino 476 (create, query, replace, comment, rename, name clashes both ways, read-only token, drop).
 
 **Where its state lives.** By default it is embedded, on one volume (`/data`), and the catalog runs as a single replica. Back that volume up together with Cairn Store.
@@ -1780,6 +1780,26 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
   - **Columns.** A column the table lacked was set aside, and with `evolve` it was added.
   - **Lineage.** The source was added to the target's lineage, merged with what was there. When Cairn Core failed, nothing was created.
   - **Checks.** Bad definitions were refused, and the API was for operators only.
+
+## Materialized views
+
+A materialized view is a query's result kept as a lakehouse table, refreshed whenever a table it reads changes. Write it in the SQL editor (or `POST /sql/run`); Cairn runs these statements itself:
+
+- **`CREATE MATERIALIZED VIEW [IF NOT EXISTS] [lakehouse.]<schema>.<name> [WITH (refresh_every_minutes = N)] AS <select>`.**
+  - It is filled at once. If that first fill fails (for example, the query reads a table its author may not read), nothing is kept.
+  - It refreshes when a table it reads changes, and also every `N` minutes when given.
+- **`REFRESH MATERIALIZED VIEW <name>`** refreshes it now. **`DROP MATERIALIZED VIEW [IF EXISTS] <name>`** removes it and its table. Only its owner (or an operator) may do either.
+- **What counts as a change.** Any commit to a table it reads, whoever writes it:
+  - Cairn Catalog reports every commit to Cairn (`POST /v1/lakehouse/changes`, the catalog's service token only), so pyiceberg, Spark and Trino writes all count.
+  - So do pipes, streams, dbt and lineage.
+
+  The scheduler's leader refreshes due views in dependency order.
+- **Fresh or stale.** `GET /v1/derived?kind=materialized_view` lists them, each with `fresh` (nothing it reads changed since its last good refresh) and `changed`, the tables that did.
+- **Whose rows.** A view is a derived table of kind `materialized_view`: it refreshes as its owner, under their masks and row filters. Reading it is reading its table, under that table's policies, so give the table the access its contents call for.
+- **Catalog settings.** Commits are reported when the catalog decides access with Cairn (`CAIRN_CATALOG_CAIRN_URL`, `CAIRN_CATALOG_CAIRN_TOKEN`). A report is retried for about a minute in the background; a commit never waits for it.
+- **Tested:**
+  - `tests/test_trino_e2e.py`, on real Trino: a view was created and filled. A change to its source made it stale and was refreshed on the next tick, and the next tick had nothing to do. `REFRESH` and `DROP` worked for its owner and were refused to another person. A view whose author may not read its source was not kept.
+  - `tests/test_lakehouse_client_e2e.py`, with the real catalog: a pyiceberg commit reached Cairn's change log from Cairn Catalog, and only the catalog may report changes.
 
 ## Derived tables (incremental refresh)
 

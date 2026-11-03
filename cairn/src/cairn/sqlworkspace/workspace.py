@@ -81,6 +81,7 @@ class SqlWorkspace:
         """``data``: the DataAccessService queries run through. ``graph``: the metadata store, for the
         schema browser."""
         self.engine, self.data, self.graph = engine, data, graph
+        self.matviews = None                               # cairn.pipelines.matviews, set when derived tables are
         self._schema_cache: dict[str, tuple[float, list[dict]]] = {}
 
     # ---- running ------------------------------------------------------------------------
@@ -89,6 +90,18 @@ class SqlWorkspace:
         from cairn.dataaccess.service import DataAccessError
 
         started = time.monotonic()
+        if self.matviews is not None:                      # CREATE / REFRESH / DROP MATERIALIZED VIEW are Cairn's
+            from cairn.pipelines.derived import DerivedError
+
+            try:
+                done = self.matviews.handle(actor, sql)
+            except DerivedError as e:
+                self._record(actor, connection, sql, "error", None, int((time.monotonic() - started) * 1000), str(e))
+                raise WorkspaceError(str(e), e.status)
+            if done is not None:
+                out = self.matviews.result(done, started)
+                self._record(actor, connection, sql, "ok", 1, out["elapsed_ms"], None)
+                return out
         try:
             out = self.data.query(actor, sql, connection, None, limit)
         except DataAccessError as e:

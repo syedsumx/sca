@@ -1100,6 +1100,69 @@ def test_stored_functions_and_procedures(trino, cairn):
     assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")
 
 
+def test_materialized_views_in_sql_refresh_when_what_they_read_changes(trino, cairn):
+    """CREATE / REFRESH / DROP MATERIALIZED VIEW in the SQL editor (Trino has none on a REST catalog): the view is
+    filled at once, says when it is stale, refreshes when a table it reads changes, and is its owner's."""
+    from cairn.pipelines.changes import DatasetChanges
+    from cairn.pipelines.derived import DerivedTables
+    from cairn.pipelines.matviews import MaterializedViews
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(owner, sql):
+        return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
+    admin, ana = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
+    changes = DatasetChanges(s.engine)
+    dt = DerivedTables(s.engine, run, "lake", s.audit, changes, urn=lambda ns, t: s.lakehouse.urn([ns], t))
+    s.sql_workspace.matviews = MaterializedViews(dt, "lake", lambda actor: actor == admin)
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.mv",
+                 "CREATE TABLE lake.mv.sales (region varchar, amount double)",
+                 "INSERT INTO lake.mv.sales VALUES ('EU', 10.0), ('US', 5.0), ('EU', 2.5)"]:
+        run(admin, stmt)
+    ws = s.sql_workspace
+    out = ws.run(admin, "CREATE MATERIALIZED VIEW lake.mv.by_region AS "
+                        "SELECT region, sum(amount) AS total FROM lake.mv.sales GROUP BY region", "lakehouse")
+    assert "created" in out["rows"][0][0] and "when a table it reads changes" in out["rows"][0][0]
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM lake.mv.by_region")} == {"EU": 12.5, "US": 5.0}
+    [mv] = [d for d in dt.list() if d["kind"] == "materialized_view"]
+    assert mv["owner"] == admin and mv["on_change"] and dt.freshness(mv)["fresh"] is True
+    # The table it reads changes; the catalog reports it (as Cairn Catalog does, POST /v1/lakehouse/changes).
+    run(admin, "INSERT INTO lake.mv.sales VALUES ('US', 4.0)")
+    r = httpx.post(f"{url}/v1/lakehouse/changes", json={"tables": [{"namespace": ["mv"], "name": "sales"}]},
+                   headers={"Authorization": "Bearer svc-secret"}, timeout=10)
+    assert r.status_code == 200, r.text
+    stale = dt.freshness(dt.get(mv["id"]))
+    assert stale["fresh"] is False and stale["changed"] == [s.lakehouse.urn(["mv"], "sales")]
+    assert dt.run_due() >= 1                                          # the scheduler's tick refreshes it
+    assert {r["region"]: r["total"] for r in trino("SELECT * FROM lake.mv.by_region")} == {"EU": 12.5, "US": 9.0}
+    assert dt.freshness(dt.get(mv["id"]))["fresh"] is True
+    assert dt.run_due() == 0                                          # nothing changed since: nothing to do
+    # REFRESH on demand; another person may neither refresh nor drop it.
+    assert "refreshed" in ws.run(admin, "REFRESH MATERIALIZED VIEW mv.by_region", "lakehouse")["rows"][0][0]
+    for stmt in ("REFRESH MATERIALIZED VIEW lake.mv.by_region", "DROP MATERIALIZED VIEW lake.mv.by_region"):
+        with pytest.raises(WorkspaceError, match="no materialized view"):
+            ws.run(ana, stmt, "lakehouse")
+    # A view whose first fill fails is not kept; its owner's access applies (ana may not read hr.salaries).
+    with pytest.raises(WorkspaceError, match="could not be filled"):
+        ws.run(ana, "CREATE MATERIALIZED VIEW lake.mv.pay AS SELECT * FROM lake.hr.salaries", "lakehouse")
+    assert not [d for d in dt.list() if d["target"] == "mv.pay"]
+    again = ws.run(admin, "CREATE MATERIALIZED VIEW IF NOT EXISTS lake.mv.by_region AS SELECT 1 AS x", "lakehouse")
+    assert again["rows"][0][0].endswith("exists")                     # IF NOT EXISTS: left as it is
+    # DROP removes the definition and the table.
+    assert "dropped" in ws.run(admin, "DROP MATERIALIZED VIEW lake.mv.by_region", "lakehouse")["rows"][0][0]
+    assert not [d for d in dt.list() if d["kind"] == "materialized_view"]
+    assert trino("SELECT count(*) AS n FROM lake.information_schema.tables WHERE table_schema = 'mv' "
+                 "AND table_name = 'by_region'") == [{"n": 0}]
+    assert ws.run(admin, "DROP MATERIALIZED VIEW IF EXISTS lake.mv.by_region", "lakehouse")["rows"] == [["nothing to drop"]]
+    s.sql_workspace.matviews = None
+
+
 def test_stored_functions_are_catalog_assets(trino, cairn):
     """Stored functions in the catalog, as Trino tells Cairn of them: created (owned by their creator, with
     signature, body and comment), replaced, overloaded and dropped; the sync adds what Cairn was not told."""

@@ -1265,7 +1265,8 @@ impl Catalog {
             expected: None,
             new: TableRow { metadata_location: req.metadata_location.clone(), metadata: json.clone() },
         };
-        self.db.commit(&[change])?;
+        self.db.commit(std::slice::from_ref(&change))?;
+        self.changed(std::slice::from_ref(&change));
         let name = req.name.clone();
         self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap(), false, (levels, &name)).await
     }
@@ -1332,11 +1333,21 @@ impl Catalog {
         })
     }
 
+    /// Tells Cairn which tables changed (when Cairn decides access, so it is there to tell).
+    fn changed(&self, changes: &[Change]) {
+        if let Some(id) = &self.cfg.identity {
+            id.changed(changes.iter().map(|c| (db::ns_levels(&c.namespace), c.name.clone())).collect());
+        }
+    }
+
     /// Swaps the table pointers (all or none). On failure the metadata files written for this commit
     /// are removed, since nothing will ever refer to them.
     async fn apply(&self, changes: Vec<Change>) -> Result<(), ApiError> {
         match self.db.commit(&changes) {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                self.changed(&changes);
+                Ok(())
+            }
             Err(e) => {
                 for c in &changes {
                     let _ = self.store.delete(&c.new.metadata_location).await;

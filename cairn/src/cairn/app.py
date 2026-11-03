@@ -235,7 +235,7 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.dataaccess.lakehouse import build_lakehouse_router
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
-                                                  authz))
+                                                  authz, getattr(services, "dataset_changes", None)))
     if getattr(services, "sql_workflows", None) is not None:
         from cairn.sqlworkspace.workflows import build_workflows_router
 

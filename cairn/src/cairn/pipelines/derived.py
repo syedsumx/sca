@@ -48,6 +48,7 @@ derived_tables = Table(
     Column("last_run_ms", BigInteger, nullable=True),
     Column("lease_until", BigInteger, nullable=False, default=0),
     Column("full_next", Boolean, nullable=False, default=False),     # the query changed: rebuild next time
+    Column("kind", String(32), nullable=False, default="table", server_default="table"),   # table | materialized_view
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
 )
@@ -83,7 +84,7 @@ def _row(r) -> dict:
     return {"id": r.id, "name": r.name, "sql": r.sql, "target": r.target, "mode": r.mode, "watermark": r.watermark,
             "key": [k for k in r.key.split(",") if k], "every_minutes": r.every_minutes, "on_change": bool(r.on_change),
             "upstreams": json.loads(r.upstreams or "[]"), "owner": r.owner, "enabled": bool(r.enabled),
-            "last_run_ms": r.last_run_ms, "created_by": r.created_by, "created_ms": r.created_ms}
+            "last_run_ms": r.last_run_ms, "created_by": r.created_by, "created_ms": r.created_ms, "kind": r.kind}
 
 
 def _q(name: str) -> str:
@@ -139,7 +140,7 @@ class DerivedTables:
         cur = self.get(did)
         row = self._values(body, cur["owner"], actor)
         changed = any(row[k] != (",".join(cur[k]) if k == "key" else cur[k]) for k in ("sql", "mode", "watermark", "key", "target"))
-        keep = ("id", "seen_change", "last_run_ms", "lease_until", "created_by", "created_ms", "owner")
+        keep = ("id", "seen_change", "last_run_ms", "lease_until", "created_by", "created_ms", "owner", "kind")
         values = {k: v for k, v in row.items() if k not in keep}
         if changed:
             values["full_next"] = True
@@ -180,11 +181,14 @@ class DerivedTables:
         read = tables_read(sql, self.catalog)
         if tuple(p.lower() for p in parts) in read:
             raise DerivedError("the query reads its own target")
+        kind = str(body.get("kind") or "table")
+        if kind not in ("table", "materialized_view"):
+            raise DerivedError("kind is table or materialized_view")
         row = {"id": uuid.uuid4().hex, "name": name[:256], "sql": sql, "target": target, "mode": mode, "watermark": wm,
                "key": ",".join(key), "every_minutes": every, "on_change": on_change,
                "upstreams": json.dumps([self.urn(s, t) for s, t in read]), "owner": owner,
                "enabled": bool(body.get("enabled", True)), "seen_change": 0, "last_run_ms": None, "lease_until": 0,
-               "created_by": actor, "created_ms": _now(), "full_next": False}
+               "created_by": actor, "created_ms": _now(), "full_next": False, "kind": kind}
         if self.changes is not None:
             row["seen_change"] = self.changes.head()
         return row
@@ -208,6 +212,13 @@ class DerivedTables:
             conn.execute(delete(derived_runs).where(derived_runs.c.derived_id == did))
             if self.audit is not None:
                 self.audit.record("lakehouse", "derived.deleted", actor, None, {"derived": did}, conn=conn)
+
+    def freshness(self, d: dict) -> dict:
+        """Is the table as its query would make it now: nothing it reads changed since its last good refresh?"""
+        if self.changes is None or not d["upstreams"]:
+            return {"fresh": None, "changed": []}
+        changed = self.changes.since(d["upstreams"], self._seen(d["id"]), 100)
+        return {"fresh": not changed, "changed": sorted({c["urn"] for c in changed})}
 
     def runs(self, did: str, limit: int = 100) -> list[dict]:
         with self.engine.connect() as conn:
@@ -362,9 +373,10 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
             raise HTTPException(e.status, str(e))
 
     @router.get("")
-    def list_derived(p=Depends(current_principal)):
+    def list_derived(kind: Optional[str] = None, p=Depends(current_principal)):
         everything = operator(p)
-        return [d for d in dt.list() if everything or d["owner"] == p.urn]
+        return [{**d, **dt.freshness(d)} for d in dt.list()
+                if (everything or d["owner"] == p.urn) and (kind is None or d["kind"] == kind)]
 
     @router.post("", status_code=201)
     def create(body: dict = Body(...), p=Depends(current_principal)):
@@ -375,7 +387,8 @@ def build_derived_router(dt: DerivedTables, current_principal, authorize) -> Any
 
     @router.get("/{did}")
     def get(did: str, p=Depends(current_principal)):
-        return mine(p, did)
+        d = mine(p, did)
+        return {**d, **dt.freshness(d)}
 
     @router.put("/{did}")
     def update_derived(did: str, body: dict = Body(...), p=Depends(current_principal)):

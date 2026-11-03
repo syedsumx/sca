@@ -7,6 +7,8 @@ they sign in as, and refuses what they may not do:
 * ``POST /v1/lakehouse/token`` gives a signed-in person, or a pipeline user (its personal access token), a
   short-lived token for Cairn Catalog (audience ``lakehouse``, signed with the key Trino's tokens use,
   published at ``/v1/trino/jwks.json``).
+* ``POST /v1/lakehouse/changes`` (Cairn Catalog only): the tables a commit changed, whoever wrote them, recorded
+  as dataset changes (``cairn.pipelines.changes``).
 * ``POST /v1/lakehouse/decide`` (Cairn Catalog only: a Cairn service token) answers, for a user and a list
   of tables, what the user may do with each: ``view``, ``read``, ``write``, ``manage``, and whether
   reading it is ``restricted`` (a column mask or a row filter applies to the user). A restricted table
@@ -298,7 +300,7 @@ class LakehouseAccess:
 
 
 def build_lakehouse_router(lake: LakehouseAccess, sessions: LakehouseSessions, current_principal, audit=None,
-                           authorize=None):
+                           authorize=None, changes=None):
     import base64
     from urllib.parse import unquote
 
@@ -374,5 +376,23 @@ def build_lakehouse_router(lake: LakehouseAccess, sessions: LakehouseSessions, c
         if len(tables) > 1000:
             raise HTTPException(413, "at most 1000 tables per decision")
         return lake.decide(user, tables)
+
+    @router.post("/changes")
+    def changed(tables: list[dict] = Body(..., embed=True), p=Depends(current_principal)):
+        """Cairn Catalog: these tables were committed to (by anyone: Trino, Spark, pyiceberg). Recorded as
+        dataset changes, so derived tables and materialized views on them refresh, and orchestrators see it."""
+        if not p.is_service:
+            raise HTTPException(403, "only Cairn Catalog reports table changes")
+        if len(tables) > 1000:
+            raise HTTPException(413, "at most 1000 tables per report")
+        urns = []
+        for t in tables:
+            ns, name = t.get("namespace"), t.get("name")
+            if not isinstance(ns, list) or not ns or not all(isinstance(x, str) for x in ns) or not isinstance(name, str):
+                raise HTTPException(422, "tables: [{namespace: [..], name}]")
+            urns.append(lake.urn(ns, name))
+        if changes is not None and urns:
+            changes.record(sorted(set(urns)), "catalog", "cairn-catalog")
+        return {"recorded": len(set(urns))}
 
     return router

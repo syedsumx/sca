@@ -784,6 +784,12 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        if getattr(s, "derived", None) is not None:      # materialized views, written in SQL (cairn.pipelines.matviews)
+            from cairn.pipelines.matviews import MaterializedViews
+
+            s.sql_workspace.matviews = MaterializedViews(
+                s.derived, s.derived.catalog,
+                lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
         # Dashboards and alerts, over saved queries.
         from cairn.sqlworkspace.boards import Boards
 

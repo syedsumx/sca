@@ -216,6 +216,39 @@ impl Identity {
         Ok(out.into_iter().map(|d| d.unwrap_or_default()).collect())
     }
 
+    /// Tells Cairn that these tables were committed to, so what depends on them can refresh. In the
+    /// background, a few tries over about a minute; a commit never waits for it or fails because of it.
+    pub fn changed(self: &std::sync::Arc<Self>, tables: Vec<(Vec<String>, String)>) {
+        if tables.is_empty() {
+            return;
+        }
+        let me = self.clone();
+        tokio::spawn(async move {
+            let body = json!({"tables": tables.iter().map(|(ns, n)| json!({"namespace": ns, "name": n})).collect::<Vec<_>>()});
+            let url = format!("{}/v1/lakehouse/changes", me.cfg.cairn_url.trim_end_matches('/'));
+            for attempt in 0..5u32 {
+                let r = me
+                    .http
+                    .post(&url)
+                    .bearer_auth(&me.cfg.cairn_token)
+                    .header("content-type", "application/json")
+                    .body(body.to_string())
+                    .send()
+                    .await;
+                match r {
+                    Ok(r) if r.status().is_success() => return,
+                    Ok(r) if r.status().is_client_error() => {
+                        tracing::warn!(status = %r.status(), "Cairn refused the table changes; not retried");
+                        return;
+                    }
+                    Ok(r) => tracing::warn!(status = %r.status(), attempt, "telling Cairn of table changes"),
+                    Err(e) => tracing::warn!(error = %e, attempt, "telling Cairn of table changes"),
+                }
+                tokio::time::sleep(Duration::from_secs(2u64.pow(attempt + 1))).await;
+            }
+        });
+    }
+
     /// May `user` create, change and drop namespaces?
     pub async fn schemas(&self, user: &str) -> Result<bool, String> {
         if let Some((at, ok)) = self.schemas.lock().unwrap().get(user) {
