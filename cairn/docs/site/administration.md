@@ -456,6 +456,29 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - a shared dashboard rendered for its owner and for someone refused one of its tiles, who saw that tile's refusal and the other tile's data;
   - an alert that stayed quiet on its first fine check, was told once (to its owner and recipient) when the condition began, again when it stopped, and once when its query failed. It was not checked before it was due.
 
+## Data apps
+
+Data apps are Streamlit apps (or any web app) that Cairn serves to people, each viewer signed in and governed as themselves.
+
+- **Define** one with `POST /v1/apps` (`MANAGE_SYSTEM_OPERATIONS`): `name`, `title`, and where it runs.
+  - `url`: the app runs elsewhere, for example a Deployment beside Cairn, and Cairn only fronts it.
+  - `command`: Cairn starts it on the first visit and stops it after `idle_minutes` (30) without traffic, for single-node installs. `{port}` and `{base}` in the command are filled in, so for Streamlit: `["streamlit", "run", "app.py", "--server.port", "{port}", "--server.baseUrlPath", "{base}", "--server.headless", "true"]`, with `workdir` for the app's folder.
+  - Either way, the app serves under `/apps/<name>/`, its base path (`CAIRN_APP_BASE`).
+- **Open** it at `/apps/<name>/`. Every request goes through Cairn, page loads and WebSockets alike:
+  - **Signed in.** Strangers get 401.
+  - **Allowed.** Opening an app needs `USE_APP` on `urn:li:dataApp:<name>`. Others get 403, and the app never sees their request; a `command` app is not even started for them. `GET /v1/apps` lists only the apps the caller may open.
+  - **Told who is viewing.** Cairn removes every `X-Cairn-*` header the browser sent, then adds:
+    - `X-Cairn-User`: the viewer's urn.
+    - `X-Cairn-App-Key`: the app's own key. An app reached by `url` should refuse requests without it; `command` apps get it as `CAIRN_APP_KEY`.
+    - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
+  - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets.
+- **Keys.** Each app's key is `HMAC(CAIRN_APPS_SECRET, name)`, defaulting to the service token: nothing is stored, every replica agrees, and rotating the secret rotates every key.
+- **Tested** in `tests/test_data_apps_e2e.py`, with a real Streamlit app opened in Chromium through Cairn.
+  - Strangers got 401, someone without `USE_APP` got 403 on the page and on the WebSocket, and the app was not started for them.
+  - Ana's first visit started the app. Its page, which Streamlit draws over its WebSocket, showed her as the viewer, the app key verified, and a Trino token present.
+  - The headers her browser forged (`X-Cairn-User: root`) never reached the app, and Cairn's secrets were not in its environment.
+  - The idle app was stopped, and the next visit started it again.
+
 ## Git folders
 
 A Git folder keeps a person's saved queries and notebooks in a git repository, reviewed like code. Cairn works on a clone of its own with the `git` command, so any host works.

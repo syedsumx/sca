@@ -296,6 +296,16 @@ jobs:
           CAIRN_CHP_BIN="$RUNNER_TEMP/node_modules/.bin/configurable-http-proxy" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jupyterhub_e2e.py | tee "$RUNNER_TEMP/hub.log"
           ! grep -q "skipped" "$RUNNER_TEMP/hub.log"
+      - name: Data apps (a real Streamlit app in Chromium, through Cairn)
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/streamlit"
+          "$RUNNER_TEMP/streamlit/bin/pip" install -q "streamlit>=1.40"
+          pip install -q "playwright>=1.50"
+          python -m playwright install --with-deps chromium
+          CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
 
   pipelines:
     runs-on: ubuntu-latest

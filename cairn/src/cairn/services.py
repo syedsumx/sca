@@ -117,6 +117,7 @@ class Services:
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
     procedures: Optional[Any] = None
+    data_apps: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1153,6 +1154,16 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+
+    # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
+    apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""
+    if apps_secret:
+        from cairn.dataaccess.dataapps import DataApps
+
+        def viewer_token(urn: str):
+            tt = getattr(s, "trino_tokens", None)
+            return tt.mint(urn, 600)["token"] if tt is not None else None
+        s.data_apps = DataApps(s.engine, apps_secret, s.audit, viewer_token)
 
     # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
     from cairn.pipelines.delta_convert import from_env as delta_from_env
