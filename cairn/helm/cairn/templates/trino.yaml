@@ -154,6 +154,18 @@ data:
     delta.register-table-procedure.enabled=true
     s3.exclusive-create=true
   {{- end }}
+  {{- if $u.routines.enabled }}
+  routines.properties: |
+    connector.name=hive
+    hive.metastore=file
+    hive.metastore.catalog.dir=s3://{{ $u.routines.bucket }}/{{ $u.routines.prefix }}
+    fs.native-s3.enabled=true
+    s3.endpoint={{ $s3 }}
+    s3.region={{ $st.region }}
+    s3.path-style-access=true
+    s3.aws-access-key=${ENV:CAIRN_ROUTINES_ACCESS_KEY}
+    s3.aws-secret-key=${ENV:CAIRN_ROUTINES_SECRET_KEY}
+  {{- end }}
   {{- range $f := $u.federation }}
   {{- if not (regexMatch "^[a-z][a-z0-9_]{0,30}$" (toString $f.name)) }}{{ fail (printf "cairn.trino.federation: name %q is a lowercase catalog name" (toString $f.name)) }}{{ end }}
   {{- if eq (toString $f.name) "lakehouse" }}{{ fail "cairn.trino.federation: lakehouse is Cairn's own catalog" }}{{ end }}
@@ -277,6 +289,12 @@ spec:
             - name: CAIRN_DELTA_SECRET_KEY
               valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
             {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: CAIRN_ROUTINES_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.routines.credentialsSecret.name" $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_ROUTINES_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
             {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
             - name: CAIRN_AI_API_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
@@ -354,6 +372,12 @@ spec:
             - name: config
               mountPath: /etc/trino/catalog/delta.properties
               subPath: delta.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/routines.properties
+              subPath: routines.properties
               readOnly: true
             {{- end }}
             {{- if $u.ai.enabled }}
@@ -544,6 +568,12 @@ spec:
             - name: CAIRN_DELTA_SECRET_KEY
               valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
             {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: CAIRN_ROUTINES_ACCESS_KEY
+              valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.routines.credentialsSecret.name" $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.accessKeyKey | default "access-key" }} } }
+            - name: CAIRN_ROUTINES_SECRET_KEY
+              valueFrom: { secretKeyRef: { name: {{ $u.routines.credentialsSecret.name }}, key: {{ $u.routines.credentialsSecret.secretKeyKey | default "secret-key" }} } }
+            {{- end }}
             {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
             - name: CAIRN_AI_API_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
@@ -602,6 +632,12 @@ spec:
             - name: config
               mountPath: /etc/trino/catalog/delta.properties
               subPath: delta.properties
+              readOnly: true
+            {{- end }}
+            {{- if $u.routines.enabled }}
+            - name: config
+              mountPath: /etc/trino/catalog/routines.properties
+              subPath: routines.properties
               readOnly: true
             {{- end }}
             {{- if $u.ai.enabled }}

@@ -236,6 +236,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.vectors import build_vectors_router
 
         app.include_router(build_vectors_router(services.vectors, cp, authz))
+    if getattr(services, "procedures", None) is not None:
+        from cairn.sqlworkspace.procedures import build_procedures_router
+
+        app.include_router(build_procedures_router(services.procedures, cp))
     if getattr(services, "git_folders", None) is not None:
         from cairn.sqlworkspace.gitfolders import build_git_folders_router
 

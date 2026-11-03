@@ -214,6 +214,11 @@ def trino(lake, cairn):
         "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
         "delta.register-table-procedure.enabled=true", "s3.exclusive-create=true", ""]))
+    # Stored functions: the Hive connector keeps them, in a file metastore in the store.
+    open(f"{d}/catalog/routines.properties", "w").write("\n".join([
+        "connector.name=hive", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/routines",
+        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
     # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
     model = services.model_stub
     open(f"{d}/catalog/llm.properties", "w").write("\n".join([
@@ -1016,3 +1021,76 @@ def test_a_delta_table_is_converted_to_iceberg_in_place(trino, lake):
         conv.convert(ploc, "converted.parts", "urn:li:corpuser:admin")
     with pytest.raises(PipeError, match="no Delta log"):
         conv.inspect(loc + "-missing")
+
+
+def test_stored_functions_and_procedures(trino, cairn):
+    """Stored SQL and Python functions, called under Cairn's policies (USE_FUNCTION per function, masks
+    first); procedures run their statements as the caller, with typed, bound arguments."""
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    _, s = cairn
+    trino("CREATE SCHEMA IF NOT EXISTS routines.shared")
+    trino("CREATE FUNCTION routines.shared.domain_of(e varchar) RETURNS varchar RETURN regexp_extract(e, '@(.*)$', 1)")
+    trino("CREATE FUNCTION routines.shared.shout(x varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'shout') "
+          "AS $$\ndef shout(x):\n    return x.upper() + '!'\n$$")
+    assert trino("SELECT routines.shared.domain_of('kim@acme.com') AS d, routines.shared.shout('hi') AS s") == \
+        [{"d": "acme.com", "s": "HI!"}]
+    # Ana may not call them until Cairn allows her, function by function; she never creates one.
+    q = "SELECT routines.shared.domain_of(email) AS d FROM sales.orders WHERE id = 1"
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino("CREATE FUNCTION routines.shared.mine(x bigint) RETURNS bigint RETURN x", user="ana")
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-domain", effect="allow", actions=["USE_FUNCTION"],
+        target=Target(resource_urns=["urn:li:function:routines.shared.domain_of"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        assert trino(q, user="ana") == [{"d": "•••.com"}]            # the mask applies before the function
+        assert trino(q) == [{"d": "acme.com"}]
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT routines.shared.shout('x') AS s", user="ana")   # only the one she was given
+    finally:
+        s.pdp.set_bundle(b)
+    # Procedures: statements with typed arguments, run as the caller on Trino.
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    procs = s.procedures
+    admin = "urn:li:corpuser:admin"
+    trino("CREATE SCHEMA IF NOT EXISTS lake.ops")
+    trino("CREATE TABLE IF NOT EXISTS lake.ops.adjustments (region varchar, amount double, day date)")
+    procs.create(admin, {"name": "adjust_region", "connection": "lakehouse",
+                         "params": [{"name": "region", "type": "varchar"}, {"name": "amount", "type": "double"},
+                                    {"name": "day", "type": "date"}],
+                         "statements": ["DELETE FROM lake.ops.adjustments WHERE region = :region AND day = :day",
+                                        "INSERT INTO lake.ops.adjustments VALUES (:region, :amount, :day)",
+                                        "SELECT region, sum(amount) AS total FROM lake.ops.adjustments GROUP BY region"]})
+    out = procs.call(admin, "adjust_region", {"region": "EU", "amount": 5, "day": "2026-11-01"})
+    assert out["ran"] == 3 and out["rows"] == [["EU", 5.0]], out
+    procs.call(admin, "adjust_region", {"region": "EU", "amount": 7.5, "day": "2026-11-01"})   # replaced, not added
+    hostile = "x'); DROP TABLE lake.ops.adjustments; --"
+    out = procs.call(admin, "adjust_region", {"region": hostile, "amount": 1, "day": "2026-11-02"})
+    assert sorted(map(tuple, out["rows"])) == [("EU", 7.5), (hostile, 1.0)]  # a value, never SQL
+    with pytest.raises(WorkspaceError, match="day: a date"):
+        procs.call(admin, "adjust_region", {"region": "EU", "amount": 1, "day": "yesterday"})
+    with pytest.raises(WorkspaceError, match="undeclared parameter :nope"):
+        procs.create(admin, {"name": "bad", "connection": "lakehouse", "statements": ["SELECT :nope"]})
+    # Ana needs EXECUTE_PROCEDURE; given it, each statement still runs as her (she may not write the table).
+    with pytest.raises(WorkspaceError, match="needs EXECUTE_PROCEDURE"):
+        procs.call("urn:li:corpuser:ana", "adjust_region", {"region": "US", "amount": 1, "day": "2026-11-01"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-proc", effect="allow", actions=["EXECUTE_PROCEDURE"],
+        target=Target(resource_urns=["urn:li:procedure:adjust_region"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        with pytest.raises(WorkspaceError, match="statement 1"):
+            procs.call("urn:li:corpuser:ana", "adjust_region", {"region": "US", "amount": 1, "day": "2026-11-01"})
+    finally:
+        s.pdp.set_bundle(b)
+    assert trino("SELECT count(*) AS n FROM lake.ops.adjustments WHERE region = 'US'") == [{"n": 0}]
+    ev = [e for e in s.audit.entries("sql", limit=50) if e["action"] == "procedure.called"]
+    assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")

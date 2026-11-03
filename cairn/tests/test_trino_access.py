@@ -473,6 +473,28 @@ def test_ai_functions_need_their_privilege(client):
     assert ask(c, "allow", "eve", "ExecuteFunction", fn("llm")) is False
 
 
+def test_stored_functions_are_granted_one_by_one(client):
+    """Stored functions (the routines catalog): USE_FUNCTION on each to call it, MANAGE_DATASET on it to
+    create or drop it; the crawler does neither."""
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+
+    c = client
+    fn = lambda name: {"function": {"catalogName": "routines", "schemaName": "shared", "functionName": name}}  # noqa: E731
+    assert ask(c, "allow", "admin", "ExecuteFunction", fn("domain_of")) is True
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("domain_of")) is False
+    assert ask(c, "allow", "admin", "CreateFunction", fn("x")) is True
+    assert ask(c, "allow", "ana", "CreateFunction", fn("x")) is False
+    assert ask(c, "allow", "cairn-catalog", "ExecuteFunction", fn("domain_of")) is False
+    s = c.app.state.services
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-fn", effect="allow", actions=["USE_FUNCTION"], target=Target(resource_urns=["urn:li:function:routines.shared.domain_*"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("domain_of")) is True
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("salary_band")) is False
+    assert ask(c, "allow", "ana", "DropFunction", fn("domain_of")) is False
+
+
 def test_a_warehouse_takes_queries_from_its_team(client):
     """A team's warehouse asks as itself: running a query there needs USE_WAREHOUSE on it; what the query
     may read is decided as everywhere else."""

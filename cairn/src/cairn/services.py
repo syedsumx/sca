@@ -116,6 +116,7 @@ class Services:
     vectors: Optional[Any] = None
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
+    procedures: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -785,6 +786,18 @@ def _build_active_metadata(s: Services) -> None:
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql"))
         s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
+        # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
+        from cairn.sqlworkspace.procedures import Procedures
+        from cairn.sqlworkspace.workspace import WorkspaceError
+
+        def run_procedure(connection: str, actor: str, sql: str):
+            definition = s.data_access.registry.definitions().get(connection)
+            if definition is None:
+                raise WorkspaceError(f"unknown connection {connection!r}", 404)
+            columns, rows, _ = s.data_access.run_on_trino(definition, actor, sql, 1000)
+            return columns, rows
+        s.procedures = Procedures(s.engine, run_procedure, lambda actor, urn: s.authorize(
+            Principal(actor, "token"), "EXECUTE_PROCEDURE", urn, raise_on_deny=False), s.audit)
         # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
         from cairn.sqlworkspace.gitfolders import GitFolders
 
@@ -1028,11 +1041,13 @@ def _build_data_access(s: Services) -> None:
 
         def decide(actor: str, groups: list[str], privilege: str, urn: Optional[str]):
             return s.pdp.decide(AuthorizeRequest(actor=actor, privilege=privilege, actor_groups=groups,
-                                                 resource=ResourceRef(type="dataset", urn=urn) if urn else None,
+                                                 resource=ResourceRef(type="function" if urn.startswith("urn:li:function:")
+                                                                      else "dataset", urn=urn) if urn else None,
                                                  environment={"channel": "trino"}))
 
         ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
-        s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs)
+        routine_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_ROUTINE_CATALOGS", "routines").split(",") if c.strip()}
+        s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs, routine_catalogs)
         s.trino_key = trino_key
         # Query history, profiles and tuning hints, from the same events as usage statistics.
         from cairn.dataaccess.query_history import QueryHistory

@@ -48,6 +48,7 @@ logger = logging.getLogger(__name__)
 
 AI = "USE_AI_FUNCTIONS"
 WAREHOUSE = "USE_WAREHOUSE"
+FUNCTION = "USE_FUNCTION"
 VIEW, READ, WRITE, MANAGE, SYSTEM = ("VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE", "WRITE_DATASET", "MANAGE_DATASET",
                                      "MANAGE_SYSTEM_OPERATIONS")
 
@@ -70,7 +71,10 @@ OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "F
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
             "SetCatalogSessionProperty", "ShowCurrentRoles", "ShowRoleGrants", "ShowRoles"}
 # Schema-level changes: MANAGE_DATASET without a particular dataset.
-SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization", "CreateFunction", "DropFunction"}
+SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorization"}
+# Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
+# on the function, called with USE_FUNCTION on it.
+FUNCTION_OPS = {"CreateFunction", "DropFunction"}
 # Other people's queries, system information and procedures.
 SYSTEM_OPS = {"ReadSystemInformation", "WriteSystemInformation", "KillQueryOwnedBy", "ViewQueryOwnedBy",
               "FilterViewQueryOwnedBy", "ExecuteProcedure", "CreateRole", "DropRole", "GrantRoles", "RevokeRoles",
@@ -195,10 +199,11 @@ class TrinoAccess:
 
     def __init__(self, decide: Callable[[str, list[str], str, Optional[str]], Any],
                  plan_for: Callable[[str, str], Any], catalogs: dict[str, CatalogMapping],
-                 ai_catalogs: Optional[set[str]] = None):
+                 ai_catalogs: Optional[set[str]] = None, routine_catalogs: Optional[set[str]] = None):
         # decide(actor, groups, privilege, urn) -> Decision (pdp)
         self.decide = decide
         self.ai_catalogs = {"llm"} if ai_catalogs is None else set(ai_catalogs)
+        self.routine_catalogs = {"routines"} if routine_catalogs is None else set(routine_catalogs)
         # ai_admit(actor): budgets and daily caps for AI functions (cairn.ai.sql_gateway); None: none.
         self.ai_admit: Optional[Callable[[str], bool]] = None
         self.plan_for = plan_for
@@ -259,6 +264,11 @@ class TrinoAccess:
             logger.warning("trino access decision failed (%s %s %s): %s", actor, privilege, urn, e)
             return False
 
+    @staticmethod
+    def function_urn(f: dict) -> str:
+        """A stored function's resource: ``urn:li:function:<catalog>.<schema>.<name>``."""
+        return "urn:li:function:" + ".".join(str(f.get(k) or "").lower() for k in ("catalogName", "schemaName", "functionName"))
+
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
@@ -278,7 +288,12 @@ class TrinoAccess:
                 if user == CRAWLER or not self.allowed(actor, groups, AI, None):
                     return False
                 return self.ai_admit is None or self.ai_admit(actor)
+            if str(f.get("catalogName") or "") in self.routine_catalogs:   # stored functions: USE_FUNCTION on each
+                return user != CRAWLER and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
             return True
+        if op in FUNCTION_OPS:
+            f = res.get("function") or {}
+            return user != CRAWLER and self.allowed(actor, groups, MANAGE, self.function_urn(f) if f else None)
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}
             meta = t.get("schemaName") == "information_schema" or t.get("catalogName") == "system"

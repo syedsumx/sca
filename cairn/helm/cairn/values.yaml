@@ -775,6 +775,14 @@ cairn:
       bucket: lakehouse
       prefix: delta
       credentialsSecret: { name: "", accessKeyKey: access-key, secretKeyKey: secret-key }
+    # Stored functions (catalog "routines"): CREATE FUNCTION routines.<schema>.<name> ... keeps SQL and Python
+    # functions in a file metastore in the store (Trino's Hive connector). Calling one needs USE_FUNCTION on
+    # urn:li:function:routines.<schema>.<name>; creating one, MANAGE_DATASET.
+    routines:
+      enabled: false
+      bucket: lakehouse
+      prefix: routines
+      credentialsSecret: { name: "", accessKeyKey: access-key, secretKeyKey: secret-key }
     ai:
       enabled: false
       provider: anthropic

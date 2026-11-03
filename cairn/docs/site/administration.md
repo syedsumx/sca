@@ -413,10 +413,20 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   ```
 
   They run on the caller's rows, after masks and filters, and cannot reach files or the network.
+- **Stored functions.** SQL and Python functions created once and called anywhere: `CREATE FUNCTION routines.<schema>.<name>(...) RETURNS ... RETURN ...` (or `LANGUAGE PYTHON`). They live in the `routines` catalog (Trino's Hive connector, with a file metastore in the store; Helm: `cairn.trino.routines.enabled` and `credentialsSecret`).
+  - **Who may call one.** Calling one needs `USE_FUNCTION` on `urn:li:function:routines.<schema>.<name>` (resource type `function`), granted per function like any privilege. Creating or dropping one needs `MANAGE_DATASET`.
+  - **What it sees.** Masks and row filters apply before any function runs. A SQL function cannot query tables, so it never reaches more than its caller passes it.
+  - **Settings.** `CAIRN_TRINO_ROUTINE_CATALOGS` names the catalogs that hold stored functions (default `routines`).
+- **Procedures** (`/v1/procedures`). A named list of SQL statements with typed parameters (`integer`, `double`, `varchar`, `boolean`, `date`; `:name` in a statement), on a Trino connection.
+  - **Calling one.** `POST /v1/procedures/<name>/call` with `{"args": {...}}`. Each argument is checked against its type and bound as a SQL literal, never spliced in as text. The statements run in order **as the caller**, so Cairn's policies apply to every statement. A failing statement stops the call; what ran before it stays. The last statement's rows come back, up to 1,000.
+  - **Who may call one.** Its owner, and those allowed `EXECUTE_PROCEDURE` on `urn:li:procedure:<name>`. A procedure never runs with its owner's rights: it does only what the caller could do anyway. Every call is audited with its arguments.
+  - **Checked when saved.** Each entry is one statement, and only declared parameters are used.
 - **Tested** with Trino (`tests/test_trino_e2e.py`, against a stand-in for the model's API; the decisions in `tests/test_trino_access.py`):
   - **AI functions.** A user without `USE_AI_FUNCTIONS` was refused and nothing was sent. With it, the model was sent her masked email, never the raw one.
   - **Through Cairn.** The provider received Cairn's key, never Trino's. The call was in Cairn's AI usage, with her query under her name. Her daily cap, a model not allowed, and the spent budget each stopped the query, and nothing reached the model. The rate limit, Anthropic usage and an unreachable provider are covered in `tests/test_sql_ai_gateway.py`.
   - **Python functions.** One ran on masked values for her, and on real values for the admin.
+  - **Stored functions.** A stored SQL function and a stored Python function ran for the admin. Ana was refused both until she was given `USE_FUNCTION` on one. That one then ran on her masked emails, and she was still refused the other and creating her own.
+  - **Procedures.** A three-statement procedure replaced a row and returned totals. A hostile string argument was stored as a value, not run as SQL. A bad date and an undeclared parameter were refused. Ana could not call it without `EXECUTE_PROCEDURE`; with it, her first statement was refused because she may not write the table, and nothing was written.
 
 ## SQL workspace
 
