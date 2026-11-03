@@ -1459,6 +1459,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
 - **Spark on Kubernetes, with no secret in the cluster.** In cluster mode, spark-submit stores the application's settings in a ConfigMap that the driver mounts. A credential given at submit time would be readable by anyone who may read ConfigMaps in the namespace. So a cluster-mode application gets no credential at all:
   - `cairn-spark submit --master k8s://… --deploy-mode cluster job.py` submits only the driver's Cairn settings (`CAIRN_URL`, `CAIRN_CATALOG_URI`, `CAIRN_WORKLOAD_TOKEN_FILE`), plus a driver pod template.
   - The template mounts a projected service-account token for audience `cairn` at `/var/run/secrets/cairn/token`. The kubelet rotates it.
+  - A job's own driver pod template (`spark.kubernetes.driver.podTemplateFile`, JSON or YAML) is kept: its volumes, sidecars and tolerations stay, and the token is added to it. A template that already uses the token's volume name or mount path is refused, not overwritten (`tests/test_spark_templates.py`; the kind job mounts its program from a config map this way).
   - The driver, a Python program calling `lakehouse_session()`, exchanges that token at Cairn (workload identity) and signs in as the pipeline user its service account is bound to.
   - Executors get no token. Their settings come from the driver over Spark's RPC, and their storage keys come with the tables.
   - The service account is `--conf spark.kubernetes.authenticate.driver.serviceAccountName=…` or `CAIRN_SPARK_SERVICE_ACCOUNT`.
