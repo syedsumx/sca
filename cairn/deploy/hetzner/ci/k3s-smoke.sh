@@ -140,9 +140,8 @@ probe() {   # namespace labels name command...: a short-lived pod; its exit stat
 }
 release="app.kubernetes.io/name=cairn,app.kubernetes.io/instance=cairn-ci-acme"
 search="wget -q -T 5 -O- http://opensearch.cairn-ci-acme.svc:9200/_cluster/health | grep -q status"
-# A TCP connection to Kafka (the probe image has no netcat): psql gets through to the port, then fails on
-# the protocol; a policy that drops the traffic shows as a timeout.
-kafka="out=\$(psql 'host=kafka.cairn-ci-acme.svc port=9092 sslmode=disable connect_timeout=5' -c '' 2>&1); echo \"\$out\"; ! echo \"\$out\" | grep -qiE 'timeout|refused|translate host'"
+# A TCP connection to Kafka (BusyBox nc: 0 once connected; 1 when refused or dropped).
+kafka="nc -w 5 kafka.cairn-ci-acme.svc 9092 </dev/null >/dev/null"
 pg="psql 'host=cairn-pg-rw.cairn-platform.svc user=cairn_ci_acme dbname=cairn_ci_acme sslmode=require connect_timeout=5' -c 'select 1'"
 probe cairn-ci-acme "$release" r-search "$search" || fail "the release cannot reach its OpenSearch"
 probe cairn-ci-acme "$release" r-kafka "$kafka" || fail "the release cannot reach its Kafka"
