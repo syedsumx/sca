@@ -771,8 +771,16 @@ def _build_active_metadata(s: Services) -> None:
             def run_maintenance(sql: str) -> list:
                 definition = (s.data_access.registry.definitions() or {}).get(conn_name) or {}
                 return s.data_access.run_on_trino(definition, maint_user, sql, 100_000)[1]
-            s.maintenance = TableMaintenance(s.engine, run_maintenance,
-                                             os.environ.get("CAIRN_MAINTENANCE_CATALOG", "lakehouse"), s.audit)
+            maint_catalog = os.environ.get("CAIRN_MAINTENANCE_CATALOG", "lakehouse")
+
+            def table_queries(schema: str, table: str, since_ms: int):
+                # Trino's query history (with Trino access on): what the table's queries filter on.
+                qh, ta = getattr(s, "query_history", None), getattr(s, "trino_access", None)
+                if qh is None or ta is None:
+                    raise RuntimeError("automatic clustering needs Trino's query history (CAIRN_TRINO_ACCESS_KEY)")
+                return qh.reading(ta.urn(maint_catalog, schema, table), since_ms)
+            s.maintenance = TableMaintenance(s.engine, run_maintenance, maint_catalog, s.audit,
+                                             table_queries if os.environ.get("CAIRN_TRINO_ACCESS_KEY") else None)
         if os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.derived import DerivedTables
 

@@ -132,6 +132,16 @@ class QueryHistory:
                     query_history.c.create_ms < int(time.time() * 1000) - self.retention_days * DAY_MS))
         return qid
 
+    def reading(self, table_urn: str, since_ms: int, limit: int = 5000) -> list[tuple[str, int]]:
+        """(SQL, bytes read) of the finished queries since ``since_ms`` that read ``table_urn``, newest first."""
+        needle = json.dumps(table_urn)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(query_history.c.sql, query_history.c.input_bytes, query_history.c.tables).where(
+                query_history.c.create_ms >= since_ms, query_history.c.state == "FINISHED",
+                query_history.c.tables.contains(needle, autoescape=True))
+                .order_by(query_history.c.create_ms.desc()).limit(limit)).all()
+        return [(r.sql, int(r.input_bytes or 0)) for r in rows if table_urn in json.loads(r.tables or "[]")]
+
     @staticmethod
     def _public(r: dict) -> dict:
         out = {k: r[k] for k in ("query_id", "user", "source", "state", "error_code", "error", "create_ms", "end_ms",

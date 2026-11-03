@@ -705,6 +705,63 @@ def test_table_maintenance_compacts_expires_and_removes_orphans(trino, cairn, la
     assert any(e["action"] == "maintenance.policy_set" for e in s.audit.entries("lakehouse", limit=20))
 
 
+def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
+    """Automatic clustering on real Trino: the table's queries (Trino's query history, sent to Cairn) filter on
+    day and region, so Cairn sorts the table by them and rewrites its overlapping files in that order."""
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    execute("CREATE SCHEMA IF NOT EXISTS lake.clus")
+    execute("CREATE TABLE lake.clus.events (id integer, day date, region varchar, note varchar)")
+    for i in range(6):        # each insert spans every day: six files that all overlap
+        execute("INSERT INTO lake.clus.events VALUES " + ", ".join(
+            f"({i * 100 + d}, DATE '2024-01-{d + 1:02d}', '{['EU', 'US', 'APAC'][d % 3]}', 'n{i}')" for d in range(20)))
+    urn = s.trino_access.urn("lake", "clus", "events")
+    since = int(time.time() * 1000) - 60_000
+    already = len(s.query_history.reading(urn, since))
+    for d in (3, 4, 5, 6, 7):
+        trino(f"SELECT count(*) AS n FROM lake.clus.events WHERE day = DATE '2024-01-{d:02d}'")
+    trino("SELECT count(*) AS n FROM lake.clus.events e WHERE e.region = 'EU' AND note LIKE 'n%'")
+    trino("SELECT region, count(*) AS n FROM lake.clus.events GROUP BY region HAVING region <> 'US'")
+    trino("SELECT count(*) AS n FROM lake.clus.events a JOIN lake.sales.orders o ON a.id = o.id")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(urn, since)) < already + 8 and time.time() < deadline:
+        time.sleep(1)
+    assert len(s.query_history.reading(urn, since)) >= already + 8
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit,
+                         lambda schema, table, since_ms: s.query_history.reading(
+                             s.trino_access.urn("lake", schema, table), since_ms))
+    m.set_policy("clus.events", {"optimize": False, "cluster": "auto", "cluster_depth": 2}, "urn:li:corpuser:admin")
+    assert len(trino('SELECT file_path FROM lake.clus."events$files"')) == 6
+    [run] = m.maintain("clus", "events")
+    assert run["operation"] == "cluster" and run["status"] == "ok", run
+    assert run["detail"].startswith("sorted by day, region (was unsorted); rewritten, depth 6.0 -> 1.0"), run["detail"]
+    ddl = trino("SHOW CREATE TABLE lake.clus.events")[0]["Create Table"]
+    assert "sorted_by = ARRAY['day ASC NULLS FIRST','region ASC NULLS FIRST']" in ddl.replace(", ", ","), ddl
+    assert len(trino("SELECT id FROM lake.clus.events")) == 120                  # nothing lost
+    [state] = [c for c in m.clustering() if c["table_name"] == "clus.events"]
+    assert state["columns"] == ["day", "region"] and state["chosen_by"] == "auto" and state["depth"] == 1.0
+    assert state["evidence"]["filters"]["day"] >= 5 and state["evidence"]["filters"].get("id", 0) <= 1
+    # Clustered already: checked, not rewritten again.
+    [again] = m.maintain("clus", "events")
+    assert again["detail"] == "sorted by day, region; depth 1.0, not rewritten", again
+    # A list of columns the table does not have is an error, recorded.
+    m.set_policy("clus.events", {"optimize": False, "cluster": ["nope"]}, "urn:li:corpuser:admin")
+    [bad] = m.maintain("clus", "events")
+    assert bad["status"] == "error" and "no column nope" in bad["detail"]
+    with pytest.raises(Exception, match="cluster is"):
+        m.set_policy("clus", {"cluster": "sometimes"}, "urn:li:corpuser:admin")
+
+
 def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
     """Federation: a PostgreSQL catalog in Trino, named to Cairn as postgres datasets (CAIRN_TRINO_CATALOGS).
     Cairn decides its tables like the lakehouse's: masks, row filters and refusals apply in place."""

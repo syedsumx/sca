@@ -4,7 +4,9 @@ For each table, the policy that applies (the table's own, else its schema's, els
 
 * ``optimize``: rewrite small files into bigger ones (``ALTER TABLE … EXECUTE optimize``);
 * ``expire_days``: expire snapshots older than that (``expire_snapshots``), so old data files can go;
-* ``orphan_days``: delete files no snapshot references, older than that (``remove_orphan_files``).
+* ``orphan_days``: delete files no snapshot references, older than that (``remove_orphan_files``);
+* ``cluster``: ``"auto"`` or a list of columns: keep the table sorted by what its queries filter on, and
+  rewrite it when its files overlap too much (``cluster_depth``); see ``cairn.pipelines.clustering``.
 
 It runs every ``every_hours`` per table on a run-as-user Trino connection (CAIRN_MAINTENANCE_CONNECTION)
 as the Cairn user CAIRN_MAINTENANCE_USER (default svc-maintenance), so Cairn's policy decides as for
@@ -16,12 +18,13 @@ outcome; policy changes are audited.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, func, select
+from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, Text, delete, func, select
 
 from cairn.common.db import metadata
 
@@ -35,6 +38,8 @@ maintenance_policies = Table(
     Column("expire_days", Integer, nullable=True),
     Column("orphan_days", Integer, nullable=True),
     Column("every_hours", Integer, nullable=False, default=24),
+    Column("cluster", String(512), nullable=True),                 # null: off; "auto"; or "col1,col2"
+    Column("cluster_depth", Float, nullable=False, default=4.0),
     Column("enabled", Boolean, nullable=False, default=True),
     Column("updated_by", String(256), nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
@@ -51,6 +56,18 @@ maintenance_runs = Table(
     Column("detail", Text, nullable=False, default=""),
 )
 
+table_clustering = Table(
+    "cairn_table_clustering", metadata,
+    Column("table_name", String(512), primary_key=True),             # <schema>.<table>
+    Column("columns", String(512), nullable=False),                  # what it is sorted by, "a,b"
+    Column("chosen_by", String(256), nullable=False),                # "auto" or the policy's list
+    Column("evidence", Text, nullable=True),                         # JSON: queries, filters, bytes
+    Column("depth", Float, nullable=True),
+    Column("files", Integer, nullable=True),
+    Column("checked_ms", BigInteger, nullable=False),
+    Column("rewritten_ms", BigInteger, nullable=True),
+)
+
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_$-]{0,127}$")
 SIZE = re.compile(r"^\d{1,6}(B|kB|MB|GB)$")
 
@@ -61,6 +78,10 @@ class MaintenanceError(Exception):
         self.status = status
 
 
+def _lit(text: str) -> str:
+    return "'" + text.replace("'", "''") + "'"
+
+
 def _now() -> int:
     return int(time.time() * 1000)
 
@@ -68,13 +89,19 @@ def _now() -> int:
 def _policy(r) -> dict:
     return {"scope": r.scope, "optimize": bool(r.optimize), "optimize_threshold": r.optimize_threshold,
             "expire_days": r.expire_days, "orphan_days": r.orphan_days, "every_hours": r.every_hours,
-            "enabled": bool(r.enabled), "updated_by": r.updated_by, "updated_ms": r.updated_ms}
+            "cluster": (r.cluster if r.cluster in (None, "auto") else r.cluster.split(",")),
+            "cluster_depth": r.cluster_depth, "enabled": bool(r.enabled), "updated_by": r.updated_by,
+            "updated_ms": r.updated_ms}
 
 
 class TableMaintenance:
-    def __init__(self, engine, execute: Callable[[str], list], catalog: str = "lakehouse", audit=None):
-        """``execute(sql)``: runs one statement on Trino as the maintenance user and returns its rows."""
+    def __init__(self, engine, execute: Callable[[str], list], catalog: str = "lakehouse", audit=None,
+                 queries: Optional[Callable[[str, str, int], list[tuple[str, int]]]] = None):
+        """``execute(sql)``: runs one statement on Trino as the maintenance user and returns its rows.
+        ``queries(schema, table, since_ms)``: (SQL, bytes read) of the finished queries that read the table
+        (Trino's query history), for automatic clustering."""
         self.engine, self.execute, self.catalog, self.audit = engine, execute, catalog, audit
+        self.queries = queries
 
     # ---- policies -----------------------------------------------------------------------
     def policies(self) -> list[dict]:
@@ -98,7 +125,19 @@ class TableMaintenance:
         threshold = str(body.get("optimize_threshold") or "128MB")
         if not SIZE.match(threshold):
             raise MaintenanceError("optimize_threshold is a size such as 128MB")
+        cluster = body.get("cluster")
+        if cluster is not None:
+            if cluster != "auto" and not (isinstance(cluster, list) and 1 <= len(cluster) <= 4
+                                          and all(isinstance(c, str) and NAME.match(c) for c in cluster)):
+                raise MaintenanceError('cluster is "auto", a list of up to 4 columns, or null')
+            if cluster == "auto" and self.queries is None:
+                raise MaintenanceError("automatic clustering needs Trino's query history (CAIRN_TRINO_ACCESS_KEY)", 409)
+        depth = body.get("cluster_depth", 4)
+        if isinstance(depth, bool) or not isinstance(depth, (int, float)) or not 1 <= depth <= 1000:
+            raise MaintenanceError("cluster_depth is between 1 and 1000")
         values = {"optimize": bool(body.get("optimize", True)), "optimize_threshold": threshold,
+                  "cluster": cluster if cluster in (None, "auto") else ",".join(c.lower() for c in cluster),
+                  "cluster_depth": float(depth),
                   "expire_days": days("expire_days"), "orphan_days": days("orphan_days"), "every_hours": every,
                   "enabled": bool(body.get("enabled", True)), "updated_by": actor, "updated_ms": _now()}
         with self.engine.begin() as conn:
@@ -106,7 +145,7 @@ class TableMaintenance:
             conn.execute(maintenance_policies.insert().values(scope=scope, **values))
             if self.audit is not None:
                 self.audit.record("lakehouse", "maintenance.policy_set", actor, None, {"scope": scope, **values}, conn=conn)
-        return {"scope": scope, **values}
+        return {"scope": scope, **values, "cluster": cluster}
 
     def delete_policy(self, scope: str, actor: str) -> None:
         with self.engine.begin() as conn:
@@ -142,12 +181,18 @@ class TableMaintenance:
         if policy["orphan_days"] is not None:
             ops.append(("remove_orphan_files", f"ALTER TABLE {target} EXECUTE "
                                                f"remove_orphan_files(retention_threshold => '{policy['orphan_days']}d')"))
+        if policy.get("cluster"):
+            ops.append(("cluster", lambda: self.cluster(schema, table, policy)))
         out = []
         for op, sql in ops:
             started = _now()
             try:
-                self.execute(sql)
-                status, detail = "ok", ""
+                if callable(sql):
+                    detail = sql()
+                else:
+                    self.execute(sql)
+                    detail = ""
+                status = "ok"
             except Exception as e:  # noqa: BLE001 - recorded, and the next operation still runs
                 status, detail = "error", str(e).splitlines()[0][:2000]
                 logger.warning("maintenance %s on %s.%s failed: %s", op, schema, table, detail)
@@ -157,6 +202,74 @@ class TableMaintenance:
                 conn.execute(maintenance_runs.insert().values(**row))
             out.append(row)
         return out
+
+    def cluster(self, schema: str, table: str, policy: dict) -> str:
+        """Sorts the table by the columns its queries filter on (or the policy's), and rewrites it in that
+        order when the sort order changed or its files overlap more than ``cluster_depth``. Says what it did."""
+        from cairn.pipelines import clustering as cl
+
+        target = f'"{self.catalog}"."{schema}"."{table}"'
+        meta = lambda kind: f'"{self.catalog}"."{schema}"."{table}${kind}"'  # noqa: E731
+        types = {r[0].lower(): str(r[1]) for r in self.execute(
+            f"SELECT column_name, data_type FROM \"{self.catalog}\".information_schema.columns "
+            f"WHERE table_schema = '{schema}' AND table_name = '{table}'")}
+        want = policy["cluster"]
+        evidence: dict = {}
+        if want == "auto":
+            if self.queries is None:
+                raise MaintenanceError("automatic clustering needs Trino's query history")
+            days = int(os.environ.get("CAIRN_CLUSTER_LOOKBACK_DAYS", "14"))
+            want, evidence = cl.choose(self.queries(schema, table, _now() - days * 86_400_000), schema, table, types)
+            chosen_by = "auto"
+        else:
+            missing = [c for c in want if c not in types]
+            if missing:
+                raise MaintenanceError(f"{schema}.{table} has no column {missing[0]}")
+            chosen_by = "policy"
+        rows = self.execute(f"SELECT value FROM {meta('properties')} WHERE key = 'sort-order'")
+        current = cl.sort_columns(rows[0][0] if rows else None)
+        now = _now()
+        if not want:
+            self._clustering(f"{schema}.{table}", current, chosen_by, evidence, None, None, now, None)
+            return f"no column to cluster by yet ({evidence.get('queries', 0)} queries read it)"
+        files = self._files(meta)
+        before = cl.depth(files, want[0])
+        changed = want != current
+        if changed:
+            self.execute(f"ALTER TABLE {target} SET PROPERTIES sorted_by = ARRAY[{', '.join(_lit(c) for c in want)}]")
+        rewrite = changed or (before is not None and before > policy.get("cluster_depth", 4.0))
+        after, rewritten = before, None
+        if rewrite and files:
+            biggest = max(int(f.get("file_size_in_bytes") or 0) for f in files)
+            self.execute(f"ALTER TABLE {target} EXECUTE optimize(file_size_threshold => "
+                         f"'{biggest // 1_048_576 + 2}MB')")            # every file, rewritten in order
+            files = self._files(meta)
+            after, rewritten = cl.depth(files, want[0]), _now()
+        self._clustering(f"{schema}.{table}", want, chosen_by, evidence, after, len(files), now, rewritten)
+        what = f"sorted by {', '.join(want)}" + (f" (was {', '.join(current) or 'unsorted'})" if changed else "")
+        return what + (f"; rewritten, depth {before} -> {after}" if rewritten else f"; depth {before}, not rewritten")
+
+    def _files(self, meta) -> list[dict]:
+        return [{"file_size_in_bytes": r[0], "readable_metrics": r[1]}
+                for r in self.execute(f"SELECT file_size_in_bytes, readable_metrics FROM {meta('files')}")]
+
+    def _clustering(self, name, columns, chosen_by, evidence, depth, files, checked, rewritten) -> None:
+        from cairn.pipelines.clustering import as_json
+
+        with self.engine.begin() as conn:
+            prev = conn.execute(select(table_clustering.c.rewritten_ms).where(table_clustering.c.table_name == name)).scalar()
+            conn.execute(delete(table_clustering).where(table_clustering.c.table_name == name))
+            conn.execute(table_clustering.insert().values(
+                table_name=name, columns=",".join(columns), chosen_by=chosen_by, evidence=as_json(evidence),
+                depth=depth, files=files, checked_ms=checked, rewritten_ms=rewritten or prev))
+
+    def clustering(self) -> list[dict]:
+        import json as _json
+
+        with self.engine.connect() as conn:
+            return [{**dict(r._mapping), "columns": [c for c in r.columns.split(",") if c],
+                     "evidence": _json.loads(r.evidence or "{}")}
+                    for r in conn.execute(select(table_clustering).order_by(table_clustering.c.table_name))]
 
     def last_run(self) -> dict[str, int]:
         with self.engine.connect() as conn:
@@ -225,6 +338,11 @@ def build_maintenance_router(m: TableMaintenance, current_principal, authorize) 
         admin(p)
         return await run_in_threadpool(lambda: wrap(lambda: m.maintain(str(body.get("schema") or ""),
                                                                         str(body.get("table") or ""))))
+
+    @router.get("/clustering")
+    def clustering(p=Depends(current_principal)):
+        admin(p)
+        return m.clustering()
 
     @router.get("/runs")
     def runs(table: Optional[str] = None, p=Depends(current_principal)):
