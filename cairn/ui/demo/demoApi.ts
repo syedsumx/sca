@@ -1176,6 +1176,12 @@ on('POST', '/v1/derived/:id/refresh', (b, _q, [id]) => {
     DERIVED.find((d) => d.id === id)!.last_run_ms = Date.now();
     return run;
 });
+on('GET', '/v1/warehouses', () => [
+    { name: 'finance', port: 8443, state: 'running', starts: 14, stops: 13, inflight: 2, idle_minutes: 15, idle_seconds: 4 },
+    { name: 'marketing', port: 8444, state: 'stopped', starts: 6, stops: 6, inflight: 0, idle_minutes: 10, idle_seconds: 7_420 },
+    { name: 'data-science', port: 8445, state: 'starting', starts: 3, stops: 2, inflight: 1, idle_minutes: 30, idle_seconds: 1 },
+    { name: 'reporting', port: 8446, state: 'running', starts: 1, stops: 0, inflight: 0, idle_minutes: 0, idle_seconds: 310 },
+]);
 on('GET', '/maintenance/policies', () => [
     { scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: 7, every_hours: 24, enabled: true, updated_by: ME, updated_ms: now - 12 * DAY },
     { scope: 'raw', optimize: true, optimize_threshold: '256MB', expire_days: 2, orphan_days: 3, every_hours: 6, enabled: true, updated_by: ME, updated_ms: now - 3 * DAY },

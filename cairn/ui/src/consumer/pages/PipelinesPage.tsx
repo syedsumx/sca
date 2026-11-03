@@ -4,7 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DbtRun } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
-import { DerivedTab, MaintenanceTab, PipesTab, StreamsTab } from './LakehouseOps';
+import { DerivedTab, MaintenanceTab, PipesTab, StreamsTab, WarehousesTab } from './LakehouseOps';
 
 const STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -33,6 +33,7 @@ export function PipelinesPage() {
                 <Tabs.TabPane tab="Streams" key="streams"><StreamsTab /></Tabs.TabPane>
                 <Tabs.TabPane tab="Derived tables" key="derived"><DerivedTab /></Tabs.TabPane>
                 <Tabs.TabPane tab="Maintenance" key="maintenance"><MaintenanceTab /></Tabs.TabPane>
+                <Tabs.TabPane tab="Warehouses" key="warehouses"><WarehousesTab /></Tabs.TabPane>
             </Tabs>
         </Page>
     );

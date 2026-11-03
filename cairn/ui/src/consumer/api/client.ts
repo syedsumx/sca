@@ -16,6 +16,7 @@ import type {
     PipeFile,
     Stream,
     StreamReject,
+    WarehouseState,
 } from './types';
 import type {
     AIAssessment,
@@ -1080,6 +1081,10 @@ export class ConsumerClient extends CairnClient {
 
     maintenanceRuns(opts?: RequestOptions) {
         return this.request<MaintenanceRun[]>('GET', '/maintenance/runs', undefined, opts);
+    }
+
+    warehouses(opts?: RequestOptions) {
+        return this.request<WarehouseState[]>('GET', '/v1/warehouses', undefined, opts);
     }
 
     jobCosts(days = 30, opts?: RequestOptions) {

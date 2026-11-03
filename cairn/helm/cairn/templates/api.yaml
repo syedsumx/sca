@@ -55,6 +55,14 @@
 {{- if .Values.cairn.streams.enabled }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STREAMS_ENABLED" "value" "true") }}
 {{- end }}
+{{- /* Warehouse status (GET /v1/warehouses): the warehouse proxy and each warehouse's port. */ -}}
+{{- if and .Values.cairn.trino.enabled .Values.cairn.trino.warehouses.list }}
+{{- $whPorts := dict }}
+{{- range .Values.cairn.trino.warehouses.list }}{{ $_ := set $whPorts .name (int .port) }}{{ end }}
+{{- $whCtx := dict "root" $ "component" "warehouses" "cfg" .Values.cairn.trino.warehouses.proxy }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WAREHOUSES_URL" "value" (printf "%s://%s" (ternary "https" "http" (not (empty .Values.cairn.trino.tls.secretName))) (include "cairn.componentName" $whCtx))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WAREHOUSE_PORTS" "value" (toJson $whPorts)) }}
+{{- end }}
 {{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}
 ---

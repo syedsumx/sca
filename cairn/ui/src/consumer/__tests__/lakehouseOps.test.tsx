@@ -31,6 +31,11 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
             'POST /v1/derived/d1/refresh': { id: 'r1', kind: 'full', status: 'ok', trigger: 'manual', started_ms: 1, finished_ms: 2, error: null },
             'GET /maintenance/policies': [{ scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: null,
                                             every_hours: 24, enabled: true, updated_by: 'urn:li:corpuser:ana', updated_ms: 1 }],
+            'GET /v1/warehouses': [{ name: 'finance', port: 8443, state: 'running', starts: 2, stops: 1, inflight: 1, idle_minutes: 15,
+                                     idle_seconds: 4 },
+                                   { name: 'ops', port: 8444, state: 'unreachable', error: 'connection refused' },
+                                   { name: 'reporting', port: 8445, state: 'stopped', starts: 1, stops: 1, inflight: 0, idle_minutes: 0,
+                                     idle_seconds: 7200 }],
             'GET /maintenance/runs': [{ id: 'm1', table_name: 'raw.clicks', operation: 'optimize', status: 'ok', started_ms: 1,
                                         finished_ms: 2, detail: '' }],
         },
@@ -67,4 +72,13 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
     expect(screen.getByText('7 days')).toBeTruthy();
     expect(screen.getByText('off')).toBeTruthy();
     expect(await screen.findByText('raw.clicks')).toBeTruthy();
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Warehouses' }));
+    expect(await screen.findByText('finance')).toBeTruthy();
+    expect(screen.getByText('running')).toBeTruthy();
+    expect(screen.getByText('unreachable')).toBeTruthy();
+    expect(screen.getByText('15 min idle')).toBeTruthy();
+    expect(screen.getByText('never')).toBeTruthy();
+    expect(screen.getByText('2.0 h')).toBeTruthy();
+    expect(screen.getByText('2 / 1')).toBeTruthy();
 });

@@ -271,7 +271,8 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
 
   Clients connect to the proxy's Service on the warehouse's port, with their usual Cairn token.
 - **Compose.** Use the Docker scaler (`"docker": {"container": "…"}` in `CAIRN_WAREHOUSES`). The proxy then needs the Docker socket; prefer Kubernetes in production.
-- **What it reports.** `GET /cairn/warehouse` on a warehouse's port shows whether it is ready, and how often it was started and stopped.
+- **What it reports.** `GET /cairn/warehouse` on a warehouse's port shows its state: whether it is ready and running, its queries in flight, how long it has been idle, and how often it was started and stopped.
+- **In the workspace.** Pipelines → Warehouses shows each warehouse's state, queries now, time idle and when it will stop (`GET /v1/warehouses`). People see the warehouses they may use; operators see all. A warehouse the API cannot reach shows as unreachable. The chart points the API at the proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`).
 - **Tested.**
   - **Docker** (`tests/test_warehouses_e2e.py`, with real Trino). Three queries to a stopped warehouse started it once, and all were answered. Trino's follow-up URLs pointed back at the proxy. A long query kept it awake. When idle it stopped, and the next query started it again.
   - **Kubernetes** (`tests/test_warehouses_k8s.py`, with a real API server and the chart's RBAC). The proxy scaled its warehouse to 1 and back to 0, and was refused (403) on any other Deployment.

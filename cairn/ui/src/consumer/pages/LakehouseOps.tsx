@@ -2,7 +2,9 @@ import { Alert, Button, Space, Table, Tag, Tooltip, message } from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { DerivedRun, DerivedTable, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, Stream, StreamReject } from '../api/types';
+import type {
+    DerivedRun, DerivedTable, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, Stream, StreamReject, WarehouseState,
+} from '../api/types';
 import { Muted, Surface } from '../components/tokens';
 
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
@@ -268,6 +270,57 @@ export function MaintenanceTab() {
                         { title: 'Result', dataIndex: 'status', render: ok },
                         { title: 'When', dataIndex: 'started_ms', render: when },
                         { title: 'Detail', dataIndex: 'detail' },
+                    ]}
+                />
+            </Surface>
+        </>
+    );
+}
+
+const WH_COLOR: Record<string, string> = { running: 'green', starting: 'blue', stopped: 'default', unreachable: 'red' };
+
+function idleFor(seconds: number | undefined): string {
+    if (seconds == null) return '—';
+    if (seconds < 90) return `${seconds}s`;
+    if (seconds < 5400) return `${Math.round(seconds / 60)} min`;
+    return `${(seconds / 3600).toFixed(1)} h`;
+}
+
+/** Each team's Trino: running or stopped (it stops when idle and starts on the next query). */
+export function WarehousesTab() {
+    const q = useDheQuery<WarehouseState[]>('/v1/warehouses', (c, signal) => c.warehouses({ signal }), { pollMs: 15_000 });
+    return (
+        <>
+            <Muted>
+                A warehouse stops after its idle time with no queries and starts again on the next one (that query waits
+                for the start). You see the warehouses you may use.
+            </Muted>
+            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            <Surface style={{ marginTop: 12 }}>
+                <Table<WarehouseState>
+                    rowKey="name"
+                    loading={q.loading}
+                    dataSource={q.data ?? []}
+                    pagination={false}
+                    locale={{ emptyText: 'No warehouses you may use.' }}
+                    columns={[
+                        { title: 'Warehouse', dataIndex: 'name' },
+                        { title: 'Port', dataIndex: 'port' },
+                        {
+                            title: 'State',
+                            dataIndex: 'state',
+                            render: (s: string, w) => (
+                                <Tooltip title={w.error ?? ''}><Tag color={WH_COLOR[s]}>{s}</Tag></Tooltip>
+                            ),
+                        },
+                        { title: 'Queries now', dataIndex: 'inflight', render: (n?: number) => n ?? '—' },
+                        { title: 'Idle for', dataIndex: 'idle_seconds', render: idleFor },
+                        {
+                            title: 'Stops after',
+                            dataIndex: 'idle_minutes',
+                            render: (m?: number) => (m == null ? '—' : m === 0 ? 'never' : `${m} min idle`),
+                        },
+                        { title: 'Starts / stops', render: (_, w) => (w.starts == null ? '—' : `${w.starts} / ${w.stops}`) },
                     ]}
                 />
             </Surface>

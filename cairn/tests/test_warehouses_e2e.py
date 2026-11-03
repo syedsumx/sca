@@ -64,6 +64,11 @@ def test_a_stopped_warehouse_starts_on_the_first_query_and_stops_when_idle(wareh
 
     w, name, pp = warehouse["w"], warehouse["name"], warehouse["port"]
     assert not running(name)
+    from cairn.dataaccess.warehouse_status import WarehouseStatus
+
+    status = WarehouseStatus("http://127.0.0.1", {"sales": pp, "gone": 1})
+    states = lambda: {x["name"]: x["state"] for x in asyncio.run(status.all(["sales", "gone"]))}  # noqa: E731
+    assert states() == {"sales": "stopped", "gone": "unreachable"}
     # Three queries arrive while it is stopped: one start, all answered.
     with ThreadPoolExecutor(3) as pool:
         results = list(pool.map(lambda _: query(pp), range(3)))
@@ -87,7 +92,10 @@ def test_a_stopped_warehouse_starts_on_the_first_query_and_stops_when_idle(wareh
     # The next query starts it again.
     assert query(pp) == [[25]] and w.starts == 2
     h = httpx.get(f"http://127.0.0.1:{pp}/cairn/warehouse", timeout=10).json()
-    assert h == {"warehouse": "sales", "ready": True, "starts": 2, "stops": w.stops}
+    assert {k: h[k] for k in ("warehouse", "ready", "running", "starts", "stops", "inflight")} == \
+        {"warehouse": "sales", "ready": True, "running": True, "starts": 2, "stops": w.stops, "inflight": 0}
+    assert h["idle_seconds"] < 30 and h["idle_minutes"] == pytest.approx(5 / 60)
+    assert states()["sales"] == "running"
 
 
 def test_configs_are_checked():
@@ -104,3 +112,26 @@ def test_configs_are_checked():
         load({"warehouses": [ok, {**ok, "name": "finance"}]})
     with pytest.raises(WarehouseError, match="no warehouses"):
         load({"warehouses": []})
+
+
+def test_people_see_the_warehouses_they_may_use():
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.testclient import TestClient
+
+    from cairn.common.security import Principal
+    from cairn.dataaccess.warehouse_status import WarehouseStatus, build_warehouses_router
+
+    allowed = {("ana", "USE_WAREHOUSE", "urn:li:warehouse:sales"), ("ops", "MANAGE_SYSTEM_OPERATIONS", None)}
+
+    def authorize(p, privilege, urn):
+        if (p.urn.split(":")[-1], privilege, urn) not in allowed:
+            raise HTTPException(403, "no")
+    def who(request: Request):
+        return Principal("urn:li:corpuser:" + request.headers["x-user"], "t")
+    app = FastAPI()
+    app.include_router(build_warehouses_router(WarehouseStatus("http://127.0.0.1", {"sales": 1, "finance": 2}), who, authorize))
+    c = TestClient(app)
+    names = lambda u: [w["name"] for w in c.get("/v1/warehouses", headers={"x-user": u}).json()]  # noqa: E731
+    assert names("ana") == ["sales"]
+    assert names("ops") == ["finance", "sales"]
+    assert names("bob") == []

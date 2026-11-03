@@ -233,7 +233,13 @@ def app_for(w: Warehouse):
     client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=600, pool=30), verify=w.upstream_ca)
 
     async def health(_request: Request):
-        return JSONResponse({"warehouse": w.name, "ready": await w.ready(), "starts": w.starts, "stops": w.stops})
+        try:
+            running = await w.scaler.running()
+        except Exception:  # noqa: BLE001 - shown as unknown
+            running = None
+        return JSONResponse({"warehouse": w.name, "ready": await w.ready(), "running": running, "starts": w.starts,
+                             "stops": w.stops, "inflight": w.inflight, "idle_minutes": w.idle_minutes,
+                             "idle_seconds": round(time.monotonic() - w.last_seen)})
 
     async def forward(request: Request):
         w.inflight += 1

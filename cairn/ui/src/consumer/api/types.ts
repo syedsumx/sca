@@ -1525,3 +1525,16 @@ export interface MaintenanceRun {
     finished_ms: number;
     detail: string;
 }
+
+/** A team's Trino warehouse, as its proxy reports it (GET /v1/warehouses). */
+export interface WarehouseState {
+    name: string;
+    port: number;
+    state: 'running' | 'starting' | 'stopped' | 'unreachable';
+    starts?: number;
+    stops?: number;
+    inflight?: number;
+    idle_minutes?: number;
+    idle_seconds?: number;
+    error?: string;
+}

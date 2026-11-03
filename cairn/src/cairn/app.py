@@ -241,6 +241,11 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.pipes import build_pipes_router
 
         app.include_router(build_pipes_router(services.pipes, cp, authz))
+    from cairn.dataaccess.warehouse_status import WarehouseStatus, build_warehouses_router
+
+    warehouse_status = WarehouseStatus.from_env()
+    if warehouse_status is not None:
+        app.include_router(build_warehouses_router(warehouse_status, cp, authz))
     if services.bundle_state is not None:
         from cairn.iac.state import build_bundles_router
 
