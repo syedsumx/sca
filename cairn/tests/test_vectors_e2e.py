@@ -3,10 +3,11 @@ text finds rows by meaning, keeps in step with the table (re-embedding only what
 vectors in the lakehouse, and is searched only by those who may read the source table without a mask or
 row filter. Needs the store and catalog binaries (and docker, like the rest of the lakehouse tests)."""
 
-import pyarrow as pa
 import pytest
 
-from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, lake  # noqa: F401  (fixtures)
+pa = pytest.importorskip("pyarrow")
+
+from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, lake  # noqa: E402, F401  (fixtures)
 
 pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker and the store and catalog binaries")
 

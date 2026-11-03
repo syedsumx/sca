@@ -404,7 +404,7 @@ jobs:
           CAIRN_SPARK_IMAGE: cairn/spark:ci
         run: |
           set -o pipefail
-          pip install -e ".[server,test,trino]" pyyaml
+          pip install -e ".[server,test,trino,streams]" pyyaml
           export CAIRN_KIND_KUBECONFIG="$HOME/.kube/config"
           # Pods reach this host at the kind network's gateway.
           export CAIRN_KIND_HOST_IP="$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)"
