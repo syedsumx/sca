@@ -72,6 +72,16 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_RPM" "value" (toString $ai.callsPerMinute)) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_USER_DAILY_QUERIES" "value" (toString $ai.userDailyQueries)) }}
 {{- end }}
+{{- /* JupyterHub: an OAuth client of Cairn's, kernels with the person's own Cairn token. */ -}}
+{{- with .Values.cairn.notebooks.jupyterhub }}
+{{- if .enabled }}
+{{- if not .redirectUris }}{{ fail "cairn.notebooks.jupyterhub.redirectUris: the hub's https://<hub>/hub/oauth_callback" }}{{ end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_JUPYTERHUB_OAUTH_SECRET" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.notebooks.jupyterhub.secret.name" .secret.name) "key" (.secret.key | default "client-secret")))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_JUPYTERHUB_OAUTH_REDIRECT_URIS" "value" (join "," .redirectUris)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_NOTEBOOK_TOKEN_TTL" "value" (toString .tokenTtlSeconds)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_NOTEBOOK_DEFAULT_CATALOG" "value" .defaultCatalog) }}
+{{- end }}
+{{- end }}
 {{- /* MLflow behind Cairn (/v1/ml). */ -}}
 {{- if .Values.cairn.mlflow.enabled }}
 {{- $mlCtx := dict "root" $ "component" "mlflow" "cfg" .Values.cairn.mlflow }}

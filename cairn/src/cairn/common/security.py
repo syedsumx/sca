@@ -75,6 +75,7 @@ class IdentityResolver:
         # Cairn workload tokens (JWTs Cairn issued for a workload): token -> the bound user's urn, None if
         # the token is not one, ValueError if it is Cairn's but no longer valid.
         self.workload_lookup: Optional[Callable[[str], Optional[str]]] = None
+        self.notebook_lookup: Optional[Callable[[str], Optional[str]]] = None   # JupyterHub kernels' tokens
 
     def resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
@@ -95,6 +96,13 @@ class IdentityResolver:
                 if grant is None:
                     raise AuthenticationError("unknown, expired or revoked agent credential")
                 return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes))
+            if token.count(".") == 2 and self.notebook_lookup is not None:
+                try:
+                    urn = self.notebook_lookup(token)
+                except ValueError as e:
+                    raise AuthenticationError(f"notebook token: {e}") from e
+                if urn is not None:
+                    return Principal(urn, "notebook")
             if token.count(".") == 2 and self.workload_lookup is not None:
                 try:
                     urn = self.workload_lookup(token)

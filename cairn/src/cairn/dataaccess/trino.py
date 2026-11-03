@@ -388,7 +388,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
                        current_principal=None, outbox=None, usage=None, catalog_sync=None,
-                       authorize=None, oauth=None, groups_of=None) -> APIRouter:
+                       authorize=None, oauth=None, groups_of=None, history=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -579,7 +579,7 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
     async def queries(given: str, request: Request):
         """Trino's HTTP event listener: each finished query, for usage statistics (who read what)."""
         check(given)
-        if usage is None:
+        if usage is None and history is None:
             raise HTTPException(503, "usage is not available")
         from cairn.dataaccess.trino_usage import UsageError
 
@@ -587,6 +587,13 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             event = await request.json()
         except ValueError:
             raise HTTPException(400, "the body is not JSON")
+        if history is not None and isinstance(event, dict):
+            try:
+                await run_in_threadpool(history.record, event)       # the query's profile, for its author
+            except Exception as e:  # noqa: BLE001 - history never costs the usage statistics
+                logger.warning("query history: %s", e)
+        if usage is None:
+            return {"query": (event.get("metadata") or {}).get("queryId") if isinstance(event, dict) else None}
         try:
             return await run_in_threadpool(usage.record, event)
         except UsageError as e:

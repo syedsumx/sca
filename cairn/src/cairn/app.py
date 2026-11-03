@@ -217,12 +217,21 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                                               current_principal=cp, outbox=services.trino_outbox,
                                               usage=services.trino_usage, catalog_sync=services.trino_catalog,
                                               authorize=authz, oauth=services.trino_oauth,
-                                              groups_of=lambda urn: services.attributes.subject(urn).get("groups", [])))
+                                              groups_of=lambda urn: services.attributes.subject(urn).get("groups", []),
+                                              history=services.query_history))
+        if services.query_history is not None:
+            from cairn.dataaccess.query_history import build_queries_router
+
+            app.include_router(build_queries_router(services.query_history, cp, authz))
     if services.lakehouse is not None and services.trino_tokens is not None:
         from cairn.dataaccess.lakehouse import build_lakehouse_router
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if getattr(services, "notebooks", None) is not None:
+        from cairn.identity.notebooks import build_notebooks_router
+
+        app.include_router(build_notebooks_router(services.notebooks, services.notebook_catalog, cp))
     if getattr(services, "ml", None) is not None:
         from cairn.ml.mlflow_gateway import build_ml_router
 
@@ -269,9 +278,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_derived_router(services.derived, cp, authz))
     if services.streams is not None:
-        from cairn.pipelines.streams import build_streams_router
+        from cairn.pipelines.streams import build_ingest_router, build_streams_router
 
         app.include_router(build_streams_router(services.streams, cp, authz))
+        app.include_router(build_ingest_router(services.streams, cp, authz))
     if services.maintenance is not None:
         from cairn.pipelines.maintenance import build_maintenance_router
 

@@ -278,6 +278,19 @@ jobs:
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py | tee "$RUNNER_TEMP/ml.log"
           ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: JupyterHub with Cairn sign-in (real hub, proxy and Jupyter server)
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/hub"
+          "$RUNNER_TEMP/hub/bin/pip" install -q "jupyterhub>=5.2,<6" "oauthenticator>=17" "jupyter_server>=2.14" httpx
+          (cd "$RUNNER_TEMP" && npm install --silent configurable-http-proxy@4)
+          CAIRN_JUPYTERHUB_BIN="$RUNNER_TEMP/hub/bin/jupyterhub" \
+          CAIRN_CHP_BIN="$RUNNER_TEMP/node_modules/.bin/configurable-http-proxy" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jupyterhub_e2e.py | tee "$RUNNER_TEMP/hub.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/hub.log"
 
   pipelines:
     runs-on: ubuntu-latest

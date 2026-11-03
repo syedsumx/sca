@@ -257,6 +257,27 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - an HR table was refused;
   - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
 
+## Query history, profiles and tuning hints
+
+Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:
+
+- who ran it, its SQL, and its state and error;
+- when it ran, and its wall, CPU and queued time;
+- the bytes and rows it read and the rows it returned;
+- its peak memory and the tables it read;
+- its plan, when Trino includes one.
+
+- **`GET /v1/queries`.** People see their own queries; operators (`MANAGE_SYSTEM_OPERATIONS`) see everyone's. Filter by `user`, `state`, `since`, `table` (a dataset URN) or `text`, or sort with `slowest`. The SQL can hold literals people typed, so no one else sees it.
+- **`GET /v1/queries/<id>`.** The profile, with tuning hints drawn from its statistics and SQL:
+  - it waited long in the queue (the warehouse was busy);
+  - it read gigabytes to return a few rows (filter on partition columns, or keep a derived table);
+  - it used `SELECT *` over wide reads;
+  - it has a cross join, or a condition-less `FROM a, b` (`UNNEST` and `LATERAL` excepted);
+  - it sorted a large result without `LIMIT`;
+  - its memory was near the per-query limit (`CAIRN_TRINO_QUERY_MAX_MEMORY`);
+  - it failed, with the failure explained: memory, access refused by Cairn's policies, or capacity.
+- **Tested** with a real Trino (`tests/test_trino_e2e.py`). A person saw only their own queries, finished and refused, with times, rows and tables. An operator saw everyone's. A cross join and a refused read got their hints, and another person could not open the profile.
+
 ## Warehouses: a Trino per team, stopped when idle
 
 A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.
@@ -293,6 +314,28 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
 
     With Kubernetes (`tests/test_warehouses_k8s.py`), the proxy's account scaled the workers Deployment 0 → 3 → 1 → 0 with the load.
   - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
+
+## Notebooks: JupyterHub with Cairn sign-in
+
+JupyterHub runs from the official JupyterHub chart with `helm/jupyterhub/values-cairn.yaml`. Its hub and notebook images include `cairn-lakehouse`.
+
+- **Sign-in.** People sign in to the hub through Cairn: JupyterHub is a client of Cairn's OAuth2 server, like Trino and Airflow. Its tokens' audience is `jupyterhub`, so they are accepted nowhere else. On Cairn's side, set `cairn.notebooks.jupyterhub`:
+  - `enabled: true`;
+  - `redirectUris`: `https://<hub>/hub/oauth_callback`;
+  - the client secret, in a Secret shared with the hub.
+
+  In `jupyterhub_config.py`, `cairn_lakehouse.jupyter.configure_hub(c, cairn_url=…, hub_url=…)` sets the rest: `GenericOAuthenticator`, Cairn's endpoints, and the spawn hook. `JUPYTERHUB_CRYPT_KEY` must be set.
+- **Kernels act as the person.** When a person's server starts, the hub exchanges their sign-in token for a Cairn token of their own (`POST /v1/notebooks/token`, valid for `tokenTtlSeconds`, 8 hours) and gives it to the server as `CAIRN_TOKEN`:
+  - `%%sql` runs on Trino as them, with their masks and row filters, and so do `%cairn spark` and MLflow;
+  - the token works wherever a personal access token does;
+  - it stops working as soon as the person is suspended, and no new one is given;
+  - each exchange is audited.
+- **Notebooks are catalog assets.** Every save sends the notebook to Cairn (`cairn_lakehouse.jupyter.post_save_hook`, set by `configure_hub`). It becomes a notebook asset owned by the person, with its cells, and a job whose inputs are the tables its `%%sql` cells read. Two-part names use `defaultCatalog`, and CTEs are not counted as tables. A failed publish never stops the save.
+- **Tested** (`tests/test_jupyterhub_e2e.py`, with a real JupyterHub, configurable-http-proxy and Jupyter server):
+  - a person signed in through Cairn's OAuth flow;
+  - their server started with their own Cairn token;
+  - saving a notebook in it published the notebook to the catalog, owned by them, with lineage from the two tables its query read;
+  - tokens for other audiences were refused, the notebook token worked as the person, and it stopped when they were suspended.
 
 ## Machine learning: MLflow behind Cairn
 
@@ -1465,6 +1508,13 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
   - `json`: one JSON object per message, one row. In `append` mode, rows are added. In `upsert` mode, a row replaces the row with the same `key` columns; a tombstone whose Kafka key is a JSON object of the key columns deletes that row.
   - `debezium`: Debezium change events, with or without the schema envelope.
   - **Avro** (`encoding: avro`): messages in the Confluent wire format (a magic byte, the schema's id, the Avro body), as Debezium's Avro converter and Confluent serializers write them. Schemas come from a Confluent-compatible Schema Registry (`CAIRN_STREAMS_SCHEMA_REGISTRY`: `{"url", "username", "password", "ca_file"}`; in Helm, `schema-registry.json` in the streams Secret) and are kept once read. Avro decimals and timestamps arrive as such. A message in another format, or naming a schema the registry does not know, is set aside; a registry that cannot be reached stops the batch, which is retried. Protobuf and JSON Schema messages are not read yet. Creates, updates and snapshot reads write the `after` image; deletes remove the row. The table follows the source database. Always `upsert`.
+  - `http`: no Kafka. Producers post rows to the table over HTTPS (`POST /v1/ingest/<name>/rows` with `{"channel", "offset", "rows": [...]}`), up to 10,000 rows a request; `append` or `upsert`, as for `json`.
+    - Each request is one commit, and its snapshot records the channel's next offset. Name one channel per producer and send the channel offset of the first row: a retried request then writes nothing twice, and an overlap writes only the new rows. A gap is refused (409).
+    - `GET /v1/ingest/<name>/channels/<channel>` says where a producer should resume.
+    - Without `offset`, rows are added at the channel's offset (at least once).
+    - Posting needs `INGEST_STREAM` on `urn:li:stream:<name>` (or `MANAGE_INGESTION`), and the stream must be enabled. One writer per channel at a time.
+    - Rows that do not fit are set aside like messages, with the channel in the reason. HTTP-only deployments set `CAIRN_STREAMS_ENABLED=true` without `CAIRN_STREAMS_KAFKA`.
+    - Tested in `tests/test_ingest_http_e2e.py`, with the real store and catalog: retries, overlaps, gaps, separate channels, rejects, upserts and who may post.
 - **Exactly once.** Each batch is one Iceberg commit, and its snapshot records the next Kafka offset of each partition. A worker taking over a partition starts from there. So if a worker dies between the table commit and the Kafka offset commit, nothing is written twice. Kafka's own committed offsets are the fallback once those snapshots have been expired.
 - **Bad messages.** A message that cannot be a row is set aside with its offset and the reason (`GET /v1/streams/{id}/rejects`), and the stream goes on. Examples: not JSON, an unknown operation, no key, or a column the table lacks. With `evolve`, new columns are added to the table instead.
 - **Failures.** A batch the table refuses, such as a value that does not convert, stops the stream. The error shows on its status and the batch is retried with back-off. Nothing is skipped silently.

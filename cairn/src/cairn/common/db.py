@@ -107,6 +107,7 @@ def load_models() -> MetaData:
     from cairn.dataaccess import lakehouse as _lakehouse  # noqa: F401
     from cairn.dataaccess import shares as _shares  # noqa: F401
     from cairn.ml import mlflow_gateway as _ml  # noqa: F401
+    from cairn.dataaccess import query_history as _query_history  # noqa: F401
     from cairn.identity import workload as _workload  # noqa: F401
     from cairn.pipelines import changes as _changes  # noqa: F401
     from cairn.pipelines import dbt as _dbt  # noqa: F401

@@ -983,6 +983,18 @@ cairn:
   # runs are the caller's, registered models are owned and governed (VIEW_ENTITY_PAGE, MANAGE_ML_MODEL,
   # USE_ML_MODEL on urn:li:mlModelGroup:(urn:li:dataPlatform:mlflow,<name>,PROD)), and each version
   # appears in the catalog with lineage from its training tables.
+  # JupyterHub with sign-in through Cairn (run the official JupyterHub chart with helm/jupyterhub/values-cairn.yaml):
+  # Cairn registers it as an OAuth client and gives each person's server a Cairn token of their own.
+  notebooks:
+    jupyterhub:
+      enabled: false
+      # The hub's OAuth callback(s): https://<hub>/hub/oauth_callback
+      redirectUris: []
+      # A Secret with the client secret (key `client-secret`, 24+ characters), shared with the hub.
+      secret: { name: "", key: client-secret }
+      tokenTtlSeconds: 28800
+      defaultCatalog: lakehouse
+
   mlflow:
     enabled: false
     image: { repository: ghcr.io/mlflow/mlflow, tag: v3.5.0 }

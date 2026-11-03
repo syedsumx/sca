@@ -14,6 +14,7 @@ import threading
 import time
 
 import httpx
+import uuid
 import pytest
 
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
@@ -478,6 +479,39 @@ def test_reads_become_usage(trino, cairn):
                for u in r.get("userCounts") or [])
     assert s.graph.get_timeseries(urn, "datasetUsageStatistics", 1)[0]["totalSqlQueries"] >= before
 
+
+
+def test_queries_have_a_history_with_profiles_and_hints(trino, cairn):
+    """Each finished query is kept with its statistics: its author sees it (and only theirs), operators
+    see all, and a profile carries tuning hints drawn from its statistics and SQL."""
+    url, s = cairn
+    tag = uuid.uuid4().hex[:8]
+    trino(f"SELECT * FROM sales.orders o, sales.orders p WHERE o.region <> '{tag}'", user="ana")
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(f"SELECT salary FROM hr.salaries WHERE name <> '{tag}'", user="ana")
+    trino(f"SELECT count(*) AS n FROM sales.orders WHERE region <> '{tag}'", user="bob")
+
+    def mine(user):
+        return httpx.get(f"{url}/v1/queries", params={"text": tag}, headers={"X-Cairn-Actor": f"urn:li:corpuser:{user}"},
+                         timeout=10).json()["queries"]
+    end = time.time() + 30
+    while time.time() < end and len(mine("admin")) < 3:
+        time.sleep(0.5)
+    ana, everyone = mine("ana"), mine("admin")
+    assert {q["user"] for q in ana} == {"ana"} and len(ana) == 2                     # her own only
+    assert {q["user"] for q in everyone} == {"ana", "bob"} and len(everyone) == 3    # operators: all
+    ok = next(q for q in ana if q["state"] == "FINISHED")
+    assert ok["wall_ms"] > 0 and ok["output_rows"] >= 1 and ok["tables"] == \
+        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"]
+    failed = next(q for q in ana if q["state"] == "FAILED")
+    assert failed["error_code"] == "PERMISSION_DENIED"
+    prof = httpx.get(f"{url}/v1/queries/{ok['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=10).json()
+    assert {"cross_join"} <= {h["kind"] for h in prof["hints"]}, prof["hints"]
+    fp = httpx.get(f"{url}/v1/queries/{failed['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=10).json()
+    assert [h["kind"] for h in fp["hints"]] == ["failed_access"]
+    # bob may not see ana's query.
+    assert httpx.get(f"{url}/v1/queries/{ok['query_id']}", headers={"X-Cairn-Actor": "urn:li:corpuser:bob"},
+                     timeout=10).status_code == 404
 
 MASK_CASES = [("varchar", "'jane@acme.com'"), ("varchar(20)", "'Johnathan'"), ("char(3)", "'abc'"), ("tinyint", "TINYINT '37'"),
               ("smallint", "SMALLINT '-1234'"), ("integer", "37"), ("bigint", "BIGINT '123456789'"),

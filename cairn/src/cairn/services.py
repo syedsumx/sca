@@ -111,6 +111,9 @@ class Services:
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
     ml: Optional[Any] = None
+    notebooks: Optional[Any] = None
+    query_history: Optional[Any] = None
+    notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
     pipeline_health: Optional[Any] = None
@@ -1014,6 +1017,10 @@ def _build_data_access(s: Services) -> None:
         ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs)
         s.trino_key = trino_key
+        # Query history, profiles and tuning hints, from the same events as usage statistics.
+        from cairn.dataaccess.query_history import QueryHistory
+
+        s.query_history = QueryHistory(s.engine, s.trino_access.urn)
         # AI functions in SQL through Cairn: the provider's key, allowed models, budgets and usage.
         from cairn.ai.sql_gateway import SqlAiGateway
 
@@ -1030,7 +1037,8 @@ def _build_data_access(s: Services) -> None:
         # Cairn's OAuth2 sign-in for Trino and Airflow: each client its own secret, redirects and audience.
         oauth_secret = _secret_env("CAIRN_TRINO_OAUTH_SECRET")
         airflow_secret = _secret_env("CAIRN_AIRFLOW_OAUTH_SECRET")
-        if oauth_secret or airflow_secret:
+        hub_secret = _secret_env("CAIRN_JUPYTERHUB_OAUTH_SECRET")
+        if oauth_secret or airflow_secret or hub_secret:
             from cairn.dataaccess.trino_oauth import TrinoOAuth
 
             s.trino_oauth = TrinoOAuth(s.engine, s.trino_tokens, oauth_secret or "",
@@ -1039,6 +1047,22 @@ def _build_data_access(s: Services) -> None:
             if airflow_secret:
                 s.trino_oauth.add_client("airflow", airflow_secret,
                                          os.environ.get("CAIRN_AIRFLOW_OAUTH_REDIRECT_URIS", "").split(","), "airflow")
+            if hub_secret:
+                # JupyterHub: sign-in through Cairn, kernels with a Cairn token of the person's own.
+                from cairn.identity.notebooks import NotebookCatalog, NotebookSessions, table_urn_for
+
+                s.trino_oauth.add_client("jupyterhub", hub_secret,
+                                         os.environ.get("CAIRN_JUPYTERHUB_OAUTH_REDIRECT_URIS", "").split(","), "jupyterhub")
+                hub_graph = s.graph
+                s.notebooks = NotebookSessions(
+                    s.trino_tokens, s.audit,
+                    (lambda urn: (hub_graph.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE"))
+                    if hub_graph is not None else None)
+                if s.identity is not None:
+                    s.identity.notebook_lookup = s.notebooks.principal_of
+                s.notebook_catalog = NotebookCatalog(s.graph, table_urn_for(s.trino_access),
+                                                     os.environ.get("CAIRN_NOTEBOOK_DEFAULT_CATALOG", "lakehouse"),
+                                                     s.audit) if s.graph is not None else None
         # Lineage Core cannot take now waits in the database (Trino sends each event once).
         from cairn.dataaccess.trino import LINEAGE_ACTOR
         from cairn.dataaccess.trino_lineage import LineageOutbox

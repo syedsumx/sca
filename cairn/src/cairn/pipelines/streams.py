@@ -25,6 +25,12 @@ A message that cannot be a row (not JSON, unknown operation, columns the table l
 goes on. A batch the table refuses (say, a type that does not convert) stops the stream with the error
 on its status and is retried with back-off: nothing is skipped silently.
 
+Over HTTP (``format: http``): no Kafka. Producers post rows to ``POST /v1/ingest/<name>/rows`` with a
+``channel`` (one per producer) and the channel ``offset`` of the first row; each request is one commit
+whose snapshot records the channel's next offset, so a retried request writes nothing twice
+(``GET /v1/ingest/<name>/channels/<channel>`` says where to resume). Posting needs ``INGEST_STREAM`` on
+``urn:li:stream:<name>``. One writer per channel at a time.
+
 Workers: ``cairn streams`` runs every enabled stream. Several replicas share the partitions (a Kafka
 consumer group per stream). Settings: ``CAIRN_STREAMS_KAFKA`` (kafka-python consumer settings:
 bootstrap_servers, security_protocol, sasl_*, ssl_cafile ...) and ``CAIRN_STREAMS_CATALOG`` (pyiceberg
@@ -92,7 +98,9 @@ stream_rejects = Table(
     Column("rejected_ms", BigInteger, nullable=False, index=True),
 )
 
-FORMATS = ("json", "debezium")
+FORMATS = ("json", "debezium", "http")
+CHANNEL = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+MAX_HTTP_ROWS = 10_000
 ENCODINGS = ("json", "avro")
 MODES = ("append", "upsert")
 TOPIC = re.compile(r"^[A-Za-z0-9._-]{1,249}$")
@@ -192,7 +200,7 @@ def parse(stream: dict, key: Optional[bytes], value: Optional[bytes],
             return "delete", k
         return None
     v = obj(value, "value")
-    if stream["format"] == "json":
+    if stream["format"] in ("json", "http"):
         return "upsert", v
     if isinstance(v.get("payload"), dict) and "op" in v["payload"]:
         v = v["payload"]                                  # the schema envelope
@@ -274,6 +282,8 @@ class Streams:
     def _values(self, body: dict, actor: str) -> dict:
         name, topic = str(body.get("name") or "").strip(), str(body.get("topic") or "")
         fmt, target = str(body.get("format") or "json"), str(body.get("target") or "")
+        if fmt == "http":
+            topic = "http"                                # rows arrive at POST /v1/ingest/<name>/rows
         mode = "upsert" if fmt == "debezium" else str(body.get("mode") or "append")
         key = body.get("key") or []
         key = [k.strip() for k in key.split(",")] if isinstance(key, str) else [str(k) for k in key]
@@ -292,6 +302,8 @@ class Streams:
         encoding = str(body.get("encoding") or "json")
         if encoding not in ENCODINGS:
             raise StreamError(f"encoding is one of {', '.join(ENCODINGS)}")
+        if encoding == "avro" and fmt == "http":
+            raise StreamError("http streams take JSON rows")
         if encoding == "avro" and not self.registry.get("url"):
             raise StreamError("avro streams need a Schema Registry (CAIRN_STREAMS_SCHEMA_REGISTRY)", 503)
         start = str(body.get("start") or "earliest")
@@ -491,6 +503,67 @@ class Streams:
         return len(rows) + deleted
 
 
+    # ---- rows over HTTP ---------------------------------------------------------------------
+    _channel_locks: dict = {}
+    _channel_locks_guard = threading.Lock()
+
+    def by_name(self, name: str) -> dict:
+        with self.engine.connect() as conn:
+            r = conn.execute(select(streams).where(streams.c.name == name)).first()
+        if r is None:
+            raise StreamError("no such stream", 404)
+        return _stream(r)
+
+    def channel_offset(self, stream: dict, channel: str) -> int:
+        """The next offset a channel expects: one past the last row committed through it."""
+        return self.offsets({**stream, "topic": f"http.{channel}"}).get(0, 0)
+
+    def ingest(self, name: str, channel: str, rows: list, offset: Optional[int] = None) -> dict:
+        """Rows posted to an http stream, written as one commit. With ``offset`` (the channel offset of
+        the first row), rows already committed through the channel are skipped: a retried request
+        writes nothing twice. One writer per channel at a time."""
+        import types
+        import zlib
+
+        stream = self.by_name(name)
+        if stream["format"] != "http":
+            raise StreamError(f"{name} is not an http stream", 409)
+        if not stream["enabled"]:
+            raise StreamError(f"{name} is paused", 409)
+        if not CHANNEL.match(channel or ""):
+            raise StreamError("channel: letters, digits, '.', '_' and '-' (up to 64)")
+        if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_HTTP_ROWS or not all(isinstance(r, dict) for r in rows):
+            raise StreamError(f"rows: 1 to {MAX_HTTP_ROWS} JSON objects")
+        if offset is not None and (not isinstance(offset, int) or offset < 0):
+            raise StreamError("offset: the channel offset of the first row (0 or more)")
+        key = (stream["id"], channel)
+        with self._channel_locks_guard:
+            lock = self._channel_locks.setdefault(key, threading.Lock())
+        with lock:
+            committed = self.channel_offset(stream, channel)
+            start = committed if offset is None else offset
+            if start > committed:
+                raise StreamError(f"offset {start} skips ahead: the channel expects {committed}", 409)
+            skip = committed - start
+            todo = rows[skip:]
+            part = zlib.crc32(channel.encode()) & 0x7FFFFFFF        # where its rejects are filed
+            msgs = [types.SimpleNamespace(partition=0, offset=committed + i, key=None,
+                                          value=json.dumps(r, default=str).encode()) for i, r in enumerate(todo)]
+            written = 0
+            if msgs:
+                http_stream = {**stream, "topic": f"http.{channel}"}
+                reject = self._reject
+                self._reject = lambda sid, p, o, reason, value: reject(sid, part, o, f"[{channel}] {reason}", value)
+                try:
+                    written = self.write(http_stream, msgs)
+                finally:
+                    self._reject = reject
+            nxt = self.channel_offset(stream, channel) if msgs else committed
+        self._status(stream["id"], status="running", add_rows=written, last_commit_ms=_now(), error=None)
+        return {"written": written, "duplicates": skip, "rejected": len(todo) - written if stream["mode"] == "append" else None,
+                "next_offset": nxt}
+
+
 class StreamWorker(threading.Thread):
     """Consumes one stream until stopped: batches by rows or seconds, one Iceberg commit per batch."""
 
@@ -585,7 +658,7 @@ class StreamRunner:
         self.stop = threading.Event()
 
     def reconcile(self) -> None:
-        want = {d["id"]: d for d in self.s.list() if d["enabled"]}
+        want = {d["id"]: d for d in self.s.list() if d["enabled"] and d["format"] != "http"}
         for sid, w in list(self.workers.items()):
             d = want.get(sid)
             if d is None or {k: d[k] for k in w.stream if k != "status"} != {k: w.stream[k] for k in w.stream if k != "status"} \
@@ -652,5 +725,38 @@ def build_streams_router(s: Streams, current_principal, authorize) -> Any:
     def rejects(sid: str, pr=Depends(current_principal)):
         admin(pr)
         return s.rejects(sid)
+
+    return router
+
+
+def build_ingest_router(s: Streams, current_principal, authorize) -> Any:
+    """Rows into http streams: ``INGEST_STREAM`` on ``urn:li:stream:<name>`` (or ``MANAGE_INGESTION``)."""
+    from fastapi import APIRouter, Body, Depends, HTTPException
+
+    router = APIRouter(prefix="/v1/ingest", tags=["lakehouse"])
+
+    def may(pr, name: str) -> None:
+        if authorize(pr, "MANAGE_INGESTION", None, raise_on_deny=False):
+            return
+        authorize(pr, "INGEST_STREAM", f"urn:li:stream:{name}")
+
+    def wrap(fn):
+        try:
+            return fn()
+        except PipeError as e:
+            raise HTTPException(e.status, str(e))
+
+    @router.post("/{name}/rows")
+    def ingest(name: str, channel: str = Body(...), rows: list = Body(...), offset: Optional[int] = Body(None),
+               pr=Depends(current_principal)):
+        """Writes rows into the stream's table now (one commit); ``offset`` makes retries exactly once."""
+        may(pr, name)
+        return wrap(lambda: s.ingest(name, channel, rows, offset))
+
+    @router.get("/{name}/channels/{channel}")
+    def channel(name: str, channel: str, pr=Depends(current_principal)):
+        """Where a channel is: the offset its next row should have (resume from here after a crash)."""
+        may(pr, name)
+        return wrap(lambda: {"channel": channel, "next_offset": s.channel_offset(s.by_name(name), channel)})
 
     return router
