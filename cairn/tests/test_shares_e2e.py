@@ -7,11 +7,12 @@ Needs docker-free binaries only: Cairn Store (with STS) and Cairn Catalog (CAIRN
 import time
 
 import httpx
-import pyarrow as pa
 import pytest
 
-from test_spark_e2e import ANA, BOB, lake, people  # noqa: F401  (fixtures)
-from test_trino_e2e import _ready, cairn  # noqa: F401  (fixtures)
+pa = pytest.importorskip("pyarrow")
+
+from test_spark_e2e import ANA, BOB, lake, people  # noqa: E402, F401  (fixtures)
+from test_trino_e2e import _ready, cairn  # noqa: E402, F401  (fixtures)
 
 pytestmark = pytest.mark.skipif(not _ready(), reason="needs the store and catalog binaries")
 
