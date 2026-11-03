@@ -1055,6 +1055,10 @@ export class ConsumerClient extends CairnClient {
         return this.request<Stream[]>('GET', '/v1/streams', undefined, opts);
     }
 
+    createStream(body: Record<string, unknown>) {
+        return this.request<Stream>('POST', '/v1/streams', body);
+    }
+
     streamRejects(id: string, opts?: RequestOptions) {
         return this.request<StreamReject[]>('GET', `/v1/streams/${enc(id)}/rejects`, undefined, opts);
     }

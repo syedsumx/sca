@@ -1,4 +1,4 @@
-import { Alert, Button, Space, Table, Tag, Tooltip, message } from 'antd';
+import { Alert, Button, Checkbox, Form, Input, InputNumber, Modal, Select, Space, Table, Tag, Tooltip, message } from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
@@ -79,8 +79,23 @@ function PipeFiles({ id }: { id: string }) {
 export function StreamsTab() {
     const { client } = useConsumerApi();
     const q = useDheQuery<Stream[]>('/v1/streams', (c, signal) => c.streams({ signal }), { pollMs: 15_000 });
+    const [creating, setCreating] = useState(false);
     return (
         <>
+            <Space style={{ marginBottom: 8 }}>
+                <Button type="primary" onClick={() => setCreating(true)}>New stream</Button>
+            </Space>
+            {creating && (
+                <NewStream
+                    onClose={() => setCreating(false)}
+                    onCreate={async (body) => {
+                        await client.createStream(body);
+                        message.success(`${String(body.name)}: created; the stream workers start it within a minute`);
+                        setCreating(false);
+                        await q.refresh();
+                    }}
+                />
+            )}
             <Muted>
                 Each batch is one table commit that also records its Kafka offsets, so nothing is written twice. Messages
                 that cannot be rows are set aside with their offset and the reason.
@@ -325,5 +340,74 @@ export function WarehousesTab() {
                 />
             </Surface>
         </>
+    );
+}
+
+/** The form for a new stream (POST /v1/streams); Cairn checks the definition and says what is wrong. */
+function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) {
+    const [form] = Form.useForm();
+    const [error, setError] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+    const format = Form.useWatch('format', form);
+    const submit = async () => {
+        const v = await form.validateFields();
+        const body: Record<string, unknown> = {
+            name: v.name, topic: v.topic, format: v.format, encoding: v.encoding, target: v.target,
+            mode: v.format === 'debezium' ? 'upsert' : v.mode,
+            key: String(v.key ?? '').split(',').map((k: string) => k.trim()).filter(Boolean),
+            create_table: !!v.create_table, evolve: !!v.evolve, start: v.start, batch_seconds: v.batch_seconds,
+        };
+        if (v.source) body.source = v.source;
+        setSaving(true);
+        setError(null);
+        try {
+            await onCreate(body);
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setSaving(false);
+        }
+    };
+    return (
+        <Modal title="New stream" visible onCancel={onClose} onOk={submit} okText="Create" confirmLoading={saving} destroyOnClose>
+            {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 12 }} />}
+            <Form form={form} layout="vertical" initialValues={{ format: 'json', encoding: 'json', mode: 'append', start: 'earliest',
+                create_table: true, batch_seconds: 10 }}>
+                <Form.Item name="name" label="Name" rules={[{ required: true }]}><Input aria-label="Name" /></Form.Item>
+                <Form.Item name="topic" label="Kafka topic" rules={[{ required: true }]}><Input aria-label="Kafka topic" /></Form.Item>
+                <Space wrap>
+                    <Form.Item name="format" label="Format">
+                        <Select aria-label="Format" style={{ width: 160 }} options={[{ value: 'json', label: 'JSON rows' },
+                            { value: 'debezium', label: 'Debezium (CDC)' }]} />
+                    </Form.Item>
+                    <Form.Item name="encoding" label="Encoding">
+                        <Select aria-label="Encoding" style={{ width: 200 }} options={[{ value: 'json', label: 'JSON' },
+                            { value: 'avro', label: 'Avro (Schema Registry)' }]} />
+                    </Form.Item>
+                    {format !== 'debezium' && (
+                        <Form.Item name="mode" label="Mode">
+                            <Select aria-label="Mode" style={{ width: 140 }} options={[{ value: 'append', label: 'Append' },
+                                { value: 'upsert', label: 'Upsert by key' }]} />
+                        </Form.Item>
+                    )}
+                </Space>
+                <Form.Item name="key" label="Key columns (comma-separated; needed for upsert and Debezium)">
+                    <Input aria-label="Key columns" placeholder="id" />
+                </Form.Item>
+                <Form.Item name="target" label="Into table (namespace.table)" rules={[{ required: true }]}>
+                    <Input aria-label="Into table" placeholder="cdc.customers" />
+                </Form.Item>
+                <Form.Item name="source" label="Source dataset URN (lineage, optional)"><Input aria-label="Source" /></Form.Item>
+                <Space wrap>
+                    <Form.Item name="start" label="Start from">
+                        <Select aria-label="Start from" style={{ width: 140 }} options={[{ value: 'earliest', label: 'Earliest' },
+                            { value: 'latest', label: 'Latest' }]} />
+                    </Form.Item>
+                    <Form.Item name="batch_seconds" label="Commit every (s)"><InputNumber min={1} max={3600} /></Form.Item>
+                </Space>
+                <Form.Item name="create_table" valuePropName="checked"><Checkbox>Create the table from the first messages</Checkbox></Form.Item>
+                <Form.Item name="evolve" valuePropName="checked"><Checkbox>Add new columns instead of setting messages aside</Checkbox></Form.Item>
+            </Form>
+        </Modal>
     );
 }

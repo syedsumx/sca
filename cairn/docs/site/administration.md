@@ -1367,7 +1367,8 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
 
 - **Formats.**
   - `json`: one JSON object per message, one row. In `append` mode, rows are added. In `upsert` mode, a row replaces the row with the same `key` columns; a tombstone whose Kafka key is a JSON object of the key columns deletes that row.
-  - `debezium`: Debezium change events, with or without the schema envelope. Creates, updates and snapshot reads write the `after` image; deletes remove the row. The table follows the source database. Always `upsert`.
+  - `debezium`: Debezium change events, with or without the schema envelope.
+  - **Avro** (`encoding: avro`): messages in the Confluent wire format (a magic byte, the schema's id, the Avro body), as Debezium's Avro converter and Confluent serializers write them. Schemas come from a Confluent-compatible Schema Registry (`CAIRN_STREAMS_SCHEMA_REGISTRY`: `{"url", "username", "password", "ca_file"}`; in Helm, `schema-registry.json` in the streams Secret) and are kept once read. Avro decimals and timestamps arrive as such. A message in another format, or naming a schema the registry does not know, is set aside; a registry that cannot be reached stops the batch, which is retried. Protobuf and JSON Schema messages are not read yet. Creates, updates and snapshot reads write the `after` image; deletes remove the row. The table follows the source database. Always `upsert`.
 - **Exactly once.** Each batch is one Iceberg commit, and its snapshot records the next Kafka offset of each partition. A worker taking over a partition starts from there. So if a worker dies between the table commit and the Kafka offset commit, nothing is written twice. Kafka's own committed offsets are the fallback once those snapshots have been expired.
 - **Bad messages.** A message that cannot be a row is set aside with its offset and the reason (`GET /v1/streams/{id}/rejects`), and the stream goes on. Examples: not JSON, an unknown operation, no key, or a column the table lacks. With `evolve`, new columns are added to the table instead.
 - **Failures.** A batch the table refuses, such as a value that does not convert, stops the stream. The error shows on its status and the batch is retried with back-off. Nothing is skipped silently.
@@ -1380,6 +1381,7 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
 - **Tested** with a real Kafka broker, Cairn Store and Cairn Catalog (`tests/test_streams_e2e.py`):
   - **CDC.** Debezium snapshot reads, creates, updates and deletes kept the table equal to the source, through later changes too. A message that was not JSON was set aside, and tombstones were ignored.
   - **Exactly once.** A worker whose Kafka offsets were deleted resumed from the table's snapshots: 8 rows, not 13.
+  - **Avro** (Redpanda's Kafka and Schema Registry). Debezium-shaped Avro events, decimals included, kept the table equal to the source. A JSON message and one naming an unknown schema were set aside. An Avro stream was refused when no registry was configured.
   - **Columns.** A column the table lacked was set aside, and with `evolve` it was added.
   - **Lineage.** The source was added to the target's lineage, merged with what was there. When Cairn Core failed, nothing was created.
   - **Checks.** Bad definitions were refused, and the API was for operators only.

@@ -750,7 +750,7 @@ def _build_active_metadata(s: Services) -> None:
 
             s.streams = Streams(s.engine, _settings("CAIRN_STREAMS_KAFKA"),
                                 _settings("CAIRN_STREAMS_CATALOG") or _settings("CAIRN_PIPES_CATALOG"), s.audit,
-                                graph=getattr(s, "graph", None))
+                                graph=getattr(s, "graph", None), registry=_settings("CAIRN_STREAMS_SCHEMA_REGISTRY"))
         if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.maintenance import TableMaintenance
 

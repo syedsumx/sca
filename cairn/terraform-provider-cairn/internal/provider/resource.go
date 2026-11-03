@@ -52,6 +52,7 @@ var kinds = []kind{
 		{name: "name", typ: "string", required: true},
 		{name: "topic", typ: "string", required: true},
 		{name: "format", typ: "string", def: "json", desc: "json or debezium"},
+		{name: "encoding", typ: "string", def: "json", desc: "json, or avro (Confluent wire format, schemas from the Schema Registry)"},
 		{name: "mode", typ: "string", computed: true, desc: "append or upsert (debezium: always upsert)"},
 		{name: "key", typ: "list", def: []string{}},
 		{name: "target", typ: "string", required: true},

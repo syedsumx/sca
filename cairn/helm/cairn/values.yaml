@@ -461,7 +461,8 @@ cairn:
   # Streams (`cairn streams`): Kafka topics, Debezium change events included, written into lakehouse
   # tables. existingSecret holds kafka.json (kafka-python consumer settings: bootstrap_servers,
   # security_protocol, sasl_*) and catalog.json (Iceberg REST catalog properties). Replicas share the
-  # partitions; define streams with POST /v1/streams.
+  # partitions; define streams with POST /v1/streams. For Avro (Confluent wire format) add
+  # schema-registry.json ({"url", "username", "password", "ca_file"}) to the same Secret.
   streams:
     enabled: false
     existingSecret: ""

@@ -5,6 +5,11 @@ A stream names a Kafka ``topic``, a ``format`` and the Iceberg ``target`` (``nam
 * ``json``: each message is a JSON object, one row. In ``append`` mode rows are added; in ``upsert`` mode
   the row replaces the one with the same ``key`` columns, and a tombstone (no value) whose Kafka key is a
   JSON object of the key columns deletes it.
+* Messages are JSON, or with ``encoding: avro`` Avro in the Confluent wire format (a magic byte, the
+  schema's id in a Schema Registry, the Avro body), as Debezium's Avro converter writes them. Schemas
+  come from the registry (``CAIRN_STREAMS_SCHEMA_REGISTRY``: ``{"url", "username", "password", "ca_file"}``)
+  and are kept once read; a message that is not in that format, or names a schema the registry does not
+  know, is set aside like any other.
 * ``debezium``: Debezium change events (with or without the schema envelope). Creates, updates and
   snapshot reads write the ``after`` image, deletes remove the ``before`` image's key, so the table
   follows the source database. Always ``upsert``.
@@ -56,6 +61,7 @@ streams = Table(
     Column("target", String(512), nullable=False),
     Column("create_table", Boolean, nullable=False, default=False),
     Column("evolve", Boolean, nullable=False, default=False),   # add new columns instead of rejecting
+    Column("encoding", String(16), nullable=False, default="json"),  # json | avro (Confluent wire format)
     Column("start", String(16), nullable=False, default="earliest"),
     Column("source", String(1024), nullable=True),         # the dataset the topic carries (lineage)
     Column("batch_rows", Integer, nullable=False, default=5000),
@@ -87,6 +93,7 @@ stream_rejects = Table(
 )
 
 FORMATS = ("json", "debezium")
+ENCODINGS = ("json", "avro")
 MODES = ("append", "upsert")
 TOPIC = re.compile(r"^[A-Za-z0-9._-]{1,249}$")
 COLUMN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
@@ -104,7 +111,9 @@ def _now() -> int:
 def _stream(r) -> dict:
     return {"id": r.id, "name": r.name, "topic": r.topic, "format": r.format, "mode": r.mode,
             "key": [k for k in r.key.split(",") if k], "target": r.target, "create_table": bool(r.create_table),
-            "evolve": bool(r.evolve), "start": r.start, "source": r.source, "batch_rows": r.batch_rows, "batch_seconds": r.batch_seconds,
+            "evolve": bool(r.evolve),
+            "encoding": getattr(r, "encoding", None) or "json", "start": r.start, "source": r.source,
+            "batch_rows": r.batch_rows, "batch_seconds": r.batch_seconds,
             "enabled": bool(r.enabled), "created_by": r.created_by, "created_ms": r.created_ms}
 
 
@@ -112,15 +121,68 @@ class Reject(Exception):
     """One message that cannot be a row."""
 
 
-def parse(stream: dict, key: Optional[bytes], value: Optional[bytes]) -> Optional[tuple[str, dict]]:
+class Registry:
+    """Avro schemas by id from a Confluent-compatible Schema Registry, kept once read."""
+
+    def __init__(self, cfg: dict):
+        self.url = str(cfg.get("url") or "").rstrip("/")
+        self.auth = (cfg["username"], cfg.get("password", "")) if cfg.get("username") else None
+        self.verify = cfg.get("ca_file") or True
+        self._schemas: dict[int, Any] = {}
+        self._lock = threading.Lock()
+
+    def schema(self, sid: int):
+        with self._lock:
+            if sid in self._schemas:
+                return self._schemas[sid]
+        import fastavro
+        import httpx
+
+        try:
+            r = httpx.get(f"{self.url}/schemas/ids/{sid}", auth=self.auth, verify=self.verify, timeout=15)
+        except httpx.HTTPError as e:
+            raise StreamError(f"the Schema Registry is not reachable: {e}", 503)   # the batch is retried
+        if r.status_code == 404:
+            raise Reject(f"schema {sid} is not in the Schema Registry")
+        if r.status_code != 200:
+            raise StreamError(f"the Schema Registry answered {r.status_code} for schema {sid}", 503)
+        doc = r.json()
+        if doc.get("schemaType", "AVRO") != "AVRO":
+            raise Reject(f"schema {sid} is {doc.get('schemaType')}, not Avro")
+        parsed = fastavro.parse_schema(json.loads(doc["schema"]))
+        with self._lock:
+            self._schemas[sid] = parsed
+        return parsed
+
+    def decode(self, raw: bytes, what: str) -> Any:
+        import io
+
+        import fastavro
+
+        if len(raw) < 5 or raw[0] != 0:
+            raise Reject(f"the {what} is not in the Confluent Avro format (magic byte, schema id, body)")
+        schema = self.schema(int.from_bytes(raw[1:5], "big"))
+        try:
+            return fastavro.schemaless_reader(io.BytesIO(raw[5:]), schema)
+        except Exception as e:  # noqa: BLE001 - a body that does not match its schema
+            raise Reject(f"the {what} does not decode with schema {int.from_bytes(raw[1:5], 'big')}: {e}")
+
+
+def parse(stream: dict, key: Optional[bytes], value: Optional[bytes],
+          registry: Optional[Registry] = None) -> Optional[tuple[str, dict]]:
     """A message as ``("upsert" | "delete", row)``; None for a tombstone with nothing to do."""
     def obj(raw: bytes, what: str) -> dict:
-        try:
-            v = json.loads(raw)
-        except ValueError:
-            raise Reject(f"the {what} is not JSON")
+        if stream.get("encoding") == "avro":
+            if registry is None:
+                raise StreamError("avro streams need a Schema Registry (CAIRN_STREAMS_SCHEMA_REGISTRY)", 503)
+            v = registry.decode(raw, what)
+        else:
+            try:
+                v = json.loads(raw)
+            except ValueError:
+                raise Reject(f"the {what} is not JSON")
         if not isinstance(v, dict):
-            raise Reject(f"the {what} is not a JSON object")
+            raise Reject(f"the {what} is not {'a record' if stream.get('encoding') == 'avro' else 'a JSON object'}")
         return v
 
     if value is None:                                     # tombstone
@@ -171,10 +233,13 @@ def infer_schema(rows: list[dict]):
 
 class Streams:
     def __init__(self, engine, kafka: dict, catalog: dict, audit=None, changes=None,
-                 urn: Optional[Callable[[str, str], str]] = None, graph=None):
-        """``graph``: Cairn Core (``get_aspect``, ``emit``), for the lineage from a stream's ``source``."""
+                 urn: Optional[Callable[[str, str], str]] = None, graph=None, registry: Optional[dict] = None):
+        """``graph``: Cairn Core (``get_aspect``, ``emit``), for the lineage from a stream's ``source``.
+        ``registry``: the Schema Registry for Avro streams ({"url", "username", "password", "ca_file"})."""
         self.engine, self.kafka, self.catalog_props, self.audit, self.changes = engine, kafka, catalog, audit, changes
         self.graph = graph
+        self.registry = registry or {}
+        self._registry = Registry(self.registry) if self.registry.get("url") else None
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
     # ---- definitions --------------------------------------------------------------------
@@ -224,6 +289,11 @@ class Streams:
             raise StreamError("upsert (and debezium) streams need the key columns")
         if not all(COLUMN.match(k) for k in key):
             raise StreamError("key columns are column names")
+        encoding = str(body.get("encoding") or "json")
+        if encoding not in ENCODINGS:
+            raise StreamError(f"encoding is one of {', '.join(ENCODINGS)}")
+        if encoding == "avro" and not self.registry.get("url"):
+            raise StreamError("avro streams need a Schema Registry (CAIRN_STREAMS_SCHEMA_REGISTRY)", 503)
         start = str(body.get("start") or "earliest")
         if start not in ("earliest", "latest"):
             raise StreamError("start is earliest or latest")
@@ -237,7 +307,8 @@ class Streams:
             raise StreamError("batch_rows is 1-1000000 and batch_seconds 1-3600")
         row = {"id": uuid.uuid4().hex, "name": name[:256], "topic": topic, "format": fmt, "mode": mode,
                "key": ",".join(key), "target": target, "create_table": bool(body.get("create_table")),
-               "evolve": bool(body.get("evolve")), "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
+               "evolve": bool(body.get("evolve")),
+               "encoding": encoding, "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
                "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now()}
         return row
 
@@ -352,7 +423,7 @@ class Streams:
         for m in messages:
             nxt[m.partition] = max(nxt.get(m.partition, 0), m.offset + 1)
             try:
-                parsed = parse(stream, m.key, m.value)
+                parsed = parse(stream, m.key, m.value, self._registry)
                 if parsed is None:
                     continue
                 op, row = parsed

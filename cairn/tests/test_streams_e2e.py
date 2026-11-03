@@ -266,3 +266,105 @@ def test_the_source_is_lineage_and_a_failed_write_creates_nothing(streams):
         assert "orders-2" not in [d["name"] for d in s.list()]
     finally:
         s.graph = None
+
+
+REDPANDA = "redpandadata/redpanda:v25.2.9"
+
+
+@pytest.fixture(scope="module")
+def redpanda():
+    """Redpanda: a Kafka API and a Confluent-compatible Schema Registry, for Avro streams."""
+    if subprocess.run(["docker", "image", "inspect", REDPANDA], capture_output=True).returncode:
+        pytest.skip(f"needs {REDPANDA}")
+    kp, sp, pp, rp = port(), port(), port(), port()
+    name = f"cairn-streams-redpanda-{uuid.uuid4().hex[:8]}"
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", REDPANDA, "redpanda", "start",
+                    "--mode", "dev-container", "--smp", "1", "--memory", "1G", "--node-id", "0",
+                    "--kafka-addr", f"PLAINTEXT://127.0.0.1:{kp}", "--advertise-kafka-addr", f"PLAINTEXT://127.0.0.1:{kp}",
+                    "--schema-registry-addr", f"127.0.0.1:{sp}", "--pandaproxy-addr", f"127.0.0.1:{pp}",
+                    "--rpc-addr", f"127.0.0.1:{rp}", "--advertise-rpc-addr", f"127.0.0.1:{rp}"], check=True, capture_output=True)
+    try:
+        wait(kp, 90)
+        wait(sp, 90)
+        from kafka import KafkaProducer
+        from kafka.admin import KafkaAdminClient, NewTopic
+
+        end = time.time() + 90
+        while True:
+            try:
+                admin = KafkaAdminClient(bootstrap_servers=f"127.0.0.1:{kp}")
+                break
+            except Exception:
+                if time.time() > end:
+                    raise
+                time.sleep(1)
+        admin.create_topics([NewTopic("pg.public.accounts", 1, 1)])
+        yield {"bootstrap": f"127.0.0.1:{kp}", "registry": f"http://127.0.0.1:{sp}",
+               "producer": KafkaProducer(bootstrap_servers=f"127.0.0.1:{kp}", acks="all")}
+    finally:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+
+
+def test_avro_change_events_through_a_schema_registry(lake, redpanda, tmp_path):  # noqa: F811
+    """Debezium's Avro converter: the Confluent wire format, schemas in a Schema Registry. The table follows
+    the source; a message in another format, or naming a schema the registry does not know, is set aside."""
+    import io
+
+    import fastavro
+    import httpx
+    from sqlalchemy import create_engine
+
+    from cairn.common.db import init_db
+    from cairn.pipelines.streams import StreamError, StreamWorker, Streams
+
+    row = {"type": "record", "name": "Value", "fields": [
+        {"name": "id", "type": "long"}, {"name": "email", "type": "string"},
+        {"name": "balance", "type": {"type": "bytes", "logicalType": "decimal", "precision": 10, "scale": 2}}]}
+    envelope = {"type": "record", "name": "Envelope", "namespace": "pg.public.accounts", "fields": [
+        {"name": "before", "type": ["null", row], "default": None}, {"name": "after", "type": ["null", "Value"], "default": None},
+        {"name": "op", "type": "string"}, {"name": "ts_ms", "type": ["null", "long"], "default": None}]}
+    r = httpx.post(f"{redpanda['registry']}/subjects/pg.public.accounts-value/versions",
+                   json={"schema": json.dumps(envelope)}, timeout=30)
+    assert r.status_code == 200, r.text
+    sid = r.json()["id"]
+    parsed = fastavro.parse_schema(envelope)
+
+    def avro(op, before=None, after=None):
+        buf = io.BytesIO()
+        fastavro.schemaless_writer(buf, parsed, {"before": before, "after": after, "op": op, "ts_ms": 1})
+        return b"\x00" + sid.to_bytes(4, "big") + buf.getvalue()
+
+    from decimal import Decimal
+    send(redpanda, "pg.public.accounts", [
+        (b"1", avro("r", after={"id": 1, "email": "ann@acme.com", "balance": Decimal("10.50")})),
+        (b"2", avro("c", after={"id": 2, "email": "raj@example.org", "balance": Decimal("3.00")})),
+        (b"2", avro("u", before={"id": 2, "email": "raj@example.org", "balance": Decimal("3.00")},
+                    after={"id": 2, "email": "raj@example.org", "balance": Decimal("7.25")})),
+        (b"1", avro("d", before={"id": 1, "email": "ann@acme.com", "balance": Decimal("10.50")})),
+        (b"3", b'{"id": 3}'),                                                    # JSON on an Avro topic
+        (b"4", b"\x00" + (sid + 999).to_bytes(4, "big") + b"\x02"),               # a schema the registry lacks
+        (b"5", avro("c", after={"id": 5, "email": "kim@acme.com", "balance": Decimal("0.99")})),
+    ])
+    engine = create_engine(f"sqlite:///{tmp_path}/cairn.db")
+    init_db(engine)
+    cat = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"], "s3.access-key-id": STORE_KEY[0],
+           "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1", "s3.path-style-access": "true"}
+    plain = Streams(engine, {"bootstrap_servers": redpanda["bootstrap"]}, cat)
+    with pytest.raises(StreamError, match="Schema Registry"):
+        plain.create({"name": "x", "topic": "pg.public.accounts", "format": "debezium", "encoding": "avro", "key": ["id"],
+                      "target": "cdc.x"}, "urn:li:corpuser:admin")
+    s = Streams(engine, {"bootstrap_servers": redpanda["bootstrap"]}, cat, registry={"url": redpanda["registry"]})
+    st = s.create({"name": "accounts", "topic": "pg.public.accounts", "format": "debezium", "encoding": "avro", "key": ["id"],
+                   "target": "cdc.accounts", "create_table": True, "batch_seconds": 1}, "urn:li:corpuser:admin")
+    assert st["encoding"] == "avro"
+    w = StreamWorker(s, {k: v for k, v in st.items() if k != "status"})
+    w.start()
+    try:
+        want = [{"id": 2, "email": "raj@example.org", "balance": Decimal("7.25")},
+                {"id": 5, "email": "kim@acme.com", "balance": Decimal("0.99")}]
+        assert wait_for(lambda: sorted(table_rows(s, "cdc.accounts"), key=lambda x: x["id"]) == want), table_rows(s, "cdc.accounts")
+    finally:
+        stop(w)
+    reasons = sorted(x["reason"] for x in s.rejects(st["id"]))
+    assert reasons == [f"schema {sid + 999} is not in the Schema Registry",
+                       "the value is not in the Confluent Avro format (magic byte, schema id, body)"], reasons

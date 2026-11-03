@@ -37,7 +37,7 @@ KINDS: dict[str, dict] = {
     "pipes": {"path": "/v1/pipes", "key": "name", "required": ("name", "bucket", "format", "target"),
               "defaults": {"prefix": "", "create_table": False, "enabled": True}},
     "streams": {"path": "/v1/streams", "key": "name", "required": ("name", "topic", "target"),
-                "defaults": {"format": "json", "mode": "append", "key": [], "create_table": False, "evolve": False,
+                "defaults": {"format": "json", "encoding": "json", "mode": "append", "key": [], "create_table": False, "evolve": False,
                              "start": "earliest", "source": None, "batch_rows": 5000, "batch_seconds": 10, "enabled": True}},
     "derived": {"path": "/v1/derived", "key": "name", "required": ("name", "sql", "target"),
                 "defaults": {"mode": "full", "watermark": None, "key": [], "every_minutes": None, "on_change": False,

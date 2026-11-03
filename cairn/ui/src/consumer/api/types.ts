@@ -1456,6 +1456,7 @@ export interface Stream {
     name: string;
     topic: string;
     format: 'json' | 'debezium';
+    encoding?: 'json' | 'avro';
     mode: 'append' | 'upsert';
     key: string[];
     target: string;

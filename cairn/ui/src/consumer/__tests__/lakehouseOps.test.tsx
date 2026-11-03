@@ -25,6 +25,7 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
                                   key: ['id'], target: 'cdc.customers', source: null, enabled: true,
                                   status: { status: 'running', rows: 1200, lag: 3, last_commit_ms: 1, error: null, updated_ms: 1 } }],
             'POST /v1/streams/s1/enabled': {},
+            'POST /v1/streams': { id: 's2' },
             'GET /v1/derived': [{ id: 'd1', name: 'by_region', sql: 'SELECT 1', target: 'sales.by_region', mode: 'full', watermark: null,
                                   key: [], every_minutes: null, on_change: true, upstreams: [], owner: 'urn:li:corpuser:ana',
                                   enabled: true, last_run_ms: null }],
@@ -58,6 +59,16 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
     expect(await screen.findByText('customers-cdc')).toBeTruthy();
     expect(screen.getByText('debezium, upsert on id')).toBeTruthy();
     expect(screen.getByText('1,200')).toBeTruthy();
+    fireEvent.click(screen.getByText('New stream'));
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'accounts' } });
+    fireEvent.change(screen.getByLabelText('Kafka topic'), { target: { value: 'pg.public.accounts' } });
+    fireEvent.change(screen.getByLabelText('Key columns'), { target: { value: 'id, region' } });
+    fireEvent.change(screen.getByLabelText('Into table'), { target: { value: 'cdc.accounts' } });
+    fireEvent.click(screen.getByText('Create'));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/streams')).toBe(true));
+    const sent = calls.find((c) => c.method === 'POST' && c.path === '/v1/streams')!.body as Record<string, unknown>;
+    expect(sent).toMatchObject({ name: 'accounts', topic: 'pg.public.accounts', key: ['id', 'region'], target: 'cdc.accounts',
+                                 encoding: 'json', mode: 'append', create_table: true });
     fireEvent.click(screen.getByText('Pause'));
     await waitFor(() => expect(calls.some((c) => c.path === '/v1/streams/s1/enabled' && (c.body as { enabled: boolean }).enabled === false)).toBe(true));
 

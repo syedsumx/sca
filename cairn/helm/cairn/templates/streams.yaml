@@ -4,7 +4,7 @@
 {{- if not $s.existingSecret }}
 {{- fail "cairn.streams.existingSecret: a Secret with kafka.json (consumer settings) and catalog.json (Iceberg REST catalog properties)" }}
 {{- end }}
-{{- $env := list (dict "name" "CAIRN_STREAMS_KAFKA" "valueFrom" (dict "secretKeyRef" (dict "name" $s.existingSecret "key" "kafka.json"))) (dict "name" "CAIRN_STREAMS_CATALOG" "valueFrom" (dict "secretKeyRef" (dict "name" $s.existingSecret "key" "catalog.json"))) }}
+{{- $env := list (dict "name" "CAIRN_STREAMS_KAFKA" "valueFrom" (dict "secretKeyRef" (dict "name" $s.existingSecret "key" "kafka.json"))) (dict "name" "CAIRN_STREAMS_CATALOG" "valueFrom" (dict "secretKeyRef" (dict "name" $s.existingSecret "key" "catalog.json"))) (dict "name" "CAIRN_STREAMS_SCHEMA_REGISTRY" "valueFrom" (dict "secretKeyRef" (dict "name" $s.existingSecret "key" "schema-registry.json" "optional" true))) }}
 {{- $ctx := dict "root" $ "component" "streams" "cfg" $s "replicas" $s.replicas "metricsPort" 9108 "args" (list "streams" "--interval" (toString $s.intervalSeconds)) "extraEnv" $env }}
 {{ include "cairn.deployment" $ctx }}
 {{- with (include "cairn.pdb" $ctx) }}
