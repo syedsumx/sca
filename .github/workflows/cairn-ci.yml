@@ -361,6 +361,62 @@ jobs:
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
 
+  spark-kind:
+    # Spark on a full Kubernetes cluster: driver and executor pods really run, signed in by their
+    # service account (no secret in the cluster), reading governed tables through Cairn Catalog.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog, the store and the cairn/spark image
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+          docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: cairn
+          version: v0.29.0
+          node_image: kindest/node:v1.33.1
+      - name: Load the image into the cluster
+        run: kind load docker-image cairn/spark:ci --name cairn
+      - name: Spark in pods on the cluster
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test,trino]" pyyaml
+          export CAIRN_KIND_KUBECONFIG="$HOME/.kube/config"
+          # Pods reach this host at the kind network's gateway.
+          export CAIRN_KIND_HOST_IP="$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)"
+          echo "pods reach the host at $CAIRN_KIND_HOST_IP"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_spark_kind_e2e.py | tee "$RUNNER_TEMP/kind.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/kind.log"
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          for p in $(kubectl -n pipelines get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n pipelines logs "$p" --tail=200 || true; done
+
   ui:
     runs-on: ubuntu-latest
     defaults:
