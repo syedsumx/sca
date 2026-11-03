@@ -223,6 +223,11 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if getattr(services, "shares", None) is not None:
+        from cairn.dataaccess.shares import build_shares_router
+
+        app.include_router(build_shares_router(services.shares, cp, authz,
+                                               lambda urn: services.attributes.subject(urn).get("groups", [])))
     if services.dataset_changes is not None:
         from cairn.pipelines.changes import build_changes_router
 
@@ -245,7 +250,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
     warehouse_status = WarehouseStatus.from_env()
     if warehouse_status is not None:
-        app.include_router(build_warehouses_router(warehouse_status, cp, authz))
+        app.include_router(build_warehouses_router(warehouse_status, cp, authz, services.audit,
+                                                   getattr(services, "costs", None), services.trino_key))
     if getattr(services, "sql_ai", None) is not None and services.trino_key:
         from cairn.ai.sql_gateway import build_sql_ai_router
 

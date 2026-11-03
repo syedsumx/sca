@@ -426,7 +426,15 @@ metadata:
 data:
   config.properties: |
     coordinator=true
+    {{- $whw := $wh.workers | default dict }}
+    {{- if gt (int ($whw.max | default 0)) 0 }}
+    # Queries run on the warehouse's workers (the proxy scales them); a query waits for the first one.
+    node-scheduler.include-coordinator=false
+    query-manager.required-workers=1
+    query-manager.required-workers-max-wait={{ $u.warehouses.startTimeoutSeconds }}s
+    {{- else }}
     node-scheduler.include-coordinator=true
+    {{- end }}
     http-server.http.port={{ $u.port }}
     discovery.uri=http://localhost:{{ $u.port }}
     query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
@@ -446,6 +454,13 @@ data:
     opa.policy.batched-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/batch
     opa.policy.row-filters-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/row-filters
     opa.policy.column-masking-uri={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/warehouse/{{ $wh.name }}/column-mask
+  worker.properties: |
+    coordinator=false
+    http-server.http.port={{ $u.port }}
+    discovery.uri=http://{{ include "cairn.componentName" $dctx }}:{{ $u.port }}
+    query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
+    internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
+    shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
 ---
 apiVersion: v1
 kind: Service
@@ -460,32 +475,41 @@ spec:
     - { name: http, port: {{ $u.port }}, targetPort: http }
 {{- end }}
 {{- end }}
-{{- if gt (int $u.workers) 0 }}
+{{- /* Workers: the shared coordinator's (cairn.trino.workers), then each warehouse's that has some. */}}
+{{- $whWorkers := list }}
+{{- range $wh := ($u.warehouses.list | default list) }}
+{{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}{{ $whWorkers = append $whWorkers $wh }}{{ end }}
+{{- end }}
+{{- range $wk := prepend $whWorkers (dict "name" "") }}
+{{- $kctx := $wctx }}
+{{- if $wk.name }}{{ $kctx = dict "root" $ "component" (printf "trino-wh-%s-workers" $wk.name) "cfg" $u }}{{ end }}
+{{- if or $wk.name (gt (int $u.workers) 0) }}
 ---
 # Trino workers: they run query stages for the coordinator; access control and lineage stay on it.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "cairn.componentName" $wctx }}
+  name: {{ include "cairn.componentName" $kctx }}
   labels:
-    {{- include "cairn.componentLabels" $wctx | nindent 4 }}
+    {{- include "cairn.componentLabels" $kctx | nindent 4 }}
 spec:
-  {{- if not $u.autoscaling.enabled }}
+  {{- /* A warehouse's workers belong to the warehouse proxy (scaled with its load): Helm leaves them. */}}
+  {{- if and (not $wk.name) (not $u.autoscaling.enabled) }}
   replicas: {{ $u.workers }}
   {{- end }}
   revisionHistoryLimit: 5
   selector:
     matchLabels:
-      {{- include "cairn.selectorLabels" $wctx | nindent 6 }}
+      {{- include "cairn.selectorLabels" $kctx | nindent 6 }}
   template:
     metadata:
       labels:
-        {{- include "cairn.componentLabels" $wctx | nindent 8 }}
+        {{- include "cairn.componentLabels" $kctx | nindent 8 }}
       annotations:
         checksum/config: {{ printf "%s%s%s%v" $u.port $u.queryMaxMemory $s3 $u.gracefulShutdownSeconds | sha256sum }}
     spec:
       automountServiceAccountToken: false
-      {{- with .Values.global.cairn.imagePullSecrets }}
+      {{- with $.Values.global.cairn.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -558,7 +582,7 @@ spec:
             initialDelaySeconds: 60
             periodSeconds: 30
           volumeMounts:
-            - name: config
+            - name: {{ if $wk.name }}whconfig{{ else }}config{{ end }}
               mountPath: /etc/trino/config.properties
               subPath: worker.properties
               readOnly: true
@@ -613,6 +637,11 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $wk.name }}
+        - name: whconfig
+          configMap:
+            name: {{ include "cairn.componentName" (dict "root" $ "component" (printf "trino-wh-%s" $wk.name) "cfg" $u) }}
+        {{- end }}
         {{- if $u.spill.enabled }}
         - name: spill
           emptyDir: { sizeLimit: {{ $u.spill.sizeLimit }} }
@@ -625,6 +654,7 @@ spec:
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+{{- end }}
 {{- end }}
 ---
 apiVersion: v1

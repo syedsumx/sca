@@ -1528,6 +1528,23 @@ export interface MaintenanceRun {
 }
 
 /** A team's Trino warehouse, as its proxy reports it (GET /v1/warehouses). */
+export interface LakehouseShare {
+    id: string;
+    name: string;
+    recipient: string;
+    tables: string[];
+    created_by: string;
+    created_at: number;
+    expires_at: number;
+    revoked_at: number | null;
+    revoked_by: string | null;
+    last_used_at: number | null;
+    state: 'active' | 'expired' | 'revoked';
+    /** Only in the answer to creating it: shown once. */
+    credential?: string;
+    connect?: Record<string, string>;
+}
+
 export interface WarehouseState {
     name: string;
     port: number;
@@ -1537,5 +1554,8 @@ export interface WarehouseState {
     inflight?: number;
     idle_minutes?: number;
     idle_seconds?: number;
+    queries_running?: number;
+    queries_queued?: number;
+    workers?: { wanted: number; ready: number; min: number; max: number; scale_ups: number; scale_downs: number };
     error?: string;
 }

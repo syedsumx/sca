@@ -10,6 +10,7 @@ import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBu
 import type {
     DerivedRun,
     DerivedTable,
+    LakehouseShare,
     MaintenancePolicy,
     MaintenanceRun,
     Pipe,
@@ -1085,6 +1086,22 @@ export class ConsumerClient extends CairnClient {
 
     maintenanceRuns(opts?: RequestOptions) {
         return this.request<MaintenanceRun[]>('GET', '/maintenance/runs', undefined, opts);
+    }
+
+    shares(opts?: RequestOptions) {
+        return this.request<{ shares: LakehouseShare[] }>('GET', '/v1/shares', undefined, opts);
+    }
+
+    createShare(body: { name: string; recipient: string; tables: string[]; expires_days: number }) {
+        return this.request<LakehouseShare>('POST', '/v1/shares', body);
+    }
+
+    revokeShare(id: string) {
+        return this.request<LakehouseShare>('POST', `/v1/shares/${enc(id)}/revoke`);
+    }
+
+    startWarehouse(name: string) {
+        return this.request<{ name: string; starting: boolean }>('POST', `/v1/warehouses/${enc(name)}/start`);
     }
 
     warehouses(opts?: RequestOptions) {

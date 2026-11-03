@@ -262,6 +262,14 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
 A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.
 
 - **Scale to zero.** After `idleMinutes` without client traffic, the warehouse is stopped. A running query counts as traffic, because its client keeps polling. The next query starts the warehouse, waits until Trino takes queries (`startTimeoutSeconds`, then a short warm-up), and goes through. Queries arriving together share one start. `idleMinutes: 0` keeps a warehouse up.
+- **Several nodes, scaled with the load.** Give a warehouse `workers: {min, max, queriesPerWorker, scaleDownMinutes}` and the chart deploys a workers Deployment for it, with the coordinator running no queries itself. The proxy counts the queries running and queued through it, from the statement URLs their clients poll. It keeps `ceil(queries / queriesPerWorker)` workers, between `min` and `max`:
+  - more at once when the load rises;
+  - fewer after `scaleDownMinutes` of less load;
+  - none while the warehouse is stopped.
+
+  A query that arrives with no worker up waits in Trino for one (up to `startTimeoutSeconds`). With Docker, workers are a pool of containers (`"workers": {"docker": {"containers": […]}}`).
+- **Start now.** Pipelines → Warehouses → **Start now** (`POST /v1/warehouses/<name>/start`, with `USE_WAREHOUSE`) starts a stopped warehouse before the first query, so that query does not wait. Starting counts as use, so the warehouse runs for at least its idle time. The proxy takes the start only with the control key the chart gives it and the API (the Trino access key). The start is audited.
+- **What it costs.** Every `CAIRN_WAREHOUSES_REPORT_SECONDS` (300), the proxy reports node-seconds to Cairn: the coordinator and each ready worker, for the time they ran. Each report is one row of the cost report (Reports → Costs → jobs: job `urn:li:warehouse:<name>`, engine `warehouse`), priced at `cairn.trino.warehouses.usdPerNodeHour` (`CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR`). A report that fails is sent again with the same id, and Cairn records each id once, so nothing is counted twice.
 - **Who may use one.** Each warehouse asks Cairn as itself. Running a query there needs `USE_WAREHOUSE` on `urn:li:warehouse:<name>`, granted to the team like any policy; operators may use any. What a query may read is decided as everywhere else, masks and row filters included.
 - **Helm.** List the warehouses in `cairn.trino.warehouses.list` (`name`, `port`, optional `idleMinutes`, `queryMaxMemory`, `resources`). The chart deploys:
   - each warehouse's Trino, whose replica count Helm leaves to the proxy;
@@ -272,10 +280,18 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
   Clients connect to the proxy's Service on the warehouse's port, with their usual Cairn token.
 - **Compose.** Use the Docker scaler (`"docker": {"container": "…"}` in `CAIRN_WAREHOUSES`). The proxy then needs the Docker socket; prefer Kubernetes in production.
 - **What it reports.** `GET /cairn/warehouse` on a warehouse's port shows its state: whether it is ready and running, its queries in flight, how long it has been idle, and how often it was started and stopped.
-- **In the workspace.** Pipelines → Warehouses shows each warehouse's state, queries now, time idle and when it will stop (`GET /v1/warehouses`). People see the warehouses they may use; operators see all. A warehouse the API cannot reach shows as unreachable. The chart points the API at the proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`).
+- **In the workspace.** Pipelines → Warehouses shows each warehouse's state, its queries running and queued, its workers, time idle and when it will stop (`GET /v1/warehouses`). People see the warehouses they may use; operators see all. A warehouse the API cannot reach shows as unreachable. The chart points the API at the proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`).
 - **Tested.**
   - **Docker** (`tests/test_warehouses_e2e.py`, with real Trino). Three queries to a stopped warehouse started it once, and all were answered. Trino's follow-up URLs pointed back at the proxy. A long query kept it awake. When idle it stopped, and the next query started it again.
   - **Kubernetes** (`tests/test_warehouses_k8s.py`, with a real API server and the chart's RBAC). The proxy scaled its warehouse to 1 and back to 0, and was refused (403) on any other Deployment.
+  - **Several nodes** (`tests/test_warehouses_scaling_e2e.py`, with a real Trino coordinator and two worker containers):
+    - the first query started the coordinator and then one worker;
+    - two queries at once brought a second worker;
+    - after the load dropped, the workers went before the coordinator's idle time, then the coordinator stopped;
+    - **Start now** worked only with the control key;
+    - node-seconds reached the cost report once per report.
+
+    With Kubernetes (`tests/test_warehouses_k8s.py`), the proxy's account scaled the workers Deployment 0 → 3 → 1 → 0 with the load.
   - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
 
 ## Delta Lake tables
@@ -1018,6 +1034,28 @@ A multi-table transaction changes every table or none.
   - the lakehouse kept working after a replica was killed.
 
   The replicas start with scoped credentials on, so they also race to create the store role.
+
+**Sharing tables outside the organisation.** A share gives a recipient, such as a partner or an auditor, read access to named tables until it expires or is revoked. The recipient reads with any Iceberg REST client (pyiceberg, Spark, Trino, Snowflake, DuckDB) from Cairn Catalog. Shares are listed under **Pipelines → Shares**.
+
+- **Making a share.** `POST /v1/shares` with `{"name": "partner-a", "recipient": "Partner A", "tables": ["analytics.products"], "expires_days": 30}`. You need MANAGE on every table you share. The answer holds the recipient's credential and connection settings, and is the only time the credential is shown. Only a hash of it is kept.
+- **What the recipient sees.** Only the shared tables and their namespaces, read-only. Their storage keys are the catalog's scoped keys for one table at a time, read-only. A share never gets the store's own key, and the catalog refuses shares unless `CAIRN_CATALOG_VEND_CREDENTIALS=scoped`.
+- **Masks and row filters.** A table to which a column mask or row filter applies is never shared, because its files hold what they hide. This is checked when the share is made and again on every request.
+- **Revoking.** `POST /v1/shares/{id}/revoke`, or **Revoke** in the UI, stops the share at once. The catalog asks Cairn about the recipient on every request, without caching, so the next request and the next token renewal are refused. Storage keys already handed out last at most the catalog's credential lifetime (`CAIRN_CATALOG_VEND_SECONDS`). Expiry works the same way.
+- **Tokens.** The recipient's client gets its token with the credential (OAuth 2.0 client credentials) at `POST /v1/shares/oauth/tokens`. Each token lasts `CAIRN_SHARES_TOKEN_TTL` seconds (default 900).
+- **Settings.** `CAIRN_SHARES_CATALOG_URL` and `CAIRN_SHARES_TOKEN_URL` are the catalog and token endpoint as recipients reach them; both must be public. In Helm, set them under `cairn.catalog.identity.shares`. `CAIRN_SHARES_MAX_DAYS` (default 365) is the longest a share may last.
+- **Who sees shares.** People see the shares they made. Operators (MANAGE_SYSTEM_OPERATIONS) see and revoke them all.
+- **Audit.** Creating and revoking a share, and every token a recipient gets, are audited (category `shares`).
+
+The recipient connects like this:
+
+```python
+from pyiceberg.catalog.rest import RestCatalog
+cat = RestCatalog("partner", uri="https://lake.example.com", credential="<the credential>", scope="catalog",
+                  **{"oauth2-server-uri": "https://cairn.example.com/v1/shares/oauth/tokens"})
+cat.load_table("analytics.products").scan().to_arrow()
+```
+
+Tested in `tests/test_shares_e2e.py`, with the real store and catalog and pyiceberg as the recipient.
 
 **Zero-copy clones.** `POST /v1/namespaces/{ns}/tables/{table}/clone` with `{"name": "dev_orders"}` (and optionally `"namespace": ["dev"]`) makes a new table on the same data files. Nothing is copied. The clone has its own id and location, so its new writes go to its own location, and the two tables change independently. The caller needs read access to the source and manage access to the target namespace.
 

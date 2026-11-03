@@ -109,6 +109,7 @@ class Services:
     dbt_runs: Optional[Any] = None
     lakehouse: Optional[Any] = None
     lakehouse_sessions: Optional[Any] = None
+    shares: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
     pipeline_health: Optional[Any] = None
@@ -1080,6 +1081,11 @@ def _build_data_access(s: Services) -> None:
                 s.trino_tokens, s.engine, s.audit,
                 user_status=(lambda urn: (graph.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE"))
                 if graph is not None else None)
+            # Tables shared with recipients outside the organisation, through Iceberg REST.
+            from cairn.dataaccess.shares import Shares
+
+            s.shares = Shares(s.engine, s.trino_tokens, s.lakehouse, s.audit)
+            s.lakehouse.shares = s.shares
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

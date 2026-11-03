@@ -19,6 +19,15 @@
     "idle_minutes" (ternary $wh.idleMinutes $w.idleMinutes (hasKey $wh "idleMinutes")) "start_timeout_seconds" $w.startTimeoutSeconds
     "kubernetes" (dict "namespace" $.Release.Namespace "deployment" (include "cairn.componentName" $dctx)) }}
 {{- if $tls }}{{ $_ := set $one "tls" (dict "cert" "/etc/cairn/tls/tls.crt" "key" "/etc/cairn/tls/tls.key") }}{{ end }}
+{{- $wk := $wh.workers | default dict }}
+{{- if gt (int ($wk.max | default 0)) 0 }}
+{{- $kctx := dict "root" $ "component" (printf "trino-wh-%s-workers" $wh.name) "cfg" $u }}
+{{- if gt (int ($wk.min | default 0)) (int $wk.max) }}{{ fail (printf "cairn.trino.warehouses.list[%s].workers: min is above max" $wh.name) }}{{ end }}
+{{- $names = append $names (include "cairn.componentName" $kctx) }}
+{{- $_ := set $one "workers" (dict "min" (int ($wk.min | default 0)) "max" (int $wk.max)
+    "queries_per_worker" ($wk.queriesPerWorker | default 4) "scale_down_minutes" ($wk.scaleDownMinutes | default 5)
+    "kubernetes" (dict "namespace" $.Release.Namespace "deployment" (include "cairn.componentName" $kctx))) }}
+{{- end }}
 {{- $list = append $list $one }}
 {{- end }}
 apiVersion: v1
@@ -92,6 +101,15 @@ spec:
           env:
             - name: CAIRN_WAREHOUSES
               value: {{ toJson (dict "warehouses" $list) | quote }}
+            # "Start now" from Cairn, and node-seconds reported to Cairn's cost report.
+            - name: CAIRN_WAREHOUSES_CONTROL_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            - name: CAIRN_TRINO_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            - name: CAIRN_WAREHOUSES_REPORT_URL
+              value: {{ printf "http://%s:%v/v1/warehouses/usage" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
           ports:
             {{- range $one := $list }}
             - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }

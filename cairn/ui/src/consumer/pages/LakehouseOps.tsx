@@ -3,7 +3,8 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type {
-    DerivedRun, DerivedTable, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, Stream, StreamReject, WarehouseState,
+    DerivedRun, DerivedTable, LakehouseShare, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, Stream, StreamReject,
+    WarehouseState,
 } from '../api/types';
 import { Muted, Surface } from '../components/tokens';
 
@@ -303,12 +304,22 @@ function idleFor(seconds: number | undefined): string {
 
 /** Each team's Trino: running or stopped (it stops when idle and starts on the next query). */
 export function WarehousesTab() {
+    const { client } = useConsumerApi();
     const q = useDheQuery<WarehouseState[]>('/v1/warehouses', (c, signal) => c.warehouses({ signal }), { pollMs: 15_000 });
+    const start = async (name: string) => {
+        try {
+            await client.startWarehouse(name);
+            message.success(`${name}: starting; it takes queries in a minute or two`);
+            await q.refresh();
+        } catch (e) {
+            message.error(e instanceof Error ? e.message : String(e));
+        }
+    };
     return (
         <>
             <Muted>
                 A warehouse stops after its idle time with no queries and starts again on the next one (that query waits
-                for the start). You see the warehouses you may use.
+                for the start), or when you start it. Its workers follow the load. You see the warehouses you may use.
             </Muted>
             {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
@@ -328,7 +339,15 @@ export function WarehousesTab() {
                                 <Tooltip title={w.error ?? ''}><Tag color={WH_COLOR[s]}>{s}</Tag></Tooltip>
                             ),
                         },
-                        { title: 'Queries now', dataIndex: 'inflight', render: (n?: number) => n ?? '—' },
+                        {
+                            title: 'Queries',
+                            render: (_, w) => (w.queries_running == null ? '—'
+                                : `${w.queries_running} running${w.queries_queued ? `, ${w.queries_queued} queued` : ''}`),
+                        },
+                        {
+                            title: 'Workers',
+                            render: (_, w) => (w.workers ? `${w.workers.ready} of ${w.workers.wanted} (${w.workers.min}–${w.workers.max})` : '—'),
+                        },
                         { title: 'Idle for', dataIndex: 'idle_seconds', render: idleFor },
                         {
                             title: 'Stops after',
@@ -336,10 +355,124 @@ export function WarehousesTab() {
                             render: (m?: number) => (m == null ? '—' : m === 0 ? 'never' : `${m} min idle`),
                         },
                         { title: 'Starts / stops', render: (_, w) => (w.starts == null ? '—' : `${w.starts} / ${w.stops}`) },
+                        {
+                            title: '',
+                            render: (_, w) => w.state === 'stopped' && (
+                                <Button size="small" onClick={() => start(w.name)}>Start now</Button>
+                            ),
+                        },
                     ]}
                 />
             </Surface>
         </>
+    );
+}
+
+const SHARE_COLOR: Record<string, string> = { active: 'green', expired: 'default', revoked: 'red' };
+const day = (s: number | null | undefined) => (s ? new Date(s * 1000).toLocaleDateString() : '—');
+
+/** Tables shared with recipients outside the organisation, read through Iceberg REST until revoked or expired. */
+export function SharesTab() {
+    const { client } = useConsumerApi();
+    const q = useDheQuery<{ shares: LakehouseShare[] }>('/v1/shares', (c, signal) => c.shares({ signal }));
+    const [creating, setCreating] = useState(false);
+    const [made, setMade] = useState<LakehouseShare | null>(null);
+    return (
+        <>
+            <Space style={{ marginBottom: 8 }}>
+                <Button type="primary" onClick={() => setCreating(true)}>New share</Button>
+            </Space>
+            {creating && (
+                <NewShare
+                    onClose={() => setCreating(false)}
+                    onCreate={async (body) => {
+                        setMade(await client.createShare(body));
+                        setCreating(false);
+                        await q.refresh();
+                    }}
+                />
+            )}
+            {made && (
+                <Modal open title={`Share ${made.name} created`} onOk={() => setMade(null)} onCancel={() => setMade(null)}
+                    cancelButtonProps={{ style: { display: 'none' } }}>
+                    <p>Send the recipient these connection settings. The credential is shown only now.</p>
+                    <Input.TextArea readOnly autoSize value={JSON.stringify(made.connect ?? { credential: made.credential }, null, 2)}
+                        aria-label="Connection settings" />
+                </Modal>
+            )}
+            <Muted>
+                A recipient reads the shared tables with any Iceberg REST client, read-only. Revoking a share stops it at
+                once. Tables with a column mask or row filter are never shared.
+            </Muted>
+            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            <Surface style={{ marginTop: 12 }}>
+                <Table<LakehouseShare>
+                    rowKey="id"
+                    loading={q.loading}
+                    dataSource={q.data?.shares ?? []}
+                    pagination={false}
+                    locale={{ emptyText: 'No shares yet.' }}
+                    columns={[
+                        { title: 'Share', dataIndex: 'name' },
+                        { title: 'Recipient', dataIndex: 'recipient' },
+                        { title: 'Tables', dataIndex: 'tables', render: (t: string[]) => t.join(', ') },
+                        { title: 'State', dataIndex: 'state', render: (s: string) => <Tag color={SHARE_COLOR[s]}>{s}</Tag> },
+                        { title: 'Expires', dataIndex: 'expires_at', render: day },
+                        { title: 'Last used', dataIndex: 'last_used_at', render: (s: number | null) => (s ? new Date(s * 1000).toLocaleString() : 'never') },
+                        { title: 'By', dataIndex: 'created_by', render: who },
+                        {
+                            title: '',
+                            render: (_, sh) => sh.state === 'active' && (
+                                <Button size="small" danger onClick={async () => {
+                                    await client.revokeShare(sh.id);
+                                    message.success(`${sh.name}: revoked; the recipient is refused from now on`);
+                                    await q.refresh();
+                                }}>Revoke</Button>
+                            ),
+                        },
+                    ]}
+                />
+            </Surface>
+        </>
+    );
+}
+
+function NewShare({ onClose, onCreate }: {
+    onClose: () => void;
+    onCreate: (body: { name: string; recipient: string; tables: string[]; expires_days: number }) => Promise<void>;
+}) {
+    const [form] = Form.useForm();
+    const [error, setError] = useState<string | null>(null);
+    const [saving, setSaving] = useState(false);
+    const submit = async () => {
+        const v = await form.validateFields();
+        setSaving(true);
+        setError(null);
+        try {
+            await onCreate({
+                name: v.name, recipient: v.recipient, expires_days: v.expires_days,
+                tables: String(v.tables ?? '').split(/[\s,]+/).map((t: string) => t.trim()).filter(Boolean),
+            });
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setSaving(false);
+        }
+    };
+    return (
+        <Modal open title="New share" okText="Create" onOk={submit} onCancel={onClose} confirmLoading={saving}>
+            {error && <Alert type="error" message={error} showIcon style={{ marginBottom: 12 }} />}
+            <Form form={form} layout="vertical" initialValues={{ expires_days: 30 }}>
+                <Form.Item name="name" label="Name" rules={[{ required: true }]}><Input placeholder="partner-a" /></Form.Item>
+                <Form.Item name="recipient" label="Recipient" rules={[{ required: true }]}>
+                    <Input placeholder="Partner A (data@partner.example)" />
+                </Form.Item>
+                <Form.Item name="tables" label="Tables" rules={[{ required: true }]} extra="namespace.table, separated by commas">
+                    <Input placeholder="analytics.products" />
+                </Form.Item>
+                <Form.Item name="expires_days" label="Expires after (days)"><InputNumber min={1} max={365} /></Form.Item>
+            </Form>
+        </Modal>
     );
 }
 

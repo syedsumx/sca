@@ -103,6 +103,8 @@ class LakehouseSessions:
         """A new session for ``actor``: its first token and the credential that renews it."""
         if not actor.startswith("urn:li:corpuser:"):
             raise ValueError("lakehouse sessions are for Cairn users")
+        if actor.removeprefix("urn:li:corpuser:").startswith("share:"):
+            raise ValueError("share: names external recipients, who sign in with their share's credential")
         now = int(time.time())
         sid, secret = uuid.uuid4().hex, secrets.token_urlsafe(32)
         ttl = min(int(ttl or self.ttl), self.max_session)
@@ -209,6 +211,7 @@ class LakehouseAccess:
         self.access, self.groups_of, self.trino_catalog = access, groups_of, trino_catalog
         # Cairn Catalog's addresses, as engines name it in OpenLineage (``CAIRN_LAKEHOUSE_CATALOG_URIS``).
         self.catalog_uris = tuple(u.rstrip("/") for u in catalog_uris if u.strip())
+        self.shares = None   # external recipients (cairn.dataaccess.shares), decided by their share alone
 
     def remap_lineage(self, event: dict) -> dict:
         """Engines that read files (Spark) name lakehouse tables by their storage paths in OpenLineage, and
@@ -256,6 +259,12 @@ class LakehouseAccess:
         return self.access.urn(self.trino_catalog, ".".join(namespace), name)
 
     def decide(self, user: str, tables: list[dict]) -> dict:
+        from cairn.dataaccess.shares import PREFIX
+
+        if user.removeprefix("urn:li:corpuser:").startswith(PREFIX):
+            if self.shares is None:
+                return {"schemas": False, "namespaces": [], "tables": [dict(NOTHING) for _ in tables]}
+            return self.shares.decide(user.removeprefix("urn:li:corpuser:"), tables)
         actor = user if user.startswith("urn:li:") else f"urn:li:corpuser:{user}"
         try:
             groups = list(self.groups_of(actor))

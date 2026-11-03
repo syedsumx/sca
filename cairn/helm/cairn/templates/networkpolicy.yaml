@@ -263,8 +263,43 @@ spec:
             matchLabels:
               {{- toYaml $sel | nindent 14 }}
               app.kubernetes.io/component: warehouses
+        {{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}
+        # Its own workers (they announce themselves and send results to it).
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+        {{- end }}
       ports:
         - port: http
+{{- if gt (int (($wh.workers | default dict).max | default 0)) 0 }}
+---
+# The warehouse's workers: reached by its coordinator and each other only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" $ }}-trino-wh-{{ $wh.name }}-workers
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- toYaml $sel | nindent 6 }}
+      app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}
+        - podSelector:
+            matchLabels:
+              {{- toYaml $sel | nindent 14 }}
+              app.kubernetes.io/component: trino-wh-{{ $wh.name }}-workers
+      ports:
+        - port: http
+{{- end }}
 {{- end }}
 {{- if .Values.cairn.trino.warehouses.list }}
 ---

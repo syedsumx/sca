@@ -711,6 +711,14 @@ cairn:
       # longest a session may last before its user signs in again (3600 s to 30 days).
       tokenTtlSeconds: 3600
       maxSessionSeconds: 604800
+      # Sharing tables with recipients outside the organisation (Iceberg REST, /v1/shares): the catalog and
+      # Cairn's token endpoint as recipients reach them (both public), how long a recipient's token lasts
+      # (60-3600 s) and the longest a share may last.
+      shares:
+        catalogUrl: ""
+        tokenUrl: ""
+        tokenTtlSeconds: 900
+        maxDays: 365
     # The volume for the embedded state (without database).
     persistence:
       size: 10Gi
@@ -742,6 +750,9 @@ cairn:
     warehouses:
       idleMinutes: 10
       startTimeoutSeconds: 300
+      # What a warehouse node (coordinator or worker) costs an hour, for the cost report ("" : not priced;
+      # node-hours are still recorded).
+      usdPerNodeHour: ""
       proxy:
         resources:
           requests: { cpu: 50m, memory: 128Mi }
@@ -752,6 +763,8 @@ cairn:
       #    idleMinutes: 15            # default: warehouses.idleMinutes (0: never stopped)
       #    queryMaxMemory: 4GB
       #    resources: { requests: { cpu: "2", memory: 8Gi }, limits: { memory: 8Gi } }
+      #    # Workers, scaled by the proxy with the queries running and queued (none while stopped):
+      #    workers: { min: 0, max: 4, queriesPerWorker: 4, scaleDownMinutes: 5 }
     # Delta Lake tables (catalog "delta") in Cairn Store, their metastore files beside them
     # (s3://<bucket>/<prefix>/), governed by Cairn like the lakehouse (datasets on the delta-lake platform).
     # A store key that can reach only that prefix, from a Secret (access-key, secret-key). One coordinator

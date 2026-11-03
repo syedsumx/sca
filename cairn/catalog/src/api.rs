@@ -443,6 +443,32 @@ impl Catalog {
         }
         match &self.cfg.identity {
             Some(id) if token.matches('.').count() == 2 => match id.verify(token).await {
+                Ok(user) if crate::identity::is_share(&user) => {
+                    // A recipient outside the organisation: read-only, its share's namespaces only, asked
+                    // afresh on every request. Never with the catalog's own store key.
+                    if matches!(self.cfg.vend, Vend::Static) {
+                        return Err(err(
+                            StatusCode::FORBIDDEN,
+                            "ForbiddenException",
+                            "External shares need scoped storage credentials (CAIRN_CATALOG_VEND_CREDENTIALS=scoped)",
+                        ));
+                    }
+                    let scope = id.share_scope(&user).await.map_err(|e| {
+                        tracing::warn!(error = %e, user = %user, "a share could not be checked: refused");
+                        err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", "Cairn could not check the share now")
+                    })?;
+                    if scope.is_empty() {
+                        tracing::info!(user = %user, "a share that has ended was refused");
+                        return Err(err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "The share has ended (revoked or expired)"));
+                    }
+                    Ok(Principal {
+                        token: String::new(),
+                        name: format!("user:{user}"),
+                        namespaces: scope,
+                        read_only: true,
+                        user: Some(user),
+                    })
+                }
                 Ok(user) => Ok(Principal {
                     token: String::new(),
                     name: format!("user:{user}"),

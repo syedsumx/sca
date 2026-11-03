@@ -1177,11 +1177,37 @@ on('POST', '/v1/derived/:id/refresh', (b, _q, [id]) => {
     return run;
 });
 on('GET', '/v1/warehouses', () => [
-    { name: 'finance', port: 8443, state: 'running', starts: 14, stops: 13, inflight: 2, idle_minutes: 15, idle_seconds: 4 },
+    { name: 'finance', port: 8443, state: 'running', starts: 14, stops: 13, inflight: 2, idle_minutes: 15, idle_seconds: 4,
+      queries_running: 5, queries_queued: 1, workers: { wanted: 2, ready: 2, min: 0, max: 4, scale_ups: 31, scale_downs: 29 } },
     { name: 'marketing', port: 8444, state: 'stopped', starts: 6, stops: 6, inflight: 0, idle_minutes: 10, idle_seconds: 7_420 },
     { name: 'data-science', port: 8445, state: 'starting', starts: 3, stops: 2, inflight: 1, idle_minutes: 30, idle_seconds: 1 },
     { name: 'reporting', port: 8446, state: 'running', starts: 1, stops: 0, inflight: 0, idle_minutes: 0, idle_seconds: 310 },
 ]);
+const SHARES: Record<string, unknown>[] = [
+    { id: 'a1b2', name: 'partner-acme', recipient: 'Acme Retail (data@acme.example)', tables: ['analytics.products', 'analytics.daily_sales'],
+      created_by: ME, created_at: Math.floor((now - 20 * DAY) / 1000), expires_at: Math.floor((now + 70 * DAY) / 1000),
+      revoked_at: null, revoked_by: null, last_used_at: Math.floor((now - 3_600_000) / 1000), state: 'active' },
+    { id: 'c3d4', name: 'auditor-2026', recipient: 'External auditor', tables: ['finance.ledger_summary'],
+      created_by: ME, created_at: Math.floor((now - 60 * DAY) / 1000), expires_at: Math.floor((now - 30 * DAY) / 1000),
+      revoked_at: null, revoked_by: null, last_used_at: Math.floor((now - 31 * DAY) / 1000), state: 'expired' },
+];
+on('GET', '/v1/shares', () => ({ shares: SHARES }));
+on('POST', '/v1/shares', (body) => {
+    const b = body as { name: string; recipient: string; tables: string[]; expires_days: number };
+    const id = Math.random().toString(16).slice(2, 10);
+    const share = { id, ...b, created_by: ME, created_at: Math.floor(now / 1000), expires_at: Math.floor((now + b.expires_days * DAY) / 1000),
+                    revoked_at: null, revoked_by: null, last_used_at: null, state: 'active' };
+    SHARES.unshift(share);
+    return { ...share, credential: `${id}:demo-secret-shown-once`,
+             connect: { type: 'rest', uri: 'https://lake.example.com', 'oauth2-server-uri': 'https://cairn.example.com/v1/shares/oauth/tokens',
+                        credential: `${id}:demo-secret-shown-once`, scope: 'catalog' } };
+});
+on('POST', '/v1/shares/:id/revoke', (_b, _q, [id]) => {
+    const share = SHARES.find((x) => x.id === id);
+    if (share) Object.assign(share, { state: 'revoked', revoked_at: Math.floor(Date.now() / 1000), revoked_by: ME });
+    return share;
+});
+on('POST', '/v1/warehouses/:id/start', (_b, _q, [name]) => ({ name, starting: true }));
 on('GET', '/maintenance/policies', () => [
     { scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: 7, every_hours: 24, enabled: true, updated_by: ME, updated_ms: now - 12 * DAY },
     { scope: 'raw', optimize: true, optimize_threshold: '256MB', expire_days: 2, orphan_days: 3, every_hours: 6, enabled: true, updated_by: ME, updated_ms: now - 3 * DAY },

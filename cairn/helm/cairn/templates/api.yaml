@@ -30,6 +30,12 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_CATALOG_URIS" "value" (join "," $uris)) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_TOKEN_TTL" "value" (toString .Values.cairn.catalog.identity.tokenTtlSeconds)) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_LAKEHOUSE_MAX_SESSION" "value" (toString .Values.cairn.catalog.identity.maxSessionSeconds)) }}
+{{- with .Values.cairn.catalog.identity.shares }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SHARES_CATALOG_URL" "value" (.catalogUrl | default $.Values.cairn.catalog.identity.publicUrl)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SHARES_TOKEN_URL" "value" .tokenUrl) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SHARES_TOKEN_TTL" "value" (toString .tokenTtlSeconds)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_SHARES_MAX_DAYS" "value" (toString .maxDays)) }}
+{{- end }}
 {{- end }}
 {{- with .Values.cairn.workloadIdentity.issuers }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WORKLOAD_ISSUERS" "value" (toJson .)) }}
@@ -73,6 +79,10 @@
 {{- $whCtx := dict "root" $ "component" "warehouses" "cfg" .Values.cairn.trino.warehouses.proxy }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WAREHOUSES_URL" "value" (printf "%s://%s" (ternary "https" "http" (not (empty .Values.cairn.trino.tls.secretName))) (include "cairn.componentName" $whCtx))) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WAREHOUSE_PORTS" "value" (toJson $whPorts)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_WAREHOUSES_CONTROL_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.accessKeySecret.key))) }}
+{{- with .Values.cairn.trino.warehouses.usdPerNodeHour }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR" "value" (toString .)) }}
+{{- end }}
 {{- end }}
 {{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}

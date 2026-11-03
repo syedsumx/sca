@@ -32,11 +32,21 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
             'POST /v1/derived/d1/refresh': { id: 'r1', kind: 'full', status: 'ok', trigger: 'manual', started_ms: 1, finished_ms: 2, error: null },
             'GET /maintenance/policies': [{ scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: null,
                                             every_hours: 24, enabled: true, updated_by: 'urn:li:corpuser:ana', updated_ms: 1 }],
+            'POST /v1/warehouses/reporting/start': { name: 'reporting', starting: true },
             'GET /v1/warehouses': [{ name: 'finance', port: 8443, state: 'running', starts: 2, stops: 1, inflight: 1, idle_minutes: 15,
-                                     idle_seconds: 4 },
+                                     idle_seconds: 4, queries_running: 3, queries_queued: 1,
+                                     workers: { wanted: 2, ready: 1, min: 0, max: 4, scale_ups: 2, scale_downs: 0 } },
                                    { name: 'ops', port: 8444, state: 'unreachable', error: 'connection refused' },
                                    { name: 'reporting', port: 8445, state: 'stopped', starts: 1, stops: 1, inflight: 0, idle_minutes: 0,
                                      idle_seconds: 7200 }],
+            'GET /v1/shares': { shares: [{ id: 'sh1', name: 'partner-a', recipient: 'Partner A', tables: ['analytics.products'],
+                                           created_by: 'urn:li:corpuser:ana', created_at: 1, expires_at: 4102444800, revoked_at: null,
+                                           revoked_by: null, last_used_at: null, state: 'active' }] },
+            'POST /v1/shares': { id: 'sh2', name: 'partner-b', recipient: 'Partner B', tables: ['analytics.products', 'sales.daily'],
+                                 created_by: 'urn:li:corpuser:ana', created_at: 1, expires_at: 2, revoked_at: null, revoked_by: null,
+                                 last_used_at: null, state: 'active', credential: 'sh2:secret-once',
+                                 connect: { uri: 'https://lake.example', credential: 'sh2:secret-once' } },
+            'POST /v1/shares/sh1/revoke': {},
             'GET /maintenance/runs': [{ id: 'm1', table_name: 'raw.clicks', operation: 'optimize', status: 'ok', started_ms: 1,
                                         finished_ms: 2, detail: '' }],
         },
@@ -92,4 +102,23 @@ it('shows pipes, streams, derived tables and maintenance next to dbt runs', asyn
     expect(screen.getByText('never')).toBeTruthy();
     expect(screen.getByText('2.0 h')).toBeTruthy();
     expect(screen.getByText('2 / 1')).toBeTruthy();
+    expect(screen.getByText('3 running, 1 queued')).toBeTruthy();
+    expect(screen.getByText('1 of 2 (0–4)')).toBeTruthy();
+    fireEvent.click(screen.getByText('Start now'));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/warehouses/reporting/start')).toBe(true));
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Shares' }));
+    expect(await screen.findByText('partner-a')).toBeTruthy();
+    fireEvent.click(screen.getByText('Revoke'));
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/shares/sh1/revoke')).toBe(true));
+    fireEvent.click(screen.getByText('New share'));
+    fireEvent.change(await screen.findByLabelText('Name'), { target: { value: 'partner-b' } });
+    fireEvent.change(screen.getByLabelText('Recipient'), { target: { value: 'Partner B' } });
+    fireEvent.change(screen.getByLabelText('Tables'), { target: { value: 'analytics.products, sales.daily' } });
+    fireEvent.click(screen.getAllByText('Create').at(-1)!);
+    await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/shares')).toBe(true));
+    expect(calls.find((c) => c.method === 'POST' && c.path === '/v1/shares')!.body).toEqual({
+        name: 'partner-b', recipient: 'Partner B', tables: ['analytics.products', 'sales.daily'], expires_days: 30,
+    });
+    expect(((await screen.findByLabelText('Connection settings')) as HTMLTextAreaElement).value).toContain('sh2:secret-once');
 });

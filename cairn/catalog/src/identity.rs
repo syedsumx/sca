@@ -56,6 +56,11 @@ pub struct Identity {
     schemas: Mutex<HashMap<String, (Instant, bool)>>,
 }
 
+/// External share recipients sign in as `share:<id>` (Cairn issues their tokens from the share's credential).
+pub fn is_share(user: &str) -> bool {
+    user.starts_with("share:")
+}
+
 fn b64(s: &str) -> Result<Vec<u8>, String> {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s.trim_end_matches('=')).map_err(|e| e.to_string())
 }
@@ -142,7 +147,7 @@ impl Identity {
         claims["sub"].as_str().filter(|s| !s.is_empty()).map(str::to_string).ok_or_else(|| "the token names no user".into())
     }
 
-    async fn ask(&self, user: &str, tables: &[(Vec<String>, String)]) -> Result<(bool, Vec<Decision>), String> {
+    async fn ask(&self, user: &str, tables: &[(Vec<String>, String)]) -> Result<(bool, Vec<Decision>, Vec<String>), String> {
         let body = json!({"user": user, "tables": tables.iter().map(|(ns, n)| json!({"namespace": ns, "name": n})).collect::<Vec<_>>()});
         let r = self
             .http
@@ -162,16 +167,28 @@ impl Identity {
         struct Answer {
             schemas: bool,
             tables: Vec<Decision>,
+            /// For an external share: the only namespaces its recipient may see.
+            #[serde(default)]
+            namespaces: Vec<String>,
         }
         let a: Answer = serde_json::from_slice(&bytes).map_err(|e| format!("Cairn's answer: {e}"))?;
         if a.tables.len() != tables.len() {
             return Err("Cairn's answer does not match the question".into());
         }
-        Ok((a.schemas, a.tables))
+        Ok((a.schemas, a.tables, a.namespaces))
+    }
+
+    /// An external share's recipient: the namespaces it may see now (none once the share has ended).
+    /// Never cached, so revoking a share stops the next request.
+    pub async fn share_scope(&self, user: &str) -> Result<Vec<String>, String> {
+        Ok(self.ask(user, &[]).await?.2)
     }
 
     /// What `user` may do with each table (cached briefly).
     pub async fn decide(&self, user: &str, tables: &[(Vec<String>, String)]) -> Result<Vec<Decision>, String> {
+        if is_share(user) {
+            return Ok(self.ask(user, tables).await?.1);
+        }
         let mut out: Vec<Option<Decision>> = vec![None; tables.len()];
         let mut missing = vec![];
         {
@@ -185,7 +202,7 @@ impl Identity {
         }
         if !missing.is_empty() {
             let ask: Vec<(Vec<String>, String)> = missing.iter().map(|i| tables[*i].clone()).collect();
-            let (schemas, got) = self.ask(user, &ask).await?;
+            let (schemas, got, _) = self.ask(user, &ask).await?;
             self.schemas.lock().unwrap().insert(user.to_string(), (Instant::now(), schemas));
             let mut cache = self.decisions.lock().unwrap();
             if cache.len() > 50_000 {
@@ -206,7 +223,7 @@ impl Identity {
                 return Ok(*ok);
             }
         }
-        let (schemas, _) = self.ask(user, &[]).await?;
+        let (schemas, _, _) = self.ask(user, &[]).await?;
         self.schemas.lock().unwrap().insert(user.to_string(), (Instant::now(), schemas));
         Ok(schemas)
     }
