@@ -115,12 +115,18 @@ step "isolation"
 pw=$(kubectl -n cairn-ci-acme get secret cairn-core-secrets -o jsonpath='{.data.db-password}' | base64 -d)
 probe() {   # namespace labels name command...: a short-lived pod; its exit status
     local ns=$1 labels=$2 name=$3 phase=""; shift 3
-    kubectl -n "$ns" run "$name" --restart=Never --image=postgres:16-alpine --labels="$labels" \
-        --env="PGPASSWORD=$pw" --overrides="{\"spec\":{\"containers\":[{\"name\":\"$name\",\"resources\":
-            {\"requests\":{\"cpu\":\"50m\",\"memory\":\"64Mi\"},\"limits\":{\"memory\":\"128Mi\"}}}]}}" \
-        --command -- sh -c "$*" >/dev/null
+    local label_json; label_json=$(tr ',' '\n' <<<"$labels" | sed 's/^\(.*\)=\(.*\)$/"\1": "\2"/' | paste -sd, -)
+    jq -n --arg name "$name" --arg pw "$pw" --arg cmd "$*" --argjson labels "{$label_json}" '{
+        apiVersion: "v1", kind: "Pod",
+        metadata: { name: $name, labels: $labels },
+        spec: { restartPolicy: "Never", containers: [{
+            name: "probe", image: "postgres:16-alpine", command: ["sh", "-c", $cmd],
+            env: [{ name: "PGPASSWORD", value: $pw }],
+            resources: { requests: { cpu: "50m", memory: "64Mi" }, limits: { memory: "128Mi" } },
+            securityContext: { allowPrivilegeEscalation: false } }] } }' |
+        kubectl -n "$ns" apply -f - >/dev/null
     for _ in $(seq 60); do
-        phase=$(kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.phase}')
+        phase=$(kubectl -n "$ns" get pod "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)
         case "$phase" in Succeeded|Failed) break ;; esac
         sleep 2
     done
