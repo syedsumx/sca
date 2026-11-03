@@ -1490,6 +1490,17 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
 - **Create** with `POST /v1/pipes` (`MANAGE_SYSTEM_OPERATIONS`). List, delete, and see each file's outcome (`GET /v1/pipes/{id}/files`). Changes are audited.
 - **As files arrive.** Point a store event target (a webhook) at `POST /v1/pipes/events`, with the secret in `CAIRN_PIPES_WEBHOOK_SECRET`. Then add the bucket's `s3:ObjectCreated:*` rule for the prefix. Cairn takes only bodies the store signed with that secret (`X-Cairn-Signature`); anything else gets 401.
 - **Sweep.** The scheduler's leader also lists each prefix, and `POST /v1/pipes/{id}/sweep` does it now. This loads anything no event announced.
+- **Files as data (`format: files`).** The table is a directory of the prefix, kept as files come and go: one row per object. Query it in SQL, or point search and AI at it.
+  - **Columns.** `key`, `path` (`s3://…`), `size`, `modified_ms`, `content_type`, `sha256`, plus the document's `text`, `pages` and `extract_error`.
+  - **Text** is extracted from:
+    - plain text, Markdown, CSV, JSON, XML, YAML and logs;
+    - HTML (the visible text, without scripts or styles);
+    - PDF (each page's text layer, with the `documents` extra; scanned pages without a text layer give nothing);
+    - Word `.docx` and PowerPoint `.pptx`.
+
+    Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it.
+  - **Changes.** A changed object replaces its row in one commit. A deleted object's row goes when the bucket's `s3:ObjectRemoved:*` event arrives, or at the next sweep.
+  - **Tested** in `tests/test_pipes_e2e.py`, with real stores and events: text, HTML, PDF, Word and binary files, a change and a deletion by event, and a deletion found by the sweep.
 - **Once each.** A file (key, size, modification time) is loaded once. It is recorded with its outcome. A file that fails, such as one with columns the table lacks, is recorded as an error; the next file still loads. A failed file is retried when it changes. Markers such as `_SUCCESS` are skipped.
 - **Downstream.** Loaded tables are recorded as changed, so data-aware schedules (Airflow, dbt) see the new data.
 - **Settings.** `CAIRN_PIPES_STORE` holds `{"endpoint", "access_key", "secret_key", "region"}`; give it a key that can only read the pipes' prefixes. `CAIRN_PIPES_CATALOG` holds the pyiceberg REST catalog properties: `uri`, `token`, and the warehouse's `s3.*` settings. Each is JSON, or a path to a JSON file.

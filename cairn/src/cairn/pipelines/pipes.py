@@ -1,8 +1,13 @@
 """Pipes: files that land in a store prefix are loaded into a lakehouse table, once each.
 
 A pipe names a bucket and prefix in Cairn Store, a format (``csv``, ``json`` lines or ``parquet``) and the
-Iceberg table it appends to (``namespace.table``, created from the first file when ``create_table``). Files
-are loaded:
+Iceberg table it appends to (``namespace.table``, created from the first file when ``create_table``).
+
+With ``files``, the table is a directory of the prefix instead: one row per object (``key``, ``path``,
+``size``, ``modified_ms``, ``content_type``, ``sha256``), with the text of documents (``text``, ``pages``,
+``extract_error``: text, Markdown, CSV, JSON, HTML, PDF, Word, PowerPoint; see ``documents``). A changed
+object replaces its row; with ``s3:ObjectRemoved:*`` events, a deleted one removes it. Files over
+``CAIRN_PIPES_MAX_DOCUMENT_BYTES`` (50 MB) are listed without their text. Files are loaded:
 
 * as soon as the store says one arrived: point a store event target (a webhook) at
   ``POST /v1/pipes/events`` with the shared secret (``CAIRN_PIPES_WEBHOOK_SECRET``; the store signs each
@@ -64,7 +69,7 @@ pipe_files = Table(
     Column("loaded_ms", BigInteger, nullable=False),
 )
 
-FORMATS = ("csv", "json", "parquet")
+FORMATS = ("csv", "json", "parquet", "files")
 TARGET = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
@@ -210,11 +215,44 @@ class Pipes:
         return fs.S3FileSystem(access_key=s.get("access_key"), secret_key=s.get("secret_key"), region=s.get("region", "us-east-1"),
                                endpoint_override=endpoint.split("://", 1)[-1], scheme=scheme)
 
+    def _file_row(self, path: str):
+        """A files pipe's row for one object: what it is, and what a document says."""
+        import mimetypes
+
+        import pyarrow as pa
+        from pyarrow import fs as pafs
+
+        from cairn.pipelines.documents import extract
+
+        fs = self._fs()
+        info = fs.get_file_info(path)
+        if info.type != pafs.FileType.File:
+            raise PipeError(f"{path} is not a file", 404)
+        limit = int(os.environ.get("CAIRN_PIPES_MAX_DOCUMENT_BYTES", str(50 * 1024 * 1024)))
+        digest, data = hashlib.sha256(), bytearray()
+        with fs.open_input_stream(path) as f:
+            while chunk := f.read(1 << 20):
+                digest.update(chunk)
+                if len(data) <= limit:
+                    data.extend(chunk)
+        text, pages, error = (None, None, f"over {limit} bytes: not read for text") if info.size > limit \
+            else extract(path, bytes(data))
+        key = path.split("/", 1)[1]
+        row = {"key": key, "path": f"s3://{path}", "size": int(info.size), "modified_ms": int(info.mtime_ns or 0) // 1_000_000,
+               "content_type": mimetypes.guess_type(key)[0] or "application/octet-stream", "sha256": digest.hexdigest(),
+               "text": text, "pages": pages, "extract_error": error}
+        schema = pa.schema([("key", pa.string()), ("path", pa.string()), ("size", pa.int64()), ("modified_ms", pa.int64()),
+                            ("content_type", pa.string()), ("sha256", pa.string()), ("text", pa.large_string()),
+                            ("pages", pa.int32()), ("extract_error", pa.string())])
+        return pa.Table.from_pylist([row], schema=schema)
+
     def _read(self, fmt: str, path: str):
         import pyarrow.csv as pacsv
         import pyarrow.json as pajson
         import pyarrow.parquet as pq
 
+        if fmt == "files":
+            return self._file_row(path)
         fs = self._fs()
         if fmt == "parquet":
             return pq.read_table(path, filesystem=fs)
@@ -228,8 +266,30 @@ class Pipes:
 
     def _append(self, pipe: dict, data) -> int:
         table = open_table(self._catalog(), pipe["target"], data.schema, pipe["create_table"])
-        table.append(fit(table, data, pipe["target"]))
+        if pipe["format"] == "files":
+            from pyiceberg.expressions import EqualTo
+
+            # One row per object: its new version replaces the old one, in one commit.
+            table.overwrite(fit(table, data, pipe["target"]), overwrite_filter=EqualTo("key", data.column("key")[0].as_py()))
+        else:
+            table.append(fit(table, data, pipe["target"]))
         return len(data)
+
+    def forget(self, pipe: dict, key: str) -> bool:
+        """A files pipe: the row of an object that was deleted goes too."""
+        from pyiceberg.exceptions import NoSuchTableError
+        from pyiceberg.expressions import EqualTo
+
+        try:
+            table = self._catalog().load_table(tuple(pipe["target"].split(".")))
+        except NoSuchTableError:
+            return False
+        table.delete(EqualTo("key", key))
+        with self.engine.begin() as conn:
+            conn.execute(delete(pipe_files).where(and_(pipe_files.c.pipe_id == pipe["id"], pipe_files.c.key == key)))
+        if self.changes is not None:
+            self.changes.record([self.urn(*pipe["target"].split("."))], "pipe", f"pipe:{pipe['name']}")
+        return True
 
     def load(self, pipe: dict, key: str, version: str) -> Optional[dict]:
         """Loads one file into the pipe's table, once per version; returns its record (None: already done)."""
@@ -264,6 +324,14 @@ class Pipes:
         base = f"{pipe['bucket']}/{pipe['prefix']}".rstrip("/")
         infos = self._fs().get_file_info(pafs.FileSelector(base, recursive=True, allow_not_found=True))
         out = []
+        if pipe["format"] == "files":
+            # Objects that are gone (an event missed): their rows go too.
+            present = {i.path.split("/", 1)[1] for i in infos if i.type == pafs.FileType.File}
+            with self.engine.connect() as conn:
+                known = {r.key for r in conn.execute(select(pipe_files.c.key).where(pipe_files.c.pipe_id == pipe["id"]))}
+            for key in sorted(known - present):
+                self.forget(pipe, key)
+                out.append({"pipe_id": pipe["id"], "key": key, "status": "removed"})
         for i in sorted((i for i in infos if i.type == pafs.FileType.File), key=lambda i: i.path):
             key = i.path.split("/", 1)[1]
             if key.endswith("/") or os.path.basename(key).startswith((".", "_")):
@@ -296,13 +364,20 @@ class Pipes:
         loaded = []
         defs = [p for p in self.list() if p["enabled"]]
         for rec in (doc or {}).get("Records") or []:
-            if not str(rec.get("eventName", "")).startswith("ObjectCreated"):
-                continue
+            event = str(rec.get("eventName", ""))
             s3 = rec.get("s3") or {}
             bucket = (s3.get("bucket") or {}).get("name", "")
             from urllib.parse import unquote_plus
 
             key = unquote_plus((s3.get("object") or {}).get("key", ""))
+            if event.startswith("ObjectRemoved"):
+                for p in defs:
+                    if p["format"] == "files" and p["bucket"] == bucket and key.startswith(p["prefix"]):
+                        self.forget(p, key)
+                        loaded.append({"pipe_id": p["id"], "key": key, "status": "removed"})
+                continue
+            if not event.startswith("ObjectCreated"):
+                continue
             for p in defs:
                 if p["bucket"] == bucket and key.startswith(p["prefix"]) and not os.path.basename(key).startswith((".", "_")):
                     from pyarrow import fs as pafs

@@ -125,3 +125,90 @@ def test_the_sweep_loads_what_no_event_announced(world):
     done = p.sweep(pipe["id"])
     assert [(f["key"], f["status"], f["rows"]) for f in done] == [("late/a.json", "ok", 2)]
     assert rows(p, "raw.late") == 2 and p.sweep(pipe["id"]) == []
+
+
+def _pdf(text: str) -> bytes:
+    """A one-page PDF with a text layer (written by hand: offsets and all)."""
+    stream = f"BT /F1 24 Tf 72 720 Td ({text}) Tj ET".encode()
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>",
+            b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    out, offsets = bytearray(b"%PDF-1.4\n"), []
+    for i, o in enumerate(objs, 1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % off for off in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
+def _docx(*paragraphs: str) -> bytes:
+    import io
+    import zipfile
+
+    body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>')
+        z.writestr("word/document.xml", '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/'
+                   f'wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>')
+    return buf.getvalue()
+
+
+def test_files_pipes_keep_a_directory_table_with_the_text_of_documents(world):
+    import hashlib
+
+    p, s3 = world["pipes"], world["s3"]
+    s3.put_bucket_notification_configuration(Bucket="landing", NotificationConfiguration={"QueueConfigurations": [
+        {"Id": "pipes", "QueueArn": "arn:cairn:store:::cairn-pipes", "Events": ["s3:ObjectCreated:*"],
+         "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "orders/"}]}}},
+        {"Id": "docs", "QueueArn": "arn:cairn:store:::cairn-pipes", "Events": ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"],
+         "Filter": {"Key": {"FilterRules": [{"Name": "prefix", "Value": "docs/"}]}}}]})
+    p.create({"name": "docs", "bucket": "landing", "prefix": "docs/", "format": "files", "target": "raw.docs",
+              "create_table": True}, "urn:li:corpuser:admin")
+    files = {"docs/notes.txt": b"Quarterly notes: revenue up.", "docs/page.html": b"<html><head><style>x{}</style>"
+             b"<script>var x=1</script></head><body><h1>Refund policy</h1><p>Within 30 days.</p></body></html>",
+             "docs/contract.pdf": _pdf("Master services agreement"), "docs/memo.docx": _docx("Board memo", "Approve the budget"),
+             "docs/blob.bin": b"\x00\x01\x02"}
+    for k, v in files.items():
+        s3.put_object(Bucket="landing", Key=k, Body=v)
+
+    def table():
+        from pyiceberg.exceptions import NoSuchTableError
+
+        try:
+            t = p._catalog().load_table(("raw", "docs")).scan().to_arrow().to_pylist()
+        except NoSuchTableError:
+            return {}
+        return {r["key"]: r for r in t}
+    pid = next(x["id"] for x in p.list() if x["name"] == "docs")
+    assert wait_for(lambda: len(table()) == 5), (sorted(table()), p.files(pid))
+    t = table()
+    assert t["docs/notes.txt"]["text"] == "Quarterly notes: revenue up." and t["docs/notes.txt"]["content_type"] == "text/plain"
+    assert "Refund policy" in t["docs/page.html"]["text"] and "var x" not in t["docs/page.html"]["text"]
+    assert "Master services agreement" in t["docs/contract.pdf"]["text"] and t["docs/contract.pdf"]["pages"] == 1
+    assert t["docs/memo.docx"]["text"] == "Board memo\nApprove the budget"
+    assert t["docs/blob.bin"]["text"] is None and t["docs/blob.bin"]["size"] == 3
+    assert t["docs/notes.txt"]["sha256"] == hashlib.sha256(files["docs/notes.txt"]).hexdigest()
+    assert t["docs/contract.pdf"]["path"] == "s3://landing/docs/contract.pdf"
+    # A changed object replaces its row; a deleted one goes.
+    s3.put_object(Bucket="landing", Key="docs/notes.txt", Body=b"Quarterly notes: revenue up 12%.")
+    assert wait_for(lambda: (table().get("docs/notes.txt") or {}).get("text") == "Quarterly notes: revenue up 12%.")
+    assert len(table()) == 5
+    s3.delete_object(Bucket="landing", Key="docs/blob.bin")
+    assert wait_for(lambda: "docs/blob.bin" not in table()) and len(table()) == 4
+
+
+def test_the_sweep_also_forgets_objects_that_are_gone(world):
+    p, s3 = world["pipes"], world["s3"]
+    pipe = p.create({"name": "archive", "bucket": "landing", "prefix": "archive/", "format": "files", "target": "raw.archive",
+                     "create_table": True}, "urn:li:corpuser:admin")
+    s3.put_object(Bucket="landing", Key="archive/a.md", Body=b"# Title\nbody")
+    assert [f["status"] for f in p.sweep(pipe["id"])] == ["ok"]
+    assert p._catalog().load_table(("raw", "archive")).scan().to_arrow().to_pylist()[0]["text"] == "# Title\nbody"
+    s3.delete_object(Bucket="landing", Key="archive/a.md")                   # no event rule for archive/
+    assert [(f["key"], f["status"]) for f in p.sweep(pipe["id"])] == [("archive/a.md", "removed")]
+    assert p._catalog().load_table(("raw", "archive")).scan().to_arrow().num_rows == 0
