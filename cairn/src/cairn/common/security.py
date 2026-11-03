@@ -48,6 +48,9 @@ class AuthenticationError(Exception):
     pass
 
 
+RESERVED_PREFIXES = ("cleanroom-",)
+
+
 class IdentityResolver:
     def __init__(
         self,
@@ -78,6 +81,14 @@ class IdentityResolver:
         self.notebook_lookup: Optional[Callable[[str], Optional[str]]] = None   # JupyterHub kernels' tokens
 
     def resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
+        p = self._resolve(headers, cookies)
+        # Names Cairn keeps for its own identities (a clean room's queries run as cleanroom-<room>): nobody
+        # signs in as one, whatever their identity provider calls them.
+        if p.urn.removeprefix("urn:li:corpuser:").startswith(RESERVED_PREFIXES):
+            raise AuthenticationError("that user name is reserved by Cairn")
+        return p
+
+    def _resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
         auth = headers.get("authorization") or headers.get("Authorization") or ""
         if auth.lower().startswith("bearer "):
             token = auth[7:].strip()

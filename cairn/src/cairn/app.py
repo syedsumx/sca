@@ -243,6 +243,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.vectors import build_vectors_router
 
         app.include_router(build_vectors_router(services.vectors, cp, authz))
+    if getattr(services, "clean_rooms", None) is not None:
+        from cairn.dataaccess.cleanrooms import build_clean_rooms_router
+
+        app.include_router(build_clean_rooms_router(services.clean_rooms, cp))
     if getattr(services, "data_apps", None) is not None:
         from cairn.dataaccess.dataapps import build_apps_router
 

@@ -118,6 +118,7 @@ class Services:
     git_folders: Optional[Any] = None
     procedures: Optional[Any] = None
     data_apps: Optional[Any] = None
+    clean_rooms: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -799,6 +800,28 @@ def _build_active_metadata(s: Services) -> None:
             return columns, rows
         s.procedures = Procedures(s.engine, run_procedure, lambda actor, urn: s.authorize(
             Principal(actor, "token"), "EXECUTE_PROCEDURE", urn, raise_on_deny=False), s.audit)
+        # Clean rooms: parties join tables in aggregate (k-anonymous), through the room's own Trino identity.
+        if getattr(s, "trino_access", None) is not None:
+            from cairn.dataaccess.cleanrooms import CleanRooms
+
+            def run_room(actor: str, sql: str):
+                conn = os.environ.get("CAIRN_CLEANROOM_CONNECTION", "lakehouse")
+                definition = s.data_access.registry.definitions().get(conn)
+                if definition is None:
+                    raise WorkspaceError(f"unknown connection {conn!r}", 404)
+                columns, rows, _ = s.data_access.run_on_trino(definition, actor, sql, 10_000)
+                return columns, rows
+
+            def groups_of(urn: str) -> list[str]:
+                return list(s.attributes.subject(urn).get("groups", [])) if s.attributes is not None else []
+
+            def may_read_table(actor: str, table: str) -> bool:
+                cat, schema, name = table.split(".", 2)
+                return s.trino_access.allowed(actor, groups_of(actor), "VIEW_DATASET_PROFILE",
+                                              s.trino_access.urn(cat, schema, name))
+            s.clean_rooms = CleanRooms(s.engine, run_room, lambda actor, party: party in groups_of(actor), may_read_table,
+                                       s.audit, os.environ.get("CAIRN_CLEANROOM_CATALOG", "lakehouse"))
+            s.trino_access.cleanroom_tables = s.clean_rooms.tables_of
         # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
         from cairn.sqlworkspace.gitfolders import GitFolders
 

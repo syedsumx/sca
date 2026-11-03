@@ -204,6 +204,8 @@ class TrinoAccess:
         self.decide = decide
         self.ai_catalogs = {"llm"} if ai_catalogs is None else set(ai_catalogs)
         self.routine_catalogs = {"routines"} if routine_catalogs is None else set(routine_catalogs)
+        # Clean rooms: the room's identity (cleanroom-<room>) reads its contributed tables and nothing else.
+        self.cleanroom_tables: Optional[Callable[[str], set[str]]] = None
         # ai_admit(actor): budgets and daily caps for AI functions (cairn.ai.sql_gateway); None: none.
         self.ai_admit: Optional[Callable[[str], bool]] = None
         self.plan_for = plan_for
@@ -272,12 +274,30 @@ class TrinoAccess:
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
+    def _room_tables(self, user: str) -> Optional[set[str]]:
+        if self.cleanroom_tables is None or not user.startswith("cleanroom-"):
+            return None
+        return self.cleanroom_tables(user.removeprefix("cleanroom-"))
+
+    @staticmethod
+    def _tkey(t: dict) -> str:
+        return ".".join(str(t.get(k) or "") for k in ("catalogName", "schemaName", "tableName")).lower()
+
     def allow(self, inp: dict, warehouse: Optional[str] = None) -> bool:
         actor, groups = self.who(inp.get("context"))
         action = inp.get("action") or {}
         op = action.get("operation", "")
         res = action.get("resource") or {}
         user = actor.removeprefix("urn:li:corpuser:")
+        room = self._room_tables(user)
+        if room is not None:                          # a clean room: read its tables, and nothing else
+            if op in ("ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables"):
+                return True
+            if op == "ExecuteFunction":
+                f = res.get("function") or {}
+                return str(f.get("catalogName") or "") not in self.ai_catalogs | self.routine_catalogs
+            t = res.get("table") or {}
+            return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and self._tkey(t) in room
         if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
             return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if op in OPEN_OPS:
@@ -328,6 +348,16 @@ class TrinoAccess:
         op = action.get("operation", "")
         items = action.get("filterResources") or []
         user = actor.removeprefix("urn:li:corpuser:")
+        room = self._room_tables(user)
+        if room is not None:
+            if op in ("FilterCatalogs", "FilterSchemas"):
+                return list(range(len(items)))
+            if op == "FilterTables":
+                return [i for i, r in enumerate(items) if self._tkey(r.get("table") or {}) in room]
+            if op == "FilterColumns":
+                t = (items[0] if items else {}).get("table") or {}
+                return list(range(len(t.get("columns") or []))) if self._tkey(t) in room else []
+            return [i for i, r in enumerate(items) if self.allow({**inp, "action": {"operation": op, "resource": r}})]
         if op in ("FilterCatalogs", "FilterSchemas", "FilterFunctions"):
             return list(range(len(items)))
         if user == CRAWLER and op in ("FilterTables", "FilterColumns"):
@@ -348,6 +378,8 @@ class TrinoAccess:
 
     def row_filters(self, inp: dict) -> list[dict]:
         actor, groups = self.who(inp.get("context"))
+        if self._room_tables(actor.removeprefix("urn:li:corpuser:")) is not None:
+            return []                                 # parties agreed to the room; only aggregates leave it
         t = ((inp.get("action") or {}).get("resource") or {}).get("table") or {}
         if not t:
             return []
@@ -369,6 +401,8 @@ class TrinoAccess:
         return out
 
     def column_mask(self, inp: dict) -> Optional[dict]:
+        if self._room_tables(self.who(inp.get("context"))[0].removeprefix("urn:li:corpuser:")) is not None:
+            return None
         actor, _ = self.who(inp.get("context"))
         col = ((inp.get("action") or {}).get("resource") or {}).get("column") or {}
         if not col:

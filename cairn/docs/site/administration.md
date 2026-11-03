@@ -1221,6 +1221,15 @@ A multi-table transaction changes every table or none.
 - **Who sees shares.** People see the shares they made. Operators (MANAGE_SYSTEM_OPERATIONS) see and revoke them all.
 - **Audit.** Creating and revoking a share, and every token a recipient gets, are audited (category `shares`).
 
+**Data clean rooms.** Two or more parties join their tables in aggregate, and none of them sees the others' rows (`/v1/clean-rooms`).
+
+- **A room** names its `parties` (Cairn users or groups) and `min_group` (k, default 10: the smallest group a result may describe). Each party brings tables it may read itself (`POST /v1/clean-rooms/<room>/tables`).
+- **Templates.** Any party proposes a query (`PUT .../templates/<name>`, SQL over the room's tables with `:params`), and it runs only once every party has approved its current text. Changing the text clears the approvals. Cairn checks each one when it is proposed: it reads only the room's tables, it is an aggregate (no rows, no `SELECT *`), and its parameters are declared.
+- **Small groups never leave.** At run time (`POST .../templates/<name>/run`), arguments are bound as typed literals, and Cairn adds `HAVING count(*) >= k` itself, whatever the template says.
+- **The room's own identity.** Queries run on Trino as `cleanroom-<room>`. Cairn's access control lets it read the contributed tables, without masks or row filters (the parties agreed to bring them), and nothing else. Nobody can sign in under that name, whatever their identity provider calls them. Proposals, approvals and runs are audited with who asked.
+- **Tested** on Trino (`tests/test_trino_e2e.py`). A retailer and an advertiser joined buyers to clicks. The template ran only after both approved, and the one-person APAC group was never released. Row templates, `SELECT *`, another table and a non-party were refused, and so was a changed template until it was approved again. Neither party could read the other's table, and the room's identity was refused a table outside the room.
+
+
 The recipient connects like this:
 
 ```python

@@ -1098,3 +1098,72 @@ def test_stored_functions_and_procedures(trino, cairn):
     assert trino("SELECT count(*) AS n FROM lake.ops.adjustments WHERE region = 'US'") == [{"n": 0}]
     ev = [e for e in s.audit.entries("sql", limit=50) if e["action"] == "procedure.called"]
     assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")
+
+
+def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
+    """Two parties join their tables in a clean room on real Trino: only templates both approved run, only
+    aggregates over at least k people leave, the room reads its tables and nothing else, and neither party
+    reads the other's table."""
+    from cairn.common.security import AuthenticationError
+    from cairn.dataaccess.cleanrooms import RoomError
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.retail", "CREATE SCHEMA IF NOT EXISTS lake.ads",
+                 "CREATE TABLE lake.retail.buyers (email varchar, region varchar, spend double)",
+                 "INSERT INTO lake.retail.buyers VALUES ('a@x', 'EU', 10), ('b@x', 'EU', 20), ('c@x', 'EU', 30), "
+                 "('d@x', 'US', 40), ('e@x', 'US', 50), ('f@x', 'APAC', 60)",
+                 "CREATE TABLE lake.ads.clicks (email varchar, campaign varchar)",
+                 "INSERT INTO lake.ads.clicks VALUES ('a@x', 'spring'), ('b@x', 'spring'), ('c@x', 'spring'), "
+                 "('d@x', 'spring'), ('e@x', 'spring'), ('f@x', 'spring'), ('z@x', 'spring')"]:
+        trino(stmt)
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    reads = lambda pid, pattern, user: Policy(  # noqa: E731
+        id=pid, effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=[pattern]),
+        condition={"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{user}"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, reads("ana-retail", "*retail.*", "ana"), reads("bob-ads", "*ads.*", "bob")]))
+    ana, bob, eve = "urn:li:corpuser:ana", "urn:li:corpuser:bob", "urn:li:corpuser:eve"
+    cr = s.clean_rooms
+    try:
+        cr.create(ana, {"name": "reach", "parties": [ana, bob], "min_group": 2})
+        cr.contribute(ana, "reach", "lake.retail.buyers")
+        with pytest.raises(RoomError, match="may not read"):
+            cr.contribute(bob, "reach", "lake.retail.buyers")         # only what you may read yourself
+        cr.contribute(bob, "reach", "lake.ads.clicks")
+        sql = ("SELECT b.region, c.campaign, count(*) AS people, sum(b.spend) AS spend FROM lake.retail.buyers b "
+               "JOIN lake.ads.clicks c ON b.email = c.email WHERE c.campaign = :campaign GROUP BY b.region, c.campaign")
+        cr.propose(ana, "reach", {"name": "by_region", "sql": sql, "params": [{"name": "campaign", "type": "varchar"}]})
+        with pytest.raises(RoomError, match="waits for approval by urn:li:corpuser:bob"):
+            cr.run_template(ana, "reach", "by_region", {"campaign": "spring"})
+        cr.approve(bob, "reach", "by_region")
+        out = cr.run_template(bob, "reach", "by_region", {"campaign": "spring"})
+        got = {r[0]: (r[2], r[3]) for r in out["rows"]}
+        assert got == {"EU": (3, 60.0), "US": (2, 90.0)}, out           # APAC is one person: never released
+        # Changing a template's text clears the approvals; rows, SELECT * and other tables are refused.
+        cr.propose(ana, "reach", {"name": "by_region", "sql": sql.replace("sum(b.spend)", "max(b.spend)"),
+                                  "params": [{"name": "campaign", "type": "varchar"}]})
+        with pytest.raises(RoomError, match="waits for approval"):
+            cr.run_template(ana, "reach", "by_region", {"campaign": "spring"})
+        for bad, msg in [("SELECT email FROM lake.ads.clicks", "aggregate"), ("SELECT * FROM lake.ads.clicks", "SELECT \\*"),
+                         ("SELECT count(*) FROM lake.sales.orders", "not in the room")]:
+            with pytest.raises(RoomError, match=msg):
+                cr.propose(ana, "reach", {"name": "bad", "sql": bad})
+        with pytest.raises(RoomError, match="not a party"):
+            cr.run_template(eve, "reach", "by_region", {"campaign": "spring"})
+        # Neither party reads the other's table; the room's identity reads its tables and nothing else.
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT count(*) AS n FROM lake.ads.clicks", user="ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino("SELECT count(*) AS n FROM lake.sales.orders", user="cleanroom-reach")
+        assert trino("SELECT count(*) AS n FROM lake.ads.clicks", user="cleanroom-reach") == [{"n": 7}]
+        # Nobody signs in as a room, whatever their identity provider calls them.
+        s.identity.dev_trust_actor_header = True
+        with pytest.raises(AuthenticationError, match="reserved"):
+            s.identity.resolve({"x-cairn-actor": "urn:li:corpuser:cleanroom-reach"}, {})
+        assert any(e["action"] == "clean_room.run" for e in s.audit.entries("sharing", limit=50))
+    finally:
+        s.pdp.set_bundle(b)
