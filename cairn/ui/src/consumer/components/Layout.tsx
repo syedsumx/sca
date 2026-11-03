@@ -48,6 +48,9 @@ export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: st
     { to: '/discover', label: 'nav.discover' },
     { to: '/search', label: 'nav.search' },
     { to: '/sql', label: 'nav.sql' },
+    { to: '/sql/workflows', label: 'nav.workflows' },
+    { to: '/sql/git', label: 'nav.gitFolders' },
+    { to: '/queries', label: 'nav.queries' },
     { to: '/dashboards', label: 'nav.dashboards' },
     { to: '/marketplace', label: 'nav.marketplace' },
     { to: '/requests', label: 'nav.requests', badge: true },
@@ -98,7 +101,7 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                 <strong style={{ marginRight: 16, color: tokens.color.primary }}>{t('nav.workspace')}</strong>
                 <nav aria-label={t('nav.sections')} style={{ display: 'flex', gap: 4, flex: 1 }}>
                     {nav.filter((n) => !('feature' in n && n.feature) || session.feature(n.feature)).map((n) => (
-                        <Tab key={n.to} to={n.to} onClick={onTab(n.to)}>
+                        <Tab key={n.to} to={n.to} exact={n.to === '/sql'} onClick={onTab(n.to)}>
                             {n.badge ? (
                                 <Badge count={unread} size="small" offset={[8, -2]}>
                                     {t(n.label)}

@@ -1559,3 +1559,121 @@ export interface WarehouseState {
     workers?: { wanted: number; ready: number; min: number; max: number; scale_ups: number; scale_downs: number };
     error?: string;
 }
+
+/** A Trino query from its events (GET /v1/queries): its author's own, or everyone's for operators. */
+export interface QueryRecord {
+    query_id: string;
+    user: string;
+    source: string;
+    state: string;
+    error_code: string | null;
+    error: string | null;
+    create_ms: number;
+    end_ms: number | null;
+    wall_ms: number;
+    cpu_ms: number;
+    queued_ms: number;
+    input_bytes: number;
+    input_rows: number;
+    output_rows: number;
+    peak_memory_bytes: number;
+    splits: number;
+    sql: string;
+    tables: string[];
+}
+
+/** One query's profile with tuning hints (GET /v1/queries/{id}). */
+export interface QueryProfile extends QueryRecord {
+    hints: { kind: string; text: string }[];
+}
+
+/** A step of a SQL workflow: refresh a derived table, check a measure, or run a report. */
+export interface SqlWorkflowStep {
+    name: string;
+    type: 'derived' | 'check' | 'query';
+    after: string[];
+    retries: number;
+    table?: string;
+    full?: boolean;
+    query?: string;
+    sql?: string;
+    connection?: string;
+    measure?: string;
+    op?: string;
+    value?: number;
+}
+
+/** Scheduled SQL: steps that depend on each other, run as the owner (GET /v1/sql-workflows). */
+export interface SqlWorkflow {
+    id: string;
+    owner: string;
+    name: string;
+    steps: SqlWorkflowStep[];
+    cron: string | null;
+    recipients: string[];
+    notify: 'failure' | 'always';
+    enabled: boolean;
+    next_run_ms: number | null;
+    last_status: string | null;
+    updated_ms: number;
+}
+
+/** One step's outcome in a workflow run. */
+export interface SqlWorkflowStepResult {
+    name: string;
+    type?: string;
+    status: 'ok' | 'error' | 'skipped';
+    error?: string | null;
+    attempts?: number;
+    ms?: number;
+    rows?: number | null;
+    detail?: string;
+    columns?: string[];
+    preview?: unknown[][];
+}
+
+/** A run of a workflow (GET /v1/sql-workflows/{id}/runs). */
+export interface SqlWorkflowRun {
+    id: string;
+    trigger: string;
+    status: string;
+    started_ms: number;
+    finished_ms: number | null;
+    steps: SqlWorkflowStepResult[];
+}
+
+/** A path in a git repository linked to its owner's saved queries and notebooks (GET /v1/git-folders). */
+export interface GitFolder {
+    id: string;
+    owner: string;
+    name: string;
+    repo: string | null;
+    url: string | null;
+    branch: string;
+    path: string;
+    every_minutes: number | null;
+    head: string | null;
+    synced_ms: number | null;
+    error: string | null;
+    created_ms: number;
+}
+
+/** What a pull changed (POST /v1/git-folders/{id}/pull). */
+export interface GitPullResult {
+    head: string;
+    created: string[];
+    updated: string[];
+    deleted: string[];
+    notebooks: string[];
+    conflicts: { file: string; query: string; why: string }[];
+    errors: { file: string; error: string }[];
+}
+
+/** What a push proposed (POST /v1/git-folders/{id}/push). */
+export interface GitPushResult {
+    changed: number;
+    branch: string | null;
+    commit?: string;
+    /** The pull request's address, for a configured repository. */
+    pull_request: string | null;
+}

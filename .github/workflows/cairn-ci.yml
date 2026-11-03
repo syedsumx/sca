@@ -317,6 +317,12 @@ jobs:
           CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+      - name: SQL workflows, git folders and query insight pages (the built UI in Chromium, against Cairn)
+        run: |
+          set -o pipefail
+          (cd ui && npm ci --silent && npm run build:mfe)
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sql_ops_ui_e2e.py | tee "$RUNNER_TEMP/sqlui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sqlui.log"
 
   pipelines:
     runs-on: ubuntu-latest

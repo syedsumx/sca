@@ -276,7 +276,12 @@ Every finished Trino query, on the shared coordinator and on team warehouses, is
   - it sorted a large result without `LIMIT`;
   - its memory was near the per-query limit (`CAIRN_TRINO_QUERY_MAX_MEMORY`);
   - it failed, with the failure explained: memory, access refused by Cairn's policies, or capacity.
+- **In the UI.** **Query insight** (`#/queries` in the workspace) lists the queries with their time, bytes read and rows, filtered by SQL text, user (operators), state, or the slowest first. A query's profile shows its hints, statistics, tables and SQL.
 - **Tested** with a real Trino (`tests/test_trino_e2e.py`). A person saw only their own queries, finished and refused, with times, rows and tables. An operator saw everyone's. A cross join and a refused read got their hints, and another person could not open the profile.
+- **The pages, tested in a browser** (`tests/test_sql_ops_ui_e2e.py`: the built UI in Chromium against a real Cairn API, a real database and a real git repository):
+  - a workflow made in the editor ran with a failing check; the browser showed the check's value and the skipped report, and the owner was notified;
+  - a git folder was linked and pulled, then a change made in Cairn was pushed to a new branch, never to `main`;
+  - query insight showed only the person's own queries, slowest first, with the queue, `SELECT *` and unbounded-sort hints.
 
 ## Warehouses: a Trino per team, stopped when idle
 
@@ -446,7 +451,8 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - `check`: a saved query's `rows`, or a column of its first row, compared with a value. It fails the step when the condition does not hold (a quality gate between steps).
   - `query`: a saved query, or `sql` on a `connection`, run as the owner. Its row count and first 20 rows are kept with the run and sent to the recipients (a scheduled report).
 
-  A step whose dependency failed is skipped, and `retries` (0-3) retries a failing step. Every run is kept, with each step's status, rows, error, attempts and time. The owner and `recipients` are told when a run fails, or after every run with `notify: always`. Queries go through the SQL workspace, so the owner's policies, masks and row filters apply. Several scheduler replicas claim each due run once.
+  A step whose dependency failed is skipped, and `retries` (0-3) retries a failing step. Every run is kept, with each step's status, rows, error, attempts and time. The owner and `recipients` are told when a run fails (`sql.workflow_failed`), or after every run with `notify: always` (`sql.workflow_finished`), on their notification channels. Queries go through the SQL workspace, so the owner's policies, masks and row filters apply. Several scheduler replicas claim each due run once.
+  - **In the UI.** **SQL workflows** (`#/sql/workflows` in the workspace) lists a person's workflows with their schedule, next run and last outcome. Its editor builds the steps (a table refresh, a check, a report), what each comes after and its retries; **Run now** runs one, and each run shows every step's outcome.
   - **Tested** in `tests/test_sql_workspace.py` (order, masks, a failing check skipping its dependents, notifications, the cron, checked definitions) and `tests/test_trino_e2e.py` (a derived-table refresh then a check, on real Trino).
   - **Who is told.** The owner and the alert's recipients are told when the condition starts to hold (`sql.alert_triggered`), when it stops (`sql.alert_resolved`), and once when the query fails. They hear about changes, not every check, on their notification channels.
   - **Where checks run.** The scheduler's leader runs them (`cairn scheduler`), so there is one check per alert however many replicas run. **Check now** runs one at once.
@@ -495,6 +501,7 @@ A Git folder keeps a person's saved queries and notebooks in a git repository, r
   - A query already proposed, or one git already holds as it is, is not pushed again.
   - Until the pull request is merged, pulls neither conflict with it nor delete the queries it adds. Once it is merged, the next pull has nothing to report.
 - **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
+- **In the UI.** **Git folders** (`#/sql/git` in the workspace) links a folder, pulls it (showing what came in, conflicts, and a button to take git's version) and pushes with a commit message, linking to the pull request when the host opens one.
 - **Settings.** `CAIRN_GIT_FOLDERS_DIR` holds the clones (default `$CAIRN_DATA_DIR/git-folders`). Deleting a folder removes its clone and keeps its queries as ordinary saved queries.
 - **Tested** in `tests/test_git_folders.py`, with a real git repository and a colleague's clone.
   - A pull made two queries from their headers and published a notebook; pulling again changed nothing.

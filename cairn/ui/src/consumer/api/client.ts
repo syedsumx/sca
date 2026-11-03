@@ -6,6 +6,15 @@ import type {
     StoreCluster,
     StoreClusterNode,
 } from './types';
+import type {
+    GitFolder,
+    GitPullResult,
+    GitPushResult,
+    QueryProfile,
+    QueryRecord,
+    SqlWorkflow,
+    SqlWorkflowRun,
+} from './types';
 import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
 import type {
     DerivedRun,
@@ -1038,6 +1047,59 @@ export class ConsumerClient extends CairnClient {
 
     checkSqlAlert(id: string) {
         return this.request<SqlAlert>('POST', `/sql/alerts/${enc(id)}/check`);
+    }
+
+    /** Trino queries: the caller's own, or everyone's for operators. */
+    queries(filters: { user?: string; state?: string; text?: string; slowest?: boolean; limit?: number }, opts?: RequestOptions) {
+        const query: Record<string, string> = {};
+        for (const [k, v] of Object.entries(filters)) if (v !== undefined && v !== '' && v !== false) query[k] = String(v);
+        return this.request<{ queries: QueryRecord[] }>('GET', '/v1/queries', undefined, { ...opts, query });
+    }
+
+    queryProfile(id: string, opts?: RequestOptions) {
+        return this.request<QueryProfile>('GET', `/v1/queries/${enc(id)}`, undefined, opts);
+    }
+
+    sqlWorkflows(opts?: RequestOptions) {
+        return this.request<SqlWorkflow[]>('GET', '/v1/sql-workflows', undefined, opts);
+    }
+
+    saveSqlWorkflow(body: Record<string, unknown>, id?: string) {
+        return id
+            ? this.request<SqlWorkflow>('PUT', `/v1/sql-workflows/${enc(id)}`, body)
+            : this.request<SqlWorkflow>('POST', '/v1/sql-workflows', body);
+    }
+
+    deleteSqlWorkflow(id: string) {
+        return this.request<void>('DELETE', `/v1/sql-workflows/${enc(id)}`);
+    }
+
+    runSqlWorkflow(id: string) {
+        return this.request<SqlWorkflowRun>('POST', `/v1/sql-workflows/${enc(id)}/run`);
+    }
+
+    sqlWorkflowRuns(id: string, opts?: RequestOptions) {
+        return this.request<SqlWorkflowRun[]>('GET', `/v1/sql-workflows/${enc(id)}/runs`, undefined, opts);
+    }
+
+    gitFolders(opts?: RequestOptions) {
+        return this.request<GitFolder[]>('GET', '/v1/git-folders', undefined, opts);
+    }
+
+    createGitFolder(body: Record<string, unknown>) {
+        return this.request<GitFolder>('POST', '/v1/git-folders', body);
+    }
+
+    deleteGitFolder(id: string) {
+        return this.request<void>('DELETE', `/v1/git-folders/${enc(id)}`);
+    }
+
+    pullGitFolder(id: string, force = false) {
+        return this.request<GitPullResult>('POST', `/v1/git-folders/${enc(id)}/pull`, { force });
+    }
+
+    pushGitFolder(id: string, message: string, add: string[] = []) {
+        return this.request<GitPushResult>('POST', `/v1/git-folders/${enc(id)}/push`, { message, add });
     }
 
     pipes(opts?: RequestOptions) {
