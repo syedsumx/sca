@@ -921,6 +921,19 @@ The store will not start with a field that does not apply to its kind (a `region
   - **Not covered.** Access-key secrets stay wrapped by a local keyring key, since they are needed when the store starts.
   - **Fails closed.** A keyring whose external key does not load stops the store at start-up. When Vault refuses or cannot be reached, the request fails with `KMS.DisabledException`; nothing is written in the clear.
   - **Tested** with a real Vault (`store/conformance/test_kms_vault.py`): encryption, copies, rotation, revocation and restore, crypto-shredding, a token scoped to another key, and bad keyrings.
+- **Customer-managed keys in AWS KMS** (or any service that speaks the KMS API). Use `"type": "aws-kms"`:
+
+  ```json
+  {"external": {"customer-b": {"type": "aws-kms", "region": "eu-west-1",
+     "key": "arn:aws:kms:eu-west-1:111122223333:key/1234abcd-...", "access_key": "AKIA...",
+     "secret_key_file": "/etc/cairn-store-keyring/kms-secret", "cache_seconds": 60}}}
+  ```
+
+  - **How it works.** Each data key is encrypted with KMS `Encrypt` and decrypted with `Decrypt`, signed with SigV4. The object's name is bound in twice: in the plaintext, as with Vault, and as the encryption context (`cairn-object`). KMS checks the context on every decrypt, and CloudTrail records it. `key` is the key's id, ARN or alias.
+  - **Credentials.** `access_key` with `secret_key_file` (and optionally `session_token_file`), each file read on every call. Without `access_key`, the store's environment is used (`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`). Give them only `kms:Encrypt` and `kms:Decrypt` on the one key.
+  - **Endpoint.** `addr` defaults to `https://kms.<region>.amazonaws.com`. Set it for a VPC endpoint or another KMS-compatible service.
+  - **The customer stays in control.** Disabling the key, or removing the store's grant or permission, stops reads and writes after `cache_seconds`. Scheduling the key for deletion shreds the data.
+  - **Tested** against a real KMS-compatible server (`nsmithuk/local-kms`, in `store/conformance/test_kms_aws.py`): encryption, copies, a key named by alias, a disabled and re-enabled key, a key pending deletion, a key that does not exist, and bad configurations. That server does not check signatures, so SigV4 is covered by the signer the store's other AWS clients share.
 
 Objects written before a key was set stay unencrypted. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 

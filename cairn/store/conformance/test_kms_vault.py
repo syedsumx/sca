@@ -150,7 +150,7 @@ def test_a_token_scoped_to_another_key_opens_nothing(custom_store, tmp_path, vau
 def test_a_keyring_that_does_not_load_stops_the_store(custom_store, tmp_path, vault):
     ring = tmp_path / "bad.json"
     for bad in [{"type": "vault-transit", "addr": vault.addr, "key": "k", "token_file": str(tmp_path / "missing")},
-                {"type": "aws-kms", "addr": vault.addr, "key": "k", "token": "t"},
+                {"type": "gcp-kms", "addr": vault.addr, "key": "k", "token": "t"},
                 {"type": "vault-transit", "addr": vault.addr, "key": "../sys", "token": "t"}]:
         ring.write_text(json.dumps({"external": {"x": bad}}))
         with pytest.raises(RuntimeError, match="did not start"):
