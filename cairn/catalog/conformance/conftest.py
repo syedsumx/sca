@@ -77,12 +77,24 @@ class Stack:
         self.procs = []
         self.replicas = []
 
-    def start(self):
-        store = subprocess.Popen([_bin("CAIRN_STORE_BIN", "store")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+    def _store(self):
+        return subprocess.Popen([_bin("CAIRN_STORE_BIN", "store")], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
             **os.environ, "CAIRN_STORE_ACCESS_KEY": STORE_KEY[0], "CAIRN_STORE_SECRET_KEY": STORE_KEY[1],
             "CAIRN_STORE_DATA": f"{self.tmp}/store", "CAIRN_STORE_ADDR": f"127.0.0.1:{self.store_port}",
             "CAIRN_STORE_BUCKETS": "lakehouse", "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_LOG_LEVEL": "warn",
             **self.store_env})
+
+    def restart_store(self, kill: bool = True, down: float = 0):
+        """The store killed (SIGKILL: no clean shutdown), left down ``down`` seconds, started again on its data."""
+        old = self.procs[0]
+        old.kill() if kill else old.terminate()
+        old.wait(15)
+        time.sleep(down)
+        self.procs[0] = self._store()
+        _wait(self.store_port)
+
+    def start(self):
+        store = self._store()
         self.procs.append(store)
         _wait(self.store_port)
         tokens = Path(self.tmp, "tokens.json")

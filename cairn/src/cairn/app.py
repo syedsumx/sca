@@ -119,6 +119,13 @@ def _base_app(name: str, services: Services) -> FastAPI:
             route = getattr(request.scope.get("route"), "path", "unmatched")
             _REQUESTS.labels(name, request.method, route, response.status_code).inc()
             _LATENCY.labels(name, route).observe(time.perf_counter() - started)
+        # Whatever is in front (the Compose edge, an ingress) or not: API answers are not sniffed, not
+        # cached by browsers or proxies, and send no referrer. Framing is left to the edge (embeds are framed).
+        h = response.headers
+        h.setdefault("x-content-type-options", "nosniff")
+        h.setdefault("referrer-policy", "no-referrer")
+        if not request.url.path.startswith("/embed/v1/sdk"):
+            h.setdefault("cache-control", "no-store")
         return response
 
     @app.exception_handler(Forbidden)

@@ -659,6 +659,23 @@ python tests/load/loadtest.py --api https://cairn.example.com/cairn/api --token 
 
 The command exits non-zero if a path breaks its limit. Pass `--limits your-limits.yaml` to check your own targets, and `--json out.json` to keep the measurements.
 
+**Decisions at scale**, measured in CI on the real code (`tests/test_scale_decisions.py`), with 61 policies (team grants by schema, masks, denies):
+
+| What | Measured | Held to |
+|---|---|---|
+| A cached policy decision | p50 0.011 ms, p99 0.04 ms, about 75,000 a second on one thread | p99 under 5 ms at 2,000 a second |
+| Cairn Catalog's decision for a job reading 1,000 tables (one call) | 650 ms the first time, 120 ms warm | under 2 s, and 0.5 s warm |
+
+The policy engine indexes policies by the privilege they grant, and only matching policies are evaluated, so a large policy set costs little for a privilege it does not mention. Explain mode (`/governance/v1/authorize?explain=true`) still evaluates every policy and says why each did or did not apply.
+
+**Chaos** (`catalog/conformance/test_chaos.py`, three catalog replicas on PostgreSQL, run in CI):
+
+- **A replica killed mid-commit.** One of three replicas is killed (SIGKILL) during 48 concurrent commits from six writers. The writers fail over to the other replicas. Every acknowledged commit is in the table exactly once, with one snapshot each. A client that was not told a commit's outcome checks the table before retrying.
+- **The database restarts** under the replicas. Each one serves again without being restarted.
+- **The store is killed** during writes and stays down for three seconds. Writes fail while it is down; afterwards the table reads in full, nothing acknowledged is missing, and writes resume. This holds with the store's production durability (`CAIRN_STORE_FSYNC` on). With it off, which only tests use, the same crash loses acknowledged writes, and this test caught exactly that.
+
+**Security checks in CI** (`tests/test_route_security.py`). Every API route, called without credentials and with an untrusted actor header, is refused (401), except a short list of routes that are public by design: OAuth token endpoints, webhooks that check their sender's signature, and embeds with their own tokens. Each is listed with why. A new route that answers strangers fails the build until it is protected or added to the list on purpose. No route answers a stranger with a server error. API answers carry `X-Content-Type-Options: nosniff`, `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, whatever proxy is in front. These checks are not a penetration test; an external one is still to do.
+
 ## High availability
 
 `helm/cairn/values-ha.yaml` is a profile for production clusters:
@@ -1784,3 +1801,14 @@ A newer schema is not readable by older services, so restoring is required: roll
 cairn db current     # schema revision of the Cairn database, and the latest one
 cairn db check       # non-zero exit if the schema is not at the latest revision or differs from it
 ```
+
+**The upgrade matrix** (the engines Cairn works with).
+
+- **The pins.** `deploy/versions/pins.json` records the version of each engine Cairn is tested with: Trino, Spark, its Iceberg runtime, dbt-core, dbt-trino, Airflow and pyiceberg. A test (`tests/test_version_pins.py`) checks that every file that pins one says the same version.
+- **Every week** (`.github/workflows/cairn-upgrade-matrix.yml`, Mondays, or on demand), `deploy/versions/latest.py` looks up each one's newest release on Docker Hub, PyPI and Maven Central, skipping pre-releases. For each that is newer than its pin, the matching end-to-end tests run against it: Trino's against the new Trino image, the catalog and lakehouse suites against the new pyiceberg, and the dbt, Airflow and Spark suites against images built with the new version.
+  - A green row means the bump is safe. A red row is the work to do before bumping. A skipped test counts as a failure.
+- **Bumping.** Change the pin in `pins.json` and in the files it lists, in one pull request. It merges only when the main CI passes on it.
+- **Tried here.** The resolver found Trino 484, Spark 4.2.1 and Iceberg 1.12.0 newer than their pins. Cairn's Trino suite (21 tests) was then run against Trino 484:
+  - First, Trino did not start: 484 refuses `s3.exclusive-create` (now `delta.s3.transaction-log-conditional-writes.enabled`) and renames `fs.native-s3.enabled` to `fs.s3.enabled`.
+  - With those two settings renamed, every test passed. Policies, masks, row filters, SSO, lineage, AI functions, stored functions, procedures, Delta writes from two clusters and Delta conversion all worked unchanged.
+  - The tests name each setting the way the image in use expects. The chart and Compose pin 476; bumping to 484 means renaming the two settings in `helm/cairn/templates/trino.yaml` in the same pull request.

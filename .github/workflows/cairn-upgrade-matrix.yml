@@ -1,0 +1,109 @@
+# The upgrade matrix: every week, each component Cairn pins (cairn/deploy/versions/pins.json) is tried at its
+# newest release against Cairn's end-to-end tests. A green row says the bump is safe; the bump itself is a
+# pull request, merged only when the main CI passes on it. A red row is the work to do before bumping.
+name: cairn-upgrade-matrix
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.m.outputs.matrix }}
+      any: ${{ steps.m.outputs.any }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: m
+        working-directory: cairn
+        run: |
+          python3 -I deploy/versions/latest.py | tee -a "$GITHUB_STEP_SUMMARY"
+          m=$(python3 -I deploy/versions/latest.py --matrix)
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+          echo "any=$(python3 -c 'import json,sys; print(str(bool(json.loads(sys.argv[1])["include"])).lower())' "$m")" >> "$GITHUB_OUTPUT"
+
+  try:
+    needs: resolve
+    if: needs.resolve.outputs.any == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    name: ${{ matrix.component }} ${{ matrix.pinned }} -> ${{ matrix.latest }}
+    steps:
+      - name: Free disk space
+        working-directory: /
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          docker system prune -af >/dev/null
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build the catalog and the store
+        working-directory: cairn
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - name: Try ${{ matrix.component }} ${{ matrix.latest }}
+        working-directory: cairn
+        env:
+          COMPONENT: ${{ matrix.component }}
+          LATEST: ${{ matrix.latest }}
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          set -o pipefail
+          pip install -q -e ".[server,test,trino,streams,documents,export]"
+          pip install -q requests httpx "boto3>=1.36" "psycopg[binary]>=3.1"
+          run() { pytest -q -p no:cacheprovider -o addopts="" -rs "$@" | tee -a "$RUNNER_TEMP/try.log"; }
+          # The catalog's own suite skips its PostgreSQL tests here (no database): not counted as skipped.
+          catalog() { (cd catalog/conformance && pytest -q -p no:cacheprovider "$@"); }
+          case "$COMPONENT" in
+            trino)
+              docker pull -q "trinodb/trino:$LATEST"
+              export CAIRN_TRINO_IMAGE="trinodb/trino:$LATEST"
+              run tests/test_trino_e2e.py tests/test_warehouses_e2e.py
+              catalog test_trino.py test_vending.py ;;
+            pyiceberg)
+              pip install -q "pyiceberg[pyarrow]==$LATEST"
+              catalog
+              run tests/test_vectors_e2e.py tests/test_pipes_e2e.py tests/test_shares_e2e.py tests/test_lakehouse_client_e2e.py ;;
+            dbt-core|dbt-trino)
+              args="--build-arg DBT_VERSION=$(python3 -c 'import json;print(json.load(open("deploy/versions/pins.json"))["dbt-core"]["pinned"])') --build-arg DBT_TRINO_VERSION=$(python3 -c 'import json;print(json.load(open("deploy/versions/pins.json"))["dbt-trino"]["pinned"])')"
+              [ "$COMPONENT" = dbt-core ] && args="$args --build-arg DBT_VERSION=$LATEST"
+              [ "$COMPONENT" = dbt-trino ] && args="$args --build-arg DBT_TRINO_VERSION=$LATEST"
+              docker build -q -f docker/dbt.Dockerfile $args -t cairn/dbt:try .
+              docker pull -q trinodb/trino:476
+              pip install -q "dbt-core" "dbt-trino" "duckdb>=1.1"
+              CAIRN_DBT_IMAGE=cairn/dbt:try run tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py ;;
+            airflow)
+              docker build -q -f docker/airflow.Dockerfile --build-arg "AIRFLOW_VERSION=$LATEST" -t cairn/airflow:try .
+              docker pull -q trinodb/trino:476
+              CAIRN_AIRFLOW_IMAGE=cairn/airflow:try run tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py ;;
+            spark)
+              docker build -q -f docker/spark.Dockerfile --build-arg "SPARK_IMAGE=apache/spark:$LATEST-scala2.13-java17-python3-ubuntu" -t cairn/spark:try .
+              docker pull -q trinodb/trino:476
+              CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
+            iceberg-spark)
+              docker build -q -f docker/spark.Dockerfile --build-arg "ICEBERG_VERSION=$LATEST" -t cairn/spark:try .
+              docker pull -q trinodb/trino:476
+              CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
+            *) echo "no tests for $COMPONENT"; exit 1 ;;
+          esac
+          # Skipped is not passed.
+          ! grep -q "skipped" "$RUNNER_TEMP/try.log"
+      - name: Summary
+        if: always()
+        run: echo "| ${{ matrix.component }} | ${{ matrix.pinned }} | ${{ matrix.latest }} | ${{ job.status }} |" >> "$GITHUB_STEP_SUMMARY"

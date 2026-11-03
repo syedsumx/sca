@@ -185,7 +185,10 @@ jobs:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
           CAIRN_CATALOG_TEST_DATABASE_URL: postgresql://postgres:pgpass@127.0.0.1:5432/postgres?sslmode=disable
-        run: cd conformance && pytest -q -p no:cacheprovider -rs
+        run: |
+          # The chaos tests restart this database under the replicas (the service container).
+          export CAIRN_CHAOS_PG_CONTAINER="$(docker ps --format '{{.Names}}' --filter ancestor=postgres:16-alpine | head -1)"
+          cd conformance && pytest -q -p no:cacheprovider -rs
 
   # Trino against a real Cairn API, Cairn Catalog and Cairn Store: sign-in with Cairn tokens over TLS,
   # access control, masks, row filters, lineage and the SQL editor (tests/test_trino_e2e.py), and the Helm

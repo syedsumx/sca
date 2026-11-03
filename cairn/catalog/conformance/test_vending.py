@@ -19,7 +19,7 @@ from botocore.exceptions import ClientError
 from conftest import ADMIN_TOKEN, READER_TOKEN, STORE_KEY, Stack
 
 STS = {"CAIRN_STORE_STS_SECRET": "catalog-sts-" + "s" * 32}
-TRINO = "trinodb/trino:476"
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
 
 
 @pytest.fixture(scope="module")

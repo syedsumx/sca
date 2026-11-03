@@ -19,7 +19,11 @@ import pytest
 
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 
-TRINO = "trinodb/trino:476"
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
+_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 476
+# Settings Trino renamed (by 484; the old names stop it starting): what this image calls them.
+S3_ON = "fs.s3.enabled=true" if _TV >= 484 else "fs.native-s3.enabled=true"
+DELTA_CONDITIONAL = "delta.s3.transaction-log-conditional-writes.enabled=true" if _TV >= 484 else "s3.exclusive-create=true"
 KEY = "trino-e2e-" + "k" * 24
 OAUTH_SECRET = "trino-oauth-" + "o" * 24
 STORE_KEY = ("cairn-catalog", "catalog-store-secret")
@@ -211,13 +215,13 @@ def trino(lake, cairn):
     # Delta Lake tables in Cairn Store, their metastore beside them (a file metastore in the store).
     open(f"{d}/catalog/delta.properties", "w").write("\n".join([
         "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
-        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
-        "delta.register-table-procedure.enabled=true", "s3.exclusive-create=true", ""]))
+        "delta.register-table-procedure.enabled=true", DELTA_CONDITIONAL, ""]))
     # Stored functions: the Hive connector keeps them, in a file metastore in the store.
     open(f"{d}/catalog/routines.properties", "w").write("\n".join([
         "connector.name=hive", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/routines",
-        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
     # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
     model = services.model_stub
@@ -227,7 +231,7 @@ def trino(lake, cairn):
     open(f"{d}/catalog/lake.properties", "w").write("\n".join([
         "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={lake['catalog']}",
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
-        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
         # Table maintenance is tested with no retention floor (production keeps Trino's 7 days).
         "iceberg.expire-snapshots.min-retention=0s", "iceberg.remove-orphan-files.min-retention=0s", ""]))
@@ -635,7 +639,7 @@ def test_trino_web_ui_and_clients_sign_in_through_cairn(trino, cairn):
     hops = [h.headers.get("location", "") for h in r.history]
     assert any("/v1/trino/oauth/authorize" in h for h in hops) and any("/oauth2/callback" in h for h in hops), hops
     info = browser.get(f"{base}/ui/api/cluster", timeout=30)
-    assert info.status_code == 200 and info.json()["nodeVersion"]["version"] == "476"
+    assert info.status_code == 200 and info.json()["nodeVersion"]["version"] == str(_TV)
     # Without a Cairn session the UI sends the browser to Cairn's sign-in.
     stranger = requests.Session()
     stranger.verify, stranger.trust_env = False, False
@@ -946,8 +950,8 @@ def test_delta_tables_take_writes_from_several_clusters_at_once(trino, lake):
     tp = port()
     open(f"{d}/catalog/delta.properties", "w").write("\n".join([
         "connector.name=delta_lake", "hive.metastore=file", "hive.metastore.catalog.dir=s3://lakehouse/delta",
-        "fs.native-s3.enabled=true", f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
-        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", "s3.exclusive-create=true", ""]))
+        S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
+        f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", DELTA_CONDITIONAL, ""]))
     open(f"{d}/config.properties", "w").write("\n".join([
         "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
         f"discovery.uri=http://127.0.0.1:{tp}", ""]))

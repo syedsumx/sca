@@ -15,7 +15,7 @@ import pytest
 
 from conftest import ADMIN_TOKEN, READER_TOKEN, STORE_KEY
 
-TRINO = "trinodb/trino:476"
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
 
 
 def docker_ok():

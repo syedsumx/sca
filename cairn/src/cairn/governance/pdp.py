@@ -92,6 +92,7 @@ class PolicyDecisionPoint:
         # Callables that add derived subject attributes (e.g. persona memberships).
         self.subject_enrichers: list[Callable[[dict, int], dict]] = []
         self._compiled: list[Policy] = []
+        self._by_privilege: dict[str, list[Policy]] = {}   # enabled policies whose actions match, in order
         self._cache: dict[str, tuple[float, Decision]] = {}
         self._lock = threading.RLock()
         self._generation = 0
@@ -142,8 +143,21 @@ class PolicyDecisionPoint:
              *(p for layer in self._layers.values() for p in layer)],
             key=lambda p: (-p.priority, p.id),
         )
+        self._by_privilege = {}
         self._cache.clear()
         self._generation += 1
+
+    def _candidates(self, privilege: str) -> list[Policy]:
+        """The policies that can apply to ``privilege``: enabled, with a matching action. Which these are
+        depends only on the policies, so it is worked out once per privilege and bundle."""
+        got = self._by_privilege.get(privilege)
+        if got is None:
+            from cairn.governance.abac import action_matches
+
+            got = [p for p in self._compiled if p.enabled and action_matches(p.actions, privilege)]
+            if len(self._by_privilege) < 10_000:
+                self._by_privilege[privilege] = got
+        return got
 
     # ---- decisions -----------------------------------------------------------------
     def build_context(self, req: AuthorizeRequest) -> dict:
@@ -215,14 +229,22 @@ class PolicyDecisionPoint:
 
     def _evaluate(self, req: AuthorizeRequest, explain: bool) -> Decision:
         ctx = self.build_context(req)
-        results = [evaluate_policy(p, req.privilege, ctx, explain) for p in self._compiled]
+        if explain:                                   # every policy, with why it did or did not apply
+            results = [evaluate_policy(p, req.privilege, ctx, explain) for p in self._compiled]
+        else:                                         # only those that can apply, kept only if they do
+            from cairn.governance.abac import RuleResult, evaluate_condition, target_matches
+
+            results = [RuleResult(policy_id=p.id, effect=p.effect, priority=p.priority, source=p.source, matched=True,
+                                  reason="condition matched")
+                       for p in self._candidates(req.privilege)
+                       if target_matches(p.target, ctx)[0] and evaluate_condition(p.condition, ctx, None)]
 
         # Sub-resources (e.g. the tag being attached) are checked against deny rules only:
         # an allow on the parent is required, and no sub-resource may be explicitly denied.
         for sub in req.sub_resources:
             sub_ctx = dict(ctx)
             sub_ctx["resource"] = {**self.resolver.resource(sub.urn), "type": sub.type, "parent": ctx["resource"]}
-            for p in self._compiled:
+            for p in (self._compiled if explain else self._candidates(req.privilege)):
                 if p.effect == "deny":
                     r = evaluate_policy(p, req.privilege, sub_ctx, explain)
                     if r.matched:

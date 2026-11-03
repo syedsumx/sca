@@ -1,0 +1,15 @@
+{
+  "_doc": "The versions Cairn is tested with. The upgrade matrix (.github/workflows/cairn-upgrade-matrix.yml) tests each component's newest release against Cairn every week; a pin moves only in a pull request whose CI passes.",
+  "trino": {"pinned": "476", "source": {"docker": "trinodb/trino", "tags": "^(\\d+)$"},
+            "files": ["tests/test_trino_e2e.py", "catalog/conformance/test_trino.py", "catalog/conformance/test_vending.py",
+                      "docker-compose.cairn.yml", "docker/spark.Dockerfile", "helm/cairn/values.yaml", "../.github/workflows/cairn-ci.yml"]},
+  "pyiceberg": {"pinned": "0.12.0", "source": {"pypi": "pyiceberg"}, "files": [],
+                "_doc": "a floor (>=0.9 in pyproject.toml), not a pin: the last version tested is recorded here"},
+  "dbt-core": {"pinned": "1.12.6", "source": {"pypi": "dbt-core"}, "files": ["docker/dbt.Dockerfile", "docker/airflow.Dockerfile"]},
+  "dbt-trino": {"pinned": "1.11.0", "source": {"pypi": "dbt-trino"}, "files": ["docker/dbt.Dockerfile", "docker/airflow.Dockerfile"]},
+  "airflow": {"pinned": "3.3.2", "source": {"pypi": "apache-airflow"}, "files": ["docker/airflow.Dockerfile"]},
+  "spark": {"pinned": "4.0.1", "source": {"docker": "apache/spark", "tags": "^(\\d+\\.\\d+\\.\\d+)-scala2\\.13-java17-python3-ubuntu$"},
+            "files": ["docker/spark.Dockerfile"]},
+  "iceberg-spark": {"pinned": "1.10.0", "source": {"maven": "org.apache.iceberg/iceberg-spark-runtime-4.0_2.13"},
+                    "files": ["docker/spark.Dockerfile"]}
+}
