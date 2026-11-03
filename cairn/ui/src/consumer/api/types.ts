@@ -1424,3 +1424,104 @@ export interface DbtRun {
     tests_failed: number;
     detail: { node: string; status: string; seconds: number }[];
 }
+
+/** Files landing in a store prefix, loaded into a lakehouse table once each (GET /v1/pipes). */
+export interface Pipe {
+    id: string;
+    name: string;
+    bucket: string;
+    prefix: string;
+    format: 'csv' | 'json' | 'parquet';
+    target: string;
+    create_table: boolean;
+    enabled: boolean;
+    created_by: string;
+    created_ms: number;
+}
+
+/** One file a pipe saw (GET /v1/pipes/{id}/files). */
+export interface PipeFile {
+    pipe_id: string;
+    key: string;
+    version: string;
+    status: 'ok' | 'error';
+    rows: number | null;
+    error: string | null;
+    loaded_ms: number;
+}
+
+/** A Kafka topic written into a lakehouse table (GET /v1/streams). */
+export interface Stream {
+    id: string;
+    name: string;
+    topic: string;
+    format: 'json' | 'debezium';
+    mode: 'append' | 'upsert';
+    key: string[];
+    target: string;
+    source: string | null;
+    enabled: boolean;
+    status: { status: 'running' | 'error' | null; rows: number | null; lag: number | null; last_commit_ms: number | null;
+        error: string | null; updated_ms: number | null };
+}
+
+/** A message a stream set aside (GET /v1/streams/{id}/rejects). */
+export interface StreamReject {
+    partition: number;
+    offset: number;
+    reason: string;
+    value: string | null;
+    rejected_ms: number;
+}
+
+/** A SELECT kept as a lakehouse table (GET /v1/derived). */
+export interface DerivedTable {
+    id: string;
+    name: string;
+    sql: string;
+    target: string;
+    mode: 'full' | 'append' | 'merge';
+    watermark: string | null;
+    key: string[];
+    every_minutes: number | null;
+    on_change: boolean;
+    upstreams: string[];
+    owner: string;
+    enabled: boolean;
+    last_run_ms: number | null;
+}
+
+/** One refresh of a derived table (GET /v1/derived/{id}/runs). */
+export interface DerivedRun {
+    id: string;
+    kind: 'create' | 'full' | 'append' | 'merge';
+    status: 'ok' | 'error';
+    trigger: 'manual' | 'schedule' | 'change';
+    started_ms: number;
+    finished_ms: number;
+    error: string | null;
+}
+
+/** Table maintenance for *, a schema or a table (GET /maintenance/policies). */
+export interface MaintenancePolicy {
+    scope: string;
+    optimize: boolean;
+    optimize_threshold: string;
+    expire_days: number | null;
+    orphan_days: number | null;
+    every_hours: number;
+    enabled: boolean;
+    updated_by: string;
+    updated_ms: number;
+}
+
+/** One maintenance operation on a table (GET /maintenance/runs). */
+export interface MaintenanceRun {
+    id: string;
+    table_name: string;
+    operation: string;
+    status: 'ok' | 'error';
+    started_ms: number;
+    finished_ms: number;
+    detail: string;
+}

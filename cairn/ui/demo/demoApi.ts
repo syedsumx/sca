@@ -1058,6 +1058,136 @@ on('GET', '/reports/costs/jobs', () => [
     { job: 'urn:li:dataJob:(urn:li:dataFlow:(spark,clickstream_stream,PROD),clickstream_stream)', engine: 'spark', runs: 1, seconds: 2_592_000, usd: 504.0 },
 ]);
 
+// ------------------------------------------------------------------------------- SQL workspace, dashboards, alerts
+const SAVED_QUERIES = [
+    { id: 'q_rev', owner: ME, name: 'EU orders', description: 'Orders in the EU, emails masked for most people', connection: 'lakehouse',
+      sql: 'SELECT order_id, email, region, amount FROM lakehouse.sales.orders WHERE region = \'EU\'', shared: true,
+      chart: { type: 'table' }, created_ms: now - 6 * DAY, updated_ms: now - 2 * DAY },
+    { id: 'q_region', owner: ME, name: 'Orders by region', description: 'From the derived table marts.by_region', connection: 'lakehouse',
+      sql: 'SELECT region, orders FROM lakehouse.sales.by_region', shared: true, chart: { type: 'bar', x: 'region', y: ['orders'] },
+      created_ms: now - 5 * DAY, updated_ms: now - DAY },
+];
+const SQL_HISTORY = [
+    { id: 'h1', connection: 'lakehouse', sql: SAVED_QUERIES[0].sql, status: 'ok', rows: 4, ms: 238, error: null, at_ms: now - 20 * 60_000 },
+    { id: 'h2', connection: 'lakehouse', sql: 'SELECT * FROM lakehouse.hr.salaries', status: 'error', rows: null, ms: 41,
+      error: 'Access Denied: Cannot select from columns [name, salary] in table lake.hr.salaries', at_ms: now - 2 * HOUR },
+];
+const DASHBOARDS = [{ id: 'd_sales', owner: ME, name: 'Sales at a glance', description: 'EU orders and the regional split', shared: true,
+    tiles: [{ query: 'q_region', title: 'Orders by region', width: 1 }, { query: 'q_rev', title: 'EU orders', width: 2 }], updated_ms: now - DAY }];
+const SQL_ALERTS = [{ id: 'a_eu', name: 'EU orders dropped', query: 'q_region', measure: 'orders', op: '<', value: 2, every_minutes: 60,
+    recipients: [ME], state: 'ok', last_value: 4, last_error: null, last_checked_ms: now - 25 * 60_000, enabled: true }];
+on('GET', '/sql/history', () => SQL_HISTORY);
+on('GET', '/sql/schema', () => [
+    { urn: LAKE_ORDERS, name: 'lakehouse.sales.orders', columns: [{ name: 'order_id', type: 'bigint' }, { name: 'email', type: 'varchar' },
+        { name: 'region', type: 'varchar' }, { name: 'amount', type: 'double' }] },
+    { urn: LAKE_BY_REGION, name: 'lakehouse.sales.by_region', columns: [{ name: 'region', type: 'varchar' }, { name: 'orders', type: 'bigint' }] },
+]);
+on('POST', '/sql/run', (b) => {
+    const run = { ...sampleFor(null, b?.sql ?? ''), elapsed_ms: 412 };
+    SQL_HISTORY.unshift({ id: `h${SQL_HISTORY.length + 1}`, connection: b?.connection ?? 'lakehouse', sql: b?.sql ?? '', status: 'ok',
+        rows: run.rows.length, ms: 412, error: null, at_ms: Date.now() });
+    return run;
+});
+on('GET', '/sql/saved', () => SAVED_QUERIES);
+on('POST', '/sql/saved', (b) => { const q = { ...b, id: `q_${Date.now()}`, owner: ME, created_ms: Date.now(), updated_ms: Date.now() }; SAVED_QUERIES.push(q); return q; });
+on('PUT', '/sql/saved/:id', (b, _q, [id]) => Object.assign(SAVED_QUERIES.find((q) => q.id === id) ?? {}, b, { updated_ms: Date.now() }));
+on('DELETE', '/sql/saved/:id', (_b, _q, [id]) => { SAVED_QUERIES.splice(SAVED_QUERIES.findIndex((q) => q.id === id), 1); });
+on('POST', '/sql/saved/:id/run', (_b, _q, [id]) => { const q = SAVED_QUERIES.find((x) => x.id === id)!; return { ...sampleFor(null, q.sql), query: q }; });
+on('GET', '/sql/dashboards', () => DASHBOARDS);
+on('POST', '/sql/dashboards', (b) => { const d = { ...b, id: `d_${Date.now()}`, owner: ME, updated_ms: Date.now() }; DASHBOARDS.push(d); return d; });
+on('PUT', '/sql/dashboards/:id', (b, _q, [id]) => Object.assign(DASHBOARDS.find((d) => d.id === id) ?? {}, b, { updated_ms: Date.now() }));
+on('DELETE', '/sql/dashboards/:id', (_b, _q, [id]) => { DASHBOARDS.splice(DASHBOARDS.findIndex((d) => d.id === id), 1); });
+on('GET', '/sql/dashboards/:id/render', (_b, _q, [id]) => {
+    const d = DASHBOARDS.find((x) => x.id === id)!;
+    return { ...d, tiles: d.tiles.map((t: { query: string; title: string; width: number }) => {
+        const q = SAVED_QUERIES.find((x) => x.id === t.query);
+        return q ? { ...t, chart: q.chart, result: { ...sampleFor(null, q.sql), elapsed_ms: 233 } } : { ...t, error: 'the query is gone' };
+    }) };
+});
+on('GET', '/sql/alerts', () => SQL_ALERTS);
+on('POST', '/sql/alerts', (b) => { const a = { ...b, id: `a_${Date.now()}`, state: 'unknown', last_value: null, last_error: null, last_checked_ms: null }; SQL_ALERTS.push(a); return a; });
+on('PUT', '/sql/alerts/:id', (b, _q, [id]) => Object.assign(SQL_ALERTS.find((a) => a.id === id) ?? {}, b));
+on('DELETE', '/sql/alerts/:id', (_b, _q, [id]) => { SQL_ALERTS.splice(SQL_ALERTS.findIndex((a) => a.id === id), 1); });
+on('POST', '/sql/alerts/:id/check', (_b, _q, [id]) => Object.assign(SQL_ALERTS.find((a) => a.id === id)!, { state: 'ok', last_value: 4, last_checked_ms: Date.now() }));
+
+// ------------------------------------------------------------------------------- pipes, streams, derived tables, maintenance
+const PIPES = [
+    { id: 'p_orders', name: 'orders-files', bucket: 'landing', prefix: 'orders/', format: 'csv', target: 'raw.orders', create_table: true,
+      enabled: true, created_by: ME, created_ms: now - 9 * DAY },
+    { id: 'p_events', name: 'web-events', bucket: 'landing', prefix: 'events/', format: 'json', target: 'raw.web_events', create_table: true,
+      enabled: true, created_by: ME, created_ms: now - 4 * DAY },
+];
+const PIPE_FILES: Record<string, object[]> = {
+    p_orders: [
+        { pipe_id: 'p_orders', key: 'orders/2026-11-03.csv', version: '18432-1', status: 'ok', rows: 412, error: null, loaded_ms: now - 40 * 60_000 },
+        { pipe_id: 'p_orders', key: 'orders/2026-11-02-fix.csv', version: '211-1', status: 'error', rows: null,
+          error: 'the data has columns raw.orders does not: discount_code', loaded_ms: now - 20 * HOUR },
+        { pipe_id: 'p_orders', key: 'orders/2026-11-02.csv', version: '17920-1', status: 'ok', rows: 398, error: null, loaded_ms: now - DAY },
+    ],
+    p_events: [{ pipe_id: 'p_events', key: 'events/2026/11/03/09.json', version: '904112-1', status: 'ok', rows: 12_840, error: null, loaded_ms: now - 2 * HOUR }],
+};
+on('GET', '/v1/pipes', () => PIPES);
+on('GET', '/v1/pipes/:id/files', (_b, _q, [id]) => PIPE_FILES[id] ?? []);
+on('POST', '/v1/pipes/:id/sweep', () => []);
+const STREAMS = [
+    { id: 's_customers', name: 'customers-cdc', topic: 'pg.public.customers', format: 'debezium', mode: 'upsert', key: ['id'],
+      target: 'cdc.customers', source: 'urn:li:dataset:(urn:li:dataPlatform:postgres,shop.public.customers,PROD)', enabled: true,
+      status: { status: 'running', rows: 1_284_903, lag: 12, last_commit_ms: now - 8_000, error: null, updated_ms: now - 8_000 } },
+    { id: 's_clicks', name: 'clickstream', topic: 'web.clicks', format: 'json', mode: 'append', key: [], target: 'raw.clicks', source: null,
+      enabled: true, status: { status: 'running', rows: 48_102_337, lag: 2_140, last_commit_ms: now - 11_000, error: null, updated_ms: now - 11_000 } },
+];
+const REJECTS: Record<string, object[]> = {
+    s_clicks: [{ partition: 3, offset: 9_211_044, reason: 'columns raw.clicks does not have: experiment', value: '{"page": "/pricing", "experiment": "b"}',
+        rejected_ms: now - 3 * HOUR }],
+};
+on('GET', '/v1/streams', () => STREAMS);
+on('GET', '/v1/streams/:id/rejects', (_b, _q, [id]) => REJECTS[id] ?? []);
+on('POST', '/v1/streams/:id/enabled', (b, _q, [id]) => Object.assign(STREAMS.find((x) => x.id === id)!, { enabled: !!b?.enabled }));
+const DERIVED = [
+    { id: 'dt_clean', name: 'orders_clean', sql: 'SELECT order_id, email, region, amount, seq FROM lakehouse.raw.orders WHERE amount > 0',
+      target: 'sales.orders', mode: 'append', watermark: 'seq', key: [], every_minutes: null, on_change: true,
+      upstreams: [ds('iceberg', 'raw.orders')], owner: 'urn:li:corpuser:svc-pipelines', enabled: true, last_run_ms: now - 38 * 60_000 },
+    { id: 'dt_region', name: 'by_region', sql: 'SELECT region, count(*) AS orders FROM lakehouse.sales.orders GROUP BY region',
+      target: 'sales.by_region', mode: 'full', watermark: null, key: [], every_minutes: null, on_change: true,
+      upstreams: [ds('iceberg', 'sales.orders')], owner: 'urn:li:corpuser:svc-pipelines', enabled: true, last_run_ms: now - 37 * 60_000 },
+    { id: 'dt_latest', name: 'customers_latest', sql: 'SELECT id, email, tier, updated_at FROM lakehouse.cdc.customers',
+      target: 'marts.customers', mode: 'merge', watermark: 'updated_at', key: ['id'], every_minutes: 60, on_change: false,
+      upstreams: [ds('iceberg', 'cdc.customers')], owner: ME, enabled: true, last_run_ms: now - 50 * 60_000 },
+];
+const DERIVED_RUNS: Record<string, object[]> = {
+    dt_clean: [
+        { id: 'r3', kind: 'append', status: 'ok', trigger: 'change', started_ms: now - 38 * 60_000, finished_ms: now - 38 * 60_000 + 4_100, error: null },
+        { id: 'r2', kind: 'append', status: 'ok', trigger: 'change', started_ms: now - 24 * HOUR, finished_ms: now - 24 * HOUR + 3_900, error: null },
+        { id: 'r1', kind: 'create', status: 'ok', trigger: 'manual', started_ms: now - 9 * DAY, finished_ms: now - 9 * DAY + 9_800, error: null },
+    ],
+    dt_region: [{ id: 'r4', kind: 'full', status: 'ok', trigger: 'change', started_ms: now - 37 * 60_000, finished_ms: now - 37 * 60_000 + 2_200, error: null }],
+    dt_latest: [
+        { id: 'r5', kind: 'merge', status: 'ok', trigger: 'schedule', started_ms: now - 50 * 60_000, finished_ms: now - 50 * 60_000 + 6_700, error: null },
+        { id: 'r6', kind: 'merge', status: 'error', trigger: 'schedule', started_ms: now - 110 * 60_000, finished_ms: now - 110 * 60_000 + 900,
+          error: 'Access Denied: Cannot select from columns [tier] in table lake.cdc.customers' },
+    ],
+};
+on('GET', '/v1/derived', () => DERIVED);
+on('GET', '/v1/derived/:id/runs', (_b, _q, [id]) => DERIVED_RUNS[id] ?? []);
+on('POST', '/v1/derived/:id/refresh', (b, _q, [id]) => {
+    const run = { id: `r_${Date.now()}`, kind: b?.full ? 'full' : DERIVED.find((d) => d.id === id)!.mode, status: 'ok', trigger: 'manual',
+        started_ms: Date.now() - 3_000, finished_ms: Date.now(), error: null };
+    (DERIVED_RUNS[id] = DERIVED_RUNS[id] ?? []).unshift(run);
+    DERIVED.find((d) => d.id === id)!.last_run_ms = Date.now();
+    return run;
+});
+on('GET', '/maintenance/policies', () => [
+    { scope: '*', optimize: true, optimize_threshold: '128MB', expire_days: 7, orphan_days: 7, every_hours: 24, enabled: true, updated_by: ME, updated_ms: now - 12 * DAY },
+    { scope: 'raw', optimize: true, optimize_threshold: '256MB', expire_days: 2, orphan_days: 3, every_hours: 6, enabled: true, updated_by: ME, updated_ms: now - 3 * DAY },
+]);
+on('GET', '/maintenance/runs', () => [
+    { id: 'm1', table_name: 'raw.clicks', operation: 'optimize', status: 'ok', started_ms: now - 2 * HOUR, finished_ms: now - 2 * HOUR + 81_000, detail: '' },
+    { id: 'm2', table_name: 'raw.clicks', operation: 'expire_snapshots', status: 'ok', started_ms: now - 2 * HOUR + 82_000, finished_ms: now - 2 * HOUR + 90_000, detail: '' },
+    { id: 'm3', table_name: 'raw.clicks', operation: 'remove_orphan_files', status: 'ok', started_ms: now - 2 * HOUR + 91_000, finished_ms: now - 2 * HOUR + 99_000, detail: '' },
+    { id: 'm4', table_name: 'sales.orders', operation: 'expire_snapshots', status: 'error', started_ms: now - 26 * HOUR, finished_ms: now - 26 * HOUR + 400,
+      detail: 'Retention specified (2.00d) is shorter than the minimum retention configured in the system (7.00d)' },
+]);
+
 // ------------------------------------------------------------------------------- compliance forms
 const tally = (assets: number, pending: number, completed: number, verified: number) =>
     ({ assets, PENDING: pending, COMPLETED: completed, VERIFIED: verified, done_pct: Math.round(((completed + verified) / assets) * 1000) / 10 });

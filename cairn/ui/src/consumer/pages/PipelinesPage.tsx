@@ -1,9 +1,10 @@
-import { Alert, Select, Space, Table, Tag } from 'antd';
+import { Alert, Select, Space, Table, Tabs, Tag } from 'antd';
 import React, { useMemo, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DbtRun } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
+import { DerivedTab, MaintenanceTab, PipesTab, StreamsTab } from './LakehouseOps';
 
 const STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -21,8 +22,24 @@ function duration(s: number | null | undefined): string {
     return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-/** dbt runs recorded by `cairn dbt`: what ran where, how it went, node by node, and the project's docs. */
+/** Pipelines: dbt runs, pipes, streams, derived tables and table maintenance. */
 export function PipelinesPage() {
+    return (
+        <Page>
+            <h1 style={{ marginBottom: 0 }}>Pipelines</h1>
+            <Tabs defaultActiveKey="dbt" destroyInactiveTabPane>
+                <Tabs.TabPane tab="dbt runs" key="dbt"><DbtRuns /></Tabs.TabPane>
+                <Tabs.TabPane tab="Pipes" key="pipes"><PipesTab /></Tabs.TabPane>
+                <Tabs.TabPane tab="Streams" key="streams"><StreamsTab /></Tabs.TabPane>
+                <Tabs.TabPane tab="Derived tables" key="derived"><DerivedTab /></Tabs.TabPane>
+                <Tabs.TabPane tab="Maintenance" key="maintenance"><MaintenanceTab /></Tabs.TabPane>
+            </Tabs>
+        </Page>
+    );
+}
+
+/** dbt runs recorded by `cairn dbt`: what ran where, how it went, node by node, and the project's docs. */
+function DbtRuns() {
     const { client } = useConsumerApi();
     const [project, setProject] = useState<string | undefined>();
     const q = useDheQuery<DbtRun[]>(`/pipelines/dbt/runs?${project ?? ''}`, (c, signal) => c.dbtRuns(project, { signal }));
@@ -30,8 +47,7 @@ export function PipelinesPage() {
     const projects = useMemo(() => Array.from(new Set(runs.map((r) => r.project))).sort(), [runs]);
 
     return (
-        <Page>
-            <h1 style={{ marginBottom: 0 }}>Pipelines</h1>
+        <>
             <Muted>
                 dbt runs recorded in Cairn, newest first. Each run&apos;s models, tests and lineage are on the datasets it
                 built.
@@ -103,6 +119,6 @@ export function PipelinesPage() {
                     ]}
                 />
             </Surface>
-        </Page>
+        </>
     );
 }

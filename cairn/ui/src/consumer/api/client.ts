@@ -8,6 +8,16 @@ import type {
 } from './types';
 import type { StoreAuditEntry, StoreAuditVerify, StoreKey, StoreKeySpec, StoreBucket } from './types';
 import type {
+    DerivedRun,
+    DerivedTable,
+    MaintenancePolicy,
+    MaintenanceRun,
+    Pipe,
+    PipeFile,
+    Stream,
+    StreamReject,
+} from './types';
+import type {
     AIAssessment,
     AISystem,
     AISystemInput,
@@ -1026,6 +1036,50 @@ export class ConsumerClient extends CairnClient {
 
     checkSqlAlert(id: string) {
         return this.request<SqlAlert>('POST', `/sql/alerts/${enc(id)}/check`);
+    }
+
+    pipes(opts?: RequestOptions) {
+        return this.request<Pipe[]>('GET', '/v1/pipes', undefined, opts);
+    }
+
+    pipeFiles(id: string, opts?: RequestOptions) {
+        return this.request<PipeFile[]>('GET', `/v1/pipes/${enc(id)}/files`, undefined, opts);
+    }
+
+    sweepPipe(id: string) {
+        return this.request<PipeFile[]>('POST', `/v1/pipes/${enc(id)}/sweep`);
+    }
+
+    streams(opts?: RequestOptions) {
+        return this.request<Stream[]>('GET', '/v1/streams', undefined, opts);
+    }
+
+    streamRejects(id: string, opts?: RequestOptions) {
+        return this.request<StreamReject[]>('GET', `/v1/streams/${enc(id)}/rejects`, undefined, opts);
+    }
+
+    setStreamEnabled(id: string, enabled: boolean) {
+        return this.request<Stream>('POST', `/v1/streams/${enc(id)}/enabled`, { enabled });
+    }
+
+    derivedTables(opts?: RequestOptions) {
+        return this.request<DerivedTable[]>('GET', '/v1/derived', undefined, opts);
+    }
+
+    derivedRuns(id: string, opts?: RequestOptions) {
+        return this.request<DerivedRun[]>('GET', `/v1/derived/${enc(id)}/runs`, undefined, opts);
+    }
+
+    refreshDerived(id: string, full = false) {
+        return this.request<DerivedRun>('POST', `/v1/derived/${enc(id)}/refresh`, { full });
+    }
+
+    maintenancePolicies(opts?: RequestOptions) {
+        return this.request<MaintenancePolicy[]>('GET', '/maintenance/policies', undefined, opts);
+    }
+
+    maintenanceRuns(opts?: RequestOptions) {
+        return this.request<MaintenanceRun[]>('GET', '/maintenance/runs', undefined, opts);
     }
 
     jobCosts(days = 30, opts?: RequestOptions) {
