@@ -22,6 +22,11 @@ so any git host works.
   the owner's named in ``add``), are committed by the owner to a new branch ``cairn/<user>/<time>``, never to
   the folder's branch. For a configured GitHub, GitLab or Bitbucket repository, a pull request is opened
   from it. Merging the pull request and pulling again brings the folder back in step.
+* **Notebooks in Jupyter** (``GET /v1/git-folders/<id>/notebooks``): a folder's notebooks appear in its owner's
+  JupyterHub server under ``git/<folder>/`` (``cairn_lakehouse.jupyter`` syncs them when the server starts and
+  on demand). Saving one there (the save hook sends it to Cairn) keeps it with the folder; the next push
+  commits it, with its outputs cleared (query results stay out of git, and diffs stay reviewable). A pull
+  that brings a new version of a notebook also changed in Jupyter since reports a conflict, unless ``force``.
 * Folders are their owner's: others neither see nor use them. Each pull and push is audited.
 """
 
@@ -40,7 +45,7 @@ import time
 import uuid
 from typing import Any, Optional
 
-from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, delete, select, update
+from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, and_, delete, select, update
 
 from cairn.common.db import metadata
 from cairn.sqlworkspace.workspace import WorkspaceError, saved_queries
@@ -72,6 +77,16 @@ git_folder_files = Table(
     Column("pushed", String(64), nullable=True),       # of the file as last pushed
 )
 
+git_folder_notebooks = Table(
+    "cairn_git_folder_notebooks", metadata,
+    Column("folder_id", String(32), primary_key=True),
+    Column("file", String(1024), primary_key=True),    # relative to the folder's path
+    Column("content", Text, nullable=False),           # as saved in Jupyter, outputs cleared
+    Column("hash", String(64), nullable=False),
+    Column("saved_ms", BigInteger, nullable=False),
+)
+
+NOTEBOOK_MAX = 5_000_000
 BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,256}$")
 SUBPATH = re.compile(r"^(?:[A-Za-z0-9._ -]+/)*[A-Za-z0-9._ -]*$")
 HEADER = re.compile(r"^--\s*(connection|description|shared|chart|name)\s*:\s*(.*)$")
@@ -136,6 +151,24 @@ def _same_query(spec: dict, q) -> bool:
             and bool(spec.get("shared")) == bool(get("shared")) and want == chart)
 
 
+def clean_notebook(nb: dict) -> str:
+    """A notebook as Cairn commits it: outputs and execution counts cleared, in nbformat's own layout."""
+    nb = json.loads(json.dumps(nb))
+    for c in nb.get("cells") or []:
+        if isinstance(c, dict) and c.get("cell_type") == "code":
+            c["outputs"] = []
+            c["execution_count"] = None
+    return json.dumps(nb, indent=1, sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _canonical(text: str) -> str:
+    """A notebook file compared by what it says, not its outputs or layout."""
+    try:
+        return clean_notebook(json.loads(text))
+    except (ValueError, TypeError, AttributeError):
+        return text
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
     return s[:120] or "query"
@@ -181,6 +214,8 @@ class GitFolders:
             raise WorkspaceError("path: a folder in the repository")
         if every is not None and (isinstance(every, bool) or not isinstance(every, int) or not 5 <= every <= 1440):
             raise WorkspaceError("every_minutes is 5-1440")
+        if any(_slug(f["name"]).lower() == _slug(name).lower() for f in self.list(actor)):   # one directory each
+            raise WorkspaceError(f"you already have a folder named {name!r} (its notebooks go in git/{_slug(name)}/)", 409)
         row = {"id": uuid.uuid4().hex, "owner": actor, "name": name, "repo": rid or None, "url": url if not rid else None,
                "branch": branch, "path": path, "every_minutes": every, "created_ms": _now()}
         with self.engine.begin() as conn:
@@ -201,10 +236,16 @@ class GitFolders:
             return [dict(r._mapping) for r in conn.execute(select(git_folders).where(git_folders.c.owner == actor)
                                                            .order_by(git_folders.c.name))]
 
+    @staticmethod
+    def jupyter_dir(f: dict) -> str:
+        """Where a folder's notebooks are in its owner's Jupyter server."""
+        return f"git/{_slug(f['name'])}"
+
     def delete(self, actor: str, fid: str) -> None:
         """Forgets the folder; its saved queries stay, as ordinary ones."""
         self.get(actor, fid)
         with self.engine.begin() as conn:
+            conn.execute(delete(git_folder_notebooks).where(git_folder_notebooks.c.folder_id == fid))
             conn.execute(delete(git_folder_files).where(git_folder_files.c.folder_id == fid))
             conn.execute(delete(git_folders).where(git_folders.c.id == fid))
             if self.audit is not None:
@@ -280,6 +321,9 @@ class GitFolders:
                     select(git_folder_files).where(git_folder_files.c.folder_id == fid))}
                 queries = {r.id: r for r in conn.execute(select(saved_queries).where(saved_queries.c.owner == actor))}
             since = f["synced_ms"] or 0
+            with self.engine.connect() as conn:
+                saves = {r.file: r for r in conn.execute(
+                    select(git_folder_notebooks).where(git_folder_notebooks.c.folder_id == fid))}
             out = {"head": head, "created": [], "updated": [], "deleted": [], "notebooks": [], "conflicts": [], "errors": []}
             for file, text in sorted(files.items()):
                 h, k = _hash(text), known.get(file)
@@ -287,10 +331,21 @@ class GitFolders:
                     continue                                  # unchanged in git
                 try:
                     if file.endswith(".ipynb"):
-                        if self.notebooks is None:
-                            continue
-                        nb = self.notebooks.publish(actor, f"git/{f['name']}/{file}", json.loads(text))
-                        self._remember(fid, file, "notebook", nb.get("urn", file), h)
+                        nb_json = json.loads(text)
+                        saved = saves.get(file)
+                        if saved is not None and saved.content != _canonical(text):
+                            if saved.saved_ms > since and not force:
+                                out["conflicts"].append({"file": file, "query": None,
+                                                         "why": "changed in git and in Jupyter since the last pull"})
+                                continue
+                        if saved is not None:                 # git's version is now the one to keep
+                            with self.engine.begin() as conn:
+                                conn.execute(delete(git_folder_notebooks).where(and_(
+                                    git_folder_notebooks.c.folder_id == fid, git_folder_notebooks.c.file == file)))
+                        ref = file
+                        if self.notebooks is not None:
+                            ref = self.notebooks.publish(actor, f"{self.jupyter_dir(f)}/{file}", nb_json).get("urn", file)
+                        self._remember(fid, file, "notebook", ref, h)
                         out["notebooks"].append(file)
                         continue
                     spec = parse_sql(text, os.path.splitext(os.path.basename(file))[0])
@@ -314,6 +369,14 @@ class GitFolders:
                 if q is not None and q.updated_ms > since and not force:
                     out["conflicts"].append({"file": file, "query": q.id, "why": "deleted in git, changed in Cairn"})
                     continue
+                saved = saves.get(file) if k["kind"] == "notebook" else None
+                if saved is not None and saved.saved_ms > since and not force:
+                    out["conflicts"].append({"file": file, "query": None, "why": "deleted in git, changed in Jupyter"})
+                    continue
+                if saved is not None:
+                    with self.engine.begin() as conn:
+                        conn.execute(delete(git_folder_notebooks).where(and_(
+                            git_folder_notebooks.c.folder_id == fid, git_folder_notebooks.c.file == file)))
                 if q is not None:
                     self.ws.delete(actor, q.id)
                 with self.engine.begin() as conn:
@@ -340,6 +403,51 @@ class GitFolders:
                 hash=h if h is not None else (old.hash if old is not None else ""),
                 pushed=pushed if pushed is not None else (old.pushed if old is not None else None)))
 
+    # ---- notebooks in Jupyter -----------------------------------------------------------------
+    def notebook_saved(self, actor: str, path: str, notebook: dict) -> Optional[dict]:
+        """A notebook saved in the person's Jupyter server: kept with the folder whose directory holds it
+        (``git/<folder>/<file>``), for the next push. Other paths are not a folder's: None."""
+        parts = path.split("/")
+        if len(parts) < 3 or parts[0] != "git" or not path.endswith(".ipynb"):
+            return None
+        folder = next((f for f in self.list(actor) if _slug(f["name"]) == parts[1]), None)
+        if folder is None:
+            return None
+        file = "/".join(parts[2:])
+        if not SUBPATH.match(file) or any(x in ("", ".", "..") for x in parts[2:]):
+            raise WorkspaceError("path: a notebook in the folder (plain names, no ..)")
+        content = clean_notebook(notebook)
+        if len(content) > NOTEBOOK_MAX:
+            raise WorkspaceError("the notebook is over 5 MB without its outputs", 413)
+        where = and_(git_folder_notebooks.c.folder_id == folder["id"], git_folder_notebooks.c.file == file)
+        with self.engine.begin() as conn:
+            conn.execute(delete(git_folder_notebooks).where(where))
+            conn.execute(git_folder_notebooks.insert().values(folder_id=folder["id"], file=file, content=content,
+                                                              hash=_hash(content), saved_ms=_now()))
+        return {"folder": folder["id"], "file": file}
+
+    def jupyter_notebooks(self, actor: str, fid: str) -> list[dict]:
+        """What the owner's Jupyter server should hold for the folder: each notebook as last saved in Jupyter,
+        or else as git has it (from the last pull or push)."""
+        f = self.get(actor, fid)
+        d = os.path.join(self.workdir, fid)
+        with self._locks.setdefault(fid, threading.Lock()):
+            from_git = {k: v for k, v in self._files(d, f["path"]).items() if k.endswith(".ipynb")} \
+                if os.path.isdir(os.path.join(d, ".git")) else {}
+        with self.engine.connect() as conn:
+            saves = {r.file: r.content for r in conn.execute(
+                select(git_folder_notebooks).where(git_folder_notebooks.c.folder_id == fid))}
+        out = []
+        for file in sorted(set(from_git) | set(saves)):
+            text = saves.get(file, from_git.get(file))
+            try:
+                nb = json.loads(text)
+            except ValueError:
+                continue                                      # not a notebook git can open either
+            out.append({"file": file, "path": f"{self.jupyter_dir(f)}/{file}", "hash": _hash(_canonical(text)),
+                        "notebook": nb, "saved_in_jupyter": file in saves})
+        return out
+
     # ---- push -------------------------------------------------------------------------------
     def push(self, actor: str, fid: str, message: str = "", add: Optional[list[str]] = None) -> dict:
         f = self.get(actor, fid)
@@ -356,7 +464,7 @@ class GitFolders:
             for qid in add or []:
                 if qid not in mine:
                     raise WorkspaceError(f"no saved query of yours {qid!r}", 404)
-            written: dict[str, tuple[str, str]] = {}           # file -> (query id, text)
+            written: dict[str, tuple[str, str, str]] = {}      # file -> (kind, query id or notebook urn, text)
             taken = set(known.values())
             for qid in list(known) + [q for q in (add or []) if q not in known]:
                 q = mine.get(qid)
@@ -379,7 +487,24 @@ class GitFolders:
                 os.makedirs(os.path.dirname(full), exist_ok=True)
                 with open(full, "w", encoding="utf-8") as fh:
                     fh.write(text)
-                written[file] = (qid, text)
+                written[file] = ("query", qid, text)
+            # Notebooks saved in Jupyter under the folder, outputs already cleared.
+            from cairn.identity.notebooks import notebook_urn
+
+            with self.engine.connect() as conn:
+                saves = list(conn.execute(select(git_folder_notebooks).where(git_folder_notebooks.c.folder_id == fid)))
+                nb_pushed = {r.file: r.pushed for r in conn.execute(select(git_folder_files).where(and_(
+                    git_folder_files.c.folder_id == fid, git_folder_files.c.kind == "notebook")))}
+            for r in saves:
+                full = os.path.join(base, r.file)
+                if nb_pushed.get(r.file) == r.hash:
+                    continue                                  # already proposed as it is
+                if os.path.exists(full) and _canonical(open(full, encoding="utf-8").read()) == r.content:
+                    continue                                  # git already says this
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as fh:
+                    fh.write(r.content)
+                written[r.file] = ("notebook", notebook_urn(user, f"{self.jupyter_dir(f)}/{r.file}"), r.content)
             self._git(d, "add", "--all", "--", f["path"] or ".")
             if not self._git(d, "status", "--porcelain").strip():
                 return {"changed": 0, "branch": None, "pull_request": None}
@@ -394,8 +519,8 @@ class GitFolders:
             if repo is not None and self.git is not None:
                 pr = self.git.provider(repo).create_pull(branch, f["branch"], message or f"Saved queries from Cairn ({f['name']})",
                                                          f"Pushed from Cairn's SQL workspace by {user}.")
-            for file, (qid, text) in written.items():
-                self._remember(fid, file, "query", qid, pushed=_hash(text))
+            for file, (kind, ref, text) in written.items():
+                self._remember(fid, file, kind, ref, pushed=_hash(text))
             out = {"changed": len(written), "branch": branch, "commit": sha, "pull_request": pr}
             if self.audit is not None:
                 self.audit.record("sql", "git_folder.pushed", actor, None, {"id": fid, **out})
@@ -449,6 +574,10 @@ def build_git_folders_router(gf: GitFolders, current_principal) -> Any:
     @router.post("/{fid}/pull")
     async def pull(fid: str, body: dict = Body(default={}), p=Depends(current_principal)):
         return await call(gf.pull, person(p), fid, bool((body or {}).get("force")))
+
+    @router.get("/{fid}/notebooks")
+    async def notebooks(fid: str, p=Depends(current_principal)):
+        return await call(gf.jupyter_notebooks, person(p), fid)
 
     @router.post("/{fid}/push")
     async def push(fid: str, body: dict = Body(default={}), p=Depends(current_principal)):

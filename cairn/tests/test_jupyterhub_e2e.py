@@ -193,3 +193,131 @@ def test_notebook_tokens_are_the_persons_and_end_with_them(stack):
     r = httpx.post(f"{st['cairn']}/v1/notebooks/publish", headers={"Authorization": "Bearer svc-secret"},
                    json={"path": "x.ipynb", "notebook": NOTEBOOK})
     assert r.status_code == 403
+
+
+def _git(cwd, *args):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+                          env={**os.environ, "GIT_AUTHOR_NAME": "dev", "GIT_AUTHOR_EMAIL": "dev@x",
+                               "GIT_COMMITTER_NAME": "dev", "GIT_COMMITTER_EMAIL": "dev@x"}).stdout
+
+
+def _start(st, user):
+    if hub_api(st, "GET", f"/users/{user}").status_code == 404:
+        sign_in(st, user).close()
+    r = hub_api(st, "POST", f"/users/{user}/server")
+    assert r.status_code in (201, 202, 400), r.text                   # 400: already running
+    end = time.time() + 120
+    while time.time() < end and not hub_api(st, "GET", f"/users/{user}").json().get("servers", {}).get("", {}).get("ready"):
+        time.sleep(1)
+    assert hub_api(st, "GET", f"/users/{user}").json()["servers"][""]["ready"], open(f"{st['dir']}/hub.log").read()[-3000:]
+
+
+def _contents(st, user, path, method="GET", **kw):
+    return httpx.request(method, f"{st['hub']}/user/{user}/api/contents/{path}",
+                         headers={"Authorization": f"token {SERVICE}"}, timeout=60, **kw)
+
+
+def _src(cell):
+    src = cell["source"]
+    return "".join(src) if isinstance(src, list) else src
+
+
+def test_git_folder_notebooks_round_trip_through_jupyter(stack):
+    """A git folder's notebooks appear in the person's Jupyter server; what they save there is pushed back to
+    git (outputs cleared) on a branch of its own; a notebook changed in both places is a conflict."""
+    st = stack
+    s, d = st["s"], st["dir"]
+    import pathlib
+
+    work = pathlib.Path(d) / "git-e2e"
+    bare, dev = work / "origin.git", work / "dev"
+    work.mkdir()
+    _git(work, "init", "--quiet", "--bare", "--initial-branch=main", str(bare))
+    _git(work, "clone", "--quiet", str(bare), str(dev))
+    (dev / "nb").mkdir()
+    (dev / "nb" / "eda.ipynb").write_text(json.dumps(NOTEBOOK))
+    (dev / "nb" / "other.ipynb").write_text(json.dumps({**NOTEBOOK, "cells": NOTEBOOK["cells"][:1]}))
+    _git(dev, "add", "-A")
+    _git(dev, "commit", "--quiet", "-m", "notebooks")
+    _git(dev, "push", "--quiet", "origin", "main")
+    s.git_folders.allowed = ["file://"]
+    s.git_folders.workdir = str(work / "clones")
+    carl = {"X-Cairn-Actor": "urn:li:corpuser:carl"}
+    r = httpx.post(f"{st['cairn']}/v1/git-folders", headers=carl,
+                   json={"name": "Team notebooks", "url": f"file://{bare}", "path": "nb"})
+    assert r.status_code == 201, r.text
+    fid = r.json()["id"]
+    pulled = httpx.post(f"{st['cairn']}/v1/git-folders/{fid}/pull", headers=carl, json={}, timeout=60).json()
+    assert sorted(pulled["notebooks"]) == ["eda.ipynb", "other.ipynb"], pulled
+    # The same folder name twice would share a directory in Jupyter: refused.
+    assert httpx.post(f"{st['cairn']}/v1/git-folders", headers=carl,
+                      json={"name": "team notebooks", "url": f"file://{bare}"}).status_code == 409
+
+    # Carl's server starts: the folder's notebooks are there, written by the extension.
+    _start(st, "carl")
+    end = time.time() + 60
+    while time.time() < end and _contents(st, "carl", "git/Team-notebooks/eda.ipynb").status_code != 200:
+        time.sleep(0.5)
+    r = _contents(st, "carl", "git/Team-notebooks/eda.ipynb")
+    assert r.status_code == 200, open(f"{d}/hub.log").read()[-3000:]
+    assert _src(r.json()["content"]["cells"][2]).startswith("%%sql")
+
+    # He edits it in Jupyter (with an output, as after running it) and adds a new notebook; both are saves.
+    nb = r.json()["content"]
+    nb["cells"][0]["source"] = "# Orders by region, EU first"
+    nb["cells"][2]["outputs"] = [{"output_type": "stream", "name": "stdout", "text": "secret-result-row\n"}]
+    nb["cells"][2]["execution_count"] = 7
+    assert _contents(st, "carl", "git/Team-notebooks/eda.ipynb", "PUT",
+                     json={"type": "notebook", "format": "json", "content": nb}).status_code == 200
+    assert _contents(st, "carl", "git/Team-notebooks/sub", "PUT", json={"type": "directory"}).status_code in (200, 201)
+    assert _contents(st, "carl", "git/Team-notebooks/sub/new.ipynb", "PUT",
+                     json={"type": "notebook", "format": "json", "content": NOTEBOOK}).status_code in (200, 201)
+    end = time.time() + 30
+    while time.time() < end and len(s.git_folders.jupyter_notebooks("urn:li:corpuser:carl", fid)) < 3:
+        time.sleep(0.5)
+    listed = {n["file"]: n for n in s.git_folders.jupyter_notebooks("urn:li:corpuser:carl", fid)}
+    assert listed["eda.ipynb"]["saved_in_jupyter"] and listed["sub/new.ipynb"]["saved_in_jupyter"], listed
+
+    # Push: both go to a new branch, outputs cleared; main is untouched.
+    r = httpx.post(f"{st['cairn']}/v1/git-folders/{fid}/push", headers=carl, json={"message": "EU first"}, timeout=60)
+    assert r.status_code == 200 and r.json()["changed"] == 2, r.text
+    branch = r.json()["branch"]
+    pushed = json.loads(_git(bare, "show", f"{branch}:nb/eda.ipynb"))
+    assert _src(pushed["cells"][0]) == "# Orders by region, EU first"
+    assert pushed["cells"][2]["outputs"] == [] and pushed["cells"][2]["execution_count"] is None
+    assert "secret-result-row" not in _git(bare, "show", f"{branch}:nb/eda.ipynb")
+    assert _src(json.loads(_git(bare, "show", f"{branch}:nb/sub/new.ipynb"))["cells"][0]) == "# Orders by region"
+    assert "EU first" not in _git(bare, "show", "main:nb/eda.ipynb")
+    # Pushing again proposes nothing new.
+    assert httpx.post(f"{st['cairn']}/v1/git-folders/{fid}/push", headers=carl, json={}, timeout=60).json()["changed"] == 0
+
+    # A colleague changes other.ipynb in git while Carl changes it in Jupyter: the pull reports a conflict
+    # and keeps Carl's version; force takes git's.
+    _git(dev, "pull", "--quiet", "origin", "main")
+    (dev / "nb" / "other.ipynb").write_text(json.dumps({**NOTEBOOK, "cells": [{**NOTEBOOK["cells"][0], "source": "# from git"}]}))
+    _git(dev, "commit", "--quiet", "-am", "colleague")
+    _git(dev, "push", "--quiet", "origin", "main")
+    mine = _contents(st, "carl", "git/Team-notebooks/other.ipynb").json()["content"]
+    mine["cells"][0]["source"] = "# from Jupyter"
+    _contents(st, "carl", "git/Team-notebooks/other.ipynb", "PUT", json={"type": "notebook", "format": "json", "content": mine})
+    time.sleep(1)
+    out = httpx.post(f"{st['cairn']}/v1/git-folders/{fid}/pull", headers=carl, json={}, timeout=60).json()
+    assert [c["file"] for c in out["conflicts"]] == ["other.ipynb"], out
+    # Syncing Jupyter keeps Carl's file (Cairn has his save, which is what the sync serves).
+    r = httpx.post(f"{st['hub']}/user/carl/cairn/git/sync", headers={"Authorization": f"token {SERVICE}"}, timeout=60)
+    assert r.status_code == 200, r.text
+    assert _src(_contents(st, "carl", "git/Team-notebooks/other.ipynb").json()["content"]["cells"][0]) == "# from Jupyter"
+    out = httpx.post(f"{st['cairn']}/v1/git-folders/{fid}/pull", headers=carl, json={"force": True}, timeout=60).json()
+    assert out["conflicts"] == [] and "other.ipynb" in out["notebooks"], out
+    # Taking git's version is Carl's choice to drop his edit: the sync brings his file in line.
+    r = httpx.post(f"{st['hub']}/user/carl/cairn/git/sync", headers={"Authorization": f"token {SERVICE}"}, timeout=60).json()
+    assert r["written"] == ["git/Team-notebooks/other.ipynb"], r
+    assert _src(_contents(st, "carl", "git/Team-notebooks/other.ipynb").json()["content"]["cells"][0]) == "# from git"
+    # An edit Cairn never received (written past Jupyter, so no save reached Cairn) is never overwritten.
+    home = pathlib.Path(d) / "home" / "carl" / "git" / "Team-notebooks" / "other.ipynb"
+    home.write_text(json.dumps({**NOTEBOOK, "cells": [{**NOTEBOOK["cells"][0], "source": "# offline edit"}]}))
+    r = httpx.post(f"{st['hub']}/user/carl/cairn/git/sync", headers={"Authorization": f"token {SERVICE}"}, timeout=60).json()
+    assert r["kept"] == ["git/Team-notebooks/other.ipynb"], r
+    assert "# offline edit" in home.read_text()
+    # Another person's Cairn token cannot read Carl's folder.
+    assert httpx.get(f"{st['cairn']}/v1/git-folders/{fid}/notebooks", headers={"X-Cairn-Actor": "urn:li:corpuser:bob"}).status_code == 404

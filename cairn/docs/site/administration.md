@@ -336,11 +336,18 @@ JupyterHub runs from the official JupyterHub chart with `helm/jupyterhub/values-
   - it stops working as soon as the person is suspended, and no new one is given;
   - each exchange is audited.
 - **Notebooks are catalog assets.** Every save sends the notebook to Cairn (`cairn_lakehouse.jupyter.post_save_hook`, set by `configure_hub`). It becomes a notebook asset owned by the person, with its cells, and a job whose inputs are the tables its `%%sql` cells read. Two-part names use `defaultCatalog`, and CTEs are not counted as tables. A failed publish never stops the save.
+- **Git folders in Jupyter.** The server extension `cairn_lakehouse.jupyter` (enabled by `configure_hub`) writes the notebooks of each of the person's [git folders](#git-folders) under `git/<folder>/` when their server starts, and again on `POST <server>/cairn/git/sync`.
+  - **Saves go back to git.** Saving a notebook under `git/<folder>/` (the save hook) also keeps it with that folder, and the folder's next push commits it.
+  - **Outputs stay out of git.** Pushed notebooks have their outputs and execution counts cleared, so query results never reach the repository and diffs show only what changed.
+  - **Local work is never overwritten.** The sync writes a file only when it is missing, or still as the last sync left it. A file edited in a way Cairn has not seen (its save never reached Cairn) is kept and reported.
 - **Tested** (`tests/test_jupyterhub_e2e.py`, with a real JupyterHub, configurable-http-proxy and Jupyter server):
   - a person signed in through Cairn's OAuth flow;
   - their server started with their own Cairn token;
   - saving a notebook in it published the notebook to the catalog, owned by them, with lineage from the two tables its query read;
-  - tokens for other audiences were refused, the notebook token worked as the person, and it stopped when they were suspended.
+  - tokens for other audiences were refused, the notebook token worked as the person, and it stopped when they were suspended;
+  - a git folder's notebooks appeared in the person's server. An edited one (run, with an output) and a new one were pushed to a branch of their own, outputs cleared, while `main` stayed as it was;
+  - a notebook changed in git and in Jupyter was a conflict; taking git's version brought the file in Jupyter in line;
+  - a file edited outside Jupyter was kept by the sync.
 
 ## Machine learning: MLflow behind Cairn
 
@@ -501,6 +508,10 @@ A Git folder keeps a person's saved queries and notebooks in a git repository, r
   - A query already proposed, or one git already holds as it is, is not pushed again.
   - Until the pull request is merged, pulls neither conflict with it nor delete the queries it adds. Once it is merged, the next pull has nothing to report.
 - **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
+- **Notebooks in Jupyter** (`GET /v1/git-folders/<id>/notebooks`). Each notebook as it was last saved in the owner's JupyterHub server, or else as git has it. JupyterHub's extension syncs them into `git/<folder>/`; see [Notebooks](#notebooks-jupyterhub-with-cairn-sign-in).
+  - Saves there are kept for the next push. Pushed notebooks have their outputs cleared.
+  - A pull that brings a new version of a notebook also changed in Jupyter since reports a conflict, unless `force`.
+  - Folder names must give different directories: a second folder named `Reports` beside `reports` is refused.
 - **In the UI.** **Git folders** (`#/sql/git` in the workspace) links a folder, pulls it (showing what came in, conflicts, and a button to take git's version) and pushes with a commit message, linking to the pull request when the host opens one.
 - **Settings.** `CAIRN_GIT_FOLDERS_DIR` holds the clones (default `$CAIRN_DATA_DIR/git-folders`). Deleting a folder removes its clone and keeps its queries as ordinary saved queries.
 - **Tested** in `tests/test_git_folders.py`, with a real git repository and a colleague's clone.

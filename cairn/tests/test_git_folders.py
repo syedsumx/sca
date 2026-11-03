@@ -150,3 +150,48 @@ def test_query_files_round_trip():
     back = parse_sql(render_sql(q), "x")
     assert back == {**q, "description": "two lines"}
     assert parse_sql("SELECT 1", "plain")["connection"] == ""
+
+
+def test_notebooks_saved_in_jupyter_are_pushed_without_outputs(world):
+    """What the Jupyter save hook sends under git/<folder>/ is kept with the folder, served back to Jupyter,
+    and pushed with outputs cleared; a notebook changed in git and in Jupyter is a conflict."""
+    s, ana, dev = world["s"], world["ana"], world["dev"]
+    fid = ana.post("/v1/git-folders", json={"name": "reports", "url": f"file://{world['bare']}", "path": "reports"}).json()["id"]
+    ana.post(f"/v1/git-folders/{fid}/pull")
+    listed = ana.get(f"/v1/git-folders/{fid}/notebooks")
+    assert listed.status_code == 200, listed.text
+    [nb] = listed.json()
+    assert (nb["file"], nb["path"], nb["saved_in_jupyter"]) == ("nb/revenue.ipynb", "git/reports/nb/revenue.ipynb", False)
+    assert world["bob"].get(f"/v1/git-folders/{fid}/notebooks").status_code == 404
+    # A save in Jupyter (with outputs) goes to the catalog and to the folder; one outside git/ only to the catalog.
+    edited = {**NOTEBOOK, "cells": [{**NOTEBOOK["cells"][0], "source": "# Revenue, edited"},
+                                    {"cell_type": "code", "metadata": {}, "execution_count": 3, "source": "1 + 1",
+                                     "outputs": [{"output_type": "execute_result", "execution_count": 3, "metadata": {},
+                                                  "data": {"text/plain": "2"}}]}]}
+    assert s.git_folders.notebook_saved(ANA, "git/reports/nb/revenue.ipynb", edited) == {"folder": fid, "file": "nb/revenue.ipynb"}
+    assert s.git_folders.notebook_saved(ANA, "scratch/x.ipynb", edited) is None
+    assert s.git_folders.notebook_saved(BOB, "git/reports/nb/revenue.ipynb", edited) is None       # not bob's folder
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    with pytest.raises(WorkspaceError, match="no \\.\\."):
+        s.git_folders.notebook_saved(ANA, "git/reports/../../etc/x.ipynb", edited)
+    [nb] = ana.get(f"/v1/git-folders/{fid}/notebooks").json()
+    assert nb["saved_in_jupyter"] and nb["notebook"]["cells"][0]["source"] == "# Revenue, edited"
+    out = ana.post(f"/v1/git-folders/{fid}/push", json={"message": "edit"}).json()
+    assert out["changed"] == 1, out
+    pushed = json.loads(git(world["bare"], "show", f"{out['branch']}:reports/nb/revenue.ipynb"))
+    assert pushed["cells"][1]["outputs"] == [] and pushed["cells"][1]["execution_count"] is None
+    assert ana.post(f"/v1/git-folders/{fid}/push", json={}).json()["changed"] == 0
+    # Git changes it too: a conflict, unless forced; forced, git's version replaces the save.
+    git(dev, "pull", "--quiet", "origin", "main")
+    (dev / "reports" / "nb" / "revenue.ipynb").write_text(json.dumps({**NOTEBOOK, "cells": NOTEBOOK["cells"][:1]}))
+    git(dev, "commit", "--quiet", "-am", "theirs")
+    git(dev, "push", "--quiet", "origin", "main")
+    out = ana.post(f"/v1/git-folders/{fid}/pull").json()
+    assert [c["file"] for c in out["conflicts"]] == ["nb/revenue.ipynb"], out
+    out = ana.post(f"/v1/git-folders/{fid}/pull", json={"force": True}).json()
+    assert out["conflicts"] == [] and out["notebooks"] == ["nb/revenue.ipynb"]
+    [nb] = ana.get(f"/v1/git-folders/{fid}/notebooks").json()
+    assert not nb["saved_in_jupyter"] and len(nb["notebook"]["cells"]) == 1
+    # Two folders whose names make the same directory are refused.
+    assert ana.post("/v1/git-folders", json={"name": "Reports", "url": f"file://{world['bare']}"}).status_code == 409

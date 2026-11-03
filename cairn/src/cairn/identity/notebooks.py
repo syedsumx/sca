@@ -8,6 +8,8 @@
   ``CAIRN_NOTEBOOK_TOKEN_TTL``, 8 hours) and gives it to the server as ``CAIRN_TOKEN``. It works wherever a
   personal access token does, as that person (``%%sql`` on Trino, ``%cairn spark``, MLflow), and stops
   working when they are suspended. Each exchange is audited.
+* **Git folders.** A notebook saved under ``git/<folder>/`` is also kept with that git folder of the person's,
+  for its next push (``cairn.sqlworkspace.gitfolders``).
 * **Notebooks are catalog assets.** On every save, the Jupyter server sends the notebook to
   ``POST /v1/notebooks/publish`` (``cairn_lakehouse.jupyter.post_save_hook``). Cairn records it as a
   notebook owned by the person, with its cells, and with lineage from the tables its ``%%sql`` cells read.
@@ -192,7 +194,9 @@ class NotebookCatalog:
         return {"urn": urn, "job": job, "reads": sorted(reads)}
 
 
-def build_notebooks_router(sessions: NotebookSessions, catalog: Optional[NotebookCatalog], current_principal):
+def build_notebooks_router(sessions: NotebookSessions, catalog: Optional[NotebookCatalog], current_principal,
+                           on_save: Optional[Callable[[str, str, dict], Optional[dict]]] = None):
+    """``on_save(actor, path, notebook)``: also called for each saved notebook (git folders keep theirs)."""
     from fastapi import APIRouter, Body, Depends, HTTPException
 
     router = APIRouter(prefix="/v1/notebooks", tags=["notebooks"])
@@ -223,9 +227,19 @@ def build_notebooks_router(sessions: NotebookSessions, catalog: Optional[Noteboo
     def publish(path: str = Body(...), notebook: dict = Body(...), p=Depends(current_principal)):
         if p.is_service or p.via in ("agent", "extension"):
             raise HTTPException(403, "notebooks are published by the person who saved them")
-        if catalog is None:
+        if catalog is None and on_save is None:
             raise HTTPException(503, "the catalog is not connected")
-        return call(catalog.publish, p.urn, path, notebook)
+        out = call(catalog.publish, p.urn, path, notebook) if catalog is not None else {}
+        if on_save is not None:
+            from cairn.sqlworkspace.workspace import WorkspaceError
+
+            try:
+                git = on_save(p.urn, path, notebook)
+            except WorkspaceError as e:
+                raise HTTPException(e.status, str(e))
+            if git is not None:
+                out = {**out, "git_folder": git}
+        return out
 
     return router
 

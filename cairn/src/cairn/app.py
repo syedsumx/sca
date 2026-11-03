@@ -270,7 +270,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if getattr(services, "notebooks", None) is not None:
         from cairn.identity.notebooks import build_notebooks_router
 
-        app.include_router(build_notebooks_router(services.notebooks, services.notebook_catalog, cp))
+        gf = getattr(services, "git_folders", None)
+        app.include_router(build_notebooks_router(services.notebooks, services.notebook_catalog, cp,
+                                                  gf.notebook_saved if gf is not None else None))
     if getattr(services, "ml", None) is not None:
         from cairn.ml.mlflow_gateway import build_ml_router
 

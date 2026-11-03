@@ -1120,6 +1120,8 @@ def _build_data_access(s: Services) -> None:
                 s.notebook_catalog = NotebookCatalog(s.graph, table_urn_for(s.trino_access),
                                                      os.environ.get("CAIRN_NOTEBOOK_DEFAULT_CATALOG", "lakehouse"),
                                                      s.audit) if s.graph is not None else None
+                if getattr(s, "git_folders", None) is not None:     # built before the catalog was
+                    s.git_folders.notebooks = s.notebook_catalog
         # Lineage Core cannot take now waits in the database (Trino sends each event once).
         from cairn.dataaccess.trino import LINEAGE_ACTOR
         from cairn.dataaccess.trino_lineage import LineageOutbox
