@@ -85,6 +85,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.pipes.run_due)        # pipes: files events missed
     if getattr(s, "derived", None) is not None:
         sch.extra.append(s.derived.run_due)      # derived tables: on schedule or upstream change
+    if getattr(s, "sql_workflows", None) is not None:
+        sch.extra.append(s.sql_workflows.run_due)    # SQL workflows on their cron
     if getattr(s, "vectors", None) is not None:
         sch.extra.append(s.vectors.run_due)      # vector indexes kept in step with their tables
     sch.run_forever()

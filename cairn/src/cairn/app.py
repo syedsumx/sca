@@ -228,6 +228,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if getattr(services, "sql_workflows", None) is not None:
+        from cairn.sqlworkspace.workflows import build_workflows_router
+
+        app.include_router(build_workflows_router(services.sql_workflows, cp))
     if getattr(services, "vectors", None) is not None:
         from cairn.pipelines.vectors import build_vectors_router
 

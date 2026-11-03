@@ -421,6 +421,13 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 - **Who.** People only: service, agent and extension tokens are refused.
 - **Dashboards** (**Dashboards**, `/sql/dashboards`). A named, optionally shared set of saved queries, shown as their charts or tables. Opening one runs every tile as the viewer. A tile the viewer may not see shows the refusal, not the data. Each tile must be a query its owner may open. Only the owner changes or deletes a dashboard.
 - **Alerts** (`/sql/alerts`). A saved query checked every `every_minutes` (5 minutes to a week), as its owner. The condition is `rows` (the number of rows) or a column of the first row, compared with a number (`>`, `>=`, `<`, `<=`, `==`, `!=`).
+- **Workflows** (`/v1/sql-workflows`). Scheduled SQL in the product: named steps that depend on each other (`after`; cycles are refused), run on a `cron` (UTC, at most every five minutes) or with **Run now**, as the workflow's owner. Steps can be:
+  - `derived`: refresh a derived table (`full` for a rebuild). Only its owner, or an operator, may schedule it; this is how SQL that writes runs on a schedule.
+  - `check`: a saved query's `rows`, or a column of its first row, compared with a value. It fails the step when the condition does not hold (a quality gate between steps).
+  - `query`: a saved query, or `sql` on a `connection`, run as the owner. Its row count and first 20 rows are kept with the run and sent to the recipients (a scheduled report).
+
+  A step whose dependency failed is skipped, and `retries` (0-3) retries a failing step. Every run is kept, with each step's status, rows, error, attempts and time. The owner and `recipients` are told when a run fails, or after every run with `notify: always`. Queries go through the SQL workspace, so the owner's policies, masks and row filters apply. Several scheduler replicas claim each due run once.
+  - **Tested** in `tests/test_sql_workspace.py` (order, masks, a failing check skipping its dependents, notifications, the cron, checked definitions) and `tests/test_trino_e2e.py` (a derived-table refresh then a check, on real Trino).
   - **Who is told.** The owner and the alert's recipients are told when the condition starts to hold (`sql.alert_triggered`), when it stops (`sql.alert_resolved`), and once when the query fails. They hear about changes, not every check, on their notification channels.
   - **Where checks run.** The scheduler's leader runs them (`cairn scheduler`), so there is one check per alert however many replicas run. **Check now** runs one at once.
 - **Tested** (`tests/test_sql_workspace.py`, and against Trino in `tests/test_trino_e2e.py`):

@@ -114,6 +114,7 @@ class Services:
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
     vectors: Optional[Any] = None
+    sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
@@ -783,6 +784,14 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # SQL workflows: derived-table refreshes, checks and reports, scheduled, run as their owner.
+        from cairn.sqlworkspace.workflows import Workflows
+
+        def tell_workflow(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql"))
+        s.sql_workflows = Workflows(s.engine, s.sql_workspace, getattr(s, "derived", None), tell_workflow,
+                                lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                                          raise_on_deny=False))
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner

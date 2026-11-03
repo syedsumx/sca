@@ -783,6 +783,27 @@ def test_derived_tables_refresh_incrementally_and_in_order(trino, cairn):
     with pytest.raises(DerivedError, match="exists"):
         dt.create({"name": "other", "target": "shop.latest", "sql": "SELECT 1 AS one", "every_minutes": 5}, admin, admin)
 
+    # A workflow chains them, as its owner: refresh, then a check on what was written (real Trino).
+    from cairn.sqlworkspace.workflows import Workflows
+    from cairn.sqlworkspace.workspace import WorkspaceError
+
+    wf = Workflows(s.engine, s.sql_workspace, dt, None, lambda actor: False)
+    # The SQL workspace reads only tables the catalog knows (the crawler would have registered it).
+    s.graph.aspects[(dt.urn("shop", "latest"), "schemaMetadata")] = {"fields": [
+        {"fieldPath": c} for c in ("id", "region", "amount", "seq")]}
+    run(admin, "INSERT INTO lake.shop.orders VALUES (7, 'US', 2.0, 7)")
+    w = wf.save(admin, {"name": "shop nightly", "steps": [
+        {"name": "latest", "type": "derived", "table": "latest"},
+        {"name": "has-7", "type": "check", "after": ["latest"],
+         "query": s.sql_workspace.save(admin, {"name": "n", "connection": "lakehouse",
+                                               "sql": "SELECT count(*) AS n FROM shop.latest WHERE id = 7"})["id"],
+         "measure": "n", "op": "==", "value": 1}]})
+    out = wf.run(w["id"])
+    assert out["status"] == "ok", out
+    assert [st["status"] for st in out["steps"]] == ["ok", "ok"]
+    with pytest.raises(WorkspaceError, match="not yours"):            # ana may not schedule admin's table
+        wf.save("urn:li:corpuser:ana", {"name": "x", "steps": [{"name": "l", "type": "derived", "table": "latest"}]})
+
 
 def test_ai_and_python_functions_run_in_sql_under_cairns_policies(trino, cairn):
     """Trino's AI functions call a model only for people Cairn allows (USE_AI_FUNCTIONS), and the model

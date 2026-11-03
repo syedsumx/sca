@@ -170,3 +170,60 @@ def test_alerts_tell_when_their_condition_starts_and_stops(ws):
             b.save_alert(ANA, wrong)
     with pytest.raises(WorkspaceError):
         b.alert(EVE, a["id"])
+
+
+def test_workflows_run_steps_in_order_as_their_owner_and_report(ws):
+    from sqlalchemy import text as sqltext
+
+    from cairn.sqlworkspace.workflows import Workflows
+
+    told = []
+    wf = Workflows(ws.engine, ws, None, lambda *a: told.append(a))
+    orders = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.orders"})
+    emails = ws.save(ANA, {"name": "Emails", "connection": "wh", "sql": "SELECT id, email FROM main.users ORDER BY id"})
+    w = wf.save(ANA, {"name": "Nightly", "cron": "15 2 * * *", "recipients": ["urn:li:corpuser:bob"], "notify": "always",
+                      "steps": [{"name": "report", "type": "query", "query": emails["id"], "after": ["enough"]},
+                                {"name": "enough", "type": "check", "query": orders["id"], "measure": "n", "op": ">=", "value": 3}]})
+    assert w["next_run_ms"] and w["steps"][0]["after"] == ["enough"]
+    run = wf.run(w["id"])
+    assert run["status"] == "ok", run
+    by = {s["name"]: s for s in run["steps"]}
+    assert by["enough"]["detail"] == "n is 3" and by["report"]["rows"] == 2
+    # Run as its owner: her masks apply to what the report keeps and sends.
+    assert by["report"]["preview"][0][1] != "a@x.com"
+    assert told[-1][0] == "sql.workflow_finished" and told[-1][3] == [ANA, "urn:li:corpuser:bob"]
+    # A failing check stops what depends on it; the owner is told.
+    with ws.data.registry.engine("wh").begin() as c:
+        c.execute(sqltext("DELETE FROM orders WHERE id = 3"))
+    run = wf.run(w["id"])
+    by = {s["name"]: s for s in run["steps"]}
+    assert run["status"] == "failed" and "check failed: n is 2" in by["enough"]["error"]
+    assert by["report"]["status"] == "skipped" and told[-1][0] == "sql.workflow_failed"
+    assert [r["status"] for r in wf.runs(ANA, w["id"])] == ["failed", "ok"]
+    # Due on its cron: the scheduler runs it once, then not until the next time.
+    later = w["next_run_ms"] + 1000
+    assert wf.run_due(later) == 1 and wf.run_due(later) == 0
+    assert wf.runs(ANA, w["id"])[0]["trigger"] == "schedule"
+
+
+def test_workflow_definitions_are_checked_and_private(ws):
+    from cairn.sqlworkspace.workflows import Workflows
+
+    wf = Workflows(ws.engine, ws, None)
+    q = ws.save(ANA, {"name": "Q", "connection": "wh", "sql": "SELECT 1 AS x"})
+    good = {"name": "x", "type": "query", "query": q["id"]}
+    for steps, msg in ([[], "1 to 50"], [[good, good], "name of its own"],
+                       [[{**good, "after": ["nope"]}], "no step 'nope'"],
+                       [[{**good, "name": "a", "after": ["b"]}, {**good, "name": "b", "after": ["a"]}], "cycle"],
+                       [[{**good, "type": "check", "op": "~", "value": 1}], "op is"],
+                       [[{"name": "d", "type": "derived", "table": "t"}], "derived tables are not set up"]):
+        with pytest.raises(WorkspaceError, match=msg):
+            wf.save(ANA, {"name": "bad", "steps": steps})
+    with pytest.raises(WorkspaceError, match="every five minutes"):
+        wf.save(ANA, {"name": "bad", "cron": "* * * * *", "steps": [good]})
+    w = wf.save(ANA, {"name": "mine", "steps": [good]})
+    with pytest.raises(WorkspaceError):
+        wf.get(EVE, w["id"])                                 # someone else's: not found
+    assert wf.list(EVE) == [] and [x["name"] for x in wf.list(ANA)] == ["mine"]
+    with pytest.raises(WorkspaceError):                      # ana's private query is not eve's to schedule
+        wf.save(EVE, {"name": "q of ana", "steps": [{"name": "x", "type": "query", "query": q["id"]}]})
