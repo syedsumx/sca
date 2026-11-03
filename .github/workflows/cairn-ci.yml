@@ -431,8 +431,11 @@ jobs:
           node_image: kindest/node:v1.33.1
       - name: Load the images into the cluster
         run: |
-          docker pull -q python:3.12-slim && docker pull -q alpine/git:v2.49.1   # data apps (test_data_apps_k8s.py)
-          kind load docker-image cairn/spark:ci python:3.12-slim alpine/git:v2.49.1 --name cairn
+          # Data apps (test_data_apps_k8s.py): single-platform copies of their images, which kind can import
+          # (a pulled multi-platform image holds only this platform's layers).
+          echo "FROM python:3.12-slim" | docker build -q -t cairn-test/python:ci -
+          echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
+          kind load docker-image cairn/spark:ci cairn-test/python:ci cairn-test/git:ci --name cairn
       - uses: azure/setup-helm@v4
       - name: Spark in pods on the cluster
         working-directory: cairn
@@ -450,7 +453,8 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_spark_kind_e2e.py | tee "$RUNNER_TEMP/kind.log"
           ! grep -q "skipped" "$RUNNER_TEMP/kind.log"
           # Data apps on the same cluster: from git, started on a visit, stopped when idle, reached only by Cairn.
-          pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_data_apps_k8s.py | tee "$RUNNER_TEMP/apps.log"
+          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci CAIRN_APPS_K8S_GIT_IMAGE=cairn-test/git:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_data_apps_k8s.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
       - name: Cluster state on failure
         if: failure()

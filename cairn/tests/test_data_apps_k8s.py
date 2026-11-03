@@ -3,8 +3,8 @@ the app's code comes from git at the deployed commit, the first visit starts it 
 only Cairn reaches its pods.
 
 Needs a kind cluster (CAIRN_KIND_KUBECONFIG; CAIRN_KIND_HOST_IP, where pods reach this host; the kind
-network's node named cairn-control-plane), helm, git, and the images python:3.12-slim and alpine/git loaded
-into the cluster."""
+network's node named cairn-control-plane), helm, git, and the app image (CAIRN_APPS_TEST_IMAGE) and git image
+(CAIRN_APPS_K8S_GIT_IMAGE) loaded into the cluster."""
 
 import base64
 import json
@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(not (KUBECONFIG and HOST and shutil.which("git")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADMIN, ANA = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
 NS = "cairn-apps"
+IMAGE = os.environ.get("CAIRN_APPS_TEST_IMAGE", "python:3.12-slim")      # loaded into the cluster
 SERVER = '''
 import http.server, os, sys
 VERSION = "{version}"
@@ -133,7 +134,7 @@ def test_an_app_on_kubernetes_from_git(cluster, repo, settings, graph, monkeypat
     app = create_api_app(s)
     admin, ana = TestClient(app, headers={"X-Cairn-Actor": ADMIN}), TestClient(app, headers={"X-Cairn-Actor": ANA})
 
-    r = admin.post("/v1/apps", json={"name": "orders", "title": "Orders", "runtime": "kubernetes", "image": "python:3.12-slim",
+    r = admin.post("/v1/apps", json={"name": "orders", "title": "Orders", "runtime": "kubernetes", "image": IMAGE,
                                      "port": 8080, "command": ["python", "server.py", "{port}"], "idle_minutes": 1,
                                      "git": {"url": repo["url"], "branch": "main", "path": "apps/orders"}})
     assert r.status_code == 201, r.text
@@ -155,7 +156,7 @@ def test_an_app_on_kubernetes_from_git(cluster, repo, settings, graph, monkeypat
 
     # Only Cairn reaches the app's pods: another pod in the cluster is refused by the network policy.
     pod_ip = kubectl("-n", NS, "get", "pods", "-l", "cairn.io/app=orders", "-o", "jsonpath={.items[0].status.podIP}")
-    probe = kubectl("run", "intruder", "--rm", "-i", "--restart=Never", "--image=python:3.12-slim", "--image-pull-policy=IfNotPresent",
+    probe = kubectl("run", "intruder", "--rm", "-i", "--restart=Never", f"--image={IMAGE}", "--image-pull-policy=IfNotPresent",
                     "--command", "--", "python", "-c",
                     f"import urllib.request\ntry:\n urllib.request.urlopen('http://{pod_ip}:8080/', timeout=5)\n print('REACHED')\n"
                     "except Exception as e:\n print('REFUSED', type(e).__name__)", check=False)
@@ -186,7 +187,7 @@ def test_an_app_on_kubernetes_from_git(cluster, repo, settings, graph, monkeypat
     other = KubeApps("default", api=cluster["api"], token_file=cluster["token"], ca_file=cluster["ca"],
                      ingress_from=[{"ipBlock": {"cidr": f"{HOST}/32"}}])
     with pytest.raises(KubeError, match="403"):
-        asyncio.run(other.deploy({"name": "x", "image": "python:3.12-slim", "port": 8080, "command": ["python"]}, "k", None))
+        asyncio.run(other.deploy({"name": "x", "image": IMAGE, "port": 8080, "command": ["python"]}, "k", None))
 
     # Deleting the app removes its objects.
     assert admin.delete("/v1/apps/orders").status_code == 204
