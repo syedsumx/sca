@@ -1197,7 +1197,13 @@ def _build_data_access(s: Services) -> None:
         def viewer_token(urn: str):
             tt = getattr(s, "trino_tokens", None)
             return tt.mint(urn, 600)["token"] if tt is not None else None
-        s.data_apps = DataApps(s.engine, apps_secret, s.audit, viewer_token)
+        from cairn.dataaccess.apps_k8s import KubeApps
+
+        # Apps from git (CAIRN_APP_GIT_URLS: URL prefixes besides the configured repositories), and on
+        # Kubernetes when CAIRN_APPS_K8S_NAMESPACE is set (a misconfiguration stops Cairn at start-up).
+        s.data_apps = DataApps(s.engine, apps_secret, s.audit, viewer_token, git=getattr(s, "git", None),
+                               kube=KubeApps.from_env(),
+                               git_urls=[u.strip() for u in os.environ.get("CAIRN_APP_GIT_URLS", "").split(",") if u.strip()])
 
     # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
     from cairn.pipelines.delta_convert import from_env as delta_from_env

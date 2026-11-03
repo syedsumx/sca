@@ -487,6 +487,22 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
     - `X-Cairn-Trino-Token` (where Trino is set up): a ten-minute token for Trino as the viewer. Queries the app runs with it are the viewer's own, under their policies, masks and row filters, never the app's.
   - **No secrets passed on.** A `command` app's environment drops Cairn's own secrets.
 - **Keys.** Each app's key is `HMAC(CAIRN_APPS_SECRET, name)`, defaulting to the service token: nothing is stored, every replica agrees, and rotating the secret rotates every key.
+- **From git.** Add `git`, either `{"repo": …}` (a repository configured for Cairn's git integration, whose token Cairn uses) or `{"url": …}` (one whose prefix the operator allows in `CAIRN_APP_GIT_URLS`; chart: `cairn.apps.gitUrls`), plus `branch` (`main`) and `path` (the app's folder, where `command` runs).
+  - **Deploys.** Creating the app deploys the branch's current commit, and the app records it (`commit`). A new commit on the branch changes nothing until `POST /v1/apps/<name>/deploy`. Each deploy is audited (`app.deployed`).
+  - **Fails closed.** An app whose first deploy fails is not kept.
+  - **Signing in.** The repository's token reaches git through the environment, never a command line or the clone's config.
+- **On Kubernetes** (`"runtime": "kubernetes"`, with `image` and `port`). Each app is a Deployment of its own in `cairn.apps.kubernetes.namespace`, at zero replicas until someone opens it. The first visit scales it to one and waits until it is ready. Every visit stamps it, and after `idle_minutes` without one it is scaled back to zero, whichever Cairn replica served it.
+  - **Code.** An app from git gets its code from an init container (`gitImage`) that checks out exactly the deployed commit. Deploying again rolls the pods to the new commit.
+  - **Locked down.** The pod has no Kubernetes credentials and runs as a non-root user (10001) without privileges or capabilities. It gets `PORT`, `CAIRN_APP_BASE` and `CAIRN_APP_KEY`; the key and any git token come from a Secret of its own.
+  - **Only Cairn reaches it.** A NetworkPolicy lets only Cairn's API pods in (or `cairn.apps.kubernetes.ingressFrom`). Cairn reaches the app at its Service; when Cairn runs outside the cluster, set `access: node-port` and `nodeAddress`. Node ports keep the caller's address, so the policy can name Cairn's.
+  - **Permissions.** The chart gives Cairn's API a Role in that namespace for the apps' Deployments, Services, Secrets and NetworkPolicies, and nothing else.
+- **Tested** in `tests/test_data_apps_git.py` (a real repository; the app a real process). The app ran the deployed commit in its `path`, kept it until deployed again, and then ran the new one. A URL outside the allowed list was refused, and a failed first deploy left no app.
+- **Tested on Kubernetes** in `tests/test_data_apps_k8s.py` (a kind cluster; the chart's Role; code from a git server):
+  - the app's objects were created stopped, and the key appeared only in its Secret;
+  - the first visit through Cairn started it, running the deployed commit as user 10001;
+  - another pod in the cluster was refused by the network policy;
+  - a deploy rolled it to the new commit, and idleness scaled it back to zero;
+  - Cairn's account could not create apps in another namespace, and deleting the app removed its objects.
 - **Tested** in `tests/test_data_apps_e2e.py`, with a real Streamlit app opened in Chromium through Cairn.
   - Strangers got 401, someone without `USE_APP` got 403 on the page and on the WebSocket, and the app was not started for them.
   - Ana's first visit started the app. Its page, which Streamlit draws over its WebSocket, showed her as the viewer, the app key verified, and a Trino token present.

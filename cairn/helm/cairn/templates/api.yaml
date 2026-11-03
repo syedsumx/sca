@@ -82,6 +82,26 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_NOTEBOOK_DEFAULT_CATALOG" "value" .defaultCatalog) }}
 {{- end }}
 {{- end }}
+{{- /* Data apps: where they may come from, and the Kubernetes runtime (templates/apps-kubernetes.yaml). */ -}}
+{{- with .Values.cairn.apps }}
+{{- if .gitUrls }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APP_GIT_URLS" "value" (join "," .gitUrls)) }}
+{{- end }}
+{{- with .kubernetes }}
+{{- if .enabled }}
+{{- if and (eq .access "node-port") (not .nodeAddress) }}{{ fail "cairn.apps.kubernetes.nodeAddress: where Cairn reaches node ports" }}{{ end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_NAMESPACE" "value" .namespace) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_ACCESS" "value" .access) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_NODE_ADDRESS" "value" .nodeAddress) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_CAIRN_NAMESPACE" "value" $.Release.Namespace) }}
+{{- if .ingressFrom }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_INGRESS_FROM" "value" (toJson .ingressFrom)) }}
+{{- end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_GIT_IMAGE" "value" .gitImage) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_APPS_K8S_RESOURCES" "value" (toJson .resources)) }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- /* MLflow behind Cairn (/v1/ml). */ -}}
 {{- if .Values.cairn.mlflow.enabled }}
 {{- $mlCtx := dict "root" $ "component" "mlflow" "cfg" .Values.cairn.mlflow }}

@@ -169,6 +169,16 @@ def _canonical(text: str) -> str:
         return text
 
 
+def repo_remote(repo) -> tuple[str, Optional[str]]:
+    """A configured repository's clone URL, and the HTTP header that signs in to it (None: public)."""
+    url = repo.api_url and repo.provider == "gitlab" and repo.api_url.rstrip("/").removesuffix("/api/v4")
+    url = f"{url}/{repo.repo}.git" if url else HOSTS[repo.provider].format(repo=repo.repo)
+    if not repo.token:
+        return url, None
+    cred = base64.b64encode(f"{AUTH_USER[repo.provider]}:{repo.token}".encode()).decode()
+    return url, f"Authorization: Basic {cred}"
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
     return s[:120] or "query"
@@ -257,13 +267,8 @@ class GitFolders:
         """The URL, the git options that sign in (never written to disk), and the configured repo."""
         if f["repo"]:
             repo = self._repo(f["repo"])
-            url = repo.api_url and repo.provider == "gitlab" and repo.api_url.rstrip("/").removesuffix("/api/v4")
-            url = (f"{url}/{repo.repo}.git" if url else HOSTS[repo.provider].format(repo=repo.repo))
-            opts = []
-            if repo.token:
-                cred = base64.b64encode(f"{AUTH_USER[repo.provider]}:{repo.token}".encode()).decode()
-                opts = ["-c", f"http.extraHeader=Authorization: Basic {cred}"]
-            return url, opts, repo
+            url, header = repo_remote(repo)
+            return url, (["-c", f"http.extraHeader={header}"] if header else []), repo
         return f["url"], [], None
 
     def _git(self, cwd: Optional[str], *args: str, opts: Optional[list[str]] = None, timeout: int = 300) -> str:

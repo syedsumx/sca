@@ -994,6 +994,23 @@ cairn:
   # appears in the catalog with lineage from its training tables.
   # JupyterHub with sign-in through Cairn (run the official JupyterHub chart with helm/jupyterhub/values-cairn.yaml):
   # Cairn registers it as an OAuth client and gives each person's server a Cairn token of their own.
+  # Data apps (/apps/<name>/): Streamlit and other web apps behind Cairn sign-in.
+  apps:
+    # URL prefixes apps may be deployed from, besides the repositories configured for git (e.g. https://git.acme.com/).
+    gitUrls: []
+    # The Kubernetes runtime (runtime: kubernetes): a Deployment per app in `namespace`, started on the first
+    # visit and stopped when idle. The chart gives Cairn's API a Role there for the apps' objects only.
+    kubernetes:
+      enabled: false
+      namespace: cairn-apps
+      # cluster-ip: Cairn reaches apps at their Service (Cairn in this cluster); node-port: at nodeAddress.
+      access: cluster-ip
+      nodeAddress: ""
+      # Network policy peers that may reach the apps (default: Cairn's API pods in this release's namespace).
+      ingressFrom: []
+      gitImage: alpine/git:v2.49.1
+      resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
+
   notebooks:
     jupyterhub:
       enabled: false
