@@ -119,6 +119,7 @@ class Provider:
     def upsert_comment(self, pr: str, body: str) -> None: ...
     def set_status(self, sha: str, ok: bool, description: str, url: str) -> None: ...
     def open_pr(self, branch: str, files: dict[str, str], title: str, body: str) -> str: ...
+    def create_pull(self, head: str, base: str, title: str, body: str) -> str: ...
 
 
 class GitHub(Provider):
@@ -178,6 +179,11 @@ class GitHub(Provider):
                 "content": base64.b64encode(content.encode()).decode()})
         return self._call("POST", f"{self.base()}/pulls", json={"title": title, "head": branch,
                                                                 "base": self.r.base_branch, "body": body}).json()["html_url"]
+
+    def create_pull(self, head: str, base: str, title: str, body: str) -> str:
+        """A pull request from a branch already pushed."""
+        return self._call("POST", f"{self.base()}/pulls", json={"title": title, "head": head, "base": base,
+                                                                "body": body}).json()["html_url"]
 
 
 class GitLab(Provider):
@@ -239,6 +245,10 @@ class GitLab(Provider):
             "source_branch": branch, "target_branch": self.r.base_branch, "title": title,
             "description": body}).json()["web_url"]
 
+    def create_pull(self, head: str, base: str, title: str, body: str) -> str:
+        return self._call("POST", f"{self.base()}/merge_requests", json={
+            "source_branch": head, "target_branch": base, "title": title, "description": body}).json()["web_url"]
+
 
 class Bitbucket(Provider):
     def base(self) -> str:
@@ -298,6 +308,11 @@ class Bitbucket(Provider):
         return self._call("POST", f"{self.base()}/pullrequests", json={
             "title": title, "description": body, "source": {"branch": {"name": branch}},
             "destination": {"branch": {"name": self.r.base_branch}}}).json()["links"]["html"]["href"]
+
+    def create_pull(self, head: str, base: str, title: str, body: str) -> str:
+        return self._call("POST", f"{self.base()}/pullrequests", json={
+            "title": title, "description": body, "source": {"branch": {"name": head}},
+            "destination": {"branch": {"name": base}}}).json()["links"]["html"]["href"]
 
 
 PROVIDERS = {"github": GitHub, "gitlab": GitLab, "bitbucket": Bitbucket}

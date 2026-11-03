@@ -1,0 +1,461 @@
+"""Git folders: a person's saved queries and notebooks kept in a git repository, reviewed like code.
+
+A folder links a path on a branch of a repository to its owner's SQL workspace (``POST /v1/git-folders``):
+``name``, ``repo`` (a repository configured for Cairn's git integration, which holds its token) or ``url``
+(one the operator allows, ``CAIRN_GIT_FOLDER_URLS``), ``branch`` (``main``), ``path`` (``""``: the root) and
+optionally ``every_minutes`` for a scheduled pull. Cairn works on a clone of its own with the ``git`` command,
+so any git host works.
+
+* **Pull** (``POST /v1/git-folders/<id>/pull``): each ``.sql`` file becomes one of the owner's saved queries,
+  and each ``.ipynb`` notebook is published to the catalog (with the tables its ``%%sql`` cells read). A file's
+  header comments give the query's settings::
+
+      -- connection: lakehouse
+      -- description: Revenue by region, for the weekly review
+      -- shared: true
+      -- chart: {"type": "bar", "x": "region", "y": ["total"]}
+      SELECT region, sum(amount) AS total FROM marts.orders GROUP BY region
+
+  A file that changed in git updates its query. A deleted file deletes it. When the query was also changed in
+  Cairn since the last pull, the file is a **conflict**: it is reported and left alone, unless ``force``.
+* **Push** (``POST /v1/git-folders/<id>/push``): the folder's queries, as they are in Cairn (and any others of
+  the owner's named in ``add``), are committed by the owner to a new branch ``cairn/<user>/<time>``, never to
+  the folder's branch. For a configured GitHub, GitLab or Bitbucket repository, a pull request is opened
+  from it. Merging the pull request and pulling again brings the folder back in step.
+* Folders are their owner's: others neither see nor use them. Each pull and push is audited.
+"""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import json
+import logging
+import os
+import re
+import shutil
+import subprocess
+import threading
+import time
+import uuid
+from typing import Any, Optional
+
+from sqlalchemy import BigInteger, Column, Integer, String, Table, and_, delete, select, update
+
+from cairn.common.db import metadata
+from cairn.sqlworkspace.workspace import WorkspaceError, saved_queries
+
+logger = logging.getLogger(__name__)
+
+git_folders = Table(
+    "cairn_git_folders", metadata,
+    Column("id", String(32), primary_key=True),
+    Column("owner", String(256), nullable=False, index=True),
+    Column("name", String(128), nullable=False),
+    Column("repo", String(64), nullable=True),        # a configured repository (its token)
+    Column("url", String(1024), nullable=True),        # or a URL the operator allows
+    Column("branch", String(256), nullable=False),
+    Column("path", String(512), nullable=False),
+    Column("every_minutes", Integer, nullable=True),
+    Column("head", String(64), nullable=True),         # the commit last pulled
+    Column("synced_ms", BigInteger, nullable=True),
+    Column("error", String(2000), nullable=True),
+    Column("created_ms", BigInteger, nullable=False),
+)
+git_folder_files = Table(
+    "cairn_git_folder_files", metadata,
+    Column("folder_id", String(32), primary_key=True),
+    Column("file", String(1024), primary_key=True),    # relative to the folder's path
+    Column("kind", String(16), nullable=False),        # query | notebook
+    Column("ref", String(512), nullable=False),        # the saved query's id, or the notebook's urn
+    Column("hash", String(64), nullable=False),        # of the file as last pulled ("": only pushed so far)
+    Column("pushed", String(64), nullable=True),       # of the file as last pushed
+)
+
+BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,256}$")
+SUBPATH = re.compile(r"^(?:[A-Za-z0-9._ -]+/)*[A-Za-z0-9._ -]*$")
+HEADER = re.compile(r"^--\s*(connection|description|shared|chart|name)\s*:\s*(.*)$")
+AUTH_USER = {"github": "x-access-token", "gitlab": "oauth2", "bitbucket": "x-token-auth"}
+HOSTS = {"github": "https://github.com/{repo}.git", "gitlab": "https://gitlab.com/{repo}.git",
+         "bitbucket": "https://bitbucket.org/{repo}.git"}
+
+
+def _now() -> int:
+    return int(time.time() * 1000)
+
+
+def _hash(text: str) -> str:
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def parse_sql(text: str, stem: str) -> dict:
+    """A query file: its header comments, then the SQL."""
+    out: dict[str, Any] = {"name": stem, "description": "", "shared": False, "chart": None, "connection": ""}
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = HEADER.match(lines[i].strip())
+        if not m:
+            break
+        key, value = m.group(1), m.group(2).strip()
+        if key == "shared":
+            out["shared"] = value.lower() in ("true", "yes", "1")
+        elif key == "chart":
+            try:
+                out["chart"] = json.loads(value)
+            except ValueError:
+                raise WorkspaceError(f"{stem}: chart is JSON")
+        else:
+            out[key] = value
+        i += 1
+    out["sql"] = "\n".join(lines[i:]).strip()
+    return out
+
+
+def render_sql(q: dict) -> str:
+    head = [f"-- connection: {q['connection']}"]
+    if q.get("description"):
+        head.append(f"-- description: {' '.join(str(q['description']).split())}")
+    if q.get("shared"):
+        head.append("-- shared: true")
+    chart = q.get("chart") or {}
+    if chart and chart != {"type": "table", "x": "", "y": []}:
+        head.append(f"-- chart: {json.dumps(chart, sort_keys=True)}")
+    return "\n".join(head) + "\n" + q["sql"].strip() + "\n"
+
+
+def _same_query(spec: dict, q) -> bool:
+    """Does a file say what the saved query is (name aside: a file may be renamed)?"""
+    get = (lambda k: q[k]) if isinstance(q, dict) else (lambda k: getattr(q, k))
+    chart = get("chart")
+    chart = json.loads(chart or "{}") if isinstance(chart, str) else (chart or {})
+    want = spec.get("chart") or {"type": "table", "x": "", "y": []}
+    want = {"type": want.get("type", "table"), "x": str(want.get("x") or ""), "y": list(want.get("y") or [])}
+    return (spec["sql"].strip() == str(get("sql")).strip() and spec["connection"] == get("connection")
+            and " ".join(str(spec.get("description") or "").split()) == " ".join(str(get("description") or "").split())
+            and bool(spec.get("shared")) == bool(get("shared")) and want == chart)
+
+
+def _slug(name: str) -> str:
+    s = re.sub(r"[^A-Za-z0-9._-]+", "-", name.strip()).strip("-.")
+    return s[:120] or "query"
+
+
+class GitFolders:
+    def __init__(self, engine, workspace, git=None, notebooks=None, audit=None, workdir: Optional[str] = None,
+                 allowed_urls: Optional[list[str]] = None):
+        """``git``: Cairn's GitService (its configured repositories and their tokens); ``notebooks``: the
+        NotebookCatalog notebooks are published to; ``allowed_urls``: URL prefixes folders may name."""
+        self.engine, self.ws, self.git, self.notebooks, self.audit = engine, workspace, git, notebooks, audit
+        self.workdir = workdir or os.path.join(os.environ.get("CAIRN_DATA_DIR", "/tmp/cairn"), "git-folders")
+        self.allowed = [u for u in (allowed_urls or []) if u]
+        self._locks: dict[str, threading.Lock] = {}
+
+    # ---- definitions --------------------------------------------------------------------
+    def _repo(self, rid: str):
+        if self.git is None:
+            raise WorkspaceError("no git repositories are configured", 404)
+        try:
+            return self.git.repo(rid)
+        except Exception:
+            raise WorkspaceError(f"no repository {rid!r}", 404)
+
+    def create(self, actor: str, body: dict) -> dict:
+        name = str(body.get("name") or "").strip()
+        rid, url = body.get("repo"), body.get("url")
+        branch, path = str(body.get("branch") or "main"), str(body.get("path") or "").strip("/")
+        every = body.get("every_minutes")
+        if not name or len(name) > 128:
+            raise WorkspaceError("a folder needs a name")
+        if bool(rid) == bool(url):
+            raise WorkspaceError("give repo (a configured repository) or url, not both")
+        if rid:
+            self._repo(str(rid))
+        else:
+            url = str(url)
+            if not any(url.startswith(p) for p in self.allowed):
+                raise WorkspaceError("that URL is not one folders may use (CAIRN_GIT_FOLDER_URLS)", 403)
+        if not BRANCH.match(branch) or ".." in branch or branch.startswith(("-", "/")):
+            raise WorkspaceError("branch: a branch name")
+        if not SUBPATH.match(path) or ".." in path.split("/"):
+            raise WorkspaceError("path: a folder in the repository")
+        if every is not None and (isinstance(every, bool) or not isinstance(every, int) or not 5 <= every <= 1440):
+            raise WorkspaceError("every_minutes is 5-1440")
+        row = {"id": uuid.uuid4().hex, "owner": actor, "name": name, "repo": rid or None, "url": url if not rid else None,
+               "branch": branch, "path": path, "every_minutes": every, "created_ms": _now()}
+        with self.engine.begin() as conn:
+            conn.execute(git_folders.insert().values(**row))
+            if self.audit is not None:
+                self.audit.record("sql", "git_folder.created", actor, None, row, conn=conn)
+        return self.get(actor, row["id"])
+
+    def get(self, actor: str, fid: str) -> dict:
+        with self.engine.connect() as conn:
+            r = conn.execute(select(git_folders).where(and_(git_folders.c.id == fid, git_folders.c.owner == actor))).first()
+        if r is None:
+            raise WorkspaceError("no such git folder of yours", 404)
+        return dict(r._mapping)
+
+    def list(self, actor: str) -> list[dict]:
+        with self.engine.connect() as conn:
+            return [dict(r._mapping) for r in conn.execute(select(git_folders).where(git_folders.c.owner == actor)
+                                                           .order_by(git_folders.c.name))]
+
+    def delete(self, actor: str, fid: str) -> None:
+        """Forgets the folder; its saved queries stay, as ordinary ones."""
+        self.get(actor, fid)
+        with self.engine.begin() as conn:
+            conn.execute(delete(git_folder_files).where(git_folder_files.c.folder_id == fid))
+            conn.execute(delete(git_folders).where(git_folders.c.id == fid))
+            if self.audit is not None:
+                self.audit.record("sql", "git_folder.deleted", actor, None, {"id": fid}, conn=conn)
+        shutil.rmtree(os.path.join(self.workdir, fid), ignore_errors=True)
+
+    # ---- git ------------------------------------------------------------------------------
+    def _remote(self, f: dict) -> tuple[str, list[str], Any]:
+        """The URL, the git options that sign in (never written to disk), and the configured repo."""
+        if f["repo"]:
+            repo = self._repo(f["repo"])
+            url = repo.api_url and repo.provider == "gitlab" and repo.api_url.rstrip("/").removesuffix("/api/v4")
+            url = (f"{url}/{repo.repo}.git" if url else HOSTS[repo.provider].format(repo=repo.repo))
+            opts = []
+            if repo.token:
+                cred = base64.b64encode(f"{AUTH_USER[repo.provider]}:{repo.token}".encode()).decode()
+                opts = ["-c", f"http.extraHeader=Authorization: Basic {cred}"]
+            return url, opts, repo
+        return f["url"], [], None
+
+    def _git(self, cwd: Optional[str], *args: str, opts: Optional[list[str]] = None, timeout: int = 300) -> str:
+        allowed = "https:ssh" + (":file" if any(p.startswith("file://") for p in self.allowed) else "")
+        env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": self.workdir, "GIT_TERMINAL_PROMPT": "0",
+               "GIT_ALLOW_PROTOCOL": allowed, "GIT_CONFIG_NOSYSTEM": "1", "LANG": "C"}
+        r = subprocess.run(["git", *(opts or []), *args], cwd=cwd, env=env, capture_output=True, text=True, timeout=timeout)
+        if r.returncode != 0:
+            raise WorkspaceError(f"git {args[0]}: {(r.stderr or r.stdout).strip()[-500:]}", 502)
+        return r.stdout
+
+    def _checkout(self, f: dict) -> tuple[str, list[str], Any]:
+        """The folder's clone, fetched and at the tip of its branch."""
+        url, opts, repo = self._remote(f)
+        d = os.path.join(self.workdir, f["id"])
+        os.makedirs(self.workdir, exist_ok=True)
+        if not os.path.isdir(os.path.join(d, ".git")):
+            shutil.rmtree(d, ignore_errors=True)
+            self._git(None, "clone", "--quiet", "--no-tags", "--branch", f["branch"], "--", url, d, opts=opts)
+        else:
+            self._git(d, "fetch", "--quiet", "--no-tags", "origin", f["branch"], opts=opts)
+        self._git(d, "checkout", "--quiet", "--force", "-B", f["branch"], f"origin/{f['branch']}")
+        self._git(d, "clean", "-fdq")
+        return d, opts, repo
+
+    def _files(self, d: str, path: str) -> dict[str, str]:
+        base = os.path.join(d, path) if path else d
+        out: dict[str, str] = {}
+        if not os.path.isdir(base):
+            return out
+        for root, dirs, names in os.walk(base):
+            dirs[:] = [x for x in dirs if x != ".git"]
+            for n in names:
+                if n.endswith((".sql", ".ipynb")):
+                    full = os.path.join(root, n)
+                    if os.path.islink(full) or os.path.getsize(full) > 5_000_000:
+                        continue
+                    out[os.path.relpath(full, base)] = open(full, encoding="utf-8", errors="replace").read()
+        return out
+
+    # ---- pull -------------------------------------------------------------------------------
+    def pull(self, actor: str, fid: str, force: bool = False) -> dict:
+        f = self.get(actor, fid)
+        with self._locks.setdefault(fid, threading.Lock()):
+            try:
+                d, _, _ = self._checkout(f)
+            except WorkspaceError as e:
+                with self.engine.begin() as conn:
+                    conn.execute(update(git_folders).where(git_folders.c.id == fid).values(error=str(e)[:2000]))
+                raise
+            head = self._git(d, "rev-parse", "HEAD").strip()
+            files = self._files(d, f["path"])
+            with self.engine.connect() as conn:
+                known = {r.file: dict(r._mapping) for r in conn.execute(
+                    select(git_folder_files).where(git_folder_files.c.folder_id == fid))}
+                queries = {r.id: r for r in conn.execute(select(saved_queries).where(saved_queries.c.owner == actor))}
+            since = f["synced_ms"] or 0
+            out = {"head": head, "created": [], "updated": [], "deleted": [], "notebooks": [], "conflicts": [], "errors": []}
+            for file, text in sorted(files.items()):
+                h, k = _hash(text), known.get(file)
+                if k and k["hash"] == h and (k["kind"] == "notebook" or k["ref"] in queries):
+                    continue                                  # unchanged in git
+                try:
+                    if file.endswith(".ipynb"):
+                        if self.notebooks is None:
+                            continue
+                        nb = self.notebooks.publish(actor, f"git/{f['name']}/{file}", json.loads(text))
+                        self._remember(fid, file, "notebook", nb.get("urn", file), h)
+                        out["notebooks"].append(file)
+                        continue
+                    spec = parse_sql(text, os.path.splitext(os.path.basename(file))[0])
+                    q = queries.get(k["ref"]) if k else None
+                    if q is not None and _same_query(spec, q):
+                        self._remember(fid, file, "query", q.id, h)    # git now says what Cairn does (a merged push)
+                        continue
+                    if q is not None and q.updated_ms > since and not force:
+                        out["conflicts"].append({"file": file, "query": q.id,
+                                                 "why": "changed in git and in Cairn since the last pull"})
+                        continue
+                    saved = self.ws.save(actor, spec, q.id if q is not None else None)
+                    self._remember(fid, file, "query", saved["id"], h)
+                    out["updated" if q is not None else "created"].append(file)
+                except (WorkspaceError, ValueError) as e:
+                    out["errors"].append({"file": file, "error": str(e)})
+            for file, k in sorted(known.items()):
+                if file in files or not k["hash"]:
+                    continue                                  # still there, or pushed and not merged yet
+                q = queries.get(k["ref"]) if k["kind"] == "query" else None
+                if q is not None and q.updated_ms > since and not force:
+                    out["conflicts"].append({"file": file, "query": q.id, "why": "deleted in git, changed in Cairn"})
+                    continue
+                if q is not None:
+                    self.ws.delete(actor, q.id)
+                with self.engine.begin() as conn:
+                    conn.execute(delete(git_folder_files).where(and_(git_folder_files.c.folder_id == fid,
+                                                                     git_folder_files.c.file == file)))
+                out["deleted"].append(file)
+            with self.engine.begin() as conn:
+                conn.execute(update(git_folders).where(git_folders.c.id == fid).values(
+                    head=head, synced_ms=_now(), error=None))
+                if self.audit is not None:
+                    self.audit.record("sql", "git_folder.pulled", actor, None,
+                                      {"id": fid, **{k: v for k, v in out.items() if k != "errors"},
+                                       "errors": len(out["errors"])}, conn=conn)
+        return out
+
+    def _remember(self, fid: str, file: str, kind: str, ref: str, h: Optional[str] = None, pushed: Optional[str] = None) -> None:
+        """Records a file as pulled (``h``) or pushed (``pushed``), keeping the other."""
+        where = and_(git_folder_files.c.folder_id == fid, git_folder_files.c.file == file)
+        with self.engine.begin() as conn:
+            old = conn.execute(select(git_folder_files).where(where)).first()
+            conn.execute(delete(git_folder_files).where(where))
+            conn.execute(git_folder_files.insert().values(
+                folder_id=fid, file=file, kind=kind, ref=ref,
+                hash=h if h is not None else (old.hash if old is not None else ""),
+                pushed=pushed if pushed is not None else (old.pushed if old is not None else None)))
+
+    # ---- push -------------------------------------------------------------------------------
+    def push(self, actor: str, fid: str, message: str = "", add: Optional[list[str]] = None) -> dict:
+        f = self.get(actor, fid)
+        user = actor.removeprefix("urn:li:corpuser:")
+        with self._locks.setdefault(fid, threading.Lock()):
+            d, opts, repo = self._checkout(f)
+            base = os.path.join(d, f["path"]) if f["path"] else d
+            with self.engine.connect() as conn:
+                rows = list(conn.execute(select(git_folder_files).where(and_(
+                    git_folder_files.c.folder_id == fid, git_folder_files.c.kind == "query"))))
+            known = {r.ref: r.file for r in rows}
+            proposed = {r.ref: r.pushed for r in rows}
+            mine = {q["id"]: q for q in self.ws.saved(actor) if q["owner"] == actor}
+            for qid in add or []:
+                if qid not in mine:
+                    raise WorkspaceError(f"no saved query of yours {qid!r}", 404)
+            written: dict[str, tuple[str, str]] = {}           # file -> (query id, text)
+            taken = set(known.values())
+            for qid in list(known) + [q for q in (add or []) if q not in known]:
+                q = mine.get(qid)
+                if q is None:
+                    continue
+                file = known.get(qid)
+                if file is None:
+                    stem, n = _slug(q["name"]), 1
+                    file = f"{stem}.sql"
+                    while file in taken or os.path.exists(os.path.join(base, file)):
+                        n += 1
+                        file = f"{stem}-{n}.sql"
+                    taken.add(file)
+                text = render_sql(q)
+                full = os.path.join(base, file)
+                if proposed.get(qid) == _hash(text):
+                    continue                                  # already proposed as it is
+                if os.path.exists(full) and _same_query(parse_sql(open(full, encoding="utf-8").read(), q["name"]), q):
+                    continue                                  # git already says this
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+                written[file] = (qid, text)
+            self._git(d, "add", "--all", "--", f["path"] or ".")
+            if not self._git(d, "status", "--porcelain").strip():
+                return {"changed": 0, "branch": None, "pull_request": None}
+            branch = f"cairn/{_slug(user)}/{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
+            self._git(d, "checkout", "--quiet", "-b", branch)
+            ident = ["-c", f"user.name={user}", "-c", f"user.email={_slug(user)}@users.noreply.cairn"]
+            self._git(d, "commit", "--quiet", "-m", message or f"Saved queries from Cairn ({f['name']})", opts=ident)
+            self._git(d, "push", "--quiet", "origin", f"{branch}:refs/heads/{branch}", opts=opts)
+            sha = self._git(d, "rev-parse", "HEAD").strip()
+            self._git(d, "checkout", "--quiet", "--force", f["branch"])
+            pr = None
+            if repo is not None and self.git is not None:
+                pr = self.git.provider(repo).create_pull(branch, f["branch"], message or f"Saved queries from Cairn ({f['name']})",
+                                                         f"Pushed from Cairn's SQL workspace by {user}.")
+            for file, (qid, text) in written.items():
+                self._remember(fid, file, "query", qid, pushed=_hash(text))
+            out = {"changed": len(written), "branch": branch, "commit": sha, "pull_request": pr}
+            if self.audit is not None:
+                self.audit.record("sql", "git_folder.pushed", actor, None, {"id": fid, **out})
+        return out
+
+    def run_due(self) -> int:
+        n = 0
+        now = _now()
+        with self.engine.connect() as conn:
+            due = [dict(r._mapping) for r in conn.execute(select(git_folders).where(git_folders.c.every_minutes.is_not(None)))]
+        for f in due:
+            if f["synced_ms"] and now - f["synced_ms"] < f["every_minutes"] * 60_000:
+                continue
+            try:
+                self.pull(f["owner"], f["id"])
+                n += 1
+            except Exception as e:  # noqa: BLE001 - recorded on the folder; the others go on
+                logger.warning("git folder %s: %s", f["id"], e)
+        return n
+
+
+def build_git_folders_router(gf: GitFolders, current_principal) -> Any:
+    from fastapi import APIRouter, Body, Depends, HTTPException
+    from starlette.concurrency import run_in_threadpool
+
+    router = APIRouter(prefix="/v1/git-folders", tags=["sql"])
+
+    def person(p):
+        if p.is_service or p.via in ("agent", "extension"):
+            raise HTTPException(403, "git folders are a person's own")
+        return p.urn
+
+    async def call(fn, *a, **kw):
+        try:
+            return await run_in_threadpool(fn, *a, **kw)
+        except WorkspaceError as e:
+            raise HTTPException(e.status, str(e))
+
+    @router.get("")
+    async def list_(p=Depends(current_principal)):
+        return await call(gf.list, person(p))
+
+    @router.post("", status_code=201)
+    async def create(body: dict = Body(...), p=Depends(current_principal)):
+        return await call(gf.create, person(p), body)
+
+    @router.delete("/{fid}", status_code=204)
+    async def remove(fid: str, p=Depends(current_principal)):
+        await call(gf.delete, person(p), fid)
+
+    @router.post("/{fid}/pull")
+    async def pull(fid: str, body: dict = Body(default={}), p=Depends(current_principal)):
+        return await call(gf.pull, person(p), fid, bool((body or {}).get("force")))
+
+    @router.post("/{fid}/push")
+    async def push(fid: str, body: dict = Body(default={}), p=Depends(current_principal)):
+        body = body or {}
+        add = body.get("add") or []
+        if not isinstance(add, list):
+            raise HTTPException(422, "add: saved query ids")
+        return await call(gf.push, person(p), fid, str(body.get("message") or ""), [str(x) for x in add])
+
+    return router

@@ -446,6 +446,29 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - a shared dashboard rendered for its owner and for someone refused one of its tiles, who saw that tile's refusal and the other tile's data;
   - an alert that stayed quiet on its first fine check, was told once (to its owner and recipient) when the condition began, again when it stopped, and once when its query failed. It was not checked before it was due.
 
+## Git folders
+
+A Git folder keeps a person's saved queries and notebooks in a git repository, reviewed like code. Cairn works on a clone of its own with the `git` command, so any host works.
+
+- **Create** one with `POST /v1/git-folders`: `name`, and `repo` (a repository configured for Cairn's git integration, whose token Cairn uses) or `url` (one the operator allows in `CAIRN_GIT_FOLDER_URLS`, a comma-separated list of URL prefixes). Optional: `branch` (`main`), `path` (a folder in the repository), and `every_minutes` for a scheduled pull. Folders are their owner's: nobody else sees or uses them.
+- **Pull** (`POST /v1/git-folders/<id>/pull`).
+  - Each `.sql` file becomes one of the owner's saved queries. Header comments give its settings (`-- connection:`, `-- description:`, `-- shared:`, `-- chart:` as JSON); the rest is the SQL.
+  - Each `.ipynb` notebook is published to the catalog, with the tables its `%%sql` cells read.
+  - A file changed in git updates its query, and a deleted file deletes it.
+  - **Conflicts.** When the query was also changed in Cairn since the last pull, the file is reported as a conflict and left alone. Pull with `{"force": true}` to take git's version.
+- **Push** (`POST /v1/git-folders/<id>/push`, optional `message` and `add`, a list of other saved query ids to add).
+  - The folder's queries, as they are in Cairn, are committed by their owner to a new branch, `cairn/<user>/<time>`, never to the folder's branch. For a configured GitHub, GitLab or Bitbucket repository, a pull request is opened from it.
+  - A query already proposed, or one git already holds as it is, is not pushed again.
+  - Until the pull request is merged, pulls neither conflict with it nor delete the queries it adds. Once it is merged, the next pull has nothing to report.
+- **Signing in to the host.** For a configured repository, the token is sent as a header on each git command and never written into the clone. Only `https` and `ssh` remotes are used, plus `file` when an allowed prefix is `file://`.
+- **Settings.** `CAIRN_GIT_FOLDERS_DIR` holds the clones (default `$CAIRN_DATA_DIR/git-folders`). Deleting a folder removes its clone and keeps its queries as ordinary saved queries.
+- **Tested** in `tests/test_git_folders.py`, with a real git repository and a colleague's clone.
+  - A pull made two queries from their headers and published a notebook; pulling again changed nothing.
+  - A colleague's edit and deletion were pulled. A push put a changed query and a new one on a new branch committed by their owner, leaving `main` alone; pushing again made no branch.
+  - Before the merge, a pull left the new query alone; after it, a pull had nothing to report.
+  - A file changed on both sides was a conflict until forced.
+  - Another person could not see or pull the folder, and a URL outside the allowed prefixes was refused.
+
 ## Reports
 
 **Reports** in the workspace answers the two questions that fund a catalog: is it used, and is the estate getting governed? It has four sections:

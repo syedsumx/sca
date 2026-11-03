@@ -115,6 +115,7 @@ class Services:
     query_history: Optional[Any] = None
     vectors: Optional[Any] = None
     delta_convert: Optional[Any] = None
+    git_folders: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -784,6 +785,12 @@ def _build_active_metadata(s: Services) -> None:
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql"))
         s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
+        # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
+        from cairn.sqlworkspace.gitfolders import GitFolders
+
+        s.git_folders = GitFolders(s.engine, s.sql_workspace, getattr(s, "git", None), getattr(s, "notebook_catalog", None),
+                                   s.audit, os.environ.get("CAIRN_GIT_FOLDERS_DIR") or None,
+                                   [u.strip() for u in os.environ.get("CAIRN_GIT_FOLDER_URLS", "").split(",")])
         # SQL workflows: derived-table refreshes, checks and reports, scheduled, run as their owner.
         from cairn.sqlworkspace.workflows import Workflows
 

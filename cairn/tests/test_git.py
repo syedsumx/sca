@@ -14,7 +14,7 @@ from cairn.app import create_api_app
 from cairn.governance.abac import Policy, PolicyBundle
 from cairn.quality.contracts import ContractSpec
 from cairn.services import build_services
-from cairn.sources.git import (MARKER, GitError, GitRepo, GitService, changed_models, model_datasets,
+from cairn.sources.git import (MARKER, GitError, GitHub, GitRepo, GitService, changed_models, model_datasets,
                                pull_request_from, set_descriptions)
 
 ADMIN, ANA = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
@@ -210,3 +210,13 @@ def test_docs_written_back_as_a_pull_request(stack):
     assert model["columns"][1]["description"] == "Total in EUR, tax included"
     assert gh.prs[0]["base"] == "main" and "column `amount`" in gh.prs[0]["body"]
     assert c.get("/integrations/git/repos", headers={"X-Cairn-Actor": ADMIN}).json()[0]["token_set"] is True
+
+
+def test_a_pull_request_from_a_pushed_branch():
+    """Git folders push a branch with git, then ask the host for the pull request."""
+    gh = FakeGitHub()
+    url = GitHub(REPO, httpx.Client(transport=httpx.MockTransport(gh))).create_pull(
+        "cairn/ana/20261103-1", "main", "Saved queries from Cairn", "Pushed by ana")
+    assert url == "https://github.com/acme/dbt/pull/8"
+    assert gh.prs == [{"title": "Saved queries from Cairn", "head": "cairn/ana/20261103-1", "base": "main",
+                       "body": "Pushed by ana"}]
