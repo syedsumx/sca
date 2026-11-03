@@ -430,6 +430,13 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - **Who may call one.** Calling one needs `USE_FUNCTION` on `urn:li:function:routines.<schema>.<name>` (resource type `function`), granted per function like any privilege. Creating or dropping one needs `MANAGE_DATASET`.
   - **What it sees.** Masks and row filters apply before any function runs. A SQL function cannot query tables, so it never reaches more than its caller passes it.
   - **Settings.** `CAIRN_TRINO_ROUTINE_CATALOGS` names the catalogs that hold stored functions (default `routines`).
+  - **In the catalog.** Each stored function is an asset people can find, document and own. It is a job with subtype `Function` in the flow `(trino,routines,PROD)`, with:
+    - its signatures (every overload), return types, language, body and comment;
+    - `function_urn`, the `urn:li:function:…` that `USE_FUNCTION` policies name.
+
+    Trino's query events keep it current. A finished `CREATE [OR REPLACE] FUNCTION` publishes it, owned by its creator; replacing it keeps the owner. `DROP FUNCTION` drops that signature, and the asset is removed with its last one.
+  - **Sync.** `POST /v1/trino/functions/sync` (`{"connection": …}`, `MANAGE_INGESTION`) lists the routines catalogs' functions as Cairn's crawler (`SHOW FUNCTIONS`). It adds those Cairn was not told of and removes those that are gone. A function Cairn already knows keeps the body it learned.
+  - **Tested** with Trino (`tests/test_trino_e2e.py`): a created function appeared with its comment, body and creator; an overload joined it, and dropping it left the other; a function made while Cairn was not listening came in with the sync (refused to someone without `MANAGE_INGESTION`); dropped functions were removed. The statements as Trino receives them, in `tests/test_trino_functions.py`.
 - **Procedures** (`/v1/procedures`). A named list of SQL statements with typed parameters (`integer`, `double`, `varchar`, `boolean`, `date`; `:name` in a statement), on a Trino connection.
   - **Calling one.** `POST /v1/procedures/<name>/call` with `{"args": {...}}`. Each argument is checked against its type and bound as a SQL literal, never spliced in as text. The statements run in order **as the caller**, so Cairn's policies apply to every statement. A failing statement stops the call; what ran before it stays. The last statement's rows come back, up to 1,000.
   - **Who may call one.** Its owner, and those allowed `EXECUTE_PROCEDURE` on `urn:li:procedure:<name>`. A procedure never runs with its owner's rights: it does only what the caller could do anyway. Every call is audited with its arguments.

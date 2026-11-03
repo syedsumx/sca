@@ -113,6 +113,7 @@ class Services:
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
+    trino_functions: Optional[Any] = None
     vectors: Optional[Any] = None
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
@@ -1135,6 +1136,10 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.trino_catalog import TrinoCatalogSync
 
             s.trino_catalog = TrinoCatalogSync(s.engine, s.graph, s.data_access, s.trino_access, s.audit)
+            from cairn.dataaccess.trino_functions import FunctionCatalog
+
+            # Stored functions as catalog assets, from Trino's events and the sync (cairn.dataaccess.trino_functions).
+            s.trino_functions = FunctionCatalog(s.engine, s.graph, s.trino_access.routine_catalogs, s.audit)
 
     if getattr(s, "trino_access", None) is not None:
         # Engines that read files themselves (Spark, pyiceberg): Cairn Catalog asks about every table.

@@ -437,7 +437,7 @@ def name_jobs_by_outputs(event: dict) -> dict:
 
 def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, tokens=None,
                        current_principal=None, outbox=None, usage=None, catalog_sync=None,
-                       authorize=None, oauth=None, groups_of=None, history=None) -> APIRouter:
+                       authorize=None, oauth=None, groups_of=None, history=None, functions=None) -> APIRouter:
     router = APIRouter(prefix="/v1/trino", tags=["trino"], include_in_schema=False)
 
     if tokens is not None:
@@ -467,6 +467,21 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
             def catalog_sync_connections(p=Depends(current_principal)):
                 authorize(p, "MANAGE_INGESTION", None)
                 return {"connections": sorted(catalog_sync.connections())}
+
+            if functions is not None:
+                @router.post("/functions/sync")
+                def functions_sync_now(connection: str = Body(..., embed=True), p=Depends(current_principal)):
+                    """Reads the routines catalogs' stored functions into Cairn's catalog now."""
+                    from cairn.dataaccess.service import DataAccessError
+
+                    authorize(p, "MANAGE_INGESTION", None)
+                    definition = catalog_sync.connections().get(connection)
+                    if definition is None:
+                        raise HTTPException(404, f"no trino:// connection {connection!r} with run_as_user")
+                    try:
+                        return functions.sync(lambda sql: catalog_sync._query(definition, sql))
+                    except DataAccessError as e:
+                        raise HTTPException(e.status if e.status != 403 else 502, f"Trino: {e}")
 
         if oauth is not None:
             from urllib.parse import quote, urlencode
@@ -641,6 +656,11 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                 await run_in_threadpool(history.record, event)       # the query's profile, for its author
             except Exception as e:  # noqa: BLE001 - history never costs the usage statistics
                 logger.warning("query history: %s", e)
+        if functions is not None and isinstance(event, dict):
+            try:
+                await run_in_threadpool(functions.from_event, event)  # a stored function created or dropped
+            except Exception as e:  # noqa: BLE001 - nor does the function catalog
+                logger.warning("stored functions: %s", e)
         if usage is None:
             return {"query": (event.get("metadata") or {}).get("queryId") if isinstance(event, dict) else None}
         try:

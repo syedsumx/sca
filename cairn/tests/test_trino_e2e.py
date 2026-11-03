@@ -1100,6 +1100,69 @@ def test_stored_functions_and_procedures(trino, cairn):
     assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")
 
 
+def test_stored_functions_are_catalog_assets(trino, cairn):
+    """Stored functions in the catalog, as Trino tells Cairn of them: created (owned by their creator, with
+    signature, body and comment), replaced, overloaded and dropped; the sync adds what Cairn was not told."""
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    fc = s.trino_functions
+    urn = fc.asset_urn("routines", "catalog_e2e", "net_price")
+    trino("CREATE SCHEMA IF NOT EXISTS routines.catalog_e2e")
+    trino("CREATE FUNCTION routines.catalog_e2e.net_price(gross double, vat double) RETURNS double "
+          "COMMENT 'Price without VAT' RETURN gross / (1 + vat)")
+
+    def info():
+        return s.graph.get_aspect(urn, "dataJobInfo") or {}
+    end = time.time() + 30
+    while time.time() < end and not info():
+        time.sleep(0.5)
+    props = info().get("customProperties") or {}
+    assert info().get("description") == "Price without VAT", info()
+    assert props["function_urn"] == "urn:li:function:routines.catalog_e2e.net_price"
+    assert props["body"] == "RETURN gross / (1 + vat)" and props["language"] == "SQL"
+    assert [o["owner"] for o in s.graph.get_aspect(urn, "ownership")["owners"]] == ["urn:li:corpuser:admin"]
+    # An overload: one asset, both signatures. Dropping one keeps the other; dropping both removes it.
+    trino("CREATE FUNCTION routines.catalog_e2e.net_price(gross double) RETURNS double RETURN gross / 1.2")
+    end = time.time() + 30
+    while time.time() < end and len(json.loads((info().get("customProperties") or {}).get("signatures", "[]"))) < 2:
+        time.sleep(0.5)
+    assert sorted(x["types"] for x in json.loads(info()["customProperties"]["signatures"])) == ["double", "double, double"]
+    trino("DROP FUNCTION routines.catalog_e2e.net_price(double)")
+    end = time.time() + 30
+    while time.time() < end and len(json.loads(info()["customProperties"]["signatures"])) > 1:
+        time.sleep(0.5)
+    assert [x["types"] for x in json.loads(info()["customProperties"]["signatures"])] == ["double, double"]
+    # A function Cairn was never told of (made while it was away) comes in with the sync, as Trino lists it.
+    fc.catalogs.discard("routines")
+    try:
+        trino("CREATE FUNCTION routines.catalog_e2e.missed(x bigint) RETURNS bigint RETURN x + 1")
+        time.sleep(2)
+    finally:
+        fc.catalogs.add("routines")
+    missed = fc.asset_urn("routines", "catalog_e2e", "missed")
+    assert s.graph.get_aspect(missed, "dataJobInfo") is None
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    r = httpx.post(f"{url}/v1/trino/functions/sync", json={"connection": "lakehouse"},
+                   headers={"X-Cairn-Actor": "urn:li:corpuser:ana"}, timeout=60)
+    assert r.status_code == 403                                     # syncing needs MANAGE_INGESTION
+    r = httpx.post(f"{url}/v1/trino/functions/sync", json={"connection": "lakehouse"},
+                   headers={"X-Cairn-Actor": "urn:li:corpuser:admin"}, timeout=60)
+    assert r.status_code == 200 and r.json()["added"] >= 1, r.text
+    got = json.loads(s.graph.get_aspect(missed, "dataJobInfo")["customProperties"]["signatures"])
+    assert got == [{"arguments": "bigint", "types": "bigint", "returns": "bigint", "language": "SQL"}]
+    # Dropped in Trino: removed from the catalog.
+    trino("DROP FUNCTION routines.catalog_e2e.net_price(double, double)")
+    trino("DROP FUNCTION routines.catalog_e2e.missed(bigint)")
+    end = time.time() + 30
+    while time.time() < end and not (s.graph.get_aspect(urn, "status") or {}).get("removed"):
+        time.sleep(0.5)
+    assert s.graph.get_aspect(urn, "status") == {"removed": True}
+    assert s.graph.get_aspect(missed, "status") == {"removed": True}
+
+
 def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
     """Two parties join their tables in a clean room on real Trino: only templates both approved run, only
     aggregates over at least k people leave, the room reads its tables and nothing else, and neither party
