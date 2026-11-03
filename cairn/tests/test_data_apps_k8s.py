@@ -148,8 +148,11 @@ def test_an_app_on_kubernetes_from_git(cluster, repo, settings, graph, monkeypat
     # Ana's first visit starts it; the pod runs the deployed commit, as a user without privileges.
     started = time.time()
     page = ana.get("/apps/orders/", timeout=300)
-    assert page.status_code == 200, (page.text, kubectl("-n", NS, "get", "pods", "-o", "wide"),
-                                     kubectl("-n", NS, "get", "events", "--sort-by=.lastTimestamp"))
+    if page.status_code != 200:                       # say why: the pods, their events, the checkout's own log
+        print(page.text, kubectl("-n", NS, "get", "pods", "-o", "wide"),
+              kubectl("-n", NS, "get", "events", "--sort-by=.lastTimestamp"),
+              kubectl("-n", NS, "logs", "-l", "cairn.io/app=orders", "-c", "checkout", "--tail=50", check=False), sep="\n")
+    assert page.status_code == 200, page.text
     assert page.text == f"version-1 viewer={ANA} key=ok uid=10001", page.text
     print(f"\ncold start through Cairn: {time.time() - started:.1f} s")
     assert kubectl("-n", NS, "get", "deployment", "cairn-app-orders", "-o", "jsonpath={.spec.replicas}") == "1"

@@ -137,7 +137,9 @@ class KubeApps:
         command = [c.replace("{port}", str(port)).replace("{base}", base) for c in app["command"]]
         secure = {"runAsNonRoot": True, "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
                   "seccompProfile": {"type": "RuntimeDefault"}}
-        workdir = "/srv/app" + (f"/{git['path']}" if git and git.get("path") else "")
+        # The clone is a directory the pod's own user makes: git refuses a repository owned by someone else
+        # (the volume's root belongs to root).
+        workdir = "/srv/app/code" + (f"/{git['path']}" if git and git.get("path") else "")
         container = {"name": "app", "image": app["image"], "command": command, "workingDir": workdir if git else None,
                      "ports": [{"name": "http", "containerPort": port}],
                      "env": [{"name": "PORT", "value": str(port)}, {"name": "CAIRN_APP_BASE", "value": f"/{base}/"},
@@ -160,8 +162,8 @@ class KubeApps:
                         for k in ("GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0")]
             spec["initContainers"] = [{
                 "name": "checkout", "image": self.git_image, "command": ["sh", "-ec",
-                    'git clone --quiet --no-checkout --branch "$CAIRN_GIT_BRANCH" -- "$CAIRN_GIT_URL" /srv/app\n'
-                    'git -C /srv/app checkout --quiet "$CAIRN_GIT_COMMIT"'],
+                    'git clone --quiet --no-checkout --branch "$CAIRN_GIT_BRANCH" -- "$CAIRN_GIT_URL" /srv/app/code\n'
+                    'git -C /srv/app/code checkout --quiet "$CAIRN_GIT_COMMIT"'],
                 "env": env, "securityContext": secure, "resources": {"limits": {"memory": "256Mi"}},
                 "volumeMounts": [{"name": "src", "mountPath": "/srv/app"}, {"name": "tmp", "mountPath": "/tmp"}]}]
         return [

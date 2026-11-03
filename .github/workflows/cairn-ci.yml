@@ -461,6 +461,8 @@ jobs:
         run: |
           kubectl get pods -A -o wide || true
           for p in $(kubectl -n pipelines get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n pipelines logs "$p" --tail=200 || true; done
+          kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
+          for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
 
   ui:
     runs-on: ubuntu-latest

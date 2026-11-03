@@ -135,7 +135,7 @@ def test_the_kubernetes_objects_hold_no_secret_in_the_open_and_pin_the_commit():
     assert pod["automountServiceAccountToken"] is False and pod["securityContext"]["runAsUser"] == 10001
     [init], [main] = pod["initContainers"], pod["containers"]
     assert {e["name"]: e.get("value") for e in init["env"]}["CAIRN_GIT_COMMIT"] == "a" * 40
-    assert main["command"] == ["python", "server.py", "8080", "apps/orders"] and main["workingDir"] == "/srv/app/apps/orders"
+    assert main["command"] == ["python", "server.py", "8080", "apps/orders"] and main["workingDir"] == "/srv/app/code/apps/orders"
     assert main["securityContext"]["allowPrivilegeEscalation"] is False and main["securityContext"]["capabilities"] == {"drop": ["ALL"]}
     assert dep["spec"]["replicas"] == 0 and svc["spec"]["type"] == "ClusterIP"
     assert pol["spec"]["ingress"] == [{"from": [{"ipBlock": {"cidr": "10.0.0.5/32"}}], "ports": [{"port": 8080, "protocol": "TCP"}]}]
