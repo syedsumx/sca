@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 PLATFORM = "urn:li:dataPlatform:iceberg"
@@ -97,6 +97,13 @@ class FeatureTables:
                               {"table": table, "keys": keys, "features": features})
         return self.get(p, name)
 
+    def definition(self, name: str) -> Optional[dict]:
+        """The feature table as declared, for Cairn's own use (no caller's access is checked)."""
+        props = self.graph.get_aspect(table_urn(name), "mlFeatureTableProperties")
+        if not props:
+            return None
+        return self._shape(name, props)
+
     def get(self, p, name: str) -> dict:
         props = self.graph.get_aspect(table_urn(name), "mlFeatureTableProperties")
         if not props:
@@ -104,6 +111,11 @@ class FeatureTables:
         source = (props.get("customProperties") or {}).get("source")
         if source and not self.may(p, "VIEW_ENTITY_PAGE", source):
             raise FeatureError("no such feature table", 404)
+        return self._shape(name, props)
+
+    @staticmethod
+    def _shape(name: str, props: dict) -> dict:
+        source = (props.get("customProperties") or {}).get("source")
         return {"name": name, "urn": table_urn(name), "table": (props.get("customProperties") or {}).get("table"),
                 "source": source, "keys": [k.rsplit(",", 1)[1].rstrip(")") for k in props.get("mlPrimaryKeys") or []],
                 "features": [f.rsplit(",", 1)[1].rstrip(")") for f in props.get("mlFeatures") or []],

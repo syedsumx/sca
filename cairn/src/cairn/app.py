@@ -252,6 +252,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ml.features import build_features_router
 
         app.include_router(build_features_router(services.feature_tables, cp))
+    if getattr(services, "online_features", None) is not None:
+        from cairn.ml.online import build_online_router
+
+        app.include_router(build_online_router(services.online_features, cp))
     if getattr(services, "clean_rooms", None) is not None:
         from cairn.dataaccess.cleanrooms import build_clean_rooms_router
 

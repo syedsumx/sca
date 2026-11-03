@@ -122,6 +122,7 @@ class Services:
     data_apps: Optional[Any] = None
     clean_rooms: Optional[Any] = None
     feature_tables: Optional[Any] = None
+    online_features: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1209,6 +1210,39 @@ def _build_data_access(s: Services) -> None:
             s.graph, lake.urn if lake is not None else
             (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
             lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit)
+        # Online feature store: feature tables served by entity key, synced from the lakehouse by Cairn's
+        # own catalog client (CAIRN_ONLINE_FEATURES_CATALOG, or the pipes'), looked up under the table's policy.
+        online_catalog = os.environ.get("CAIRN_ONLINE_FEATURES_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
+        if online_catalog:
+            from cairn.ml.online import OnlineFeatures
+            from cairn.pipelines.pipes import _settings as _catalog_settings
+
+            props = _catalog_settings("CAIRN_ONLINE_FEATURES_CATALOG" if os.environ.get("CAIRN_ONLINE_FEATURES_CATALOG")
+                                      else "CAIRN_PIPES_CATALOG")
+
+            def online_catalog_client():
+                from pyiceberg.catalog.rest import RestCatalog
+
+                return RestCatalog("cairn-online-features", **props)
+
+            def online_policy(actor: str, urn: str):
+                from cairn.governance.pdp import AuthorizeRequest, ResourceRef
+
+                d = s.pdp.decide(AuthorizeRequest(actor=actor, privilege="VIEW_DATASET_PROFILE",
+                                                  resource=ResourceRef(type="dataset", urn=urn),
+                                                  environment={"channel": "online-features"}))
+                if d.decision != "ALLOW":
+                    return False, False, None
+                return True, any(o.type == "row_filter" for o in d.obligations), masking.plan(actor, urn)
+            store_url = os.environ.get("CAIRN_ONLINE_STORE_URL", "").strip()
+            store_engine = None
+            if store_url:
+                from sqlalchemy import create_engine
+
+                store_engine = create_engine(store_url, pool_pre_ping=True)
+            s.online_features = OnlineFeatures(
+                s.engine, s.feature_tables, online_catalog_client, online_policy,
+                lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit, store_engine)
 
     # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
     apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""
