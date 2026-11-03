@@ -113,6 +113,7 @@ class Services:
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
+    vectors: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
@@ -1121,6 +1122,24 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+
+    # Vector search on lakehouse tables (the pipes' catalog, or CAIRN_VECTORS_CATALOG).
+    vec_catalog = os.environ.get("CAIRN_VECTORS_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
+    if vec_catalog:
+        from cairn.ai.embeddings import HashingEmbedder
+        from cairn.pipelines.pipes import _settings
+        from cairn.pipelines.vectors import VectorIndexes
+
+        def may_read(p, table: str) -> tuple[bool, bool]:
+            lk = getattr(s, "lakehouse", None)
+            if lk is None:
+                return (s.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False), False)
+            ns, _, name = table.rpartition(".")
+            d = lk.decide(p.urn, [{"namespace": ns.split("."), "name": name}])["tables"][0]
+            return bool(d.get("read")), bool(d.get("restricted"))
+        s.vectors = VectorIndexes(s.engine, _settings("CAIRN_VECTORS_CATALOG" if os.environ.get("CAIRN_VECTORS_CATALOG")
+                                                      else "CAIRN_PIPES_CATALOG"),
+                                  s.semantic.embedder if s.semantic is not None else HashingEmbedder(), s.audit, may_read)
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

@@ -228,6 +228,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_lakehouse_router(services.lakehouse, services.lakehouse_sessions, cp, services.audit,
                                                   authz))
+    if getattr(services, "vectors", None) is not None:
+        from cairn.pipelines.vectors import build_vectors_router
+
+        app.include_router(build_vectors_router(services.vectors, cp, authz))
     if getattr(services, "notebooks", None) is not None:
         from cairn.identity.notebooks import build_notebooks_router
 
