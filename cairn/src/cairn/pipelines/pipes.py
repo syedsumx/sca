@@ -74,6 +74,14 @@ TARGET = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
 
+
+def _version(info) -> str:
+    """A file's version: its size and modification time, in whole seconds (as milliseconds, the form recorded
+    since pipes began). A single object's time comes from its HTTP Last-Modified, which has whole seconds; a
+    listing's can have milliseconds (pyarrow 26.0.1 keeps them). Both must give the same version, or a sweep
+    would load again every file an event loaded."""
+    return f"{info.size}-{int(info.mtime_ns or 0) // 1_000_000_000 * 1000}"
+
 class PipeError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -336,7 +344,7 @@ class Pipes:
             key = i.path.split("/", 1)[1]
             if key.endswith("/") or os.path.basename(key).startswith((".", "_")):
                 continue
-            rec = self.load(pipe, key, f"{i.size}-{int(i.mtime_ns or 0) // 1_000_000}")
+            rec = self.load(pipe, key, _version(i))
             if rec is not None:
                 out.append(rec)
         return out
@@ -385,7 +393,7 @@ class Pipes:
                     info = self._fs().get_file_info(f"{bucket}/{key}")
                     if info.type != pafs.FileType.File:
                         continue
-                    rec2 = self.load(p, key, f"{info.size}-{int(info.mtime_ns or 0) // 1_000_000}")
+                    rec2 = self.load(p, key, _version(info))
                     if rec2 is not None:
                         loaded.append(rec2)
         return loaded
