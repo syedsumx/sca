@@ -151,7 +151,8 @@ def test_cluster_mode_puts_no_secret_in_the_cluster_and_the_driver_signs_in_itse
     assert line, (r.stdout + r.stderr)[-6000:]
     out = json.loads(line[len("CAIRN-RESULT "):])
     assert out["count=analytics.products"] == {"ok": 3}, out
-    assert "ok" in out["sql=CREATE TABLE lakehouse.analytics.k8s_products AS SELECT * FROM lakehouse.analytics.products"], out
+    if "ok" not in out["sql=CREATE TABLE lakehouse.analytics.k8s_products AS SELECT * FROM lakehouse.analytics.products"]:
+        pytest.fail("the write was refused:\n" + json.dumps(out, indent=1))   # in full: pytest shortens assertion text
     assert "error" in out["sql=SELECT count(*) FROM lakehouse.hr.salaries"], out   # ana may not read hr
     ev = [e for e in s.audit.entries("identity", limit=50) if e["action"] == "workload.token_issued"
           and e["details"]["subject"] == "system:serviceaccount:pipelines:svc-spark"]
