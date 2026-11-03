@@ -35,7 +35,7 @@ export = ["pyarrow>=15", "pyiceberg>=0.8"]
 # Trino connections for the SQL editor and Ask-your-data (queries run as the signed-in user).
 trino = ["trino>=0.330"]
 # Pipes and streams (cairn streams): files and Kafka topics into Iceberg tables.
-streams = ["kafka-python>=2.2", "pyarrow>=15", "pyiceberg>=0.9", "fastavro>=1.9"]
+streams = ["kafka-python>=2.2,<3", "pyarrow>=15", "pyiceberg>=0.9", "fastavro>=1.9"]
 all = ["cairn-platform[server,postgres,ai,actions,agent,export,trino,streams]"]
 
 [project.scripts]

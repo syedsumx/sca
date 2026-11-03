@@ -177,7 +177,7 @@ jobs:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
-          pip install requests pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10" "psycopg[binary]>=3.1"
+          pip install requests httpx pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10" "psycopg[binary]>=3.1"
           cd conformance && pytest -q -p no:cacheprovider
       - name: Conformance again, with the state in PostgreSQL (and several replicas)
         env:

@@ -9,7 +9,6 @@ import uuid
 
 import httpx
 import pyarrow as pa
-import pytest
 
 from conftest import ADMIN_TOKEN
 
@@ -74,7 +73,8 @@ def test_clones_go_to_other_namespaces_and_names_are_checked(stack, cat, ns):
     r = http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"namespace": [other], "name": "dev_orders"})
     assert r.status_code == 200, r.text
     assert [x["id"] for x in rows(cat.load_table(f"{other}.dev_orders"))] == [1, 2, 3]
-    assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"namespace": [other], "name": "dev_orders"}).status_code == 409
+    again = http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"namespace": [other], "name": "dev_orders"})
+    assert again.status_code == 409
     assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/missing/clone", json={"name": "x"}).status_code == 404
     assert http(stack, "POST", f"/v1/namespaces/{ns}/tables/orders/clone", json={"name": "a/b"}).status_code == 400
 
