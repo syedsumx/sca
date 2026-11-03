@@ -65,6 +65,22 @@ def _opt(rest: list[str], name: str) -> str | None:
     return None
 
 
+def _drop_conf(rest: list[str], key: str) -> list[str]:
+    """``rest`` without ``--conf key=...`` (in either form)."""
+    out, i = [], 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--conf" and i + 1 < len(rest) and rest[i + 1].split("=", 1)[0] == key:
+            i += 2
+            continue
+        if a.startswith("--conf=") and a[len("--conf="):].split("=", 1)[0] == key:
+            i += 1
+            continue
+        out.append(a)
+        i += 1
+    return out
+
+
 def _primary(rest: list[str]) -> str | None:
     """spark-submit's primary resource: the first argument that is not an option or an option's value."""
     i = 0
@@ -96,9 +112,30 @@ def _submit_cluster(rest: list[str], extra: str | None) -> int:
         return 2
     import json
 
+    audience = os.environ.get("CAIRN_WORKLOAD_AUDIENCE", "cairn")
+    # The job's own driver pod template, if it has one: the token is added to it, not put in its place.
+    key = "spark.kubernetes.driver.podTemplateFile"
+    own_path = _conf_value(rest, key)
+    if own_path:
+        try:
+            text = open(own_path).read()
+            try:
+                own = json.loads(text)
+            except ValueError:
+                import yaml
+
+                own = yaml.safe_load(text)
+            pod = k8s.merge_driver_template(own, audience, jvm=jvm, container_name=_conf_value(
+                rest, "spark.kubernetes.driver.podTemplateContainerName") or "spark-kubernetes-driver")
+        except (OSError, ValueError, ImportError) as e:
+            print(f"cairn-spark: the driver pod template {own_path}: {e}", file=sys.stderr)
+            return 2
+        rest = _drop_conf(rest, key)
+    else:
+        pod = k8s.driver_pod_template(audience, jvm=jvm)
     fd, template = tempfile.mkstemp(prefix="cairn-spark-driver-", suffix=".json")
     with os.fdopen(fd, "w") as f:
-        json.dump(k8s.driver_pod_template(os.environ.get("CAIRN_WORKLOAD_AUDIENCE", "cairn"), jvm=jvm), f)
+        json.dump(pod, f)
     props = _properties(k8s.cluster_conf(url, catalog, sa, template), extra)
     print(f"cairn-spark: submitting {main} to Kubernetes; its driver signs in as service account {sa}", file=sys.stderr)
     try:

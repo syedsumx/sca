@@ -22,6 +22,7 @@ the session's settings in a private file (cairn_spark.driver).
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Optional, Sequence
 
@@ -58,6 +59,35 @@ def driver_pod_template(audience: str = "cairn", expiration_seconds: int = 3600,
         container["command"] = ["cairn-spark-driver"]
     return {"apiVersion": "v1", "kind": "Pod", "spec": {
         "volumes": [identity_volume(audience, expiration_seconds)], "containers": [container]}}
+
+
+def merge_driver_template(own: dict, audience: str = "cairn", expiration_seconds: int = 3600, jvm: bool = False,
+                          container_name: str = "spark-kubernetes-driver") -> dict:
+    """A pod template of the job's own (its volumes, sidecars, tolerations...) with the projected token
+    added to it, so the driver still signs in by itself. A template that already uses the token's volume
+    name or mount path is refused rather than overwritten."""
+    if not isinstance(own, dict) or own.get("kind", "Pod") != "Pod":
+        raise ValueError("the driver pod template is a Pod")
+    out = json.loads(json.dumps(own))
+    spec = out.setdefault("spec", {})
+    vols = spec.setdefault("volumes", [])
+    if any(v.get("name") == VOLUME for v in vols):
+        raise ValueError(f"the driver pod template already has a volume named {VOLUME}")
+    vols.append(identity_volume(audience, expiration_seconds))
+    containers = spec.setdefault("containers", [])
+    c = next((x for x in containers if x.get("name") == container_name), None)
+    if c is None:
+        c = {"name": container_name}
+        containers.insert(0, c)
+    mounts = c.setdefault("volumeMounts", [])
+    if any(m.get("mountPath") == TOKEN_DIR for m in mounts):
+        raise ValueError(f"the driver pod template already mounts something at {TOKEN_DIR}")
+    mounts.append(identity_mount())
+    if jvm:
+        c["command"] = ["cairn-spark-driver"]
+    out.setdefault("apiVersion", "v1")
+    out["kind"] = "Pod"
+    return out
 
 
 def cluster_conf(cairn_url: str, catalog_uri: str, service_account: str, template_path: str) -> dict:

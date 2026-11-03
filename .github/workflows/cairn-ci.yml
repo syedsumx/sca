@@ -255,7 +255,7 @@ jobs:
       - name: Terraform against Cairn
         run: |
           set -o pipefail
-          pip install -e ".[server,test]"
+          pip install -e ".[server,test,streams]"   # vector indexes (their tables) need pyiceberg
           docker pull -q hashicorp/terraform:1.13.4
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py | tee "$RUNNER_TEMP/tf.log"
           ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
