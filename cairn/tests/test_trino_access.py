@@ -249,6 +249,20 @@ def test_sign_in_tokens_are_for_people(client):
     assert client.post("/v1/trino/token", headers={"X-Cairn-Actor": ANA}, json={"ttl_seconds": 86400 * 2}).status_code == 422
 
 
+def test_pipeline_users_get_trino_tokens_too(client, monkeypatch):
+    """A pipeline user signs in with a personal access token (or a workload token exchanged at Cairn) and
+    gets a Trino token for itself, so Spark's governed reads and notebooks work for jobs as for people.
+    The shared service token and agents do not."""
+    s = client.app.state.services
+    real = s.identity._me_lookup
+    monkeypatch.setattr(s.identity, "_me_lookup",
+                        lambda url, h, c: "urn:li:corpuser:svc-dbt" if h.get("Authorization") == "Bearer pat-svc-dbt" else real(url, h, c))
+    r = client.post("/v1/trino/token", headers={"Authorization": "Bearer pat-svc-dbt"})
+    assert r.status_code == 200, r.text
+    assert r.json()["user"] == "svc-dbt"
+    assert client.post("/v1/trino/token", headers={"Authorization": "Bearer svc-secret"}).status_code == 403
+
+
 def test_every_replica_signs_with_the_one_key(settings, graph):
     from sqlalchemy import create_engine
 
