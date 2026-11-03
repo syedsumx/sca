@@ -115,7 +115,8 @@ def test_expiry_masks_and_bad_credentials_end_a_share(cairn, lake):  # noqa: F81
     with s.engine.begin() as conn:
         conn.execute(update(lakehouse_shares).where(lakehouse_shares.c.id == share["id"]).values(expires_s=int(time.time()) - 1))
     assert api(url, ANA, "GET", f"/v1/shares/{share['id']}").json()["state"] == "expired"
-    with pytest.raises(Exception):
+    from pyiceberg.exceptions import OAuthError, UnauthorizedError
+    with pytest.raises((OAuthError, UnauthorizedError)):
         recipient(url, lake["catalog"], share["credential"]).list_namespaces()
     # A wrong secret is an unknown client; ordinary users cannot pose as a share.
     r = httpx.post(f"{url}/v1/shares/oauth/tokens", data={"grant_type": "client_credentials",
