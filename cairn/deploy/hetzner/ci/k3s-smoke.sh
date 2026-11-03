@@ -35,6 +35,12 @@ MONITORING=true
 STATE_DIR=$work/state
 EOF
 
+# Fail at once, and say so, if the node comes under disk pressure: evicted pods make every later check meaningless.
+pressure() {
+    if kubectl get node ci-1 -o jsonpath='{.status.conditions[?(@.type=="DiskPressure")].status}' 2>/dev/null | grep -q True; then
+        df -h / >&2; fail "the node is under disk pressure: pods are being evicted (free disk on the runner)"
+    fi
+}
 step "node: files, firewall, kernel settings"
 public_if=$(ip -o route show default | awk '{print $5; exit}')
 PUBLIC_IF=$public_if VLAN_ID=4000 PRIVATE_IP=10.10.0.11 ADMIN_CIDRS=127.0.0.1/32 LB_SOURCE_CIDRS=127.0.0.1/32 \
@@ -77,6 +83,7 @@ pg_pod=$(kubectl -n cairn-platform get pod -l cnpg.io/cluster=cairn-pg,cnpg.io/i
 [ -n "$pg_pod" ] || fail "no PostgreSQL primary"
 kubectl -n monitoring get prometheus >/dev/null
 
+pressure
 step "tenant: tenant.sh create (databases, namespace, services, isolation), release rendered"
 python3 deploy/ops/licence.py issue --key deploy/licence/dev-private-key.pem --kid cairn-dev --customer "CI" \
     --tenant ci-acme --days 30 >"$work/ci.licence"
@@ -111,6 +118,7 @@ psql_admin() { kubectl -n cairn-platform exec -i "$pg_pod" -c postgres -- psql -
 psql_admin -c "select has_database_privilege('public', 'cairn_ci_acme', 'connect')" | grep -q f \
     || fail "every role may connect to the tenant's database"
 
+pressure
 step "isolation"
 pw=$(kubectl -n cairn-ci-acme get secret cairn-core-secrets -o jsonpath='{.data.db-password}' | base64 -d)
 probe() {   # namespace labels name command...: a short-lived pod; its exit status
@@ -162,6 +170,7 @@ kubectl create namespace cairn-other >/dev/null && kubectl label namespace cairn
 kubectl create namespace not-a-tenant >/dev/null
 ! probe not-a-tenant "app=x" n-pg "$pg" || fail "a namespace that is no tenant reaches PostgreSQL"
 
+pressure
 step "tenant.sh delete --drop-data"
 HELM="$work/helm-stub" HELM_STUB_LOG=/dev/null deploy/hosting/tenant.sh delete ci-acme --drop-data
 [ -z "$(psql_admin -c "select 1 from pg_database where datname in ('cairn_ci_acme','cairn_catalog_ci_acme')")" ] \
