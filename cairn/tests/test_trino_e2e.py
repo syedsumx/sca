@@ -1135,6 +1135,11 @@ def test_a_tables_change_feed_is_read_as_the_caller(trino, cairn):
     plain = feed.changes(admin, "sales", "cdf_orders", str(first))
     assert sorted(c["_change_type"] for c in plain["changes"]) == ["delete", "delete", "insert", "insert", "insert"]
     assert feed.changes(admin, "sales", "cdf_orders", str(out["until_snapshot"]))["changes"] == []
+    # since as a time: the last snapshot committed at or before it.
+    at = next(s for s in snaps if s["snapshot"] == first)["committed_at"]
+    assert feed.changes(admin, "sales", "cdf_orders", at, key=["id"])["since_snapshot"] == first
+    with pytest.raises(ChangeFeedError, match="no snapshot at or before"):
+        feed.changes(admin, "sales", "cdf_orders", "2000-01-01T00:00:00+00:00")
 
     # Ana's feed is masked, as her reads are; Bob's holds only the EU rows he may see.
     mine = feed.changes(ana, "sales", "cdf_orders", str(first), key=["id"])
