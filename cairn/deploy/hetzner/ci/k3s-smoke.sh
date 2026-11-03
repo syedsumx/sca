@@ -134,7 +134,7 @@ probe() {   # namespace labels name command...: a short-lived pod; its exit stat
         case "$phase" in Succeeded|Failed) break ;; esac
         sleep 2
     done
-    [ "$phase" = Succeeded ] || kubectl -n "$ns" logs "$name" 2>/dev/null | tail -2 >&2 || true
+    [ "$phase" = Succeeded ] || kubectl -n "$ns" logs "$name" 2>/dev/null | tail -12 >&2 || true
     kubectl -n "$ns" delete pod "$name" --wait=false >/dev/null
     [ "$phase" = Succeeded ]
 }
@@ -143,9 +143,16 @@ search="wget -q -T 5 -O- http://opensearch.cairn-ci-acme.svc:9200/_cluster/healt
 # A TCP connection to Kafka (BusyBox nc: 0 once connected; 1 when refused or dropped).
 kafka="nc -w 5 kafka.cairn-ci-acme.svc 9092 </dev/null >/dev/null"
 pg="psql 'host=cairn-pg-rw.cairn-platform.svc user=cairn_ci_acme dbname=cairn_ci_acme sslmode=require connect_timeout=5' -c 'select 1'"
-probe cairn-ci-acme "$release" r-search "$search" || fail "the release cannot reach its OpenSearch"
-probe cairn-ci-acme "$release" r-kafka "$kafka" || fail "the release cannot reach its Kafka"
-probe cairn-ci-acme "$release" r-pg "$pg" || fail "the tenant cannot sign in to its database"
+diagnose() {
+    echo "--- endpoints, policies and pods in cairn-ci-acme" >&2
+    kubectl -n cairn-ci-acme get endpoints -o wide >&2 || true
+    kubectl -n cairn-ci-acme get networkpolicy -o yaml >&2 || true
+    kubectl -n cairn-ci-acme get pods -o wide --show-labels >&2 || true
+}
+# The release's paths, from one pod: each step says when it got through.
+kafka_pod=$(kubectl -n cairn-ci-acme get pod kafka-0 -o jsonpath='{.status.podIP}')
+probe cairn-ci-acme "$release" r-paths "$search && echo search-ok && nc -w 5 $kafka_pod 9092 </dev/null >/dev/null && echo kafka-pod-ok && $kafka && echo kafka-service-ok && $pg >/dev/null && echo postgres-ok" \
+    || { diagnose; fail "the release cannot reach its OpenSearch, Kafka and database (see which got through above)"; }
 kubectl create namespace cairn-other >/dev/null && kubectl label namespace cairn-other cairn.io/tenant=other >/dev/null
 ! probe cairn-other "app.kubernetes.io/name=cairn,app.kubernetes.io/instance=cairn-other" o-search "$search" \
     || fail "another tenant reaches this tenant's OpenSearch"

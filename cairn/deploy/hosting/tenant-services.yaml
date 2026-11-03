@@ -28,6 +28,7 @@ spec:
       labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false     # no KAFKA_* / OPENSEARCH_* variables from Services: these images read them as settings
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: opensearch
@@ -80,6 +81,7 @@ spec:
       labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
     spec:
       automountServiceAccountToken: false
+      enableServiceLinks: false     # no KAFKA_* / OPENSEARCH_* variables from Services: these images read them as settings
       securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: kafka
