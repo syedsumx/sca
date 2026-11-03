@@ -73,7 +73,10 @@ class Store:
                "CAIRN_STORE_CREDENTIALS_FILE": str(creds), "CAIRN_STORE_DATA": self.data,
                "CAIRN_STORE_ADDR": f"127.0.0.1:{self.port}", "CAIRN_STORE_FSYNC": "true" if self.fsync else "false",
                "CAIRN_STORE_LOG_LEVEL": "warn", **self.meta_env(), **self.extra_env}
-        self.proc = subprocess.Popen([self.binary], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        # CAIRN_TEST_STORE_LOGS=<dir> keeps each store's log there (store-<port>.log), for debugging.
+        logs = os.environ.get("CAIRN_TEST_STORE_LOGS")
+        out = open(os.path.join(logs, f"store-{self.port}.log"), "ab") if logs else subprocess.DEVNULL
+        self.proc = subprocess.Popen([self.binary], env=env, stdout=out, stderr=out)
         for _ in range(100):
             try:
                 with socket.create_connection(("127.0.0.1", self.port), timeout=0.2):

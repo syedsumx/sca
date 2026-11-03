@@ -18,6 +18,7 @@ mod iam;
 pub mod images;
 pub mod kafka;
 pub mod keys;
+pub mod kmip;
 pub mod kms;
 pub mod lifecycle;
 pub mod mounts;

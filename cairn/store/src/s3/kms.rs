@@ -30,6 +30,41 @@
 //! Without `access_key`, the store's environment gives the credentials (`AWS_ACCESS_KEY_ID`,
 //! `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`), read on every call so rotated credentials are picked up.
 //! `addr` defaults to `https://kms.<region>.amazonaws.com`.
+//!
+//! Or an Azure Key Vault (or Managed HSM) RSA key (`"type": "azure-keyvault"`): the data key is wrapped
+//! with `wrapkey` (RSA-OAEP-256) and unwrapped with `unwrapkey` by the key version that wrapped it, so a
+//! rotated key still opens old objects. Sign-in (`auth`): `client-secret` (`tenant_id`, `client_id`,
+//! `client_secret_file`), `workload-identity` (AKS: `tenant_id`, `client_id`, `federated_token_file`),
+//! `managed-identity` (optionally `client_id`) or `token-file`. Disable the key or remove the store's
+//! access, and the objects can no longer be read.
+//!
+//! ```json
+//! {"external": {"customer-c": {"type": "azure-keyvault", "addr": "https://acme.vault.azure.net", "key": "cairn-c",
+//!   "auth": "workload-identity", "tenant_id": "...", "client_id": "...",
+//!   "federated_token_file": "/var/run/secrets/azure/tokens/azure-identity-token"}}}
+//! ```
+//!
+//! Or a Google Cloud KMS key (`"type": "gcp-kms"`, `key` = its resource name): `encrypt` and `decrypt`, with
+//! the object's name bound in as the additional authenticated data, which Cloud KMS checks. Sign-in
+//! (`auth`): `service-account` (`credentials_file`, a service account key), `metadata` (GKE and GCE) or
+//! `token-file`. `addr` defaults to `https://cloudkms.googleapis.com`.
+//!
+//! ```json
+//! {"external": {"customer-d": {"type": "gcp-kms", "auth": "metadata",
+//!   "key": "projects/acme/locations/europe-west1/keyRings/cairn/cryptoKeys/customer-d"}}}
+//! ```
+//!
+//! Or a key in a KMIP server (`"type": "kmip"`: an HSM or key manager speaking KMIP 1.4, e.g. Thales
+//! CipherTrust, Fortanix, Entrust KeyControl): `key` is the AES key's unique identifier, `addr` the
+//! server's `host:port`, and the store signs in with a client certificate (`client_cert_file`,
+//! `client_key_file`; `ca_file` checks the server). Encrypt and Decrypt in AES-GCM, the object's name
+//! authenticated. Revoke or destroy the key, and the objects can no longer be read.
+//!
+//! ```json
+//! {"external": {"customer-e": {"type": "kmip", "addr": "hsm.acme.internal:5696", "key": "4711",
+//!   "ca_file": "/run/secrets/kmip/ca.pem", "client_cert_file": "/run/secrets/kmip/tls.crt",
+//!   "client_key_file": "/run/secrets/kmip/tls.key"}}}
+//! ```
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -79,12 +114,151 @@ pub struct ExternalConfig {
     pub secret_key_file: String,
     #[serde(default)]
     pub session_token_file: String,
+    // azure-keyvault, gcp-kms: how the store signs in
+    #[serde(default)]
+    pub auth: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub client_id: String,
+    #[serde(default)]
+    pub client_secret_file: String,
+    #[serde(default)]
+    pub federated_token_file: String,
+    #[serde(default)]
+    pub credentials_file: String,
+    /// The sign-in endpoint (Entra ID's login, the managed identity or metadata endpoint), for sovereign
+    /// clouds and tests.
+    #[serde(default)]
+    pub auth_addr: String,
+    // kmip
+    #[serde(default)]
+    pub ca_file: String,
+    #[serde(default)]
+    pub client_cert_file: String,
+    #[serde(default)]
+    pub client_key_file: String,
 }
 
 /// Which key manager, and how to sign in to it.
 enum Backend {
     Vault { mount: String, namespace: String, token: String, token_file: Option<PathBuf> },
     Aws { region: String, access_key: String, secret_key: String, secret_key_file: Option<PathBuf>, session_token_file: Option<PathBuf> },
+    Azure { version: String, auth: CloudAuth },
+    Gcp { auth: CloudAuth },
+    Kmip(super::kmip::Kmip),
+}
+
+/// How the store gets an OAuth access token for Azure Key Vault or Google Cloud KMS.
+enum CloudAuth {
+    TokenFile(PathBuf),
+    AzureSecret { login: String, tenant: String, client: String, secret_file: PathBuf },
+    AzureFederated { login: String, tenant: String, client: String, token_file: PathBuf },
+    AzureManaged { endpoint: String, client: String },
+    GcpServiceAccount { email: String, key_id: String, key: std::sync::Arc<ring::signature::RsaKeyPair>, token_uri: String },
+    GcpMetadata { endpoint: String },
+}
+
+const AZURE_SCOPE: &str = "https://vault.azure.net/.default";
+const GCP_SCOPE: &str = "https://www.googleapis.com/auth/cloudkms";
+const B64URL: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+fn guid(s: &str) -> bool {
+    s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+fn plain_name(s: &str, max: usize) -> bool {
+    !s.is_empty() && s.len() <= max && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+/// The private key of a PEM (PKCS#8) block.
+fn pem_pkcs8(pem: &str) -> Result<Vec<u8>, String> {
+    let body: String = pem.lines().filter(|l| !l.starts_with("-----")).collect();
+    B64.decode(body.trim()).map_err(|e| format!("the private key: {e}"))
+}
+
+fn cloud_auth(c: &ExternalConfig, azure: bool) -> Result<CloudAuth, String> {
+    let file = |f: &str, what: &str| -> Result<PathBuf, String> {
+        if f.is_empty() {
+            Err(format!("{} needs {what}", c.auth))
+        } else {
+            Ok(PathBuf::from(f))
+        }
+    };
+    let need_ids = || -> Result<(), String> {
+        if !guid(&c.tenant_id) || !guid(&c.client_id) {
+            return Err("tenant_id and client_id: the app's directory (tenant) and client ids".into());
+        }
+        Ok(())
+    };
+    let login = || {
+        if c.auth_addr.is_empty() {
+            "https://login.microsoftonline.com".to_string()
+        } else {
+            c.auth_addr.trim_end_matches('/').to_string()
+        }
+    };
+    match (azure, c.auth.as_str()) {
+        (_, "token-file") => Ok(CloudAuth::TokenFile(file(&c.token_file, "token_file")?)),
+        (true, "client-secret") => {
+            need_ids()?;
+            Ok(CloudAuth::AzureSecret {
+                login: login(),
+                tenant: c.tenant_id.clone(),
+                client: c.client_id.clone(),
+                secret_file: file(&c.client_secret_file, "client_secret_file")?,
+            })
+        }
+        (true, "workload-identity") => {
+            need_ids()?;
+            Ok(CloudAuth::AzureFederated {
+                login: login(),
+                tenant: c.tenant_id.clone(),
+                client: c.client_id.clone(),
+                token_file: file(&c.federated_token_file, "federated_token_file")?,
+            })
+        }
+        (true, "managed-identity") => {
+            if !c.client_id.is_empty() && !guid(&c.client_id) {
+                return Err("client_id: the user-assigned identity's client id".into());
+            }
+            let endpoint = if c.auth_addr.is_empty() { "http://169.254.169.254".into() } else { c.auth_addr.trim_end_matches('/').into() };
+            Ok(CloudAuth::AzureManaged { endpoint, client: c.client_id.clone() })
+        }
+        (false, "service-account") => {
+            let path = file(&c.credentials_file, "credentials_file")?;
+            let raw = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            let j: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?;
+            let text = |k: &str| j[k].as_str().unwrap_or_default().to_string();
+            if text("type") != "service_account" || text("client_email").is_empty() || text("private_key").is_empty() {
+                return Err(format!("{}: not a service account key", path.display()));
+            }
+            let der = pem_pkcs8(&text("private_key"))?;
+            let key = ring::signature::RsaKeyPair::from_pkcs8(&der).map_err(|e| format!("{}: the private key: {e}", path.display()))?;
+            let token_uri = if !c.auth_addr.is_empty() {
+                c.auth_addr.clone()
+            } else if text("token_uri").is_empty() {
+                "https://oauth2.googleapis.com/token".into()
+            } else {
+                text("token_uri")
+            };
+            Ok(CloudAuth::GcpServiceAccount {
+                email: text("client_email"),
+                key_id: text("private_key_id"),
+                key: std::sync::Arc::new(key),
+                token_uri,
+            })
+        }
+        (false, "metadata") => {
+            let endpoint =
+                if c.auth_addr.is_empty() { "http://metadata.google.internal".into() } else { c.auth_addr.trim_end_matches('/').into() };
+            Ok(CloudAuth::GcpMetadata { endpoint })
+        }
+        (true, other) => Err(format!("auth {other:?}: client-secret, workload-identity, managed-identity or token-file")),
+        (false, other) => Err(format!("auth {other:?}: service-account, metadata or token-file")),
+    }
 }
 
 fn default_mount() -> String {
@@ -106,7 +280,11 @@ pub struct Transit {
     backend: Backend,
     ttl: Duration,
     cache: Cache,
-    rt: tokio::runtime::Runtime,
+    token: Mutex<Option<(String, Instant)>>,
+    /// Azure: the key's current version and when it was looked up.
+    latest: Mutex<Option<(String, Instant)>>,
+    /// Always Some until dropped (see Drop).
+    rt: Option<tokio::runtime::Runtime>,
     http: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
 }
 
@@ -115,6 +293,15 @@ fn safe(s: &str) -> bool {
         && s.len() <= 128
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
         && !s.contains("..")
+}
+
+impl Drop for Transit {
+    /// The store drops keyrings on its own runtime, where a runtime may not be dropped in place.
+    fn drop(&mut self) {
+        if let Some(rt) = self.rt.take() {
+            rt.shutdown_background();
+        }
+    }
 }
 
 impl Transit {
@@ -166,9 +353,71 @@ impl Transit {
                     },
                 )
             }
-            other => return Err(format!("type {other:?}: the external key managers are vault-transit and aws-kms")),
+            "azure-keyvault" | "gcp-kms" | "kmip" => {
+                let theirs: &[(&str, &str)] = &[
+                    ("region", &c.region),
+                    ("access_key", &c.access_key),
+                    ("secret_key", &c.secret_key),
+                    ("secret_key_file", &c.secret_key_file),
+                    ("namespace", &c.namespace),
+                    ("token", &c.token),
+                ];
+                if let Some((name, _)) = theirs.iter().find(|(_, v)| !v.is_empty()) {
+                    return Err(format!("{name} is not a {} setting", c.kind));
+                }
+                match c.kind.as_str() {
+                    "azure-keyvault" => {
+                        if !plain_name(&c.key, 127) || (!c.version.is_empty() && !plain_name(&c.version, 64)) {
+                            return Err("key (and version): the Key Vault key's name and version".into());
+                        }
+                        if c.addr.is_empty() {
+                            return Err("addr: the vault's address, https://<name>.vault.azure.net".into());
+                        }
+                        (c.addr.clone(), Backend::Azure { version: c.version.clone(), auth: cloud_auth(&c, true)? })
+                    }
+                    "gcp-kms" => {
+                        let parts: Vec<&str> = c.key.split('/').collect();
+                        let shape = parts.len() == 8
+                            && parts.iter().step_by(2).copied().eq(["projects", "locations", "keyRings", "cryptoKeys"])
+                            && parts.iter().skip(1).step_by(2).all(|p| plain_name(p, 128));
+                        if !shape {
+                            return Err("key: projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>".into());
+                        }
+                        let addr = if c.addr.is_empty() { "https://cloudkms.googleapis.com".to_string() } else { c.addr.clone() };
+                        (addr, Backend::Gcp { auth: cloud_auth(&c, false)? })
+                    }
+                    _ => {
+                        if c.key.is_empty() || c.key.len() > 256 || c.key.chars().any(|x| x.is_control()) {
+                            return Err("key: the KMIP unique identifier of the AES key".into());
+                        }
+                        let (host, port) = c.addr.rsplit_once(':').ok_or("addr: the KMIP server's host:port")?;
+                        let port: u16 = port.parse().map_err(|_| "addr: the KMIP server's host:port")?;
+                        if host.is_empty() || host.contains('/') {
+                            return Err("addr: the KMIP server's host:port".into());
+                        }
+                        for (name, v) in
+                            [("ca_file", &c.ca_file), ("client_cert_file", &c.client_cert_file), ("client_key_file", &c.client_key_file)]
+                        {
+                            if v.is_empty() {
+                                return Err(format!("kmip needs {name}"));
+                            }
+                        }
+                        let tls = super::kmip::tls_config(
+                            std::path::Path::new(&c.ca_file),
+                            std::path::Path::new(&c.client_cert_file),
+                            std::path::Path::new(&c.client_key_file),
+                        )?;
+                        (format!("kmip://{}", c.addr), Backend::Kmip(super::kmip::Kmip { host: host.to_string(), port, tls }))
+                    }
+                }
+            }
+            other => {
+                return Err(format!(
+                    "type {other:?}: the external key managers are vault-transit, aws-kms, azure-keyvault, gcp-kms and kmip"
+                ))
+            }
         };
-        if !(addr.starts_with("https://") || addr.starts_with("http://")) {
+        if !(addr.starts_with("https://") || addr.starts_with("http://") || addr.starts_with("kmip://")) {
             return Err("addr is the key manager's http(s):// address".into());
         }
         // Its own runtime: calls are made from synchronous code that may run on the store's runtime.
@@ -189,7 +438,9 @@ impl Transit {
             backend,
             ttl: Duration::from_secs(c.cache_seconds),
             cache: Mutex::new(HashMap::new()),
-            rt,
+            token: Mutex::new(None),
+            latest: Mutex::new(None),
+            rt: Some(rt),
             http,
         };
         t.credentials()?; // credentials that cannot be read stop the store at start-up
@@ -217,7 +468,125 @@ impl Transit {
                 let st = session_token_file.as_ref().map(read).transpose()?.unwrap_or_default();
                 Ok((access_key.clone(), sk, st))
             }
+            Backend::Azure { auth, .. } | Backend::Gcp { auth } => {
+                // Files that must be readable at start-up; tokens themselves are fetched on use.
+                match auth {
+                    CloudAuth::TokenFile(f)
+                    | CloudAuth::AzureSecret { secret_file: f, .. }
+                    | CloudAuth::AzureFederated { token_file: f, .. } => {
+                        read(f)?;
+                    }
+                    _ => {}
+                }
+                Ok((String::new(), String::new(), String::new()))
+            }
+            Backend::Kmip(_) => Ok((String::new(), String::new(), String::new())),
         }
+    }
+
+    /// An OAuth access token for Azure Key Vault or Cloud KMS: from the file on every call, or fetched and
+    /// kept until a minute before it expires.
+    fn bearer(&self) -> Result<String, String> {
+        let auth = match &self.backend {
+            Backend::Azure { auth, .. } | Backend::Gcp { auth } => auth,
+            _ => unreachable!(),
+        };
+        let read = |f: &PathBuf| std::fs::read_to_string(f).map(|s| s.trim().to_string()).map_err(|e| format!("{}: {e}", f.display()));
+        if let CloudAuth::TokenFile(f) = auth {
+            return read(f);
+        }
+        if let Some((t, until)) = self.token.lock().unwrap().as_ref() {
+            if Instant::now() < *until {
+                return Ok(t.clone());
+            }
+        }
+        let r = match auth {
+            CloudAuth::TokenFile(_) => unreachable!(),
+            CloudAuth::AzureSecret { login, tenant, client, secret_file } => self.form(
+                &format!("{login}/{tenant}/oauth2/v2.0/token"),
+                &[
+                    ("grant_type", "client_credentials"),
+                    ("client_id", client),
+                    ("client_secret", &read(secret_file)?),
+                    ("scope", AZURE_SCOPE),
+                ],
+            )?,
+            CloudAuth::AzureFederated { login, tenant, client, token_file } => self.form(
+                &format!("{login}/{tenant}/oauth2/v2.0/token"),
+                &[
+                    ("grant_type", "client_credentials"),
+                    ("client_id", client),
+                    ("client_assertion_type", "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"),
+                    ("client_assertion", &read(token_file)?),
+                    ("scope", AZURE_SCOPE),
+                ],
+            )?,
+            CloudAuth::AzureManaged { endpoint, client } => {
+                let mut url =
+                    format!("{endpoint}/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net");
+                if !client.is_empty() {
+                    url.push_str(&format!("&client_id={client}"));
+                }
+                self.get(&url, &[("metadata", "true")])?
+            }
+            CloudAuth::GcpMetadata { endpoint } => self
+                .get(&format!("{endpoint}/computeMetadata/v1/instance/service-accounts/default/token"), &[("metadata-flavor", "Google")])?,
+            CloudAuth::GcpServiceAccount { email, key_id, key, token_uri } => {
+                let now = time::OffsetDateTime::now_utc().unix_timestamp();
+                let header = serde_json::json!({"alg": "RS256", "typ": "JWT", "kid": key_id});
+                let claims = serde_json::json!({"iss": email, "scope": GCP_SCOPE, "aud": token_uri, "iat": now, "exp": now + 3600});
+                let signing = format!("{}.{}", B64URL.encode(header.to_string()), B64URL.encode(claims.to_string()));
+                let mut sig = vec![0u8; key.public().modulus_len()];
+                key.sign(&ring::signature::RSA_PKCS1_SHA256, &ring::rand::SystemRandom::new(), signing.as_bytes(), &mut sig)
+                    .map_err(|_| "signing the service account's token request failed".to_string())?;
+                let jwt = format!("{signing}.{}", B64URL.encode(sig));
+                self.form(token_uri, &[("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", &jwt)])?
+            }
+        };
+        let token = r["access_token"].as_str().ok_or("the sign-in returned no access token")?.to_string();
+        let secs = r["expires_in"].as_u64().or_else(|| r["expires_in"].as_str().and_then(|s| s.parse().ok())).unwrap_or(300);
+        let until = Instant::now() + Duration::from_secs(secs.saturating_sub(60).max(10));
+        *self.token.lock().unwrap() = Some((token.clone(), until));
+        Ok(token)
+    }
+
+    /// The key's current version (wrapping names one): looked up and kept for `cache_seconds`, so a new
+    /// version is used soon after the customer rotates the key.
+    fn azure_latest(&self) -> Result<String, String> {
+        if let Some((v, at)) = self.latest.lock().unwrap().as_ref() {
+            if at.elapsed() < self.ttl {
+                return Ok(v.clone());
+            }
+        }
+        let bearer = format!("Bearer {}", self.bearer()?);
+        let r = self.get(&format!("{}/keys/{}?api-version=7.4", self.addr, self.key), &[("authorization", &bearer)])?;
+        let kid = r["key"]["kid"].as_str().unwrap_or_default();
+        let v = kid.rsplit('/').next().filter(|v| plain_name(v, 64)).ok_or("the key manager returned no key version")?.to_string();
+        *self.latest.lock().unwrap() = Some((v.clone(), Instant::now()));
+        Ok(v)
+    }
+
+    fn form(&self, url: &str, fields: &[(&str, &str)]) -> Result<serde_json::Value, String> {
+        let enc = |v: &str| percent_encoding::utf8_percent_encode(v, percent_encoding::NON_ALPHANUMERIC).to_string();
+        let body = fields.iter().map(|(k, v)| format!("{k}={}", enc(v))).collect::<Vec<_>>().join("&");
+        let req = hyper::Request::post(url).header("content-type", "application/x-www-form-urlencoded");
+        self.send(req.body(Full::new(Bytes::from(body))).map_err(|e| e.to_string())?)
+    }
+
+    fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<serde_json::Value, String> {
+        let mut req = hyper::Request::get(url);
+        for (k, v) in headers {
+            req = req.header(*k, *v);
+        }
+        self.send(req.body(Full::new(Bytes::new())).map_err(|e| e.to_string())?)
+    }
+
+    /// A JSON call to Azure Key Vault or Cloud KMS with the bearer token.
+    fn cloud(&self, url: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
+        let req = hyper::Request::post(url)
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {}", self.bearer()?));
+        self.send(req.body(Full::new(Bytes::from(body.to_string()))).map_err(|e| e.to_string())?)
     }
 
     fn send(&self, req: hyper::Request<Full<Bytes>>) -> Result<serde_json::Value, String> {
@@ -234,7 +603,8 @@ impl Transit {
             serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|e| e.to_string())
         };
         // On a plain thread, so this never blocks inside an async runtime's context.
-        std::thread::scope(|s| s.spawn(|| self.rt.block_on(fut)).join()).map_err(|_| "key manager call panicked".to_string())?
+        std::thread::scope(|s| s.spawn(|| self.rt.as_ref().expect("runtime").block_on(fut)).join())
+            .map_err(|_| "key manager call panicked".to_string())?
     }
 
     fn vault(&self, op: &str, body: serde_json::Value) -> Result<serde_json::Value, String> {
@@ -296,6 +666,27 @@ impl Transit {
                     .aws("Encrypt", serde_json::json!({"KeyId": self.key, "Plaintext": plain, "EncryptionContext": Self::context(aad)}))?;
                 r["CiphertextBlob"].as_str().ok_or("the key manager returned no ciphertext")?.to_string()
             }
+            Backend::Azure { ref version, .. } => {
+                let version = if version.is_empty() { self.azure_latest()? } else { version.clone() };
+                let path = format!("{}/{version}", self.key);
+                let r = self.cloud(
+                    &format!("{}/keys/{path}/wrapkey?api-version=7.4", self.addr),
+                    serde_json::json!({"alg": "RSA-OAEP-256", "value": B64URL.encode(Self::bound(dek, aad))}),
+                )?;
+                let value = r["value"].as_str().ok_or("the key manager returned no wrapped key")?;
+                // Kept with the version that wrapped it: unwrapping names it, so a rotated key still opens old objects.
+                let kid = r["kid"].as_str().unwrap_or_default();
+                let used = kid.rsplit('/').next().filter(|v| plain_name(v, 64)).ok_or("the key manager returned no key version")?;
+                format!("{used}.{value}")
+            }
+            Backend::Gcp { .. } => {
+                let r = self.cloud(
+                    &format!("{}/v1/{}:encrypt", self.addr, self.key),
+                    serde_json::json!({"plaintext": plain, "additionalAuthenticatedData": B64.encode(Sha256::digest(aad))}),
+                )?;
+                r["ciphertext"].as_str().ok_or("the key manager returned no ciphertext")?.to_string()
+            }
+            Backend::Kmip(ref k) => B64.encode(k.encrypt(&self.key, &Self::bound(dek, aad), &Sha256::digest(aad))?),
         };
         self.cache.lock().unwrap().insert((ct.clone(), aad.to_vec()), (*dek, Instant::now()));
         Ok(ct)
@@ -330,6 +721,25 @@ impl Transit {
                 )?;
                 B64.decode(r["Plaintext"].as_str().ok_or("the key manager returned no plaintext")?).map_err(|e| e.to_string())?
             }
+            Backend::Azure { .. } => {
+                let (version, value) = ct.split_once('.').ok_or("a damaged wrapped key")?;
+                if !plain_name(version, 64) {
+                    return Err("a damaged wrapped key".into());
+                }
+                let r = self.cloud(
+                    &format!("{}/keys/{}/{version}/unwrapkey?api-version=7.4", self.addr, self.key),
+                    serde_json::json!({"alg": "RSA-OAEP-256", "value": value}),
+                )?;
+                B64URL.decode(r["value"].as_str().ok_or("the key manager returned no plaintext")?).map_err(|e| e.to_string())?
+            }
+            Backend::Gcp { .. } => {
+                let r = self.cloud(
+                    &format!("{}/v1/{}:decrypt", self.addr, self.key),
+                    serde_json::json!({"ciphertext": ct, "additionalAuthenticatedData": B64.encode(Sha256::digest(aad))}),
+                )?;
+                B64.decode(r["plaintext"].as_str().ok_or("the key manager returned no plaintext")?).map_err(|e| e.to_string())?
+            }
+            Backend::Kmip(ref k) => k.decrypt(&self.key, &B64.decode(ct).map_err(|e| e.to_string())?, &Sha256::digest(aad))?,
         };
         if plain.len() != 64 {
             return Err("the key manager returned something that is not a data key".into());
@@ -395,5 +805,50 @@ mod tests {
         let mut orphan = ok;
         orphan["access_key"] = serde_json::json!("");
         assert!(Transit::new("b", cfg(orphan).unwrap()).is_err());
+    }
+
+    #[test]
+    fn azure_gcp_and_kmip_configs_are_checked() {
+        let dir = std::env::temp_dir().join(format!("cairn-kms-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tok = dir.join("token");
+        std::fs::write(&tok, "t").unwrap();
+        let tok = tok.to_str().unwrap();
+        let id = "11111111-2222-3333-4444-555555555555";
+        let az = serde_json::json!({"type": "azure-keyvault", "addr": "https://acme.vault.azure.net", "key": "k",
+                                    "auth": "client-secret", "tenant_id": id, "client_id": id, "client_secret_file": tok});
+        assert!(Transit::new("c", cfg(az.clone()).unwrap()).is_ok());
+        for (k, v) in [
+            ("auth", "service-account"),
+            ("tenant_id", "acme"),
+            ("key", "a/b"),
+            ("addr", ""),
+            ("region", "x"),
+            ("client_secret_file", "/does/not/exist"),
+        ] {
+            let mut bad = az.clone();
+            bad[k] = serde_json::json!(v);
+            assert!(Transit::new("c", cfg(bad).unwrap()).is_err(), "azure {k}={v}");
+        }
+        let mi =
+            serde_json::json!({"type": "azure-keyvault", "addr": "https://acme.vault.azure.net", "key": "k", "auth": "managed-identity"});
+        assert!(Transit::new("c", cfg(mi).unwrap()).is_ok());
+        let gcp = serde_json::json!({"type": "gcp-kms", "key": "projects/p/locations/global/keyRings/r/cryptoKeys/k", "auth": "metadata"});
+        let t = Transit::new("d", cfg(gcp.clone()).unwrap()).unwrap();
+        assert_eq!(t.addr, "https://cloudkms.googleapis.com");
+        for (k, v) in [("key", "projects/p/keyRings/r/cryptoKeys/k"), ("auth", "client-secret"), ("auth", "service-account")] {
+            let mut bad = gcp.clone();
+            bad[k] = serde_json::json!(v);
+            assert!(Transit::new("d", cfg(bad).unwrap()).is_err(), "gcp {k}={v}");
+        }
+        let kmip = serde_json::json!({"type": "kmip", "addr": "hsm:5696", "key": "1", "ca_file": "/x", "client_cert_file": "/x",
+                                      "client_key_file": "/x"});
+        assert!(Transit::new("e", cfg(kmip.clone()).unwrap()).is_err()); // unreadable certificates stop the store
+        for (k, v) in [("addr", "hsm"), ("addr", "https://hsm:5696"), ("ca_file", "")] {
+            let mut bad = kmip.clone();
+            bad[k] = serde_json::json!(v);
+            assert!(Transit::new("e", cfg(bad).unwrap()).is_err(), "kmip {k}={v}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -1012,6 +1012,38 @@ The store will not start with a field that does not apply to its kind (a `region
   - **Endpoint.** `addr` defaults to `https://kms.<region>.amazonaws.com`. Set it for a VPC endpoint or another KMS-compatible service.
   - **The customer stays in control.** Disabling the key, or removing the store's grant or permission, stops reads and writes after `cache_seconds`. Scheduling the key for deletion shreds the data.
   - **Tested** against a real KMS-compatible server (`nsmithuk/local-kms`, in `store/conformance/test_kms_aws.py`): encryption, copies, a key named by alias, a disabled and re-enabled key, a key pending deletion, a key that does not exist, and bad configurations. That server does not check signatures, so SigV4 is covered by the signer the store's other AWS clients share.
+- **Customer-managed keys in Azure Key Vault** (or Managed HSM). Use `"type": "azure-keyvault"` with an RSA key that allows `wrapKey` and `unwrapKey`:
+
+  ```json
+  {"external": {"customer-c": {"type": "azure-keyvault", "addr": "https://acme.vault.azure.net", "key": "cairn-c",
+     "auth": "workload-identity", "tenant_id": "<directory id>", "client_id": "<app id>",
+     "federated_token_file": "/var/run/secrets/azure/tokens/azure-identity-token", "cache_seconds": 60}}}
+  ```
+
+  - **How it works.** Each data key, with the object's name bound in, is wrapped with RSA-OAEP-256 (`wrapkey`) and unwrapped with `unwrapkey`. The key version that wrapped it is kept with it, so old objects still open after a rotation. Without `version`, the store uses the key's current version, looked up again every `cache_seconds`; set `version` to pin one.
+  - **Sign-in (`auth`).** `client-secret`: an app registration's secret in `client_secret_file`. `workload-identity`: the federated token AKS projects into the pod, in `federated_token_file`. `managed-identity`: the VM's or node's identity (`client_id` picks a user-assigned one). `token-file`: a ready access token, read on every call. Tokens are kept until a minute before they expire. `auth_addr` overrides the sign-in address (`https://login.microsoftonline.com`; the managed-identity endpoint for `managed-identity`), e.g. for a sovereign cloud.
+  - **The customer stays in control.** Disabling the key version, or removing the store's role (`Key Vault Crypto Service Encryption User`), stops reads of the objects it wrapped after `cache_seconds`. Purging the key shreds the data.
+- **Customer-managed keys in Google Cloud KMS.** Use `"type": "gcp-kms"` with a symmetric `ENCRYPT_DECRYPT` key:
+
+  ```json
+  {"external": {"customer-d": {"type": "gcp-kms", "key": "projects/acme/locations/europe-west1/keyRings/cairn/cryptoKeys/customer-d",
+     "auth": "service-account", "credentials_file": "/etc/cairn-store-keyring/gcp-sa.json", "cache_seconds": 60}}}
+  ```
+
+  - **How it works.** Each data key is encrypted with Cloud KMS `encrypt` and decrypted with `decrypt`. The object's name is bound in the plaintext and as additional authenticated data (its SHA-256), which KMS checks on every decrypt. KMS picks the key version itself.
+  - **Sign-in (`auth`).** `service-account`: a service account key file; the store signs its token request (RS256). `metadata`: the identity of the GKE workload or VM. `token-file`: a ready access token. Give the account only `roles/cloudkms.cryptoKeyEncrypterDecrypter` on the one key. `addr` overrides `https://cloudkms.googleapis.com` (e.g. a private endpoint).
+  - **The customer stays in control.** Disabling or destroying the key version, or removing the role, stops reads after `cache_seconds`.
+- **Customer-managed keys in an HSM over KMIP.** Use `"type": "kmip"` for HSMs and key managers that speak KMIP 1.4 (Thales CipherTrust, Entrust KeyControl, Fortanix, IBM GKLM, PyKMIP and others), with an AES key that allows encrypt and decrypt:
+
+  ```json
+  {"external": {"customer-e": {"type": "kmip", "addr": "hsm.acme.internal:5696", "key": "<the key's unique id>",
+     "ca_file": "/etc/cairn-store-keyring/kmip-ca.pem", "client_cert_file": "/etc/cairn-store-keyring/kmip.crt",
+     "client_key_file": "/etc/cairn-store-keyring/kmip.key", "cache_seconds": 60}}}
+  ```
+
+  - **How it works.** The store connects with TLS and its client certificate (mutual TLS: the HSM decides by certificate what the store may use) and asks the HSM to encrypt each data key with AES-GCM, the object's name as the additional data. The key never leaves the HSM.
+  - **The customer stays in control.** Revoking, deactivating or destroying the key, or removing the certificate's access, stops reads after `cache_seconds`.
+- **Common to every customer-managed key.** The same fail-closed behaviour as Vault: a keyring that does not load stops the store; a refusal fails the request with `KMS.DisabledException` and logs the key manager's answer. Keep credential files in the keyring Secret. **Tested** against real servers (`store/conformance/test_kms_cloud.py`): Azure Key Vault on Lowkey Vault with each sign-in (client secret, workload identity, managed identity), rotation and a disabled version; Cloud KMS on floci-gcp with a signed service-account sign-in and a key the object was not written with; KMIP on PyKMIP's server, with a certificate the HSM refuses and a revoked key.
 
 Objects written before a key was set stay unencrypted. Requests to set them are refused with `NotImplemented`; Cairn Store never accepts a setting it would ignore.
 

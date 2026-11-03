@@ -94,9 +94,11 @@ jobs:
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
-          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" "kafka-python==2.2.15" pytest "cryptography>=42" "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9"
+          pip install "boto3>=1.36" "botocore[crt]" requests "webdav4>=0.10" "paramiko>=3.4" "psycopg[binary]>=3.1" "pillow>=10" "grpcio-tools>=1.60" "kafka-python==2.2.15" pytest "cryptography>=42" "pyarrow>=17" "pyiceberg[sql-sqlite,pyarrow]>=0.9" "pykmip==0.11.0"
           docker pull -q hashicorp/vault:1.20   # customer-managed keys (test_kms_vault.py)
           docker pull -q nsmithuk/local-kms:3   # customer-managed keys in AWS KMS (test_kms_aws.py)
+          docker pull -q nagyesta/lowkey-vault:3.4.0   # Azure Key Vault (test_kms_cloud.py)
+          docker pull -q floci/floci-gcp:0.12.0        # Google Cloud KMS (test_kms_cloud.py); PyKMIP is the KMIP server
           cd conformance && pytest -q -p no:cacheprovider
 
   store-postgres:

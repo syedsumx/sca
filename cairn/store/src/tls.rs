@@ -24,11 +24,11 @@ pub struct TlsFiles {
     pub cluster_ca: Option<PathBuf>,
 }
 
-fn provider() -> Arc<rustls::crypto::CryptoProvider> {
+pub fn provider() -> Arc<rustls::crypto::CryptoProvider> {
     Arc::new(rustls::crypto::ring::default_provider())
 }
 
-fn load_certs(p: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
+pub fn load_certs(p: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
     let certs: Vec<_> = CertificateDer::pem_file_iter(p)
         .map_err(|e| format!("{}: {e}", p.display()))?
         .collect::<Result<_, _>>()
@@ -37,6 +37,11 @@ fn load_certs(p: &Path) -> Result<Vec<CertificateDer<'static>>, String> {
         return Err(format!("{}: no certificates", p.display()));
     }
     Ok(certs)
+}
+
+/// A private key from a PEM file.
+pub fn load_key(p: &Path) -> Result<PrivateKeyDer<'static>, String> {
+    PrivateKeyDer::from_pem_file(p).map_err(|e| format!("{}: {e}", p.display()))
 }
 
 /// Builds a server configuration from the files.
