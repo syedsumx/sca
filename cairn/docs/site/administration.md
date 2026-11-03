@@ -1429,6 +1429,8 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - Creating, altering and dropping tables, views and schemas, and table procedures such as `optimize`, need `MANAGE_DATASET`.
     - Other users' queries and system operations need `MANAGE_SYSTEM_OPERATIONS`.
     - Operations Cairn does not know are refused.
+    - **Iceberg metadata tables** (`<table>$<name>`) are decided on their table. `$snapshots`, `$history` and `$refs` hold no row values: whoever may read the table may read them. The others (`$files`, `$manifests`, `$partitions` and the rest) carry column bounds that can show masked values, so they need `MANAGE_DATASET` on the table. None takes masks or row filters.
+    - **Connector table functions** (`<catalog>.system.<name>`, such as Iceberg's and Delta's `table_changes` or a JDBC catalog's `query`) return rows past masks and row filters, so only operators (`MANAGE_SYSTEM_OPERATIONS`) may call them. Value-free ones (`bucket`) stay open. A table's changes are read through [the change feed](#change-data-feed) instead.
     - **Who has them.** `WRITE_DATASET`, `MANAGE_DATASET` and `MANAGE_SYSTEM_OPERATIONS` are Cairn's own privileges, and Cairn Core policies never grant them. Trino has no Core fallback, so a request no Cairn policy allows is refused. The baseline bundle grants all three to the group `urn:li:corpGroup:lakehouse-admins` (policy `lakehouse-admins-manage-tables`). Add your lakehouse administrators to it (SCIM, or Core's group page), or write your own policy. Tested with a real Cairn Core: a user put in the group through SCIM created schemas and tables through Trino, while the Core admin, who is not in the group, was refused.
   - **Masks and filters.** Columns the caller's masking plan covers come back masked in SQL, so filters and joins see the masked values too. Every mask keeps the column's type:
     - **Text:** `partial` (`j•••@•••.com`), `hash` (a stable digest) or `redact` (`••••`).
@@ -1780,6 +1782,34 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
   - **Columns.** A column the table lacked was set aside, and with `evolve` it was added.
   - **Lineage.** The source was added to the target's lineage, merged with what was there. When Cairn Core failed, nothing was created.
   - **Checks.** Bad definitions were refused, and the API was for operators only.
+
+## Change data feed
+
+A lakehouse table's row changes between two of its snapshots, for consumers that sync, audit or react to what changed.
+
+- **`GET /v1/lakehouse/tables/<schema>/<table>/changes?since=<snapshot id or ISO time>`**, optionally with `until` (default: the current snapshot), `key` (columns, comma-separated) and `limit` (1,000; at most 10,000).
+  - Each row comes back with `_change_type`: `insert` or `delete`.
+  - With `key`, a deletion and an insertion with the same key are an update: `update_preimage` and `update_postimage`.
+  - `until_snapshot` is the snapshot to pass as the next `since`.
+  - The changes are net between the two snapshots: a row added and removed in between does not appear.
+- **`GET …/snapshots`** lists the table's snapshots: id, parent, commit time and operation.
+- **Governed as a read.** Both snapshots are read as the caller, with ordinary time-travel queries on Trino, so their policies, masks and row filters apply. Someone masked sees masked values in the feed, and someone row-filtered sees only the changes to rows they may see at each snapshot. Trino's own `table_changes` is not offered, because its rows escape masks and row filters.
+- **Cost.** The feed compares the two snapshots (`EXCEPT ALL` both ways): exact, but it reads both. Keep feeds frequent on large tables.
+- **Settings.** `CAIRN_CHANGE_FEED_CONNECTION` is a run-as-user Trino connection (default: `CAIRN_DERIVED_CONNECTION`, then `CAIRN_MAINTENANCE_CONNECTION`). The catalog's name comes from `CAIRN_DERIVED_CATALOG`.
+- **Tested** on real Trino (`tests/test_trino_e2e.py`). Each case, and what happened:
+
+  | Case | Result |
+  |---|---|
+  | Inserts, a delete and an update since a snapshot | Came back as inserts, a delete and an update (pre- and post-image) by key, and as deletes and inserts without one |
+  | The feed from its own last snapshot | Empty |
+  | A masked reader | Saw only masked emails |
+  | A row-filtered reader | Saw his EU rows leave and arrive |
+  | A table the reader may not read | Refused |
+  | `$files` | Refused to a reader |
+  | `$snapshots` | Open to a reader |
+  | `table_changes` on an append-only table | Ran for the admin, refused to a masked reader |
+
+  The access decisions are also in `tests/test_trino_access.py`.
 
 ## Materialized views
 

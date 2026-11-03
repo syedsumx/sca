@@ -515,3 +515,25 @@ def test_a_warehouse_takes_queries_from_its_team(client):
     assert ask(c, "warehouse/sales/allow", "eve", "ExecuteQuery", groups=["analysts"]) is False     # deny wins
     r = c.post(f"/v1/trino/{KEY}/warehouse/Bad_Name/allow", json={"input": {}})
     assert r.status_code == 404
+
+
+def test_iceberg_metadata_tables_and_connector_table_functions(client):
+    """Metadata tables are decided on their table: snapshots, history and refs (no row values) for its readers,
+    the rest (file bounds can show masked values) for its managers; none takes masks or row filters. Connector
+    functions such as table_changes or a JDBC catalog's query return rows past masks and filters: operators only."""
+    c = client
+    snaps = table("orders$snapshots", columns=["snapshot_id"])
+    assert ask(c, "allow", "ana", "SelectFromColumns", snaps) is True
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("salaries$snapshots", "hr", columns=["snapshot_id"])) is False
+    assert ask(c, "allow", "ana", "SelectFromColumns", table("orders$files", columns=["lower_bounds"])) is False
+    assert ask(c, "allow", "admin", "SelectFromColumns", table("orders$files", columns=["lower_bounds"])) is True
+    assert ask(c, "allow", "ana", "DeleteFromTable", table("orders$snapshots")) is False
+    assert ask(c, "batch", "ana", "FilterColumns", filterResources=[snaps]) == [0]
+    assert ask(c, "batch", "ana", "FilterColumns", filterResources=[table("orders$files", columns=["lower_bounds"])]) == []
+    assert ask(c, "row-filters", "bob", "GetRowFilters", table("orders$snapshots")) == []
+    fn = lambda cat, sch, name: {"function": {"catalogName": cat, "schemaName": sch, "functionName": name}}  # noqa: E731
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("lakehouse", "system", "table_changes")) is False
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("postgres", "system", "query")) is False
+    assert ask(c, "allow", "admin", "ExecuteFunction", fn("lakehouse", "system", "table_changes")) is True
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("lakehouse", "system", "bucket")) is True
+    assert ask(c, "allow", "ana", "ExecuteFunction", fn("system", "builtin", "sequence")) is True

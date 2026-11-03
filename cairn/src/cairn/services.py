@@ -114,6 +114,7 @@ class Services:
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
     trino_functions: Optional[Any] = None
+    change_feed: Optional[Any] = None
     vectors: Optional[Any] = None
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
@@ -779,6 +780,15 @@ def _build_active_metadata(s: Services) -> None:
                 definition = (s.data_access.registry.definitions() or {}).get(derived_conn) or {}
                 return s.data_access.run_on_trino(definition, owner, sql, 100_000)[1]
             s.derived = DerivedTables(s.engine, run_derived, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
+        feed_conn = (os.environ.get("CAIRN_CHANGE_FEED_CONNECTION") or os.environ.get("CAIRN_DERIVED_CONNECTION")
+                     or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"))
+        if feed_conn:                                    # a table's row changes, read as the caller
+            from cairn.pipelines.change_feed import ChangeFeed
+
+            def run_feed(actor: str, sql: str, limit: int):
+                definition = (s.data_access.registry.definitions() or {}).get(feed_conn) or {}
+                return s.data_access.run_on_trino(definition, actor, sql, limit)
+            s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"))
         _build_data_access(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace

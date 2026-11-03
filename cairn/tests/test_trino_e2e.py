@@ -1100,6 +1100,73 @@ def test_stored_functions_and_procedures(trino, cairn):
     assert ev and ev[0]["details"]["args"]["region"] in ("EU", hostile, "US")
 
 
+def test_a_tables_change_feed_is_read_as_the_caller(trino, cairn):
+    """A table's row changes between snapshots (inserts, deletes, and updates by key), read as whoever asks:
+    their masks and row filters apply to the feed as to any read; Trino's own table_changes stays refused."""
+    from cairn.pipelines.change_feed import ChangeFeed, ChangeFeedError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    feed = ChangeFeed(lambda actor, sql, limit: s.data_access.run_on_trino(definition, actor, sql, limit), "lake")
+    admin, ana, bob = ("urn:li:corpuser:" + u for u in ("admin", "ana", "bob"))
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.cdf_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"}]}
+    trino("CREATE TABLE lake.sales.cdf_orders (id integer, email varchar, region varchar)")
+    trino("INSERT INTO lake.sales.cdf_orders VALUES (1, 'kim@acme.com', 'EU'), (2, 'lee@acme.com', 'US')")
+    first = feed.snapshots(admin, "sales", "cdf_orders")[-1]["snapshot"]
+    trino("INSERT INTO lake.sales.cdf_orders VALUES (3, 'max@acme.com', 'EU'), (4, 'ola@acme.com', 'US')")
+    trino("DELETE FROM lake.sales.cdf_orders WHERE id = 2")
+    trino("UPDATE lake.sales.cdf_orders SET region = 'APAC' WHERE id = 1")
+    snaps = feed.snapshots(admin, "sales", "cdf_orders")
+    assert len(snaps) >= 4 and snaps[-1]["snapshot"] != first
+
+    out = feed.changes(admin, "sales", "cdf_orders", str(first), key=["id"])
+    got = [(c["_change_type"], c["id"], c["region"], c["email"]) for c in out["changes"]]
+    assert got == [("update_preimage", 1, "EU", "kim@acme.com"), ("update_postimage", 1, "APAC", "kim@acme.com"),
+                   ("delete", 2, "US", "lee@acme.com"), ("insert", 3, "EU", "max@acme.com"),
+                   ("insert", 4, "US", "ola@acme.com")], got
+    assert out["since_snapshot"] == first and out["until_snapshot"] == snaps[-1]["snapshot"]
+    # Without a key, an update is a delete and an insert. Nothing changes after the last snapshot.
+    plain = feed.changes(admin, "sales", "cdf_orders", str(first))
+    assert sorted(c["_change_type"] for c in plain["changes"]) == ["delete", "delete", "insert", "insert", "insert"]
+    assert feed.changes(admin, "sales", "cdf_orders", str(out["until_snapshot"]))["changes"] == []
+
+    # Ana's feed is masked, as her reads are; Bob's holds only the EU rows he may see.
+    mine = feed.changes(ana, "sales", "cdf_orders", str(first), key=["id"])
+    assert all("•" in c["email"] and "acme" not in c["email"] for c in mine["changes"]), mine["changes"]
+    assert len(mine["changes"]) == 5
+    bobs = feed.changes(bob, "sales", "cdf_orders", str(first), key=["id"])
+    # At each snapshot he sees EU rows only: id 1 left EU (a delete for him), id 3 arrived.
+    assert sorted((c["_change_type"], c["id"]) for c in bobs["changes"]) == [("delete", 1), ("insert", 3)], bobs["changes"]
+
+    # The feed's errors.
+    with pytest.raises(ChangeFeedError, match="no snapshot"):
+        feed.changes(admin, "sales", "cdf_orders", "123")
+    with pytest.raises(ChangeFeedError, match="key"):
+        feed.changes(admin, "sales", "cdf_orders", str(first), key=["nope"])
+    # A table she may not read: refused by Trino under Cairn's policy, before any row is compared.
+    trino("CREATE SCHEMA IF NOT EXISTS lake.hr")
+    with pytest.raises(Exception, match="Access Denied"):
+        feed.changes(ana, "hr", "salaries", "1")
+    # Iceberg's value-bearing metadata (file bounds) is the table managers' only; snapshots are readers'.
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino('SELECT lower_bounds FROM lake.sales."cdf_orders$files"', user="ana")
+    assert trino('SELECT count(*) AS n FROM lake.sales."cdf_orders$snapshots"', user="ana")[0]["n"] >= 4
+    # Trino's table_changes would return raw rows past masks: refused (on an append-only table, where it runs).
+    trino("CREATE TABLE lake.sales.cdf_appends AS SELECT * FROM lake.sales.cdf_orders")
+    trino("INSERT INTO lake.sales.cdf_appends VALUES (9, 'zed@acme.com', 'EU')")
+    apps = [x["snapshot"] for x in feed.snapshots(admin, "sales", "cdf_appends")]
+    q = f"SELECT email FROM TABLE(lake.system.table_changes('sales', 'cdf_appends', {apps[0]}, {apps[-1]}))"
+    assert trino(q) == [{"email": "zed@acme.com"}]                    # it works, for the admin
+    with pytest.raises(RuntimeError, match="Access Denied"):
+        trino(q, user="ana")
+
+
 def test_materialized_views_in_sql_refresh_when_what_they_read_changes(trino, cairn):
     """CREATE / REFRESH / DROP MATERIALIZED VIEW in the SQL editor (Trino has none on a REST catalog): the view is
     filled at once, says when it is stale, refreshes when a table it reads changes, and is its owner's."""
@@ -1142,7 +1209,9 @@ def test_materialized_views_in_sql_refresh_when_what_they_read_changes(trino, ca
     assert dt.run_due() >= 1                                          # the scheduler's tick refreshes it
     assert {r["region"]: r["total"] for r in trino("SELECT * FROM lake.mv.by_region")} == {"EU": 12.5, "US": 9.0}
     assert dt.freshness(dt.get(mv["id"]))["fresh"] is True
-    assert dt.run_due() == 0                                          # nothing changed since: nothing to do
+    runs = len(dt.runs(mv["id"]))
+    dt.run_due()
+    assert len(dt.runs(mv["id"])) == runs                             # nothing it reads changed since: not refreshed
     # REFRESH on demand; another person may neither refresh nor drop it.
     assert "refreshed" in ws.run(admin, "REFRESH MATERIALIZED VIEW mv.by_region", "lakehouse")["rows"][0][0]
     for stmt in ("REFRESH MATERIALIZED VIEW lake.mv.by_region", "DROP MATERIALIZED VIEW lake.mv.by_region"):

@@ -75,6 +75,10 @@ SCHEMA_OPS = {"CreateSchema", "DropSchema", "RenameSchema", "SetSchemaAuthorizat
 # Stored functions (in the catalogs of CAIRN_TRINO_ROUTINE_CATALOGS): created and dropped with MANAGE_DATASET
 # on the function, called with USE_FUNCTION on it.
 FUNCTION_OPS = {"CreateFunction", "DropFunction"}
+# Iceberg metadata tables (<table>$<name>) that show no row values: readable by whoever may read the table.
+SAFE_METADATA = {"snapshots", "history", "refs"}
+# Connector functions (<catalog>.system.<name>) that compute on what they are given and return no stored rows.
+SAFE_CONNECTOR_FUNCTIONS = {"bucket"}
 # Other people's queries, system information and procedures.
 SYSTEM_OPS = {"ReadSystemInformation", "WriteSystemInformation", "KillQueryOwnedBy", "ViewQueryOwnedBy",
               "FilterViewQueryOwnedBy", "ExecuteProcedure", "CreateRole", "DropRole", "GrantRoles", "RevokeRoles",
@@ -295,7 +299,8 @@ class TrinoAccess:
                 return True
             if op == "ExecuteFunction":
                 f = res.get("function") or {}
-                return str(f.get("catalogName") or "") not in self.ai_catalogs | self.routine_catalogs
+                return str(f.get("catalogName") or "") not in self.ai_catalogs | self.routine_catalogs \
+                    and not self._raw_rows(f)              # no connector table functions: only aggregates leave
             t = res.get("table") or {}
             return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and self._tkey(t) in room
         if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
@@ -310,6 +315,8 @@ class TrinoAccess:
                 return self.ai_admit is None or self.ai_admit(actor)
             if str(f.get("catalogName") or "") in self.routine_catalogs:   # stored functions: USE_FUNCTION on each
                 return user != CRAWLER and self.allowed(actor, groups, FUNCTION, self.function_urn(f))
+            if self._raw_rows(f):          # e.g. table_changes, query: rows that escape masks and row filters
+                return user != CRAWLER and self.allowed(actor, groups, SYSTEM, None)
             return True
         if op in FUNCTION_OPS:
             f = res.get("function") or {}
@@ -334,6 +341,16 @@ class TrinoAccess:
             # FilterColumns, FilterViewQueryOwnedBy), so reading them is open; changing them is not.
             if (t.get("schemaName") == "information_schema" or t.get("catalogName") == "system") and TABLE_OPS[op] in (VIEW, READ):
                 return True
+            name = str(t.get("tableName") or "")
+            if "$" in name:                            # an Iceberg metadata table: decided on its table
+                base, meta = name.split("$", 1)
+                if TABLE_OPS[op] not in (VIEW, READ):
+                    return False
+                urn = self.table_urn({**t, "tableName": base})
+                # Snapshots, history and refs hold no row values; files, manifests, partitions and the rest
+                # carry column bounds that can reveal masked values: the table's managers only.
+                need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
+                return self.allowed(actor, groups, need, urn)
             ok = self.allowed(actor, groups, TABLE_OPS[op], self.table_urn(t))
             if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
                 target = (action.get("targetResource") or {}).get("table")
@@ -341,6 +358,23 @@ class TrinoAccess:
             return ok
         logger.info("trino operation %s is not known to Cairn: refused", op)
         return False
+
+    @staticmethod
+    def _raw_rows(f: dict) -> bool:
+        """A connector's own function (``<catalog>.system.<name>``) that is not known to be value-free: such
+        table functions (Iceberg's and Delta's ``table_changes``, JDBC connectors' ``query``) return a
+        table's or a source's rows directly, where Cairn's masks and row filters do not reach."""
+        catalog, schema = str(f.get("catalogName") or ""), str(f.get("schemaName") or "")
+        return catalog != "system" and schema == "system" and str(f.get("functionName") or "") not in SAFE_CONNECTOR_FUNCTIONS
+
+    def _may_view(self, actor: str, groups: list[str], t: dict) -> bool:
+        """VIEW on a table; for an Iceberg metadata table, on its table (MANAGE for those showing values)."""
+        name = str(t.get("tableName") or "")
+        if "$" in name:
+            base, meta = name.split("$", 1)
+            return self.allowed(actor, groups, VIEW if meta in SAFE_METADATA else MANAGE,
+                                self.table_urn({**t, "tableName": base}))
+        return self.allowed(actor, groups, VIEW, self.table_urn(t))
 
     def batch(self, inp: dict) -> list[int]:
         actor, groups = self.who(inp.get("context"))
@@ -364,11 +398,11 @@ class TrinoAccess:
             t = (items[0] if items else {}).get("table") or {}
             return list(range(len(t.get("columns") or []))) if op == "FilterColumns" else list(range(len(items)))
         if op == "FilterTables":
-            return [i for i, r in enumerate(items) if r.get("table") and self.allowed(actor, groups, VIEW, self.table_urn(r["table"]))]
+            return [i for i, r in enumerate(items) if r.get("table") and self._may_view(actor, groups, r["table"])]
         if op == "FilterColumns":
             t = (items[0] if items else {}).get("table") or {}
             cols = t.get("columns") or []
-            return list(range(len(cols))) if t and self.allowed(actor, groups, VIEW, self.table_urn(t)) else []
+            return list(range(len(cols))) if t and self._may_view(actor, groups, t) else []
         if op == "FilterViewQueryOwnedBy":
             if self.allowed(actor, groups, SYSTEM, None):
                 return list(range(len(items)))
@@ -381,8 +415,8 @@ class TrinoAccess:
         if self._room_tables(actor.removeprefix("urn:li:corpuser:")) is not None:
             return []                                 # parties agreed to the room; only aggregates leave it
         t = ((inp.get("action") or {}).get("resource") or {}).get("table") or {}
-        if not t:
-            return []
+        if not t or "$" in str(t.get("tableName") or ""):
+            return []                                 # Iceberg metadata tables hold no rows to filter (see allow)
         urn = self.table_urn(t)
         try:
             d = self.decide(actor, groups, READ, urn)
@@ -405,8 +439,8 @@ class TrinoAccess:
             return None
         actor, _ = self.who(inp.get("context"))
         col = ((inp.get("action") or {}).get("resource") or {}).get("column") or {}
-        if not col:
-            return None
+        if not col or "$" in str(col.get("tableName") or ""):
+            return None                               # metadata tables: no row values (or managers only)
         urn = self.urn(col.get("catalogName", ""), col.get("schemaName", ""), col.get("tableName", ""))
         try:
             plan = self.plan_for(actor, urn)
