@@ -107,6 +107,13 @@ def cmd_warehouses(a) -> None:
     asyncio.run(serve(warehouses, a.host, a.reap_every))
 
 
+def cmd_dr(a) -> None:
+    """After failing over: every lakehouse table readable on the standby (cairn.pipelines.dr)."""
+    from cairn.pipelines.dr import main
+
+    raise SystemExit(main(a))
+
+
 def cmd_bundle(a) -> None:
     """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
     from cairn.iac.bundle import main
@@ -687,6 +694,20 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
     bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")
     bd.set_defaults(fn=cmd_bundle)
+
+    dr = sub.add_parser("dr", help="disaster recovery: after failing over, make every lakehouse table readable")
+    dr_sub = dr.add_subparsers(dest="dr_cmd", required=True)
+    rc = dr_sub.add_parser("reconcile", help="move tables whose newest files never reached the standby back to "
+                                             "their newest whole commit (report only, unless --apply)")
+    rc.add_argument("--catalog", required=True, help="the standby's Cairn Catalog")
+    rc.add_argument("--token", required=True, help="a catalog token that may manage every table")
+    rc.add_argument("--store", required=True, help="the standby's Cairn Store (S3 endpoint)")
+    rc.add_argument("--access-key", required=True)
+    rc.add_argument("--secret-key", default="")
+    rc.add_argument("--secret-key-file", default="")
+    rc.add_argument("--region", default="us-east-1")
+    rc.add_argument("--apply", action="store_true", help="make the repairs (default: report what they would be)")
+    rc.set_defaults(fn=cmd_dr)
 
     st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
     st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")

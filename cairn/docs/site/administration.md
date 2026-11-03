@@ -1744,6 +1744,38 @@ audit log: altering or deleting an entry breaks the chain.
 * **Verify an export** without database access: `cairn audit verify-file audit.jsonl`. Pass the
   previous export's `head` with `--after-head` to prove nothing is missing in between.
 
+## Disaster recovery across regions
+
+A standby region keeps a copy of the lakehouse, so losing the primary region costs minutes and the last few commits, not the lakehouse.
+
+**What runs in the standby.**
+
+- **Cairn Store**, receiving the primary's bucket by replication (`PutBucketReplication` to a target on the standby; see Replication above). Versioning is on at both ends.
+- **PostgreSQL**, a streaming standby of the primary's database that holds the catalog's state (and Cairn's own). Use your PostgreSQL operator, or `pg_basebackup -R`.
+- **Nothing else needs to run** until failover. Cairn Catalog, the Cairn API and Trino hold no state of their own beyond the database and the store.
+
+**Why reconcile.** The two copies are made independently, so either can be ahead. Where the database is ahead, a table points at a metadata file, manifest or data file that never reached the standby store, and cannot be read there.
+
+**Failover runbook.**
+
+1. **Declare the primary lost**, and stop anything still writing to it.
+2. **Promote the standby database**: `pg_ctl promote`, or your operator's switchover.
+3. **Start Cairn Catalog** in the standby: `CAIRN_CATALOG_DATABASE_URL` pointing at the promoted database, `CAIRN_CATALOG_S3_ENDPOINT` at the standby store, the same warehouse (`s3://<bucket>/...`) and tokens.
+4. **Reconcile**: `cairn dr reconcile --catalog <standby catalog> --token <catalog token> --store <standby store> --access-key ... --secret-key-file ...`.
+   - It reports every table that cannot be read and what it would roll back to: its newest commit whose files all arrived.
+   - Run it again with `--apply` to make the repairs. Each repair drops the table without purging its files, then registers it at that metadata file, so the files of the lost commits stay in the store for inspection.
+   - Tables whose files are all there are not touched. A table with no whole commit left is reported as unrecoverable; restore it from a backup.
+5. **Point clients at the standby**: Cairn's API and Trino's catalogs, through DNS or configuration.
+6. **Afterwards**, rebuild the old primary as the new standby, the other way round.
+
+**Measured** in the drill (`tests/test_dr_drill.py`, run in CI):
+
+- **Setup.** Two regions, each with a real store and PostgreSQL. The primary's store replicated to the standby's, and its database streamed to the standby's.
+- **The loss.** Ten commits were made. The standby's store was frozen for the last four, as over a slow link. Then the primary region was killed: store, catalog and database.
+- **Recovery.** The standby database was promoted and a catalog started on it. The report found one table to roll back by four commits, and left the other alone. `--apply` repaired it.
+- **Results.** RPO: 4 of 10 commits (4.3 s of writes). RTO: about 2 s from the loss to every table readable. The standby then took writes.
+- **Your figures** depend on replication lag (watch `x-amz-replication-status` and PostgreSQL's replication lag) and on how fast your DNS and clients follow.
+
 ## Upgrades
 
 Upgrades run forward only: there are no down-migrations, so the way back is the backup you take first. Releases are rehearsed by installing the previous release, filling it with data, and upgrading it with exactly these steps. The current release was rehearsed from schema revision 0009 to 0014; every table kept its data and the audit chain stayed valid.
