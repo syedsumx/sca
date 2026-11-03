@@ -119,6 +119,7 @@ class Services:
     procedures: Optional[Any] = None
     data_apps: Optional[Any] = None
     clean_rooms: Optional[Any] = None
+    feature_tables: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1177,6 +1178,14 @@ def _build_data_access(s: Services) -> None:
         lake.urn if lake is not None else
         (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
         lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False))
+    # Feature tables: lakehouse tables declared as ML features, in the catalog with their lineage.
+    if s.graph is not None:
+        from cairn.ml.features import FeatureTables
+
+        s.feature_tables = FeatureTables(
+            s.graph, lake.urn if lake is not None else
+            (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{'.'.join(ns)}.{t},PROD)"),
+            lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit)
 
     # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
     apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""
