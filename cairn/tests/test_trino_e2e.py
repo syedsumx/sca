@@ -96,6 +96,10 @@ def cairn(tmp_path_factory):
                                                      "crm": {"platform": "postgres", "database": "crm"}})
     os.environ["CAIRN_TRINO_OAUTH_SECRET"] = OAUTH_SECRET
     os.environ["CAIRN_TRINO_OAUTH_REDIRECT_URIS"] = "https://127.0.0.1/oauth2/callback"  # the real port is set below
+    # AI functions in SQL go through Cairn's gateway to the model (a recording stand-in here).
+    model = ModelStub()
+    os.environ.update({"CAIRN_AI_SQL_UPSTREAM": f"http://127.0.0.1:{model.port}", "CAIRN_AI_SQL_PROVIDER": "openai",
+                       "CAIRN_AI_SQL_API_KEY": "provider-key-held-by-cairn", "CAIRN_AI_SQL_MODELS": "stub-model"})
     try:
         graph = InMemoryGraph()
         graph.aspects[(ORDERS, "schemaMetadata")] = {"fields": [
@@ -113,6 +117,9 @@ def cairn(tmp_path_factory):
         os.environ.pop("CAIRN_TRINO_CATALOGS")
         os.environ.pop("CAIRN_TRINO_OAUTH_SECRET")
         os.environ.pop("CAIRN_TRINO_OAUTH_REDIRECT_URIS")
+        for k in ("CAIRN_AI_SQL_UPSTREAM", "CAIRN_AI_SQL_PROVIDER", "CAIRN_AI_SQL_API_KEY", "CAIRN_AI_SQL_MODELS"):
+            os.environ.pop(k)
+    s.model_stub = model
     sub = lambda u: {"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{u}"}  # noqa: E731
     s.pdp.set_bundle(PolicyBundle(policies=[
         Policy(id="admin", effect="allow", actions=["*"], condition=sub("admin")),
@@ -169,12 +176,14 @@ class ModelStub:
 
         stub = self
         self.prompts: list[str] = []
+        self.bodies: list[dict] = []
 
         class H(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("content-length") or 0)) or b"{}")
                 text = " ".join(str(m.get("content")) for m in body.get("messages") or [])
                 stub.prompts.append(text)
+                stub.bodies.append({"body": body, "headers": dict(self.headers)})
                 out = json.dumps({"id": "c1", "object": "chat.completion", "created": 0, "model": body.get("model", ""),
                                   "choices": [{"index": 0, "finish_reason": "stop",
                                                "message": {"role": "assistant", "content": "positive"}}],
@@ -205,10 +214,10 @@ def trino(lake, cairn):
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}",
         "delta.register-table-procedure.enabled=true", "delta.enable-non-concurrent-writes=true", ""]))
     # AI functions (Trino's ai connector) against a recording stand-in for the model's API.
-    model = ModelStub()
+    model = services.model_stub
     open(f"{d}/catalog/llm.properties", "w").write("\n".join([
-        "connector.name=ai", "ai.provider=openai", "ai.model=stub-model", f"ai.openai.endpoint=http://127.0.0.1:{model.port}",
-        "ai.openai.api-key=${ENV:CAIRN_AI_API_KEY}", ""]))
+        "connector.name=ai", "ai.provider=openai", "ai.model=stub-model", f"ai.openai.endpoint={cairn_url}/v1/trino/{KEY}/ai",
+        "ai.openai.api-key=not-the-provider-key", ""]))      # Trino never has the provider's key
     open(f"{d}/catalog/lake.properties", "w").write("\n".join([
         "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={lake['catalog']}",
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
@@ -762,6 +771,28 @@ def test_ai_and_python_functions_run_in_sql_under_cairns_policies(trino, cairn):
         assert not any("jane@acme.com" in p for p in trino.model.prompts), trino.model.prompts   # the raw value never left
         with pytest.raises(RuntimeError, match="Access Denied"):
             trino(q, user="bob")
+        # Through Cairn: the provider got Cairn's key, and the call is in Cairn's AI usage, with ana's query.
+        sent = {k.lower(): v for k, v in trino.model.bodies[-1]["headers"].items()}
+        assert sent["authorization"] == "Bearer provider-key-held-by-cairn"
+        by_actor = {r["key"]: r for r in s.ai_usage.summary(group_by="actor")["groups"]}
+        assert by_actor["trino-sql"]["input_tokens"] >= 1 and by_actor["urn:li:corpuser:ana"]["calls"] >= 1, by_actor
+        calls = len(trino.model.prompts)
+        # A daily cap per person: ana has used hers.
+        s.sql_ai.user_daily_queries = s.sql_ai.queries_today("urn:li:corpuser:ana")
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(q, user="ana")
+        s.sql_ai.user_daily_queries = None
+        # A model that is not allowed, and the deployment's budget used up: refused, nothing sent.
+        s.sql_ai.models = ["another-model"]
+        fresh = q.replace("id = 1", "id = 2")       # the connector keeps answers to prompts it has seen
+        with pytest.raises(RuntimeError, match="AI provider"):     # Cairn's reason is in its log; Trino says this
+            trino(fresh, user="ana")
+        s.sql_ai.models = ["stub-model"]
+        s.ai_usage.daily_budget_usd = 0.0
+        with pytest.raises(RuntimeError, match="Access Denied|budget"):
+            trino(q.replace("id = 1", "id = 3"), user="ana")
+        s.ai_usage.daily_budget_usd = None
+        assert len(trino.model.prompts) == calls
     finally:
         s.pdp.set_bundle(b)
     py = ("WITH FUNCTION domain(e varchar) RETURNS varchar LANGUAGE PYTHON WITH (handler = 'domain') "

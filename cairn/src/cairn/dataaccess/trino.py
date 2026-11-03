@@ -199,6 +199,8 @@ class TrinoAccess:
         # decide(actor, groups, privilege, urn) -> Decision (pdp)
         self.decide = decide
         self.ai_catalogs = {"llm"} if ai_catalogs is None else set(ai_catalogs)
+        # ai_admit(actor): budgets and daily caps for AI functions (cairn.ai.sql_gateway); None: none.
+        self.ai_admit: Optional[Callable[[str], bool]] = None
         self.plan_for = plan_for
         self.catalogs = catalogs
 
@@ -273,7 +275,9 @@ class TrinoAccess:
         if op == "ExecuteFunction":   # built-in and inline functions are open; AI functions need USE_AI_FUNCTIONS
             f = res.get("function") or {}
             if str(f.get("catalogName") or "") in self.ai_catalogs:
-                return user != CRAWLER and self.allowed(actor, groups, AI, None)
+                if user == CRAWLER or not self.allowed(actor, groups, AI, None):
+                    return False
+                return self.ai_admit is None or self.ai_admit(actor)
             return True
         if user == CRAWLER:  # structure only: listings and descriptions, Trino's metadata tables, no rows
             t = res.get("table") or {}

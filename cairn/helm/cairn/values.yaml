@@ -765,8 +765,15 @@ cairn:
       enabled: false
       provider: anthropic
       model: claude-haiku-5-5
-      endpoint: ""
+      endpoint: ""          # the provider's URL (default: Anthropic's or OpenAI's)
       apiKeySecret: { name: "", key: api-key }
+      # Through Cairn (default): Trino never has the provider's key; Cairn allows the models, counts calls
+      # against the daily AI budget (cairn.ai budgets), caps calls a minute and queries a person a day,
+      # and records usage. false: Trino calls the provider directly with the key.
+      viaCairn: true
+      allowedModels: []     # besides `model`
+      callsPerMinute: 600
+      userDailyQueries: 200
     federation: []
     #  - name: crm
     #    connector: postgresql

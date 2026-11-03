@@ -91,6 +91,7 @@ class Services:
     streams: Optional[Any] = None
     derived: Optional[Any] = None
     bundle_state: Optional[Any] = None
+    sql_ai: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -1011,6 +1012,12 @@ def _build_data_access(s: Services) -> None:
         ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs)
         s.trino_key = trino_key
+        # AI functions in SQL through Cairn: the provider's key, allowed models, budgets and usage.
+        from cairn.ai.sql_gateway import SqlAiGateway
+
+        s.sql_ai = SqlAiGateway.from_env(s.ai_usage) if s.ai_usage is not None else None
+        if s.sql_ai is not None:
+            s.trino_access.ai_admit = s.sql_ai.admit
         # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
         from cairn.dataaccess.trino_auth import TrinoTokens
 

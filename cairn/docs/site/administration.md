@@ -295,6 +295,13 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 - **AI functions.** Trino's `ai` connector, as the catalog `llm`: `llm.ai.ai_gen`, `ai_classify`, `ai_analyze_sentiment`, `ai_extract`, `ai_mask`, `ai_translate` and `ai_fix_grammar`. For example: `SELECT llm.ai.ai_classify(comment, ARRAY['bug', 'praise']) FROM support.tickets`.
   - **Who may call them.** They send rows to a model outside the lakehouse, so calling one needs Cairn's `USE_AI_FUNCTIONS`, granted like any privilege. Others are refused before anything is sent. The catalog crawler never calls them. `CAIRN_TRINO_AI_CATALOGS` names the AI catalogs (default `llm`).
   - **What the model sees.** What the caller sees: masks and row filters apply before any function runs, so a masked column reaches the model masked.
+  - **Through Cairn** (default, `cairn.trino.ai.viaCairn`). Trino calls the model through Cairn (`/v1/trino/<key>/ai/...`), and only Cairn has the provider's key (`CAIRN_AI_SQL_API_KEY`). Cairn:
+    - allows only `model` and `allowedModels`;
+    - counts every call against the deployment's daily AI budget (`CAIRN_AI_DAILY_BUDGET_USD`, shared with Cairn's own AI features);
+    - caps calls a minute (`callsPerMinute`, per API replica);
+    - records tokens and cost in AI usage as `trino-sql`.
+
+    Trino's connector does not say who a call is for, so tokens are counted for the deployment as a whole. Per person, Cairn admits at most `userDailyQueries` AI-function queries a day, and the person's own token allowance (`CAIRN_AI_USER_DAILY_TOKENS`) applies. Each query is recorded under the person, so the usage report shows who used AI functions and how often. When a limit is reached, the query fails and nothing reaches the model. Trino reports "request to AI provider failed"; Cairn's log says why. The connector also keeps answers to prompts it has already seen, so a repeated prompt is not sent again.
   - **Helm.** Set `cairn.trino.ai`: `enabled`, `provider` (`anthropic`, or `openai` for any OpenAI-compatible endpoint such as Ollama or vLLM), `model`, an optional `endpoint`, and `apiKeySecret`.
 - **Python functions.** Inline, per query, sandboxed in WebAssembly by Trino:
 
@@ -310,6 +317,7 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   They run on the caller's rows, after masks and filters, and cannot reach files or the network.
 - **Tested** with Trino (`tests/test_trino_e2e.py`, against a stand-in for the model's API; the decisions in `tests/test_trino_access.py`):
   - **AI functions.** A user without `USE_AI_FUNCTIONS` was refused and nothing was sent. With it, the model was sent her masked email, never the raw one.
+  - **Through Cairn.** The provider received Cairn's key, never Trino's. The call was in Cairn's AI usage, with her query under her name. Her daily cap, a model not allowed, and the spent budget each stopped the query, and nothing reached the model. The rate limit, Anthropic usage and an unreachable provider are covered in `tests/test_sql_ai_gateway.py`.
   - **Python functions.** One ran on masked values for her, and on real values for the admin.
 
 ## SQL workspace

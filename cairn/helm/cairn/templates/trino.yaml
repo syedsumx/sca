@@ -129,10 +129,16 @@ data:
     connector.name=ai
     ai.provider={{ $u.ai.provider }}
     ai.model={{ required "cairn.trino.ai.model" $u.ai.model }}
+    {{- if $u.ai.viaCairn }}
+    # Through Cairn: it holds the provider's key, allows the models, keeps budgets and records usage.
+    ai.{{ $u.ai.provider }}.endpoint={{ $api }}/v1/trino/${ENV:CAIRN_TRINO_ACCESS_KEY}/ai
+    ai.{{ $u.ai.provider }}.api-key=not-the-provider-key
+    {{- else }}
     {{- with $u.ai.endpoint }}
     ai.{{ $u.ai.provider }}.endpoint={{ . }}
     {{- end }}
     ai.{{ $u.ai.provider }}.api-key=${ENV:CAIRN_AI_API_KEY}
+    {{- end }}
   {{- end }}
   {{- if $u.delta.enabled }}
   delta.properties: |
@@ -271,7 +277,7 @@ spec:
             - name: CAIRN_DELTA_SECRET_KEY
               valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
             {{- end }}
-            {{- if $u.ai.enabled }}
+            {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
             - name: CAIRN_AI_API_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
             {{- end }}
@@ -514,7 +520,7 @@ spec:
             - name: CAIRN_DELTA_SECRET_KEY
               valueFrom: { secretKeyRef: { name: {{ $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.secretKeyKey | default "secret-key" }} } }
             {{- end }}
-            {{- if $u.ai.enabled }}
+            {{- if and $u.ai.enabled (not $u.ai.viaCairn) }}
             - name: CAIRN_AI_API_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.ai.apiKeySecret.name" $u.ai.apiKeySecret.name }}, key: {{ $u.ai.apiKeySecret.key | default "api-key" }} } }
             {{- end }}

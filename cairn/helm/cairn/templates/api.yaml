@@ -55,6 +55,17 @@
 {{- if .Values.cairn.streams.enabled }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_STREAMS_ENABLED" "value" "true") }}
 {{- end }}
+{{- /* AI functions in SQL through Cairn (cairn.ai.sql_gateway): the provider, its key, models and limits. */ -}}
+{{- $ai := .Values.cairn.trino.ai }}
+{{- if and .Values.cairn.trino.enabled $ai.enabled $ai.viaCairn }}
+{{- $upstream := $ai.endpoint | default (ternary "https://api.anthropic.com" "https://api.openai.com" (eq $ai.provider "anthropic")) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_UPSTREAM" "value" $upstream) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_PROVIDER" "value" $ai.provider) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_API_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.trino.ai.apiKeySecret.name" $ai.apiKeySecret.name) "key" ($ai.apiKeySecret.key | default "api-key")))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_MODELS" "value" (join "," (prepend ($ai.allowedModels | default list) $ai.model))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_RPM" "value" (toString $ai.callsPerMinute)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_AI_SQL_USER_DAILY_QUERIES" "value" (toString $ai.userDailyQueries)) }}
+{{- end }}
 {{- /* Warehouse status (GET /v1/warehouses): the warehouse proxy and each warehouse's port. */ -}}
 {{- if and .Values.cairn.trino.enabled .Values.cairn.trino.warehouses.list }}
 {{- $whPorts := dict }}
