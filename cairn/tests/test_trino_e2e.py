@@ -762,6 +762,82 @@ def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
         m.set_policy("clus", {"cluster": "sometimes"}, "urn:li:corpuser:admin")
 
 
+def test_workbooks_compile_spreadsheet_formulas_to_sql_run_as_the_viewer(trino, cairn):
+    """A workbook (calculated columns, filters, grouping, a pivot) compiled to one query on real Trino and run as
+    whoever looks: the admin sees the values, Ana's emails are masked inside formulas too, Bob sees only EU rows."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.workbooks import WorkbookError
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.wb_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}, {"fieldPath": "region"},
+        {"fieldPath": "amount"}, {"fieldPath": "discount"}, {"fieldPath": "quarter"}]}
+    trino("CREATE TABLE lake.sales.wb_orders AS SELECT * FROM (VALUES "
+          "(1, 'jane@acme.com', 'EU', 100e0, 1e-1, 'Q1'), (2, 'bo@example.org', 'US', 50e0, 0e0, 'Q1'), "
+          "(3, 'li@acme.com', 'EU', 200e0, 2e-1, 'Q2'), (4, 'max@acme.com', 'US', 80e0, 0e0, 'Q2')) "
+          "AS t(id, email, region, amount, discount, quarter)")
+    admin, ana, bob = ("urn:li:corpuser:" + u for u in ("admin", "ana", "bob"))
+    rows_el = {"source": {"table": "sales.wb_orders"},
+               "columns": [{"name": "Net", "formula": "[amount] * (1 - [discount])"},
+                           {"name": "Domain", "formula": 'Mid([email], Len(Left([email], 1)) + 1, 100)'},
+                           {"name": "Size", "formula": 'If([Net] >= 90, "large", "small")'}],
+               "filters": [{"column": "Net", "op": ">", "value": 0}], "sort": [{"column": "id"}]}
+    out = s.workbooks.run(admin, "lakehouse", rows_el)
+    cols = out["columns"]
+    got = [dict(zip(cols, r)) for r in out["rows"]]
+    assert [(g["id"], round(g["Net"], 2), g["Size"]) for g in got] == [(1, 90.0, "large"), (2, 50.0, "small"),
+                                                                      (3, 160.0, "large"), (4, 80.0, "small")]
+    assert got[0]["Domain"] == "ane@acme.com"
+    # Ana's email is masked before any formula sees it: the masked value is what her formula works on.
+    mine = [dict(zip(out_a := s.workbooks.run(ana, "lakehouse", rows_el)["columns"], r))
+            for r in s.workbooks.run(ana, "lakehouse", rows_el)["rows"]]
+    assert all("acme" not in (m["email"] or "") and "acme" not in (m["Domain"] or "") for m in mine), mine
+    assert "Net" in out_a
+    # Bob's row filter applies under the workbook too.
+    assert {r[cols.index("region")] for r in s.workbooks.run(bob, "lakehouse", rows_el)["rows"]} == {"EU"}
+
+    # Grouped, with a filter on the groups, and a pivot whose values are found in the data (as the viewer sees it).
+    grouped = {**rows_el, "group_by": ["region"],
+               "aggregates": [{"name": "Revenue", "formula": "Sum([Net])"}, {"name": "Orders", "formula": "Count()"},
+                              {"name": "Average", "formula": "Round(Avg([Net]), 1)"}],
+               "filters": [{"column": "Revenue", "op": ">", "value": 100, "on": "groups"}],
+               "sort": [{"column": "Revenue", "desc": True}]}
+    g = s.workbooks.run(admin, "lakehouse", grouped)
+    assert [tuple(r) for r in g["rows"]] == [("EU", 250.0, 2, 125.0), ("US", 130.0, 2, 65.0)], g["rows"]
+    pivot = {"source": {"table": "sales.wb_orders"}, "group_by": ["region"],
+             "pivot": {"column": "quarter", "aggregate": "Sum([amount])"}, "sort": [{"column": "region"}]}
+    p = s.workbooks.run(admin, "lakehouse", pivot)
+    assert p["columns"] == ["region", "Q1", "Q2"] and [tuple(r) for r in p["rows"]] == [("EU", 100.0, 200.0), ("US", 50.0, 80.0)]
+    assert s.workbooks.run(bob, "lakehouse", pivot)["rows"] == [["EU", 100.0, 200.0]]
+
+    # A formula naming a column the table does not have is refused before anything runs.
+    with pytest.raises(WorkbookError, match="no column"):
+        s.workbooks.run(admin, "lakehouse", {**rows_el, "columns": [{"name": "X", "formula": "[salary] * 2"}]})
+
+    # Over HTTP: compile shows the SQL; a saved workbook is the owner's, shared ones open for others.
+    h = {"X-Cairn-Actor": ana}
+    r = httpx.post(f"{url}/sql/workbooks/compile", json={"connection": "lakehouse", "element": grouped}, headers=h, timeout=60)
+    assert r.status_code == 200 and "GROUP BY" in r.json()["sql"], r.text
+    r = httpx.post(f"{url}/sql/workbooks/run", json={"connection": "lakehouse", "element": rows_el}, headers=h, timeout=60)
+    # A column computed from a masked one is masked too.
+    assert r.status_code == 200 and r.json()["masked_columns"] == ["email", "Domain"], r.text
+    saved = httpx.post(f"{url}/sql/workbooks", json={"name": "Orders by size", "connection": "lakehouse", "shared": True,
+                                                     "spec": {"elements": [rows_el, grouped]}}, headers=h, timeout=30)
+    assert saved.status_code == 201, saved.text
+    wid = saved.json()["id"]
+    assert httpx.get(f"{url}/sql/workbooks/{wid}", headers={"X-Cairn-Actor": bob}, timeout=30).json()["name"] == "Orders by size"
+    assert httpx.put(f"{url}/sql/workbooks/{wid}", json={"name": "Mine now", "connection": "lakehouse",
+                                                          "spec": {"elements": [rows_el]}},
+                     headers={"X-Cairn-Actor": bob}, timeout=30).status_code == 403
+    assert httpx.delete(f"{url}/sql/workbooks/{wid}", headers=h, timeout=30).status_code == 204
+
+
 def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
     """Federation: a PostgreSQL catalog in Trino, named to Cairn as postgres datasets (CAIRN_TRINO_CATALOGS).
     Cairn decides its tables like the lakehouse's: masks, row filters and refusals apply in place."""

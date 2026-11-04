@@ -130,6 +130,7 @@ class Services:
     metering: Optional[Any] = None
     usage_reporter: Optional[Any] = None
     status_page: Optional[Any] = None
+    workbooks: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -810,6 +811,13 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # Workbooks: spreadsheet-style elements compiled to SQL and run through the workspace as the viewer.
+        from cairn.sqlworkspace.workbooks import Workbooks, _table as _wb_table
+
+        def workbook_columns(actor: str, connection: str, table: str) -> list[str]:
+            out = s.data_access.query(actor, f"SELECT * FROM {_wb_table(table)} LIMIT 0", connection, None, 1)
+            return list(out.get("columns") or [])
+        s.workbooks = Workbooks(s.engine, s.sql_workspace, workbook_columns)
         if getattr(s, "derived", None) is not None:      # materialized views, written in SQL (cairn.pipelines.matviews)
             from cairn.pipelines.matviews import MaterializedViews
 

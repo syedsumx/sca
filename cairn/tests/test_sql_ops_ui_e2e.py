@@ -284,3 +284,45 @@ def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
             assert errors == [], errors
         finally:
             browser.close()
+
+
+def test_a_workbook_is_built_in_the_browser_and_runs_as_the_viewer(cairn):
+    """Workbooks in Chromium against Cairn: a calculated column, grouping and an aggregate chosen in the page are
+    compiled by Cairn into one query, run on the real database as the signed-in person, shown, and saved."""
+    from playwright.sync_api import sync_playwright
+
+    s, url, _, _ = cairn
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/sql/workbooks", wait_until="domcontentloaded")
+            page.get_by_role("heading", name="Workbooks").wait_for(timeout=30_000)
+            page.get_by_role("combobox", name="Source table").click()
+            page.get_by_title("main.orders").click()
+            page.get_by_role("button", name="Add column").click()
+            page.get_by_label("Columns name 1").fill("Net")
+            page.get_by_label("Columns formula 1").fill("[amount] * 2")
+            page.get_by_role("button", name="Add aggregate").click()
+            page.get_by_label("Aggregates name 1").fill("Revenue")
+            page.get_by_label("Aggregates formula 1").fill("Sum([Net])")
+            page.get_by_role("combobox", name="Group by").click()
+            page.locator(".ant-select-dropdown:visible").get_by_title("region").click()
+            page.keyboard.press("Escape")
+            page.get_by_role("combobox", name="Sort column").click()
+            page.locator(".ant-select-dropdown:visible").last.get_by_title("region").click()
+            page.get_by_role("button", name="Run").click()
+            page.get_by_text("2 row(s)").wait_for(timeout=30_000)
+            cells = page.locator(".ant-table-tbody tr.ant-table-row").all_inner_texts()
+            assert [c.split("\t") for c in cells] == [["EU", "33"], ["US", "6"]], cells
+            page.locator(".ant-collapse-header").get_by_text("SQL", exact=True).click()
+            assert 'GROUP BY "region"' in page.locator("pre").inner_text()
+            page.get_by_role("button", name="Save", exact=True).click()
+            page.get_by_label("Workbook name").fill("Revenue by region")
+            page.get_by_role("dialog").get_by_role("button", name="Save").click()
+            page.get_by_role("button", name="Revenue by region").wait_for(timeout=15_000)
+            assert errors == [], errors
+        finally:
+            browser.close()
+    [w] = s.workbooks.list(ANA)
+    assert w["name"] == "Revenue by region" and w["spec"]["elements"][0]["group_by"] == ["region"]
+    assert any("GROUP BY" in h["sql"] for h in s.sql_workspace.history(ANA))       # in Ana's history, run as her

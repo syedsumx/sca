@@ -92,6 +92,8 @@ import type {
     Dashboard,
     RenderedDashboard,
     SavedQuery,
+    Workbook,
+    WorkbookElement,
     SchemaTable,
     SqlAlert,
     SqlRun,
@@ -985,6 +987,28 @@ export class ConsumerClient extends CairnClient {
 
     runSql(sql: string, connection: string, limit = 200) {
         return this.request<DataResult>('POST', '/sql/run', { sql, connection, limit });
+    }
+
+    compileWorkbook(element: WorkbookElement, connection: string) {
+        return this.request<{ sql: string; columns: string[] }>('POST', '/sql/workbooks/compile', { element, connection });
+    }
+
+    runWorkbook(element: WorkbookElement, connection: string) {
+        return this.request<DataResult & { sql: string }>('POST', '/sql/workbooks/run', { element, connection });
+    }
+
+    workbooks(opts?: RequestOptions) {
+        return this.request<Workbook[]>('GET', '/sql/workbooks', undefined, opts);
+    }
+
+    saveWorkbook(body: Pick<Workbook, 'name' | 'connection' | 'shared' | 'spec'> & { description?: string }, id?: string) {
+        return id
+            ? this.request<Workbook>('PUT', `/sql/workbooks/${enc(id)}`, body)
+            : this.request<Workbook>('POST', '/sql/workbooks', body);
+    }
+
+    deleteWorkbook(id: string) {
+        return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
     }
 
     sqlHistory(opts?: RequestOptions) {

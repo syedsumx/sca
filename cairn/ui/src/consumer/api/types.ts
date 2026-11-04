@@ -1677,3 +1677,35 @@ export interface GitPushResult {
     /** The pull request's address, for a configured repository. */
     pull_request: string | null;
 }
+
+/** A workbook element: a table explored without SQL (compiled to SQL and run as the viewer). */
+export interface WorkbookFilter {
+    column: string;
+    op: '=' | '!=' | '>' | '>=' | '<' | '<=' | 'in' | 'not_in' | 'contains' | 'starts_with' | 'between' | 'is_null' | 'not_null';
+    value?: string | number | boolean | null;
+    values?: (string | number | boolean | null)[];
+    on?: 'rows' | 'groups';
+}
+
+export interface WorkbookElement {
+    source: { table: string };
+    columns?: { name: string; formula: string }[];
+    filters?: WorkbookFilter[];
+    group_by?: string[];
+    aggregates?: { name: string; formula: string }[];
+    pivot?: { column: string; aggregate: string; values?: (string | number | null)[] } | null;
+    sort?: { column: string; desc?: boolean }[];
+    limit?: number;
+}
+
+export interface Workbook {
+    id: string;
+    owner: string;
+    name: string;
+    description: string;
+    connection: string;
+    shared: boolean;
+    spec: { elements: WorkbookElement[] };
+    created_ms: number;
+    updated_ms: number;
+}

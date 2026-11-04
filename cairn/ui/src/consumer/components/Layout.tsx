@@ -48,6 +48,7 @@ export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: st
     { to: '/discover', label: 'nav.discover' },
     { to: '/search', label: 'nav.search' },
     { to: '/sql', label: 'nav.sql' },
+    { to: '/sql/workbooks', label: 'nav.workbooks' },
     { to: '/sql/workflows', label: 'nav.workflows' },
     { to: '/sql/git', label: 'nav.gitFolders' },
     { to: '/queries', label: 'nav.queries' },
