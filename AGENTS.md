@@ -79,7 +79,7 @@ CI is `.github/workflows/cairn-ci.yml` (14 jobs); `.github/workflows/cairn-upgra
 
 ## Working through the roadmap queue
 
-The queue (28 items) is in the platform guide. For each item, in order:
+The queue (44 items: the original 28, then the BI track and the gaps found after it) is in the platform guide. For each item, in order:
 
 1. Build it in the right package, with its migration, wiring, API and docs.
 2. Test it end to end against real components locally; add the test to the CI job that covers its area.
