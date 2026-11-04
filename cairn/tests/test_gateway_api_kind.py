@@ -104,7 +104,12 @@ spec: {controllerName: gateway.envoyproxy.io/gatewayclass-controller}
                                "--show-only", "templates/gateway-api.yaml"],
                               check=True, capture_output=True, text=True).stdout
     k("-n", NS, "apply", "-f", "-", stdin=rendered)
-    k("-n", NS, "wait", "--for=condition=Programmed", "gateway/t-cairn-gateway", "--timeout=300s")
+    # Accepted, not Programmed: kind has no LoadBalancer, so the Gateway never gets an address (Programmed stays
+    # False, AddressNotAssigned). Requests go through a port-forward to Envoy's Service instead, and the loop below
+    # waits until Envoy answers with the routes.
+    r = subprocess.run(["kubectl", "-n", NS, "wait", "--for=condition=Accepted", "gateway/t-cairn-gateway", "--timeout=300s"],
+                       capture_output=True, text=True, timeout=330, env={**os.environ, "KUBECONFIG": KUBECONFIG})
+    assert r.returncode == 0, f"{r.stderr}\n" + k("-n", NS, "get", "gateway", "-o", "yaml", check=False)
     svc = ""
     end = time.time() + 120
     while not svc and time.time() < end:
