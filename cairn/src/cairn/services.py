@@ -129,6 +129,7 @@ class Services:
     signup: Optional[Any] = None
     metering: Optional[Any] = None
     usage_reporter: Optional[Any] = None
+    status_page: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1399,6 +1400,11 @@ def _build_costs(s: Services, hub, Event) -> None:
         s.metering = Metering(s.engine, _read_secret(signup_cfg["metering_key_file"]) or "", signup_cfg.get("meters") or {},
                               s.signup.stripe, customer_of, int(signup_cfg.get("settle_hours", 6)))
     s.usage_reporter = UsageReporter.from_env(s.engine, getattr(s, "licence", None))
+    # Status page: components probed, uptime, incidents and maintenance (CAIRN_STATUS).
+    from cairn.hosting.status import StatusPage, load_config as load_status
+
+    status_cfg = load_status()
+    s.status_page = StatusPage(s.engine, status_cfg, audit=s.audit) if status_cfg else None
     # SIEM export: the audit log pushed to Splunk HEC, syslog (RFC 5424, CEF) or HTTPS sinks (CAIRN_SIEM_SINKS).
     from cairn.common.siem import SiemExport, load_sinks
 

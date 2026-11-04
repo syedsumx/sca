@@ -116,6 +116,7 @@ def load_models() -> MetaData:
     from cairn.common import siem as _siem  # noqa: F401
     from cairn.hosting import signup as _signup  # noqa: F401
     from cairn.hosting import metering as _metering  # noqa: F401
+    from cairn.hosting import status as _status  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401
     from cairn.dataaccess import dataapps as _dataapps  # noqa: F401
