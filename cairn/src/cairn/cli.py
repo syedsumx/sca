@@ -95,6 +95,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.online_features.run_due)   # online features: synced when their table changes
     if getattr(s, "ml_monitoring", None) is not None:
         sch.extra.append(s.ml_monitoring.run_due)     # model monitors: drift and accuracy checks, retention
+    if getattr(s, "budgets", None) is not None:
+        sch.extra.append(s.budgets.run_due)           # cost budgets: thresholds and forecasts, hourly
     sch.run_forever()
 
 

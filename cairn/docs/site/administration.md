@@ -619,6 +619,16 @@ The rest of the API is under `/cairn/api/reports/costs`:
 - `GET /asset?urn=…` returns one table's daily series,
 - `POST /propose-deprecation` with `{"urn", "reason"}` sends the proposal.
 
+### Cost budgets
+
+A budget is what one part of the platform may spend each period, with alerts before and when it does. Operators (`MANAGE_SYSTEM_OPERATIONS`) set them at `POST /cairn/api/v1/budgets`:
+
+- `name`, `amount_usd`, `period` (`month`, the default; `week`, from Monday; `day`; calendar periods in UTC), `thresholds` (percents of the amount; default 80 and 100), `forecast` (default on) and `notify` (people or groups).
+- One `scope`: `{"all": true}`; `{"domain": "urn:li:domain:…"}`; `{"owner": "urn:li:corpGroup:…"}` (the tables a person or group owns); `{"platform": "snowflake"}`; `{"tables": [urns]}`; `{"warehouse": "<name>"}` (one of `CAIRN_WAREHOUSES`); `{"ai": true}` or `{"ai": "urn:li:corpuser:…"}`.
+- **Spend** comes from the cost report, never counted twice: the tables' daily storage and compute (collectors, posted rows, Spark runs split across what they wrote), runs charged to no table (warehouse node-hours; Spark runs that wrote nothing) and AI calls.
+- **Alerts.** The scheduler checks each budget hourly (`POST …/budgets/<id>/check` checks one now). Each threshold, and the forecast (the spend so far at its daily rate over the whole period, once a fifth of it has passed, when that would exceed the amount), is sent at most once a period to the budget's creator and `notify`: `budget.threshold_crossed` (one message for the highest threshold just crossed) and `budget.forecast_exceeded`, through the notification hub (in-app, and any routes for those types).
+- `GET …/budgets/<id>` shows the period's spend by day, the ten largest contributors, the forecast and the alerts sent. Budgets are visible to operators, their creators and the people they notify. `PATCH` changes one and `DELETE` removes it; changes are audited (`budget.created`, `budget.changed`, `budget.deleted`). Tables `cairn_budgets` and `cairn_budget_alerts` (migration 0068). Tested through the API in `tests/test_budgets.py`.
+
 ## One database
 
 By default the catalog stores its metadata in MySQL, and Cairn's own data is in PostgreSQL. You can put the catalog in PostgreSQL too. Then you have one database server to run, back up and patch, and no MySQL licence to review.

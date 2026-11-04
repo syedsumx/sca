@@ -112,6 +112,7 @@ def load_models() -> MetaData:
     from cairn.pipelines import vectors as _vectors  # noqa: F401
     from cairn.ml import online as _online  # noqa: F401
     from cairn.ml import monitoring as _monitoring  # noqa: F401
+    from cairn.reports import budgets as _budgets  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401
     from cairn.dataaccess import dataapps as _dataapps  # noqa: F401

@@ -124,6 +124,7 @@ class Services:
     feature_tables: Optional[Any] = None
     online_features: Optional[Any] = None
     ml_monitoring: Optional[Any] = None
+    budgets: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1375,6 +1376,23 @@ def _build_costs(s: Services, hub, Event) -> None:
             actor=actor, entity_urn=urn, include_owners=True, include_followers=True, payload=figures))
 
     s.costs = CostService(s.engine, s.graph, has_downstream, notify, registry=s.connections, audit=s.audit)
+    # Cost budgets: a scope's spend per period against an amount, alerts at thresholds and on forecast.
+    from cairn.reports.budgets import Budgets
+
+    def tell_budget(type_, title, body, recipients, payload):
+        hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/costs"))
+
+    def warehouse_names() -> list[str]:
+        raw = os.environ.get("CAIRN_WAREHOUSES", "").strip()
+        if not raw:
+            return []
+        import json as _json
+
+        cfg = _json.loads(open(raw).read() if not raw.startswith("{") else raw)
+        return [w.get("name") for w in cfg.get("warehouses") or [] if isinstance(w, dict)]
+    s.budgets = Budgets(s.engine, s.graph, tell_budget,
+                        lambda p: s.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False),
+                        warehouse_names, s.audit)
 
 
 def _build_automations(s: Services, hub, Event) -> None:

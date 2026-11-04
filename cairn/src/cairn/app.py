@@ -439,6 +439,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
 
         app.include_router(reports_router(services.reports, cp, services.authorize, services.can_view,
                                           services.summaries, services.costs))
+    if getattr(services, "budgets", None) is not None:
+        from cairn.reports.budgets import build_budgets_router
+
+        app.include_router(build_budgets_router(services.budgets, cp))
     if "governance" in modules and services.automations is not None:
         from cairn.governance.automations_api import build_router as automations_router
 
