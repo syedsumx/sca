@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
-import type { BuiltDashboard, ChartSpec, Dashboard, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
+import type { BuiltDashboard, ChartSpec, Dashboard, DashboardAction, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -49,11 +49,73 @@ function Control({ board, control, value, onChange }: {
         onChange={(e) => onChange(e.target.value || null)} />;
 }
 
+/** The dashboard's actions: buttons (a form when they ask for fields) run as the person clicking. */
+function Actions({ board, row, onDone }: { board: string; row: Record<string, unknown> | null; onDone: () => void }) {
+    const { client } = useConsumerApi();
+    const list = useDheQuery<DashboardAction[]>(`/sql/dashboards/${board}/actions`, (c, signal) => c.dashboardActions(board, { signal }));
+    const [open, setOpen] = useState<DashboardAction | null>(null);
+    const [inputs, setInputs] = useState<Record<string, unknown>>({});
+    const [busy, setBusy] = useState(false);
+    const go = async (a: DashboardAction, values: Record<string, unknown>) => {
+        setBusy(true);
+        try {
+            const out = await client.runDashboardAction(board, a.id, { inputs: values, row: a.kind === 'input_update' ? row ?? undefined : undefined });
+            const failed = out.steps?.filter((s) => s.status !== 'ok') ?? [];
+            if (failed.length) message.warning(`${a.label}: ${failed.map((s) => `${s.name} ${s.status}`).join(', ')}`);
+            else message.success(`${a.label}: done`);
+            setOpen(null);
+            setInputs({});
+            onDone();
+        } catch (e) {
+            message.error(`${a.label}: ${(e as Error).message}`);
+        } finally {
+            setBusy(false);
+        }
+    };
+    const start = (a: DashboardAction) => {
+        if (a.config.fields?.length) {
+            setInputs({});
+            setOpen(a);
+        } else if (a.config.confirm) {
+            Modal.confirm({ title: a.config.confirm, okText: a.label, onOk: () => go(a, {}) });
+        } else void go(a, {});
+    };
+    if (!list.data?.length) return null;
+    return (
+        <>
+            {list.data.map((a) => (
+                <Button key={a.id} onClick={() => start(a)} disabled={a.kind === 'input_update' && !row} loading={busy && open?.id === a.id}
+                    title={a.kind === 'input_update' && !row ? 'Pick a row in a table tile first' : undefined}>
+                    {a.label}
+                </Button>
+            ))}
+            <Modal title={open?.label} open={!!open} onCancel={() => setOpen(null)} confirmLoading={busy}
+                okText={open?.label} onOk={() => open && void go(open, inputs)}>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                    {open?.config.confirm && <Muted>{open.config.confirm}</Muted>}
+                    {(open?.config.fields ?? []).map((f) => f.type === 'boolean' ? (
+                        <Checkbox key={f.name} aria-label={f.label} checked={inputs[f.name] === true}
+                            onChange={(e) => setInputs({ ...inputs, [f.name]: e.target.checked })}>{f.label}</Checkbox>
+                    ) : f.type === 'number' || f.type === 'integer' ? (
+                        <InputNumber key={f.name} aria-label={f.label} placeholder={f.label + (f.required ? ' *' : '')} style={{ width: '100%' }}
+                            value={(inputs[f.name] as number | undefined) ?? null} onChange={(v) => setInputs({ ...inputs, [f.name]: v ?? undefined })} />
+                    ) : (
+                        <Input key={f.name} aria-label={f.label} type={f.type === 'date' ? 'date' : 'text'} placeholder={f.label + (f.required ? ' *' : '')}
+                            value={(inputs[f.name] as string | undefined) ?? ''} onChange={(e) => setInputs({ ...inputs, [f.name]: e.target.value })} />
+                    ))}
+                </Space>
+            </Modal>
+        </>
+    );
+}
+
 /** One dashboard, every tile run as the viewer, filtered by the controls, cross-filtered by clicks and drilled. */
 function Board({ id }: { id: string }) {
     const [state, setState] = useState<DashboardState>({});
+    const [refresh, setRefresh] = useState(0);
+    const [row, setRow] = useState<Record<string, unknown> | null>(null);
     const key = JSON.stringify(state);
-    const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render#${key}`, (c, signal) =>
+    const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render#${key}#${refresh}`, (c, signal) =>
         c.renderDashboard(id, { signal }, key === '{}' ? undefined : state));
     const [last, setLast] = useState<RenderedDashboard | null>(null);
     useEffect(() => { if (q.data) setLast(q.data); }, [q.data]);
@@ -69,9 +131,10 @@ function Board({ id }: { id: string }) {
         ...state, drill: { ...(state.drill ?? {}), [String(i)]: path }, selection: selection.filter((x) => x.from !== i) });
     return (
         <>
-            {(board.controls?.length || selection.length > 0) && (
+            {(
                 <Surface style={{ marginBottom: 12 }}>
                     <Space wrap data-testid="controls">
+                        <Actions board={id} row={row} onDone={() => { setRow(null); setRefresh((r) => r + 1); }} />
                         {(board.controls ?? []).map((c) => (
                             <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
                                 onChange={(v) => setState({ ...state, controls: { ...(state.controls ?? {}), [c.id]: v } })} />
@@ -119,6 +182,8 @@ function Board({ id }: { id: string }) {
                                 <Table
                                     size="small"
                                     rowKey="__row"
+                                    rowClassName={(r: Record<string, unknown>) => (row && r._row_id === row._row_id ? 'ant-table-row-selected' : '')}
+                                    onRow={(r: Record<string, unknown>) => ({ onClick: () => { if (r._row_id) setRow(r); } })}
                                     pagination={{ pageSize: 10, hideOnSinglePage: true }}
                                     dataSource={t.result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(t.result!.columns.map((c, j) => [c, r[j]])) }))}
                                     columns={t.result.columns.map((c) => ({ title: c, dataIndex: c, render: (v: unknown) => String(v ?? '') }))}

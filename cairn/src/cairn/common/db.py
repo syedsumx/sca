@@ -120,6 +120,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import workbooks as _workbooks  # noqa: F401
     from cairn.sqlworkspace import input_tables as _input_tables  # noqa: F401
     from cairn.sqlworkspace import metrics as _metrics  # noqa: F401
+    from cairn.sqlworkspace import actions as _actions  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401
     from cairn.dataaccess import dataapps as _dataapps  # noqa: F401

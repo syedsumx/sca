@@ -129,3 +129,43 @@ it('builds a dashboard from a question, saves it and opens it, listing what was 
     expect(await screen.findByText('metric profit is not one of the metrics listed')).toBeTruthy();
     expect(await screen.findByRole('img', { name: /bar chart of revenue by region/ })).toBeTruthy();   // opened
 });
+
+it('runs a form action and a row action, as the person clicking', async () => {
+    const calls: MockCall[] = [];
+    const tile = { element: { source: { table: 'sales.requests' } }, connection: 'lakehouse', title: 'Requests', width: 1,
+                   chart: { type: 'table' } };
+    const board = { id: 'd5', owner: 'urn:li:corpuser:ana', name: 'Requests', description: '', shared: true, updated_ms: 1, controls: [] };
+    const rowId = 'a'.repeat(32);
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG, 'GET /sql/saved': [], 'GET /sql/workbooks': [], 'GET /sql/metrics': [],
+        'GET /sql/dashboards': [{ ...board, tiles: [tile] }],
+        'GET /sql/dashboards/d5/render': { ...board, tiles: [{ ...tile, result: TILE_RESULT(
+            [[rowId, 'laptop', 'open', '2026-11-04 10:00:00+00:00']], ['_row_id', 'item', 'status', '_updated_at']) }] },
+        'POST /sql/dashboards/d5/render': { ...board, tiles: [{ ...tile, result: TILE_RESULT(
+            [[rowId, 'laptop', 'open', '2026-11-04 10:00:00+00:00']], ['_row_id', 'item', 'status', '_updated_at']) }] },
+        'GET /sql/dashboards/d5/actions': [
+            { id: 'a1', dashboard: 'd5', name: 'request', label: 'New request', kind: 'input_row', owner: board.owner,
+              config: { fields: [{ name: 'item', label: 'Item', type: 'text', required: true }], confirm: '' } },
+            { id: 'a2', dashboard: 'd5', name: 'approve', label: 'Approve', kind: 'input_update', owner: board.owner,
+              config: { fields: [], confirm: '' } }],
+        'POST /sql/dashboards/d5/actions/a1/run': { action: 'request', status: 'ok' },
+        'POST /sql/dashboards/d5/actions/a2/run': { action: 'approve', status: 'ok' },
+    }, calls);
+    render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><DashboardsPage /></CairnProvider></MemoryRouter>);
+    fireEvent.mouseDown((await screen.findAllByRole('combobox'))[0]);
+    fireEvent.click(await screen.findByText('Requests (shared)'));
+    fireEvent.click(await screen.findByRole('button', { name: 'New request' }));
+    fireEvent.change(await screen.findByLabelText('Item'), { target: { value: 'monitor' } });
+    fireEvent.click(screen.getAllByRole('button', { name: 'New request' }).slice(-1)[0]);
+    await waitFor(() => expect(calls.some((c) => c.path === '/sql/dashboards/d5/actions/a1/run')).toBe(true));
+    expect(calls.find((c) => c.path === '/sql/dashboards/d5/actions/a1/run')!.body).toEqual({ inputs: { item: 'monitor' } });
+    // A row action waits for a row to be picked, and sends the row as read.
+    const approve = await screen.findByRole('button', { name: 'Approve' });
+    expect((approve as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(await screen.findByText('laptop'));
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Approve' }) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }));
+    await waitFor(() => expect(calls.some((c) => c.path === '/sql/dashboards/d5/actions/a2/run')).toBe(true));
+    expect(calls.find((c) => c.path === '/sql/dashboards/d5/actions/a2/run')!.body).toMatchObject({
+        inputs: {}, row: { _row_id: rowId, _updated_at: '2026-11-04 10:00:00+00:00', item: 'laptop' } });
+});

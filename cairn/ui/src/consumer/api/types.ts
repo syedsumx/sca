@@ -1794,3 +1794,15 @@ export interface BuiltDashboard {
     tables: string[];
     dashboard: Dashboard | null;
 }
+
+/** An action on a dashboard: a form or button that writes an input table, runs a workflow or calls an API. */
+export interface DashboardAction {
+    id: string;
+    dashboard: string;
+    name: string;
+    label: string;
+    kind: 'input_row' | 'input_update' | 'workflow' | 'webhook';
+    config: { fields?: { name: string; label: string; type: string; required: boolean }[]; confirm?: string; table?: string;
+              who?: 'owner' | 'viewers' };
+    owner: string;
+}

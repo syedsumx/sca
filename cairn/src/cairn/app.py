@@ -433,6 +433,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 from cairn.sqlworkspace.workbooks import build_workbooks_router
 
                 app.include_router(build_workbooks_router(services.workbooks, cp))
+            if getattr(services, "bi_actions", None) is not None:
+                from cairn.sqlworkspace.actions import build_actions_router
+
+                app.include_router(build_actions_router(services.bi_actions, cp))
             if getattr(services, "builder", None) is not None:
                 from cairn.sqlworkspace.builder import build_builder_router
 

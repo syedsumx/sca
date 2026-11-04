@@ -134,6 +134,7 @@ class Services:
     input_tables: Optional[Any] = None
     metrics: Optional[Any] = None
     builder: Optional[Any] = None
+    bi_actions: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -928,6 +929,12 @@ def _build_active_metadata(s: Services) -> None:
         s.sql_workflows = Workflows(s.engine, s.sql_workspace, getattr(s, "derived", None), tell_workflow,
                                 lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
                                                           raise_on_deny=False))
+        # App actions on dashboards: forms and buttons that write input tables, run workflows or call APIs.
+        from cairn.sqlworkspace.actions import Actions
+
+        s.bi_actions = Actions(s.engine, s.sql_boards, s.input_tables, s.sql_workflows, s.audit,
+                               lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                                         raise_on_deny=False))
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner

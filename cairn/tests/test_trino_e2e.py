@@ -1038,6 +1038,114 @@ def test_the_ai_builder_makes_a_dashboard_from_a_question_checked_as_the_person(
     assert "metric ai_revenue = sum(CASE WHEN \"status\" = 'paid' THEN \"amount\" END)" in calls[-1]
 
 
+def test_dashboard_actions_write_run_and_call_as_the_person_who_clicks(trino, cairn, monkeypatch):
+    """App actions on real Trino: a form adds a row to an input table and a button approves the clicked row, each
+    written as the person clicking (Ana, who may not write, is refused by Trino); a workflow button runs only for
+    those it is meant for; a webhook goes only to an allowed origin, signed. Every run is recorded."""
+    import hashlib
+    import hmac
+    import http.server
+    import threading
+
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    t = httpx.post(f"{url}/sql/input-tables", headers=admin, timeout=60, json={
+        "connection": "lakehouse", "table": "sales.requests",
+        "columns": [{"name": "item", "type": "text"}, {"name": "amount", "type": "number"}, {"name": "status", "type": "text"}]})
+    assert t.status_code == 201, t.text
+    tid = t.json()["id"]
+    board = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Requests", "shared": True,
+        "tiles": [{"element": {"source": {"table": "sales.requests"}, "sort": [{"column": "item"}]}, "connection": "lakehouse",
+                   "title": "Requests"}]}).json()
+    did = board["id"]
+    base = f"{url}/sql/dashboards/{did}/actions"
+
+    def add(body, h=admin):
+        return httpx.post(base, json=body, headers=h, timeout=60)
+
+    r = add({"name": "request", "label": "New request", "kind": "input_row", "input_table": tid,
+             "fields": [{"name": "item", "required": True}, "amount"], "constants": {"status": "open"}})
+    assert r.status_code == 201, r.text
+    request = r.json()["id"]
+    approve = add({"name": "approve", "label": "Approve", "kind": "input_update", "input_table": tid,
+                   "set": {"status": "approved"}, "confirm": "Approve this request?"}).json()["id"]
+    for bad, msg in [({"name": "x", "kind": "input_row", "input_table": tid, "fields": ["nope"]}, "not a column"),
+                     ({"name": "y", "kind": "input_update", "input_table": tid, "set": {"amount": "lots"}}, "is not a number"),
+                     ({"name": "z", "kind": "teleport"}, "kind")]:
+        r = add(bad)
+        assert r.status_code == 400 and msg in r.text, (bad, r.text)
+    assert add({"name": "mine", "kind": "input_row", "input_table": tid, "fields": ["item"]}, ana).status_code == 403
+
+    run = lambda aid, h, **body: httpx.post(f"{base}/{aid}/run", json=body, headers=h, timeout=120)  # noqa: E731
+    r = run(request, admin, inputs={"item": "laptop", "amount": 1200})
+    assert r.status_code == 200 and r.json()["status"] == "ok", r.text
+    assert run(request, admin, inputs={"amount": 5}).status_code == 400                      # item is required
+    assert run(request, admin, inputs={"item": "x", "status": "approved"}).status_code == 400  # not a field
+    # Ana sees the dashboard and its actions, but Trino refuses her write (no WRITE_DATASET).
+    assert [x["name"] for x in httpx.get(base, headers=ana, timeout=30).json()] == ["request", "approve"]
+    assert run(request, ana, inputs={"item": "monitor"}).status_code == 403
+    rows = s.input_tables.rows("urn:li:corpuser:admin", tid)
+    row = dict(zip(rows["columns"], rows["rows"][0]))
+    assert (row["item"], row["amount"], row["status"]) == ("laptop", 1200.0, "open")
+    r = run(approve, admin, row={"_row_id": row["_row_id"], "_updated_at": row["_updated_at"]})
+    assert r.status_code == 200, r.text
+    assert trino("SELECT status FROM lake.sales.requests") == [{"status": "approved"}]
+    assert run(approve, admin, row={"_row_id": row["_row_id"], "_updated_at": row["_updated_at"]}).status_code == 409
+
+    # A workflow: only its owner puts it on a dashboard; "who" decides who may click.
+    wf = s.sql_workflows.save("urn:li:corpuser:admin", {"name": "count requests", "steps": [
+        {"name": "count", "type": "query", "sql": "SELECT count(*) AS n FROM sales.requests", "connection": "lakehouse"}]})
+    mine = add({"name": "refresh", "kind": "workflow", "workflow": wf["id"]}).json()["id"]
+    theirs = add({"name": "refresh_all", "kind": "workflow", "workflow": wf["id"], "who": "viewers"}).json()["id"]
+    assert run(mine, ana).status_code == 403
+    r = run(theirs, ana)
+    assert r.status_code == 200 and r.json()["steps"] == [{"name": "count", "status": "ok"}], r.text
+
+    # A webhook: only an operator adds one, only to an allowed origin, signed with Cairn's secret.
+    got = []
+
+    class Hook(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            got.append((dict(self.headers), self.rfile.read(int(self.headers["Content-Length"]))))
+            self.send_response(204)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Hook)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    hook = f"http://127.0.0.1:{srv.server_port}"
+    body = {"name": "notify", "kind": "webhook", "url": f"{hook}/requests", "fields": [{"name": "note", "type": "text"}]}
+    monkeypatch.delenv("CAIRN_ACTION_WEBHOOK_ORIGINS", raising=False)
+    assert add(body).status_code == 403                                  # no origin allowed yet
+    monkeypatch.setenv("CAIRN_ACTION_WEBHOOK_ORIGINS", hook)
+    monkeypatch.setenv("CAIRN_ACTION_WEBHOOK_SECRET", "hook-secret")
+    assert add({**body, "url": "http://127.0.0.1:1/elsewhere"}).status_code == 403
+    notify = add(body).json()
+    assert "url" not in notify["config"]                                  # viewers do not see where it goes
+    r = run(notify["id"], ana, inputs={"note": "please hurry"})
+    assert r.status_code == 200 and r.json()["answered"] == 204, r.text
+    headers, sent = got[0]
+    assert json.loads(sent)["actor"] == "urn:li:corpuser:ana" and json.loads(sent)["inputs"] == {"note": "please hurry"}
+    assert headers["X-Cairn-Signature"] == "sha256=" + hmac.new(b"hook-secret", sent, hashlib.sha256).hexdigest()
+    srv.shutdown()
+
+    # Every run is kept for the dashboard's owner (who, the outcome, not the values).
+    runs = httpx.get(f"{base}/{request}/runs", headers=admin, timeout=30).json()
+    assert sorted(x["status"] for x in runs) == ["error", "error", "ok", "refused"], runs
+    assert any(x["actor"] == "urn:li:corpuser:ana" and x["status"] == "refused" for x in runs)
+    assert httpx.get(f"{base}/{request}/runs", headers=ana, timeout=30).status_code == 403
+    assert sum(e["action"] == "bi.action_run" for e in s.audit.entries("sql", limit=200)) >= 8
+
+
 def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
     """Input tables (writeback): a table people type into, created and changed on real Trino as the person
     writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,
