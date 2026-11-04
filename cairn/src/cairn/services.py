@@ -131,6 +131,7 @@ class Services:
     usage_reporter: Optional[Any] = None
     status_page: Optional[Any] = None
     workbooks: Optional[Any] = None
+    input_tables: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -818,6 +819,36 @@ def _build_active_metadata(s: Services) -> None:
             out = s.data_access.query(actor, f"SELECT * FROM {_wb_table(table)} LIMIT 0", connection, None, 1)
             return list(out.get("columns") or [])
         s.workbooks = Workbooks(s.engine, s.sql_workspace, workbook_columns)
+        # Input tables: lakehouse tables people type into, each statement run on Trino as the person writing.
+        from cairn.sqlworkspace.input_tables import InputTables
+
+        def input_run(connection: str, actor: str, sql: str):
+            definition = (s.data_access.registry.definitions() or {}).get(connection) if s.data_access.registry else None
+            if not definition or not definition.get("run_as_user") or not str(definition.get("url", "")).startswith("trino://"):
+                from cairn.sqlworkspace.input_tables import InputTableError
+
+                raise InputTableError(f"{connection!r} is not a Trino connection that runs as the user", 400)
+            return s.data_access.run_on_trino(definition, actor, sql, 1000)[:2]
+
+        def input_register(connection: str, table: str, columns: list, owner: str, description: str) -> None:
+            import re as _re
+
+            from cairn.sdk.source import Dataset, Field, to_mcps
+
+            schema, name = table.split(".")
+            urn = s.data_access._source(connection, None).urn(schema, name, None)
+            m = _re.fullmatch(r"urn:li:dataset:\(urn:li:dataPlatform:([^,]+),(.+),([A-Z]+)\)", urn)
+            if m is None or s.graph is None:
+                return
+            kinds = {"text": "string", "number": "number", "integer": "number", "boolean": "boolean", "date": "date",
+                     "timestamp": "time"}
+            fields = [Field(path=c["name"], type=kinds[c["type"]], native_type=c["type"]) for c in columns]
+            fields += [Field(path="_row_id", native_type="varchar"), Field(path="_updated_by", native_type="varchar"),
+                       Field(path="_updated_at", type="time", native_type="timestamp(6) with time zone")]
+            s.graph.emit(to_mcps(m.group(1), [Dataset(
+                name=m.group(2), fields=fields, owners=[owner], description=description or None, subtype="Table",
+                properties={"cairn_input_table": "true", "cairn_connection": connection})], m.group(3)))
+        s.input_tables = InputTables(s.engine, input_run, s.data_access.query, s.audit, input_register)
         if getattr(s, "derived", None) is not None:      # materialized views, written in SQL (cairn.pipelines.matviews)
             from cairn.pipelines.matviews import MaterializedViews
 

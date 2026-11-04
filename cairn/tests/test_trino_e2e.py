@@ -838,6 +838,92 @@ def test_workbooks_compile_spreadsheet_formulas_to_sql_run_as_the_viewer(trino, 
     assert httpx.delete(f"{url}/sql/workbooks/{wid}", headers=h, timeout=30).status_code == 204
 
 
+def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
+    """Input tables (writeback): a table people type into, created and changed on real Trino as the person
+    writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,
+    a stale edit is refused, every change is audited, and a workbook reads the table at once."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "ana", "bob"))
+    base = f"{url}/sql/input-tables"
+    spec = {"connection": "lakehouse", "table": "sales.targets", "description": "Quarterly targets, typed in",
+            "columns": [{"name": "region", "type": "text"}, {"name": "target", "type": "number"},
+                        {"name": "due", "type": "date"}, {"name": "approved", "type": "boolean"}]}
+    # Ana may read sales tables but not create one: Trino asks Cairn, and Cairn refuses.
+    r = httpx.post(base, json={**spec, "table": "sales.anas"}, headers=ana, timeout=60)
+    assert r.status_code == 403, r.text
+    assert httpx.post(base, json={**spec, "columns": [{"name": "Bad Name", "type": "text"}]}, headers=admin,
+                      timeout=30).status_code == 400
+    r = httpx.post(base, json=spec, headers=admin, timeout=60)
+    assert r.status_code == 201, r.text
+    tid = r.json()["id"]
+    assert httpx.post(base, json=spec, headers=admin, timeout=30).status_code == 409          # one input table per table
+    ddl = trino("SHOW CREATE TABLE lake.sales.targets")[0]["Create Table"]
+    assert '"_updated_at" timestamp(6) with time zone' in ddl or "_updated_at timestamp(6) with time zone" in ddl, ddl
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.targets,PROD)"
+    assert (s.graph.get_aspect(urn, "datasetProperties") or {}).get("customProperties", {}).get("cairn_input_table") == "true"
+
+    rows = [{"region": "EU", "target": 1200.5, "due": "2026-12-31", "approved": True},
+            {"region": "US", "target": 900, "due": "2026-12-31", "approved": False},
+            {"region": "EU", "target": "300", "due": None, "approved": "false"}]
+    r = httpx.post(f"{base}/{tid}/rows", json={"rows": rows}, headers=admin, timeout=60)
+    assert r.status_code == 201 and len(r.json()["added"]) == 3, r.text
+    # Values are checked against the column's type and written as literals, never as SQL.
+    for bad in ({"target": "lots"}, {"due": "tomorrow"}, {"approved": "maybe"}, {"nope": 1},
+                {"region": "x'); DROP TABLE sales.targets; --", "target": "1); DROP"}):
+        assert httpx.post(f"{base}/{tid}/rows", json={"rows": [bad]}, headers=admin, timeout=30).status_code == 400, bad
+    # Ana can read but not write: Trino refuses her INSERT (no WRITE_DATASET).
+    r = httpx.post(f"{base}/{tid}/rows", json={"rows": [{"region": "EU", "target": 1}]}, headers=ana, timeout=60)
+    assert r.status_code == 403, r.text
+
+    got = httpx.get(f"{base}/{tid}/rows", headers=admin, timeout=60).json()
+    cols = got["columns"]
+    table = [dict(zip(cols, x)) for x in got["rows"]]
+    assert sorted((t["region"], t["target"]) for t in table) == [("EU", 300.0), ("EU", 1200.5), ("US", 900.0)], table
+    assert {t["_updated_by"] for t in table} == {"urn:li:corpuser:admin"}
+    # Bob's row filter applies to typed-in rows like any other.
+    assert {x[cols.index("region")] for x in httpx.get(f"{base}/{tid}/rows", headers=bob, timeout=60).json()["rows"]} == {"EU"}
+
+    us = next(t for t in table if t["region"] == "US")
+    r = httpx.patch(f"{base}/{tid}/rows/{us['_row_id']}", json={"values": {"target": 950, "approved": True},
+                                                                "expected_updated_at": us["_updated_at"]},
+                    headers=admin, timeout=60)
+    assert r.status_code == 200, r.text
+    # The same edit again carries the old _updated_at: someone (here, the admin) changed the row since.
+    r = httpx.patch(f"{base}/{tid}/rows/{us['_row_id']}", json={"values": {"target": 1},
+                                                                "expected_updated_at": us["_updated_at"]},
+                    headers=admin, timeout=60)
+    assert r.status_code == 409, r.text
+    assert httpx.patch(f"{base}/{tid}/rows/{'0' * 32}", json={"values": {"target": 1}}, headers=admin,
+                       timeout=60).status_code == 404
+    assert trino("SELECT target, approved FROM lake.sales.targets WHERE region = 'US'") == [{"target": 950.0, "approved": True}]
+
+    # A workbook reads the input table straight away (it is in the catalog).
+    w = s.workbooks.run("urn:li:corpuser:admin", "lakehouse", {
+        "source": {"table": "sales.targets"}, "group_by": ["region"],
+        "aggregates": [{"name": "Total", "formula": "Sum([target])"}], "sort": [{"column": "region"}]})
+    assert [tuple(x) for x in w["rows"]] == [("EU", 1500.5), ("US", 950.0)], w["rows"]
+
+    small = [t["_row_id"] for t in table if t["target"] == 300.0]
+    r = httpx.request("DELETE", f"{base}/{tid}/rows", json={"rows": small}, headers=admin, timeout=60)
+    assert r.status_code == 200 and r.json()["deleted"] == 1, r.text
+    assert len(trino("SELECT * FROM lake.sales.targets")) == 2
+    actions = [e["action"] for e in s.audit.entries("sql", limit=100) if (e.get("subject") or "") == "sales.targets"]
+    for a in ("input.created", "input.rows_added", "input.row_changed", "input.rows_deleted"):
+        assert a in actions, actions
+    assert [t["table_name"] for t in httpx.get(base, headers=bob, timeout=30).json()] == ["sales.targets"]
+    # Only its creator (or an operator) stops it being an input table; the data stays.
+    assert httpx.delete(f"{base}/{tid}", headers=bob, timeout=30).status_code == 403
+    assert httpx.delete(f"{base}/{tid}", headers=admin, timeout=30).status_code == 204
+    assert len(trino("SELECT * FROM lake.sales.targets")) == 2
+
+
 def test_other_databases_are_queried_through_trino_under_cairns_policies(trino):
     """Federation: a PostgreSQL catalog in Trino, named to Cairn as postgres datasets (CAIRN_TRINO_CATALOGS).
     Cairn decides its tables like the lakehouse's: masks, row filters and refusals apply in place."""

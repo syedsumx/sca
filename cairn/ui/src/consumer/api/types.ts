@@ -1709,3 +1709,16 @@ export interface Workbook {
     created_ms: number;
     updated_ms: number;
 }
+
+/** An input table: a lakehouse table people type into (each write runs on Trino as the person). */
+export type InputColumnType = 'text' | 'number' | 'integer' | 'boolean' | 'date' | 'timestamp';
+
+export interface InputTable {
+    id: string;
+    connection: string;
+    table_name: string;
+    columns: { name: string; type: InputColumnType }[];
+    description: string;
+    created_by: string;
+    created_ms: number;
+}

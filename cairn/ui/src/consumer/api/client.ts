@@ -94,6 +94,8 @@ import type {
     SavedQuery,
     Workbook,
     WorkbookElement,
+    InputTable,
+    InputColumnType,
     SchemaTable,
     SqlAlert,
     SqlRun,
@@ -1009,6 +1011,35 @@ export class ConsumerClient extends CairnClient {
 
     deleteWorkbook(id: string) {
         return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
+    }
+
+    inputTables(opts?: RequestOptions) {
+        return this.request<InputTable[]>('GET', '/sql/input-tables', undefined, opts);
+    }
+
+    createInputTable(body: { connection: string; table: string; description?: string; columns: { name: string; type: InputColumnType }[] }) {
+        return this.request<InputTable>('POST', '/sql/input-tables', body);
+    }
+
+    inputRows(id: string, opts?: RequestOptions) {
+        return this.request<DataResult & { table: InputTable }>('GET', `/sql/input-tables/${enc(id)}/rows`, undefined, opts);
+    }
+
+    addInputRows(id: string, rows: Record<string, unknown>[]) {
+        return this.request<{ added: string[] }>('POST', `/sql/input-tables/${enc(id)}/rows`, { rows });
+    }
+
+    changeInputRow(id: string, rowId: string, values: Record<string, unknown>, expectedUpdatedAt?: string) {
+        return this.request<{ changed: string }>('PATCH', `/sql/input-tables/${enc(id)}/rows/${enc(rowId)}`,
+            { values, expected_updated_at: expectedUpdatedAt });
+    }
+
+    deleteInputRows(id: string, rows: string[]) {
+        return this.request<{ deleted: number }>('DELETE', `/sql/input-tables/${enc(id)}/rows`, { rows });
+    }
+
+    forgetInputTable(id: string) {
+        return this.request<void>('DELETE', `/sql/input-tables/${enc(id)}`);
     }
 
     sqlHistory(opts?: RequestOptions) {
