@@ -117,18 +117,32 @@ spec: {controllerName: gateway.envoyproxy.io/gatewayclass-controller}
                 f"gateway.envoyproxy.io/owning-gateway-name=t-cairn-gateway,gateway.envoyproxy.io/owning-gateway-namespace={NS}").strip()
         time.sleep(2)
     assert svc, "Envoy Gateway made no Service for the Gateway"
+    # Envoy's pod must be ready before a port-forward to its Service can attach (a port-forward started earlier
+    # exits at once and never recovers), so wait for its Deployment, and start the port-forward again if it exits.
+    owner = f"gateway.envoyproxy.io/owning-gateway-name=t-cairn-gateway,gateway.envoyproxy.io/owning-gateway-namespace={NS}"
+    k("-n", "envoy-gateway-system", "wait", "--for=condition=Available", "deployment", "-l", owner, "--timeout=180s",
+      timeout=210)
     local = port()
-    pf = subprocess.Popen(["kubectl", "-n", "envoy-gateway-system", "port-forward", svc.splitlines()[0], f"{local}:80"],
-                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={**os.environ, "KUBECONFIG": KUBECONFIG})
+
+    def forward():
+        return subprocess.Popen(["kubectl", "-n", "envoy-gateway-system", "port-forward", svc.splitlines()[0], f"{local}:80"],
+                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+                                env={**os.environ, "KUBECONFIG": KUBECONFIG})
+    pf = forward()
     url = f"http://127.0.0.1:{local}"
-    end = time.time() + 120
+    end, last = time.time() + 180, "no answer"
     while True:                                  # until Envoy has the routes (it answers 200 for the web UI)
+        if pf.poll() is not None:
+            last = f"port-forward exited: {(pf.stderr.read() or '').strip()[:300]}"
+            pf = forward()
         try:
-            if httpx.get(f"{url}/", headers={"Host": "cairn.test"}, timeout=5).status_code == 200:
+            r = httpx.get(f"{url}/", headers={"Host": "cairn.test"}, timeout=5)
+            if r.status_code == 200:
                 break
-        except httpx.HTTPError:
-            pass
-        assert time.time() < end, k("-n", NS, "get", "httproute", "-o", "yaml")
+            last = f"HTTP {r.status_code}: {r.text[:200]}"
+        except httpx.HTTPError as e:
+            last = repr(e)
+        assert time.time() < end, f"{last}\n" + k("-n", NS, "get", "httproute", "-o", "yaml")
         time.sleep(2)
     yield url
     pf.terminate()
