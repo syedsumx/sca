@@ -716,6 +716,14 @@ The hosting control plane can take signups and payments itself: set `CAIRN_SIGNU
 
 Licence files are written 0600 to a private temporary directory and deleted after use. Signups are in `cairn_signups` and Stripe's events in `cairn_stripe_events` (migration 0070); confirmations and licences issued or renewed are audited (category `hosting`). Tested with stripe-mock and Mailpit in `tests/test_signup_e2e.py`.
 
+### Usage metering
+
+Hosted tenants report their usage to the control plane, which bills it through Stripe's meters.
+
+- **Keys.** Add `metering_key_file` (a random secret) and `meters` (which metrics are billed, and as which Stripe meter: `{"query_cpu_seconds": "cairn_cpu_seconds", "warehouse_node_seconds": "cairn_node_seconds", "ai_usd_cents": "cairn_ai_cents"}`) to `CAIRN_SIGNUP`. Each new tenant gets its own key, derived from that secret and its name, so the control plane stores none: provisioning passes it to `tenant.sh create … --metering-key FILE`, which keeps it in the tenant's Secret `cairn-metering` and turns on `cairn.metering` (the notifier gets `CAIRN_METERING_URL` and the key file). For an existing tenant, run `tenant.sh upgrade <id> --metering-key FILE` with `CAIRN_METERING_URL` set.
+- **What a tenant reports**, once a day is over (UTC) by an hour, and again until the control plane accepts it: `seats` (people active in the last 30 days, as the licence counts them), `query_cpu_seconds` (CPU time of the day's finished Trino queries), `warehouse_node_seconds` (team warehouses' node time) and `ai_usd_cents` (AI calls at the providers' prices). The report is signed (`X-Cairn-Signature: sha256=<HMAC>`) with the tenant's key; `POST /v1/metering/report` refuses a wrong signature (401), a day not yet over (400) and an unknown tenant (404).
+- **Billing.** The control plane keeps one value per tenant, day and metric (a newer report replaces it until it is billed). Once a day has settled (`settle_hours` after it ended, default 6), the notifier sends each metric that has a meter as a Stripe meter event for the tenant's customer, identified `<tenant>-<day>-<metric>`, so Stripe counts it once however often it is retried; a failure is kept on the row and retried. Operators see a tenant's usage at `GET /v1/metering/<tenant>`. Tables `cairn_metering_sent` (in tenants) and `cairn_tenant_usage` (on the control plane), migration 0071. Tested in `tests/test_metering_e2e.py` against stripe-mock.
+
 ### Hosting on Hetzner
 
 `deploy/hetzner/` builds a hosting cluster on Hetzner dedicated servers. Its README is the full runbook.

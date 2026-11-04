@@ -443,6 +443,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.hosting.signup import build_signup_router
 
         app.include_router(build_signup_router(services.signup))
+    if getattr(services, "metering", None) is not None:   # tenants' usage reports (signed), operators' view
+        from cairn.hosting.metering import build_metering_router
+
+        app.include_router(build_metering_router(services.metering, cp, services.authorize))
     if getattr(services, "siem", None) is not None:
         from cairn.common.siem import build_siem_router
 

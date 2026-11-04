@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provision, update and remove hosted tenants: one Cairn release per tenant, in namespace cairn-<id>.
 #
-#   deploy/hosting/tenant.sh create <id> --licence FILE [--values platform.yaml] [--dry-run]
+#   deploy/hosting/tenant.sh create <id> --licence FILE [--metering-key FILE] [--values platform.yaml] [--dry-run]
 #   deploy/hosting/tenant.sh upgrade <id> [--licence FILE] [--values platform.yaml]
 #   deploy/hosting/tenant.sh delete <id> [--drop-data]
 #   deploy/hosting/tenant.sh list
@@ -23,6 +23,8 @@
 #   CAIRN_MONITORING_NAMESPACE  Prometheus's namespace, also admitted by the isolation
 #   CAIRN_TLS_ISSUER      a cert-manager ClusterIssuer: each tenant's host gets its certificate from it
 #   CAIRN_POD_SECURITY    Pod Security level enforced in tenant namespaces (baseline, restricted)
+#   CAIRN_METERING_URL    the control plane the tenant reports its usage to (with --metering-key: the
+#                         tenant's key, kept in Secret cairn-metering; see cairn.hosting.metering)
 #
 # Per tenant it creates: databases cairn_<id> and cairn_catalog_<id> owned by role cairn_<id>, the
 # namespace with a ResourceQuota, the credentials Secrets (random, never printed), the licence Secret
@@ -34,10 +36,11 @@ CHART=helm/cairn
 HELM=${HELM:-helm}
 cmd=${1:-}; id=${2:-}
 shift $(( $# >= 2 ? 2 : $# ))
-licence=""; values=(); drop=0; dry=0
+licence=""; metering=""; values=(); drop=0; dry=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --licence) licence=$2; shift 2 ;;
+        --metering-key) metering=$2; shift 2 ;;
         --values) values+=(-f "$2"); shift 2 ;;
         --drop-data) drop=1; shift ;;
         --dry-run) dry=1; shift ;;
@@ -135,7 +138,20 @@ helm_args() {
         --set "core.kafka.bootstrap=$(kafka_bootstrap)" \
         --set "core.ingress.host=$id.$CAIRN_HOST_DOMAIN" \
         --set "cairn.publicUrl=https://$id.$CAIRN_HOST_DOMAIN" \
-        --set "cairn.licence.tenantId=$id" $(tls_args)
+        --set "cairn.licence.tenantId=$id" $(tls_args) $(metering_args)
+}
+
+metering_args() {   # usage reports to the control plane, once the tenant has its metering key
+    if [ -n "$metering" ] || { [ $dry = 0 ] && kubectl -n "$(ns)" get secret cairn-metering >/dev/null 2>&1; }; then
+        need CAIRN_METERING_URL
+        echo --set cairn.metering.enabled=true --set "cairn.metering.url=$CAIRN_METERING_URL"
+    fi
+}
+
+metering_secret() {
+    [ -n "$metering" ] || return 0
+    kubectl -n "$(ns)" create secret generic cairn-metering --from-file=key="$metering" \
+        --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 }
 
 render() {   # what create would apply, without touching a cluster or a database
@@ -186,6 +202,7 @@ SQL
         --from-literal=database-url="postgresql+psycopg://cairn_$db:$pw@$CAIRN_PG_HOST:5432/cairn_$db" \
         --from-literal=action-link-secret="$(rand)" --from-literal=embed-signing-secret="$(rand)" >/dev/null
     kubectl -n "$(ns)" create secret generic cairn-licence --from-file=licence="$licence" >/dev/null
+    metering_secret
     # shellcheck disable=SC2046
     $HELM install "cairn-$id" "$CHART" $(helm_args) --wait --timeout 20m
     echo "tenant $id: https://$id.$CAIRN_HOST_DOMAIN (admin password in secret cairn-core-secrets)" >&2
@@ -199,6 +216,7 @@ upgrade() {
         kubectl -n "$(ns)" create secret generic cairn-licence --from-file=licence="$licence" \
             --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     fi
+    metering_secret
     # shellcheck disable=SC2046
     $HELM upgrade "cairn-$id" "$CHART" $(helm_args) --wait --timeout 20m
 }

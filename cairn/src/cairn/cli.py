@@ -174,6 +174,12 @@ def notifier_tick(s) -> dict:
         out["siem"] = s.siem.ship()             # the audit log to the SIEM sinks, at least once and in order
     if getattr(s, "signup", None) is not None:
         out["provisioning_retried"] = s.signup.retry_failed()   # hosted tenants whose provisioning failed
+    if getattr(s, "usage_reporter", None) is not None and now_ms - _SWEEP_STATE.get("metering_ms", 0) >= 600_000:
+        _SWEEP_STATE["metering_ms"] = now_ms
+        out["usage_reported"] = s.usage_reporter.report(now_ms)   # a tenant's finished days to the control plane
+    if getattr(s, "metering", None) is not None and now_ms - _SWEEP_STATE.get("billing_ms", 0) >= 600_000:
+        _SWEEP_STATE["billing_ms"] = now_ms
+        out["usage_billed"] = s.metering.bill(now_ms)            # settled usage to Stripe's meters
     if s.marketplace is not None:
         out["access"] = s.marketplace.sweep(now_ms)
         if s.marketplace.provisioner is not None:

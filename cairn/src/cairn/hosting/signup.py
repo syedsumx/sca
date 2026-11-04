@@ -31,7 +31,8 @@ This runs on the hosting control plane (``CAIRN_SIGNUP``, a JSON object or a fil
    (``GET /v1/billing/portal?token=``), where they change the plan, the card or cancel.
 
 Secrets (Stripe's key and webhook secret, the licence signing key, SMTP's password) are read from files.
-Licence files are written 0600 to a private directory and removed after use.
+Licence files are written 0600 to a private directory and removed after use. With ``metering_key_file``,
+each new tenant also gets its usage-metering key (``--metering-key``; see ``cairn.hosting.metering``).
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ from cairn.common.db import metadata
 
 logger = logging.getLogger(__name__)
 
-TENANT = re.compile(r"^[a-z][a-z0-9-]{1,30}[a-z0-9]$")
+TENANT = re.compile(r"^[a-z][a-z0-9-]{1,28}[a-z0-9]$")      # as deploy/hosting/tenant.sh takes it
 EMAIL = re.compile(r"^[^@\s]{1,64}@[A-Za-z0-9.-]{1,253}\.[A-Za-z]{2,}$")
 RESERVED = {"www", "api", "app", "admin", "signup", "billing", "status", "mail", "docs", "help", "support", "cairn",
             "static", "assets", "auth", "login", "trino", "grafana", "prometheus", "kube", "system"}
@@ -238,7 +239,7 @@ class Signup:
         if not 1 <= len(org) <= 200:
             raise SignupError("organization: your organization's name")
         if not TENANT.match(tenant) or tenant in RESERVED or "--" in tenant:
-            raise SignupError("tenant: 3 to 32 lowercase letters, digits and dashes, starting with a letter")
+            raise SignupError("tenant: 3 to 30 lowercase letters, digits and dashes, starting with a letter")
         if plan not in self.cfg["plans"]:
             raise SignupError(f"plan: one of {', '.join(self.cfg['plans'])}")
         self._limit(f"ip:{client_ip}", 10)
@@ -415,14 +416,24 @@ class Signup:
             with os.fdopen(fd, "w") as f:
                 f.write(licence)
             cmd = [*self.cfg.get("provision", ["deploy/hosting/tenant.sh"]), action, tenant, "--licence", path]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=int(self.cfg.get("provision_timeout", 1800)))
+            env = dict(os.environ)
+            if self.cfg.get("metering_key_file") and action == "create":
+                from cairn.hosting.metering import tenant_key
+
+                kpath = os.path.join(d, f"{tenant}.metering")
+                fd = os.open(kpath, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(fd, "w") as f:
+                    f.write(tenant_key(_read(self.cfg["metering_key_file"]) or "", tenant))
+                cmd += ["--metering-key", kpath]
+                env["CAIRN_METERING_URL"] = self.cfg["public_url"]
+            r = subprocess.run(cmd, capture_output=True, text=True, env=env,
+                               timeout=int(self.cfg.get("provision_timeout", 1800)))
             if r.returncode != 0:
                 raise SignupError(f"provisioning {tenant} ({action}) failed: {(r.stderr or r.stdout)[-1500:]}", 502)
         finally:
-            try:
-                os.remove(path)
-            finally:
-                os.rmdir(d)
+            for name in os.listdir(d):
+                os.remove(os.path.join(d, name))
+            os.rmdir(d)
 
     def _licence(self, sid: str, action: str) -> None:
         row = self._by(signups.c.id, sid)

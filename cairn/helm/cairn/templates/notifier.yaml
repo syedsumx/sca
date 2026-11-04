@@ -1,7 +1,17 @@
 {{- if .Values.cairn.notifier.enabled }}
 {{- /* No port: drains cairn_notifications and fans out to Slack / Teams / email. */}}
 {{- $n := .Values.cairn.notifier }}
-{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "metricsPort" 9108 "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) }}
+{{- $m := .Values.cairn.metering }}
+{{- $env := list }}
+{{- $vols := list }}
+{{- $mounts := list }}
+{{- if $m.enabled }}
+{{- if not $m.url }}{{ fail "cairn.metering.url: the control plane's URL" }}{{ end }}
+{{- $env = list (dict "name" "CAIRN_METERING_URL" "value" $m.url) (dict "name" "CAIRN_METERING_KEY_FILE" "value" "/etc/cairn/metering/key") }}
+{{- $vols = list (dict "name" "metering" "secret" (dict "secretName" $m.secretName "defaultMode" 256)) }}
+{{- $mounts = list (dict "name" "metering" "mountPath" "/etc/cairn/metering" "readOnly" true) }}
+{{- end }}
+{{- $ctx := dict "root" $ "component" "notifier" "cfg" $n "replicas" $n.replicas "metricsPort" 9108 "args" (list "notifier" "--interval" (toString $n.intervalSeconds)) "extraEnv" $env "extraVolumes" $vols "extraVolumeMounts" $mounts }}
 {{ include "cairn.deployment" $ctx }}
 {{- with (include "cairn.pdb" $ctx) }}
 ---

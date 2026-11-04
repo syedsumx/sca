@@ -127,6 +127,8 @@ class Services:
     budgets: Optional[Any] = None
     siem: Optional[Any] = None
     signup: Optional[Any] = None
+    metering: Optional[Any] = None
+    usage_reporter: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1383,6 +1385,20 @@ def _build_costs(s: Services, hub, Event) -> None:
 
     signup_cfg = load_signup()           # a misconfigured control plane stops at start-up
     s.signup = Signup(s.engine, signup_cfg, audit=s.audit) if signup_cfg else None
+    # Usage metering: tenants report their daily usage; the control plane bills it through Stripe's meters.
+    from cairn.hosting.metering import Metering, UsageReporter
+    from cairn.hosting.signup import _read as _read_secret, signups as _signups
+
+    s.metering = None
+    if s.signup is not None and signup_cfg.get("metering_key_file"):
+        def customer_of(tenant: str):
+            with s.engine.connect() as conn:
+                row = conn.execute(_signups.select().where(_signups.c.tenant == tenant)).first()
+            return row.stripe_customer if row is not None and row.status in ("active", "paid", "canceled", "failed") \
+                else None
+        s.metering = Metering(s.engine, _read_secret(signup_cfg["metering_key_file"]) or "", signup_cfg.get("meters") or {},
+                              s.signup.stripe, customer_of, int(signup_cfg.get("settle_hours", 6)))
+    s.usage_reporter = UsageReporter.from_env(s.engine, getattr(s, "licence", None))
     # SIEM export: the audit log pushed to Splunk HEC, syslog (RFC 5424, CEF) or HTTPS sinks (CAIRN_SIEM_SINKS).
     from cairn.common.siem import SiemExport, load_sinks
 

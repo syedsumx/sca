@@ -74,8 +74,11 @@ _, payload, sig = text.split(".")
 pad = lambda s: base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 key = serialization.load_pem_public_key(open(pub, "rb").read())
 key.verify(pad(sig), pad(payload))          # raises if the licence was not signed by the vendor key
+metering = sys.argv[sys.argv.index("--metering-key") + 1] if "--metering-key" in sys.argv else None
 with open(log, "a") as f:
-    f.write(json.dumps({"action": action, "tenant": tenant, "path": path, "licence": json.loads(pad(payload))}) + "\n")
+    f.write(json.dumps({"action": action, "tenant": tenant, "path": path, "licence": json.loads(pad(payload)),
+                        "metering_key": open(metering).read() if metering else None,
+                        "metering_url": os.environ.get("CAIRN_METERING_URL")}) + "\n")
 '''
 
 
@@ -95,12 +98,16 @@ def api(services, settings, graph, tmp_path, monkeypatch):
                                                                          serialization.PublicFormat.SubjectPublicKeyInfo))
     (tmp_path / "stripe").write_text("sk_test_123")
     (tmp_path / "whsec").write_text(WEBHOOK_SECRET)
+    (tmp_path / "metering").write_text("metering-master-key-7d1e")
     (tmp_path / "provision.py").write_text(PROVISION)
     cfg = {"domain": "cairn.test", "public_url": "https://signup.cairn.test",
            "smtp": f"smtp://127.0.0.1:{services['smtp']}?starttls=false", "from": "hello@cairn.test",
            "stripe_key_file": str(tmp_path / "stripe"), "stripe_webhook_secret_file": str(tmp_path / "whsec"),
            "stripe_api": services["stripe"], "licence_key_file": str(tmp_path / "licence.pem"), "licence_kid": "test-1",
            "provision": [sys.executable, str(tmp_path / "provision.py")],
+           "metering_key_file": str(tmp_path / "metering"),
+           "meters": {"query_cpu_seconds": "cairn_cpu_seconds", "warehouse_node_seconds": "cairn_node_seconds",
+                      "ai_usd_cents": "cairn_ai_cents"},
            "plans": {"team": {"price": "price_team", "edition": "team", "max_users": 25},
                      "business": {"price": "price_business", "edition": "enterprise", "max_users": 250}}}
     monkeypatch.setenv("CAIRN_SIGNUP", json.dumps(cfg))
@@ -183,6 +190,9 @@ def test_a_team_signs_up_pays_and_its_licence_follows_the_subscription(api):
     [created] = provisioned(tmp)
     lic = created["licence"]
     assert created["action"] == "create" and created["tenant"] == "acme" and not os.path.exists(created["path"])
+    from cairn.hosting.metering import tenant_key
+    assert created["metering_key"] == tenant_key("metering-master-key-7d1e", "acme")     # its usage-metering key
+    assert created["metering_url"] == "https://signup.cairn.test"
     assert (lic["tenant"], lic["edition"], lic["max_users"], lic["kid"]) == ("acme", "team", 25, "test-1")
     assert lic["expires_at"] == datetime.fromtimestamp(end, tz=timezone.utc).date().isoformat()
     assert [x["Subject"] for x in mails(srv, "kim@acme.test", 2)][-1] == "Your Cairn workspace acme is ready"

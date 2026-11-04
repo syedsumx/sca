@@ -230,7 +230,7 @@ jobs:
           pip install -e ".[server,test,trino,streams,documents]" "ipython>=8.20"   # ipython: the notebook test
           docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams
           docker pull -q postgres:16-alpine            # the DR drill (primary and streaming standby)
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_dr_drill.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_metering_e2e.py tests/test_dr_drill.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"

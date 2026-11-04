@@ -1104,6 +1104,13 @@ cairn:
     existingSecret: ""
     secretKey: licence
 
+  # Usage metering (hosted tenants): the notifier reports the tenant's daily usage to the control plane,
+  # signed with the key in Secret secretName (key "key"). deploy/hosting/tenant.sh --metering-key sets it.
+  metering:
+    enabled: false
+    url: ""
+    secretName: cairn-metering
+
   ha:
     # Spread replicas of every component over nodes and zones (when it runs more than one).
     # PodDisruptionBudgets are per component (<component>.pdb); values-ha.yaml turns them all on.
