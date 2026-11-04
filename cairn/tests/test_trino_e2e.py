@@ -1225,7 +1225,8 @@ def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(
     actions = [e["action"] for e in s.audit.entries("sql", limit=100) if (e.get("subject") or "") == "sales.targets"]
     for a in ("input.created", "input.rows_added", "input.row_changed", "input.rows_deleted"):
         assert a in actions, actions
-    assert [t["table_name"] for t in httpx.get(base, headers=bob, timeout=30).json()] == ["sales.targets"]
+    # Listed for anyone (other tests in this module add input tables of their own).
+    assert "sales.targets" in [t["table_name"] for t in httpx.get(base, headers=bob, timeout=30).json()]
     # Only its creator (or an operator) stops it being an input table; the data stays.
     assert httpx.delete(f"{base}/{tid}", headers=bob, timeout=30).status_code == 403
     assert httpx.delete(f"{base}/{tid}", headers=admin, timeout=30).status_code == 204
