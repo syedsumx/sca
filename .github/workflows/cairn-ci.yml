@@ -437,6 +437,8 @@ jobs:
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
           kind load docker-image cairn/spark:ci cairn-test/python:ci cairn-test/git:ci --name cairn
       - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
       - name: Spark in pods on the cluster
         working-directory: cairn
         env:

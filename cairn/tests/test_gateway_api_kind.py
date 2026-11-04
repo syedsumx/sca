@@ -86,9 +86,10 @@ spec:
 @pytest.fixture(scope="module")
 def gateway():
     k("apply", "--server-side", "-f", CRDS)
-    subprocess.run(["helm", "upgrade", "--install", "eg", "oci://docker.io/envoyproxy/gateway-helm", "--version", "v1.2.6",
-                    "-n", "envoy-gateway-system", "--create-namespace", "--wait", "--timeout", "8m"],
-                   check=True, capture_output=True, env={**os.environ, "KUBECONFIG": KUBECONFIG}, timeout=600)
+    r = subprocess.run(["helm", "upgrade", "--install", "eg", "oci://docker.io/envoyproxy/gateway-helm", "--version", "v1.2.6",
+                        "-n", "envoy-gateway-system", "--create-namespace", "--wait", "--timeout", "8m"],
+                       capture_output=True, text=True, env={**os.environ, "KUBECONFIG": KUBECONFIG}, timeout=600)
+    assert r.returncode == 0, f"installing Envoy Gateway failed:\n{r.stdout}\n{r.stderr}"
     k("apply", "-f", "-", stdin="""apiVersion: gateway.networking.k8s.io/v1
 kind: GatewayClass
 metadata: {name: eg}
