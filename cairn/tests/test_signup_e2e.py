@@ -46,6 +46,33 @@ def wait(p: int) -> None:
     raise RuntimeError(f"port {p} did not open")
 
 
+def ready(url: str, ok, headers=None, seconds: int = 60) -> None:
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            if ok(httpx.get(url, headers=headers or {}, timeout=3)):
+                return
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.5)
+    raise RuntimeError(f"{url} did not answer")
+
+
+def ready_smtp(p: int, seconds: int = 60) -> None:
+    import smtplib
+
+    end = time.time() + seconds
+    while time.time() < end:
+        try:
+            with smtplib.SMTP("127.0.0.1", p, timeout=3) as s:
+                if s.noop()[0] == 250:
+                    return
+        except (OSError, smtplib.SMTPException):
+            pass
+        time.sleep(0.5)
+    raise RuntimeError("the SMTP server did not answer")
+
+
 @pytest.fixture(scope="module")
 def services():
     names = [f"cairn-stripe-{os.getpid()}", f"cairn-mail-{os.getpid()}"]
@@ -56,6 +83,11 @@ def services():
                     MAIL_IMAGE], check=True, capture_output=True)
     for p in (sp, smtp, mapi):
         wait(p)
+    # Docker's port proxy accepts before the servers inside are up: wait until each one answers.
+    ready(f"http://127.0.0.1:{mapi}/api/v1/messages", lambda r: r.status_code == 200)
+    ready(f"http://127.0.0.1:{sp}/v1/customers", lambda r: r.status_code in (200, 401),
+          headers={"Authorization": "Bearer sk_test_123"})
+    ready_smtp(smtp)
     yield {"stripe": f"http://127.0.0.1:{sp}", "smtp": smtp, "mail": f"http://127.0.0.1:{mapi}"}
     for n in names:
         subprocess.run(["docker", "rm", "-f", n], capture_output=True)

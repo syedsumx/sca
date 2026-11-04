@@ -317,10 +317,6 @@ jobs:
           CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
-          # The chart's Gateway API routes through a real Gateway implementation (Envoy Gateway).
-          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
-            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
-          ! grep -q "skipped" "$RUNNER_TEMP/gateway.log"
       - name: SQL workflows, git folders and query insight pages (the built UI in Chromium, against Cairn)
         run: |
           set -o pipefail
@@ -460,6 +456,10 @@ jobs:
           CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci CAIRN_APPS_K8S_GIT_IMAGE=cairn-test/git:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_data_apps_k8s.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+          # The chart's Gateway API routes through a real Gateway implementation (Envoy Gateway).
+          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gateway.log"
       - name: Cluster state on failure
         if: failure()
         run: |
