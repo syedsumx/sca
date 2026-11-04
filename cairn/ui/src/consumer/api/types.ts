@@ -1783,3 +1783,14 @@ export interface MetricQuery {
     filters?: WorkbookFilter[];
     limit?: number;
 }
+
+/** What the AI builder made of a question (POST /sql/builder). */
+export interface BuiltDashboard {
+    title: string;
+    tiles: RenderedDashboard['tiles'];
+    controls: DashboardControl[];
+    refused: { tile?: unknown; control?: unknown; error: string }[];
+    metrics: string[];
+    tables: string[];
+    dashboard: Dashboard | null;
+}

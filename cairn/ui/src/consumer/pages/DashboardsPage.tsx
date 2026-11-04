@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
-import type { ChartSpec, Dashboard, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
+import type { BuiltDashboard, ChartSpec, Dashboard, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -142,6 +142,10 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
     const metricList = useDheQuery<Metric[]>('/sql/metrics', (c, signal) => c.metrics({ signal }));
     const [open, setOpen] = useState<string | null>(null);
     const [editing, setEditing] = useState(false);
+    const [asking, setAsking] = useState(false);
+    const [question, setQuestion] = useState('');
+    const [building, setBuilding] = useState(false);
+    const [built, setBuilt] = useState<BuiltDashboard | null>(null);
     const [form, setForm] = useState({ name: '', shared: false, queries: [] as string[], workbooks: [] as string[],
         chart: 'bar' as ChartSpec['type'], drill: [] as string[], controls: [] as ControlDraft[],
         metrics: [] as string[], metricDims: [] as string[], metricGrain: undefined as MetricQuery['grain'] });
@@ -173,6 +177,21 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
             message.error((e as Error).message);
         }
     };
+    const build = async () => {
+        setBuilding(true);
+        setBuilt(null);
+        try {
+            const out = await client.buildDashboard({ question, save: true });
+            setBuilt(out);
+            setTick((t) => t + 1);
+            if (out.dashboard) setOpen(out.dashboard.id);
+            if (!out.refused.length) setAsking(false);
+        } catch (e) {
+            message.error((e as Error).message);
+        } finally {
+            setBuilding(false);
+        }
+    };
     const setControl = (k: number, patch: Partial<ControlDraft>) =>
         setForm({ ...form, controls: form.controls.map((c, j) => (j === k ? { ...c, ...patch } : c)) });
     const canCreate = !!form.name.trim() && (form.queries.length > 0 || form.workbooks.length > 0 || form.metrics.length > 0);
@@ -182,10 +201,23 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
             <Space style={{ marginBottom: 12 }} wrap>
                 <Select aria-label="Dashboard" placeholder="Open a dashboard" style={{ minWidth: 260 }} value={open ?? undefined}
                     onChange={setOpen} options={(list.data ?? []).map((d) => ({ value: d.id, label: d.shared ? `${d.name} (shared)` : d.name }))} />
+                <Button onClick={() => { setBuilt(null); setAsking(true); }}>Build from a question</Button>
                 <Button onClick={() => setEditing(true)} disabled={!saved.length && !(books.data ?? []).length && !(metricList.data ?? []).length}>New dashboard</Button>
                 {!saved.length && !(books.data ?? []).length && <Muted>Save queries in SQL, or workbooks, first; a dashboard shows them.</Muted>}
             </Space>
             {open ? <Board key={`${open}-${tick}`} id={open} /> : <Empty description="Pick or create a dashboard" />}
+            <Modal title="Build a dashboard from a question" open={asking} onCancel={() => setAsking(false)} onOk={() => void build()}
+                okText="Build" confirmLoading={building} okButtonProps={{ disabled: question.trim().length < 3 }}>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                    <Input.TextArea aria-label="Question" rows={3} value={question} onChange={(e) => setQuestion(e.target.value)}
+                        placeholder="Revenue by region this year, and orders by status" />
+                    <Muted>Cairn builds it from the metrics and tables you may see, checks every tile as you, and saves it as yours (private).</Muted>
+                    {built && built.refused.length > 0 && (
+                        <Alert type="info" showIcon message={`Built ${built.tiles.length} tile(s); left out:`}
+                            description={<ul style={{ margin: 0 }}>{built.refused.map((r, i) => <li key={i}>{r.error}</li>)}</ul>} />
+                    )}
+                </Space>
+            </Modal>
             <Modal title="New dashboard" open={editing} onOk={() => void create()} onCancel={() => setEditing(false)} width={680}
                 okText="Create" okButtonProps={{ disabled: !canCreate }}>
                 <Space direction="vertical" style={{ width: '100%' }}>

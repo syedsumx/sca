@@ -133,6 +133,7 @@ class Services:
     workbooks: Optional[Any] = None
     input_tables: Optional[Any] = None
     metrics: Optional[Any] = None
+    builder: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -868,6 +869,17 @@ def _build_active_metadata(s: Services) -> None:
         s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
             Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
         s.sql_boards.metrics = s.metrics
+        # The AI builder: a question becomes a dashboard of metric and workbook tiles, each checked as the person.
+        from cairn.sqlworkspace.builder import Builder
+
+        def urn_of(connection: str, table: str) -> Optional[str]:
+            try:
+                parts = table.split(".")
+                return s.data_access._source(connection, None).urn(parts[-2], parts[-1], parts[0] if len(parts) == 3 else None)
+            except Exception:  # noqa: BLE001 - an unknown connection or table: not usable
+                return None
+        s.builder = Builder(s.llm, s.settings.ai.model_nlq or s.settings.ai.model, s.ask, s.metrics, s.sql_boards,
+                            urn_of, s.audit)
         # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
         from cairn.sqlworkspace.procedures import Procedures
         from cairn.sqlworkspace.workspace import WorkspaceError
@@ -1395,7 +1407,8 @@ def _build_data_access(s: Services) -> None:
         return [h["urn"] for h in hits]
 
     s.ask = AskService(s.data_access, s.graph, s.llm, s.context_layer, search,
-                       s.settings.ai.model_nlq or s.settings.ai.model, s.audit)
+                       s.settings.ai.model_nlq or s.settings.ai.model, s.audit,
+                       lambda refs: s.metrics.for_tables(refs) if getattr(s, "metrics", None) is not None else [])
     if s.context is not None:
         from cairn.context.semantic import SemanticService
 

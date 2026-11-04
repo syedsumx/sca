@@ -969,6 +969,75 @@ def test_metrics_are_defined_once_and_mean_the_same_in_queries_and_dashboards(tr
     assert {"metric.saved", "metric.certified"} <= set(actions), actions
 
 
+def test_the_ai_builder_makes_a_dashboard_from_a_question_checked_as_the_person(trino, cairn):
+    """The AI builder on real Trino, the model scripted: its plan's tiles are compiled as the person asking, the
+    ones naming an unknown metric or column are refused and the model told why, the preview runs as the person
+    (Bob sees only EU), and the dashboard is saved as theirs. Ask-your-data is given the metric's definition."""
+    import httpx
+
+    from cairn.ai.llm import StaticProvider
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ai_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount")]}
+    trino("CREATE TABLE lake.sales.ai_orders AS SELECT * FROM (VALUES (1, 'EU', 'paid', 100e0), (2, 'EU', 'refunded', 40e0), "
+          "(3, 'US', 'paid', 70e0)) AS t(id, region, status, amount)")
+    admin, bob = "urn:li:corpuser:admin", "urn:li:corpuser:bob"
+    s.metrics.save(admin, {"name": "ai_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.ai_orders",
+                           "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+                           "dimensions": ["region"]})
+    good = [{"kind": "metric", "title": "Revenue by region", "metric": {"metrics": ["ai_revenue"], "dimensions": ["region"]}},
+            {"kind": "element", "title": "Orders by status", "chart": {"type": "pie", "x": "status", "y": ["Orders"]},
+             "element": {"source": {"table": "sales.ai_orders"}, "group_by": ["status"],
+                         "aggregates": [{"name": "Orders", "formula": "Count()"}], "sort": [{"column": "status"}]}}]
+    bad = [{"kind": "metric", "title": "Profit", "metric": {"metrics": ["profit"]}},
+           {"kind": "element", "title": "Margin", "element": {"source": {"table": "sales.ai_orders"},
+                                                              "aggregates": [{"name": "M", "formula": "Sum([margin])"}]}}]
+    calls = []
+
+    def responder(system, user, schema):
+        calls.append(user)
+        if "dashboard" in system:
+            tiles = good + bad if len([c for c in calls if "Question:" in c and "Tables:" in c]) == 1 else good
+            return {"title": "Sales overview", "tiles": tiles,
+                    "controls": [{"id": "region", "label": "Region", "column": "region", "kind": "values",
+                                  "source": {"table": "sales.ai_orders"}}]}
+        return {"sql": 'SELECT region, sum(CASE WHEN "status" = \'paid\' THEN "amount" END) AS revenue '
+                       "FROM sales.ai_orders GROUP BY region ORDER BY region", "explanation": "Revenue by region."}
+    model = StaticProvider(responder)
+    s.builder.llm, s.ask.sql.llm = model, model
+
+    r = httpx.post(f"{url}/sql/builder", json={"question": "How is revenue doing by region, and orders by status?",
+                                               "datasets": [urn], "save": True},
+                   headers={"X-Cairn-Actor": admin}, timeout=120)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert [t["title"] for t in out["tiles"]] == ["Revenue by region", "Orders by status"]
+    assert sorted(map(tuple, out["tiles"][0]["result"]["rows"])) == [("EU", 100.0), ("US", 70.0)], out["tiles"][0]
+    assert out["tiles"][1]["result"]["rows"] == [["paid", 2], ["refunded", 1]]
+    assert out["controls"][0]["source"] == {"connection": "lakehouse", "table": "sales.ai_orders"}
+    # The first plan's bad tiles were refused as the person, and the model was told why before its second try.
+    retry = [c for c in calls if "A previous tile was refused" in c]
+    assert retry and "profit is not one of the metrics listed" in retry[0] and "no column [margin]" in retry[0], retry
+    assert out["refused"] == []                                         # the second plan built cleanly
+    saved = s.sql_boards.dashboard(admin, out["dashboard"]["id"])
+    assert saved["name"] == "Sales overview" and not saved["shared"] and len(saved["tiles"]) == 2
+    # The model never writes SQL for tiles, and Bob's preview is his own rows.
+    b = httpx.post(f"{url}/sql/builder", json={"question": "Revenue by region", "datasets": [urn]},
+                   headers={"X-Cairn-Actor": bob}, timeout=120).json()
+    assert [r[0] for r in b["tiles"][0]["result"]["rows"]] == ["EU"] and b["dashboard"] is None
+    assert any(e["action"] == "bi.built" for e in s.audit.entries("sql", limit=50))
+
+    # Ask-your-data is told the metric's definition for the tables it uses.
+    a = s.ask.ask(admin, "What is revenue by region?", lambda u: True, [urn])
+    assert a["error"] is None and "ai_revenue" in [d["name"] for d in a["definitions"]], a
+    assert "metric ai_revenue = sum(CASE WHEN \"status\" = 'paid' THEN \"amount\" END)" in calls[-1]
+
+
 def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
     """Input tables (writeback): a table people type into, created and changed on real Trino as the person
     writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,

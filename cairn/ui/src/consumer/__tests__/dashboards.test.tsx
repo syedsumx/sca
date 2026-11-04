@@ -106,3 +106,26 @@ it('a click on a bar selects its value, and a drillable tile drills into it', as
     fireEvent.click(await screen.findByRole('button', { name: 'Drill into EU' }));
     await waitFor(() => expect((calls.filter((c) => c.method === 'POST').slice(-1)[0].body as { drill?: unknown }).drill).toEqual({ 0: ['EU'] }));
 });
+
+it('builds a dashboard from a question, saves it and opens it, listing what was left out', async () => {
+    const calls: MockCall[] = [];
+    const tile = { metric: { metrics: ['revenue'], dimensions: ['region'] }, title: 'Revenue by region', width: 1,
+                   chart: { type: 'bar', x: 'region', y: ['revenue'] } };
+    const board = { id: 'd9', owner: 'urn:li:corpuser:ana', name: 'Sales overview', description: '', shared: false, updated_ms: 1,
+                    controls: [], tiles: [tile] };
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG, 'GET /sql/saved': [], 'GET /sql/workbooks': [], 'GET /sql/metrics': [],
+        'GET /sql/dashboards': [board],
+        'GET /sql/dashboards/d9/render': { ...board, tiles: [{ ...tile, result: TILE_RESULT([['EU', 100], ['US', 70]], ['region', 'revenue']) }] },
+        'POST /sql/builder': { title: 'Sales overview', tiles: [tile], controls: [], metrics: ['revenue'], tables: [],
+                               refused: [{ error: 'metric profit is not one of the metrics listed' }], dashboard: board },
+    }, calls);
+    render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><DashboardsPage /></CairnProvider></MemoryRouter>);
+    fireEvent.click(await screen.findByRole('button', { name: 'Build from a question' }));
+    fireEvent.change(await screen.findByLabelText('Question'), { target: { value: 'Revenue by region and profit' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Build' }));
+    await waitFor(() => expect(calls.some((c) => c.path === '/sql/builder')).toBe(true));
+    expect(calls.find((c) => c.path === '/sql/builder')!.body).toEqual({ question: 'Revenue by region and profit', save: true });
+    expect(await screen.findByText('metric profit is not one of the metrics listed')).toBeTruthy();
+    expect(await screen.findByRole('img', { name: /bar chart of revenue by region/ })).toBeTruthy();   // opened
+});

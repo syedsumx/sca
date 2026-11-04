@@ -99,6 +99,7 @@ import type {
     InputColumnType,
     Metric,
     MetricQuery,
+    BuiltDashboard,
     SchemaTable,
     SqlAlert,
     SqlRun,
@@ -1014,6 +1015,10 @@ export class ConsumerClient extends CairnClient {
 
     deleteWorkbook(id: string) {
         return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
+    }
+
+    buildDashboard(body: { question: string; datasets?: string[]; save?: boolean; name?: string }) {
+        return this.request<BuiltDashboard>('POST', '/sql/builder', body);
     }
 
     metrics(opts?: RequestOptions) {

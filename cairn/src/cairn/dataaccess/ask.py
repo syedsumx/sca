@@ -2,8 +2,9 @@
 
 1. **Tables**: the datasets the caller named, or the best matches for the question among the
    datasets they may see that a warehouse connection serves (all on one connection).
-2. **Context**: their columns, the approved metric and join definitions over them, and the SQL that
-   answered similar questions before (:mod:`cairn.context.layer`).
+2. **Context**: their columns, the approved metric and join definitions over them, the metrics layer's
+   metrics on those tables (:mod:`cairn.sqlworkspace.metrics`), and the SQL that answered similar questions
+   before (:mod:`cairn.context.layer`).
 3. **SQL**: one read-only SELECT from the model (:mod:`cairn.ai.text2sql`).
 4. **Run**: through :class:`DataAccessService`, so the caller's table permissions, purposes, column
    masking, row limit and audit apply exactly as for SQL they wrote themselves. When the warehouse
@@ -38,13 +39,15 @@ def _column(field_path: str) -> str:
 class AskService:
     def __init__(self, data: DataAccessService, graph, llm, context_layer=None,
                  search: Optional[Callable[[str, Callable[[str], bool], int], list[str]]] = None,
-                 model: Optional[str] = None, audit=None):
-        """``search(question, can_view, k)``: dataset urns ranked for the question."""
+                 model: Optional[str] = None, audit=None, metrics: Optional[Callable[[set[str]], list[dict]]] = None):
+        """``search(question, can_view, k)``: dataset urns ranked for the question; ``metrics(tables)``: the metrics
+        layer's definitions over those tables (``schema.table``), given to the model as approved metrics."""
         self.data = data
         self.graph = graph
         self.layer = context_layer
         self.search = search
         self.audit = audit
+        self.metrics = metrics
         self.sql = TextToSQL(llm, model)
 
     @property
@@ -93,11 +96,16 @@ class AskService:
             raise AskError("none of the matching datasets is in a warehouse Cairn can query", 404)
         return source, chosen
 
-    def _context(self, question: str, urns: set[str], can_view) -> tuple[list[dict], list[dict]]:
-        if self.layer is None:
-            return [], []
-        defs = [d for d in self.layer.definitions() if set(d["doc"].get("datasets") or []) & urns]
-        examples = [e for e in self.layer.answers(question, can_view, 5) if set(e["tables"]) & urns][:3]
+    def _context(self, question: str, urns: set[str], can_view, refs: Optional[set[str]] = None) -> tuple[list[dict], list[dict]]:
+        defs, examples = [], []
+        if self.layer is not None:
+            defs = [d for d in self.layer.definitions() if set(d["doc"].get("datasets") or []) & urns]
+            examples = [e for e in self.layer.answers(question, can_view, 5) if set(e["tables"]) & urns][:3]
+        if self.metrics is not None and refs:
+            try:
+                defs += self.metrics(refs)
+            except Exception:  # noqa: BLE001 - the metrics layer never stops a question being answered
+                pass
         return defs, examples
 
     # ---- asking ---------------------------------------------------------------------------
@@ -106,7 +114,7 @@ class AskService:
         if not self.configured:
             raise AskError("asking questions of data needs an LLM provider (not configured)", 503)
         source, tables = self._tables(question, urns or [], can_view)
-        defs, examples = self._context(question, set(tables), can_view)
+        defs, examples = self._context(question, set(tables), can_view, {ref for ref, _ in tables.values()})
         schema = {ref: cols for ref, cols in tables.values()}
         out: dict[str, Any] = {
             "question": question, "connection": source.connection, "dialect": source.dialect,

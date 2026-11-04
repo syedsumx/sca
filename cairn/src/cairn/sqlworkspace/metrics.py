@@ -30,7 +30,8 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, insert, select, update
 
 from cairn.common.db import metadata
-from cairn.sqlworkspace.workbooks import MAX_ROWS, WorkbookError, _table
+from cairn.sqlworkspace.formulas import Compiler, FormulaError, ident
+from cairn.sqlworkspace.workbooks import MAX_ROWS, WorkbookError, _table, filter_sql
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,62}$")
 GRAINS = ("day", "week", "month", "quarter", "year")
@@ -106,6 +107,32 @@ def element_for(defs: list[dict], query: dict) -> dict:
             "aggregates": [{"name": d["name"], "formula": d["measure"], "where": d["filters"]} for d in defs]}
 
 
+def _columns_in(formula: str) -> set[str]:
+    from cairn.sqlworkspace.formulas import Node, Parser
+
+    out: set[str] = set()
+
+    def walk(n: Node) -> None:
+        if n.kind == "col":
+            out.add(str(n.value))
+        for a in n.args:
+            walk(a)
+    walk(Parser(formula).parse())
+    return out
+
+
+def sql_expression(m: dict) -> str:
+    """The metric as one SQL aggregate over its table's columns (its filters inside it), for text-to-SQL. The
+    definition was checked against the table when it was saved."""
+    try:
+        cond = " AND ".join(filter_sql(f, lambda c: ident(str(c))) for f in m["filters"])
+        cols = _columns_in(m["measure"])
+        out = Compiler({c: (f"CASE WHEN {cond} THEN {ident(c)} END" if cond else ident(c)) for c in cols}).compile(m["measure"])
+    except (FormulaError, WorkbookError) as e:
+        raise MetricError(f"{m['name']}: {e}")
+    return out.sql.replace("count(*)", f"count_if({cond})") if cond else out.sql
+
+
 class Metrics:
     def __init__(self, engine, workbooks, audit=None, is_operator: Optional[Callable[[str], bool]] = None):
         """``workbooks``: compiles and runs elements as a person; ``is_operator(actor)``: may certify and change
@@ -123,6 +150,21 @@ class Metrics:
         if r is None:
             raise MetricError(f"no metric {name}", 404)
         return _row(r)
+
+    def for_tables(self, refs: set[str]) -> list[dict]:
+        """Ask-your-data definitions for the metrics over these tables (``schema.table``, any case)."""
+        want = {r.lower() for r in refs}
+        out = []
+        for m in self.list():
+            if m["table"].lower() in want or m["table"].lower().split(".", 1)[-1] in want:
+                try:
+                    out.append({"name": m["name"], "kind": "metric", "version": m["version"],
+                                "doc": {"expression": sql_expression(m), "table": m["table"],
+                                        "description": (m["description"] or m["label"]) +
+                                        (" (certified)" if m["certified"] else "")}})
+                except MetricError:
+                    continue
+        return out
 
     def save(self, actor: str, body: dict, name: Optional[str] = None) -> dict:
         if not isinstance(body, dict):
