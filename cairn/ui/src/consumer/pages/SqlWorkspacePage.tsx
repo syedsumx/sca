@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
+import { SqlEditor } from '../components/SqlEditor';
 import { Muted, Page, Surface } from '../components/tokens';
 
 const ago = (ms: number) => new Date(ms).toLocaleString();
@@ -131,15 +132,11 @@ export function SqlWorkspacePage() {
                                 <strong>{current.name}</strong> {current.shared && <Tag color="blue">shared</Tag>}
                             </div>
                         )}
-                        <Input.TextArea
-                            aria-label="SQL"
+                        <SqlEditor
                             value={sql}
-                            onChange={(e) => setSql(e.target.value)}
-                            onKeyDown={(e) => {
-                                if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') void run();
-                            }}
-                            autoSize={{ minRows: 6, maxRows: 20 }}
-                            style={{ fontFamily: 'ui-monospace, Menlo, monospace' }}
+                            onChange={setSql}
+                            tables={schema.data ?? []}
+                            onRun={() => void run()}
                             placeholder="SELECT region, count(*) AS orders FROM sales.orders GROUP BY region"
                         />
                         <Space style={{ marginTop: 8 }} wrap>
@@ -155,7 +152,7 @@ export function SqlWorkspacePage() {
                             <Button onClick={download} disabled={!result}>
                                 Download CSV
                             </Button>
-                            <Muted>Ctrl+Enter runs</Muted>
+                            <Muted>Ctrl+Enter runs · Ctrl+Space suggests</Muted>
                         </Space>
                     </Surface>
                     {error && <Alert style={{ marginTop: 12 }} type="error" message={error} showIcon />}

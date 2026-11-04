@@ -236,3 +236,51 @@ def test_workflows_git_folders_and_query_insight_in_the_browser(cairn):
             browser.close()
     assert not [e for e in errors if "ResizeObserver" not in e], errors
     print("\n" + json.dumps({"workflow_run": run["status"], "pushed_branch": branch}))
+
+
+def test_the_sql_editor_suggests_what_the_person_may_query(cairn):
+    """Autocomplete in the SQL editor, in Chromium against Cairn: tables and columns come from what the signed-in
+    person may query (a table denied to her is never suggested), and a query built from suggestions runs."""
+    from playwright.sync_api import sync_playwright
+
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+
+    s, url, _, _ = cairn
+    secret = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.secrets,PROD)"
+    s.graph.aspects[(secret, "schemaMetadata")] = {"fields": [{"fieldPath": "salary", "nativeDataType": "REAL"}]}
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="all", effect="allow", actions=["*"]),
+        Policy(id="no-ops", effect="deny", actions=["MANAGE_SYSTEM_OPERATIONS"]),
+        Policy(id="no-secrets", effect="deny", actions=["VIEW_ENTITY_PAGE"], target=Target(resource_urns=[secret]))]))
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
+            page.get_by_text("main.orders", exact=True).wait_for(timeout=30_000)
+            box = page.get_by_label("SQL", exact=True)
+            box.click()
+            page.keyboard.type("SELECT  FROM main.")
+            options = page.get_by_role("listbox", name="Suggestions").get_by_role("option")
+            options.first.wait_for()
+            assert [o.split("\n")[0] for o in options.all_inner_texts()] == ["orders"], options.all_inner_texts()
+            page.keyboard.press("Enter")
+            assert box.input_value() == "SELECT  FROM main.orders"
+            # Back to the select list: the columns of the table read.
+            assert box.evaluate("e => e.getBoundingClientRect().width") > 600      # the editor fills its panel
+            page.keyboard.press("Control+Home")
+            for _ in range(7):
+                page.keyboard.press("ArrowRight")
+            page.keyboard.press("Control+Space")
+            options.first.wait_for()
+            assert [o.split("\n")[0] for o in options.all_inner_texts()] == ["amount", "id", "region"]
+            page.keyboard.type("reg")
+            page.wait_for_function("() => (document.querySelector('[role=option]') || {}).textContent?.startsWith('region')")
+            assert any(o.startswith("regexp_like") for o in options.all_inner_texts())   # functions after the column
+            page.keyboard.press("Tab")
+            assert box.input_value() == "SELECT region FROM main.orders"
+            page.keyboard.press("Control+Enter")
+            page.get_by_text("3 row(s)", exact=False).wait_for(timeout=30_000)
+            assert page.get_by_role("cell", name="EU").count() == 2
+            assert errors == [], errors
+        finally:
+            browser.close()

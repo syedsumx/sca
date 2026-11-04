@@ -59,3 +59,47 @@ it('browses, runs as the caller, keeps history, saves and shares', async () => {
 it('writes CSV with quoting', () => {
     expect(toCsv(['a', 'b'], [['x,y', 'he said "hi"'], [null, 2]])).toBe('a,b\r\n"x,y","he said ""hi"""\r\n,2');
 });
+
+it('suggests the tables and columns the person may query as they type, and takes one with the keyboard', async () => {
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /data/sources': [{ connection: 'trino', platform: 'trino', database: null }],
+        'GET /sql/schema': [
+            { urn: 'u1', name: 'lake.sales.orders', columns: [{ name: 'region', type: 'varchar' }, { name: 'amount', type: 'double' }] },
+            { urn: 'u2', name: 'lake.sales.customers', columns: [{ name: 'email', type: 'varchar' }] },
+        ],
+        'GET /sql/history': [],
+        'GET /sql/saved': [],
+    });
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <SqlWorkspacePage />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    expect(await screen.findByText('lake.sales.orders')).toBeTruthy();
+    const box = screen.getByLabelText('SQL') as HTMLTextAreaElement;
+    const type = (value: string) => {
+        box.setSelectionRange(value.length, value.length);
+        fireEvent.change(box, { target: { value, selectionStart: value.length } });
+    };
+    type('SELECT * FROM lake.sales.o');
+    const list = await screen.findByRole('listbox', { name: 'Suggestions' });
+    expect(Array.from(list.querySelectorAll('[role=option]')).map((o) => o.firstChild?.textContent)).toEqual(['orders', 'customers']); // prefix first, then substring
+    fireEvent.keyDown(box, { key: 'Enter' });
+    expect(box.value).toBe('SELECT * FROM lake.sales.orders');
+    expect(screen.queryByRole('listbox')).toBeNull();
+    // Columns of the table read, after the select list is reopened with Ctrl+Space.
+    fireEvent.change(box, { target: { value: 'SELECT  FROM lake.sales.orders' } });
+    box.setSelectionRange(7, 7);
+    fireEvent.keyDown(box, { key: ' ', ctrlKey: true });
+    const cols = await screen.findByRole('listbox', { name: 'Suggestions' });
+    expect(Array.from(cols.querySelectorAll('[role=option]')).map((o) => o.firstChild?.textContent)).toEqual(['amount', 'region']);
+    fireEvent.keyDown(box, { key: 'ArrowDown' });
+    fireEvent.keyDown(box, { key: 'Tab' });
+    expect(box.value).toBe('SELECT region FROM lake.sales.orders');
+    fireEvent.keyDown(box, { key: ' ', ctrlKey: true });
+    fireEvent.keyDown(box, { key: 'Escape' });
+    expect(screen.queryByRole('listbox')).toBeNull();
+});
