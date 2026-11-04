@@ -77,6 +77,19 @@ Ordered by what an enterprise needs first to retire a Snowflake or Databricks co
 | L31 | **BI: spreadsheet workbooks.** Explore a table like a spreadsheet: formulas, filters, grouping, pivots, compiled to SQL and run as the viewer | An analyst builds revenue by region and quarter without SQL; a colleague with masked columns sees them masked | ✅ the formula language compiled safely to Trino SQL, workbook elements with calculated columns, row and group filters, aggregates and pivots, saved and shared workbooks, the Workbooks page (`tests/test_workbooks.py`, `tests/test_trino_e2e.py`, `tests/test_sql_ops_ui_e2e.py`) |
 | L32 | **BI: input tables (writeback).** Tables people type into, written on Trino as the person and read back governed | Finance types quarterly targets next to actuals; a workbook compares them at once; a stale edit never overwrites a colleague's | ✅ create, add, edit and delete rows as the person (Trino asks Cairn for each statement), typed literals, optimistic concurrency on `_updated_at`, catalog registration, audit, the Input tables page (`tests/test_trino_e2e.py`, `tests/test_input_tables.py`, `inputTables.test.tsx`) |
 | L33 | **BI: interactive dashboards.** Shared filter controls, cross-filtering, drill-down, workbook tiles and more chart types | A sales lead picks EU and a date range, clicks a region to filter the orders, drills from region to country; each viewer still sees only their rows | ✅ values, range, date range and text controls (choices from the data as the viewer sees it), cross-filter on click, drill paths on workbook tiles, stacked bar, area, scatter, pie and number charts, all run as the viewer (`tests/test_sql_workspace.py`, `tests/test_trino_e2e.py`, `dashboards.test.tsx`, `tests/test_sql_ops_ui_e2e.py`) |
+| L34 | **BI: metrics layer.** Named metrics (measure, dimensions, filters, time grain) defined once and used in workbooks, dashboards and Ask-your-data | "Revenue" means the same in every tile and answer; changing its definition changes them all | ⬜ |
+| L35 | **BI: AI builder.** The assistant builds workbooks and dashboards from a question, using metrics and governed columns | "Revenue by region this quarter, with a filter on country" becomes a saved dashboard the person may see | ⬜ |
+| L36 | **BI: app actions.** Forms and buttons on dashboards that write to input tables, call an API or run a workflow, as the person | An approver clicks Approve on a row; the input table changes and a workflow runs, audited | ⬜ |
+| L37 | **BI: scheduled exports and a result cache.** Dashboards and workbooks sent as PDF/CSV on a schedule; results cached per viewer's policy and invalidated when tables change | A Monday email with each recipient's own view; a second viewer with the same policy gets the cached result | ⬜ |
+| L38 | **BI assets in the catalog.** Workbooks, dashboards and input tables as catalog entities with lineage from the tables they read | Dropping a column shows which dashboards break, before it is dropped | ⬜ |
+| L39 | **BI version history.** Every save of a workbook or dashboard kept; compare and restore | A broken edit is rolled back to yesterday's version | ⬜ |
+| L40 | **Embedded dashboards.** Dashboards embedded with signed, origin-bound tokens, running as the embedding user | A portal shows a dashboard with that user's row filters | ⬜ |
+| L41 | **BI as code.** Workbooks, dashboards and input tables in `cairn bundle` and the Terraform provider | A dashboard deployed from git to staging and production | ⬜ |
+| L42 | **Input-table approvals.** Optional review before changes to an input table land | A change to targets waits for a reviewer; approved, it is written as its author | ⬜ |
+| L43 | **Partition-aware volume monitors.** Volume and freshness per partition | A missing day in a partitioned table alerts even when the table total looks normal | ⬜ |
+| L44 | **Remote agent hardening.** Key rotation by signed re-enrolment and an mTLS option between agent and gateway | An agent rotates its key without downtime; a gateway with mTLS refuses an agent without a client certificate | ⬜ |
+| L45 | **Python functions.** Sandboxed Python UDFs callable from SQL, governed like SQL functions | A Python function runs on Trino rows without network or filesystem access | ⬜ |
+| L46 | **Chaos tests.** Cairn Core, the PDP, the gateway and the catalog stopped under load in CI | Each outage fails closed and recovers without lost writes | ⬜ |
 
 ## History: the metadata platform (M0–M6)
 
@@ -105,8 +118,8 @@ certification structured properties, the `Certified` tag and the `Classification
 | 1.4 | Projection to native `assertionInfo` / `assertionRunEvent` / `incidentInfo` | ✅ verified live via Cairn Core GraphQL (e2e) |
 | 1.5 | Leader-elected scheduler (pg advisory lock) with hash partitioning | ✅ leadership acquired on Postgres in the live stack |
 | 1.6 | REST API + React dashboard, monitor editor, evaluation chart, dataset health badge | ✅ |
-| 1.7 | Next: smart-monitor auto-provisioning (create volume/freshness monitors for every certified or top-usage dataset) | ⬜ |
-| 1.8 | Next: per-column profiling collector (null/distinct for all columns in one scan) and partition-aware volume | ⬜ |
+| 1.7 | Smart-monitor auto-provisioning (create volume/freshness monitors for every certified or top-usage dataset) | ✅ auto-monitor rules (`quality/scheduler.py`, `tests/test_auto_monitors.py`) |
+| 1.8 | Per-column profiling collector (null/distinct for all columns in one scan) and partition-aware volume | 🟡 per-column profiling (`quality/profiler.py`); ⬜ partition-aware volume (L43) |
 | 1.9 | Next: optional Kafka-sink of evaluations for real-time alerting fan-out (PagerDuty/Opsgenie native) | ⬜ |
 
 **DoD:** a volume monitor on a demo table pages within one interval when rows drop 90%. It auto-resolves
@@ -124,7 +137,7 @@ on recovery, and both events are visible on the dataset's Quality and Incidents 
 | 2.6 | PII classifier (names + validated value patterns) and lineage propagation action with attribution, loop safety, revert | ✅ propagation verified live (Kafka → actions → Cairn Core) |
 | 2.7 | Certification/approval workflows: quorum, SoD, veto, entry checks, expiry, DQ auto-revoke, projection (structured property + tag) | ✅ |
 | 2.8 | UI: access simulator, policy editor, certification inbox | ✅ |
-| 2.9 | Next: MCL consumer that calls `AttributeResolver.invalidate` (today: TTL 60 s) | ⬜ |
+| 2.9 | MCL consumer that calls `AttributeResolver.invalidate` (was: TTL 60 s) | ✅ `governance/invalidation.py` (`tests/test_mcl_invalidation.py`) |
 | 2.10 | Next: enforce `mask_columns` obligations in Cairn Core GraphQL responses (field-level redaction resolver) and in the Cairn SQL proxy | ⬜ |
 | 2.11 | Next: policy-as-code CI (`cairn policies validate` + simulation test fixtures in Git) and SCIM/IdP attribute sync | ⬜ |
 
@@ -142,9 +155,9 @@ on downstream columns within one MCL round-trip.
 | 3.4 | Agent: enrolment, heartbeat, poll loop with backoff, local secret resolution (env/dir/Vault/AWS SM), encrypted `cairn-encrypted` sink | ✅ real Postgres ingestion through an isolated network verified live |
 | 3.5 | Helm chart `cairn-remote-agent` (restricted PSS, read-only rootfs, egress-only NetworkPolicy) | ✅ lint/kubeconform |
 | 3.6 | UI: fleet, pools, enrolment-token flow, runs | ✅ |
-| 3.7 | Next: cancellation (`dataHubExecutionRequestSignal` → heartbeat `cancel_task_ids` → pipeline interrupt) | ⬜ gateway side done |
-| 3.8 | Next: encrypted live log streaming from the pipeline logger, key rotation via signed re-enrolment, mTLS option | ⬜ |
-| 3.9 | Next: on-disk spool for batches during gateway outages | ⬜ |
+| 3.7 | Cancellation (`dataHubExecutionRequestSignal` → heartbeat `cancel_task_ids` → pipeline interrupt) | ✅ queued and running tasks (`tests/test_agent_ops.py`) |
+| 3.8 | Encrypted live log streaming from the pipeline logger, key rotation via signed re-enrolment, mTLS option | 🟡 run logs streamed, scrubbed and paginated (`tests/test_agent_ops.py`); ⬜ key rotation by re-enrolment and mTLS (L44) |
+| 3.9 | On-disk spool for batches during gateway outages | ✅ in order, bounded, lease hand-back (`agent/sink.py`, `tests/test_agent_ops.py`) |
 
 **DoD:** a Postgres source reachable *only* from the `vpc-finance` network is ingested through the
 agent. The recipe in Cairn Core contains only `${PG_PASSWORD}`, and the gateway rejects a forged
@@ -174,7 +187,7 @@ writes nothing until it is approved.
 |---|---|---|
 | 5.1 | Build and scan images (`docker/Dockerfile`, `agent.Dockerfile`, plugin image); SBOM; cosign signatures | ✅ build (`deploy/build-images.sh`), Trivy gate, SBOMs, cosign signing and registry push from `main` in CI |
 | 5.2 | End-to-end smoke tests against the compose stack (Playwright UI + API), chaos tests (Cairn Core/PDP/gateway outages) | ✅ e2e suite (API, Playwright UI, SSO, SCIM, edge) in CI on a fresh stack; ⬜ chaos tests |
-| 5.3 | Load test PDP (target p99 < 5 ms cached, < 25 ms uncached at 2k rps) and gateway (100 agents, 1 GB metadata/run) | ⬜ |
+| 5.3 | Load test PDP (target p99 < 5 ms cached, < 25 ms uncached at 2k rps) and gateway (100 agents, 1 GB metadata/run) | 🟡 `tests/load/loadtest.py` against published limits, cached decisions and 1k-table jobs in `tests/test_scale_decisions.py`; ⬜ 2k rps and gateway volume not run in CI |
 | 5.4 | Alembic migrations for the `cairn` schema; v0.1 databases (`create_all`) are adopted at the baseline | ✅ SQLite + Postgres tests, live upgrade of a v0.1 database, `cairn db check` in CI |
 | 5.5 | Threat model review + external pentest of the gateway; key management via KMS/HSM for the gateway identity | ✅ threat model (`docs/site/agent-security.md`) with a negative test per attack, gateway hardening (vocabulary, `editable*`, platform proof, body cap, trusted proxies); ⬜ external pentest, KMS/HSM |
 | 5.6 | Upgrade playbook: pin-and-test matrix against Cairn Core minor releases (aspect shapes, GraphQL fields) | ⬜ |
