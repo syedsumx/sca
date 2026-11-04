@@ -101,3 +101,35 @@ def test_elements_refuse_what_cannot_be_right():
     # A filter value is a literal, never SQL.
     q = compile_element({**base, "filters": [{"column": "Region", "op": "=", "value": "EU' OR 1=1 --"}]}, SRC)
     assert "\"Region\" = 'EU'' OR 1=1 --'" in q
+
+
+def test_an_aggregate_with_where_counts_only_those_rows():
+    el = {"source": {"table": "lake.sales.orders"}, "group_by": ["Region"],
+          "aggregates": [{"name": "Paid", "formula": "Sum([Amount])", "where": [{"column": "Discount", "op": "=", "value": 0}]},
+                         {"name": "N", "formula": "Count()", "where": [{"column": "Region", "op": "in", "values": ["EU"]}]},
+                         {"name": "All", "formula": "Sum([Amount])"}]}
+    q = compile_element(el, SRC)
+    assert 'sum(CASE WHEN "Discount" = 0 THEN "Amount" END) AS "Paid"' in q
+    assert "count_if(\"Region\" IN ('EU')) AS \"N\"" in q and 'sum("Amount") AS "All"' in q
+    with pytest.raises(WorkbookError, match="no column Nope"):
+        nope = [{"column": "Nope", "op": "=", "value": 1}]
+        compile_element({**el, "aggregates": [{"name": "X", "formula": "Count()", "where": nope}]}, SRC)
+
+
+def test_a_metric_query_is_one_workbook_element():
+    from cairn.sqlworkspace.metrics import MetricError, element_for
+
+    rev = {"name": "revenue", "connection": "c", "table": "sales.orders", "measure": "Sum([Amount])",
+           "filters": [{"column": "Discount", "op": "=", "value": 0}], "time_column": "Ordered at", "dimensions": ["Region"]}
+    n = {**rev, "name": "orders", "measure": "Count()", "filters": []}
+    el = element_for([rev, n], {"dimensions": ["Region"], "grain": "month"})
+    assert el["group_by"] == ["Region", "period"] and el["sort"] == [{"column": "period"}]
+    q = compile_element(el, SRC)
+    assert "date_trunc('month', \"Ordered at\")" in q and 'count(*) AS "orders"' in q
+    assert 'sum(CASE WHEN "Discount" = 0 THEN "Amount" END) AS "revenue"' in q
+    for defs, query, msg in [([rev], {"dimensions": ["id"]}, "not broken down by id"),
+                             ([rev, {**n, "table": "sales.other"}], {}, "same table"),
+                             ([rev, {**n, "time_column": None}], {"grain": "month"}, "same time column"),
+                             ([rev], {"grain": "hour"}, "grain"), ([], {}, "at least one")]:
+        with pytest.raises(MetricError, match=msg):
+            element_for(defs, query)

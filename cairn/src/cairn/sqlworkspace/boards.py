@@ -118,6 +118,7 @@ class Boards:
         """``notify(type, title, body, recipients, payload)`` tells people about an alert; ``workbooks``
         (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles."""
         self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
+        self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -163,6 +164,18 @@ class Boards:
         out: dict[str, Any] = {"width": 2 if t.get("width") == 2 else 1}
         if t.get("chart") is not None:
             out["chart"] = json.loads(_chart(t.get("chart")))
+        if t.get("metric") is not None:
+            if self.metrics is None:
+                raise WorkspaceError("metric tiles are not available here")
+            from cairn.sqlworkspace.metrics import MetricError
+
+            try:
+                self.metrics.compile(actor, t["metric"])               # metrics that exist, a query that compiles
+            except (MetricError, WorkbookError) as e:
+                raise WorkspaceError(f"tile: {e}", e.status)
+            q = t["metric"]
+            return {**out, "metric": q,
+                    "title": str(t.get("title") or ", ".join(q.get("metrics") or []))[:256]}
         if t.get("element") is not None:
             if self.wb is None:
                 raise WorkspaceError("workbook tiles are not available here")
@@ -242,11 +255,15 @@ class Boards:
         for i, t in enumerate(board["tiles"]):
             filters = [f for f, only in wanted if only is None or i in only]
             try:
-                if t.get("element") is not None:
+                if t.get("metric") is not None:
+                    tiles.append(self._run_metric(actor, t, filters))
+                elif t.get("element") is not None:
                     tiles.append(self._run_element(actor, t, filters, drill.get(str(i)) or []))
                 else:
                     tiles.append(self._run_query(actor, t, filters))
-            except (WorkspaceError, WorkbookError) as e:
+            except Exception as e:  # noqa: BLE001 - one tile's error shows in that tile
+                if not hasattr(e, "status"):
+                    raise
                 tiles.append({**t, "error": str(e), "status": e.status})
         return {**board, "tiles": tiles}
 
@@ -274,6 +291,19 @@ class Boards:
             chart = {**chart, "x": levels[len(path)]}
         return {**t, "chart": chart, "result": out, "sql": sql, "applied": applied,
                 "level": {"path": path, "column": levels[len(path)] if levels else None}}
+
+    def _run_metric(self, actor: str, t: dict, filters: list[dict]) -> dict:
+        """A metric tile: the metric query, with the controls and clicks on the metric's table's columns added."""
+        q = dict(t["metric"])
+        defs = [self.metrics.get(n) for n in q.get("metrics") or []]
+        have = {c.lower() for c in self.wb.columns_of(actor, defs[0]["connection"], defs[0]["table"])} if defs else set()
+        applied = [f for f in filters if str(f["column"]).lower() in have]
+        q["filters"] = list(q.get("filters") or []) + applied
+        out = self.metrics.query(actor, q)
+        dims = q.get("dimensions") or []
+        default = ({"type": "line", "x": "period", "y": q["metrics"]} if q.get("grain") else
+                   {"type": "bar", "x": dims[0], "y": q["metrics"]} if dims else {"type": "number", "x": "", "y": q["metrics"][:1]})
+        return {**t, "chart": t.get("chart") or default, "result": out, "applied": applied}
 
     def _run_query(self, actor: str, t: dict, filters: list[dict]) -> dict:
         q = self.ws.get(actor, t["query"])

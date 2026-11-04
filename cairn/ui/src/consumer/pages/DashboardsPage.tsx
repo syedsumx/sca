@@ -3,7 +3,7 @@ import React, { useEffect, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
-import type { ChartSpec, Dashboard, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
+import type { ChartSpec, Dashboard, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -139,10 +139,12 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
     const [tick, setTick] = useState(0);
     const list = useDheQuery<Dashboard[]>(`/sql/dashboards#${tick}`, (c, signal) => c.dashboards({ signal }));
     const books = useDheQuery<Workbook[]>('/sql/workbooks', (c, signal) => c.workbooks({ signal }));
+    const metricList = useDheQuery<Metric[]>('/sql/metrics', (c, signal) => c.metrics({ signal }));
     const [open, setOpen] = useState<string | null>(null);
     const [editing, setEditing] = useState(false);
     const [form, setForm] = useState({ name: '', shared: false, queries: [] as string[], workbooks: [] as string[],
-        chart: 'bar' as ChartSpec['type'], drill: [] as string[], controls: [] as ControlDraft[] });
+        chart: 'bar' as ChartSpec['type'], drill: [] as string[], controls: [] as ControlDraft[],
+        metrics: [] as string[], metricDims: [] as string[], metricGrain: undefined as MetricQuery['grain'] });
 
     const elementTiles = (): DashboardTile[] => (books.data ?? []).filter((w) => form.workbooks.includes(w.id)).flatMap((w) =>
         w.spec.elements.map((el) => {
@@ -158,7 +160,9 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
         try {
             const src = firstTable();
             const d = await client.saveDashboard({ name: form.name, shared: form.shared,
-                tiles: [...form.queries.map((q) => ({ query: q, title: '', width: 1 as const })), ...elementTiles()],
+                tiles: [...form.queries.map((q) => ({ query: q, title: '', width: 1 as const })), ...elementTiles(),
+                    ...(form.metrics.length ? [{ metric: { metrics: form.metrics, dimensions: form.metricDims, grain: form.metricGrain },
+                        title: '', width: 2 as const }] : [])],
                 controls: form.controls.filter((c) => c.column.trim()).map((c, k) => ({
                     id: `c${k + 1}`, label: c.label || c.column, column: c.column.trim(), kind: c.kind,
                     source: c.kind === 'values' && src ? { connection: src.connection, table: src.spec.elements[0].source.table } : null })) });
@@ -171,14 +175,14 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
     };
     const setControl = (k: number, patch: Partial<ControlDraft>) =>
         setForm({ ...form, controls: form.controls.map((c, j) => (j === k ? { ...c, ...patch } : c)) });
-    const canCreate = !!form.name.trim() && (form.queries.length > 0 || form.workbooks.length > 0);
+    const canCreate = !!form.name.trim() && (form.queries.length > 0 || form.workbooks.length > 0 || form.metrics.length > 0);
 
     return (
         <>
             <Space style={{ marginBottom: 12 }} wrap>
                 <Select aria-label="Dashboard" placeholder="Open a dashboard" style={{ minWidth: 260 }} value={open ?? undefined}
                     onChange={setOpen} options={(list.data ?? []).map((d) => ({ value: d.id, label: d.shared ? `${d.name} (shared)` : d.name }))} />
-                <Button onClick={() => setEditing(true)} disabled={!saved.length && !(books.data ?? []).length}>New dashboard</Button>
+                <Button onClick={() => setEditing(true)} disabled={!saved.length && !(books.data ?? []).length && !(metricList.data ?? []).length}>New dashboard</Button>
                 {!saved.length && !(books.data ?? []).length && <Muted>Save queries in SQL, or workbooks, first; a dashboard shows them.</Muted>}
             </Space>
             {open ? <Board key={`${open}-${tick}`} id={open} /> : <Empty description="Pick or create a dashboard" />}
@@ -198,6 +202,18 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
                                 options={CHART_TYPES.map((t) => ({ value: t, label: t.replace('_', ' ') }))} />
                             <Select aria-label="Drill path" mode="tags" placeholder="Drill path: region, country, city" style={{ minWidth: 300 }}
                                 value={form.drill} onChange={(drill) => setForm({ ...form, drill })} />
+                        </Space>
+                    )}
+                    <Select aria-label="Dashboard metrics" mode="multiple" placeholder="Metrics to show (one tile)" style={{ width: '100%' }}
+                        value={form.metrics} onChange={(metrics) => setForm({ ...form, metrics })}
+                        options={(metricList.data ?? []).map((m) => ({ value: m.name, label: m.certified ? `${m.label} (certified)` : m.label }))} />
+                    {form.metrics.length > 0 && (
+                        <Space wrap>
+                            <Select aria-label="Metric breakdown" mode="tags" placeholder="Break down by" style={{ minWidth: 240 }}
+                                value={form.metricDims} onChange={(metricDims) => setForm({ ...form, metricDims })} />
+                            <Select aria-label="Metric grain" allowClear placeholder="Over time" style={{ width: 140 }} value={form.metricGrain}
+                                onChange={(metricGrain) => setForm({ ...form, metricGrain })}
+                                options={['day', 'week', 'month', 'quarter', 'year'].map((g) => ({ value: g, label: g }))} />
                         </Space>
                     )}
                     <strong>Controls</strong>

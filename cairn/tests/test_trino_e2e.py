@@ -899,6 +899,76 @@ def test_interactive_dashboards_filter_cross_filter_and_drill_as_the_viewer(trin
     assert [x[0] for x in t[0]["result"]["rows"]] == ["EU"] and {x[1] for x in t[1]["result"]["rows"]} == {"EU"}
 
 
+def test_metrics_are_defined_once_and_mean_the_same_in_queries_and_dashboards(trino, cairn):
+    """The metrics layer on real Trino: revenue (paid orders only) and orders, defined once, queried by region and
+    month as each viewer (Bob sees only EU), shown on a dashboard tile that follows a change of definition."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.m_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount", "ordered_at")]}
+    trino("CREATE TABLE lake.sales.m_orders AS SELECT id, region, status, amount, CAST(d AS date) AS ordered_at FROM (VALUES "
+          "(1, 'EU', 'paid', 100e0, '2026-01-05'), (2, 'EU', 'refunded', 40e0, '2026-01-20'), (3, 'US', 'paid', 70e0, '2026-01-09'), "
+          "(4, 'EU', 'paid', 30e0, '2026-02-02'), (5, 'US', 'paid', 20e0, '2026-02-14')) AS t(id, region, status, amount, d)")
+    admin, ana, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "ana", "bob"))
+    base = f"{url}/sql/metrics"
+    revenue = {"name": "revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.m_orders",
+               "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+               "time_column": "ordered_at", "dimensions": ["region", "status"]}
+    r = httpx.post(base, json=revenue, headers=ana, timeout=60)
+    assert r.status_code == 201 and r.json()["version"] == 1 and not r.json()["certified"], r.text
+    r = httpx.post(base, json={**revenue, "name": "orders", "label": "Orders", "measure": "Count()", "filters": []},
+                   headers=ana, timeout=60)
+    assert r.status_code == 201, r.text
+    # A definition that does not compile is refused when saved.
+    bad = httpx.post(base, json={**revenue, "name": "broken", "measure": "[amount]"}, headers=ana, timeout=60)
+    assert bad.status_code == 400 and "aggregate" in bad.text
+    assert httpx.post(base, json={**revenue, "name": "nope", "time_column": "shipped_at"}, headers=ana,
+                      timeout=60).status_code == 400
+
+    def query(h, q):
+        r = httpx.post(f"{base}/query", json=q, headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        return [dict(zip(out["columns"], x)) for x in out["rows"]]
+
+    rows = query(admin, {"metrics": ["revenue", "orders"], "dimensions": ["region"], "grain": "month"})
+    got = {(x["region"], str(x["period"])[:7]): (x["revenue"], x["orders"]) for x in rows}
+    assert got == {("EU", "2026-01"): (100.0, 2), ("US", "2026-01"): (70.0, 1),
+                   ("EU", "2026-02"): (30.0, 1), ("US", "2026-02"): (20.0, 1)}, got
+    # Bob's row filter applies under the metric: the same definition, only his rows.
+    assert {x["region"] for x in query(bob, {"metrics": ["revenue"], "dimensions": ["region"]})} == {"EU"}
+    r = httpx.post(f"{base}/query", json={"metrics": ["revenue"], "dimensions": ["id"]}, headers=admin, timeout=60)
+    assert r.status_code == 400 and "not broken down by id" in r.text
+    # Only an operator certifies; only the owner (or an operator) changes it.
+    assert httpx.post(f"{base}/revenue/certify", json={}, headers=ana, timeout=30).status_code == 403
+    assert httpx.post(f"{base}/revenue/certify", json={}, headers=admin, timeout=30).json()["certified"] is True
+    assert httpx.put(f"{base}/revenue", json=revenue, headers=bob, timeout=60).status_code == 403
+
+    # A dashboard tile of the metric, filtered by a control on the metric's table.
+    r = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Revenue KPIs", "shared": True,
+        "tiles": [{"metric": {"metrics": ["revenue"], "dimensions": ["region"]}, "title": "Revenue by region"}],
+        "controls": [{"id": "status", "column": "status", "kind": "text"}]})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    tile = lambda: httpx.post(f"{url}/sql/dashboards/{did}/render", json={}, headers=admin, timeout=120).json()["tiles"][0]  # noqa: E731
+    first = tile()
+    assert first["chart"] == {"type": "bar", "x": "region", "y": ["revenue"]}
+    assert sorted(map(tuple, first["result"]["rows"])) == [("EU", 130.0), ("US", 90.0)], first
+    # The owner changes the definition (refunds count too): the tile follows, and certification is withdrawn.
+    changed = httpx.put(f"{base}/revenue", json={**revenue, "filters": []}, headers=ana, timeout=60).json()
+    assert changed["version"] == 2 and changed["certified"] is False
+    assert sorted(map(tuple, tile()["result"]["rows"])) == [("EU", 170.0), ("US", 90.0)]
+    actions = [e["action"] for e in s.audit.entries("sql", limit=100) if e.get("subject") == "metric:revenue"]
+    assert {"metric.saved", "metric.certified"} <= set(actions), actions
+
+
 def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
     """Input tables (writeback): a table people type into, created and changed on real Trino as the person
     writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,

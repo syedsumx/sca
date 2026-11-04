@@ -6,7 +6,8 @@ A workbook element starts from a table the person may query and adds, without wr
   :mod:`cairn.sqlworkspace.formulas`); they may use one another;
 * **filters**: ``{"column": "Region", "op": "in", "values": ["EU", "US"]}`` (``= != > >= < <= in not_in
   contains starts_with between is_null not_null``), on rows, or with ``"on": "groups"`` on the grouped values;
-* **grouping**: ``group_by`` columns and ``aggregates`` (``{"name": "Revenue", "formula": "Sum([Net])"}``);
+* **grouping**: ``group_by`` columns and ``aggregates`` (``{"name": "Revenue", "formula": "Sum([Net])"}``, optionally
+  with ``"where": [filters]`` for an aggregate over only those rows, as metrics use);
 * **a pivot**: ``{"column": "Quarter", "values": [...], "aggregate": "Sum([Net])"}`` (the values found in the
   data, up to 24, when none are given): one column per value;
 * **sort** and **limit** (at most 10,000 rows).
@@ -168,8 +169,19 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
     out_cols, agg_exprs = [], {}
     for a in aggregates:
         name = _name((a or {}).get("name"), "aggregates.name")
+        where = a.get("where") or []
+        if not isinstance(where, list) or len(where) > 20:
+            raise WorkbookError(f"{name}: where is a list of filters")
+        cond = " AND ".join(filter_sql(f, lambda col: ident(next((k for k in cols if k.lower() == str(col).lower()), None)
+                                                            or _missing(col))) for f in where)
         try:
-            c = inner.compile(str(a.get("formula") or ""))
+            if cond:
+                # A filtered aggregate: every column it reads is null outside the filter (and Count() counts the filter).
+                only = Compiler({k: f"CASE WHEN {cond} THEN {ident(k)} END" for k in cols})
+                c = only.compile(str(a.get("formula") or ""))
+                c = type(c)(c.sql.replace("count(*)", f"count_if({cond})"), c.columns, c.aggregate)
+            else:
+                c = inner.compile(str(a.get("formula") or ""))
         except FormulaError as e:
             raise WorkbookError(f"{name}: {e}")
         if not c.aggregate:

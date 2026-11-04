@@ -50,6 +50,7 @@ export const NAV: { to: string; label: MessageKey; badge?: boolean; feature?: st
     { to: '/sql', label: 'nav.sql' },
     { to: '/sql/workbooks', label: 'nav.workbooks' },
     { to: '/sql/input-tables', label: 'nav.inputTables' },
+    { to: '/sql/metrics', label: 'nav.metrics' },
     { to: '/sql/workflows', label: 'nav.workflows' },
     { to: '/sql/git', label: 'nav.gitFolders' },
     { to: '/queries', label: 'nav.queries' },

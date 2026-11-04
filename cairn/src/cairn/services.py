@@ -132,6 +132,7 @@ class Services:
     status_page: Optional[Any] = None
     workbooks: Optional[Any] = None
     input_tables: Optional[Any] = None
+    metrics: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -861,6 +862,12 @@ def _build_active_metadata(s: Services) -> None:
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql/workflows"))
         s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks)
+        # The metrics layer: measures defined once, queried as the person (through workbook elements).
+        from cairn.sqlworkspace.metrics import Metrics
+
+        s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
+            Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
+        s.sql_boards.metrics = s.metrics
         # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
         from cairn.sqlworkspace.procedures import Procedures
         from cairn.sqlworkspace.workspace import WorkspaceError

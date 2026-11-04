@@ -760,6 +760,7 @@ export interface Dashboard {
 /** A dashboard tile: a saved query, or a workbook element (which may drill down through ``drill``). */
 export interface DashboardTile {
     query?: string;
+    metric?: MetricQuery;
     element?: WorkbookElement;
     connection?: string;
     drill?: string[];
@@ -1754,4 +1755,31 @@ export interface InputTable {
     description: string;
     created_by: string;
     created_ms: number;
+}
+
+/** A metric: a measure over one table, defined once (GET /sql/metrics). */
+export interface Metric {
+    id: string;
+    name: string;
+    label: string;
+    description: string;
+    connection: string;
+    table: string;
+    measure: string;
+    filters: WorkbookFilter[];
+    time_column: string | null;
+    dimensions: string[];
+    owner: string;
+    certified: boolean;
+    version: number;
+    updated_ms: number;
+}
+
+/** A metric query: metrics broken down by dimensions and a time grain, run as the viewer. */
+export interface MetricQuery {
+    metrics: string[];
+    dimensions?: string[];
+    grain?: 'day' | 'week' | 'month' | 'quarter' | 'year';
+    filters?: WorkbookFilter[];
+    limit?: number;
 }

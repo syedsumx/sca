@@ -97,6 +97,8 @@ import type {
     WorkbookElement,
     InputTable,
     InputColumnType,
+    Metric,
+    MetricQuery,
     SchemaTable,
     SqlAlert,
     SqlRun,
@@ -1012,6 +1014,29 @@ export class ConsumerClient extends CairnClient {
 
     deleteWorkbook(id: string) {
         return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
+    }
+
+    metrics(opts?: RequestOptions) {
+        return this.request<Metric[]>('GET', '/sql/metrics', undefined, opts);
+    }
+
+    saveMetric(body: Partial<Metric>, name?: string) {
+        return name
+            ? this.request<Metric>('PUT', `/sql/metrics/${enc(name)}`, body)
+            : this.request<Metric>('POST', '/sql/metrics', body);
+    }
+
+    certifyMetric(name: string, certified: boolean) {
+        return this.request<Metric>('POST', `/sql/metrics/${enc(name)}/certify`, { certified });
+    }
+
+    deleteMetric(name: string) {
+        return this.request<void>('DELETE', `/sql/metrics/${enc(name)}`);
+    }
+
+    queryMetrics(query: MetricQuery) {
+        return this.request<DataResult & { metrics: Pick<Metric, 'name' | 'label' | 'version' | 'certified'>[] }>(
+            'POST', '/sql/metrics/query', query);
     }
 
     inputTables(opts?: RequestOptions) {
