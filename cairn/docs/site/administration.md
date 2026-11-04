@@ -702,6 +702,20 @@ The tenant's licence must name its id. The release runs with `cairn.licence.requ
 
 Every tenant's databases are closed to other roles: `CONNECT` is revoked from `PUBLIC`. `tenant.sh render-services <id>` prints the isolation policies and services that `create` would apply.
 
+### Signup and billing
+
+The hosting control plane can take signups and payments itself: set `CAIRN_SIGNUP` (JSON or a file) on its Cairn API and notifier. Required: `domain` (tenants are `<tenant>.<domain>`), `public_url` (where the control plane is reached), `smtp` (`smtps://user@host:465`, or `smtp://host:587`, which uses STARTTLS) with `smtp_password_file` and `from`, `stripe_key_file`, `stripe_webhook_secret_file`, `licence_key_file` and `licence_kid` (the vendor signing key, as `deploy/ops/licence.py keygen` makes it), and `plans` (`{"team": {"price": "price_…", "edition": "team", "max_users": 25}}`). Optional: `provision` (the command, default `["deploy/hosting/tenant.sh"]`), `grace_days` (14). Every secret is read from a file; a wrong setting stops the control plane at start-up.
+
+1. **Sign up** (`POST /v1/signup`, public): `email`, `organization`, `tenant` (3 to 32 lowercase letters, digits and dashes; reserved names such as `www`, `api` and `admin` are refused; `GET /v1/signup/available/<tenant>` checks one) and `plan`. Cairn emails a confirmation link, good once for 24 hours. Attempts are limited per address and per client.
+2. **Confirm** (`GET /v1/signup/verify?token=`): Cairn creates the Stripe customer and a Checkout session for the plan's price and sends the browser to Stripe's payment page.
+3. **Stripe's webhook** (`POST /v1/billing/stripe/webhook`; point a Stripe webhook endpoint at it with these events): the `Stripe-Signature` header is checked against the endpoint's secret with five minutes' tolerance, and each event is handled once, even when Stripe sends it again or twice at once.
+   - `checkout.session.completed`: the tenant is created (`provision create <tenant> --licence <file>`) with a licence for the plan's edition and users, valid until the paid period ends, and the owner is emailed its address. If provisioning fails, the signup shows `failed` with the error and the notifier retries it every tick until it works.
+   - `invoice.paid` renews the licence to the new period's end; `customer.subscription.updated` with another plan's price reissues it for that edition (`provision upgrade`).
+   - `customer.subscription.deleted`: nothing renews the licence. It runs out, its grace passes and the tenant becomes read-only with its data kept; the owner is told. `invoice.payment_failed` emails the owner while Stripe retries.
+4. **Billing portal**: `POST /v1/billing/portal-link {"email"}` emails the owner a link (good once, for an hour) that opens Stripe's billing portal (`GET /v1/billing/portal?token=`) to change the plan or card, or cancel. The answer is the same whether or not the address owns a workspace.
+
+Licence files are written 0600 to a private temporary directory and deleted after use. Signups are in `cairn_signups` and Stripe's events in `cairn_stripe_events` (migration 0070); confirmations and licences issued or renewed are audited (category `hosting`). Tested with stripe-mock and Mailpit in `tests/test_signup_e2e.py`.
+
 ### Hosting on Hetzner
 
 `deploy/hetzner/` builds a hosting cluster on Hetzner dedicated servers. Its README is the full runbook.

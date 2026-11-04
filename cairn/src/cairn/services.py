@@ -126,6 +126,7 @@ class Services:
     ml_monitoring: Optional[Any] = None
     budgets: Optional[Any] = None
     siem: Optional[Any] = None
+    signup: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1377,6 +1378,11 @@ def _build_costs(s: Services, hub, Event) -> None:
             actor=actor, entity_urn=urn, include_owners=True, include_followers=True, payload=figures))
 
     s.costs = CostService(s.engine, s.graph, has_downstream, notify, registry=s.connections, audit=s.audit)
+    # Hosted signup and Stripe billing (the hosting control plane only: CAIRN_SIGNUP).
+    from cairn.hosting.signup import Signup, load_config as load_signup
+
+    signup_cfg = load_signup()           # a misconfigured control plane stops at start-up
+    s.signup = Signup(s.engine, signup_cfg, audit=s.audit) if signup_cfg else None
     # SIEM export: the audit log pushed to Splunk HEC, syslog (RFC 5424, CEF) or HTTPS sinks (CAIRN_SIEM_SINKS).
     from cairn.common.siem import SiemExport, load_sinks
 

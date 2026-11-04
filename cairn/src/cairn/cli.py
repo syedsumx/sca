@@ -172,6 +172,8 @@ def notifier_tick(s) -> dict:
     out: dict = {"delivery": s.notify.dispatch_pending()}
     if getattr(s, "siem", None) is not None:
         out["siem"] = s.siem.ship()             # the audit log to the SIEM sinks, at least once and in order
+    if getattr(s, "signup", None) is not None:
+        out["provisioning_retried"] = s.signup.retry_failed()   # hosted tenants whose provisioning failed
     if s.marketplace is not None:
         out["access"] = s.marketplace.sweep(now_ms)
         if s.marketplace.provisioner is not None:
