@@ -1230,7 +1230,7 @@ def test_results_are_shared_only_between_people_who_see_the_same_and_exports_are
     # Due schedules are claimed once.
     with s.engine.begin() as conn:
         conn.execute(update(report_schedules).where(report_schedules.c.id == sid).values(next_ms=1))
-    assert s.reports.run_due() >= 1 and s.reports.run_due() == 0
+    assert s.report_schedules.run_due() >= 1 and s.report_schedules.run_due() == 0
 
     # The email carries the recipient's file (a real SMTP server: Mailpit).
     mail, mp = f"cairn-reports-mail-{os.getpid()}", port()
@@ -1249,7 +1249,7 @@ def test_results_are_shared_only_between_people_who_see_the_same_and_exports_are
             assert time.time() < end, "Mailpit did not start"
             time.sleep(1)
         sender = EmailSender(f"smtp://127.0.0.1:{smtp}?starttls=false", "cairn@test.example", lambda a: "bob@test.example",
-                             lambda row: [s.reports.attachment(row["payload"]["file"])])
+                             lambda row: [s.report_schedules.attachment(row["payload"]["file"])])
         sender.send({"recipient": "urn:li:corpuser:bob", "type": "report.ready", "title": "Weekly orders (CSV)",
                      "body": "Your copy is ready.", "payload": {"file": files["bob"], "url": "/sql/reports/files/x"}}, None)
         msgs = httpx.get(f"http://127.0.0.1:{mp}/api/v1/messages", timeout=10).json()["messages"]

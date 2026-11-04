@@ -81,7 +81,7 @@ class Services:
     connections: Optional[Any] = None       # named warehouse connections (quality, tag sync)
     contracts: Optional[Any] = None
     automations: Optional[Any] = None
-    reports: Optional[Any] = None
+    report_schedules: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -663,7 +663,7 @@ def _build_active_metadata(s: Services) -> None:
     if cfg.smtp_url:
         def email_attachments(row: dict) -> list:
             fid = (row.get("payload") or {}).get("file")
-            rep = getattr(s, "reports", None)
+            rep = getattr(s, "report_schedules", None)
             got = rep.attachment(fid) if (rep is not None and fid and row.get("type") == "report.ready") else None
             return [got] if got else []
         hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of, email_attachments)
@@ -967,7 +967,7 @@ def _build_active_metadata(s: Services) -> None:
         def tell_report(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                               url=payload.get("url")))
-        s.reports = Reports(s.engine, s.sql_boards, s.workbooks, tell_report, s.audit)
+        s.report_schedules = Reports(s.engine, s.sql_boards, s.workbooks, tell_report, s.audit)
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner
