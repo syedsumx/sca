@@ -1,7 +1,14 @@
-"""Dashboards and SQL alerts, over saved queries.
+"""Dashboards and SQL alerts, over saved queries and workbook elements.
 
-* A **dashboard** is a named, ordered set of saved queries shown with their charts. Opening it runs every
+* A **dashboard** is a named, ordered set of tiles shown with their charts: a saved query
+  (``{"query": id}``) or a workbook element (``{"element": {...}, "connection": c}``). Opening it runs every
   tile as the viewer, so a shared dashboard shows each person only what they may see.
+* **Interactive**: dashboard ``controls`` (``values``, ``range``, ``date_range``, ``text``) filter every tile
+  with that column (or the tiles listed in ``targets``); clicking a value in a tile cross-filters the others
+  (``selection``); an element tile with ``drill`` (a list of columns, such as region → country → city)
+  goes one level down per value clicked. ``POST …/render`` with ``{"controls", "selection", "drill"}``
+  runs the tiles so filtered. Filters reach SQL only as quoted columns and literals: a saved query is
+  wrapped (``SELECT * FROM (<query>) WHERE …``), an element gets them as its own filters.
 * An **alert** checks a saved query on a schedule, as its owner, and tells the owner (and anyone listed)
   when its condition starts to hold and when it stops: ``rows`` (the number of rows) or a column of the
   first row, compared with ``op`` and ``value``. A query that fails is reported as an error once.
@@ -11,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from typing import Any, Callable, Optional
@@ -18,7 +26,9 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Float, Integer, String, Table, Text, and_, delete, or_, select, update
 
 from cairn.common.db import metadata
-from cairn.sqlworkspace.workspace import WorkspaceError
+from cairn.sqlworkspace.formulas import ident
+from cairn.sqlworkspace.workbooks import WorkbookError, filter_sql
+from cairn.sqlworkspace.workspace import WorkspaceError, _chart
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +39,8 @@ dashboards = Table(
     Column("name", String(256), nullable=False),
     Column("description", String(2000), nullable=False, default=""),
     Column("shared", Boolean, nullable=False, default=False),
-    Column("tiles", Text, nullable=False),          # [{"query": id, "title": str, "width": 1|2}]
+    Column("tiles", Text, nullable=False),          # [{"query": id | "element": {...}, "title", "width", "chart"}]
+    Column("controls", Text, nullable=False, default="[]"),
     Column("updated_ms", BigInteger, nullable=False),
 )
 
@@ -64,7 +75,35 @@ def _now() -> int:
 
 def _board(r) -> dict:
     return {"id": r.id, "owner": r.owner, "name": r.name, "description": r.description, "shared": bool(r.shared),
-            "tiles": json.loads(r.tiles), "updated_ms": r.updated_ms}
+            "tiles": json.loads(r.tiles), "controls": json.loads(r.controls or "[]"), "updated_ms": r.updated_ms}
+
+
+CONTROL_KINDS = ("values", "range", "date_range", "text")
+CONTROL_ID = re.compile(r"^[a-z0-9_-]{1,40}$")
+
+
+def _scalar(v: Any, what: str) -> Any:
+    if v is None or isinstance(v, (bool, int, float)) or (isinstance(v, str) and len(v) <= 1000):
+        return v
+    raise WorkspaceError(f"{what}: text, a number, true/false or null")
+
+
+def control_filters(control: dict, value: Any) -> list[dict]:
+    """The filters a control's value stands for (none when it is empty)."""
+    col, kind = control["column"], control["kind"]
+    if value is None or value == "" or value == []:
+        return []
+    if kind == "values":
+        if not isinstance(value, list) or len(value) > 1000:
+            raise WorkspaceError(f"{control['id']}: a list of values")
+        return [{"column": col, "op": "in", "values": [_scalar(v, control["id"]) for v in value]}]
+    if kind in ("range", "date_range"):
+        if not isinstance(value, list) or len(value) != 2:
+            raise WorkspaceError(f"{control['id']}: [from, to] (either may be null)")
+        low, high = (_scalar(v, control["id"]) for v in value)
+        return ([{"column": col, "op": ">=", "value": low}] if low not in (None, "") else []) + \
+            ([{"column": col, "op": "<=", "value": high}] if high not in (None, "") else [])
+    return [{"column": col, "op": "contains", "value": str(_scalar(value, control["id"]))}]
 
 
 def _alert(r) -> dict:
@@ -75,9 +114,10 @@ def _alert(r) -> dict:
 
 
 class Boards:
-    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None):
-        """``notify(type, title, body, recipients, payload)`` tells people about an alert."""
-        self.engine, self.ws, self.notify = engine, workspace, notify
+    def __init__(self, engine, workspace, notify: Optional[Callable[..., Any]] = None, workbooks=None):
+        """``notify(type, title, body, recipients, payload)`` tells people about an alert; ``workbooks``
+        (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles."""
+        self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -85,13 +125,11 @@ class Boards:
         tiles = body.get("tiles") or []
         if not name or not isinstance(tiles, list) or not tiles:
             raise WorkspaceError("a dashboard needs a name and at least one tile")
-        clean = []
-        for t in tiles[:24]:
-            q = self.ws.get(actor, str((t or {}).get("query") or ""))      # each tile: a query the owner may open
-            clean.append({"query": q["id"], "title": str(t.get("title") or q["name"])[:256],
-                          "width": 2 if t.get("width") == 2 else 1})
+        clean = [self._tile(actor, t) for t in tiles[:24]]
+        controls = self._controls(body.get("controls") or [], len(clean))
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000],
-                  "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "updated_ms": _now()}
+                  "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "controls": json.dumps(controls),
+                  "updated_ms": _now()}
         with self.engine.begin() as conn:
             if did is None:
                 did = uuid.uuid4().hex
@@ -119,18 +157,154 @@ class Boards:
             if not conn.execute(delete(dashboards).where(and_(dashboards.c.id == did, dashboards.c.owner == actor))).rowcount:
                 raise WorkspaceError("no such dashboard of yours", 404)
 
-    def render(self, actor: str, did: str) -> dict:
-        """Every tile run as the viewer; a tile they may not see shows its error, not its data."""
-        board = self.dashboard(actor, did)
-        tiles = []
-        for t in board["tiles"]:
+    def _tile(self, actor: str, t: Any) -> dict:
+        if not isinstance(t, dict):
+            raise WorkspaceError("a tile is an object")
+        out: dict[str, Any] = {"width": 2 if t.get("width") == 2 else 1}
+        if t.get("chart") is not None:
+            out["chart"] = json.loads(_chart(t.get("chart")))
+        if t.get("element") is not None:
+            if self.wb is None:
+                raise WorkspaceError("workbook tiles are not available here")
+            connection = str(t.get("connection") or "")
             try:
-                out = self.ws.run_saved(actor, t["query"], 1000)
-                q = out.pop("query")
-                tiles.append({**t, "chart": q["chart"], "result": out})
-            except WorkspaceError as e:
+                self.wb.compile(actor, connection, t["element"])       # a valid element over a table the owner may query
+            except WorkbookError as e:
+                raise WorkspaceError(f"tile: {e}", e.status)
+            drill = t.get("drill") or []
+            if not isinstance(drill, list) or len(drill) > 6 or not all(isinstance(c, str) and c for c in drill):
+                raise WorkspaceError("drill: up to 6 column names, from the top level down")
+            if drill and [str(g).lower() for g in (t["element"].get("group_by") or [])[:1]] != [drill[0].lower()]:
+                raise WorkspaceError("drill: the element is grouped by the first drill column")
+            return {**out, "element": t["element"], "connection": connection, "drill": drill,
+                    "title": str(t.get("title") or (t["element"].get("source") or {}).get("table") or "Tile")[:256]}
+        q = self.ws.get(actor, str(t.get("query") or ""))          # each tile: a query the owner may open
+        return {**out, "query": q["id"], "title": str(t.get("title") or q["name"])[:256]}
+
+    @staticmethod
+    def _controls(raw: Any, tiles: int) -> list[dict]:
+        if not isinstance(raw, list) or len(raw) > 12:
+            raise WorkspaceError("controls: up to 12")
+        out, seen = [], set()
+        for c in raw:
+            if not isinstance(c, dict):
+                raise WorkspaceError("a control is an object")
+            cid = str(c.get("id") or "")
+            if not CONTROL_ID.match(cid) or cid in seen:
+                raise WorkspaceError("control id: a new short name (a-z, 0-9, _ and -)")
+            seen.add(cid)
+            column = str(c.get("column") or "").strip()
+            if not column or len(column) > 128 or '"' in column:
+                raise WorkspaceError(f"{cid}: column is a column name")
+            kind = c.get("kind")
+            if kind not in CONTROL_KINDS:
+                raise WorkspaceError(f"{cid}: kind is one of {', '.join(CONTROL_KINDS)}")
+            targets = c.get("targets")
+            if targets is not None and (not isinstance(targets, list) or
+                                        not all(isinstance(i, int) and not isinstance(i, bool) and 0 <= i < tiles
+                                                for i in targets)):
+                raise WorkspaceError(f"{cid}: targets are tile positions (from 0)")
+            source = c.get("source")
+            if kind == "values":
+                if not isinstance(source, dict) or not source.get("connection") or not source.get("table"):
+                    raise WorkspaceError(f"{cid}: a values control lists the values of source {{connection, table}}")
+                source = {"connection": str(source["connection"]), "table": str(source["table"])}
+            control = {"id": cid, "label": str(c.get("label") or column)[:128], "column": column, "kind": kind,
+                       "targets": targets, "source": source if kind == "values" else None, "default": None}
+            if c.get("default") is not None:
+                control_filters(control, c.get("default"))                 # checked like a value
+                control["default"] = c["default"]
+            out.append(control)
+        return out
+
+    def render(self, actor: str, did: str, state: Optional[dict] = None) -> dict:
+        """Every tile run as the viewer, filtered by the controls' values, the selection (cross-filter) and its
+        drill level; a tile they may not see shows its error, not its data."""
+        board = self.dashboard(actor, did)
+        state = state if isinstance(state, dict) else {}
+        values = state.get("controls") if isinstance(state.get("controls"), dict) else {}
+        selection = state.get("selection") or []
+        drill = state.get("drill") if isinstance(state.get("drill"), dict) else {}
+        if not isinstance(selection, list) or len(selection) > 12:
+            raise WorkspaceError("selection: up to 12 {column, value, from}")
+        wanted: list[tuple[dict, Optional[list]]] = []          # (filter, tiles it is for; None: every tile)
+        for c in board["controls"]:
+            v = values.get(c["id"], c.get("default"))
+            wanted += [(f, c["targets"]) for f in control_filters(c, v)]
+        for sel in selection:
+            if not isinstance(sel, dict) or not isinstance(sel.get("column"), str):
+                raise WorkspaceError("selection: {column, value, from}")
+            v = _scalar(sel.get("value"), "selection")
+            f = {"column": sel["column"], "op": "is_null"} if v is None else {"column": sel["column"], "op": "=", "value": v}
+            frm = sel.get("from")
+            wanted.append((f, [i for i in range(len(board["tiles"])) if i != frm]))
+        tiles = []
+        for i, t in enumerate(board["tiles"]):
+            filters = [f for f, only in wanted if only is None or i in only]
+            try:
+                if t.get("element") is not None:
+                    tiles.append(self._run_element(actor, t, filters, drill.get(str(i)) or []))
+                else:
+                    tiles.append(self._run_query(actor, t, filters))
+            except (WorkspaceError, WorkbookError) as e:
                 tiles.append({**t, "error": str(e), "status": e.status})
         return {**board, "tiles": tiles}
+
+    def _run_element(self, actor: str, t: dict, filters: list[dict], path: list) -> dict:
+        el = json.loads(json.dumps(t["element"]))
+        table = (el.get("source") or {}).get("table", "")
+        have = {c.lower() for c in self.wb.columns_of(actor, t["connection"], table)}
+        have |= {str((c or {}).get("name") or "").lower() for c in el.get("columns") or []}
+        levels = t.get("drill") or []
+        if not isinstance(path, list) or (levels and len(path) >= len(levels)):
+            raise WorkspaceError(f"drill: at most {max(len(levels) - 1, 0)} values down")
+        if path:
+            filters = filters + [{"column": levels[k], "op": "=", "value": _scalar(v, "drill")} if v is not None
+                                 else {"column": levels[k], "op": "is_null"} for k, v in enumerate(path)]
+            top, now = levels[0], levels[len(path)]
+            el["group_by"] = [now] + [g for g in el.get("group_by") or [] if g.lower() != top.lower()][0:]
+            el["sort"] = [{**s, "column": now} if str(s.get("column", "")).lower() == top.lower() else s
+                          for s in el.get("sort") or []]
+        applied = [f for f in filters if str(f["column"]).lower() in have]
+        el["filters"] = list(el.get("filters") or []) + [{**f, "on": "rows"} for f in applied]
+        out = self.wb.run(actor, t["connection"], el)
+        sql = out.pop("sql")
+        chart = t.get("chart") or {"type": "table", "x": "", "y": []}
+        if path and chart.get("x", "").lower() == levels[0].lower():
+            chart = {**chart, "x": levels[len(path)]}
+        return {**t, "chart": chart, "result": out, "sql": sql, "applied": applied,
+                "level": {"path": path, "column": levels[len(path)] if levels else None}}
+
+    def _run_query(self, actor: str, t: dict, filters: list[dict]) -> dict:
+        q = self.ws.get(actor, t["query"])
+        applied: list[dict] = []
+        if filters:
+            inner = q["sql"].strip().rstrip(";")
+            columns = self.ws.run(actor, f"SELECT * FROM ({inner}) AS tile", q["connection"], 1)["columns"]
+            by = {c.lower(): c for c in columns}
+            applied = [f for f in filters if str(f["column"]).lower() in by]
+        if applied:
+            where = " AND ".join(filter_sql(f, lambda c: ident(by[str(c).lower()])) for f in applied)
+            out = self.ws.run(actor, f"SELECT * FROM ({inner}) AS tile WHERE {where}", q["connection"], 1000)
+        else:
+            out = self.ws.run(actor, q["sql"], q["connection"], 1000)
+        return {**t, "chart": t.get("chart") or q["chart"], "result": out, "applied": applied}
+
+    def control_values(self, actor: str, did: str, cid: str) -> list:
+        """A values control's choices: the column's values in its source, as the viewer sees them."""
+        board = self.dashboard(actor, did)
+        c = next((x for x in board["controls"] if x["id"] == cid), None)
+        if c is None or c["kind"] != "values":
+            raise WorkspaceError("no such values control", 404)
+        if self.wb is None:
+            raise WorkspaceError("workbooks are not available here")
+        try:
+            out = self.wb.run(actor, c["source"]["connection"], {
+                "source": {"table": c["source"]["table"]}, "group_by": [c["column"]],
+                "aggregates": [{"name": "n", "formula": "Count()"}], "sort": [{"column": c["column"]}], "limit": 500})
+        except WorkbookError as e:
+            raise WorkspaceError(str(e), e.status)
+        return [r[0] for r in out.get("rows") or []]
 
     # ---- alerts ---------------------------------------------------------------------------
     def save_alert(self, actor: str, body: dict, aid: Optional[str] = None) -> dict:
@@ -261,6 +435,16 @@ def build_boards_router(boards: Boards, current_principal) -> Any:
     async def render(did: str, p=Depends(current_principal)):
         actor = person(p)
         return await run_in_threadpool(lambda: wrap(lambda: boards.render(actor, did)))
+
+    @router.post("/dashboards/{did}/render")
+    async def render_with(did: str, body: dict = Body(...), p=Depends(current_principal)):
+        actor = person(p)
+        return await run_in_threadpool(lambda: wrap(lambda: boards.render(actor, did, body)))
+
+    @router.get("/dashboards/{did}/controls/{cid}/values")
+    async def control_values(did: str, cid: str, p=Depends(current_principal)):
+        actor = person(p)
+        return await run_in_threadpool(lambda: wrap(lambda: boards.control_values(actor, did, cid)))
 
     @router.get("/alerts")
     def list_alerts(p=Depends(current_principal)):

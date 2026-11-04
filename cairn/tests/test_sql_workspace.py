@@ -74,7 +74,7 @@ def test_saved_queries_are_private_or_shared_and_run_as_whoever_opens_them(ws):
     with pytest.raises(WorkspaceError):
         ws.delete(EVE, q["id"])
     for bad in ({"name": "", "connection": "wh", "sql": "SELECT 1"}, {"name": "x", "connection": "wh", "sql": "DROP TABLE t"},
-                {"name": "x", "connection": "wh", "sql": "SELECT 1 FROM main.users", "chart": {"type": "pie"}}):
+                {"name": "x", "connection": "wh", "sql": "SELECT 1 FROM main.users", "chart": {"type": "radar"}}):
         with pytest.raises(WorkspaceError):
             ws.save(ANA, bad)
     ws.delete(ANA, q["id"])
@@ -134,6 +134,45 @@ def test_dashboards_render_each_tile_as_the_viewer(ws):
         b.save_dashboard(EVE, {"name": "x", "tiles": [{"query": private["id"]}]})
     with pytest.raises(WorkspaceError):
         b.delete_dashboard(EVE, board["id"])
+
+
+def test_dashboard_controls_and_cross_filters_narrow_the_tiles_that_have_the_column(ws):
+    """Interactive dashboards: a control filters the tiles that have its column, a value clicked in one tile
+    filters the others, and filter values reach SQL only as literals."""
+    from cairn.sqlworkspace.boards import Boards
+
+    b = Boards(ws.engine, ws)
+    totals = ws.save(ANA, {"name": "Totals", "connection": "wh", "shared": True,
+                           "sql": "SELECT user_id, sum(amount) AS total FROM main.orders GROUP BY user_id ORDER BY user_id;"})
+    people = ws.save(ANA, {"name": "People", "connection": "wh", "sql": "SELECT count(*) AS n FROM main.users"})
+    orders = ws.save(ANA, {"name": "Orders", "connection": "wh", "sql": "SELECT id, user_id, amount FROM main.orders ORDER BY id"})
+    pie = {"type": "pie", "x": "user_id", "y": ["total"]}
+    board = b.save_dashboard(ANA, {"name": "Sales", "tiles": [{"query": totals["id"], "chart": pie},
+                                                              {"query": people["id"]}, {"query": orders["id"]}],
+                                   "controls": [{"id": "amt", "label": "Amount", "column": "amount", "kind": "range"},
+                                                {"id": "who", "column": "user_id", "kind": "range", "targets": [0]}]})
+    assert [c["id"] for c in board["controls"]] == ["amt", "who"]
+    plain = b.render(ANA, board["id"])
+    assert plain["tiles"][0]["chart"]["type"] == "pie" and plain["tiles"][2]["result"]["rows"][0][0] == 1
+    out = b.render(ANA, board["id"], {"controls": {"amt": [8, None], "who": [None, 1]}})
+    # amount >= 8 only reaches the tile with an amount column; user_id <= 1 only the tile it targets.
+    assert out["tiles"][0]["result"]["rows"] == [[1, 12.5]] and out["tiles"][0]["applied"] == [
+        {"column": "user_id", "op": "<=", "value": 1}]
+    assert out["tiles"][1]["result"]["rows"] == [[2]] and out["tiles"][1]["applied"] == []
+    assert all(r[2] >= 8 for r in out["tiles"][2]["result"]["rows"]) and out["tiles"][2]["applied"][0]["column"] == "amount"
+    # Cross-filter: user 2 clicked in tile 0 filters the other tiles with user_id, not tile 0 itself.
+    x = b.render(ANA, board["id"], {"selection": [{"column": "user_id", "value": 2, "from": 0}]})
+    assert len(x["tiles"][0]["result"]["rows"]) == 2 and {r[1] for r in x["tiles"][2]["result"]["rows"]} == {2}
+    # A value is a literal, never SQL.
+    sneaky = b.render(ANA, board["id"], {"selection": [{"column": "user_id", "value": "1 OR 1=1", "from": 0}]})
+    assert sneaky["tiles"][2]["result"]["rows"] == []
+    for bad in ([{"id": "a", "column": "x", "kind": "slider"}], [{"id": "A B", "column": "x", "kind": "text"}],
+                [{"id": "a", "column": "x", "kind": "values"}], [{"id": "a", "column": "x", "kind": "text", "targets": [7]}],
+                [{"id": "a", "column": "x", "kind": "range", "default": [1]}]):
+        with pytest.raises(WorkspaceError):
+            b.save_dashboard(ANA, {"name": "x", "tiles": [{"query": totals["id"]}], "controls": bad})
+    with pytest.raises(WorkspaceError):
+        b.render(ANA, board["id"], {"controls": {"amt": "lots"}})
 
 
 def test_alerts_tell_when_their_condition_starts_and_stops(ws):

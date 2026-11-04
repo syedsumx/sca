@@ -860,7 +860,7 @@ def _build_active_metadata(s: Services) -> None:
 
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql/workflows"))
-        s.sql_boards = Boards(s.engine, s.sql_workspace, tell)
+        s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks)
         # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
         from cairn.sqlworkspace.procedures import Procedures
         from cairn.sqlworkspace.workspace import WorkspaceError

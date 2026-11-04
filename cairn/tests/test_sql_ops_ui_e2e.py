@@ -326,3 +326,40 @@ def test_a_workbook_is_built_in_the_browser_and_runs_as_the_viewer(cairn):
     [w] = s.workbooks.list(ANA)
     assert w["name"] == "Revenue by region" and w["spec"]["elements"][0]["group_by"] == ["region"]
     assert any("GROUP BY" in h["sql"] for h in s.sql_workspace.history(ANA))       # in Ana's history, run as her
+
+
+def test_a_dashboard_is_filtered_and_cross_filtered_in_the_browser(cairn):
+    """Interactive dashboards in Chromium against Cairn: a range control narrows the tile with its column, and a
+    click on a bar filters the other tiles; every tile is re-run by Cairn as the signed-in person."""
+    from playwright.sync_api import sync_playwright
+
+    s, url, _, _ = cairn
+    chart = {"type": "bar", "x": "region", "y": ["total"]}
+    totals = s.sql_workspace.save(ANA, {"name": "By region", "connection": "wh", "chart": chart,
+                                        "sql": "SELECT region, sum(amount) AS total FROM main.orders GROUP BY region ORDER BY region"})
+    orders = s.sql_workspace.save(ANA, {"name": "Orders", "connection": "wh",
+                                        "sql": "SELECT id, region, amount FROM main.orders ORDER BY id"})
+    s.sql_boards.save_dashboard(ANA, {"name": "Interactive", "tiles": [{"query": totals["id"]}, {"query": orders["id"]}],
+                                      "controls": [{"id": "amount", "label": "Amount", "column": "amount", "kind": "range"}]})
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/dashboards", wait_until="domcontentloaded")
+            page.get_by_role("combobox", name="Dashboard").click()
+            page.get_by_title("Interactive").click()
+            page.get_by_role("img", name="bar chart of total by region").wait_for(timeout=30_000)
+            ids = lambda: [r.split("\t")[0] for r in page.locator(".ant-table-tbody tr.ant-table-row").all_inner_texts()]  # noqa: E731
+            assert ids() == ["1", "2", "3"]
+            page.get_by_label("Amount from").fill("5")
+            page.get_by_text("Filtered by amount").wait_for(timeout=30_000)
+            page.wait_for_function("document.querySelectorAll('.ant-table-tbody tr.ant-table-row').length === 2", timeout=30_000)
+            assert ids() == ["1", "3"]
+            page.get_by_label("Amount from").fill("")
+            page.wait_for_function("document.querySelectorAll('.ant-table-tbody tr.ant-table-row').length === 3", timeout=30_000)
+            page.locator("svg rect", has=page.locator("title", has_text="US:")).click()      # cross-filter on US
+            page.get_by_text("region = US").wait_for(timeout=15_000)
+            page.wait_for_function("document.querySelectorAll('.ant-table-tbody tr.ant-table-row').length === 1", timeout=30_000)
+            assert ids() == ["2"]
+            assert errors == [], errors
+        finally:
+            browser.close()

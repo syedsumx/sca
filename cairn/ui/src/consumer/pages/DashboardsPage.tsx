@@ -1,54 +1,167 @@
 import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { Dashboard, RenderedDashboard, SavedQuery, SqlAlert } from '../api/types';
+import { CHART_TYPES } from '../api/types';
+import type { ChartSpec, Dashboard, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
 const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
 
-/** One dashboard, every tile run as the viewer. */
+/** One control: a list of values to pick from, a range, a date range or text. */
+function Control({ board, control, value, onChange }: {
+    board: string; control: DashboardControl; value: unknown; onChange: (v: unknown) => void;
+}) {
+    const options = useDheQuery<unknown[]>(control.kind === 'values' ? `/sql/dashboards/${board}/controls/${control.id}/values` : null,
+        (c, signal) => c.dashboardControlValues(board, control.id, { signal }));
+    const pair = Array.isArray(value) && value.length === 2 ? value : [null, null];
+    const label = control.label || control.column;
+    if (control.kind === 'values') {
+        return (
+            <Select aria-label={label} mode="multiple" allowClear placeholder={label} style={{ minWidth: 200 }}
+                value={Array.isArray(value) ? (value as (string | number)[]) : []} loading={options.loading}
+                onChange={(v) => onChange(v.length ? v : null)}
+                options={(options.data ?? []).map((o) => ({ value: o as string | number, label: o === null ? '(empty)' : String(o) }))} />
+        );
+    }
+    if (control.kind === 'range') {
+        return (
+            <Space size={4}>
+                <InputNumber aria-label={`${label} from`} placeholder={`${label} from`} value={pair[0] as number | null}
+                    onChange={(v) => onChange([v ?? null, pair[1]])} />
+                <InputNumber aria-label={`${label} to`} placeholder="to" value={pair[1] as number | null}
+                    onChange={(v) => onChange([pair[0], v ?? null])} />
+            </Space>
+        );
+    }
+    if (control.kind === 'date_range') {
+        return (
+            <Space size={4}>
+                <Input type="date" aria-label={`${label} from`} value={(pair[0] as string) ?? ''} style={{ width: 160 }}
+                    onChange={(e) => onChange([e.target.value || null, pair[1]])} />
+                <Input type="date" aria-label={`${label} to`} value={(pair[1] as string) ?? ''} style={{ width: 160 }}
+                    onChange={(e) => onChange([pair[0], e.target.value || null])} />
+            </Space>
+        );
+    }
+    return <Input aria-label={label} placeholder={`${label} contains`} allowClear style={{ width: 200 }} value={(value as string) ?? ''}
+        onChange={(e) => onChange(e.target.value || null)} />;
+}
+
+/** One dashboard, every tile run as the viewer, filtered by the controls, cross-filtered by clicks and drilled. */
 function Board({ id }: { id: string }) {
-    const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render`, (c, signal) => c.renderDashboard(id, { signal }));
+    const [state, setState] = useState<DashboardState>({});
+    const key = JSON.stringify(state);
+    const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render#${key}`, (c, signal) =>
+        c.renderDashboard(id, { signal }, key === '{}' ? undefined : state));
+    const [last, setLast] = useState<RenderedDashboard | null>(null);
+    useEffect(() => { if (q.data) setLast(q.data); }, [q.data]);
+    const board = q.data ?? last;
     if (q.error) return <Alert type="error" message={q.error.message} />;
-    if (!q.data) return <Muted>Loading…</Muted>;
+    if (!board) return <Muted>Loading…</Muted>;
+    const selection = state.selection ?? [];
+    const select = (from: number, column: string, value: unknown) => {
+        const same = selection.some((x) => x.from === from && x.column === column && x.value === value);
+        setState({ ...state, selection: same ? selection.filter((x) => x.from !== from) : [...selection.filter((x) => x.from !== from), { column, value, from }] });
+    };
+    const drill = (i: number, path: unknown[]) => setState({
+        ...state, drill: { ...(state.drill ?? {}), [String(i)]: path }, selection: selection.filter((x) => x.from !== i) });
     return (
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
-            {q.data.tiles.map((t, i) => (
-                <Surface key={i} style={{ gridColumn: t.width === 2 ? 'span 2' : undefined }}>
-                    <strong>{t.title}</strong>
-                    {t.error ? (
-                        <Alert type="warning" message={t.error} style={{ marginTop: 8 }} />
-                    ) : t.result && t.chart && t.chart.type !== 'table' ? (
-                        <ResultChart columns={t.result.columns} rows={t.result.rows} chart={t.chart} height={220} />
-                    ) : t.result ? (
-                        <Table
-                            size="small"
-                            rowKey="__row"
-                            pagination={{ pageSize: 10, hideOnSinglePage: true }}
-                            dataSource={t.result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(t.result!.columns.map((c, j) => [c, r[j]])) }))}
-                            columns={t.result.columns.map((c) => ({ title: c, dataIndex: c, render: (v: unknown) => String(v ?? '') }))}
-                        />
-                    ) : null}
+        <>
+            {(board.controls?.length || selection.length > 0) && (
+                <Surface style={{ marginBottom: 12 }}>
+                    <Space wrap data-testid="controls">
+                        {(board.controls ?? []).map((c) => (
+                            <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
+                                onChange={(v) => setState({ ...state, controls: { ...(state.controls ?? {}), [c.id]: v } })} />
+                        ))}
+                        {selection.map((x) => (
+                            <Tag key={`${x.from}-${x.column}`} closable onClose={() => setState({ ...state, selection: selection.filter((y) => y !== x) })}>
+                                {x.column} = {String(x.value)}
+                            </Tag>
+                        ))}
+                        {q.loading && <Muted>Updating…</Muted>}
+                    </Space>
                 </Surface>
-            ))}
-        </div>
+            )}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+                {board.tiles.map((t, i) => {
+                    const path = t.level?.path ?? [];
+                    const mine = selection.find((x) => x.from === i);
+                    const deeper = !!t.drill && t.drill.length > path.length + 1;
+                    const x = t.chart?.x ?? '';
+                    return (
+                        <Surface key={i} style={{ gridColumn: t.width === 2 ? 'span 2' : undefined }}>
+                            <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
+                                <strong>{t.title}</strong>
+                                {path.length > 0 && (
+                                    <Space size={4}>
+                                        <Muted>{t.drill!.slice(0, path.length).map((c, k) => `${c}: ${String(path[k])}`).join(' › ')}</Muted>
+                                        <Button size="small" onClick={() => drill(i, path.slice(0, -1))}>Up</Button>
+                                    </Space>
+                                )}
+                                {mine && deeper && (
+                                    <Button size="small" type="primary" onClick={() => drill(i, [...path, mine.value])}>
+                                        Drill into {String(mine.value)}
+                                    </Button>
+                                )}
+                            </Space>
+                            {(t.applied?.length ?? 0) > 0 && (
+                                <div><Muted>Filtered by {t.applied!.map((f) => f.column).filter((c, k, a) => a.indexOf(c) === k).join(', ')}</Muted></div>
+                            )}
+                            {t.error ? (
+                                <Alert type="warning" message={t.error} style={{ marginTop: 8 }} />
+                            ) : t.result && t.chart && t.chart.type !== 'table' ? (
+                                <ResultChart columns={t.result.columns} rows={t.result.rows} chart={t.chart} height={220}
+                                    selected={mine?.value} onSelect={x ? (v) => select(i, x, v) : undefined} />
+                            ) : t.result ? (
+                                <Table
+                                    size="small"
+                                    rowKey="__row"
+                                    pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                                    dataSource={t.result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(t.result!.columns.map((c, j) => [c, r[j]])) }))}
+                                    columns={t.result.columns.map((c) => ({ title: c, dataIndex: c, render: (v: unknown) => String(v ?? '') }))}
+                                />
+                            ) : null}
+                        </Surface>
+                    );
+                })}
+            </div>
+        </>
     );
 }
+
+type ControlDraft = { column: string; kind: DashboardControl['kind']; label: string };
 
 function Dashboards({ saved }: { saved: SavedQuery[] }) {
     const { client } = useConsumerApi();
     const [tick, setTick] = useState(0);
     const list = useDheQuery<Dashboard[]>(`/sql/dashboards#${tick}`, (c, signal) => c.dashboards({ signal }));
+    const books = useDheQuery<Workbook[]>('/sql/workbooks', (c, signal) => c.workbooks({ signal }));
     const [open, setOpen] = useState<string | null>(null);
     const [editing, setEditing] = useState(false);
-    const [form, setForm] = useState({ name: '', shared: false, queries: [] as string[] });
+    const [form, setForm] = useState({ name: '', shared: false, queries: [] as string[], workbooks: [] as string[],
+        chart: 'bar' as ChartSpec['type'], drill: [] as string[], controls: [] as ControlDraft[] });
+
+    const elementTiles = (): DashboardTile[] => (books.data ?? []).filter((w) => form.workbooks.includes(w.id)).flatMap((w) =>
+        w.spec.elements.map((el) => {
+            const x = el.group_by?.[0] ?? '';
+            const y = (el.aggregates ?? []).map((a) => a.name);
+            const drill = form.drill.length && x && form.drill[0] === x ? form.drill : undefined;
+            return { element: el, connection: w.connection, title: w.name, width: 1 as const, drill,
+                     chart: x && y.length ? { type: form.chart, x, y } : { type: 'table' as const } };
+        }));
+    const firstTable = () => (books.data ?? []).find((w) => form.workbooks.includes(w.id));
 
     const create = async () => {
         try {
+            const src = firstTable();
             const d = await client.saveDashboard({ name: form.name, shared: form.shared,
-                tiles: form.queries.map((q) => ({ query: q, title: '', width: 1 as const })) });
+                tiles: [...form.queries.map((q) => ({ query: q, title: '', width: 1 as const })), ...elementTiles()],
+                controls: form.controls.filter((c) => c.column.trim()).map((c, k) => ({
+                    id: `c${k + 1}`, label: c.label || c.column, column: c.column.trim(), kind: c.kind,
+                    source: c.kind === 'values' && src ? { connection: src.connection, table: src.spec.elements[0].source.table } : null })) });
             setEditing(false);
             setTick((t) => t + 1);
             setOpen(d.id);
@@ -56,23 +169,54 @@ function Dashboards({ saved }: { saved: SavedQuery[] }) {
             message.error((e as Error).message);
         }
     };
+    const setControl = (k: number, patch: Partial<ControlDraft>) =>
+        setForm({ ...form, controls: form.controls.map((c, j) => (j === k ? { ...c, ...patch } : c)) });
+    const canCreate = !!form.name.trim() && (form.queries.length > 0 || form.workbooks.length > 0);
 
     return (
         <>
             <Space style={{ marginBottom: 12 }} wrap>
                 <Select aria-label="Dashboard" placeholder="Open a dashboard" style={{ minWidth: 260 }} value={open ?? undefined}
                     onChange={setOpen} options={(list.data ?? []).map((d) => ({ value: d.id, label: d.shared ? `${d.name} (shared)` : d.name }))} />
-                <Button onClick={() => setEditing(true)} disabled={!saved.length}>New dashboard</Button>
-                {!saved.length && <Muted>Save queries in SQL first; a dashboard shows them.</Muted>}
+                <Button onClick={() => setEditing(true)} disabled={!saved.length && !(books.data ?? []).length}>New dashboard</Button>
+                {!saved.length && !(books.data ?? []).length && <Muted>Save queries in SQL, or workbooks, first; a dashboard shows them.</Muted>}
             </Space>
             {open ? <Board key={`${open}-${tick}`} id={open} /> : <Empty description="Pick or create a dashboard" />}
-            <Modal title="New dashboard" open={editing} onOk={() => void create()} onCancel={() => setEditing(false)}
-                okText="Create" okButtonProps={{ disabled: !form.name.trim() || !form.queries.length }}>
+            <Modal title="New dashboard" open={editing} onOk={() => void create()} onCancel={() => setEditing(false)} width={680}
+                okText="Create" okButtonProps={{ disabled: !canCreate }}>
                 <Space direction="vertical" style={{ width: '100%' }}>
                     <Input aria-label="Dashboard name" placeholder="Name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
                     <Select aria-label="Queries" mode="multiple" placeholder="Saved queries to show" style={{ width: '100%' }}
                         value={form.queries} onChange={(queries) => setForm({ ...form, queries })}
                         options={saved.map((q) => ({ value: q.id, label: q.name }))} />
+                    <Select aria-label="Workbooks" mode="multiple" placeholder="Workbooks to show (one tile per element)" style={{ width: '100%' }}
+                        value={form.workbooks} onChange={(workbooks) => setForm({ ...form, workbooks })}
+                        options={(books.data ?? []).map((w) => ({ value: w.id, label: w.name }))} />
+                    {form.workbooks.length > 0 && (
+                        <Space wrap>
+                            <Select aria-label="Chart type" style={{ width: 150 }} value={form.chart} onChange={(chart) => setForm({ ...form, chart })}
+                                options={CHART_TYPES.map((t) => ({ value: t, label: t.replace('_', ' ') }))} />
+                            <Select aria-label="Drill path" mode="tags" placeholder="Drill path: region, country, city" style={{ minWidth: 300 }}
+                                value={form.drill} onChange={(drill) => setForm({ ...form, drill })} />
+                        </Space>
+                    )}
+                    <strong>Controls</strong>
+                    {form.controls.map((c, k) => (
+                        <Space key={k} wrap>
+                            <Input aria-label={`Control column ${k + 1}`} placeholder="column" value={c.column} style={{ width: 160 }}
+                                onChange={(e) => setControl(k, { column: e.target.value })} />
+                            <Select aria-label={`Control kind ${k + 1}`} value={c.kind} style={{ width: 140 }} onChange={(kind) => setControl(k, { kind })}
+                                options={[{ value: 'values', label: 'list of values' }, { value: 'range', label: 'number range' },
+                                          { value: 'date_range', label: 'date range' }, { value: 'text', label: 'text contains' }]} />
+                            <Input aria-label={`Control label ${k + 1}`} placeholder="label" value={c.label} style={{ width: 160 }}
+                                onChange={(e) => setControl(k, { label: e.target.value })} />
+                            <Button aria-label={`Remove control ${k + 1}`} onClick={() => setForm({ ...form, controls: form.controls.filter((_, j) => j !== k) })}>×</Button>
+                        </Space>
+                    ))}
+                    <Button size="small" onClick={() => setForm({ ...form, controls: [...form.controls, { column: '', kind: 'values', label: '' }] })}>
+                        Add control
+                    </Button>
+                    <Muted>A control filters every tile that has its column. A list of values takes its choices from the first workbook&apos;s table.</Muted>
                     <Checkbox checked={form.shared} onChange={(e) => setForm({ ...form, shared: e.target.checked })}>
                         Share (each viewer sees each tile as themselves)
                     </Checkbox>
@@ -161,7 +305,7 @@ export function DashboardsPage() {
     return (
         <Page>
             <h1 style={{ marginBottom: 0 }}>Dashboards</h1>
-            <Muted>Saved queries with their charts, and alerts on them. Every tile and check runs as a person, under their policies.</Muted>
+            <Muted>Saved queries and workbooks with their charts, filters and drill-down, and alerts. Every tile and check runs as a person, under their policies.</Muted>
             <Tabs style={{ marginTop: 12 }} items={[
                 { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} /> },
                 { key: 'alerts', label: 'Alerts', children: <Alerts saved={saved.data ?? []} /> },

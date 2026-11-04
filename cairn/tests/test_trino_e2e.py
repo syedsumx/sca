@@ -838,6 +838,67 @@ def test_workbooks_compile_spreadsheet_formulas_to_sql_run_as_the_viewer(trino, 
     assert httpx.delete(f"{url}/sql/workbooks/{wid}", headers=h, timeout=30).status_code == 204
 
 
+def test_interactive_dashboards_filter_cross_filter_and_drill_as_the_viewer(trino, cairn):
+    """Interactive dashboards on real Trino: workbook tiles filtered by a values control (whose choices are the
+    data as the viewer sees it), cross-filtered by a click in another tile, and drilled from region to
+    country; each viewer's row filter still applies underneath."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.db_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "country", "amount")]}
+    trino("CREATE TABLE lake.sales.db_orders AS SELECT * FROM (VALUES (1, 'EU', 'DE', 100e0), (2, 'EU', 'FR', 50e0), "
+          "(3, 'EU', 'DE', 30e0), (4, 'US', 'US', 80e0), (5, 'APAC', 'JP', 20e0)) AS t(id, region, country, amount)")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    by_region = {"source": {"table": "sales.db_orders"}, "group_by": ["region"],
+                 "aggregates": [{"name": "Revenue", "formula": "Sum([amount])"}], "sort": [{"column": "region"}]}
+    rows = {"source": {"table": "sales.db_orders"}, "sort": [{"column": "id"}]}
+    r = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Revenue", "shared": True,
+        "tiles": [{"element": by_region, "connection": "lakehouse", "title": "By region", "drill": ["region", "country"],
+                   "chart": {"type": "bar", "x": "region", "y": ["Revenue"]}},
+                  {"element": rows, "connection": "lakehouse", "title": "Orders", "chart": {"type": "table"}}],
+        "controls": [{"id": "region", "label": "Region", "column": "region", "kind": "values",
+                      "source": {"connection": "lakehouse", "table": "sales.db_orders"}},
+                     {"id": "amount", "column": "amount", "kind": "range"}]})
+    assert r.status_code == 201, r.text
+    did = r.json()["id"]
+    # A drill whose top is not what the element is grouped by is refused when saving.
+    bad = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "x", "tiles": [{"element": by_region, "connection": "lakehouse", "drill": ["country", "region"]}]})
+    assert bad.status_code == 400 and "drill" in bad.text
+
+    values = lambda h: httpx.get(f"{url}/sql/dashboards/{did}/controls/region/values", headers=h, timeout=60).json()  # noqa: E731
+    assert values(admin) == ["APAC", "EU", "US"]
+    assert values(bob) == ["EU"]                                        # the choices are what Bob may see
+
+    def render(h, state):
+        r = httpx.post(f"{url}/sql/dashboards/{did}/render", json=state, headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        return r.json()["tiles"]
+
+    t = render(admin, {"controls": {"region": ["EU", "US"], "amount": [40, None]}})
+    assert [tuple(x) for x in t[0]["result"]["rows"]] == [("EU", 150.0), ("US", 80.0)], t[0]
+    assert [x[0] for x in t[1]["result"]["rows"]] == [1, 2, 4]
+    # A click on EU in the chart cross-filters the orders, not the chart itself.
+    t = render(admin, {"selection": [{"column": "region", "value": "EU", "from": 0}]})
+    assert len(t[0]["result"]["rows"]) == 3 and [x[0] for x in t[1]["result"]["rows"]] == [1, 2, 3]
+    # Drill into EU: the chart is now by country, within EU.
+    t = render(admin, {"drill": {"0": ["EU"]}})
+    assert t[0]["result"]["columns"] == ["country", "Revenue"] and t[0]["chart"]["x"] == "country"
+    assert [tuple(x) for x in t[0]["result"]["rows"]] == [("DE", 130.0), ("FR", 50.0)], t[0]["result"]
+    assert t[0]["level"] == {"path": ["EU"], "column": "country"}
+    assert "error" in render(admin, {"drill": {"0": ["EU", "DE"]}})[0]          # no level below country
+    # Bob's row filter applies under every control and click.
+    t = render(bob, {"controls": {"region": ["EU", "US"]}})
+    assert [x[0] for x in t[0]["result"]["rows"]] == ["EU"] and {x[1] for x in t[1]["result"]["rows"]} == {"EU"}
+
+
 def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
     """Input tables (writeback): a table people type into, created and changed on real Trino as the person
     writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,

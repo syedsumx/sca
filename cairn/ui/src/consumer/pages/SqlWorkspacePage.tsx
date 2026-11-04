@@ -4,6 +4,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
+import { CHART_TYPES } from '../api/types';
 import { SqlEditor } from '../components/SqlEditor';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -190,7 +191,7 @@ export function SqlWorkspacePage() {
                                                 <Space wrap style={{ marginBottom: 8 }}>
                                                     <Select aria-label="Chart type" value={chart.type} style={{ width: 100 }}
                                                         onChange={(type) => setChart({ ...chart, type })}
-                                                        options={['table', 'bar', 'line'].map((v) => ({ value: v, label: v }))} />
+                                                        options={CHART_TYPES.map((v) => ({ value: v, label: v.replace('_', ' ') }))} />
                                                     <Select aria-label="x" placeholder="x" value={chart.x} style={{ width: 160 }}
                                                         onChange={(x) => setChart({ ...chart, x })}
                                                         options={result.columns.map((c) => ({ value: c, label: c }))} />

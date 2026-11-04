@@ -40,13 +40,13 @@ saved_queries = Table(
     Column("connection", String(256), nullable=False),
     Column("sql", Text, nullable=False),
     Column("shared", Boolean, nullable=False, default=False),
-    Column("chart", Text, nullable=False, default="{}"),       # {"type": "bar|line", "x": col, "y": [cols]}
+    Column("chart", Text, nullable=False, default="{}"),       # {"type": one of CHART_TYPES, "x": col, "y": [cols]}
     Column("created_ms", BigInteger, nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
 )
 
 HISTORY_KEEP = 500          # per person
-CHART_TYPES = ("table", "bar", "line")
+CHART_TYPES = ("table", "bar", "stacked_bar", "line", "area", "pie", "scatter", "number")
 
 
 class WorkspaceError(Exception):

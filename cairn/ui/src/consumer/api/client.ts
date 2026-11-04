@@ -90,6 +90,7 @@ import type {
     CostTotal,
     JobCost,
     Dashboard,
+    DashboardState,
     RenderedDashboard,
     SavedQuery,
     Workbook,
@@ -1082,8 +1083,14 @@ export class ConsumerClient extends CairnClient {
         return this.request<void>('DELETE', `/sql/dashboards/${enc(id)}`);
     }
 
-    renderDashboard(id: string, opts?: RequestOptions) {
-        return this.request<RenderedDashboard>('GET', `/sql/dashboards/${enc(id)}/render`, undefined, opts);
+    renderDashboard(id: string, opts?: RequestOptions, state?: DashboardState) {
+        return state
+            ? this.request<RenderedDashboard>('POST', `/sql/dashboards/${enc(id)}/render`, state, opts)
+            : this.request<RenderedDashboard>('GET', `/sql/dashboards/${enc(id)}/render`, undefined, opts);
+    }
+
+    dashboardControlValues(id: string, control: string, opts?: RequestOptions) {
+        return this.request<unknown[]>('GET', `/sql/dashboards/${enc(id)}/controls/${enc(control)}/values`, undefined, opts);
     }
 
     sqlAlerts(opts?: RequestOptions) {

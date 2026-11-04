@@ -83,6 +83,35 @@ def _name(n: Any, what: str) -> str:
     return n.strip()
 
 
+def filter_sql(f: dict, resolve) -> str:
+    """One filter as a SQL condition; ``resolve(column)`` gives the column's SQL (and refuses unknown ones)."""
+    if not isinstance(f, dict):
+        raise WorkbookError("a filter is an object")
+    op = f.get("op")
+    if op not in FILTER_OPS:
+        raise WorkbookError(f"filter op: one of {', '.join(sorted(FILTER_OPS))}")
+    x = resolve(f.get("column"))
+    if op == "is_null":
+        return f"{x} IS NULL"
+    if op == "not_null":
+        return f"{x} IS NOT NULL"
+    if op in ("in", "not_in"):
+        vals = f.get("values")
+        if not isinstance(vals, list) or not vals or len(vals) > 1000:
+            raise WorkbookError("filter values: a list (1 to 1,000)")
+        return f"{x} {'NOT IN' if op == 'not_in' else 'IN'} ({', '.join(_value(v) for v in vals)})"
+    if op == "between":
+        vals = f.get("values")
+        if not isinstance(vals, list) or len(vals) != 2:
+            raise WorkbookError("between: values [low, high]")
+        return f"{x} BETWEEN {_value(vals[0])} AND {_value(vals[1])}"
+    if op == "contains":
+        return f"strpos(lower(CAST({x} AS varchar)), lower({_value(str(f.get('value', '')))})) > 0"
+    if op == "starts_with":
+        return f"starts_with(CAST({x} AS varchar), {_value(str(f.get('value', '')))})"
+    return f"{x} {'<>' if op == '!=' else op} {_value(f.get('value'))}"
+
+
 def compile_element(spec: dict, source_columns: list[str], pivot_values: Optional[list] = None) -> str:
     """The SQL for a workbook element over a table with ``source_columns``."""
     if not isinstance(spec, dict):
@@ -111,29 +140,7 @@ def compile_element(spec: dict, source_columns: list[str], pivot_values: Optiona
         return hit
 
     def condition(f: dict, of: Optional[Any] = None) -> str:
-        op = f.get("op")
-        if op not in FILTER_OPS:
-            raise WorkbookError(f"filter op: one of {', '.join(sorted(FILTER_OPS))}")
-        x = (of or expr)(f.get("column"))
-        if op == "is_null":
-            return f"{x} IS NULL"
-        if op == "not_null":
-            return f"{x} IS NOT NULL"
-        if op in ("in", "not_in"):
-            vals = f.get("values")
-            if not isinstance(vals, list) or not vals or len(vals) > 1000:
-                raise WorkbookError("filter values: a list (1 to 1,000)")
-            return f"{x} {'NOT IN' if op == 'not_in' else 'IN'} ({', '.join(_value(v) for v in vals)})"
-        if op == "between":
-            vals = f.get("values")
-            if not isinstance(vals, list) or len(vals) != 2:
-                raise WorkbookError("between: values [low, high]")
-            return f"{x} BETWEEN {_value(vals[0])} AND {_value(vals[1])}"
-        if op == "contains":
-            return f"strpos(lower(CAST({x} AS varchar)), lower({_value(str(f.get('value', '')))})) > 0"
-        if op == "starts_with":
-            return f"starts_with(CAST({x} AS varchar), {_value(str(f.get('value', '')))})"
-        return f"{x} {'<>' if op == '!=' else op} {_value(f.get('value'))}"
+        return filter_sql(f, of or expr)
 
     filters = spec.get("filters") or []
     if not isinstance(filters, list):

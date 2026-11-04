@@ -704,8 +704,10 @@ export interface DataResult {
 }
 
 /** A chart over a query's result: a table, or bars or lines of columns ``y`` against column ``x``. */
+export const CHART_TYPES = ['table', 'bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'number'] as const;
+
 export interface ChartSpec {
-    type: 'table' | 'bar' | 'line';
+    type: (typeof CHART_TYPES)[number];
     x?: string;
     y?: string[];
 }
@@ -750,13 +752,44 @@ export interface Dashboard {
     name: string;
     description: string;
     shared: boolean;
-    tiles: { query: string; title: string; width: 1 | 2 }[];
+    tiles: DashboardTile[];
+    controls?: DashboardControl[];
     updated_ms: number;
+}
+
+/** A dashboard tile: a saved query, or a workbook element (which may drill down through ``drill``). */
+export interface DashboardTile {
+    query?: string;
+    element?: WorkbookElement;
+    connection?: string;
+    drill?: string[];
+    title: string;
+    width: 1 | 2;
+    chart?: ChartSpec;
+}
+
+/** A dashboard control: filters every tile with ``column`` (or the tiles in ``targets``). */
+export interface DashboardControl {
+    id: string;
+    label: string;
+    column: string;
+    kind: 'values' | 'range' | 'date_range' | 'text';
+    targets?: number[] | null;
+    source?: { connection: string; table: string } | null;
+    default?: unknown;
+}
+
+/** What the viewer chose: control values, values clicked in tiles, and each tile's drill path. */
+export interface DashboardState {
+    controls?: Record<string, unknown>;
+    selection?: { column: string; value: unknown; from: number }[];
+    drill?: Record<string, unknown[]>;
 }
 
 /** A dashboard with every tile run as the viewer (GET /sql/dashboards/{id}/render). */
 export interface RenderedDashboard extends Omit<Dashboard, 'tiles'> {
-    tiles: { query: string; title: string; width: 1 | 2; chart?: ChartSpec; result?: DataResult; error?: string }[];
+    tiles: (DashboardTile & { result?: DataResult; error?: string; applied?: WorkbookFilter[];
+        level?: { path: unknown[]; column: string | null } })[];
 }
 
 /** An alert on a saved query (GET /sql/alerts). */
