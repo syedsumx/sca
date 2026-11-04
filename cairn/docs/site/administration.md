@@ -226,6 +226,8 @@ point `CAIRN_TLS_DIR` at another directory, and restart the edge. It then also s
 plain HTTP to HTTPS (`CAIRN_TLS_PUBLIC_PORT` is the port users reach, default 443), and set
 `CAIRN_PUBLIC_URL` to the `https://` address. On Kubernetes, TLS is the ingress's job.
 
+**Gateway API.** On a cluster that routes with the Gateway API instead of an Ingress controller, set `core.ingress.enabled=false` and `core.gateway.enabled=true` (the chart refuses both at once). The chart then renders an HTTPRoute serving the same paths as the Ingress: `/cairn/api` and `/cairn/mcp` with their prefix stripped (and `X-Forwarded-Prefix: /cairn/api`), OAuth discovery (`/.well-known/oauth-*`) unchanged, `/cairn-ui/` and `/docs` to the consumer UI, the rest to the web UI, and the engine's developer consoles to nothing. Attach it to a shared Gateway with `core.gateway.parentRefs` (`[{name, namespace, sectionName}]`; the Gateway must allow routes from the release's namespace), or let the chart create one with `core.gateway.create.enabled`, `create.className` (the GatewayClass) and `create.tlsSecret` (an HTTPS listener on 443; use `create.annotations` for cert-manager). `hostnames` defaults to `core.ingress.host`; `timeout` (300s) and `apiTimeout` (3600s) bound requests. Hosted tenants use a shared Gateway with `CAIRN_GATEWAY=<namespace>/<name>[/<listener>]` for `tenant.sh` (TLS is then the Gateway's, a wildcard certificate for `*.<domain>`). Tested through Envoy Gateway on kind in CI (`tests/test_gateway_api_kind.py`), and validated against the Gateway API schemas.
+
 **Rate limits.** Per client address: password sign-in 10 attempts a minute (bursts of 20), the Cairn
 API 50 requests a second (bursts of 400). Over the limit, the edge answers `429 Too Many Requests`.
 

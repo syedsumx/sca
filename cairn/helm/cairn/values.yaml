@@ -133,6 +133,20 @@ core:
     tls: []
     blockDeveloperConsoles: true
 
+  # Gateway API routes instead of the Ingress (enable one): HTTPRoutes serving the same paths, attached to
+  # parentRefs (a shared Gateway), or to a Gateway the chart creates (create.enabled, with its GatewayClass).
+  gateway:
+    enabled: false
+    parentRefs: []        # e.g. [{name: platform, namespace: gateway-system, sectionName: https}]
+    hostnames: []         # default: [core.ingress.host]
+    timeout: 300s         # the UI and the engine
+    apiTimeout: 3600s     # the Cairn API and MCP (long SQL runs, streams)
+    create:
+      enabled: false
+      className: ""
+      tlsSecret: ""       # an HTTPS listener on 443 with this certificate
+      annotations: {}     # e.g. cert-manager.io/cluster-issuer
+
 # ============================================================================================
 # Cairn control plane
 # ============================================================================================

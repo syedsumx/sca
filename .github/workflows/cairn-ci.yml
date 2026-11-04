@@ -317,6 +317,10 @@ jobs:
           CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+          # The chart's Gateway API routes through a real Gateway implementation (Envoy Gateway).
+          CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gateway.log"
       - name: SQL workflows, git folders and query insight pages (the built UI in Chromium, against Cairn)
         run: |
           set -o pipefail
@@ -584,6 +588,17 @@ jobs:
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           done
+          # Gateway API routes (core.gateway), checked against the Gateway API's own schemas.
+          for values in "--set core.gateway.enabled=true --set core.gateway.create.enabled=true --set core.gateway.create.className=eg --set core.gateway.create.tlsSecret=cairn-tls" \
+              "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml --set core.ingress.enabled=false --set core.gateway.enabled=true --set core.gateway.parentRefs[0].name=platform --set core.gateway.parentRefs[0].namespace=gateway"; do
+            # shellcheck disable=SC2086
+            helm template cairn helm/cairn $values --show-only templates/gateway-api.yaml \
+              | kubeconform -strict -summary -kubernetes-version 1.30.0 \
+                  -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+          done
+          # Gateway API routes and an Ingress both exposing Cairn are refused.
+          ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
+              --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
           # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
           curl -fsSL -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
           tar xzf /tmp/airflow-chart.tgz -C /tmp

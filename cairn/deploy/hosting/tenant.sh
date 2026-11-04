@@ -23,6 +23,9 @@
 #   CAIRN_MONITORING_NAMESPACE  Prometheus's namespace, also admitted by the isolation
 #   CAIRN_TLS_ISSUER      a cert-manager ClusterIssuer: each tenant's host gets its certificate from it
 #   CAIRN_POD_SECURITY    Pod Security level enforced in tenant namespaces (baseline, restricted)
+#   CAIRN_GATEWAY         <namespace>/<name>[/<listener>]: route each tenant through this shared Gateway API
+#                         Gateway (HTTPRoutes, core.gateway) instead of an Ingress; TLS is the Gateway's
+#                         (a wildcard certificate for *.<domain>), and its routes must be allowed from tenants
 #   CAIRN_METERING_URL    the control plane the tenant reports its usage to (with --metering-key: the
 #                         tenant's key, kept in Secret cairn-metering; see cairn.hosting.metering)
 #
@@ -115,6 +118,16 @@ apply_services() {
         kubectl -n "$(ns)" rollout status statefulset/kafka --timeout 10m >&2
     fi
 }
+edge_args() {   # a shared Gateway (CAIRN_GATEWAY=<namespace>/<name>[/<listener>]) instead of an Ingress per tenant
+    [ -n "${CAIRN_GATEWAY:-}" ] || { tls_args; return 0; }
+    local gns gname gsection
+    IFS=/ read -r gns gname gsection <<<"$CAIRN_GATEWAY"
+    [ -n "$gns" ] && [ -n "$gname" ] || die "CAIRN_GATEWAY: <namespace>/<name>[/<listener>]"
+    echo --set core.ingress.enabled=false --set core.gateway.enabled=true \
+        --set "core.gateway.parentRefs[0].namespace=$gns" --set "core.gateway.parentRefs[0].name=$gname" \
+        ${gsection:+--set "core.gateway.parentRefs[0].sectionName=$gsection"}
+}
+
 tls_args() {
     [ -n "${CAIRN_TLS_ISSUER:-}" ] || return 0
     echo --set-string "core.ingress.annotations.cert-manager\.io/cluster-issuer=$CAIRN_TLS_ISSUER" \
@@ -138,7 +151,7 @@ helm_args() {
         --set "core.kafka.bootstrap=$(kafka_bootstrap)" \
         --set "core.ingress.host=$id.$CAIRN_HOST_DOMAIN" \
         --set "cairn.publicUrl=https://$id.$CAIRN_HOST_DOMAIN" \
-        --set "cairn.licence.tenantId=$id" $(tls_args) $(metering_args)
+        --set "cairn.licence.tenantId=$id" $(edge_args) $(metering_args)
 }
 
 metering_args() {   # usage reports to the control plane, once the tenant has its metering key
