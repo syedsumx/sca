@@ -81,12 +81,15 @@ class SqlWorkspace:
         """``data``: the DataAccessService queries run through. ``graph``: the metadata store, for the
         schema browser."""
         self.engine, self.data, self.graph = engine, data, graph
+        self.cache = None                                  # cairn.sqlworkspace.cache.ResultCache (dashboards, workbooks)
         self.matviews = None                               # cairn.pipelines.matviews, set when derived tables are
         self._schema_cache: dict[str, tuple[float, list[dict]]] = {}
 
     # ---- running ------------------------------------------------------------------------
-    def run(self, actor: str, sql: str, connection: str, limit: int = 200) -> dict:
-        """Runs ``sql`` as ``actor`` (authorized and masked per table) and records it in their history."""
+    def run(self, actor: str, sql: str, connection: str, limit: int = 200, cache: bool = False) -> dict:
+        """Runs ``sql`` as ``actor`` (authorized and masked per table) and records it in their history. With
+        ``cache`` (dashboards, workbooks, metrics), a result computed for someone whose policies on every table read
+        are the same is reused (:mod:`cairn.sqlworkspace.cache`)."""
         from cairn.dataaccess.service import DataAccessError
 
         started = time.monotonic()
@@ -102,12 +105,20 @@ class SqlWorkspace:
                 out = self.matviews.result(done, started)
                 self._record(actor, connection, sql, "ok", 1, out["elapsed_ms"], None)
                 return out
+        ticket = None
+        if cache and self.cache is not None:
+            hit, ticket = self.cache.get(actor, sql, connection, limit)
+            if hit is not None:
+                self._record(actor, connection, sql, "ok", len(hit.get("rows") or []), 0, None)
+                return hit
         try:
             out = self.data.query(actor, sql, connection, None, limit)
         except DataAccessError as e:
             self._record(actor, connection, sql, "error", None, int((time.monotonic() - started) * 1000), str(e))
             raise WorkspaceError(str(e), e.status)
         self._record(actor, connection, sql, "ok", len(out.get("rows") or []), out.get("elapsed_ms"), None)
+        if ticket is not None:
+            self.cache.put(ticket, out)
         return out
 
     def _record(self, actor, connection, sql, status, rows, ms, error) -> None:

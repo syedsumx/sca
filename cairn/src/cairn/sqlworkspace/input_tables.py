@@ -101,11 +101,13 @@ def stamp_literal(text: str) -> str:
 
 class InputTables:
     def __init__(self, engine, run: Callable[[str, str, str], tuple[list, list]], read: Callable[[str, str, str, Optional[str], int], dict],
-                 audit=None, register: Optional[Callable[[str, str, list, str, str], None]] = None):
+                 audit=None, register: Optional[Callable[[str, str, list, str, str], None]] = None,
+                 changed: Optional[Callable[[str, str], None]] = None):
         """``run(connection, actor, sql)``: a statement on Trino as ``actor`` (columns, rows); ``read(actor, sql,
         connection, urn, limit)``: a governed read (masks applied); ``register(connection, table, columns, owner,
         description)``: puts the new table in Cairn's catalog (owned by its creator), so it can be read at once."""
         self.engine, self.run, self.read, self.audit, self.register = engine, run, read, audit, register
+        self.changed = changed            # changed(connection, table): a write landed (the change log, the result cache)
 
     def _get(self, tid: str) -> dict:
         with self.engine.connect() as conn:
@@ -231,6 +233,13 @@ class InputTables:
         self._audit(actor, "input.forgotten", t["table_name"], {})
 
     def _audit(self, actor: str, action: str, table: str, details: dict) -> None:
+        if self.changed is not None and action in ("input.rows_added", "input.row_changed", "input.rows_deleted"):
+            t = next((x for x in self.list() if x["table_name"] == table), None)
+            if t is not None:
+                try:
+                    self.changed(t["connection"], table)
+                except Exception:  # noqa: BLE001 - recording the change never undoes the write
+                    pass
         if self.audit is not None:
             self.audit.record("sql", action, actor, table, details)
 

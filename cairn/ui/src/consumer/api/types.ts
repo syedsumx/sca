@@ -1806,3 +1806,19 @@ export interface DashboardAction {
               who?: 'owner' | 'viewers' };
     owner: string;
 }
+
+/** A scheduled export: a dashboard or workbook sent as CSV or PDF, each recipient their own view. */
+export interface ReportSchedule {
+    id: string;
+    owner: string;
+    name: string;
+    target_kind: 'dashboard' | 'workbook';
+    target_id: string;
+    format: 'csv' | 'pdf';
+    every_minutes: number;
+    recipients: string[];
+    next_ms: number;
+    last_ms: number | null;
+    last_status: string | null;
+    enabled: boolean;
+}

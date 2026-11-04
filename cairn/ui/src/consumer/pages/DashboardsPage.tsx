@@ -109,6 +109,52 @@ function Actions({ board, row, onDone }: { board: string; row: Record<string, un
     );
 }
 
+const EVERY = [{ value: 1440, label: 'Every day' }, { value: 10080, label: 'Every week' }, { value: 60, label: 'Every hour' }];
+
+/** Schedule this dashboard as CSV or PDF; every recipient gets their own view. */
+function ScheduleExport({ board, name }: { board: string; name: string }) {
+    const { client } = useConsumerApi();
+    const [open, setOpen] = useState(false);
+    const [form, setForm] = useState({ format: 'csv' as 'csv' | 'pdf', every: 10080, people: [] as string[] });
+    const [busy, setBusy] = useState(false);
+    const save = async (now: boolean) => {
+        setBusy(true);
+        try {
+            const r = await client.saveReport({ name, target: { dashboard: board }, format: form.format, every_minutes: form.every,
+                recipients: form.people.map((p) => (p.startsWith('urn:li:corpuser:') ? p : `urn:li:corpuser:${p}`)) });
+            if (now) {
+                const out = await client.runReport(r.id);
+                message.success(`Sent to ${out.sent.length}` + (out.skipped.length ? `; ${out.skipped.length} may not open this dashboard` : ''));
+            } else message.success('Export scheduled');
+            setOpen(false);
+        } catch (e) {
+            message.error((e as Error).message);
+        } finally {
+            setBusy(false);
+        }
+    };
+    return (
+        <>
+            <Button onClick={() => setOpen(true)}>Schedule export</Button>
+            <Modal title={`Schedule ${name}`} open={open} onCancel={() => setOpen(false)} footer={[
+                <Button key="now" loading={busy} onClick={() => void save(true)}>Schedule and send now</Button>,
+                <Button key="save" type="primary" loading={busy} onClick={() => void save(false)}>Schedule</Button>]}>
+                <Space direction="vertical" style={{ width: '100%' }}>
+                    <Space wrap>
+                        <Select aria-label="Export format" value={form.format} style={{ width: 110 }} onChange={(format) => setForm({ ...form, format })}
+                            options={[{ value: 'csv', label: 'CSV' }, { value: 'pdf', label: 'PDF' }]} />
+                        <Select aria-label="How often" value={form.every} style={{ width: 150 }} onChange={(every) => setForm({ ...form, every })}
+                            options={EVERY} />
+                    </Space>
+                    <Select aria-label="Recipients" mode="tags" placeholder="Recipients (user names); you get a copy too" style={{ width: '100%' }}
+                        value={form.people} onChange={(people) => setForm({ ...form, people })} />
+                    <Muted>Each recipient&apos;s copy is made as them: their masks and row filters apply. Someone who may not open the dashboard gets nothing.</Muted>
+                </Space>
+            </Modal>
+        </>
+    );
+}
+
 /** One dashboard, every tile run as the viewer, filtered by the controls, cross-filtered by clicks and drilled. */
 function Board({ id }: { id: string }) {
     const [state, setState] = useState<DashboardState>({});
@@ -135,6 +181,7 @@ function Board({ id }: { id: string }) {
                 <Surface style={{ marginBottom: 12 }}>
                     <Space wrap data-testid="controls">
                         <Actions board={id} row={row} onDone={() => { setRow(null); setRefresh((r) => r + 1); }} />
+                        <ScheduleExport board={id} name={board.name} />
                         {(board.controls ?? []).map((c) => (
                             <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
                                 onChange={(v) => setState({ ...state, controls: { ...(state.controls ?? {}), [c.id]: v } })} />

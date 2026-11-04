@@ -292,10 +292,10 @@ class Workbooks:
             raise WorkbookError(f"the pivot column has more than {MAX_PIVOT} values: filter it, or list the values")
         return values or [None]
 
-    def run(self, actor: str, connection: str, spec: dict) -> dict:
+    def run(self, actor: str, connection: str, spec: dict, cache: bool = True) -> dict:
         compiled = self.compile(actor, connection, spec)
         limit = min(int(spec.get("limit", 1000)), MAX_ROWS)
-        out = self.workspace.run(actor, compiled["sql"], connection, limit)
+        out = self.workspace.run(actor, compiled["sql"], connection, limit, cache=cache)
         return {**out, "sql": compiled["sql"]}
 
     # ---- saved workbooks -----------------------------------------------------------------------

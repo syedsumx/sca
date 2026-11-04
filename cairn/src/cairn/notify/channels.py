@@ -277,12 +277,18 @@ class TeamsSender:
 # --------------------------------------------------------------------------- email / webhook
 class EmailSender:
     def __init__(self, smtp_url: str, sender: str = "cairn@localhost",
-                 email_of: Optional[Callable[[str], Optional[str]]] = None):
+                 email_of: Optional[Callable[[str], Optional[str]]] = None,
+                 attachments: Optional[Callable[[dict], list[tuple[str, str, bytes]]]] = None):
+        """``attachments(row)``: files to attach to a notification's email (a report's copy), as
+        (filename, content type, bytes). ``?starttls=false`` on an ``smtp://`` URL skips STARTTLS (a relay
+        on the same host)."""
         u = urlparse(smtp_url)  # smtp://user:pass@host:587 or smtps://...
         self.host, self.port = u.hostname, u.port or (465 if u.scheme == "smtps" else 587)
         self.user, self.password, self.ssl = u.username, u.password, u.scheme == "smtps"
+        self.starttls = not self.ssl and "starttls=false" not in (u.query or "")
         self.sender = sender
         self.email_of = email_of or (lambda actor: None)
+        self.attachments = attachments
 
     def send(self, row: dict, hub) -> str:
         to = self.email_of(row["recipient"])
@@ -298,9 +304,12 @@ class EmailSender:
         if _url(row):
             lines.append(f"Open in Cairn: {_url(row)}")
         msg.set_content("\n".join(lines))
+        for name, ctype, data in (self.attachments(row) if self.attachments is not None else []):
+            main, _, sub = ctype.partition("/")
+            msg.add_attachment(data, maintype=main, subtype=sub or "octet-stream", filename=name)
         smtp_cls = smtplib.SMTP_SSL if self.ssl else smtplib.SMTP
         with smtp_cls(self.host, self.port, timeout=15) as s:
-            if not self.ssl:
+            if self.starttls:
                 s.starttls()
             if self.user:
                 s.login(self.user, self.password or "")

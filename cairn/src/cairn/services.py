@@ -135,6 +135,7 @@ class Services:
     metrics: Optional[Any] = None
     builder: Optional[Any] = None
     bi_actions: Optional[Any] = None
+    reports: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -660,7 +661,12 @@ def _build_active_metadata(s: Services) -> None:
         slack_sender = SlackSender(cfg.slack_bot_token, email_of)
         hub.channels["slack"] = slack_sender
     if cfg.smtp_url:
-        hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of)
+        def email_attachments(row: dict) -> list:
+            fid = (row.get("payload") or {}).get("file")
+            rep = getattr(s, "reports", None)
+            got = rep.attachment(fid) if (rep is not None and fid and row.get("type") == "report.ready") else None
+            return [got] if got else []
+        hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of, email_attachments)
     if cfg.teams_webhook_url and not hub.list_routes():
         hub.put_routes([Route(id="teams-default", channel="teams", target=cfg.teams_webhook_url,
                               event_types=["quality.incident.raised", "certification.requested", "asset.deprecated",
@@ -815,6 +821,22 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # The shared result cache (dashboards, workbooks, metrics): shared only between people whose decisions on
+        # every table read are the same, dropped when a table read changes.
+        from cairn.governance.pdp import AuthorizeRequest as _AR, ResourceRef as _RR
+        from cairn.sqlworkspace.cache import ResultCache
+
+        def cache_decisions(actor: str, urn: str) -> list:
+            out: list = []
+            for privilege, channel in (("VIEW_ENTITY_PAGE", "trino"), ("VIEW_DATASET_PROFILE", "trino"),
+                                       ("VIEW_DATASET_PROFILE", "core-proxy")):
+                d = s.pdp.decide(_AR(actor=actor, privilege=privilege, actor_groups=[],
+                                     resource=_RR(type="dataset", urn=urn), environment={"channel": channel}))
+                out.append([d.decision, sorted(([o.type, o.params] for o in d.obligations), key=str)])
+            out.append(bool(s.data_access.can_read(actor, urn)))
+            return out
+        s.sql_workspace.cache = ResultCache(s.engine, s.data_access.urns_of, cache_decisions,
+                                            lambda: getattr(s, "dataset_changes", None), s.audit)
         # Workbooks: spreadsheet-style elements compiled to SQL and run through the workspace as the viewer.
         from cairn.sqlworkspace.workbooks import Workbooks, _table as _wb_table
 
@@ -851,7 +873,11 @@ def _build_active_metadata(s: Services) -> None:
             s.graph.emit(to_mcps(m.group(1), [Dataset(
                 name=m.group(2), fields=fields, owners=[owner], description=description or None, subtype="Table",
                 properties={"cairn_input_table": "true", "cairn_connection": connection})], m.group(3)))
-        s.input_tables = InputTables(s.engine, input_run, s.data_access.query, s.audit, input_register)
+        def input_changed(connection: str, table: str) -> None:
+            if getattr(s, "dataset_changes", None) is not None:
+                schema, name = table.split(".")
+                s.dataset_changes.record([s.data_access._source(connection, None).urn(schema, name, None)], "input-table")
+        s.input_tables = InputTables(s.engine, input_run, s.data_access.query, s.audit, input_register, input_changed)
         if getattr(s, "derived", None) is not None:      # materialized views, written in SQL (cairn.pipelines.matviews)
             from cairn.pipelines.matviews import MaterializedViews
 
@@ -935,6 +961,13 @@ def _build_active_metadata(s: Services) -> None:
         s.bi_actions = Actions(s.engine, s.sql_boards, s.input_tables, s.sql_workflows, s.audit,
                                lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
                                                          raise_on_deny=False))
+        # Scheduled exports: dashboards and workbooks sent as CSV or PDF, each recipient rendered as themselves.
+        from cairn.sqlworkspace.reports import Reports
+
+        def tell_report(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url=payload.get("url")))
+        s.reports = Reports(s.engine, s.sql_boards, s.workbooks, tell_report, s.audit)
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor
         from cairn.quality.auto import Planner

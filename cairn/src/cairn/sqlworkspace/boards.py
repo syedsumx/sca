@@ -238,6 +238,7 @@ class Boards:
         values = state.get("controls") if isinstance(state.get("controls"), dict) else {}
         selection = state.get("selection") or []
         drill = state.get("drill") if isinstance(state.get("drill"), dict) else {}
+        cache = not state.get("fresh")                        # "fresh": run every tile again, past the cache
         if not isinstance(selection, list) or len(selection) > 12:
             raise WorkspaceError("selection: up to 12 {column, value, from}")
         wanted: list[tuple[dict, Optional[list]]] = []          # (filter, tiles it is for; None: every tile)
@@ -258,16 +259,16 @@ class Boards:
                 if t.get("metric") is not None:
                     tiles.append(self._run_metric(actor, t, filters))
                 elif t.get("element") is not None:
-                    tiles.append(self._run_element(actor, t, filters, drill.get(str(i)) or []))
+                    tiles.append(self._run_element(actor, t, filters, drill.get(str(i)) or [], cache))
                 else:
-                    tiles.append(self._run_query(actor, t, filters))
+                    tiles.append(self._run_query(actor, t, filters, cache))
             except Exception as e:  # noqa: BLE001 - one tile's error shows in that tile
                 if not hasattr(e, "status"):
                     raise
                 tiles.append({**t, "error": str(e), "status": e.status})
         return {**board, "tiles": tiles}
 
-    def _run_element(self, actor: str, t: dict, filters: list[dict], path: list) -> dict:
+    def _run_element(self, actor: str, t: dict, filters: list[dict], path: list, cache: bool = True) -> dict:
         el = json.loads(json.dumps(t["element"]))
         table = (el.get("source") or {}).get("table", "")
         have = {c.lower() for c in self.wb.columns_of(actor, t["connection"], table)}
@@ -284,7 +285,7 @@ class Boards:
                           for s in el.get("sort") or []]
         applied = [f for f in filters if str(f["column"]).lower() in have]
         el["filters"] = list(el.get("filters") or []) + [{**f, "on": "rows"} for f in applied]
-        out = self.wb.run(actor, t["connection"], el)
+        out = self.wb.run(actor, t["connection"], el, cache=cache)
         sql = out.pop("sql")
         chart = t.get("chart") or {"type": "table", "x": "", "y": []}
         if path and chart.get("x", "").lower() == levels[0].lower():
@@ -305,7 +306,7 @@ class Boards:
                    {"type": "bar", "x": dims[0], "y": q["metrics"]} if dims else {"type": "number", "x": "", "y": q["metrics"][:1]})
         return {**t, "chart": t.get("chart") or default, "result": out, "applied": applied}
 
-    def _run_query(self, actor: str, t: dict, filters: list[dict]) -> dict:
+    def _run_query(self, actor: str, t: dict, filters: list[dict], cache: bool = True) -> dict:
         q = self.ws.get(actor, t["query"])
         applied: list[dict] = []
         if filters:
@@ -315,9 +316,10 @@ class Boards:
             applied = [f for f in filters if str(f["column"]).lower() in by]
         if applied:
             where = " AND ".join(filter_sql(f, lambda c: ident(by[str(c).lower()])) for f in applied)
-            out = self.ws.run(actor, f"SELECT * FROM ({inner}) AS tile WHERE {where}", q["connection"], 1000)
+            out = self.ws.run(actor, f"SELECT * FROM ({inner}) AS tile WHERE {where}", q["connection"], 1000,
+                              cache=cache)
         else:
-            out = self.ws.run(actor, q["sql"], q["connection"], 1000)
+            out = self.ws.run(actor, q["sql"], q["connection"], 1000, cache=cache)
         return {**t, "chart": t.get("chart") or q["chart"], "result": out, "applied": applied}
 
     def control_values(self, actor: str, did: str, cid: str) -> list:

@@ -169,3 +169,32 @@ it('runs a form action and a row action, as the person clicking', async () => {
     expect(calls.find((c) => c.path === '/sql/dashboards/d5/actions/a2/run')!.body).toMatchObject({
         inputs: {}, row: { _row_id: rowId, _updated_at: '2026-11-04 10:00:00+00:00', item: 'laptop' } });
 });
+
+it('schedules a dashboard export and sends it now, each recipient their own copy', async () => {
+    const calls: MockCall[] = [];
+    const board = { id: 'd7', owner: 'urn:li:corpuser:ana', name: 'Weekly orders', description: '', shared: true, updated_ms: 1,
+                    controls: [], tiles: [] };
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG, 'GET /sql/saved': [], 'GET /sql/workbooks': [], 'GET /sql/metrics': [],
+        'GET /sql/dashboards': [board], 'GET /sql/dashboards/d7/render': board, 'GET /sql/dashboards/d7/actions': [],
+        'POST /sql/reports': { id: 'r1', owner: board.owner, name: 'Weekly orders', target_kind: 'dashboard', target_id: 'd7',
+                               format: 'pdf', every_minutes: 1440, recipients: [board.owner, 'urn:li:corpuser:bob'], next_ms: 1,
+                               last_ms: null, last_status: null, enabled: true },
+        'POST /sql/reports/r1/run': { sent: [{ recipient: board.owner, file: 'f1' }], skipped: [{ recipient: 'urn:li:corpuser:bob', reason: 'no' }] },
+    }, calls);
+    render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><DashboardsPage /></CairnProvider></MemoryRouter>);
+    fireEvent.mouseDown((await screen.findAllByRole('combobox'))[0]);
+    fireEvent.click(await screen.findByText('Weekly orders (shared)'));
+    fireEvent.click(await screen.findByRole('button', { name: 'Schedule export' }));
+    fireEvent.mouseDown(await screen.findByRole('combobox', { name: 'Export format' }));
+    fireEvent.click((await screen.findAllByTitle('PDF')).slice(-1)[0]);
+    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'How often' }));
+    fireEvent.click((await screen.findAllByTitle('Every day')).slice(-1)[0]);
+    const people = screen.getByRole('combobox', { name: 'Recipients' });
+    fireEvent.change(people, { target: { value: 'bob' } });
+    fireEvent.keyDown(people, { key: 'Enter', keyCode: 13 });
+    fireEvent.click(screen.getByRole('button', { name: 'Schedule and send now' }));
+    await waitFor(() => expect(calls.some((c) => c.path === '/sql/reports/r1/run')).toBe(true));
+    expect(calls.find((c) => c.path === '/sql/reports' && c.method === 'POST')!.body).toEqual({
+        name: 'Weekly orders', target: { dashboard: 'd7' }, format: 'pdf', every_minutes: 1440, recipients: ['urn:li:corpuser:bob'] });
+});

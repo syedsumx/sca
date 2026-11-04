@@ -101,6 +101,7 @@ import type {
     MetricQuery,
     BuiltDashboard,
     DashboardAction,
+    ReportSchedule,
     SchemaTable,
     SqlAlert,
     SqlRun,
@@ -1016,6 +1017,20 @@ export class ConsumerClient extends CairnClient {
 
     deleteWorkbook(id: string) {
         return this.request<void>('DELETE', `/sql/workbooks/${enc(id)}`);
+    }
+
+    reports(opts?: RequestOptions) {
+        return this.request<ReportSchedule[]>('GET', '/sql/reports', undefined, opts);
+    }
+
+    saveReport(body: { name: string; target: { dashboard?: string; workbook?: string }; format: 'csv' | 'pdf';
+                       every_minutes: number; recipients: string[] }) {
+        return this.request<ReportSchedule>('POST', '/sql/reports', body);
+    }
+
+    runReport(id: string) {
+        return this.request<{ sent: { recipient: string; file: string }[]; skipped: { recipient: string; reason: string }[] }>(
+            'POST', `/sql/reports/${enc(id)}/run`);
     }
 
     dashboardActions(id: string, opts?: RequestOptions) {

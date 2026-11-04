@@ -313,6 +313,12 @@ class DataAccessService:
         self._read(actor, [urn])
         return out.as_dict()
 
+    def urns_of(self, sql: str, connection: str) -> list[str]:
+        """The datasets ``sql`` reads on ``connection``, named as :meth:`query` names them (no access check)."""
+        source = self._source(connection, None)
+        _, tables = tables_in(sql, source.dialect)
+        return [source.urn(t.db or "", t.name, t.catalog or None) for t in tables]
+
     def query(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
               limit: int = 200) -> dict:
         source = self._source(connection, urn)

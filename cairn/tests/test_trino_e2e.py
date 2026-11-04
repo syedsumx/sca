@@ -1146,6 +1146,123 @@ def test_dashboard_actions_write_run_and_call_as_the_person_who_clicks(trino, ca
     assert sum(e["action"] == "bi.action_run" for e in s.audit.entries("sql", limit=200)) >= 8
 
 
+def test_results_are_shared_only_between_people_who_see_the_same_and_exports_are_each_recipients_own(trino, cairn):
+    """The result cache and scheduled exports on real Trino. Ana and Carol (the same policies) share a cached tile;
+    Bob (an EU row filter) and the admin (no masks) get their own; a change to the table drops it; "fresh" goes
+    past it. A scheduled export renders each recipient's copy as them (Bob's has only EU rows), each copy only
+    for its recipient, a recipient who may not open the dashboard is skipped, and the email carries the file."""
+    import io
+    import socket
+
+    import httpx
+    from pypdf import PdfReader
+    from sqlalchemy import update
+
+    from cairn.notify.channels import EmailSender
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.reports import report_schedules
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.c_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    trino("CREATE TABLE lake.sales.c_orders AS SELECT * FROM (VALUES (1, 'EU', 100e0), (2, 'US', 70e0), (3, 'EU', 30e0)) "
+          "AS t(id, region, amount)")
+    who = {u: {"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "carol", "bob")}
+    board = httpx.post(f"{url}/sql/dashboards", headers=who["admin"], timeout=60, json={
+        "name": "Orders by region", "shared": True,
+        "tiles": [{"element": {"source": {"table": "sales.c_orders"}, "group_by": ["region"],
+                               "aggregates": [{"name": "Total", "formula": "Sum([amount])"}], "sort": [{"column": "region"}]},
+                   "connection": "lakehouse", "title": "By region"}]}).json()
+    cache = s.sql_workspace.cache
+    cache.clear()
+
+    def tile(user, state=None):
+        r = httpx.post(f"{url}/sql/dashboards/{board['id']}/render", json=state or {}, headers=who[user], timeout=120)
+        assert r.status_code == 200, r.text
+        return r.json()["tiles"][0]["result"]
+
+    first = tile("ana")
+    assert not first.get("cached") and cache.stats() == {**cache.stats(), "entries": 1, "hits": 0}
+    shared = tile("carol")                                               # the same policies as Ana: her result
+    assert shared.get("cached") is True and shared["rows"] == first["rows"] and cache.stats()["hits"] == 1
+    bob = tile("bob")                                                    # an EU row filter: his own
+    assert not bob.get("cached") and bob["rows"] == [["EU", 130.0]] and cache.stats()["entries"] == 2
+    assert not tile("admin").get("cached") and cache.stats()["entries"] == 3   # no masks: his own too
+    assert not tile("ana", {"fresh": True}).get("cached")              # past the cache
+    s.dataset_changes.record([urn], "test")                              # the table changed: dropped
+    assert not tile("carol").get("cached")
+    assert any(e["action"] == "data.queried" and (e.get("details") or {}).get("cached")
+               for e in s.audit.entries("data", limit=100))
+
+    # A scheduled export: each recipient's copy rendered as them.
+    rep = f"{url}/sql/reports"
+    r = httpx.post(rep, headers=who["admin"], timeout=60, json={
+        "name": "Weekly orders", "target": {"dashboard": board["id"]}, "format": "csv", "every_minutes": 10080,
+        "recipients": ["urn:li:corpuser:bob", "urn:li:corpuser:ana"]})
+    assert r.status_code == 201 and r.json()["recipients"][0] == "urn:li:corpuser:admin", r.text
+    sid = r.json()["id"]
+    assert httpx.post(rep, headers=who["admin"], timeout=60, json={"name": "x", "target": {"dashboard": board["id"]},
+                                                                   "every_minutes": 5}).status_code == 400
+    sent = httpx.post(f"{rep}/{sid}/run", headers=who["admin"], timeout=180).json()
+    files = {x["recipient"].removeprefix("urn:li:corpuser:"): x["file"] for x in sent["sent"]}
+    assert set(files) == {"admin", "bob", "ana"} and sent["skipped"] == []
+    bob_csv = httpx.get(f"{rep}/files/{files['bob']}", headers=who["bob"], timeout=30)
+    assert bob_csv.status_code == 200 and bob_csv.headers["content-type"].startswith("text/csv")
+    assert bob_csv.text.splitlines()[:3] == ["# By region", "region,Total", "EU,130.0"] and "US" not in bob_csv.text
+    assert "US,70.0" in httpx.get(f"{rep}/files/{files['admin']}", headers=who["admin"], timeout=30).text
+    assert httpx.get(f"{rep}/files/{files['bob']}", headers=who["ana"], timeout=30).status_code == 404   # his alone
+
+    # PDF, and a recipient who may not open a private dashboard gets nothing.
+    private = httpx.post(f"{url}/sql/dashboards", headers=who["admin"], timeout=60, json={
+        "name": "Private", "tiles": board["tiles"]}).json()
+    pdf = httpx.post(rep, headers=who["admin"], timeout=60, json={
+        "name": "Private orders", "target": {"dashboard": private["id"]}, "format": "pdf",
+        "recipients": ["urn:li:corpuser:bob"]}).json()
+    out = httpx.post(f"{rep}/{pdf['id']}/run", headers=who["admin"], timeout=180).json()
+    assert [x["recipient"] for x in out["skipped"]] == ["urn:li:corpuser:bob"] and len(out["sent"]) == 1
+    doc = httpx.get(f"{rep}/files/{out['sent'][0]['file']}", headers=who["admin"], timeout=30)
+    text = PdfReader(io.BytesIO(doc.content)).pages[0].extract_text()
+    assert doc.headers["content-type"] == "application/pdf" and "By region" in text and "US" in text
+
+    # Due schedules are claimed once.
+    with s.engine.begin() as conn:
+        conn.execute(update(report_schedules).where(report_schedules.c.id == sid).values(next_ms=1))
+    assert s.reports.run_due() >= 1 and s.reports.run_due() == 0
+
+    # The email carries the recipient's file (a real SMTP server: Mailpit).
+    mail, mp = f"cairn-reports-mail-{os.getpid()}", port()
+    smtp = port()
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", mail, "-p", f"127.0.0.1:{mp}:8025", "-p", f"127.0.0.1:{smtp}:1025",
+                    os.environ.get("CAIRN_MAILPIT_IMAGE", "axllent/mailpit:v1.21.8")], check=True, capture_output=True, timeout=300)
+    try:
+        end = time.time() + 60
+        while True:
+            try:
+                if httpx.get(f"http://127.0.0.1:{mp}/api/v1/messages", timeout=2).status_code == 200:
+                    socket.create_connection(("127.0.0.1", smtp), 2).close()
+                    break
+            except (httpx.HTTPError, OSError):
+                pass
+            assert time.time() < end, "Mailpit did not start"
+            time.sleep(1)
+        sender = EmailSender(f"smtp://127.0.0.1:{smtp}?starttls=false", "cairn@test.example", lambda a: "bob@test.example",
+                             lambda row: [s.reports.attachment(row["payload"]["file"])])
+        sender.send({"recipient": "urn:li:corpuser:bob", "type": "report.ready", "title": "Weekly orders (CSV)",
+                     "body": "Your copy is ready.", "payload": {"file": files["bob"], "url": "/sql/reports/files/x"}}, None)
+        msgs = httpx.get(f"http://127.0.0.1:{mp}/api/v1/messages", timeout=10).json()["messages"]
+        assert msgs and msgs[0]["Attachments"] == 1, msgs
+        mid = msgs[0]["ID"]
+        parts = httpx.get(f"http://127.0.0.1:{mp}/api/v1/message/{mid}", timeout=10).json()["Attachments"]
+        assert parts[0]["FileName"].endswith(".csv") and parts[0]["ContentType"].startswith("text/csv")
+        body = httpx.get(f"http://127.0.0.1:{mp}/api/v1/message/{mid}/part/{parts[0]['PartID']}", timeout=10).text
+        assert "EU,130.0" in body and "US" not in body
+    finally:
+        subprocess.run(["docker", "rm", "-f", mail], capture_output=True)
+
+
 def test_input_tables_are_written_on_trino_as_the_person_and_read_back_governed(trino, cairn):
     """Input tables (writeback): a table people type into, created and changed on real Trino as the person
     writing, so Cairn's policies decide each statement; rows read back masked and filtered like any table,
