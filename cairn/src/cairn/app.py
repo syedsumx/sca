@@ -439,6 +439,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
 
         app.include_router(reports_router(services.reports, cp, services.authorize, services.can_view,
                                           services.summaries, services.costs))
+    if getattr(services, "siem", None) is not None:
+        from cairn.common.siem import build_siem_router
+
+        app.include_router(build_siem_router(services.siem, cp, services.authorize))
     if getattr(services, "budgets", None) is not None:
         from cairn.reports.budgets import build_budgets_router
 

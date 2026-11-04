@@ -125,6 +125,7 @@ class Services:
     online_features: Optional[Any] = None
     ml_monitoring: Optional[Any] = None
     budgets: Optional[Any] = None
+    siem: Optional[Any] = None
     sql_workflows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
@@ -1376,6 +1377,11 @@ def _build_costs(s: Services, hub, Event) -> None:
             actor=actor, entity_urn=urn, include_owners=True, include_followers=True, payload=figures))
 
     s.costs = CostService(s.engine, s.graph, has_downstream, notify, registry=s.connections, audit=s.audit)
+    # SIEM export: the audit log pushed to Splunk HEC, syslog (RFC 5424, CEF) or HTTPS sinks (CAIRN_SIEM_SINKS).
+    from cairn.common.siem import SiemExport, load_sinks
+
+    sinks = load_sinks()                  # a misconfigured sink stops Cairn at start-up, not silently
+    s.siem = SiemExport(s.engine, s.audit, sinks) if sinks and s.audit is not None else None
     # Cost budgets: a scope's spend per period against an amount, alerts at thresholds and on forecast.
     from cairn.reports.budgets import Budgets
 

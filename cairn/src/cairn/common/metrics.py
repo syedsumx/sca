@@ -44,6 +44,7 @@ try:
     AI_COST = Counter("cairn_ai_cost_usd_total", "Estimated LLM spend in USD", ["task"])
     AI_BUDGET_REFUSALS = Counter("cairn_ai_budget_refusals_total", "LLM calls refused by the budget")
     AUDIT_EVENTS = Counter("cairn_audit_events_total", "Audit log entries", ["category"])
+    SIEM_SENT = Counter("cairn_siem_entries_sent_total", "Audit entries a SIEM sink accepted", ["sink"])
     WORKER_LAST_SUCCESS = Gauge("cairn_worker_last_success_timestamp_seconds",
                                 "When a background worker last finished a cycle without error", ["worker"])
     WORKER_ERRORS = Counter("cairn_worker_errors_total", "Background worker cycles that failed", ["worker"])
@@ -60,7 +61,7 @@ try:
     ENABLED = True
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
-    NOTIFICATIONS_PENDING = TRINO_LINEAGE_HELD = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = _Noop()
+    NOTIFICATIONS_PENDING = TRINO_LINEAGE_HELD = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = SIEM_SENT = _Noop()
     WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
     AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = _Noop()
     ENABLED = False

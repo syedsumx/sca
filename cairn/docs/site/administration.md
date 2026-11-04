@@ -1963,6 +1963,13 @@ audit log: altering or deleting an entry breaks the chain.
   writing new entries, for a log shipper.
 * **Verify an export** without database access: `cairn audit verify-file audit.jsonl`. Pass the
   previous export's `head` with `--after-head` to prove nothing is missing in between.
+* **Push it to a SIEM** as it is written: list sinks in `CAIRN_SIEM_SINKS` (JSON or a file; a wrong sink stops Cairn at start-up) and the notifier (`cairn notifier`) sends each one what it has not accepted yet.
+  - `splunk_hec`: Splunk's HTTP Event Collector (`url`, `token_file`, optional `index`, `sourcetype`, default `cairn:audit`).
+  - `syslog`: RFC 5424 over TCP (`host`, `port`), with TLS when `tls: true` (`ca_file` for a private CA); facility *log audit*, severity *warning* for denials and failures; `format: json` (default) or `cef` (QRadar, ArcSight, Sentinel's CEF connector).
+  - `http`: the entries as a JSON array, with `Authorization: Bearer` from `token_file` (Elastic, Datadog, Sumo Logic, a log pipeline).
+  - Tokens are read from files (mounted secrets), never from the configuration. `categories` limits a sink; `batch` (500) sets the batch size.
+  - **Delivery** is at least once, in chain order: a sink's cursor moves only when it accepted a batch (HEC's and HTTP's answers; for syslog, the receiver reading the whole stream and closing). Each entry carries `id`, `seq` and its chain `hash`, so the SIEM can drop repeats and verify the chain from what it holds. A failing sink backs off (up to five minutes) and keeps its place; one notifier ships a sink at a time.
+  - `GET /cairn/api/v1/audit/siem` (`MANAGE_POLICIES`) shows each sink's position, lag behind the log, entries sent and last error; `POST …/siem/<sink>/rewind {"seq": n}` sends again after entry `n` (audited). Metric: `cairn_siem_entries_sent_total{sink}`. Migration 0069. Tested against Vector as a Splunk HEC, syslog (TCP and TLS) and HTTP receiver in `tests/test_siem_e2e.py`.
 
 ## Disaster recovery across regions
 

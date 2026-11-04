@@ -170,6 +170,8 @@ def notifier_tick(s) -> dict:
     """One maintenance pass: deliver notifications, expire access, revoke expired grants, purge chats."""
     now_ms = int(time.time() * 1000)
     out: dict = {"delivery": s.notify.dispatch_pending()}
+    if getattr(s, "siem", None) is not None:
+        out["siem"] = s.siem.ship()             # the audit log to the SIEM sinks, at least once and in order
     if s.marketplace is not None:
         out["access"] = s.marketplace.sweep(now_ms)
         if s.marketplace.provisioner is not None:
