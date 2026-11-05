@@ -2387,6 +2387,25 @@ A notebook or Python script can run on a schedule (or on demand) as its owner, i
   - On Trino (`test_a_scheduled_job_reads_the_lake_as_its_owner`): the admin's job counted every row; Bob's same job counted only his EU rows, over TLS against Trino's CA, and no token was kept.
   - On kind (`tests/test_jobs_k8s.py`): runs as Kubernetes Jobs with only the chart's Role, the pod locked down, a failure and a time limit recorded, and nothing (the token's Secret included) left behind.
 
+## SaaS connectors
+
+Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally (`/v1/saas-syncs`, `cairn.pipelines.saas`).
+
+- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce` or `hubspot`), `object` (an API name: `Account`, `contacts`), `fields` (API names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
+- **Keys.** They live in a [secret scope](#secret-scopes) the owner may read, and are read as the owner at each run. They are never stored on the sync, sent to the browser, logged or audited. A required key the owner cannot read stops the run before any request.
+  - Salesforce: `instance_url` and a connected app's `client_id` and `client_secret` (OAuth client credentials flow), or an `access_token`. API version `CAIRN_SAAS_SALESFORCE_API` (`v61.0`).
+  - HubSpot: a private app's `access_token`, and optionally `base_url` (default `https://api.hubapi.com`).
+  - Both must be `https://`.
+- **Incremental.** Each run asks only for records modified since the last one it loaded (Salesforce `SystemModstamp`, HubSpot `hs_lastmodifieddate`), oldest first, and upserts them by `id`: the batch's ids are deleted and the batch is appended, in one commit. The cursor advances after each committed batch (`CAIRN_SAAS_BATCH_ROWS`, 5,000), so a failed run resumes where it stopped. Records modified within the cursor's own second are asked for again and upserted again, so none is skipped. HubSpot's search stops at 10,000 records, so a longer run asks again from the last one it got. Changing a sync's object or table starts it from the beginning.
+- **The table.** It is created on the first run, with `id`, the fields (lowercased, as text, as the APIs return them), `_modified` and `_synced_ms`. A field added to the sync adds a column. Deleted records are not removed, because neither API's incremental query returns them.
+- **Governed.** The table is an ordinary lakehouse table: Cairn's policies, masks and row filters apply to everyone who reads it. The owner needs `WRITE_DATASET` on it, checked when the sync is saved and at every run. Loads are recorded as dataset changes, so data-aware schedules follow.
+- **Runs** go to a pool of `CAIRN_SAAS_CONCURRENCY` (2) beside the scheduler's tick, and each sync is claimed, so one scheduler runs it. A failed run is recorded on the sync (`last_status`, `last_error`), audited (`saas.sync_failed`) and told to the owner. Successful runs are audited as `saas.sync_run`, with the rows and the cursor.
+- **Settings.** On when there is a catalog to load into: `CAIRN_SAAS_CATALOG`, or else `CAIRN_PIPES_CATALOG` (pyiceberg REST catalog properties), and secret scopes are on (`CAIRN_SECRETS_KEY`). Outbound HTTPS to the SaaS hosts must be allowed by your network policy.
+- **Tested** with the real store, catalog and Trino, a real secret scope, and a local server answering the endpoints the connectors call (`tests/test_saas_e2e.py`). It is not a substitute for a run against a real Salesforce org or HubSpot account.
+  - Salesforce: five accounts loaded over three pages. A change and an addition were then asked from the cursor and upserted, with no duplicates. Bob's row filter applied to the loaded table.
+  - HubSpot: contacts loaded, a field added a column, and a failing API was recorded and told, with the cursor kept.
+  - Refused: a sync the owner may not write, injection-shaped object and field names, keys the owner cannot read (no request was made), and another person's sync.
+
 ## Governed volumes
 
 A volume is a folder of files (landing files, models, documents, exports) that Cairn's grants govern, not only the store's bucket policies (`/v1/volumes`, `cairn.dataaccess.volumes`).

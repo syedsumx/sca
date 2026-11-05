@@ -85,6 +85,7 @@ class Services:
     saml: Optional[Any] = None
     secret_scopes: Optional[Any] = None
     volumes: Optional[Any] = None
+    saas: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -834,6 +835,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_saml(s)
         _build_secret_scopes(s)
         _build_volumes(s)
+        _build_saas(s)
         _build_records(s)
         from cairn.common.limits import ApiLimits
 
@@ -1864,6 +1866,38 @@ def _build_volumes(s: Services) -> None:
         return lambda actor: s.authorize(Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False)
     s.volumes = Volumes(s.engine, store, groups_of, allowed(PRIVILEGE), allowed("MANAGE_SYSTEM_OPERATIONS"), s.audit,
                         os.environ.get("CAIRN_VOLUMES_ENDPOINT", url))
+
+
+def _build_saas(s: Services) -> None:
+    """SaaS connectors (cairn.pipelines.saas): Salesforce and HubSpot into Iceberg; on with a catalog to load into."""
+    from cairn.pipelines.pipes import _settings
+    from cairn.pipelines.saas import SaasSyncs
+
+    catalog = _settings("CAIRN_SAAS_CATALOG") if os.environ.get("CAIRN_SAAS_CATALOG") else (
+        _settings("CAIRN_PIPES_CATALOG") if os.environ.get("CAIRN_PIPES_CATALOG") else None)
+    if not catalog or s.secret_scopes is None:
+        return
+
+    class _Changes:                  # built later (pipeline health): looked up when a sync loads rows
+        def record(self, *a, **k):
+            c = getattr(s, "dataset_changes", None)
+            if c is not None:
+                c.record(*a, **k)
+
+    def urn(ns: str, t: str) -> str:
+        lake = getattr(s, "lakehouse", None)
+        return lake.urn([ns], t) if lake is not None else f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"
+
+    def notify(type_, title, body, recipients, payload):
+        hub = getattr(s, "notify", None)
+        if hub is not None:
+            from cairn.notify.hub import Event
+
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload))
+    s.saas = SaasSyncs(s.engine, catalog, s.secret_scopes.read,
+                       lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
+                                                    raise_on_deny=False),
+                       urn, s.audit, _Changes(), notify)
 
 
 def _build_saml(s: Services) -> None:
