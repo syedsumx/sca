@@ -26,7 +26,8 @@ bundles = Table(
 )
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
-KINDS = ("policies", "connections", "pipes", "streams", "derived", "maintenance", "vectors", "queries", "dashboards", "alerts", "workflows")
+KINDS = ("policies", "connections", "pipes", "streams", "derived", "maintenance", "vectors", "queries", "dashboards", "alerts",
+         "workflows", "workbooks", "metrics", "input_tables")
 
 
 class BundleStateError(Exception):

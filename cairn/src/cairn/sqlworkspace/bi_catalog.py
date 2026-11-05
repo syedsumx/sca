@@ -102,7 +102,13 @@ class BiCatalog:
 
     # ---- what an asset reads ---------------------------------------------------------------------
     def _refs_sql(self, sql: str, connection: str) -> dict[str, set[str]]:
-        source = self.ws.data._source(connection, None)
+        from cairn.dataaccess.service import DataAccessError
+
+        try:
+            source = self.ws.data._source(connection, None)
+        except DataAccessError as e:                     # the asset is still in the catalog, without lineage
+            logger.warning("no lineage for SQL on %r: %s", connection, e)
+            return {}
         return columns_read(sql, source.dialect, lambda t: source.urn(t.db or "", t.name, t.catalog or None))
 
     def _refs_element(self, owner: str, connection: str, element: dict) -> dict[str, set[str]]:

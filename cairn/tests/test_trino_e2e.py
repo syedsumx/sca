@@ -2481,3 +2481,95 @@ def test_an_embedded_dashboard_shows_each_portal_user_their_own_rows(trino, cair
     server.should_exit = True
     acts = [e["action"] for e in s.audit.entries(limit=3000)]
     assert "embed.session_started" in acts and acts.count("embed.refused") >= 7
+
+
+def test_bi_as_code_deploys_a_dashboard_to_staging_and_production(trino, cairn, tmp_path):
+    """BI in `cairn bundle`: an input table, a saved query, a metric, a workbook and a dashboard with query, element
+    and metric tiles deployed from one file to staging and production; a second plan has nothing to do; an edit is
+    an update; prune removes what the file no longer has; an input table is never rewritten."""
+    import httpx
+
+    from cairn.iac.bundle import BundleError, Client, apply, load, plan
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.bic_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0)) AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.bic_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    yaml_text = """
+bundle: bi-${env}
+input_tables:
+  - table: sales.bic_targets_${env}
+    connection: lakehouse
+    columns: [{name: region, type: text}, {name: target, type: number}]
+queries:
+  - name: Revenue by region (${env})
+    connection: lakehouse
+    sql: SELECT region, SUM(amount) AS revenue FROM sales.bic_orders GROUP BY region ORDER BY region
+metrics:
+  - name: bic_revenue_${env}
+    label: Revenue
+    connection: lakehouse
+    table: sales.bic_orders
+    measure: Sum([amount])
+    dimensions: [region]
+workbooks:
+  - name: Orders (${env})
+    connection: lakehouse
+    spec: {elements: [{source: {table: sales.bic_orders}, sort: [{column: id}]}]}
+dashboards:
+  - name: Sales (${env})
+    tiles:
+      - {query: "Revenue by region (${env})", title: Revenue}
+      - {element: {source: {table: sales.bic_orders}, group_by: [region], aggregates: [{name: n, formula: "Count()"}]},
+         connection: lakehouse, title: Orders by region}
+      - {metric: {metrics: ["bic_revenue_${env}"], dimensions: [region]}, title: Metric}
+"""
+    (tmp_path / "bi.yaml").write_text(yaml_text)
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    client = Client(url, "", http=httpx.Client(headers=admin, timeout=120))
+
+    def deploy(env, prune=False):
+        b = load(str(tmp_path / "bi.yaml"), {"env": env})
+        changes, state = plan(client, b, prune)
+        apply(client, b, changes, state, log=lambda *_: None)
+        return changes
+
+    for env in ("staging", "prod"):
+        made = deploy(env)
+        assert sorted((c.kind, c.action) for c in made) == sorted(
+            [("input_tables", "create"), ("queries", "create"), ("metrics", "create"), ("workbooks", "create"),
+             ("dashboards", "create")]), [c.line() for c in made]
+    boards = {d["name"]: d for d in httpx.get(f"{url}/sql/dashboards", headers=admin, timeout=60).json()}
+    for env in ("staging", "prod"):
+        b = boards[f"Sales ({env})"]
+        tiles = httpx.post(f"{url}/sql/dashboards/{b['id']}/render", headers=admin, json={}, timeout=120).json()["tiles"]
+        assert [t.get("error") for t in tiles] == [None, None, None], tiles
+        assert [tuple(r) for r in tiles[0]["result"]["rows"]] == [("EU", 10.0), ("US", 20.0)]
+    names = [t["table_name"] for t in httpx.get(f"{url}/sql/input-tables", headers=admin, timeout=60).json()]
+    assert {"sales.bic_targets_staging", "sales.bic_targets_prod"} <= set(names)
+
+    # Nothing to do the second time.
+    again = plan(client, load(str(tmp_path / "bi.yaml"), {"env": "prod"}))[0]
+    assert {c.action for c in again} == {"keep"}, [c.line() for c in again if c.action != "keep"]
+    # An edit is an update, in production only.
+    (tmp_path / "bi.yaml").write_text(yaml_text.replace("title: Revenue}", "title: Revenue (EUR)}"))
+    upd = [c for c in deploy("prod") if c.action != "keep"]
+    assert [(c.kind, c.action) for c in upd] == [("dashboards", "update")]
+    boards = {d["name"]: d for d in httpx.get(f"{url}/sql/dashboards", headers=admin, timeout=60).json()}
+    assert boards["Sales (prod)"]["tiles"][0]["title"] == "Revenue (EUR)" and boards["Sales (staging)"]["tiles"][0]["title"] == "Revenue"
+    # An input table is created by a bundle but never rewritten by one.
+    (tmp_path / "bi.yaml").write_text(yaml_text.replace("type: number}]", "type: integer}]"))
+    with pytest.raises(BundleError, match="never rewrites"):
+        plan(client, load(str(tmp_path / "bi.yaml"), {"env": "prod"}))
+    # Prune: the workbook and the metric leave the file, and Cairn.
+    trimmed = yaml_text.split("metrics:")[0] + "dashboards:" + yaml_text.split("dashboards:")[1].replace(
+        '      - {metric: {metrics: ["bic_revenue_${env}"], dimensions: [region]}, title: Metric}\n', "")
+    (tmp_path / "bi.yaml").write_text(trimmed)
+    gone = [(c.kind, c.action) for c in deploy("prod", prune=True) if c.action != "keep"]
+    assert ("workbooks", "delete") in gone and ("metrics", "delete") in gone, gone
+    assert "Orders (prod)" not in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
+    assert "Orders (staging)" in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]

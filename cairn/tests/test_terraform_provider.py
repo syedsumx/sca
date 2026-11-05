@@ -55,6 +55,16 @@ def world(tmp_path_factory):
     finally:
         for k, v in old.items():
             os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
+    # A small warehouse, so metrics (checked by compiling them) have a real table to be checked against.
+    import sqlalchemy
+
+    with sqlalchemy.create_engine(f"sqlite:///{d}/wh.db").begin() as c:
+        c.execute(sqlalchemy.text("CREATE TABLE orders (id INTEGER, region TEXT, amount REAL)"))
+    from cairn.quality.collectors import ConnectionRegistry
+
+    s.data_access.registry = ConnectionRegistry({"wh": {"url": f"sqlite:///{d}/wh.db", "catalog": {"platform": "sqlite"}}})
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
     real = s.identity._me_lookup
     s.identity._me_lookup = lambda url, h, c: ADMIN if (h.get("Authorization") or "") == f"Bearer {TOKEN}" else real(url, h, c)
     s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="admin", effect="allow", actions=["*"],
@@ -192,10 +202,28 @@ resource "cairn_saved_query" "revenue" {
   chart      = jsonencode({ type = "bar", x = "region", y = ["total"] })
 }
 
+resource "cairn_workbook" "orders" {
+  name            = "orders-wb"
+  connection_name = "wh"
+  spec = jsonencode({ elements = [{
+    source = { table = "main.orders" }, group_by = ["region"], aggregates = [{ name = "n", formula = "Count()" }]
+  }] })
+}
+
+resource "cairn_metric" "revenue" {
+  name            = "tf_revenue"
+  label           = "Revenue"
+  connection_name = "wh"
+  table           = "main.orders"
+  measure         = "Sum([amount])"
+  dimensions      = ["region"]
+}
+
 resource "cairn_dashboard" "sales" {
   name   = "sales"
   shared = true
-  tiles  = jsonencode([{ query = cairn_saved_query.revenue.id, width = 2 }, { query = data.cairn_saved_query.by_hand.id, title = "TITLE" }])
+  tiles  = jsonencode([{ query = cairn_saved_query.revenue.id, width = 2 }, { query = data.cairn_saved_query.by_hand.id, title = "TITLE" },
+                       { metric = { metrics = [cairn_metric.revenue.name], dimensions = ["region"] }, title = "Revenue" }])
 }
 
 resource "cairn_sql_alert" "drop" {
@@ -241,8 +269,12 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     q = next(x for x in s.sql_workspace.saved(ADMIN) if x["name"] == "revenue-by-region")
     assert q["chart"] == {"type": "bar", "x": "region", "y": ["total"]}
     board = s.sql_boards.dashboards(ADMIN)[0]
-    assert [(t["query"], t["title"], t["width"]) for t in board["tiles"]] == [
-        (q["id"], "revenue-by-region", 2), (hand["id"], "Hand", 1)]           # the data source found the hand-made query
+    assert [(t.get("query"), t["title"], t["width"]) for t in board["tiles"]] == [
+        (q["id"], "revenue-by-region", 2), (hand["id"], "Hand", 1), (None, "Revenue", 1)]   # the data source found the hand-made query
+    assert board["tiles"][2]["metric"]["metrics"] == ["tf_revenue"]
+    wb = next(x for x in s.workbooks.list(ADMIN) if x["name"] == "orders-wb")
+    assert wb["connection"] == "wh" and wb["spec"]["elements"][0]["group_by"] == ["region"]
+    assert s.metrics.get("tf_revenue")["measure"] == "Sum([amount])"
     assert s.sql_boards.alerts(ADMIN)[0]["value"] == 1000
     wf = s.sql_workflows.list(ADMIN)[0]
     assert [x["name"] for x in wf["steps"]] == ["refresh", "not-empty"] and wf["cron"] == "0 2 * * *"
@@ -262,6 +294,7 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     tf(w, "destroy", "-auto-approve")
     assert [x["name"] for x in s.sql_workspace.saved(ADMIN)] == ["by-hand"]
     assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
+    assert not s.workbooks.list(ADMIN) and not [m for m in s.metrics.list() if m["name"] == "tf_revenue"]
     assert s.vectors.list() == []
 
 

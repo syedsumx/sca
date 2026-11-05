@@ -84,7 +84,7 @@ Ordered by what an enterprise needs first to retire a Snowflake or Databricks co
 | L38 | **BI assets in the catalog.** Saved queries, workbooks and dashboards as catalog entities (input tables already are datasets) with lineage from the tables they read | Dropping a column shows which dashboards break, before it is dropped | ✅ |
 | L39 | **BI version history.** Every save of a saved query, workbook or dashboard kept; compare and restore | A broken edit is rolled back to yesterday's version | ✅ |
 | L40 | **Embedded dashboards.** Dashboards embedded with signed, origin-bound tokens, running as the embedding user | A portal shows a dashboard with that user's row filters | ✅ |
-| L41 | **BI as code.** Workbooks, dashboards and input tables in `cairn bundle` and the Terraform provider | A dashboard deployed from git to staging and production | ⬜ |
+| L41 | **BI as code.** Workbooks, dashboards (every tile kind), metrics and input tables in `cairn bundle` and the Terraform provider (Terraform's input tables not yet run by Terraform in a test) | A dashboard deployed from git to staging and production | ✅ |
 | L42 | **Input-table approvals.** Optional review before changes to an input table land | A change to targets waits for a reviewer; approved, it is written as its author | ⬜ |
 | L43 | **Partition-aware volume monitors.** Volume and freshness per partition | A missing day in a partitioned table alerts even when the table total looks normal | ⬜ |
 | L44 | **Remote agent hardening.** Key rotation by signed re-enrolment and an mTLS option between agent and gateway | An agent rotates its key without downtime; a gateway with mTLS refuses an agent without a client certificate | ⬜ |

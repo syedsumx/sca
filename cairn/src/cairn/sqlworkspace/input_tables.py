@@ -118,7 +118,7 @@ class InputTables:
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
-            return [{**dict(r._mapping), "columns": json.loads(r.columns)}
+            return [{**dict(r._mapping), "table": r.table_name, "columns": json.loads(r.columns)}
                     for r in conn.execute(select(input_tables).order_by(input_tables.c.table_name))]
 
     def create(self, actor: str, body: dict) -> dict:

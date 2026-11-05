@@ -77,23 +77,26 @@ class Versions:
             return None
         doc = self._doc(kind, r)
         who = actor or r.owner
-        for _ in range(5):                                  # two replicas saving at once: take the next number
-            with self.engine.begin() as conn:
+        for _ in range(5):
+            # Read, then write in a transaction of its own that only writes: on SQLite, a transaction that read and
+            # then writes fails at once when another one wrote meanwhile. Two saves at once clash on the key and
+            # take the next number.
+            with self.engine.connect() as conn:
                 last = conn.execute(select(bi_versions.c.version, bi_versions.c.doc).where(and_(
                     bi_versions.c.kind == kind, bi_versions.c.asset_id == aid)).order_by(bi_versions.c.version.desc())
                     .limit(1)).first()
-                if last is not None and last.doc == doc:
-                    return last.version
-                n = (last.version if last else 0) + 1
-                try:
-                    with conn.begin_nested():
-                        conn.execute(insert(bi_versions).values(kind=kind, asset_id=aid, version=n, doc=doc, saved_by=who,
-                                                                saved_ms=int(time.time() * 1000)))
-                except IntegrityError:
-                    continue
-                conn.execute(delete(bi_versions).where(and_(bi_versions.c.kind == kind, bi_versions.c.asset_id == aid,
-                                                            bi_versions.c.version <= n - self.keep)))
-                return n
+            if last is not None and last.doc == doc:
+                return last.version
+            n = (last.version if last else 0) + 1
+            try:
+                with self.engine.begin() as conn:
+                    conn.execute(insert(bi_versions).values(kind=kind, asset_id=aid, version=n, doc=doc, saved_by=who,
+                                                            saved_ms=int(time.time() * 1000)))
+                    conn.execute(delete(bi_versions).where(and_(bi_versions.c.kind == kind, bi_versions.c.asset_id == aid,
+                                                                bi_versions.c.version <= n - self.keep)))
+            except IntegrityError:
+                continue
+            return n
         raise VersionError("could not number the version (too many saves at once)", 409)
 
     # ---- reading ----------------------------------------------------------------------------------
