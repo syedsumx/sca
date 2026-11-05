@@ -422,6 +422,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.notify.ticketing_api import build_router as ticketing_router
 
         app.include_router(ticketing_router(services.ticketing, cp, services.authorize))
+    if getattr(services, "saml", None) is not None:          # SAML sign-in, handed on as OIDC (public routes)
+        from cairn.identity.saml import build_sso_router
+
+        app.include_router(build_sso_router(services.saml))
     if "quality" in modules and services.data_access is not None:
         from cairn.dataaccess.api import build_router as data_router
 

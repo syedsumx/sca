@@ -88,8 +88,29 @@ Ordered by what an enterprise needs first to retire a Snowflake or Databricks co
 | L42 | **Input-table approvals.** Optional review before changes to an input table land | A change to targets waits for a reviewer; approved, it is written as its author | ⬜ |
 | L43 | **Partition-aware volume monitors.** Volume and freshness per partition | A missing day in a partitioned table alerts even when the table total looks normal | ⬜ |
 | L44 | **Remote agent hardening.** Key rotation by signed re-enrolment and an mTLS option between agent and gateway | An agent rotates its key without downtime; a gateway with mTLS refuses an agent without a client certificate | ⬜ |
-| L45 | **Python functions.** Sandboxed Python UDFs callable from SQL, governed like SQL functions | A Python function runs on Trino rows without network or filesystem access | ⬜ |
+| L45 | **Python functions.** Sandboxed Python UDFs callable from SQL, governed like SQL functions | A Python function runs on Trino rows without network or filesystem access | ✅ already built: inline and stored `LANGUAGE PYTHON` functions on Trino under `USE_FUNCTION` (`tests/test_trino_e2e.py::test_ai_and_python_functions_run_in_sql_under_cairns_policies`); found by the capability audit |
 | L46 | **Chaos tests.** Cairn Core, the PDP, the gateway and the catalog stopped under load in CI | Each outage fails closed and recovers without lost writes | ⬜ |
+| L47 | **SAML single sign-on.** SAML 2.0 alongside OIDC: SP metadata, signed assertions checked, groups from attributes | An Okta/ADFS/Entra tenant set up for SAML signs people in to Cairn with their groups; a forged or replayed assertion is refused | ✅ Cairn as SAML service provider (signed response or assertion, signature-wrapping and replay refused, audience, recipient, validity, InResponseTo) and OpenID provider for Cairn Core (code + PKCE, own signing key, groups claim); audited (`tests/test_saml_e2e.py` against Keycloak) |
+| L48 | **Secrets for people's notebooks and jobs.** Secret scopes owned by people or groups, read by notebooks, workflows and Spark as the person | A notebook reads an API key from a scope its user may read; nobody else can; the value is never logged or shown again | ⬜ |
+| L49 | **Sharing BI assets with people and groups.** Viewer and editor roles on dashboards, workbooks, saved queries and metrics | A dashboard shared with Finance as viewers opens for Finance only; an editor changes it; others get 404 | ⬜ |
+| L50 | **Retention enforced, legal hold and automated erasure.** Retention policies delete expired rows; legal hold blocks deletes and expiry on a table; right-to-be-forgotten deletes rows and proves it | Rows older than the policy are gone after the run; a table on hold keeps them; an erasure request ends with a signed report of rows removed | ⬜ |
+| L51 | **Per-tenant and per-user API quotas, and tenant IP allowlists** | A user over their quota gets 429 with Retry-After; a request from outside the tenant's allowlist is refused | ⬜ |
+| L52 | **BI folders, comments and usage analytics** | Dashboards organised in folders, discussed in threads, and a report shows who uses which and which are stale | ⬜ |
+| L53 | **Metric alerts.** Thresholds and anomaly detection on metrics | Revenue dropping 20% week over week, or out of its usual range, notifies the owner once | ⬜ |
+| L54 | **Map and heatmap charts; dashboards that work on a phone** | A region map and a heatmap render from metric tiles; a dashboard is usable at phone width | ⬜ |
+| L55 | **Export files delivered to Slack and Teams** | A scheduled export arrives in a Slack channel as a file, each recipient's own view | ⬜ |
+| L56 | **Metrics over SQL for outside BI tools** | Tableau or Power BI queries a metric through Trino as the signed-in person and gets the same number as the dashboard | ⬜ |
+| L57 | **Scheduled notebook and Python jobs in Cairn** | A notebook runs nightly as its owner, its output kept, failures notified | ⬜ |
+| L58 | **Governed volumes.** Folders of files under Cairn's policies, not only S3 policies | A volume shared with a group is readable by them alone, through the API and Spark | ⬜ |
+| L59 | **Snapshot browser and restore** | A person sees a table's snapshots and restores yesterday's, audited | ⬜ |
+| L60 | **Cost per query, user and table on Trino** | The cost report attributes Trino CPU and scanned bytes to people, teams and tables | ⬜ |
+| L61 | **SaaS data connectors.** Loading from Salesforce, HubSpot and similar into Iceberg | Salesforce accounts land in a governed table on a schedule, incrementally | ⬜ |
+| L62 | **Reverse ETL.** Syncing governed tables out to SaaS apps | A segment table syncs to a CRM as its owner; masked columns are never sent | ⬜ |
+| L63 | **Managed model serving.** Deployments with autoscaling from the registry | A registered model is deployed from Cairn, scales with load and is invoked as the caller | ⬜ |
+| L64 | **Build and deploy custom agents** | A team defines an agent with tools and scopes, deploys it, and its actions are governed and traced | ⬜ |
+| L65 | **SDKs beyond Python, and an API deprecation policy** | JS and Java clients for the main APIs; deprecated routes send Deprecation and Sunset headers | ⬜ |
+| L66 | **Consent management** | A subject's withdrawn consent excludes their rows from purposes that need it | ⬜ |
+| L67 | **Accessibility tested.** Automated axe checks of the main pages in CI | The main pages pass axe with no serious violations | ⬜ |
 
 ## History: the metadata platform (M0–M6)
 

@@ -43,10 +43,12 @@ def _int_b64(n: int) -> str:
 
 
 class TrinoTokens:
-    def __init__(self, engine, passphrase: str, issuer: str, ttl: int = 3600):
+    def __init__(self, engine, passphrase: str, issuer: str, ttl: int = 3600, key_name: str = "current"):
+        """``key_name``: which signing key (one row each); another service signing with Cairn (the SSO bridge)
+        uses a key of its own, so its tokens can never pass for Trino's."""
         if not 60 <= ttl <= MAX_TTL:
             raise ValueError(f"the Trino token lifetime must be between 60 and {MAX_TTL} seconds")
-        self.engine, self.issuer, self.ttl = engine, issuer, ttl
+        self.engine, self.issuer, self.ttl, self.key_name = engine, issuer, ttl, key_name
         self._pass = passphrase.encode()
         self._lock = threading.Lock()
         self._key = None
@@ -60,7 +62,7 @@ class TrinoTokens:
         with self._lock:
             if self._key is not None:
                 return self._key, self._kid
-            q = select(trino_signing_keys.c.kid, trino_signing_keys.c.private_pem).where(trino_signing_keys.c.name == "current")
+            q = select(trino_signing_keys.c.kid, trino_signing_keys.c.private_pem).where(trino_signing_keys.c.name == self.key_name)
             with self.engine.connect() as conn:
                 row = conn.execute(q).first()
             if row is None:
@@ -70,7 +72,7 @@ class TrinoTokens:
                 kid = uuid.uuid4().hex
                 try:
                     with self.engine.begin() as conn:
-                        conn.execute(trino_signing_keys.insert().values(name="current", kid=kid, private_pem=pem,
+                        conn.execute(trino_signing_keys.insert().values(name=self.key_name, kid=kid, private_pem=pem,
                                                                         created_ms=int(time.time() * 1000)))
                     row = (kid, pem)
                 except IntegrityError:  # another replica made it first: use theirs

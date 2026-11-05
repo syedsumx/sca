@@ -82,6 +82,7 @@ class Services:
     contracts: Optional[Any] = None
     automations: Optional[Any] = None
     report_schedules: Optional[Any] = None
+    saml: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -817,6 +818,7 @@ def _build_active_metadata(s: Services) -> None:
                 return s.data_access.run_on_trino(definition, actor, sql, limit)
             s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"))
         _build_data_access(s)
+        _build_saml(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace
 
@@ -1650,3 +1652,30 @@ def _hook_quality_events(s: Services, Event) -> None:
                 logger.exception("contract refresh failed")
 
     s.quality.notifier = notifier
+
+
+def _build_saml(s: Services) -> None:
+    """SAML single sign-on, handed on as OIDC (cairn.identity.saml): on only when every setting it needs is there."""
+    issuer = os.environ.get("CAIRN_SSO_ISSUER_URL", "").rstrip("/")
+    passphrase = os.environ.get("CAIRN_SSO_SIGNING_PASSPHRASE", "")
+    clients_file = os.environ.get("CAIRN_SSO_CLIENTS_FILE", "")
+    md_url, md_file = os.environ.get("CAIRN_SAML_IDP_METADATA_URL", ""), os.environ.get("CAIRN_SAML_IDP_METADATA_FILE", "")
+    if not (issuer and (md_url or md_file)):
+        return
+    if not passphrase or not clients_file:
+        raise RuntimeError("SAML sign-in needs CAIRN_SSO_SIGNING_PASSPHRASE and CAIRN_SSO_CLIENTS_FILE")
+    from cairn.dataaccess.trino_auth import TrinoTokens
+    from cairn.identity.saml import SamlBridge, load_clients
+
+    def idp_metadata() -> bytes:
+        if md_file:
+            with open(md_file, "rb") as f:
+                return f.read()
+        import httpx
+
+        r = httpx.get(md_url, timeout=15, follow_redirects=False)
+        r.raise_for_status()
+        return r.content
+    signer = TrinoTokens(s.engine, passphrase, issuer, 3600, key_name="sso-oidc")
+    s.saml = SamlBridge(s.engine, signer, issuer, load_clients(clients_file), idp_metadata, s.audit,
+                        os.environ.get("CAIRN_SAML_SP_ENTITY_ID") or None)

@@ -20,7 +20,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `src/cairn/iac/` | `cairn bundle` (resources from git) | Python |
 | `src/cairn/ml/`, `ai/`, `agent/`, `context/` | MLflow integration, feature tables, AI functions, assistants, context agents | Python |
 | `src/cairn/quality/`, `marketplace/`, `identity/`, `notify/`, `export/` | Quality, access requests, SSO/SCIM, notifications, metadata export | Python |
-| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0078) | Python |
+| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0079) | Python |
 | `store/` | Cairn Store: S3-compatible object store | Rust |
 | `catalog/` | Cairn Catalog: Iceberg REST catalog | Rust |
 | `spark/` | `cairn-spark`: governed Spark submit, Kubernetes pod templates | Python |
@@ -79,7 +79,7 @@ CI is `.github/workflows/cairn-ci.yml` (14 jobs); `.github/workflows/cairn-upgra
 
 ## Working through the roadmap queue
 
-The queue (44 items: the original 28, then the BI track and the gaps found after it) is in the platform guide. For each item, in order:
+The queue (65 items: the original 28, the BI track, the gaps found after it, and the capability audit's L47-L67) is in the platform guide. For each item, in order:
 
 1. Build it in the right package, with its migration, wiring, API and docs.
 2. Test it end to end against real components locally; add the test to the CI job that covers its area.

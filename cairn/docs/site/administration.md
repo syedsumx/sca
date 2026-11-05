@@ -48,6 +48,42 @@ People are created on first sign-in, and the groups in their token's `groups` cl
 settings: `CAIRN_SSO_SCOPE` (default `openid email profile`), `CAIRN_SSO_USER_CLAIM` (default
 `preferred_username`) and `CAIRN_SSO_REQUIRED_GROUPS` (only members of these groups may sign in).
 
+### SAML identity providers
+
+For an identity provider set up for SAML 2.0 (ADFS, Okta, Entra ID, PingFederate, Keycloak and others), Cairn
+signs people in with SAML and hands the result on to the sign-in above as OpenID Connect: Cairn is the SAML
+service provider towards the identity provider, and an OpenID provider towards `cairn-web` (`cairn.identity.saml`).
+
+1. Set `CAIRN_SSO_ISSUER_URL` to where browsers reach Cairn's API, followed by `/v1/sso` (for example
+   `https://cairn.example.com/cairn/api/v1/sso`), `CAIRN_SAML_IDP_METADATA_URL` (or `CAIRN_SAML_IDP_METADATA_FILE`)
+   to the identity provider's SAML metadata, `CAIRN_SSO_SIGNING_PASSPHRASE` (encrypts Cairn's token-signing key;
+   `_FILE` works) and `CAIRN_SSO_CLIENTS_FILE`, a JSON file of the OpenID clients:
+   `[{"client_id": "cairn-web", "client_secret": "…", "redirect_uris": ["https://cairn.example.com/callback/oidc"]}]`.
+2. In the identity provider, add a SAML application from Cairn's metadata, `<CAIRN_SSO_ISSUER_URL>/saml/metadata`
+   (entity ID `<CAIRN_SSO_ISSUER_URL>/saml/metadata` unless `CAIRN_SAML_SP_ENTITY_ID` is set; assertion consumer
+   service `<CAIRN_SSO_ISSUER_URL>/saml/acs`, HTTP-POST). Sign the assertion or the whole response (do not encrypt
+   it), and send the groups in an attribute named `groups` (`CAIRN_SAML_GROUPS_ATTRIBUTE`), the email in `email`
+   (`CAIRN_SAML_EMAIL_ATTRIBUTE`). The user is the NameID unless `CAIRN_SAML_USERNAME_ATTRIBUTE` names an attribute.
+3. Point the OIDC sign-in at Cairn: `CAIRN_SSO_DISCOVERY_URL=<CAIRN_SSO_ISSUER_URL>/.well-known/openid-configuration`,
+   with the client ID and secret from the clients file, then `cairn sso check` and `CAIRN_SSO_ENABLED=true` as above.
+
+Cairn accepts a SAML response only if all of these hold:
+- It answers a sign-in Cairn started (`InResponseTo`, used once, within 10 minutes).
+- It holds exactly one assertion. That assertion, or the response containing it, carries a valid signature with the
+  identity provider's certificate, and only the signed content is read.
+- The issuer is the identity provider, the destination and recipient are Cairn's ACS, and the audience is Cairn.
+- It is inside its validity window (`CAIRN_SAML_CLOCK_SKEW_SECONDS`, default 120).
+- Its assertion ID has not been seen before.
+
+Encrypted assertions and documents with a DTD are refused. The OpenID side issues authorization codes that work
+once for 2 minutes, checks PKCE (S256) and the client secret, and signs ID tokens with a key of its own, so they
+are never accepted by Trino. Sign-ins and refusals (with the reason) are audited: `sso.saml_signed_in` and
+`sso.saml_refused`, category `identity`. Install the `saml` extra (`pip install "cairn-platform[saml]"`). Tables
+`cairn_saml_requests`, `cairn_saml_assertions` and `cairn_sso_codes` (migration 0079). Tested against a real
+Keycloak (`tests/test_saml_e2e.py`), with both a signed assertion and a signed response. The refusals tested are a
+tampered NameID, a second assertion smuggled beside the signed one, a replay, a response for another sign-in, a
+DTD, a wrong PKCE verifier and a wrong client secret.
+
 ## User provisioning (SCIM)
 
 With SCIM 2.0 the identity provider creates, updates and deactivates people and groups ahead of

@@ -122,6 +122,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import metrics as _metrics  # noqa: F401
     from cairn.sqlworkspace import actions as _actions  # noqa: F401
     from cairn.sqlworkspace import cache as _cache  # noqa: F401
+    from cairn.identity import saml as _saml  # noqa: F401
     from cairn.sqlworkspace import reports as _bi_reports  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401
