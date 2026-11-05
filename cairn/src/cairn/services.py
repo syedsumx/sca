@@ -666,17 +666,19 @@ def _build_active_metadata(s: Services) -> None:
     from cairn.notify.ticketing import TicketingService
     s.ticketing = TicketingService(s.engine, hub, lambda email: actor_for_email(s.graph, email), audit=s.audit)
     hub.channels["ticket"] = s.ticketing.sender
+    def report_attachments(row: dict) -> list:
+        """A report's copy, for its own recipient only (email attaches it, Slack uploads it to their DM)."""
+        fid = (row.get("payload") or {}).get("file")
+        rep = getattr(s, "report_schedules", None)
+        got = rep.attachment(fid, row.get("recipient")) if (rep is not None and fid and row.get("type") == "report.ready") \
+            else None
+        return [got] if got else []
     slack_sender = None
     if cfg.slack_bot_token:
-        slack_sender = SlackSender(cfg.slack_bot_token, email_of)
+        slack_sender = SlackSender(cfg.slack_bot_token, email_of, attachments=report_attachments)
         hub.channels["slack"] = slack_sender
     if cfg.smtp_url:
-        def email_attachments(row: dict) -> list:
-            fid = (row.get("payload") or {}).get("file")
-            rep = getattr(s, "report_schedules", None)
-            got = rep.attachment(fid) if (rep is not None and fid and row.get("type") == "report.ready") else None
-            return [got] if got else []
-        hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of, email_attachments)
+        hub.channels["email"] = EmailSender(cfg.smtp_url, cfg.email_from, email_of, report_attachments)
     if cfg.teams_webhook_url and not hub.list_routes():
         hub.put_routes([Route(id="teams-default", channel="teams", target=cfg.teams_webhook_url,
                               event_types=["quality.incident.raised", "certification.requested", "asset.deprecated",
@@ -1069,8 +1071,9 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace.reports import Reports
 
         def tell_report(type_, title, body, recipients, payload):
-            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
-                              url=payload.get("url")))
+            # An absolute link (Teams, Slack, email); the file opens only for its own, signed-in recipient.
+            link = f"{hub.public_url}/cairn/api/sql/reports/files/{payload['file']}" if payload.get("file") else None
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url=link))
         s.report_schedules = Reports(s.engine, s.sql_boards, s.workbooks, tell_report, s.audit)
         _build_steward(s)
         from cairn.governance.tag_sync import TagSyncService, sqlalchemy_executor

@@ -116,8 +116,12 @@ class SlackSender:
     """Bot-token sender (``chat.postMessage``). DMs resolve the user via settings or email lookup."""
 
     def __init__(self, bot_token: str, email_of: Optional[Callable[[str], Optional[str]]] = None,
-                 http: Optional[httpx.Client] = None, api_url: Optional[str] = None, max_retry_after: float = 10.0):
+                 http: Optional[httpx.Client] = None, api_url: Optional[str] = None, max_retry_after: float = 10.0,
+                 attachments: Optional[Callable[[dict], list[tuple[str, str, bytes]]]] = None):
+        """``attachments(row)``: files that go with a notification (a report's copy), uploaded into the same
+        conversation; only to a person (a direct message), never to a shared channel."""
         self.token = bot_token
+        self.attachments = attachments
         self.email_of = email_of or (lambda actor: None)
         self.http = http or httpx.Client(timeout=15)
         self.api = (api_url or slack_api_url()).rstrip("/")
@@ -167,7 +171,21 @@ class SlackSender:
             raise RuntimeError(f"refusing to send invalid Slack blocks: {problems}")
         body = self._call("chat.postMessage", {"channel": channel, "text": _clip(f"{row['title']}: {row['body']}", 3000),
                                                 "blocks": blocks, "unfurl_links": False})
+        if self.attachments is not None and not str(row.get("recipient", "")).startswith("route:"):
+            for name, _ctype, data in self.attachments(row):
+                self.upload(body["channel"], name, data, row.get("title") or name)
         return f"{body.get('channel')}:{body.get('ts')}"
+
+    def upload(self, channel_id: str, filename: str, data: bytes, title: str) -> str:
+        """Slack's file upload: ask for an upload URL, send the bytes there, then share the file into the
+        conversation (``files.getUploadURLExternal``, ``files.completeUploadExternal``)."""
+        got = self._lookup("files.getUploadURLExternal", {"filename": filename, "length": len(data)})
+        resp = self.http.post(got["upload_url"], content=data, headers={"Content-Type": "application/octet-stream"})
+        if resp.status_code >= 300:
+            raise RuntimeError(f"slack file upload returned HTTP {resp.status_code}")
+        self._call("files.completeUploadExternal", {"files": [{"id": got["file_id"], "title": _clip(title, 250)}],
+                                                    "channel_id": channel_id})
+        return got["file_id"]
 
     def update(self, channel: str, ts: str, text: str) -> None:
         self._call("chat.update", {"channel": channel, "ts": ts, "text": text,

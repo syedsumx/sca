@@ -5,7 +5,8 @@
 copy is rendered **as that recipient**: their row filters and masks apply, a recipient who may not open the
 dashboard or workbook gets nothing (and the run says so), and a tile they may not see shows its refusal, not its
 data. Each copy is kept for 7 days and offered only to its recipient (``GET /sql/reports/files/<id>``); the
-recipient is told (event ``report.ready``, by their usual channels; email carries the file as an attachment).
+recipient is told (event ``report.ready``, by their usual channels): email carries the file as an attachment, and
+Slack uploads it into the recipient's own direct messages; neither ever carries another person's copy.
 
 Runs are claimed so that one replica sends each (``every_minutes``: 60 to 43,200), and ``POST …/<id>/run`` sends one
 now (the owner). Audited: ``report.saved``, ``report.sent``, ``report.deleted``.
@@ -296,11 +297,14 @@ class Reports:
             raise WorkspaceError("no such report file of yours", 404)
         return {"filename": r.filename, "content_type": r.content_type, "data": r.data}
 
-    def attachment(self, fid: str) -> Optional[tuple[str, str, bytes]]:
-        """For email: (filename, content type, bytes) of a report file."""
+    def attachment(self, fid: str, recipient: Optional[str] = None) -> Optional[tuple[str, str, bytes]]:
+        """For email and Slack: (filename, content type, bytes) of a report file, only to the person it was made
+        for (a notification sent elsewhere never carries someone else's copy)."""
         with self.engine.connect() as conn:
             r = conn.execute(select(report_files).where(report_files.c.id == fid)).first()
-        return (r.filename, r.content_type, r.data) if r is not None else None
+        if r is None or r.expires_ms < _now() or (recipient is not None and r.recipient != recipient):
+            return None
+        return (r.filename, r.content_type, r.data)
 
     def _audit(self, actor: str, action: str, sid: str, details: dict) -> None:
         if self.audit is not None:
