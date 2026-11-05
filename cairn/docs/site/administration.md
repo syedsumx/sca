@@ -84,6 +84,46 @@ Keycloak (`tests/test_saml_e2e.py`), with both a signed assertion and a signed r
 tampered NameID, a second assertion smuggled beside the signed one, a replay, a response for another sign-in, a
 DTD, a wrong PKCE verifier and a wrong client secret.
 
+## Secret scopes
+
+API keys, passwords and tokens that notebooks, jobs and pipelines need live in **secret scopes**
+(`/v1/secret-scopes`), not in code or environment variables. Each scope has an access list of people and groups:
+
+| Permission | May |
+|---|---|
+| `READ` | read values |
+| `WRITE` | also add, change and remove secrets |
+| `MANAGE` | also change the access list and delete the scope |
+
+Whoever creates a scope manages it, and a scope always keeps at least one manager. Someone not on the list gets
+404 for the scope, as if it did not exist. An operator (`MANAGE_SYSTEM_OPERATIONS`) may manage every scope, but
+reads a value only after adding themselves with `READ`; that change is audited like any other. Extensions and AI
+agents acting for someone are refused (403).
+
+From a notebook or job, as its person: `cairn_lakehouse.secret("stripe", "api_key")`. It uses `CAIRN_URL` and the
+person's own token (`CAIRN_TOKEN[_FILE]` or `CAIRN_WORKLOAD_TOKEN_FILE`). Over the API:
+`PUT /v1/secret-scopes/<scope>/secrets/<key>` with `{"value": "..."}`, and `GET` the same path to read.
+
+**Encryption.** Values are encrypted with AES-256-GCM, each bound to its scope and key, so a value copied to
+another row does not decrypt. The key is `CAIRN_SECRETS_KEY`: 32 random bytes, base64
+(`openssl rand -base64 32`), from a Kubernetes Secret; `CAIRN_SECRETS_KEY_FILE` works too. Without it the feature
+is off (503 "not configured"); values are never kept unencrypted.
+
+**Rotation.**
+1. Put the new key in `CAIRN_SECRETS_KEY` and the old one in `CAIRN_SECRETS_KEY_PREVIOUS`, then restart.
+2. As an operator, `POST /v1/secret-scopes/rotate`; it re-encrypts every value with the new key and returns how many.
+3. Remove `CAIRN_SECRETS_KEY_PREVIOUS`.
+
+**Values are never listed, logged or audited.** Listing a scope gives its keys, who last changed each one and
+when. Reading a value returns `Cache-Control: no-store` and is audited as `secret.read` (who, scope and key). The
+other entries are `secret.scope_created`, `secret.acl_changed`, `secret.written`, `secret.removed`,
+`secret.scope_deleted` and `secret.key_rotated`, in category `identity`.
+
+Limits: 1,000 secrets per scope, and 128 KB per value. Tables `cairn_secret_scopes`, `cairn_secret_acls` and
+`cairn_secrets` (migration 0080). Tested over HTTP in `tests/test_secret_scopes.py`. The tests cover: access by
+person and by group; the operator rule; a moved or altered ciphertext being refused; a notebook reading through
+the client; and rotation with the previous key.
+
 ## User provisioning (SCIM)
 
 With SCIM 2.0 the identity provider creates, updates and deactivates people and groups ahead of

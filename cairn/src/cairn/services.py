@@ -83,6 +83,7 @@ class Services:
     automations: Optional[Any] = None
     report_schedules: Optional[Any] = None
     saml: Optional[Any] = None
+    secret_scopes: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -819,6 +820,7 @@ def _build_active_metadata(s: Services) -> None:
             s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"))
         _build_data_access(s)
         _build_saml(s)
+        _build_secret_scopes(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace
 
@@ -1652,6 +1654,18 @@ def _hook_quality_events(s: Services, Event) -> None:
                 logger.exception("contract refresh failed")
 
     s.quality.notifier = notifier
+
+
+def _build_secret_scopes(s: Services) -> None:
+    """Secret scopes (cairn.identity.secret_scopes): the routes are always there; without CAIRN_SECRETS_KEY they say 503."""
+    from cairn.identity.secret_scopes import SecretScopes
+
+    def groups_of(actor: str) -> list[str]:
+        return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
+
+    def is_operator(actor: str) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False)
+    s.secret_scopes = SecretScopes(s.engine, groups_of, is_operator, s.audit)
 
 
 def _build_saml(s: Services) -> None:

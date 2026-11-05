@@ -1,5 +1,7 @@
 """pyiceberg and DuckDB on the Cairn lakehouse, as a Cairn identity.
 
+``secret(scope, key)`` reads a value from a Cairn secret scope as the same user.
+
 ``catalog()`` opens a lakehouse session at Cairn (the same as Spark's: CAIRN_URL, CAIRN_TOKEN[_FILE] or
 CAIRN_WORKLOAD_TOKEN_FILE, CAIRN_CATALOG_URI) and returns a pyiceberg catalog on Cairn Catalog. Every
 table is decided by Cairn for that user, storage keys are per table (read-only unless the user may
@@ -82,3 +84,22 @@ def duckdb_connection(tables: Sequence[str], connection=None, cat=None, **scan):
         view = t.rsplit(".", 1)[-1]
         con.register(view, cat.load_table(t).scan(**scan).to_arrow())
     return con
+
+
+def secret(scope: str, key: str, *, cairn_url: Optional[str] = None, token: Optional[str] = None) -> str:
+    """A secret's value from a Cairn secret scope, read as the token's user (who needs READ on the scope).
+
+    The read is audited by Cairn; the value is not cached here, so a rotated secret is read afresh."""
+    from urllib.parse import quote
+
+    cairn_url = (cairn_url or os.environ.get("CAIRN_URL", "")).rstrip("/")
+    if not cairn_url:
+        raise CairnLakehouseError("set CAIRN_URL (Cairn's API)")
+    verify = os.environ.get("CAIRN_CA_FILE") or True
+    tok = token or _cairn_token(cairn_url, verify)
+    r = httpx.get(f"{cairn_url}/v1/secret-scopes/{quote(scope, safe='')}/secrets/{quote(key, safe='')}",
+                  headers={"Authorization": f"Bearer {tok}"}, timeout=30, verify=verify)
+    if r.status_code != 200:
+        detail = r.json().get("detail") if r.headers.get("content-type", "").startswith("application/json") else ""
+        raise CairnLakehouseError(f"Cairn refused secret {scope}/{key} ({r.status_code}): {detail}")
+    return r.json()["value"]

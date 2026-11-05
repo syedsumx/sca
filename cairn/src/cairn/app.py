@@ -422,6 +422,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.notify.ticketing_api import build_router as ticketing_router
 
         app.include_router(ticketing_router(services.ticketing, cp, services.authorize))
+    if getattr(services, "secret_scopes", None) is not None:   # secrets that notebooks and jobs read as the person
+        from cairn.identity.secret_scopes import build_secret_scopes_router
+
+        app.include_router(build_secret_scopes_router(services.secret_scopes, cp))
     if getattr(services, "saml", None) is not None:          # SAML sign-in, handed on as OIDC (public routes)
         from cairn.identity.saml import build_sso_router
 
