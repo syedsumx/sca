@@ -147,7 +147,7 @@ def test_node_seconds_reach_the_cost_report_once(cluster, tmp_path):
     # What the proxy counted is reported the same way, through its own report call.
     import uvicorn
     ap = port()
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=ap, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=ap, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     wait(ap)
     try:

@@ -45,7 +45,8 @@ def world(lake, tmp_path_factory):  # noqa: F811
         return Principal("urn:li:corpuser:admin", "token")
     app = FastAPI()
     app.include_router(build_pipes_router(p, who, lambda pr, priv, urn: None))
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=api, log_level=os.environ.get("PIPES_LOG", "warning")))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=api, log_level=os.environ.get("PIPES_LOG", "warning"),
+                                           timeout_keep_alive=75))
     threading.Thread(target=server.run, daemon=True).start()
     wait(api)
     # The landing store, telling Cairn about new objects (signed webhook).

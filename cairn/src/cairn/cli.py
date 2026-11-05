@@ -26,8 +26,17 @@ def _services(**kwargs):
 def _serve(app, host: str, port: int, root_path: str = "") -> None:
     import uvicorn
 
+    # Idle connections are kept open longer than the clients that pool them (Trino's HTTP client keeps one for a
+    # minute): with uvicorn's default of 5 seconds, a client could send its next request on a connection the server
+    # was closing at that moment, and Trino reported "Failed to query OPA backend" for it.
     uvicorn.run(app, host=host, port=port, root_path=root_path, proxy_headers=True,
-                forwarded_allow_ips=os.environ.get("CAIRN_FORWARDED_ALLOW_IPS", "127.0.0.1"))
+                forwarded_allow_ips=os.environ.get("CAIRN_FORWARDED_ALLOW_IPS", "127.0.0.1"),
+                timeout_keep_alive=keep_alive())
+
+
+def keep_alive() -> int:
+    """How long an idle HTTP connection stays open, in seconds (``CAIRN_HTTP_KEEP_ALIVE_SECONDS``, 75)."""
+    return max(1, int(os.environ.get("CAIRN_HTTP_KEEP_ALIVE_SECONDS", "75")))
 
 
 def cmd_api(a) -> None:

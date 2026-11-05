@@ -46,7 +46,7 @@ def api():
                                             Policy(id="no-ops", effect="deny", actions=["MANAGE_SYSTEM_OPERATIONS"])]))
     s.data_access.registry = ConnectionRegistry({"wh": {"url": f"sqlite:///{d}/wh.db", "catalog": {"platform": "sqlite"}}})
     p = _port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     url = f"http://127.0.0.1:{p}"
     for _ in range(100):

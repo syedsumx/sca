@@ -654,7 +654,9 @@ def run(services: Services, transport: str = "stdio", host: str = "127.0.0.1", p
     allowed = [h.strip() for h in os.environ.get("CAIRN_MCP_ALLOWED_HOSTS", "").split(",") if h.strip()]
     security = TransportSecuritySettings(enable_dns_rebinding_protection=bool(allowed), allowed_hosts=allowed)
     app = server.streamable_http_app(host=host, transport_security=security, stateless_http=True)
-    uvicorn.run(_BearerAuthMiddleware(app, services), host=host, port=port, log_level="info")
+    from cairn.cli import keep_alive
+
+    uvicorn.run(_BearerAuthMiddleware(app, services), host=host, port=port, log_level="info", timeout_keep_alive=keep_alive())
 
 
 __all__ = ["CairnTools", "build_mcp_server", "run"]

@@ -107,7 +107,7 @@ def cairn(settings, graph, tmp_path, monkeypatch):
     app.mount("/ui", StaticFiles(directory=BUNDLE), name="ui")
     app.add_api_route("/host", lambda: HTMLResponse(HOST), methods=["GET"])
     p = _port()
-    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     end = time.time() + 30
     while True:

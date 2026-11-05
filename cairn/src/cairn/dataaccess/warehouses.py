@@ -488,7 +488,10 @@ def app_for(w: Warehouse):
 async def serve(warehouses: list[Warehouse], host: str = "0.0.0.0", reap_every: float = 30) -> None:
     import uvicorn
 
+    from cairn.cli import keep_alive
+
     servers = [uvicorn.Server(uvicorn.Config(app_for(w), host=host, port=w.port, log_level="warning", proxy_headers=False,
+                                             timeout_keep_alive=keep_alive(),
                                              ssl_certfile=w.tls_cert or None, ssl_keyfile=w.tls_key or None))
                for w in warehouses]
 

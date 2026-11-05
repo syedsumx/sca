@@ -60,7 +60,7 @@ def _stack(key: str | None, previous: str | None = None, db: str | None = None):
     tokens = {"nb.ana.token": ANA, "nb.carol.token": CAROL, "nb.bob.token": BOB}
     s.identity.notebook_lookup = tokens.get
     p = _port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     url = f"http://127.0.0.1:{p}"
     for _ in range(100):

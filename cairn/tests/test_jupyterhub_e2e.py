@@ -72,7 +72,7 @@ def stack():
     finally:
         for k in env:
             os.environ.pop(k)
-    api = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, log_level="warning"))
+    api = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=api.run, daemon=True).start()
     wait(f"http://127.0.0.1:{cp}/healthz")
     cairn_url = f"http://127.0.0.1:{cp}"

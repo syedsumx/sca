@@ -107,7 +107,7 @@ def cairn(keycloak, settings, graph, tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_SSO_CLIENTS_FILE", str(clients))
     monkeypatch.setenv("CAIRN_SAML_IDP_METADATA_URL", f"{keycloak}/realms/acme/protocol/saml/descriptor")
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     end = time.time() + 30
     while True:

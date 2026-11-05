@@ -40,7 +40,7 @@ def replicas():
         s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="ops", effect="allow", actions=["*"],
                                                        condition={"attr": "subject.urn", "op": "eq", "value": OPS})]))
         p = _port()
-        server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning"))
+        server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
         threading.Thread(target=server.run, daemon=True).start()
         urls.append(f"http://127.0.0.1:{p}")
         servers.append((server, s))

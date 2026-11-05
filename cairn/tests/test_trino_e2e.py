@@ -137,7 +137,7 @@ def cairn(tmp_path_factory):
                obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})], condition=sub("bob")),
     ]))
     p = port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="0.0.0.0", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="0.0.0.0", port=p, timeout_keep_alive=75, log_level="warning"))
     t = threading.Thread(target=server.run, daemon=True)
     t.start()
     wait(p)
@@ -2416,7 +2416,7 @@ def test_an_embedded_dashboard_shows_each_portal_user_their_own_rows(trino, cair
         "users": ["urn:li:corpuser:bob", "urn:li:corpuser:portal-*"]}}))
     s.embedded_dashboards = EmbeddedDashboards(s.engine, s.sql_boards, load_clients(str(tmp_path / "clients.json")), s.audit)
     cp = port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, timeout_keep_alive=75, log_level="warning"))
     _th.Thread(target=server.run, daemon=True).start()
     wait(cp)
     cairn_url = f"http://127.0.0.1:{cp}"

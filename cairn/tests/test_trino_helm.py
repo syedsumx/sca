@@ -159,7 +159,11 @@ def start_cluster(lake, cairn, extra=()):  # noqa: F811
     def sql(statement, user="admin", source=None):
         out = subprocess.run(command(statement, user, source), capture_output=True, text=True, timeout=300)
         if out.returncode != 0:
-            raise RuntimeError(out.stderr.strip().splitlines()[-1] if out.stderr.strip() else out.stdout)
+            why = out.stderr.strip().splitlines()[-1] if out.stderr.strip() else out.stdout
+            if "OPA backend" in why:   # say why Trino could not ask Cairn, from the coordinator's own log
+                logs = subprocess.run(["docker", "logs", sql.coordinator], capture_output=True, text=True).stderr
+                why += "\n" + "\n".join([ln for ln in logs.splitlines() if "opa" in ln.lower()][-20:])
+            raise RuntimeError(why)
         return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
 
     sql.coordinator = start_coordinator()

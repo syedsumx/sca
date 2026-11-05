@@ -72,7 +72,8 @@ def cairn(settings, graph, tmp_path, monkeypatch):
                condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
     (tmp_path / "app.py").write_text(APP)
     p = _port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning", ws="websockets"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning", ws="websockets",
+                                           timeout_keep_alive=75))
     threading.Thread(target=server.run, daemon=True).start()
     end = time.time() + 30
     while True:

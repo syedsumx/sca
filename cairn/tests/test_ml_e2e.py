@@ -87,7 +87,7 @@ def ml():
     app.include_router(build_monitoring_router(mon, who))      # before MLflow's pass-through, as in Cairn
     app.include_router(build_ml_router(gw, who))
     cp = port()
-    api = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cp, log_level="warning"))
+    api = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cp, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=api.run, daemon=True).start()
     wait(f"http://127.0.0.1:{cp}/docs")
     yield {"cairn": f"http://127.0.0.1:{cp}", "mlflow": f"http://127.0.0.1:{mp}", "gw": gw, "graph": graph,

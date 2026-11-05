@@ -70,7 +70,7 @@ def world(tmp_path_factory):
     s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="admin", effect="allow", actions=["*"],
                                                    condition={"attr": "subject.urn", "op": "eq", "value": ADMIN})]))
     p = port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, log_level="warning"))
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
     wait(p)
     work = d / "work"
