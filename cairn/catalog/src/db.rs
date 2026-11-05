@@ -104,7 +104,9 @@ impl Local {
 
     fn begin_write(&self) -> Result<redb::WriteTransaction> {
         let mut tx = self.db.begin_write()?;
-        tx.set_durability(if self.fsync { Durability::Immediate } else { Durability::None });
+        // Without fsync (tests) a commit is still written: it survives the process dying, not the machine.
+        // (Durability::None would keep it in memory until a later durable commit: a killed catalog lost it.)
+        tx.set_durability(if self.fsync { Durability::Immediate } else { Durability::Eventual });
         Ok(tx)
     }
 

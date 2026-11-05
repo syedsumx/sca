@@ -303,7 +303,9 @@ impl Db {
         Ok(match self {
             Db::Redb(d) => {
                 let mut tx = d.begin_write()?;
-                tx.set_durability(if fsync { redb::Durability::Immediate } else { redb::Durability::None });
+                // Without fsync a commit is still written (it survives the process, not the machine); None would
+                // keep it in memory until a later durable commit, so a killed store lost it.
+                tx.set_durability(if fsync { redb::Durability::Immediate } else { redb::Durability::Eventual });
                 WriteTransaction::R(tx)
             }
             Db::Pg(p) => WriteTransaction::P(p.begin(true)?),

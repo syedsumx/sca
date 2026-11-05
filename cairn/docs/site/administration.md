@@ -1137,6 +1137,28 @@ Three AX42 servers (about €200–260 a month with the load balancer and backup
 - **ingress-nginx:** Kubernetes retired the project in March 2026. It stays pinned because Cairn's chart uses its annotations.
 - **Tenant OpenSearch and Kafka:** each runs on one node and doesn't fail over to another.
 
+## Outages: what fails closed and what is kept
+
+Tested by stopping real components under load in CI (chaos tests):
+
+| Goes down | While it is down | When it is back |
+|---|---|---|
+| Cairn's API (the policy decision point Trino asks) | Trino refuses every query and write: nothing is allowed without a decision | Queries and writes go on; nothing refused was written |
+| Cairn Catalog (process killed) | Writes to Iceberg tables fail; none is acknowledged | Writes go on; every acknowledged write is in its table exactly once |
+| The agent gateway (process stopped) | Agents spool sealed batches on disk (`spool_max_bytes`) | Agents send them in order; a run that cannot finish within its lease is handed back |
+| Cairn Core, behind the gateway | The gateway refuses batches it cannot store; agents keep and resend them | Every change lands once, in order |
+
+Tested in `tests/test_trino_e2e.py::test_outages_under_load_fail_closed_and_lose_no_writes` (Trino, the store
+and the catalog: three writers inserting without pause while Cairn is stopped and started and the catalog
+process killed and restarted) and `tests/test_chaos_gateway.py` (a real gateway restarted and Core refusing
+writes while an agent sends a run). Cairn Core's own outages are tested at its edge: quality results, Trino
+lineage and usage wait in Cairn's database and are sent again (`tests/test_quality_engine.py`,
+`tests/test_trino_access.py`).
+
+The catalog and the store with `CAIRN_*_FSYNC=false` (tests only) now still write every commit: it survives
+the process dying, though not the machine. Before, such commits stayed in memory until a later durable commit,
+so a killed process lost them; the chaos test found it.
+
 ## Monitoring
 
 Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an HTTP API (notifier, scheduler, context miner) serve them on `CAIRN_METRICS_PORT`; Helm sets it to 9108.

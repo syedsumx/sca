@@ -84,7 +84,7 @@
 //! CAIRN_STORE_QUEUE_RETENTION_INTERVAL  seconds between retention passes over message queue topics (60)
 //! CAIRN_STORE_DISKS          more disks for blob files: /mnt/a:hdd,/mnt/b:ssd (off when empty)
 //! CAIRN_STORE_DATA_DISK_TYPE the data directory's disk type, and that of buckets without one (hdd)
-//! CAIRN_STORE_FSYNC             false disables fsync (tests only: a crash can lose acknowledged writes)
+//! CAIRN_STORE_FSYNC             false skips fsync (tests only: a machine crash can lose acknowledged writes)
 //! CAIRN_STORE_LOG_LEVEL         debug, info, warn, error
 //! ```
 

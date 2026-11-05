@@ -26,7 +26,7 @@
 //! CAIRN_CATALOG_CAIRN_URL         ... Cairn's API, asked about every table such a token touches
 //! CAIRN_CATALOG_CAIRN_TOKEN       ... a Cairn service token to ask with (or _FILE)
 //! CAIRN_CATALOG_JWT_ISSUER / _AUDIENCE  the tokens' issuer (cairn) and audience (lakehouse)
-//! CAIRN_CATALOG_FSYNC             false disables fsync (tests only)
+//! CAIRN_CATALOG_FSYNC             false skips fsync: commits survive the process dying, not the machine (tests only)
 //! CAIRN_CATALOG_LOG_LEVEL         debug, info, warn, error
 //! ```
 

@@ -70,14 +70,26 @@ def lake():
         "CAIRN_STORE_ADDR": f"0.0.0.0:{sp}", "CAIRN_STORE_BUCKETS": "lakehouse,trino-exchange", "CAIRN_STORE_FSYNC": "false",
         "CAIRN_STORE_META": ""})]
     wait(sp)
-    procs.append(subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
-        **os.environ, "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": f"{d}/c", "CAIRN_CATALOG_TOKEN": CATALOG_TOKEN,
-        "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
-        "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
-        "CAIRN_CATALOG_FSYNC": "false"}))
+    def start_catalog():
+        return subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+            **os.environ, "CAIRN_CATALOG_ADDR": f"0.0.0.0:{cp}", "CAIRN_CATALOG_DATA": f"{d}/c", "CAIRN_CATALOG_TOKEN": CATALOG_TOKEN,
+            "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": STORE_KEY[0],
+            "CAIRN_CATALOG_S3_SECRET_KEY": STORE_KEY[1], "CAIRN_CATALOG_WAREHOUSE": "s3://lakehouse/warehouse",
+            "CAIRN_CATALOG_FSYNC": "false"})
+    procs.append(start_catalog())
     wait(cp)
+
+    def kill_catalog():                     # the chaos test: the process dies, as on a node failure
+        procs[1].kill()
+        procs[1].wait(15)
+
+    def restart_catalog():
+        procs[1] = start_catalog()
+        wait(cp)
+
     # On every interface: the Helm test's containers reach them through the Docker host.
-    yield {"store": f"http://127.0.0.1:{sp}", "catalog": f"http://127.0.0.1:{cp}", "store_port": sp, "catalog_port": cp}
+    yield {"store": f"http://127.0.0.1:{sp}", "catalog": f"http://127.0.0.1:{cp}", "store_port": sp, "catalog_port": cp,
+           "kill_catalog": kill_catalog, "restart_catalog": restart_catalog}
     for p in reversed(procs):
         p.terminate()
         p.wait(15)
@@ -137,13 +149,24 @@ def cairn(tmp_path_factory):
                obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})], condition=sub("bob")),
     ]))
     p = port()
-    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="0.0.0.0", port=p, timeout_keep_alive=75, log_level="warning"))
-    t = threading.Thread(target=server.run, daemon=True)
-    t.start()
-    wait(p)
+    app = create_api_app(s)
+    running: dict = {}
+
+    def start_api():
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=p, timeout_keep_alive=75, log_level="warning"))
+        t = threading.Thread(target=server.run, daemon=True)
+        t.start()
+        running.update(server=server, thread=t)
+        wait(p)
+
+    def stop_api():                          # the chaos test: Cairn (the PDP Trino asks) goes away
+        running["server"].should_exit = True
+        running["thread"].join(30)
+
+    start_api()
+    s.chaos_stop_api, s.chaos_start_api = stop_api, start_api
     yield f"http://127.0.0.1:{p}", s
-    server.should_exit = True
-    t.join(10)
+    stop_api()
 
 
 def write_tls(d):
@@ -2703,3 +2726,81 @@ def test_a_missing_day_in_an_iceberg_table_fails_its_partitioned_volume_monitor(
     load(normal)
     assert qe.evaluate(qe.store.get_monitor(m.id), now=now + 2).status == "PASS"
     trino("DROP TABLE lake.sales.daily_events")
+
+
+def test_outages_under_load_fail_closed_and_lose_no_writes(trino, cairn, lake):
+    """L46, chaos: writers insert into an Iceberg table through Trino without pause while Cairn (the PDP Trino asks
+    before every action) is stopped and started, then the catalog process is killed and started again. During each
+    outage nothing is allowed and nothing is written (fail closed); afterwards writing resumes; at the end every
+    acknowledged write is in the table exactly once, and nothing that was refused is."""
+    _, s = cairn
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.chaos (writer integer, n integer)")
+    trino("DELETE FROM lake.sales.chaos")
+    acked: list[tuple[int, int]] = []
+    failed: list[tuple[int, int, str]] = []
+    stop = threading.Event()
+    lock = threading.Lock()
+
+    def writer(w):
+        n = 0
+        while not stop.is_set():
+            n += 1
+            try:
+                trino(f"INSERT INTO lake.sales.chaos VALUES ({w}, {n})")
+                with lock:
+                    acked.append((w, n, time.time()))
+            except Exception as e:  # noqa: BLE001 - an outage: recorded, not raised
+                with lock:
+                    failed.append((w, n, str(e)[:200]))
+                time.sleep(0.5)
+
+    threads = [threading.Thread(target=writer, args=(w,), daemon=True) for w in (1, 2, 3)]
+    for t in threads:
+        t.start()
+
+    def wait_for_writes(k, timeout=180):
+        end, start = time.time() + timeout, len(acked)
+        while len(acked) < start + k:
+            assert time.time() < end, f"writes did not resume ({len(acked) - start} of {k}); last errors {failed[-3:]}"
+            time.sleep(0.5)
+
+    try:
+        wait_for_writes(6)
+        # 1. Cairn, the PDP, goes away: Trino refuses everything rather than allow it.
+        s.chaos_stop_api()
+        down_from = time.time()
+        time.sleep(1)
+        with pytest.raises(RuntimeError, match="OPA|Access Denied|access"):
+            trino("SELECT count(*) AS n FROM lake.sales.chaos")
+        time.sleep(8)
+        down_to = time.time()
+        s.chaos_start_api()
+        during = [a for a in acked if down_from + 1 < a[2] < down_to - 0.5]
+        assert during == [], f"writes were allowed while the PDP was down: {during[:3]}"
+        wait_for_writes(6)
+
+        # 2. The catalog process dies mid-load, then comes back with its data.
+        lake["kill_catalog"]()
+        dead_from = time.time()
+        time.sleep(8)
+        dead_to = time.time()
+        lake["restart_catalog"]()
+        during = [a for a in acked if dead_from + 1 < a[2] < dead_to - 0.5]
+        assert during == [], f"writes were acknowledged while the catalog was down: {during[:3]}"
+        wait_for_writes(6)
+    finally:
+        stop.set()
+        for t in threads:
+            t.join(120)
+
+    assert failed, "the outages refused nothing: the test did not test them"
+    rows = [(r["writer"], r["n"]) for r in trino("SELECT writer, n FROM lake.sales.chaos")]
+    assert len(rows) == len(set(rows)), "a write landed twice"
+    got, ok = set(rows), {(w, n) for w, n, _ in acked}
+    assert ok <= got, f"acknowledged writes were lost: {sorted(ok - got)[:5]}"
+    # A write that failed may only be in the table if its failure came after the commit (its answer was lost);
+    # nothing refused before it ran (access denied by the absent PDP) may be there.
+    refused = {(w, n) for w, n, why in failed if "OPA" in why or "Access Denied" in why}
+    assert not (got & refused), f"refused writes were written: {sorted(got & refused)[:5]}"
+    assert got - ok <= {(w, n) for w, n, _ in failed}
+    trino("DROP TABLE lake.sales.chaos")
