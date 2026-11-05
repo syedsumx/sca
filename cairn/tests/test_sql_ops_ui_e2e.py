@@ -32,8 +32,10 @@ def _ready():
 
 pytestmark = pytest.mark.skipif(not _ready(), reason="needs Playwright, git and the built UI bundle (npm run build:mfe)")
 
-# The host page: loads the remote as Cairn Core's MFE host does and mounts it, API on the same origin.
-HOST = """<!doctype html><html><head><meta charset="utf-8"><title>Cairn</title></head>
+# The host page: loads the remote as Cairn Core's MFE host does and mounts it, API on the same origin (with the same
+# viewport as Cairn Core's page, so a phone lays it out at its own width).
+HOST = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cairn</title></head>
 <body><div id="root"></div><script src="/ui/remoteEntry.js"></script><script>
 (async () => {
   await cairnConsumer.init({});
@@ -444,6 +446,55 @@ def test_folders_comments_and_usage_of_a_dashboard_in_the_browser(cairn):
             page.get_by_role("button", name="Usage").click()
             expect(page.get_by_test_id("usage-total")).to_contain_text("by 1 person", timeout=15_000)
             assert s.bi_collab.usage(ANA, "dashboard", board["id"])["views"] >= 1
+            assert errors == [], errors
+        finally:
+            browser.close()
+
+
+def test_a_dashboard_with_a_heatmap_and_a_map_on_a_phone(cairn):
+    """A dashboard on a phone (Chromium as an iPhone, against Cairn): its tiles stack in one column, its heatmap and
+    map draw from the person's rows, and the page never scrolls sideways."""
+    from playwright.sync_api import expect, sync_playwright
+
+    s, url, _, _ = cairn
+    heat = s.sql_workspace.save(ANA, {
+        "name": "By half", "connection": "wh",
+        "chart": {"type": "heatmap", "x": "region", "series": "half", "y": ["total"]},
+        "sql": "SELECT region, CASE WHEN id < 3 THEN 'early' ELSE 'late' END AS half, sum(amount) AS total "
+               "FROM main.orders GROUP BY 1, 2 ORDER BY 1, 2"})
+    where = s.sql_workspace.save(ANA, {
+        "name": "Stores", "connection": "wh",
+        "chart": {"type": "map", "x": "city", "lat": "lat", "lon": "lon", "y": ["sales"]},
+        "sql": "SELECT CASE region WHEN 'EU' THEN 'Paris' ELSE 'New York' END AS city, "
+               "CASE region WHEN 'EU' THEN 48.86 ELSE 40.71 END AS lat, CASE region WHEN 'EU' THEN 2.35 ELSE -74.0 END AS lon, "
+               "sum(amount) AS sales FROM main.orders GROUP BY region"})
+    s.sql_boards.save_dashboard(ANA, {"name": "On the go", "tiles": [{"query": heat["id"], "width": 2}, {"query": where["id"]},
+                                                                     {"query": heat["id"], "chart": {"type": "table"}}]})
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ctx = browser.new_context(**pw.devices["iPhone 13"], extra_http_headers={"X-Cairn-Actor": ANA})
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            page.goto(f"{url}/host#/dashboards", wait_until="domcontentloaded")
+            page.get_by_role("combobox", name="Dashboard").click()
+            page.get_by_title("On the go").click()
+            heatmap = page.get_by_role("img", name="heatmap of total by region and half")
+            expect(heatmap).to_be_visible(timeout=30_000)
+            text = "els => els.map(e => e.textContent)"
+            cells = heatmap.locator("rect title").evaluate_all(text)
+            assert "EU · early: 9.5" in cells and "EU · late: 7" in cells and "US · early: 3" in cells, cells
+            the_map = page.get_by_role("img", name="map of 2 points sized by sales")
+            expect(the_map).to_be_visible()
+            assert sorted(the_map.locator("circle title").evaluate_all(text)) == ["New York: 3", "Paris: 16.5"]
+            # One column: every tile starts at the same left edge, one below the other, inside the screen.
+            boxes = [b.bounding_box() for b in page.get_by_test_id("tiles").locator(":scope > div").all()]
+            assert len(boxes) == 3 and len({round(b["x"]) for b in boxes}) == 1, boxes
+            assert boxes[0]["y"] < boxes[1]["y"] < boxes[2]["y"]
+            width = page.evaluate("window.innerWidth")
+            assert all(b["x"] >= 0 and b["x"] + b["width"] <= width + 1 for b in boxes), (boxes, width)
+            assert page.evaluate("document.documentElement.scrollWidth") <= width, "the page scrolls sideways"
             assert errors == [], errors
         finally:
             browser.close()

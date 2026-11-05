@@ -1,4 +1,4 @@
-import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
+import { Alert, Button, Checkbox, Empty, Grid, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
 import { useLocation } from 'react-router-dom';
 
@@ -160,6 +160,8 @@ function ScheduleExport({ board, name }: { board: string; name: string }) {
 
 /** One dashboard, every tile run as the viewer, filtered by the controls, cross-filtered by clicks and drilled. */
 function Board({ id }: { id: string }) {
+    // On a phone (narrower than antd's md, 768px) tiles stack in one column.
+    const wide = Grid.useBreakpoint().md !== false;
     const [state, setState] = useState<DashboardState>({});
     const [refresh, setRefresh] = useState(0);
     const [row, setRow] = useState<Record<string, unknown> | null>(null);
@@ -201,14 +203,14 @@ function Board({ id }: { id: string }) {
                     </Space>
                 </Surface>
             )}
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 12 }}>
+            <div data-testid="tiles" style={{ display: 'grid', gridTemplateColumns: wide ? 'repeat(2, minmax(0, 1fr))' : 'minmax(0, 1fr)', gap: 12 }}>
                 {board.tiles.map((t, i) => {
                     const path = t.level?.path ?? [];
                     const mine = selection.find((x) => x.from === i);
                     const deeper = !!t.drill && t.drill.length > path.length + 1;
                     const x = t.chart?.x ?? '';
                     return (
-                        <Surface key={i} style={{ gridColumn: t.width === 2 ? 'span 2' : undefined }}>
+                        <Surface key={i} style={{ gridColumn: t.width === 2 && wide ? 'span 2' : undefined, minWidth: 0 }}>
                             <Space wrap style={{ justifyContent: 'space-between', width: '100%' }}>
                                 <strong>{t.title}</strong>
                                 {path.length > 0 && (
@@ -238,6 +240,7 @@ function Board({ id }: { id: string }) {
                                     rowClassName={(r: Record<string, unknown>) => (row && r._row_id === row._row_id ? 'ant-table-row-selected' : '')}
                                     onRow={(r: Record<string, unknown>) => ({ onClick: () => { if (r._row_id) setRow(r); } })}
                                     pagination={{ pageSize: 10, hideOnSinglePage: true }}
+                                    scroll={{ x: 'max-content' }}
                                     dataSource={t.result.rows.map((r, n) => ({ __row: n, ...Object.fromEntries(t.result!.columns.map((c, j) => [c, r[j]])) }))}
                                     columns={t.result.columns.map((c) => ({ title: c, dataIndex: c, render: (v: unknown) => String(v ?? '') }))}
                                 />
@@ -275,7 +278,8 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
             const y = (el.aggregates ?? []).map((a) => a.name);
             const drill = form.drill.length && x && form.drill[0] === x ? form.drill : undefined;
             return { element: el, connection: w.connection, title: w.name, width: 1 as const, drill,
-                     chart: x && y.length ? { type: form.chart, x, y } : { type: 'table' as const } };
+                     chart: x && y.length ? { type: form.chart, x, y, ...(form.chart === 'heatmap' ? { series: el.group_by?.[1] } : {}) }
+                         : { type: 'table' as const } };
         }));
     const firstTable = () => (books.data ?? []).find((w) => form.workbooks.includes(w.id));
 
@@ -350,7 +354,7 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
                     {form.workbooks.length > 0 && (
                         <Space wrap>
                             <Select aria-label="Chart type" style={{ width: 150 }} value={form.chart} onChange={(chart) => setForm({ ...form, chart })}
-                                options={CHART_TYPES.map((t) => ({ value: t, label: t.replace('_', ' ') }))} />
+                                options={CHART_TYPES.filter((t) => t !== 'map').map((t) => ({ value: t, label: t.replace('_', ' ') }))} />
                             <Select aria-label="Drill path" mode="tags" placeholder="Drill path: region, country, city" style={{ minWidth: 300 }}
                                 value={form.drill} onChange={(drill) => setForm({ ...form, drill })} />
                         </Space>

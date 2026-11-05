@@ -46,7 +46,7 @@ saved_queries = Table(
 )
 
 HISTORY_KEEP = 500          # per person
-CHART_TYPES = ("table", "bar", "stacked_bar", "line", "area", "pie", "scatter", "number")
+CHART_TYPES = ("table", "bar", "stacked_bar", "line", "area", "pie", "scatter", "number", "heatmap", "map")
 
 
 class WorkspaceError(Exception):
@@ -67,7 +67,20 @@ def _chart(chart: Optional[dict]) -> str:
     y = chart.get("y") or []
     if not isinstance(y, list) or not all(isinstance(c, str) for c in y):
         raise WorkspaceError("chart y is a list of column names")
-    return json.dumps({"type": t, "x": str(chart.get("x") or ""), "y": y[:8]})
+    out = {"type": t, "x": str(chart.get("x") or ""), "y": y[:8]}
+    # A heatmap colours one value (y) by two columns, x across and ``series`` down; a map places rows at ``lat`` and
+    # ``lon`` (degrees), sized by y and named by x.
+    for k in ("series", "lat", "lon"):
+        v = chart.get(k)
+        if v is not None and not isinstance(v, str):
+            raise WorkspaceError(f"chart {k} is a column name")
+        if v:
+            out[k] = v
+    if t == "heatmap" and not (out["x"] and out.get("series") and y):
+        raise WorkspaceError("a heatmap needs x, series and a y column")
+    if t == "map" and not (out.get("lat") and out.get("lon")):
+        raise WorkspaceError("a map needs lat and lon columns")
+    return json.dumps(out)
 
 
 def _saved(r, level: int = 0) -> dict:

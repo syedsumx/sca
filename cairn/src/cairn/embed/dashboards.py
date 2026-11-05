@@ -196,7 +196,7 @@ PAGE = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport"
 body{{font:14px system-ui,sans-serif;margin:12px;color:#1f2328;background:#fff}}
 .tile{{border:1px solid #d0d7de;border-radius:8px;padding:10px;margin:0 0 12px}} h1{{font-size:18px}} h2{{font-size:15px;margin:0 0 8px}}
 table{{border-collapse:collapse;width:100%}} td,th{{border-bottom:1px solid #eaeef2;padding:4px 6px;text-align:left}}
-.err{{color:#cf222e}}
+.err{{color:#cf222e}} .scroll{{overflow-x:auto;-webkit-overflow-scrolling:touch}} td,th{{white-space:nowrap}}
 </style></head><body><h1>{title}</h1><div id="tiles">Loading…</div>
 <script id="cairn-embed" type="application/json">{boot}</script>
 <script nonce="{nonce}">
@@ -219,7 +219,8 @@ table{{border-collapse:collapse;width:100%}} td,th{{border-bottom:1px solid #eae
           var tr = el("tr"); row.forEach(function (v) {{ tr.appendChild(el("td", v === null ? "" : String(v))); }});
           table.appendChild(tr);
         }});
-        box.appendChild(table); root.appendChild(box);
+        var wrap = el("div"); wrap.className = "scroll"; wrap.appendChild(table);   // wide tables scroll on a phone
+        box.appendChild(wrap); root.appendChild(box);
       }});
     }});
 }})();

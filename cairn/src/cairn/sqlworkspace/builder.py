@@ -38,8 +38,9 @@ A tile is either
   "aggregates": [{{"name": "Revenue", "formula": "Sum([amount])"}}], "filters": [{{"column": c, "op": "=", "value": v}}],
   "sort": [{{"column": c, "desc": true}}], "limit": 100}}}}. Formulas are spreadsheet formulas over columns in square
   brackets: Sum, Count(), CountDistinct, Avg, Min, Max, Median, If, DateTrunc("month", [col]); text in double quotes.
-Each tile may have "chart": {{"type": "bar"|"line"|"area"|"pie"|"number"|"table"|"stacked_bar"|"scatter", "x": column,
-"y": [columns]}}. Controls filter every tile with their column: {{"id": "region", "label": "Region", "column": c,
+Each tile may have "chart": {{"type": "bar"|"line"|"area"|"pie"|"number"|"table"|"stacked_bar"|"scatter"|"heatmap"|"map", "x": column,
+"y": [columns]}}; a heatmap also names "series" (the column down its side), a map "lat" and "lon" (columns in
+degrees). Controls filter every tile with their column: {{"id": "region", "label": "Region", "column": c,
 "kind": "values"|"range"|"date_range"|"text"}}; a values control also names "source": {{"table": "schema.table"}}.
 Use only the metric names, tables and columns listed. At most {MAX_TILES} tiles. {UNTRUSTED_NOTICE}"""
 

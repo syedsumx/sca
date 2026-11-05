@@ -352,6 +352,9 @@ export interface UiConfig {
     workspaces?: WorkspaceRef[];
     /** URL agents use to reach the gateway (shown in the enrolment command). */
     gateway_url?: string;
+    /** Map charts draw on these tiles ({z}/{x}/{y}), when the operator configured a tile server. */
+    map_tiles?: string | null;
+    map_attribution?: string | null;
 }
 
 // ------------------------------------------------------------- compliance forms
@@ -704,12 +707,17 @@ export interface DataResult {
 }
 
 /** A chart over a query's result: a table, or bars or lines of columns ``y`` against column ``x``. */
-export const CHART_TYPES = ['table', 'bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'number'] as const;
+export const CHART_TYPES = ['table', 'bar', 'stacked_bar', 'line', 'area', 'scatter', 'pie', 'number', 'heatmap', 'map'] as const;
 
 export interface ChartSpec {
     type: (typeof CHART_TYPES)[number];
     x?: string;
     y?: string[];
+    /** heatmap: the column down its side (x runs across). */
+    series?: string;
+    /** map: the columns holding latitude and longitude, in degrees. */
+    lat?: string;
+    lon?: string;
 }
 
 /** A query in the SQL workspace history (GET /sql/history). */

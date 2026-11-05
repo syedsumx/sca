@@ -74,9 +74,21 @@ def test_saved_queries_are_private_or_shared_and_run_as_whoever_opens_them(ws):
     with pytest.raises(WorkspaceError):
         ws.delete(EVE, q["id"])
     for bad in ({"name": "", "connection": "wh", "sql": "SELECT 1"}, {"name": "x", "connection": "wh", "sql": "DROP TABLE t"},
-                {"name": "x", "connection": "wh", "sql": "SELECT 1 FROM main.users", "chart": {"type": "radar"}}):
+                {"name": "x", "connection": "wh", "sql": "SELECT 1 FROM main.users", "chart": {"type": "radar"}},
+                {"name": "x", "connection": "wh", "sql": "SELECT 1", "chart": {"type": "heatmap", "x": "a", "y": ["n"]}},
+                {"name": "x", "connection": "wh", "sql": "SELECT 1", "chart": {"type": "map", "lat": "lat"}},
+                {"name": "x", "connection": "wh", "sql": "SELECT 1", "chart": {"type": "map", "lat": 1, "lon": "lon"}}):
         with pytest.raises(WorkspaceError):
             ws.save(ANA, bad)
+    # A heatmap: one value by two columns; a map: rows placed at their latitude and longitude.
+    heat = ws.save(ANA, {"name": "h", "connection": "wh", "sql": "SELECT 1",
+                         "chart": {"type": "heatmap", "x": "day", "series": "region", "y": ["n"]}})
+    assert heat["chart"] == {"type": "heatmap", "x": "day", "series": "region", "y": ["n"]}
+    where = ws.save(ANA, {"name": "m", "connection": "wh", "sql": "SELECT 1",
+                          "chart": {"type": "map", "x": "city", "lat": "lat", "lon": "lon", "y": ["n"]}})
+    assert where["chart"] == {"type": "map", "x": "city", "lat": "lat", "lon": "lon", "y": ["n"]}
+    ws.delete(ANA, heat["id"])
+    ws.delete(ANA, where["id"])
     ws.delete(ANA, q["id"])
     assert ws.saved(ANA) == []
 

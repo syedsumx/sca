@@ -196,9 +196,20 @@ export function SqlWorkspacePage() {
                                                     <Select aria-label="x" placeholder="x" value={chart.x} style={{ width: 160 }}
                                                         onChange={(x) => setChart({ ...chart, x })}
                                                         options={result.columns.map((c) => ({ value: c, label: c }))} />
-                                                    <Select aria-label="y" placeholder="y" mode="multiple" value={chart.y} style={{ minWidth: 200 }}
-                                                        onChange={(y) => setChart({ ...chart, y })}
+                                                    <Select aria-label="y" placeholder={chart.type === 'map' ? 'size by' : 'y'} mode="multiple"
+                                                        value={chart.y} style={{ minWidth: 200 }} onChange={(y) => setChart({ ...chart, y })}
                                                         options={numeric.map((c) => ({ value: c, label: c }))} />
+                                                    {chart.type === 'heatmap' && (
+                                                        <Select aria-label="series" placeholder="down the side" value={chart.series} style={{ width: 160 }}
+                                                            onChange={(series) => setChart({ ...chart, series })}
+                                                            options={result.columns.map((c) => ({ value: c, label: c }))} />
+                                                    )}
+                                                    {chart.type === 'map' && (['lat', 'lon'] as const).map((k) => (
+                                                        <Select key={k} aria-label={k === 'lat' ? 'latitude' : 'longitude'} style={{ width: 140 }}
+                                                            placeholder={k === 'lat' ? 'latitude' : 'longitude'} value={chart[k]}
+                                                            onChange={(v) => setChart({ ...chart, [k]: v })}
+                                                            options={numeric.map((c) => ({ value: c, label: c }))} />
+                                                    ))}
                                                 </Space>
                                                 <ResultChart columns={result.columns} rows={result.rows} chart={chart} />
                                             </>

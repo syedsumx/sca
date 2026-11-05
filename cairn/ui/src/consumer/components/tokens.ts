@@ -32,6 +32,9 @@ export const Page = styled.div`
     margin: 0 auto;
     padding: ${tokens.space(6)} ${tokens.space(6)} ${tokens.space(12)};
     color: ${tokens.color.text};
+    @media (max-width: 600px) {
+        padding: ${tokens.space(3)} ${tokens.space(4)} ${tokens.space(8)};
+    }
     .cairn-markdown p {
         margin: 0 0 8px;
     }

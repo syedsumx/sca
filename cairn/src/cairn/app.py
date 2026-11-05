@@ -170,6 +170,7 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     from cairn.governance.api import build_router as governance_router
     from cairn.quality.api import build_router as quality_router
 
+    _map_tiles()                       # a bad tile server setting stops the API at start, not each page later
     app = _base_app("api", services)
     cp, authz = _principal_dependency(services), _authorize(services)
     modules = set(modules)
@@ -601,6 +602,8 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             "workspaces": services.workspaces.mine(p.urn) if services.workspaces is not None else [],
             "gateway_url": services.settings.gateway.public_url,
             "public_url": cfg.public_url,
+            "map_tiles": _map_tiles(),
+            "map_attribution": os.environ.get("CAIRN_MAP_ATTRIBUTION", "")[:200] or None,
             "features": {
                 "assistant": services.assistant is not None,
                 "assistant_llm": services.llm is not None,
@@ -614,6 +617,17 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 "masking_proxy": cfg.masking_proxy_enabled or bool(cfg.session_signing_key),
             },
         }
+
+
+def _map_tiles() -> Optional[str]:
+    """The tile server map charts draw on (``CAIRN_MAP_TILES_URL``, ``https://…/{z}/{x}/{y}.png``), or none: map
+    charts then draw their points on a plain grid, and browsers fetch nothing from elsewhere."""
+    url = os.environ.get("CAIRN_MAP_TILES_URL", "").strip()
+    if not url:
+        return None
+    if not url.startswith("https://") or not all(p in url for p in ("{z}", "{x}", "{y}")) or any(c in url for c in "\"'<> "):
+        raise ValueError("CAIRN_MAP_TILES_URL: an https:// URL with {z}, {x} and {y} in it")
+    return url
 
 
 def create_pdp_app(services: Services) -> FastAPI:
