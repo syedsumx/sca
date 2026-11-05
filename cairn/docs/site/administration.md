@@ -84,6 +84,43 @@ Keycloak (`tests/test_saml_e2e.py`), with both a signed assertion and a signed r
 tampered NameID, a second assertion smuggled beside the signed one, a replay, a response for another sign-in, a
 DTD, a wrong PKCE verifier and a wrong client secret.
 
+## API quotas and the IP allowlist
+
+Each tenant (one Cairn deployment) can cap API use, and accept requests only from known networks.
+
+| Setting | Environment default | What it does |
+|---|---|---|
+| `tenant_per_minute` | `CAIRN_API_TENANT_PER_MINUTE` | requests a minute for the whole tenant |
+| `user_per_minute` | `CAIRN_API_USER_PER_MINUTE` | requests a minute for each person |
+| `users` | — | `{urn: n}`: a person's (or a service account's) own limit |
+| `ip_allowlist` | `CAIRN_IP_ALLOWLIST` | CIDRs; requests from anywhere else get 403, before sign-in |
+| `trusted_proxies` | `CAIRN_TRUSTED_PROXIES` | CIDRs of the proxies in front, whose `X-Forwarded-For` is believed |
+
+Environment values are comma-separated. An operator (`MANAGE_SYSTEM_OPERATIONS`) changes them at run time with
+`GET` and `PUT /v1/admin/limits`; every replica uses the change within 5 seconds, and the change is audited
+(`limits.changed`).
+
+* **Over a quota**, the API answers 429 with `Retry-After` (the seconds left in the minute), `X-RateLimit-Limit`,
+  `X-RateLimit-Remaining` and `X-RateLimit-Scope` (`user` or `tenant`). Counts are kept in Cairn's database
+  per minute, so all replicas share one count. Cairn's service token is not held to a person's quota, but it
+  counts towards the tenant's.
+* **The client's address** is the connection's. When the connection comes from a trusted proxy, it is the
+  last address in `X-Forwarded-For` that is not a trusted proxy. An address put in front by the client is
+  therefore not believed.
+* **Locking out:** a change whose allowlist would refuse the operator making it is refused (409). Include the
+  addresses of Cairn's own callers: Trino's access-control and event callbacks, Spark, the web UI's proxy,
+  and in-cluster jobs (usually the pod CIDR).
+* If the settings cannot be read, the last ones read are used; before any were read, requests are refused (fail closed). `/health` is never refused (probes).
+* Agents keep their own per-agent quotas as well (`/v1/agents`).
+
+Tables `cairn_api_limits` and `cairn_api_usage` (migration 0083). Tested over HTTP against two replicas sharing one
+database (`tests/test_api_limits.py`). The tests cover:
+* a person's quota counted across both replicas, with `Retry-After`;
+* a named override;
+* the tenant quota;
+* the allowlist, a spoofed address refused, and a trusted proxy;
+* the lock-out guard.
+
 ## Secret scopes
 
 API keys, passwords and tokens that notebooks, jobs and pipelines need live in **secret scopes**

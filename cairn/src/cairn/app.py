@@ -53,6 +53,13 @@ def _principal_dependency(services: Services):
                 services.agents.admit(principal.agent)
             except AgentError as e:
                 raise HTTPException(e.status, str(e), headers={"Retry-After": "60"})
+        if getattr(services, "limits", None) is not None and not principal.is_service:
+            verdict = services.limits.admit_user(principal.urn)
+            if verdict is not None and not verdict[0]:
+                _ok, limit, _remaining, retry = verdict
+                raise HTTPException(429, f"you are over your limit of {limit} requests a minute", headers={
+                    "Retry-After": str(retry), "X-RateLimit-Limit": str(limit), "X-RateLimit-Remaining": "0",
+                    "X-RateLimit-Scope": "user"})
         if services.licence is not None:
             route = getattr(request.scope.get("route"), "path", request.url.path)
             try:
@@ -110,6 +117,10 @@ def _base_app(name: str, services: Services) -> FastAPI:
     app.state.services = services
     setup_tracing(app, name, getattr(services, "engine", None))
     app.add_middleware(_AgentAttribution, services=services)
+    if getattr(services, "limits", None) is not None:      # outermost: the IP allowlist and the tenant's quota
+        from cairn.common.limits import LimitsMiddleware
+
+        app.add_middleware(LimitsMiddleware, limits=services.limits)
 
     @app.middleware("http")
     async def metrics(request: Request, call_next):
@@ -426,6 +437,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.notify.ticketing_api import build_router as ticketing_router
 
         app.include_router(ticketing_router(services.ticketing, cp, services.authorize))
+    if getattr(services, "limits", None) is not None:
+        from cairn.common.limits import build_limits_router
+
+        app.include_router(build_limits_router(services.limits, cp, authz))
     if getattr(services, "secret_scopes", None) is not None:   # secrets that notebooks and jobs read as the person
         from cairn.identity.secret_scopes import build_secret_scopes_router
 

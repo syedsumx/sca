@@ -65,7 +65,7 @@ def _stack(key: str | None, previous: str | None = None, db: str | None = None):
     url = f"http://127.0.0.1:{p}"
     for _ in range(100):
         try:
-            if httpx.get(f"{url}/healthz", timeout=2).status_code == 200:
+            if httpx.get(f"{url}/health", timeout=2).status_code == 200:
                 break
         except httpx.HTTPError:
             pass

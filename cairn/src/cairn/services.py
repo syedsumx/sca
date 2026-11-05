@@ -86,6 +86,7 @@ class Services:
     secret_scopes: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
+    limits: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -824,6 +825,9 @@ def _build_active_metadata(s: Services) -> None:
         _build_saml(s)
         _build_secret_scopes(s)
         _build_records(s)
+        from cairn.common.limits import ApiLimits
+
+        s.limits = ApiLimits(s.engine, s.audit)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace
 
