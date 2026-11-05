@@ -130,3 +130,43 @@ it('shows what each Spark job cost', async () => {
     expect(within(row).getByText('30')).toBeTruthy();
     expect(within(row).getByText(/80/)).toBeTruthy();
 });
+
+it('shows what Trino queries cost per person, team and table', async () => {
+    const calls: MockCall[] = [];
+    const report = (by: string) => ({
+        by, days: 30, priced: true, scope: 'all', total_usd: 22,
+        rows: by === 'user'
+            ? [{ key: 'urn:li:corpuser:bob', queries: 2, cpu_hours: 0.5, scanned_bytes: 2e12, usd: 11 },
+               { key: 'urn:li:corpuser:ana', queries: 2, cpu_hours: 3, scanned_bytes: 1e12, usd: 11 }]
+            : by === 'team'
+                ? [{ key: 'urn:li:corpGroup:finance', queries: 2, cpu_hours: 1.5, scanned_bytes: 5e11, usd: 5.5 }]
+                : [{ key: DS, name: 'orders', queries: 2, cpu_hours: 2, scanned_bytes: 1e12, usd: 9 }],
+    });
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /reports': SNAP,
+        'GET /reports/costs/idle': [],
+        'GET /reports/costs/expensive': [],
+        'GET /reports/costs/jobs': [],
+        'GET /reports/costs/trino': (_b: unknown, url: URL) => report(url.searchParams.get('by') ?? 'user'),
+    }, calls);
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <ReportsPage />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    fireEvent.click(await screen.findByRole('tab', { name: 'Trino' }));
+    const ana = (await screen.findByText('ana')).closest('tr')!;
+    expect(within(ana).getByText('3.0 h')).toBeTruthy();
+    expect(within(ana).getByText('1.0 TB')).toBeTruthy();
+    expect(within(ana).getByText('$11.00')).toBeTruthy();
+    expect(screen.getByText(/All queries, last 30 days · \$22.00/)).toBeTruthy();
+    fireEvent.click(screen.getByText('Teams'));
+    expect(await screen.findByText('finance')).toBeTruthy();
+    fireEvent.click(screen.getByText('Tables'));
+    expect(await screen.findByRole('link', { name: 'orders' })).toBeTruthy();
+    expect(calls.filter((c) => c.path === '/reports/costs/trino').map((c) => c.url.searchParams.get('by')))
+        .toEqual(['user', 'team', 'table']);
+});

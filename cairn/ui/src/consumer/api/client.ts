@@ -8,6 +8,7 @@ import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, 
     RestoreResult,
     SnapshotRows,
     TableSnapshot,
+    TrinoCosts,
 } from './types';
 import type {
     GitFolder,
@@ -1392,6 +1393,11 @@ export class ConsumerClient extends CairnClient {
 
     jobCosts(days = 30, opts?: RequestOptions) {
         return this.request<JobCost[]>('GET', '/reports/costs/jobs', undefined, { ...opts, query: { days } });
+    }
+
+    /** Trino's cost per person, team or table: everyone's for operators, the caller's own otherwise. */
+    trinoCosts(by: 'user' | 'team' | 'table', days = 30, opts?: RequestOptions) {
+        return this.request<TrinoCosts>('GET', '/reports/costs/trino', undefined, { ...opts, query: { by, days } });
     }
 
     proposeDeprecation(urn: string, reason: string) {

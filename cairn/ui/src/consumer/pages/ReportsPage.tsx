@@ -1,10 +1,10 @@
-import { Alert, Button, Drawer, Progress, Space, Table, Tabs, message } from 'antd';
+import { Alert, Button, Drawer, Progress, Radio, Space, Table, Tabs, message } from 'antd';
 import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { CostTotal, JobCost, CoverageFacet, CoverageRow, ReportAsset, ReportSnapshot } from '../api/types';
+import type { CostTotal, JobCost, CoverageFacet, CoverageRow, ReportAsset, ReportSnapshot, TrinoCostRow, TrinoCosts } from '../api/types';
 import { assetPath } from '../components/Assets';
 import { download } from '../components/BulkEdit';
 import { SloDashboard } from '../components/Slos';
@@ -123,7 +123,7 @@ function CoverageTable({
 
 const usd = (v: number) => `$${v.toLocaleString(undefined, { maximumFractionDigits: 2, minimumFractionDigits: 2 })}`;
 const size = (b: number | null) =>
-    b === null ? '–' : b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : `${(b / 1e9).toFixed(1)} GB`;
+    b === null ? '–' : b >= 1e12 ? `${(b / 1e12).toFixed(1)} TB` : b >= 1e8 ? `${(b / 1e9).toFixed(1)} GB` : `${(b / 1e6).toFixed(1)} MB`;
 
 /** The job's name: the last part of its dataJob urn (`urn:li:dataJob:(<flow>,<name>)`). */
 function jobName(urn: string): string {
@@ -157,6 +157,48 @@ function JobCostTable() {
                     { title: 'Cost, 30 days', render: (_, j) => usd(j.usd) },
                 ]}
             />
+        </>
+    );
+}
+
+/** What Trino's queries cost, per person, team or table: CPU time and data scanned at Trino's rates. */
+function TrinoCostTable() {
+    const [by, setBy] = useState<'user' | 'team' | 'table'>('user');
+    const q = useDheQuery<TrinoCosts>(`/reports/costs/trino?by=${by}`, (c, signal) => c.trinoCosts(by, 30, { signal }));
+    const label = (r: TrinoCostRow) =>
+        by === 'table' ? <Link to={assetPath(r.key)}>{r.name ?? r.key}</Link> : r.key.replace(/^urn:li:corp(user|Group):/, '');
+    return (
+        <>
+            <Space style={{ marginBottom: 8 }}>
+                <Radio.Group value={by} onChange={(e) => setBy(e.target.value)} optionType="button" size="small"
+                    options={[{ label: 'People', value: 'user' }, { label: 'Teams', value: 'team' }, { label: 'Tables', value: 'table' }]} />
+                {q.data && (
+                    <Muted>
+                        {q.data.scope === 'mine' ? 'Your queries' : 'All queries'}, last {q.data.days} days
+                        {q.data.total_usd !== null ? ` · ${usd(q.data.total_usd)}` : ''}
+                    </Muted>
+                )}
+            </Space>
+            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.data && !q.data.priced && (
+                <Alert type="info" showIcon style={{ marginBottom: 8 }}
+                    message="Trino is not priced: set CAIRN_COST_TRINO_USD_PER_CPU_HOUR and CAIRN_COST_TRINO_USD_PER_TB_SCANNED. CPU and data scanned are shown." />
+            )}
+            <Table<TrinoCostRow>
+                size="small"
+                rowKey="key"
+                loading={q.loading && !q.data}
+                dataSource={q.data?.rows ?? []}
+                pagination={{ pageSize: 15, hideOnSinglePage: true, showSizeChanger: false }}
+                columns={[
+                    { title: by === 'user' ? 'Person' : by === 'team' ? 'Team' : 'Table', render: (_, r) => label(r) },
+                    { title: 'Queries', dataIndex: 'queries' },
+                    { title: 'CPU', render: (_, r) => hours(r.cpu_hours) },
+                    { title: 'Scanned', render: (_, r) => size(r.scanned_bytes) },
+                    { title: 'Cost, 30 days', render: (_, r) => (r.usd === null ? <Muted>–</Muted> : usd(r.usd)) },
+                ]}
+            />
+            <Muted>Each query's cost is shared evenly among its author's teams, and among the tables it read.</Muted>
         </>
     );
 }
@@ -333,6 +375,7 @@ export function ReportsPage() {
                             { key: 'idle', label: 'Idle tables', children: <CostTable kind="idle" /> },
                             { key: 'expensive', label: 'Expensive per read', children: <CostTable kind="expensive" /> },
                             { key: 'jobs', label: 'Spark jobs', children: <JobCostTable /> },
+                            { key: 'trino', label: 'Trino', children: <TrinoCostTable /> },
                         ]}
                     />
                     {s.governance.personas !== undefined && (

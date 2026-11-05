@@ -58,6 +58,26 @@ query_history = Table(
 )
 
 
+def trino_rates() -> tuple[Optional[float], Optional[float]]:
+    """(USD per CPU hour, USD per TB scanned) of Trino (``CAIRN_COST_TRINO_USD_PER_CPU_HOUR``,
+    ``CAIRN_COST_TRINO_USD_PER_TB_SCANNED``); either may be unset. Both unset: queries are not priced."""
+    def rate(name: str) -> Optional[float]:
+        try:
+            v = float(os.environ.get(name, ""))
+        except ValueError:
+            return None
+        return v if v >= 0 else None
+    return rate("CAIRN_COST_TRINO_USD_PER_CPU_HOUR"), rate("CAIRN_COST_TRINO_USD_PER_TB_SCANNED")
+
+
+def price(cpu_ms: int, input_bytes: int, rates: Optional[tuple[Optional[float], Optional[float]]] = None) -> Optional[float]:
+    """A query's cost: its CPU time and the bytes it scanned at Trino's rates; None when Trino is not priced."""
+    cpu, tb = rates if rates is not None else trino_rates()
+    if cpu is None and tb is None:
+        return None
+    return round((cpu or 0) * (cpu_ms or 0) / 3_600_000 + (tb or 0) * (input_bytes or 0) / 1e12, 6)
+
+
 def _ms(v: Any) -> int:
     """Trino's HTTP event listener sends durations in seconds (0.282); ISO-8601 (PT1.5S) is read too."""
     if v is None:
@@ -149,6 +169,7 @@ class QueryHistory:
                                  "peak_memory_bytes", "splits")}
         out["sql"] = r["sql"]
         out["tables"] = json.loads(r["tables"] or "[]")
+        out["cost_usd"] = price(r["cpu_ms"], r["input_bytes"])
         return out
 
     def list(self, actor_user: str, everyone: bool, user: Optional[str] = None, state: Optional[str] = None,

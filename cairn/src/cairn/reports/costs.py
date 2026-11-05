@@ -30,6 +30,12 @@ Collectors are configured in ``CAIRN_COST_SOURCES`` (YAML)::
   ``CAIRN_COST_SPARK_USD_PER_CORE_HOUR``. The cost of producing data belongs to what it produced, so a
   run's cost is split evenly across the tables it wrote. Each run is charged once, in
   ``cairn_run_costs``, however often its events are delivered.
+* **Trino** (Cairn's own warehouse) prices each query from its CPU time and the bytes it scanned, at
+  ``CAIRN_COST_TRINO_USD_PER_CPU_HOUR`` and ``CAIRN_COST_TRINO_USD_PER_TB_SCANNED``, from the query history
+  Trino's event listener sends (``cairn.dataaccess.query_history``). ``trino(by=...)`` attributes it to people,
+  to teams (a person's groups, or only those in ``CAIRN_COST_TEAMS``; split evenly among a person's teams),
+  and to tables (split evenly across the tables a query read), and the per-table totals include it, with each
+  query a read of each table it read.
 """
 
 from __future__ import annotations
@@ -440,7 +446,101 @@ class CostService:
                              "compute_usd": round(sum(r["compute_usd"] for r in last30), 2),
                              "reads": sum(r["reads"] for r in last30)}}
 
+    # ---- Trino ------------------------------------------------------------------------------------
+    def _trino_queries(self, since_ms: int, user: Optional[str] = None) -> list[dict]:
+        import json
+
+        from cairn.dataaccess.query_history import query_history as qh
+
+        q = select(qh.c.user, qh.c.cpu_ms, qh.c.input_bytes, qh.c.tables).where(qh.c.create_ms >= since_ms)
+        if user:
+            q = q.where(qh.c.user == user)
+        with self.engine.connect() as conn:
+            return [{"user": r.user, "cpu_ms": int(r.cpu_ms or 0), "bytes": int(r.input_bytes or 0),
+                     "tables": json.loads(r.tables or "[]")} for r in conn.execute(q)]
+
+    def trino(self, by: str = "user", days: int = 30, now_ms: Optional[int] = None, user: Optional[str] = None,
+              groups_of: Optional[Callable[[str], list[str]]] = None, limit: int = 200) -> dict:
+        """Trino's CPU, scanned bytes and cost over the last ``days``, per ``user``, ``team`` or ``table``,
+        most expensive first. ``user`` narrows it to one person's queries."""
+        from cairn.dataaccess.query_history import price, trino_rates
+
+        if by not in ("user", "team", "table"):
+            raise ValueError("by: user, team or table")
+        if by == "team" and groups_of is None:
+            raise ValueError("teams are not known here")
+        rates = trino_rates()
+        now_ms = now_ms or int(time.time() * 1000)
+        teams_only = {t.strip() for t in os.environ.get("CAIRN_COST_TEAMS", "").split(",") if t.strip()}
+        team_cache: dict[str, list[str]] = {}
+
+        def teams(u: str) -> list[str]:
+            if u not in team_cache:
+                try:
+                    gs = [g for g in groups_of(f"urn:li:corpuser:{u}") if not teams_only or g in teams_only]
+                except Exception:  # noqa: BLE001 - unknown groups: the person's cost stays unassigned
+                    logger.warning("could not look up the groups of %s", u)
+                    gs = []
+                team_cache[u] = sorted(set(gs)) or ["(no team)"]
+            return team_cache[u]
+        agg: dict[str, dict] = {}
+        for q in self._trino_queries(now_ms - days * DAY_MS, user):
+            keys = ([f"urn:li:corpuser:{q['user']}"] if by == "user" else teams(q["user"]) if by == "team"
+                    else q["tables"])
+            if not keys:
+                continue
+            share = 1 / len(keys)                     # a query's figures split evenly across its teams or tables
+            for k in keys:
+                a = agg.setdefault(k, {"key": k, "queries": 0, "cpu_ms": 0.0, "scanned_bytes": 0.0})
+                a["queries"] += 1
+                a["cpu_ms"] += q["cpu_ms"] * share
+                a["scanned_bytes"] += q["bytes"] * share
+        rows = []
+        for a in agg.values():
+            usd = price(int(a["cpu_ms"]), int(a["scanned_bytes"]), rates)
+            rows.append({"key": a["key"], "queries": a["queries"], "cpu_hours": round(a["cpu_ms"] / 3_600_000, 6),
+                         "scanned_bytes": int(a["scanned_bytes"]), "usd": usd})
+        rows.sort(key=lambda r: (-(r["usd"] or 0), -r["cpu_hours"], -r["scanned_bytes"], r["key"]))
+        return {"by": by, "days": days, "priced": rates != (None, None),
+                "rates": {"usd_per_cpu_hour": rates[0], "usd_per_tb_scanned": rates[1]},
+                # Every query's cost is split across its keys, so the rows add up to the total whatever ``by`` is.
+                "total_usd": round(sum(r["usd"] or 0 for r in rows), 4) if rates != (None, None) else None,
+                "rows": rows[:limit]}
+
+    def _trino_tables(self, since_ms: int) -> dict[str, dict]:
+        """Per table: Trino's cost (split evenly across the tables each query read) and reads, since ``since_ms``."""
+        from cairn.dataaccess.query_history import price, trino_rates
+
+        rates = trino_rates()
+        out: dict[str, dict] = {}
+        for q in self._trino_queries(since_ms):
+            for urn in q["tables"]:
+                o = out.setdefault(urn, {"compute_usd": 0.0, "reads": 0})
+                o["reads"] += 1
+                o["compute_usd"] += (price(q["cpu_ms"], q["bytes"], rates) or 0) / len(q["tables"])
+        return out
+
     def _totals(self, days: int, now_ms: int) -> list[dict]:
+        totals = self._stored_totals(days, now_ms)
+        try:
+            trino = self._trino_tables(now_ms - days * DAY_MS)
+        except Exception:  # noqa: BLE001 - no query history (no Trino): the stored figures alone
+            logger.debug("no Trino query history to add to the cost totals", exc_info=True)
+            trino = {}
+        by_urn = {t["urn"]: t for t in totals}
+        for urn, f in trino.items():
+            t = by_urn.get(urn)
+            if t is None:
+                platform = urn.split("dataPlatform:", 1)[1].split(",", 1)[0] if "dataPlatform:" in urn else "trino"
+                t = by_urn[urn] = {"urn": urn, "platform": platform, "storage_usd": 0.0, "compute_usd": 0.0,
+                                   "cost_usd": 0.0, "reads": 0, "storage_bytes": None, "last_day": None}
+                totals.append(t)
+            t["compute_usd"] = round(t["compute_usd"] + f["compute_usd"], 2)
+            t["cost_usd"] = round(t["storage_usd"] + t["compute_usd"], 2)
+            t["reads"] += f["reads"]
+        return totals
+
+    def _stored_totals(self, days: int, now_ms: int) -> list[dict]:
         since = _day(now_ms - days * DAY_MS)
         with self.engine.connect() as conn:
             rows = conn.execute(select(asset_costs.c.urn, asset_costs.c.platform,

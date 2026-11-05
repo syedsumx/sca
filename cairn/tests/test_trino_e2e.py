@@ -3041,3 +3041,46 @@ def test_a_person_browses_a_tables_snapshots_and_restores_yesterdays(trino, cair
     assert feed.restore(admin, "sales", "snap_orders", str(bad["snapshot"]), "undo")["records"] == 1
     assert [r["id"] for r in trino("SELECT id FROM lake.sales.snap_orders")] == [2]
     trino("DROP TABLE lake.sales.snap_orders")
+
+
+def test_trino_costs_come_from_real_queries(trino, cairn, monkeypatch):
+    """L60 on real Trino: the queries Trino reports (CPU time, scanned bytes, tables read) are priced and
+    attributed to the people who ran them, to teams and to tables; the per-person figures match the query
+    history query by query, and a person sees only what their own queries cost."""
+    url, s = cairn
+    monkeypatch.setenv("CAIRN_COST_TRINO_USD_PER_CPU_HOUR", "3")
+    monkeypatch.setenv("CAIRN_COST_TRINO_USD_PER_TB_SCANNED", "5")
+    tag = uuid.uuid4().hex[:8]
+    for _ in range(3):
+        trino(f"SELECT count(*) AS n FROM sales.orders WHERE region <> '{tag}'", user="ana")
+    trino(f"SELECT o.id FROM sales.orders o, sales.orders p WHERE o.region <> '{tag}'", user="bob")
+    admin, ana = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana"))
+
+    def history(user):
+        return httpx.get(f"{url}/v1/queries", params={"user": user, "limit": 1000}, headers=admin, timeout=10).json()["queries"]
+    end = time.time() + 30
+    while time.time() < end and sum(tag in q["sql"] for q in history("ana") + history("bob")) < 4:
+        time.sleep(0.5)
+    mine = [q for q in history("ana") if tag in q["sql"]]
+    assert len(mine) == 3 and all(q["cpu_ms"] > 0 and q["input_bytes"] > 0 and q["cost_usd"] > 0 for q in mine), mine
+    q = mine[0]
+    assert q["cost_usd"] == round(3 * q["cpu_ms"] / 3_600_000 + 5 * q["input_bytes"] / 1e12, 6)
+
+    report = httpx.get(f"{url}/reports/costs/trino", params={"by": "user"}, headers=admin, timeout=30).json()
+    assert report["scope"] == "all" and report["priced"]
+    rows = {r["key"]: r for r in report["rows"]}
+    for user in ("ana", "bob"):                       # each person's figure is the sum of their queries' costs
+        qs = history(user)
+        assert rows[f"urn:li:corpuser:{user}"]["queries"] == len(qs)
+        assert abs(rows[f"urn:li:corpuser:{user}"]["usd"] - sum(x["cost_usd"] for x in qs)) < 1e-4
+    by_table = httpx.get(f"{url}/reports/costs/trino", params={"by": "table"}, headers=admin, timeout=30).json()
+    orders = next(r for r in by_table["rows"] if r["key"] == "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)")
+    assert orders["queries"] >= 4 and orders["usd"] > 0 and orders["scanned_bytes"] > 0
+    teams = httpx.get(f"{url}/reports/costs/trino", params={"by": "team"}, headers=admin, timeout=30).json()
+    assert abs(teams["total_usd"] - report["total_usd"]) < 1e-3       # every query lands on some team
+    # Ana sees her own queries' cost only.
+    hers = httpx.get(f"{url}/reports/costs/trino", params={"by": "user"}, headers=ana, timeout=30).json()
+    assert hers["scope"] == "mine" and [r["key"] for r in hers["rows"]] == ["urn:li:corpuser:ana"]
+    # The table cost report counts Trino's compute and reads too.
+    exp = httpx.get(f"{url}/reports/costs/expensive", params={"min_cost_usd": 0}, headers=admin, timeout=30).json()
+    assert any(t["urn"] == orders["key"] and t["compute_usd"] >= 0 and t["reads"] >= 4 for t in exp), exp

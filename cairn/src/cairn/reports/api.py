@@ -28,7 +28,7 @@ class DeprecationIn(BaseModel):
 
 
 def build_router(reports: ReportService, current_principal, authorize, can_view, summaries,
-                 costs: Optional[CostService] = None) -> APIRouter:
+                 costs: Optional[CostService] = None, groups_of=None) -> APIRouter:
     router = APIRouter(prefix="/reports", tags=["reports"])
 
     def _reader(p: Principal) -> None:
@@ -106,6 +106,28 @@ def build_router(reports: ReportService, current_principal, authorize, can_view,
         """What each Spark application cost, priced from its runs (cores x wall-clock time)."""
         _reader(p)
         return costs.jobs(days)
+
+    @router.get("/costs/trino")
+    def trino_costs(by: str = Query("user", pattern="^(user|team|table)$"), days: int = Query(30, ge=1, le=365),
+                    p: Principal = Depends(current_principal)):
+        """Trino's CPU, scanned bytes and cost per person, team or table. Operators (or everyone, with
+        CAIRN_REPORTS_OPEN) see all queries; anyone else sees what their own queries cost."""
+        everyone = (os.environ.get("CAIRN_REPORTS_OPEN", "").lower() in ("1", "true", "yes")
+                    or authorize(p, MANAGE, None, raise_on_deny=False))
+        mine = None if everyone else p.urn.removeprefix("urn:li:corpuser:")
+        if mine == p.urn:                       # not a person (and not an operator): nothing of theirs to show
+            raise HTTPException(403, "Trino costs are shown to people, for their own queries, and to operators")
+        try:
+            out = costs.trino(by, days, user=mine, groups_of=groups_of)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        out["scope"] = "mine" if mine else "all"
+        if by == "table":
+            check = can_view(p)
+            rows = [r for r in out["rows"] if check(r["key"])]
+            names = summaries([r["key"] for r in rows])
+            out["rows"] = [{**r, "name": (names.get(r["key"]) or {}).get("name") or r["key"]} for r in rows]
+        return out
 
     @router.get("/costs/asset")
     def asset_cost(urn: str, p: Principal = Depends(current_principal)):

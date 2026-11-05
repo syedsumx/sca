@@ -1946,3 +1946,22 @@ export interface RestoreResult {
     to_id: string;
     records: number;
 }
+
+/** Trino's CPU, scanned bytes and cost per person, team or table (GET /reports/costs/trino). */
+export interface TrinoCostRow {
+    key: string;
+    name?: string;
+    queries: number;
+    cpu_hours: number;
+    scanned_bytes: number;
+    usd: number | null;
+}
+
+export interface TrinoCosts {
+    by: 'user' | 'team' | 'table';
+    days: number;
+    priced: boolean;
+    scope: 'all' | 'mine';
+    total_usd: number | null;
+    rows: TrinoCostRow[];
+}

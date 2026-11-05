@@ -525,7 +525,8 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.reports.api import build_router as reports_router
 
         app.include_router(reports_router(services.reports, cp, services.authorize, services.can_view,
-                                          services.summaries, services.costs))
+                                          services.summaries, services.costs,
+                                          lambda u: [str(g) for g in (services.attributes.subject(u).get("groups") or [])]))
     if getattr(services, "signup", None) is not None:      # public: signing up, Stripe's webhook, the portal
         from cairn.hosting.signup import build_signup_router
 

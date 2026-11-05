@@ -1013,6 +1013,15 @@ Daily figures per table come from warehouse collectors, which run once a day for
   - **Per job.** **Reports → Cost → Spark jobs** (`GET /reports/costs/jobs?days=30`) lists what each application cost over 30 days: its runs, running time and dollars.
 
   It is an estimate of what was reserved, not a bill. For the exact figure from your cloud, post daily rows to `POST /reports/costs`.
+- **Trino** (Cairn's own warehouse) prices each query from what Trino reports for it when `CAIRN_COST_TRINO_USD_PER_CPU_HOUR` or `CAIRN_COST_TRINO_USD_PER_TB_SCANNED` is set:
+  - **The price.** Its CPU time at the first rate plus the bytes it scanned at the second, from the query history Trino's event listener sends (kept `CAIRN_QUERY_HISTORY_DAYS`, 30). Failed queries count: their CPU was spent. Each query's profile (`GET /v1/queries/<id>`) shows its `cost_usd`.
+  - **Per person, team and table.** **Reports → Cost → Trino** (`GET /reports/costs/trino?by=user|team|table&days=30`) lists queries, CPU hours, data scanned and dollars.
+    - A **team** is one of the person's groups, or only those named in `CAIRN_COST_TEAMS` (comma-separated group URNs). A person's queries are split evenly among their teams; people in none are under "(no team)".
+    - A **table**'s share is an even split of each query across the tables it read.
+    - The rows add up to the total whichever way the report is cut.
+  - **Who sees what.** Operators (`MANAGE_SYSTEM_OPERATIONS`, or everyone with `CAIRN_REPORTS_OPEN`) see every query. Anyone else sees what their own queries cost, and by table only the tables they may see.
+  - **In the table report.** The idle and expensive lists add Trino's compute to each table it read, and count each query as a read.
+  - Without either rate, the report still shows CPU and data scanned, and no dollars.
 
   Storage is the `SVV_TABLE_INFO` size, at `storage_usd_per_gb_month` (default 0.024). The connection's user needs to see every user's queries (`SYSLOG ACCESS UNRESTRICTED`).
 
