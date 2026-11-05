@@ -45,7 +45,7 @@ EVENT_TYPES = [
     "privacy.request_completed", "privacy.retention_breach", "product.slo_changed", "pipeline.run_failed",
     "sql.alert_triggered", "sql.alert_resolved", "report.ready", "sql.workflow_failed", "sql.workflow_finished",
     "ml.drift_detected", "ml.drift_resolved", "budget.threshold_crossed", "budget.forecast_exceeded",
-    "bi.shared", "privacy.erasure_proved",
+    "bi.shared", "privacy.erasure_proved", "input.change_requested", "input.change_decided",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

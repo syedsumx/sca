@@ -108,6 +108,7 @@ class InputTables:
         description)``: puts the new table in Cairn's catalog (owned by its creator), so it can be read at once."""
         self.engine, self.run, self.read, self.audit, self.register = engine, run, read, audit, register
         self.changed = changed            # changed(connection, table): a write landed (the change log, the result cache)
+        self.approvals = None             # cairn.sqlworkspace.input_approvals.InputApprovals: review before writes land
 
     def _get(self, tid: str) -> dict:
         with self.engine.connect() as conn:
@@ -164,7 +165,7 @@ class InputTables:
         out = self.read(actor, sql, t["connection"], None, max(1, min(limit, 10_000)))
         return {**out, "table": t}
 
-    def add(self, actor: str, tid: str, rows: list) -> dict:
+    def add(self, actor: str, tid: str, rows: list, dry_run: bool = False) -> dict:
         t = self._get(tid)
         if not isinstance(rows, list) or not 1 <= len(rows) <= MAX_ROWS:
             raise InputTableError(f"rows: 1 to {MAX_ROWS}")
@@ -180,11 +181,14 @@ class InputTables:
                                           + [literal(rid), literal(actor), "current_timestamp"]) + ")")
         schema, name = t["table_name"].split(".")
         names = ", ".join([ident(c["name"]) for c in cols] + ['"_row_id"', '"_updated_by"', '"_updated_at"'])
+        if dry_run:
+            return {"checked": len(values)}
         self.run(t["connection"], actor, f"INSERT INTO {ident(schema)}.{ident(name)} ({names}) VALUES {', '.join(values)}")
         self._audit(actor, "input.rows_added", t["table_name"], {"rows": ids})
         return {"added": ids}
 
-    def change(self, actor: str, tid: str, row_id: str, values: dict, expected_updated_at: Optional[str]) -> dict:
+    def change(self, actor: str, tid: str, row_id: str, values: dict, expected_updated_at: Optional[str],
+               dry_run: bool = False) -> dict:
         t = self._get(tid)
         types = {c["name"]: c["type"] for c in t["columns"]}
         if not isinstance(values, dict) or not values or set(values) - set(types):
@@ -199,6 +203,8 @@ class InputTables:
                 where += f' AND "_updated_at" = {stamp_literal(str(expected_updated_at))}'
             except ValueError:
                 raise InputTableError("expected_updated_at: the row's _updated_at as read")
+        if dry_run:
+            return {"checked": row_id}
         schema, name = t["table_name"].split(".")
         _, rows = self.run(t["connection"], actor, f"UPDATE {ident(schema)}.{ident(name)} SET {', '.join(sets)} WHERE {where}")
         changed = int(rows[0][0]) if rows and rows[0] else 0
@@ -211,11 +217,13 @@ class InputTables:
         self._audit(actor, "input.row_changed", t["table_name"], {"row": row_id, "columns": sorted(values)})
         return {"changed": row_id}
 
-    def remove(self, actor: str, tid: str, row_ids: list) -> dict:
+    def remove(self, actor: str, tid: str, row_ids: list, dry_run: bool = False) -> dict:
         t = self._get(tid)
         if not isinstance(row_ids, list) or not row_ids or len(row_ids) > MAX_ROWS or \
                 not all(isinstance(r, str) and re.fullmatch(r"[0-9a-f]{32}", r) for r in row_ids):
             raise InputTableError(f"rows: 1 to {MAX_ROWS} row ids")
+        if dry_run:
+            return {"checked": len(row_ids)}
         schema, name = t["table_name"].split(".")
         _, rows = self.run(t["connection"], actor, f'DELETE FROM {ident(schema)}.{ident(name)} WHERE "_row_id" IN '
                                                    f"({', '.join(literal(r) for r in row_ids)})")
@@ -246,9 +254,11 @@ class InputTables:
 
 def build_input_tables_router(it: InputTables, current_principal, is_operator) -> Any:
     from fastapi import APIRouter, Body, Depends, HTTPException
+    from fastapi.responses import JSONResponse
     from starlette.concurrency import run_in_threadpool
 
     from cairn.dataaccess.service import DataAccessError
+    from cairn.sqlworkspace.input_approvals import ApprovalError
     from cairn.sqlworkspace.workspace import WorkspaceError
 
     router = APIRouter(prefix="/sql/input-tables", tags=["sql"])
@@ -261,8 +271,21 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
     async def call(fn):
         try:
             return await run_in_threadpool(fn)
-        except (InputTableError, WorkspaceError, DataAccessError) as e:
+        except (InputTableError, WorkspaceError, DataAccessError, ApprovalError) as e:
             raise HTTPException(e.status, str(e))
+
+    async def write(actor: str, tid: str, kind: str, payload: dict, status: int):
+        """Through review when the table has reviewers (202 and the change's id), else at once."""
+        code, out = await call(lambda: (it.approvals.write(actor, tid, kind, payload) if it.approvals is not None
+                                        else (status, _direct(actor, tid, kind, payload))))
+        return JSONResponse(out, status_code=status if code == 200 else code)
+
+    def _direct(actor: str, tid: str, kind: str, p: dict) -> dict:
+        if kind == "add":
+            return it.add(actor, tid, p.get("rows"))
+        if kind == "change":
+            return it.change(actor, tid, p["row_id"], p.get("values"), p.get("expected_updated_at"))
+        return it.remove(actor, tid, p.get("rows"))
 
     @router.get("")
     async def list_(p=Depends(current_principal)):
@@ -281,18 +304,44 @@ def build_input_tables_router(it: InputTables, current_principal, is_operator) -
 
     @router.post("/{tid}/rows", status_code=201)
     async def add(tid: str, body: dict = Body(...), p=Depends(current_principal)):
-        actor = person(p)
-        return await call(lambda: it.add(actor, tid, body.get("rows")))
+        return await write(person(p), tid, "add", {"rows": body.get("rows")}, 201)
 
     @router.patch("/{tid}/rows/{row_id}")
     async def change(tid: str, row_id: str, body: dict = Body(...), p=Depends(current_principal)):
-        actor = person(p)
-        return await call(lambda: it.change(actor, tid, row_id, body.get("values"), body.get("expected_updated_at")))
+        return await write(person(p), tid, "change", {"row_id": row_id, "values": body.get("values"),
+                                                      "expected_updated_at": body.get("expected_updated_at")}, 200)
 
     @router.delete("/{tid}/rows")
     async def remove(tid: str, body: dict = Body(...), p=Depends(current_principal)):
+        return await write(person(p), tid, "remove", {"rows": body.get("rows")}, 200)
+
+    @router.put("/{tid}/approval")
+    async def approval(tid: str, body: dict = Body(...), p=Depends(current_principal)):
+        if it.approvals is None:
+            raise HTTPException(503, "input-table approvals are not configured")
         actor = person(p)
-        return await call(lambda: it.remove(actor, tid, body.get("rows")))
+        return await call(lambda: it.approvals.set(actor, tid, body.get("reviewers")))
+
+    @router.get("/{tid}/changes")
+    async def changes(tid: str, state: Optional[str] = None, p=Depends(current_principal)):
+        if it.approvals is None:
+            raise HTTPException(503, "input-table approvals are not configured")
+        actor = person(p)
+        return await call(lambda: it.approvals.changes(actor, tid, state))
+
+    @router.post("/changes/{cid}/approve")
+    async def approve(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
+        if it.approvals is None:
+            raise HTTPException(503, "input-table approvals are not configured")
+        actor = person(p)
+        return await call(lambda: it.approvals.decide(actor, cid, True, str(body.get("note") or "")))
+
+    @router.post("/changes/{cid}/reject")
+    async def reject(cid: str, body: dict = Body(default={}), p=Depends(current_principal)):
+        if it.approvals is None:
+            raise HTTPException(503, "input-table approvals are not configured")
+        actor = person(p)
+        return await call(lambda: it.approvals.decide(actor, cid, False, str(body.get("note") or "")))
 
     @router.delete("/{tid}", status_code=204)
     async def forget(tid: str, p=Depends(current_principal)):

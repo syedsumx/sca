@@ -130,6 +130,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import bi_catalog as _bi_catalog  # noqa: F401
     from cairn.sqlworkspace import versions as _bi_versions  # noqa: F401
     from cairn.embed import dashboards as _embed_dashboards  # noqa: F401
+    from cairn.sqlworkspace import input_approvals as _input_approvals  # noqa: F401
     from cairn.sqlworkspace import reports as _bi_reports  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401

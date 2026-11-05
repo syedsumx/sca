@@ -2573,3 +2573,73 @@ dashboards:
     assert ("workbooks", "delete") in gone and ("metrics", "delete") in gone, gone
     assert "Orders (prod)" not in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
     assert "Orders (staging)" in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
+
+
+def test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author(trino, cairn):
+    """Input-table approvals on real Trino: with reviewers set, a change waits (nothing is written); nobody approves
+    their own; an approved change is written as its author; a rejected one never is; a change that no longer
+    applies (the row was edited meanwhile) ends failed, with why, instead of overwriting."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    admin, ana, carol = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "carol"))
+    base = f"{url}/sql/input-tables"
+    c = httpx.Client(timeout=120)
+    t = c.post(base, headers=admin, json={"connection": "lakehouse", "table": "sales.appr_targets",
+                                          "columns": [{"name": "region", "type": "text"}, {"name": "target", "type": "number"}]})
+    assert t.status_code == 201, t.text
+    tid = t.json()["id"]
+    assert c.put(f"{base}/{tid}/approval", headers=ana, json={"reviewers": ["urn:li:corpuser:carol"]}).status_code == 403
+    assert c.put(f"{base}/{tid}/approval", headers=admin, json={"reviewers": ["urn:li:corpuser:carol"]}).status_code == 200
+
+    count = lambda: trino("SELECT count(*) AS n FROM lake.sales.appr_targets")[0]["n"]  # noqa: E731
+    r = c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "EU", "target": 100}]})
+    assert r.status_code == 202 and r.json()["state"] == "pending", r.text
+    cid = r.json()["pending"]
+    assert count() == 0                                                              # nothing written yet
+    bad = c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "EU", "target": "lots"}]})
+    assert bad.status_code == 400                                                    # checked when asked, not later
+    pending = c.get(f"{base}/{tid}/changes", params={"state": "pending"}, headers=carol).json()
+    assert [x["id"] for x in pending] == [cid] and pending[0]["author"] == "urn:li:corpuser:admin"
+    told = [n for n in s.notify.inbox("urn:li:corpuser:carol") if n["type"] == "input.change_requested"]
+    assert told
+    assert c.post(f"{base}/changes/{cid}/approve", headers=admin).status_code == 403    # not their own
+    assert c.post(f"{base}/changes/{cid}/approve", headers=ana).status_code == 403      # not a reviewer
+    ok = c.post(f"{base}/changes/{cid}/approve", headers=carol)
+    assert ok.status_code == 200 and ok.json()["state"] == "applied", ok.text
+    assert c.post(f"{base}/changes/{cid}/approve", headers=carol).status_code == 409    # decided once
+    row = trino("SELECT _row_id, region, target, _updated_by FROM lake.sales.appr_targets")
+    assert len(row) == 1 and row[0]["_updated_by"] == "urn:li:corpuser:admin" and row[0]["target"] == 100.0
+    rid = row[0]["_row_id"]
+    stamp = c.get(f"{base}/{tid}/rows", headers=admin).json()["rows"][0]
+    stamp = stamp[-1]                                                                # _updated_at, as read
+
+    # Rejected: never written.
+    r2 = c.patch(f"{base}/{tid}/rows/{rid}", headers=admin, json={"values": {"target": 999}})
+    assert r2.status_code == 202
+    rej = c.post(f"{base}/changes/{r2.json()['pending']}/reject", headers=carol, json={"note": "too high"})
+    assert rej.json()["state"] == "rejected" and rej.json()["note"] == "too high"
+    assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 100.0
+    decided = [n for n in s.notify.inbox("urn:li:corpuser:admin") if n["type"] == "input.change_decided"]
+    assert {"applied", "rejected"} <= {n["title"].rsplit(" ", 1)[-1] for n in decided}
+
+    # A change asked on the row as it was, approved after someone else changed it: failed, not an overwrite.
+    stale = c.patch(f"{base}/{tid}/rows/{rid}", headers=admin, json={"values": {"target": 120}, "expected_updated_at": stamp})
+    assert stale.status_code == 202
+    trino(f"UPDATE lake.sales.appr_targets SET target = 110, _updated_at = current_timestamp WHERE _row_id = '{rid}'")
+    failed = c.post(f"{base}/changes/{stale.json()['pending']}/approve", headers=carol).json()
+    assert failed["state"] == "failed" and "changed this row" in failed["result"]["error"], failed
+    assert trino("SELECT target FROM lake.sales.appr_targets")[0]["target"] == 110.0
+    # Ana (not a reviewer) sees only her own changes; with review off, writes land at once again.
+    assert c.get(f"{base}/{tid}/changes", headers=ana).json() == []
+    c.put(f"{base}/{tid}/approval", headers=admin, json={"reviewers": []})
+    assert c.post(f"{base}/{tid}/rows", headers=admin, json={"rows": [{"region": "US", "target": 50}]}).status_code == 201
+    assert count() == 2
+    acts = {e["action"] for e in s.audit.entries(limit=3000)}
+    assert {"input.reviewers_set", "input.change_requested", "input.change_applied", "input.change_rejected",
+            "input.change_failed"} <= acts

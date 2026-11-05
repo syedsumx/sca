@@ -631,6 +631,23 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - **No lost edits.** A change (`PATCH …/<id>/rows/<row_id>` with `values` and `expected_updated_at`, the row's `_updated_at` as read) writes only if nobody changed the row since; otherwise nothing is written and the answer is 409 (**Read again** in the page).
   - **Audited** (category `sql`): `input.created`, `input.rows_added`, `input.row_changed`, `input.rows_deleted` and `input.forgotten`, with the row ids and columns changed, not the values. Each commit is a new snapshot of the table, so the change feed, derived tables and materialized views follow.
   - `DELETE /sql/input-tables/<id>` (its creator or an operator with `MANAGE_SYSTEM_OPERATIONS`) stops listing it as an input table; the data stays in the lakehouse. Table `cairn_input_tables` (migration 0074). Tested on real Trino as three people (`tests/test_trino_e2e.py`), the typed values (`tests/test_input_tables.py`) and the page (`ui/src/consumer/__tests__/inputTables.test.tsx`).
+  - **Review before changes land.** The table's creator or an operator sets reviewers
+    (`PUT /sql/input-tables/<id>/approval`, `{"reviewers": ["urn:li:corpuser:…", "urn:li:corpGroup:…"]}`; `[]`
+    turns review off).
+    - **Waiting.** Every added, changed or deleted row is then a change request (202 with its id). It is
+      checked at once (columns, types) and written only when a reviewer approves it.
+    - **Four eyes.** Nobody approves their own change, so a reviewer's own change needs another reviewer.
+    - **Written as the author.** An approved change is written on Trino as its author, so their policies
+      decide and `_updated_by` is theirs. A row edited meanwhile makes the change `failed`, with why, instead
+      of overwriting it. Rejected changes are never written.
+    - **API.** `GET …/<id>/changes` lists changes (`?state=pending`); reviewers see all of them, authors their
+      own. `POST …/changes/<cid>/approve` and `POST …/changes/<cid>/reject` (with a `note`) decide.
+    - **Notifications.** Reviewers named as people are told of new changes (`input.change_requested`). Groups
+      are not expanded for notifications. Authors are told the decision (`input.change_decided`).
+    - Each step is audited. A change being decided while Cairn stops stays `deciding`; an operator can see it
+      in the list.
+    - Tables `cairn_input_approval` and `cairn_input_changes` (migration 0087). Tested on real Trino
+      (`test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author`).
 - **History.** Each person's last 500 runs, including refused ones and why (`GET /sql/history`).
 - **Saved queries.** Private, or shared with everyone. A shared query runs as whoever opens it, never as its owner, so each person sees only what they may (`/sql/saved`, `POST /sql/saved/{id}/run`). Only its owner changes or deletes it. A saved query keeps its chart.
 - **Who.** People only: service, agent and extension tokens are refused.

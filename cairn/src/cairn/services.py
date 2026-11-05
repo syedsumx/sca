@@ -892,6 +892,15 @@ def _build_active_metadata(s: Services) -> None:
                 schema, name = table.split(".")
                 s.dataset_changes.record([s.data_access._source(connection, None).urn(schema, name, None)], "input-table")
         s.input_tables = InputTables(s.engine, input_run, s.data_access.query, s.audit, input_register, input_changed)
+        from cairn.sqlworkspace.input_approvals import InputApprovals
+
+        def tell_input(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url="/sql/input-tables"))
+        s.input_tables.approvals = InputApprovals(
+            s.engine, s.input_tables, lambda u: [str(g) for g in (s.attributes.subject(u).get("groups") or [])],
+            lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False),
+            tell_input, s.audit)
         if getattr(s, "derived", None) is not None:      # materialized views, written in SQL (cairn.pipelines.matviews)
             from cairn.pipelines.matviews import MaterializedViews
 
