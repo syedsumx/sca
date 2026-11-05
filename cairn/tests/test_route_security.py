@@ -19,6 +19,8 @@ PUBLIC = {
     ("POST", "/oauth/register"): "RFC 7591 registration: off, admin-approved or open by setting; public clients only",
     ("POST", "/v1/lakehouse/oauth/tokens"): "engines exchange client credentials for catalog tokens (400 without)",
     ("POST", "/v1/shares/oauth/tokens"): "share recipients exchange their credential (400 without)",
+    ("GET", "/governance/privacy/proof-keys"): "the public key erasure proofs are signed with: auditors check them without Cairn",
+    ("POST", "/governance/privacy/proof/verify"): "checks a signed erasure proof someone was given (it holds no identifier)",
     ("GET", "/embed/v1/sdk.js"): "the embed SDK script (404 until embeds are configured)",
     ("GET", "/embed/v1/assets/{urn}"): "embeds authenticate with a signed embed token (422 without)",
     ("GET", "/embed/v1/frame/{kind}"): "as above",
