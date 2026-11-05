@@ -685,6 +685,30 @@ Table `cairn_bi_lineage` (migration 0084). Tested on real Trino
 `DROP COLUMN` named exactly the query and dashboard that then failed; the other query and the workbook kept
 working.
 
+### Version history
+
+Every save of a saved query, workbook or dashboard is kept as a numbered version. A save that changes nothing
+is not a new version.
+
+| Call | What it does |
+|---|---|
+| `GET /sql/versions/<kind>/<id>` | the versions, newest first, with who saved each and when |
+| `GET …/<n>` | one version as it was |
+| `GET …/diff?a=<n>&b=<m>` | the fields that changed, and a line-by-line diff |
+| `POST …/<n>/restore` | saves that version again, as a new version |
+
+* **Restore** goes through the asset's own save, so the same rules hold. Owners and editors restore. A
+  dashboard's tiles are checked again. An editor's restore leaves who may see the asset as it is.
+* **Reading history:** anyone who may open the asset may read it. Others get 404.
+* **What is kept:** the newest `CAIRN_BI_VERSIONS` (default 200) versions of each asset. Versions go with
+  the asset when it is deleted.
+* A version that could not be recorded never fails the save; the next save records the asset as it is then.
+
+Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_version_history_rolls_a_broken_edit_back`):
+* a query broken by an edit, compared and restored, runs again;
+* a dashboard's earlier name and tiles are restored;
+* a viewer may read the history but not restore it.
+
 ### Sharing with people and groups
 
 Saved queries, workbooks and dashboards are shared with people or groups (`PUT /sql/shares/<kind>/<id>`, kind

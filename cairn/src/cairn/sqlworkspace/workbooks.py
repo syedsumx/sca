@@ -269,7 +269,7 @@ class Workbooks:
         the table's columns as the person may see them."""
         self.engine, self.workspace, self.columns_of = engine, workspace, columns_of
         self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
-        self.on_change = None                              # (kind, id) after a save or delete
+        self.on_change = None                              # (kind, id, actor) after a save or delete
 
     def compile(self, actor: str, connection: str, spec: dict) -> dict:
         table = (spec.get("source") or {}).get("table", "")
@@ -355,7 +355,7 @@ class Workbooks:
                 wid = uuid.uuid4().hex
                 conn.execute(insert(workbooks).values(id=wid, owner=actor, created_ms=_now(), **values))
         if self.on_change is not None:
-            self.on_change("workbook", wid)
+            self.on_change("workbook", wid, actor)
         return self.get(actor, wid)
 
     def delete(self, actor: str, wid: str) -> None:
@@ -365,7 +365,7 @@ class Workbooks:
             if self.sharing is not None:
                 self.sharing.drop("workbook", wid, conn)
         if self.on_change is not None:
-            self.on_change("workbook", wid)
+            self.on_change("workbook", wid, actor)
 
 
 def build_workbooks_router(wb: Workbooks, current_principal) -> Any:

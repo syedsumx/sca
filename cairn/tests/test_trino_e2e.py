@@ -2305,3 +2305,64 @@ def test_bi_assets_are_catalog_entities_and_a_dropped_column_shows_what_breaks(t
         "/sql/impact", params={"dataset": ds}, headers=admin).json()["assets"]}
     assert c.post("/sql/catalog/sync", headers=ana).status_code == 403
     assert c.post("/sql/catalog/sync", headers=admin).json()["published"] >= 3
+
+
+def test_bi_version_history_rolls_a_broken_edit_back(trino, cairn):
+    """Every save kept: a saved query and a dashboard broken by an edit are compared with the version before and
+    restored to it, as a new version; viewers read the history, only owners and editors restore."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.ver_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0)) AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ver_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    admin, bob = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    c = httpx.Client(base_url=url, timeout=120)
+    good = "SELECT region, SUM(amount) AS revenue FROM sales.ver_orders GROUP BY region ORDER BY region"
+    q = c.post("/sql/saved", headers=admin, json={"name": "ver revenue", "connection": "lakehouse", "sql": good}).json()
+    board = c.post("/sql/dashboards", headers=admin, json={"name": "ver board", "tiles": [{"query": q["id"], "title": "Revenue"}]}).json()
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).status_code == 200
+
+    # The broken edit: a column that is not there.
+    bad = good.replace("SUM(amount)", "SUM(amount_eur)")
+    assert c.put(f"/sql/saved/{q['id']}", headers=admin, json={**q, "sql": bad}).status_code == 200
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).status_code >= 400
+    assert "error" in c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"][0]
+    c.put(f"/sql/dashboards/{board['id']}", headers=admin, json={"name": "ver board (renamed)",
+                                                                "tiles": [{"query": q["id"], "title": "Oops"}]})
+
+    hist = c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()
+    assert [h["version"] for h in hist] == [2, 1] and hist[0]["saved_by"] == "urn:li:corpuser:admin"
+    d = c.get(f"/sql/versions/query/{q['id']}/diff", params={"a": 1, "b": 2}, headers=admin).json()
+    assert d["changed"] == ["sql"] and "amount_eur" in d["diff"]
+    assert c.get(f"/sql/versions/query/{q['id']}/1", headers=admin).json()["doc"]["sql"] == good
+
+    # Bob may not see the history of a query not shared with him; shared as a viewer he reads it, but only an
+    # editor restores.
+    assert c.get(f"/sql/versions/query/{q['id']}", headers=bob).status_code == 404
+    c.put(f"/sql/shares/query/{q['id']}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "VIEWER"})
+    assert len(c.get(f"/sql/versions/query/{q['id']}", headers=bob).json()) == 2
+    assert c.post(f"/sql/versions/query/{q['id']}/1/restore", headers=bob).status_code == 403
+
+    # Restored: it runs again, and the restore is a new version.
+    r = c.post(f"/sql/versions/query/{q['id']}/1/restore", headers=admin)
+    assert r.status_code == 200 and r.json()["asset"]["sql"] == good, r.text
+    assert c.post(f"/sql/saved/{q['id']}/run", headers=admin).json()["rows"] == [["EU", 10.0], ["US", 20.0]]
+    assert [h["version"] for h in c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()] == [3, 2, 1]
+    # The dashboard's own history: back to its first name and title.
+    bh = c.get(f"/sql/versions/dashboard/{board['id']}", headers=admin).json()
+    assert [h["name"] for h in bh] == ["ver board (renamed)", "ver board"]
+    rb = c.post(f"/sql/versions/dashboard/{board['id']}/1/restore", headers=admin).json()["asset"]
+    assert rb["name"] == "ver board" and rb["tiles"][0]["title"] == "Revenue"
+    assert "error" not in c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"][0]
+    # A save that changes nothing is not a new version; a deleted asset takes its history with it.
+    c.put(f"/sql/saved/{q['id']}", headers=admin, json={**q, "sql": good})
+    assert len(c.get(f"/sql/versions/query/{q['id']}", headers=admin).json()) == 3
+    assert c.delete(f"/sql/dashboards/{board['id']}", headers=admin).status_code == 204
+    assert c.get(f"/sql/versions/dashboard/{board['id']}", headers=admin).status_code == 404
+    assert s.bi_versions.count("dashboard", board["id"]) == 0

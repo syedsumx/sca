@@ -88,6 +88,7 @@ class Services:
     records: Optional[Any] = None
     limits: Optional[Any] = None
     bi_catalog: Optional[Any] = None
+    bi_versions: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -933,7 +934,18 @@ def _build_active_metadata(s: Services) -> None:
         s.bi_catalog = BiCatalog(s.engine, s.graph, s.sql_workspace, s.workbooks, s.sql_boards, s.metrics, bi_can_open,
                                  lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
                                                            raise_on_deny=False))
-        s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = s.bi_catalog.changed
+        # Version history: every save kept, compared and restored through the asset's own save.
+        from cairn.sqlworkspace.versions import Versions
+
+        s.bi_versions = Versions(s.engine, s.sql_workspace, s.workbooks, s.sql_boards, s.bi_sharing)
+
+        def bi_changed(kind: str, aid: str, actor: str) -> None:
+            try:
+                s.bi_versions.record(kind, aid, actor)
+            except Exception:  # noqa: BLE001 - the save stands; the next one records the asset as it is then
+                logger.exception("recording a version of %s %s failed", kind, aid)
+            s.bi_catalog.changed(kind, aid, actor)
+        s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = bi_changed
         # The AI builder: a question becomes a dashboard of metric and workbook tiles, each checked as the person.
         from cairn.sqlworkspace.builder import Builder
 

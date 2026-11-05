@@ -169,7 +169,7 @@ class BiCatalog:
         d = dict(r._mapping)
         return {**d, "spec": json.loads(d["spec"])}
 
-    def changed(self, kind: str, aid: str) -> None:
+    def changed(self, kind: str, aid: str, actor: Optional[str] = None) -> None:
         """After a save or a delete: the asset's lineage and its catalog entity, as they are now."""
         try:
             row = self._row(kind, aid)
