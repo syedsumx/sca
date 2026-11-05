@@ -501,6 +501,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                     from cairn.sqlworkspace.metric_alerts import build_metric_alerts_router
 
                     app.include_router(build_metric_alerts_router(services.metric_alerts, cp))
+                if getattr(services, "jobs", None) is not None:
+                    from cairn.pipelines.jobs import build_jobs_router
+
+                    app.include_router(build_jobs_router(services.jobs, cp))
                 if getattr(services, "bi_versions", None) is not None:
                     from cairn.sqlworkspace.versions import build_versions_router
 

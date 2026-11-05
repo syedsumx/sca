@@ -197,6 +197,30 @@ app.kubernetes.io/component: {{ .component }}
   value: {{ .Values.cairn.gateway.publicUrl | quote }}
 - name: CAIRN_GATEWAY_KEY_DIR
   value: /var/lib/cairn/keys
+{{- with .Values.cairn.jobs }}
+{{- if eq .runtime "kubernetes" }}
+- name: CAIRN_JOBS_RUNTIME
+  value: kubernetes
+- name: CAIRN_JOBS_K8S_NAMESPACE
+  value: {{ .namespace | quote }}
+- name: CAIRN_JOBS_IMAGE
+  value: {{ .image | quote }}
+- name: CAIRN_JOBS_K8S_RESOURCES
+  value: {{ toJson .resources | quote }}
+- name: CAIRN_JOBS_KEEP_DAYS
+  value: {{ .keepDays | quote }}
+{{- with .trinoUrl }}
+- name: CAIRN_JOBS_TRINO_URL
+  value: {{ . | quote }}
+{{- end }}
+{{- if .trinoCa.configMap }}
+- name: CAIRN_JOBS_TRINO_CA_FILE
+  value: /etc/cairn-jobs-trino-ca/{{ .trinoCa.key }}
+{{- end }}
+{{- else if .runtime }}
+{{- fail "cairn.jobs.runtime: \"\" or kubernetes" }}
+{{- end }}
+{{- end }}
 - name: CAIRN_LLM_PROVIDER
   value: {{ .Values.cairn.ai.llmProvider | quote }}
 - name: CAIRN_AI_MODEL
@@ -429,6 +453,11 @@ spec:
               mountPath: /run/cairn-licence
               readOnly: true
             {{- end }}
+            {{- if and (eq $root.Values.cairn.jobs.runtime "kubernetes") $root.Values.cairn.jobs.trinoCa.configMap }}
+            - name: jobs-trino-ca
+              mountPath: /etc/cairn-jobs-trino-ca
+              readOnly: true
+            {{- end }}
             {{- with .extraVolumeMounts }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -455,6 +484,11 @@ spec:
           secret:
             secretName: {{ . }}
             items: [{ key: {{ $root.Values.cairn.licence.secretKey | default "licence" }}, path: licence }]
+        {{- end }}
+        {{- if and (eq $root.Values.cairn.jobs.runtime "kubernetes") $root.Values.cairn.jobs.trinoCa.configMap }}
+        - name: jobs-trino-ca
+          configMap:
+            name: {{ $root.Values.cairn.jobs.trinoCa.configMap }}
         {{- end }}
         {{- with .extraVolumes }}
         {{- toYaml . | nindent 8 }}

@@ -92,6 +92,7 @@ class Services:
     embedded_dashboards: Optional[Any] = None
     bi_collab: Optional[Any] = None
     metric_alerts: Optional[Any] = None
+    jobs: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -978,6 +979,22 @@ def _build_active_metadata(s: Services) -> None:
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
                               url=f"{hub.public_url}/cairn/sql/metrics"))
         s.metric_alerts = MetricAlerts(s.engine, s.metrics, tell_metric, s.audit)
+        # Scheduled notebook and Python jobs: each run in a container of its own, as its owner (their Trino token).
+        from cairn.pipelines.jobs import Jobs, runner_from_env
+
+        def tell_job(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url=f"{hub.public_url}/v1/jobs/{payload['job']}/runs/{payload['run']}"))
+
+        def job_token(owner: str, ttl: int):
+            tokens = getattr(s, "trino_tokens", None)     # built later, with Trino; no Trino, no token
+            return tokens.mint(owner, ttl)["token"] if tokens is not None else None
+        s.jobs = Jobs(s.engine, runner_from_env(),
+                      lambda actor: s.authorize(Principal(actor, "token"), "RUN_JOBS", None, raise_on_deny=False),
+                      lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                                raise_on_deny=False),
+                      job_token, os.environ.get("CAIRN_JOBS_TRINO_URL", ""), tell_job, s.audit,
+                      os.environ.get("CAIRN_JOBS_TRINO_CA_FILE", ""))
         # BI assets in the catalog: charts and dashboards with lineage from the tables and columns they read.
         from cairn.sqlworkspace.bi_catalog import BiCatalog
         from cairn.sqlworkspace.sharing import access as _bi_access

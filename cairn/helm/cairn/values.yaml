@@ -1033,6 +1033,19 @@ cairn:
       gitImage: alpine/git:v2.49.1
       resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
 
+  # Scheduled notebook and Python jobs (/v1/jobs): each run as a Kubernetes Job in `namespace`, as its owner
+  # (a Trino token minted for them, in a Secret deleted after the run). The chart gives Cairn's account a Role
+  # there for the jobs' objects only. Defining or running a job needs RUN_JOBS.
+  jobs:
+    runtime: ""                 # "" (jobs off) or kubernetes
+    namespace: cairn-jobs
+    image: cairn/jobs:0.1.0
+    # Where a job reaches Trino (https://...), and a ConfigMap key with Trino's CA when its certificate is private.
+    trinoUrl: ""
+    trinoCa: { configMap: "", key: ca.crt }
+    resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }
+    keepDays: 30
+
   notebooks:
     jupyterhub:
       enabled: false

@@ -1,0 +1,43 @@
+{{- with .Values.cairn.jobs }}
+{{- if eq .runtime "kubernetes" }}
+{{- /* Scheduled jobs on Kubernetes: Cairn's account (API and scheduler) may create and delete the jobs' objects in
+       their namespace, read their pods' logs, and nothing else there (cairn.pipelines.jobs.KubeRunner). */}}
+{{- $ctx := dict "root" $ "component" "jobs" "cfg" $.Values.cairn.api }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "secrets"]
+    verbs: ["create", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

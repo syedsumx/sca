@@ -2935,3 +2935,52 @@ def test_a_published_metric_gives_outside_bi_tools_the_dashboards_number_as_the_
         trino("SELECT count(*) FROM lake.metrics.mv_revenue")
     httpx.delete(f"{base}/mv_avg", headers=admin, timeout=60)
     trino("DROP TABLE lake.sales.mv_orders")
+
+
+def test_a_scheduled_job_reads_the_lake_as_its_owner(trino, cairn):
+    """L57 on real Trino: a Python job in the cairn/jobs image signs in to Trino with a token minted for its owner,
+    over TLS against Trino's own CA. The admin's job counts every row; Bob's same job counts only his EU rows (his
+    row filter applies), and the token never appears in what the run keeps. Without RUN_JOBS, Bob is refused."""
+    from cairn.pipelines.jobs import DockerRunner
+
+    image = os.environ.get("CAIRN_JOBS_TEST_IMAGE", "cairn/jobs:dev")
+    if not shutil.which("docker") or subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode:
+        pytest.skip(f"needs the {image} image")
+    url, s = cairn
+    trino("DROP TABLE IF EXISTS lake.sales.job_orders")
+    trino("CREATE TABLE lake.sales.job_orders AS SELECT * FROM (VALUES (1, 'EU'), (2, 'US'), (3, 'EU'), (4, 'US'), "
+          "(5, 'US')) AS t(id, region)")
+    s.jobs.runner = DockerRunner(image, network="host", memory="512m", cpus="1")
+    s.jobs.trino_url = f"https://127.0.0.1:{trino.tls}"
+    s.jobs.trino_ca = open(f"{trino.dir}/ca.pem").read()
+    code = ("import os, trino\n"
+            "c = trino.dbapi.connect(host=os.environ['CAIRN_TRINO_URL'].split('//')[1].split(':')[0],\n"
+            "    port=int(os.environ['CAIRN_TRINO_URL'].rsplit(':', 1)[1]), http_scheme='https', catalog='lake',\n"
+            "    user=os.environ['CAIRN_USER'], auth=trino.auth.JWTAuthentication(os.environ['CAIRN_TRINO_TOKEN']),\n"
+            "    verify=os.environ['CAIRN_TRINO_CA_FILE']).cursor()\n"
+            "c.execute('SELECT count(*) FROM sales.job_orders')\n"
+            "print('rows', c.fetchone()[0], 'as', os.environ['CAIRN_USER'])\n")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    body = {"kind": "python", "code": code, "timeout_minutes": 5}
+    assert httpx.post(f"{url}/v1/jobs", headers=bob, timeout=60, json={"name": "count-b", **body}).status_code == 403
+    assert httpx.post(f"{url}/v1/jobs", headers=admin, timeout=60, json={"name": "count-a", **body}).status_code == 201
+    r = httpx.post(f"{url}/v1/jobs/count-a/run?wait=true", headers=admin, timeout=300).json()
+    assert r["status"] == "succeeded", r
+    run = httpx.get(f"{url}/v1/jobs/count-a/runs/{r['run']}", headers=admin, timeout=60).json()
+    assert run["output"].strip() == "rows 5 as admin" and run["as_user"] == "urn:li:corpuser:admin"
+    # Bob given RUN_JOBS: the same job, his rows only.
+    allowed = s.jobs.allowed
+    s.jobs.allowed = lambda a: a == "urn:li:corpuser:bob" or allowed(a)
+    try:
+        assert httpx.post(f"{url}/v1/jobs", headers=bob, timeout=60, json={"name": "count-b", **body}).status_code == 201
+        r = httpx.post(f"{url}/v1/jobs/count-b/run?wait=true", headers=bob, timeout=300).json()
+        run = httpx.get(f"{url}/v1/jobs/count-b/runs/{r['run']}", headers=bob, timeout=60).json()
+        assert run["output"].strip() == "rows 2 as bob", run
+        assert "eyJ" not in (run["log"] or "") + run["output"]                  # no token kept
+        assert httpx.get(f"{url}/v1/jobs/count-a/runs/{r['run']}", headers=bob, timeout=60).status_code == 404
+    finally:
+        s.jobs.allowed = allowed
+        for name, who in (("count-a", admin), ("count-b", bob)):
+            httpx.delete(f"{url}/v1/jobs/{name}", headers=who, timeout=60)
+        s.jobs.runner = None
+        trino("DROP TABLE lake.sales.job_orders")

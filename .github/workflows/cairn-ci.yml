@@ -220,11 +220,15 @@ jobs:
           version: v3.16.4
       - name: Pull Trino (and Vector, stripe-mock and Mailpit for the SIEM and signup tests)
         run: for i in trinodb/trino:476 timberio/vector:0.43.1-alpine stripe/stripe-mock:v0.194.0 axllent/mailpit:v1.21.8; do docker pull $i; done
+      - name: The image scheduled jobs run in
+        working-directory: cairn
+        run: docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
       - name: Trino end to end
         working-directory: cairn
         env:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_JOBS_TEST_IMAGE: cairn/jobs:ci
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,streams,documents,saml]" "ipython>=8.20"   # ipython: the notebook test
@@ -233,7 +237,7 @@ jobs:
           docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams
           docker pull -q keycloak/keycloak:26.0.7        # SAML sign-in against a real identity provider
           docker pull -q postgres:16-alpine            # the DR drill (primary and streaming standby)
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
@@ -427,6 +431,7 @@ jobs:
           (cd catalog && cargo build --release --locked)
           (cd store && cargo build --release --locked)
           docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
+          docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
       - name: Kind cluster
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
@@ -445,7 +450,7 @@ jobs:
           # (a pulled multi-platform image holds only this platform's layers).
           echo "FROM python:3.12-slim" | docker build -q -t cairn-test/python:ci -
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
-          kind load docker-image cairn/spark:ci cairn-test/python:ci cairn-test/git:ci --name cairn
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn-test/python:ci cairn-test/git:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -472,12 +477,17 @@ jobs:
           CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
           ! grep -q "skipped" "$RUNNER_TEMP/gateway.log"
+          # Scheduled jobs as Kubernetes Jobs, made and removed with only the chart's Role.
+          CAIRN_JOBS_TEST_IMAGE=cairn/jobs:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jobs_k8s.py | tee "$RUNNER_TEMP/jobs.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/jobs.log"
       - name: Cluster state on failure
         if: failure()
         run: |
           kubectl get pods -A -o wide || true
           for p in $(kubectl -n pipelines get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n pipelines logs "$p" --tail=200 || true; done
           kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-jobs-test get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
 
   ui:
@@ -596,7 +606,8 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.trino.workers=2 --set cairn.trino.federation[0].name=crm --set cairn.trino.federation[0].connector=postgresql --set cairn.trino.federation[0].properties.connection-url=jdbc:postgresql://crm-db:5432/crm --set cairn.trino.federation[0].credentialsSecret.name=crm-trino --set cairn.trino.federation[0].platform=postgres --set cairn.trino.federation[0].database=crm" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
-              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls"; do
+              "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
+              "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
