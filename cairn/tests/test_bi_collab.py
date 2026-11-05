@@ -106,6 +106,7 @@ def test_comments_threads_mentions_and_who_may_delete(api):
     assert first.status_code == 201, first.text
     told_ana = [n for n in s.notify.inbox(ANA) if n["type"] == "bi.mentioned"]
     assert told_ana and "Why is US so high" in told_ana[0]["body"]
+    assert told_ana[0]["action_url"].endswith(f"/cairn/dashboards?open={board['id']}")
     assert not [n for n in s.notify.inbox(CAROL) if n["type"] == "bi.mentioned"]                # may not open it
     reply = c.post(path, headers=h(ANA), json={"body": "A large order on the 2nd", "parent": first.json()["id"]}).json()
     assert reply["parent_id"] == first.json()["id"]
@@ -136,3 +137,20 @@ def test_views_are_counted_as_people_look_and_shown_to_owners_and_editors(api):
     assert ("query", q["id"]) not in {(x["kind"], x["id"]) for x in pop}                     # not his to open
     stale = {(x["kind"], x["id"]) for x in c.get("/sql/usage/stale", headers=h(ANA)).json()}
     assert ("query", private["id"]) in stale and ("dashboard", board["id"]) not in stale and ("query", q["id"]) not in stale
+
+
+def test_a_deleted_asset_leaves_its_folders_and_takes_its_comments_and_views(api):
+    s, c = api
+    q, private, board = assets(s)
+    f = c.post("/sql/folders", headers=h(ANA), json={"name": "Gone soon"}).json()
+    c.put(f"/sql/folders/{f['id']}/items/dashboard/{board['id']}", headers=h(ANA))
+    c.post(f"/sql/comments/dashboard/{board['id']}", headers=h(ANA), json={"body": "note"})
+    c.post(f"/sql/dashboards/{board['id']}/render", headers=h(ANA), json={})
+    assert s.bi_collab.folder(ANA, f["id"])["items"]
+    assert c.delete(f"/sql/dashboards/{board['id']}", headers=h(ANA)).status_code in (200, 204)
+    from sqlalchemy import select
+
+    from cairn.sqlworkspace.collab import bi_comments, bi_folder_items, bi_views
+    with s.engine.connect() as conn:
+        for t in (bi_folder_items, bi_comments, bi_views):
+            assert conn.execute(select(t).where(t.c.asset_id == board["id"])).first() is None, t.name

@@ -813,8 +813,22 @@ Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_versi
     caller's own assets nobody viewed in the last `days` (default 30) days.
   - Views are kept `CAIRN_BI_USAGE_DAYS` (default 180) days.
 
+* **When an asset is deleted**, it leaves the folders it was in, and its comments and views are deleted with it.
+* **Notifications** about BI assets (shared, mentioned, commented) link to where the asset opens in the web UI:
+  a dashboard itself (`/cairn/dashboards?open=<id>`), a workbook or saved query its page.
+
+In the web UI:
+* **Comments** on a dashboard, a workbook or a saved query opens its threads. Reply, edit your own, or delete
+  (yours, or any as the owner); on a dashboard, a comment can be about one tile.
+* **Usage** (owners and editors) shows its views and people per day over the last 30 days.
+* The Dashboards page has a **Folders** tab, to make, rename, share and delete folders, file assets into them
+  and open them from there, and a **Usage** tab with the most viewed assets and your own that nobody opened in
+  30 days.
+
 Tables `cairn_bi_folders`, `cairn_bi_folder_items`, `cairn_bi_comments` and `cairn_bi_views` (migration 0088). Tested
-over HTTP against a Cairn server and a SQLite warehouse (`tests/test_bi_collab.py`).
+over HTTP against a Cairn server and a SQLite warehouse (`tests/test_bi_collab.py`), and in Chromium against Cairn
+(`tests/test_sql_ops_ui_e2e.py`: a dashboard filed into a new folder, opened from it, commented on with a
+mention, and its views shown).
 
 ### Sharing with people and groups
 

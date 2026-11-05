@@ -1851,6 +1851,56 @@ export interface BiVersionDiff {
     diff: string;
 }
 
+export interface BiFolder {
+    id: string;
+    name: string;
+    parent_id: string | null;
+    owner: string;
+    shared: boolean;
+    created_ms: number;
+}
+
+export interface BiFolderDetail extends BiFolder {
+    items: { kind: BiKind; id: string }[];
+    folders: BiFolder[];
+}
+
+export interface BiComment {
+    id: string;
+    kind: BiKind;
+    asset_id: string;
+    tile: number | null;
+    parent_id: string | null;
+    author: string;
+    body: string | null;
+    deleted: boolean;
+    created_ms: number;
+    edited_ms: number | null;
+}
+
+export interface BiUsage {
+    kind: BiKind;
+    id: string;
+    since: string;
+    views: number;
+    viewers: number;
+    days: { day: string; views: number; viewers: number }[];
+}
+
+export interface BiPopular {
+    kind: BiKind;
+    id: string;
+    views: number;
+    viewers: number;
+}
+
+export interface BiStale {
+    kind: BiKind;
+    id: string;
+    name: string;
+    updated_ms: number | null;
+}
+
 export interface BiImpact {
     dataset: string;
     column: string | null;

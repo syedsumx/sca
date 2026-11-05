@@ -1,5 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type { BiImpact, BiKind, BiShares, BiVersion, BiVersionDiff,
+import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, BiStale, BiUsage, BiShares, BiVersion, BiVersionDiff,
     CompiledPolicy,
     DbtRun,
     LineageGraph,
@@ -1051,6 +1051,62 @@ export class ConsumerClient extends CairnClient {
 
     restoreBiVersion(kind: BiKind, id: string, version: number) {
         return this.request<{ restored: number }>('POST', `/sql/versions/${kind}/${enc(id)}/${version}/restore`);
+    }
+
+    me(opts?: RequestOptions) {
+        return this.request<{ urn: string; via: string }>('GET', '/me', undefined, opts);
+    }
+
+    biFolders(opts?: RequestOptions) {
+        return this.request<BiFolder[]>('GET', '/sql/folders', undefined, opts);
+    }
+
+    biFolder(id: string, opts?: RequestOptions) {
+        return this.request<BiFolderDetail>('GET', `/sql/folders/${enc(id)}`, undefined, opts);
+    }
+
+    makeBiFolder(body: { name: string; shared?: boolean; parent?: string | null }) {
+        return this.request<BiFolder>('POST', '/sql/folders', body);
+    }
+
+    changeBiFolder(id: string, body: { name?: string; shared?: boolean }) {
+        return this.request<BiFolder>('PATCH', `/sql/folders/${enc(id)}`, body);
+    }
+
+    deleteBiFolder(id: string) {
+        return this.request<void>('DELETE', `/sql/folders/${enc(id)}`);
+    }
+
+    fileBi(folder: string, kind: BiKind, id: string, remove = false) {
+        return this.request<BiFolderDetail>(remove ? 'DELETE' : 'PUT', `/sql/folders/${enc(folder)}/items/${kind}/${enc(id)}`);
+    }
+
+    biComments(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiComment[]>('GET', `/sql/comments/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    commentBi(kind: BiKind, id: string, body: { body: string; parent?: string; tile?: number }) {
+        return this.request<BiComment>('POST', `/sql/comments/${kind}/${enc(id)}`, body);
+    }
+
+    editBiComment(id: string, body: string) {
+        return this.request<BiComment>('PATCH', `/sql/comments/${enc(id)}`, { body });
+    }
+
+    deleteBiComment(id: string) {
+        return this.request<void>('DELETE', `/sql/comments/${enc(id)}`);
+    }
+
+    biUsage(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiUsage>('GET', `/sql/usage/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    biPopular(opts?: RequestOptions) {
+        return this.request<BiPopular[]>('GET', '/sql/usage/popular', undefined, opts);
+    }
+
+    biStale(opts?: RequestOptions) {
+        return this.request<BiStale[]>('GET', '/sql/usage/stale', undefined, opts);
     }
 
     biImpact(dataset: string, column?: string, opts?: RequestOptions) {

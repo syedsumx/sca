@@ -912,7 +912,8 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace.boards import Boards
 
         def tell(type_, title, body, recipients, payload):
-            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql/workflows"))
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url=f"{hub.public_url}/cairn/sql/workflows"))
         s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks)
         # Sharing queries, workbooks and dashboards with people and groups (viewers, editors); data stays the viewer's.
         from cairn.sqlworkspace.sharing import Sharing
@@ -920,9 +921,16 @@ def _build_active_metadata(s: Services) -> None:
         def share_groups(actor: str) -> list[str]:
             return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
 
+        def bi_link(kind: str, aid: str) -> str:
+            # Where the asset opens in the UI: a dashboard itself, a workbook or saved query its page.
+            from urllib.parse import quote
+
+            path = {"dashboard": f"dashboards?open={quote(aid, safe='')}", "workbook": "sql/workbooks"}.get(kind, "sql")
+            return f"{hub.public_url}/cairn/{path}"
+
         def tell_shared(title, name, body, recipients, payload):
             hub.publish(Event(type="bi.shared", title=title, body=body, recipients=recipients, payload=payload,
-                              url=f"/sql/{payload['kind']}s/{payload['id']}"))
+                              url=bi_link(payload["kind"], payload["id"])))
         s.bi_sharing = Sharing(s.engine, share_groups, s.audit, tell_shared)
         s.sql_workspace.sharing = s.workbooks.sharing = s.sql_boards.sharing = s.bi_sharing
         # The metrics layer: measures defined once, queried as the person (through workbook elements).
@@ -956,6 +964,11 @@ def _build_active_metadata(s: Services) -> None:
             except Exception:  # noqa: BLE001 - the save stands; the next one records the asset as it is then
                 logger.exception("recording a version of %s %s failed", kind, aid)
             s.bi_catalog.changed(kind, aid, actor)
+            if s.bi_collab is not None:
+                try:
+                    s.bi_collab.forget_if_gone(kind, aid)
+                except Exception:  # noqa: BLE001 - the delete stands; what is left points at nothing and is not shown
+                    logger.exception("forgetting the comments and views of %s %s failed", kind, aid)
         s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = bi_changed
         # Folders, comments and usage of BI assets.
         from cairn.sqlworkspace.collab import BiCollab
@@ -970,7 +983,7 @@ def _build_active_metadata(s: Services) -> None:
 
         def tell_bi(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
-                              url=f"/sql/{payload['kind']}s/{payload['id']}"))
+                              url=bi_link(payload["kind"], payload["id"])))
         s.bi_collab = BiCollab(s.engine, bi_level, tell_bi, s.audit, int(os.environ.get("CAIRN_BI_USAGE_DAYS", "180")))
         s.sql_workspace.on_view = s.workbooks.on_view = s.sql_boards.on_view = s.bi_collab.viewed
         # Embedded dashboards: portals sign a token for one of their users; the tiles run as that user.

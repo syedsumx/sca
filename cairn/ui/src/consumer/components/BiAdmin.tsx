@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiImpact, BiKind, BiRole, BiShares, BiVersion, BiVersionDiff } from '../api/types';
+import { BiCollabButtons } from './BiCollab';
 import { Muted } from './tokens';
 
 const KIND_NAME: Record<BiKind, string> = { query: 'saved query', workbook: 'workbook', dashboard: 'dashboard' };
@@ -120,14 +121,15 @@ export function HistoryDialog({ kind, id, name, role, open, onClose, onRestored 
 }
 
 /** The Share and History buttons for an asset. */
-export function BiAssetButtons({ kind, id, name, role, onRestored }: {
-    kind: BiKind; id: string; name: string; role?: BiRole | null; onRestored?: () => void;
+export function BiAssetButtons({ kind, id, name, role, onRestored, tiles }: {
+    kind: BiKind; id: string; name: string; role?: BiRole | null; onRestored?: () => void; tiles?: string[];
 }) {
     const [open, setOpen] = useState<'share' | 'history' | null>(null);
     return (
         <>
             {(role === 'OWNER' || role === 'EDITOR') && <Button onClick={() => setOpen('share')}>Share</Button>}
             <Button onClick={() => setOpen('history')}>History</Button>
+            <BiCollabButtons kind={kind} id={id} name={name} role={role} tiles={tiles} />
             <ShareDialog kind={kind} id={id} name={name} role={role} open={open === 'share'} onClose={() => setOpen(null)} />
             <HistoryDialog kind={kind} id={id} name={name} role={role} open={open === 'history'} onClose={() => setOpen(null)}
                 onRestored={onRestored} />

@@ -1,10 +1,12 @@
 import { Alert, Button, Checkbox, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
 import type { BuiltDashboard, ChartSpec, Dashboard, DashboardAction, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { BiAssetButtons } from '../components/BiAdmin';
+import { BiFolders, BiUsageOverview } from '../components/BiCollab';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -184,6 +186,7 @@ function Board({ id }: { id: string }) {
                         <Actions board={id} row={row} onDone={() => { setRow(null); setRefresh((r) => r + 1); }} />
                         <ScheduleExport board={id} name={board.name} />
                         <BiAssetButtons kind="dashboard" id={id} name={board.name} role={board.role}
+                            tiles={board.tiles.map((t, i) => t.title || `Tile ${i + 1}`)}
                             onRestored={() => setRefresh((r) => r + 1)} />
                         {(board.controls ?? []).map((c) => (
                             <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
@@ -249,13 +252,14 @@ function Board({ id }: { id: string }) {
 
 type ControlDraft = { column: string; kind: DashboardControl['kind']; label: string };
 
-function Dashboards({ saved }: { saved: SavedQuery[] }) {
+function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | null }) {
     const { client } = useConsumerApi();
     const [tick, setTick] = useState(0);
     const list = useDheQuery<Dashboard[]>(`/sql/dashboards#${tick}`, (c, signal) => c.dashboards({ signal }));
     const books = useDheQuery<Workbook[]>('/sql/workbooks', (c, signal) => c.workbooks({ signal }));
     const metricList = useDheQuery<Metric[]>('/sql/metrics', (c, signal) => c.metrics({ signal }));
-    const [open, setOpen] = useState<string | null>(null);
+    const [open, setOpen] = useState<string | null>(openId ?? null);
+    useEffect(() => { if (openId) setOpen(openId); }, [openId]);
     const [editing, setEditing] = useState(false);
     const [asking, setAsking] = useState(false);
     const [question, setQuestion] = useState('');
@@ -465,13 +469,19 @@ function Alerts({ saved }: { saved: SavedQuery[] }) {
 /** Dashboards of saved queries, and alerts on them. */
 export function DashboardsPage() {
     const saved = useDheQuery<SavedQuery[]>('/sql/saved', (c, signal) => c.savedQueries({ signal }));
+    // A link from a folder or the usage list opens its dashboard (`/dashboards?open=<id>`).
+    const openId = new URLSearchParams(useLocation().search).get('open');
+    const [tab, setTab] = useState('boards');
+    useEffect(() => { if (openId) setTab('boards'); }, [openId]);
     return (
         <Page>
             <h1 style={{ marginBottom: 0 }}>Dashboards</h1>
             <Muted>Saved queries and workbooks with their charts, filters and drill-down, and alerts. Every tile and check runs as a person, under their policies.</Muted>
-            <Tabs style={{ marginTop: 12 }} items={[
-                { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} /> },
+            <Tabs style={{ marginTop: 12 }} activeKey={tab} onChange={setTab} items={[
+                { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} /> },
                 { key: 'alerts', label: 'Alerts', children: <Alerts saved={saved.data ?? []} /> },
+                { key: 'folders', label: 'Folders', children: <BiFolders /> },
+                { key: 'usage', label: 'Usage', children: <BiUsageOverview /> },
             ]} />
         </Page>
     );

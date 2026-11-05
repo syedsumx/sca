@@ -274,6 +274,18 @@ class BiCollab:
         if self.audit is not None:
             self.audit.record("sql", "bi.comment_deleted", actor, f"{c['kind']}:{c['asset_id']}", {"comment": cid})
 
+    def forget_if_gone(self, kind: str, aid: str) -> None:
+        """After a delete: the asset leaves its folders, and its comments and views go with it."""
+        from cairn.sqlworkspace.sharing import _table
+
+        t = _table(kind)
+        with self.engine.begin() as conn:
+            if conn.execute(select(t.c.id).where(t.c.id == aid)).first() is not None:
+                return
+            conn.execute(delete(bi_folder_items).where(and_(bi_folder_items.c.kind == kind, bi_folder_items.c.asset_id == aid)))
+            conn.execute(delete(bi_comments).where(and_(bi_comments.c.kind == kind, bi_comments.c.asset_id == aid)))
+            conn.execute(delete(bi_views).where(and_(bi_views.c.kind == kind, bi_views.c.asset_id == aid)))
+
     # ---- usage ------------------------------------------------------------------------------------
     def viewed(self, kind: str, aid: str, actor: str) -> None:
         """Counts one view (never fails what is being viewed); the order of the save and view hooks."""

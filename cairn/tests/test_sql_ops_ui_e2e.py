@@ -398,3 +398,52 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
             assert errors == [], errors
         finally:
             browser.close()
+
+
+def test_folders_comments_and_usage_of_a_dashboard_in_the_browser(cairn):
+    """Folders, comments and usage in Chromium against Cairn: a dashboard is filed into a new shared folder and
+    opened from it, a comment there mentions a person it is shared with (who is told), and its owner sees the views."""
+    from playwright.sync_api import expect, sync_playwright
+
+    s, url, _, _ = cairn
+    bob = "urn:li:corpuser:bob"
+    q = s.sql_workspace.save(ANA, {"name": "By region", "connection": "wh",
+                                   "sql": "SELECT region, sum(amount) AS total FROM main.orders GROUP BY region ORDER BY region"})
+    board = s.sql_boards.save_dashboard(ANA, {"name": "Weekly sales", "tiles": [{"query": q["id"], "title": "Totals"}]})
+    s.bi_sharing.set(ANA, "dashboard", board["id"], bob, "VIEWER")
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/dashboards", wait_until="domcontentloaded")
+            page.get_by_role("tab", name="Folders").click()
+            page.get_by_role("button", name="New folder").click()
+            made = page.get_by_role("dialog", name="New folder")
+            made.get_by_label("Folder name").fill("Sales team")
+            made.get_by_text("Shared with everyone").click()
+            made.get_by_role("button", name="Create").click()
+            folders = page.get_by_test_id("bi-folders")
+            folders.get_by_role("combobox", name="Add to folder").click()
+            page.get_by_title("Weekly sales (dashboard)").click()
+            folders.get_by_role("button", name="Add", exact=True).click()
+            link = folders.get_by_role("link", name="Weekly sales")
+            expect(link).to_be_visible(timeout=15_000)
+            [f] = [f for f in s.bi_collab.folders(ANA) if f["name"] == "Sales team"]
+            assert f["shared"] and s.bi_collab.folder(bob, f["id"])["items"] == [{"kind": "dashboard", "id": board["id"]}]
+            link.click()                                                       # opens the dashboard
+            page.get_by_role("button", name="Comments").click()
+            drawer = page.get_by_role("dialog").filter(has=page.get_by_text("Comments on “Weekly sales”"))
+            drawer.get_by_label("New comment").fill("Is EU complete? @bob")
+            drawer.get_by_role("combobox", name="About tile").click()
+            page.get_by_title("Totals").last.click()
+            drawer.get_by_role("button", name="Comment").click()
+            expect(drawer.get_by_test_id("comment")).to_contain_text("Is EU complete?", timeout=15_000)
+            [c] = s.bi_collab.comments(ANA, "dashboard", board["id"])
+            assert (c["author"], c["tile"]) == (ANA, 0)
+            assert [n for n in s.notify.inbox(bob) if n["type"] == "bi.mentioned"]
+            page.keyboard.press("Escape")
+            page.get_by_role("button", name="Usage").click()
+            expect(page.get_by_test_id("usage-total")).to_contain_text("by 1 person", timeout=15_000)
+            assert s.bi_collab.usage(ANA, "dashboard", board["id"])["views"] >= 1
+            assert errors == [], errors
+        finally:
+            browser.close()
