@@ -91,6 +91,7 @@ class Services:
     bi_versions: Optional[Any] = None
     embedded_dashboards: Optional[Any] = None
     bi_collab: Optional[Any] = None
+    metric_alerts: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -939,6 +940,13 @@ def _build_active_metadata(s: Services) -> None:
         s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
             Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
         s.sql_boards.metrics = s.metrics
+        # Metric alerts: a metric watched per period as its alert's owner; told once on each change of state.
+        from cairn.sqlworkspace.metric_alerts import MetricAlerts
+
+        def tell_metric(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url=f"{hub.public_url}/cairn/sql/metrics"))
+        s.metric_alerts = MetricAlerts(s.engine, s.metrics, tell_metric, s.audit)
         # BI assets in the catalog: charts and dashboards with lineage from the tables and columns they read.
         from cairn.sqlworkspace.bi_catalog import BiCatalog
         from cairn.sqlworkspace.sharing import access as _bi_access

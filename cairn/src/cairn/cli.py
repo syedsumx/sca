@@ -111,6 +111,8 @@ def cmd_scheduler(a) -> None:
     sch = Scheduler(s.quality, a.tick, a.workers, a.partition, a.partitions)
     if getattr(s, "sql_boards", None) is not None:
         sch.extra.append(s.sql_boards.run_due)   # SQL alerts
+    if getattr(s, "metric_alerts", None) is not None:
+        sch.extra.append(s.metric_alerts.run_due)   # metric alerts
     if getattr(s, "report_schedules", None) is not None:
         sch.extra.append(s.report_schedules.run_due)   # scheduled exports of dashboards and workbooks
     if getattr(s, "git_folders", None) is not None:

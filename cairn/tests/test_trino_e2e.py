@@ -2804,3 +2804,72 @@ def test_outages_under_load_fail_closed_and_lose_no_writes(trino, cairn, lake):
     assert not (got & refused), f"refused writes were written: {sorted(got & refused)[:5]}"
     assert got - ok <= {(w, n) for w, n, _ in failed}
     trino("DROP TABLE lake.sales.chaos")
+
+
+def test_a_metric_alert_tells_its_owner_once_as_they_see_the_metric(trino, cairn):
+    """L53 on real Trino: revenue per week from an Iceberg table. US revenue drops 25% in the last complete week
+    while EU stays flat: the admin's alert (all rows) triggers and tells them once, however often it is checked,
+    and once more when revenue recovers; Bob's same alert runs under his row filter (EU only) and stays quiet.
+    The week still filling is never judged."""
+    import datetime as dt
+
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.metric_alerts import period_start
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.ma_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount", "ordered_at")]}
+    now = int(time.time() * 1000)
+    this_week = period_start("week", now)
+    weeks = [this_week - dt.timedelta(weeks=k) for k in range(6, 0, -1)]          # six complete weeks, oldest first
+
+    def load(us_last):
+        rows, i = [], 0
+        for k, w in enumerate(weeks):
+            for region, amount in (("EU", 100), ("US", us_last if k == len(weeks) - 1 else 200)):
+                i += 1
+                rows.append(f"({i}, '{region}', {amount}e0, DATE '{w + dt.timedelta(days=2)}')")
+        rows.append(f"(999, 'US', 5e0, DATE '{this_week}')")                   # this week: still filling, never judged
+        trino("DROP TABLE IF EXISTS lake.sales.ma_orders")
+        trino("CREATE TABLE lake.sales.ma_orders AS SELECT * FROM (VALUES " + ", ".join(rows) + ") AS t(id, region, amount, ordered_at)")
+
+    load(us_last=150)                                                          # US -25%: total 300 → 250 (-16.7%)
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    m = httpx.post(f"{url}/sql/metrics", headers=admin, timeout=60, json={
+        "name": "ma_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.ma_orders",
+        "measure": "Sum([amount])", "time_column": "ordered_at", "dimensions": ["region"]})
+    assert m.status_code == 201, m.text
+    body = {"name": "US revenue falls", "metric": "ma_revenue", "grain": "week",
+            "rule": {"kind": "change", "drop_pct": 20}, "filters": [{"column": "region", "op": "=", "value": "US"}]}
+    bad = httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60, json={**body, "metric": "nope"})
+    assert bad.status_code == 404, bad.text
+    assert httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60,
+                      json={**body, "rule": {"kind": "change"}}).status_code == 400
+    a = httpx.post(f"{url}/sql/metric-alerts", headers=admin, timeout=60, json=body).json()
+    b = httpx.post(f"{url}/sql/metric-alerts", headers=bob, timeout=60, json={**body, "filters": []}).json()
+    told = lambda who, kind: [n for n in s.notify.inbox(who) if n["type"] == kind]  # noqa: E731
+
+    first = httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()
+    assert first["state"] == "triggered" and first["last_value"] == 150 and first["last_period"] == str(weeks[-1]), first
+    assert "-25.0%" in first["last_message"]
+    for _ in range(2):                                                         # checked again: still bad, not told again
+        assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()["state"] == "triggered"
+    assert len(told("urn:li:corpuser:admin", "metric.alert_triggered")) == 1
+    # Bob sees only EU (his row filter applies under the metric), which is flat: his alert stays quiet.
+    mine = httpx.post(f"{url}/sql/metric-alerts/{b['id']}/check", headers=bob, timeout=120).json()
+    assert mine["state"] == "ok" and mine["last_value"] == 100, mine
+    assert not told("urn:li:corpuser:bob", "metric.alert_triggered")
+    # Others cannot see or check someone's alert.
+    assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=bob, timeout=60).status_code == 404
+    # Revenue recovers: told once that it is back.
+    load(us_last=200)
+    assert httpx.post(f"{url}/sql/metric-alerts/{a['id']}/check", headers=admin, timeout=120).json()["state"] == "ok"
+    assert len(told("urn:li:corpuser:admin", "metric.alert_resolved")) == 1
+    # The scheduler finds due alerts and checks each once.
+    assert s.metric_alerts.run_due(now=int(time.time() * 1000) + 3_700_000) >= 2
+    trino("DROP TABLE lake.sales.ma_orders")
