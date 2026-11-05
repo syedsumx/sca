@@ -548,6 +548,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "notify" in modules and services.notify is not None:
         app.include_router(notify_router(services.notify, services.slack, cp, authz,
                                          services.slack_events, services.teams_bot))
+    if getattr(services, "embedded_dashboards", None) is not None:   # portals' users, signed by the portal
+        from cairn.embed.dashboards import build_embedded_dashboards_router
+
+        app.include_router(build_embedded_dashboards_router(services.embedded_dashboards))
     if "embed" in modules and services.embed is not None:
         app.include_router(embed_router(services.embed, cp, services.can_view))
 

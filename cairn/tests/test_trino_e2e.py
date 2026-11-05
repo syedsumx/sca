@@ -2366,3 +2366,118 @@ def test_bi_version_history_rolls_a_broken_edit_back(trino, cairn):
     assert c.delete(f"/sql/dashboards/{board['id']}", headers=admin).status_code == 204
     assert c.get(f"/sql/versions/dashboard/{board['id']}", headers=admin).status_code == 404
     assert s.bi_versions.count("dashboard", board["id"]) == 0
+
+
+def test_an_embedded_dashboard_shows_each_portal_user_their_own_rows(trino, cairn, tmp_path):
+    """A portal frames a Cairn dashboard for its users with tokens its server signs: in Chromium, Bob's portal
+    page shows only Bob's rows (his row filter), a page on another origin cannot frame it, and tokens that are
+    reused, expired, tampered with, for another user, origin or dashboard are refused."""
+    import http.server
+    import json as _json
+    import threading as _th
+    import time as _time
+    import uuid as _uuid
+
+    import httpx
+    import uvicorn
+
+    from cairn.app import create_api_app
+    from cairn.embed.dashboards import EmbeddedDashboards, load_clients, sign
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.emb_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0), (3, 'EU', 5e0)) "
+          "AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.emb_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    admin = {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    q = httpx.post(f"{url}/sql/saved", headers=admin, timeout=60, json={
+        "name": "emb orders", "connection": "lakehouse", "sql": "SELECT id, region FROM sales.emb_orders ORDER BY id"}).json()
+    board = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Orders for partners", "tiles": [{"query": q["id"], "title": "Orders"}]}).json()
+    other = httpx.post(f"{url}/sql/dashboards", headers=admin, timeout=60, json={
+        "name": "Internal", "tiles": [{"query": q["id"]}]}).json()
+
+    # The portal, on its own origin; and another site.
+    hp, xp = port(), port()
+    portal, elsewhere = f"http://127.0.0.1:{hp}", f"http://localhost:{xp}"
+    secret = b"p" * 40
+    (tmp_path / "secret").write_bytes(secret)
+    (tmp_path / "clients.json").write_text(_json.dumps({"portal": {
+        "secret_file": str(tmp_path / "secret"), "origins": [portal], "dashboards": [board["id"]],
+        "users": ["urn:li:corpuser:bob", "urn:li:corpuser:portal-*"]}}))
+    s.embedded_dashboards = EmbeddedDashboards(s.engine, s.sql_boards, load_clients(str(tmp_path / "clients.json")), s.audit)
+    cp = port()
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=cp, log_level="warning"))
+    _th.Thread(target=server.run, daemon=True).start()
+    wait(cp)
+    cairn_url = f"http://127.0.0.1:{cp}"
+
+    def token(**over):
+        claims = {"client": "portal", "sub": "urn:li:corpuser:bob", "dashboard": board["id"], "origin": portal,
+                  "exp": int(_time.time()) + 300, "jti": _uuid.uuid4().hex, **over}
+        return sign(secret, claims)
+
+    # Refusals, before any browser: each is 403 and nothing is served.
+    get = lambda t, did=board["id"]: httpx.get(f"{cairn_url}/embed/v1/dashboards/{did}", params={"token": t}, timeout=30)  # noqa: E731
+    used = token()
+    assert get(used).status_code == 200
+    assert get(used).status_code == 403                                                    # once only
+    assert get(token(exp=int(_time.time()) - 5)).status_code == 403                         # expired
+    assert get(token(exp=int(_time.time()) + 3600)).status_code == 403                      # too far ahead
+    assert get(token(sub="urn:li:corpuser:admin")).status_code == 403                       # not the client's to sign
+    assert get(token(origin=elsewhere)).status_code == 403                                  # not the client's origin
+    assert get(token(dashboard=other["id"]), other["id"]).status_code == 403               # not given to the client
+    assert get(token(), other["id"]).status_code == 403                                     # for another dashboard
+    body, sig = token().split(".")
+    assert get(f"{body}.{sig[:-2]}AA").status_code == 403                                   # tampered
+    assert httpx.post(f"{cairn_url}/embed/v1/dashboards/{board['id']}/render", json={}, timeout=30).status_code == 401
+    page = get(token())
+    assert page.headers["content-security-policy"].startswith(f"frame-ancestors {portal};")
+
+    class Host(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            src = f"{cairn_url}/embed/v1/dashboards/{board['id']}?token={token()}"
+            out = f'<!doctype html><title>Portal</title><iframe id="f" src="{src}" width="800" height="400"></iframe>'.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, *a):
+            pass
+    for p_ in (hp, xp):
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", p_), Host)
+        _th.Thread(target=srv.serve_forever, daemon=True).start()
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        pg = browser.new_page()
+        pg.goto(portal)
+        frame = pg.frame_locator("#f")
+        frame.locator("[data-tile='0'] table tr").nth(1).wait_for(timeout=60_000)
+        cells = frame.locator("[data-tile='0'] td").all_inner_texts()
+        assert cells and set(cells[1::2]) == {"EU"} and cells[0::2] == ["1", "3"], cells   # only Bob's rows
+        # The same page served from another origin: Chromium will not frame it.
+        pg2 = browser.new_page()
+        pg2.goto(f"{elsewhere}/")
+        pg2.wait_for_timeout(3000)
+        inner = pg2.frames[1] if len(pg2.frames) > 1 else None
+        assert inner is None or "Orders for partners" not in (inner.content() if inner.url.startswith(cairn_url) else ""), \
+            "a page on another origin framed the dashboard"
+        browser.close()
+    # A session follows what the operator allows now: taken off the client, the dashboard stops rendering.
+    sess = s.embedded_dashboards.open(token(), board["id"])["session"]
+    render = lambda: httpx.post(f"{cairn_url}/embed/v1/dashboards/{board['id']}/render", json={}, timeout=60,  # noqa: E731
+                                headers={"Authorization": f"Embed {sess}"})
+    assert render().status_code == 200
+    s.embedded_dashboards.clients["portal"]["dashboards"] = []
+    assert render().status_code == 403
+    server.should_exit = True
+    acts = [e["action"] for e in s.audit.entries(limit=3000)]
+    assert "embed.session_started" in acts and acts.count("embed.refused") >= 7

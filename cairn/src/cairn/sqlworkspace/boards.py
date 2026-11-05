@@ -263,10 +263,12 @@ class Boards:
             out.append(control)
         return out
 
-    def render(self, actor: str, did: str, state: Optional[dict] = None) -> dict:
+    def render(self, actor: str, did: str, state: Optional[dict] = None, granted: bool = False) -> dict:
         """Every tile run as the viewer, filtered by the controls' values, the selection (cross-filter) and its
-        drill level; a tile they may not see shows its error, not its data."""
-        board = self.dashboard(actor, did)
+        drill level; a tile they may not see shows its error, not its data. ``granted``: the viewer was let in by
+        something other than sharing (an embed client the operator allowed this dashboard); the data is still
+        theirs."""
+        board = self._granted(did) if granted else self.dashboard(actor, did)
         state = state if isinstance(state, dict) else {}
         values = state.get("controls") if isinstance(state.get("controls"), dict) else {}
         selection = state.get("selection") or []
@@ -355,9 +357,16 @@ class Boards:
             out = self.ws.run(actor, q["sql"], q["connection"], 1000, cache=cache)
         return {**t, "chart": t.get("chart") or q["chart"], "result": out, "applied": applied}
 
-    def control_values(self, actor: str, did: str, cid: str) -> list:
+    def _granted(self, did: str) -> dict:
+        with self.engine.connect() as conn:
+            r = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
+        if r is None:
+            raise WorkspaceError("no such dashboard", 404)
+        return _board(r)
+
+    def control_values(self, actor: str, did: str, cid: str, granted: bool = False) -> list:
         """A values control's choices: the column's values in its source, as the viewer sees them."""
-        board = self.dashboard(actor, did)
+        board = self._granted(did) if granted else self.dashboard(actor, did)
         c = next((x for x in board["controls"] if x["id"] == cid), None)
         if c is None or c["kind"] != "values":
             raise WorkspaceError("no such values control", 404)

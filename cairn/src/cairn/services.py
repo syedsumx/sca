@@ -89,6 +89,7 @@ class Services:
     limits: Optional[Any] = None
     bi_catalog: Optional[Any] = None
     bi_versions: Optional[Any] = None
+    embedded_dashboards: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -946,6 +947,12 @@ def _build_active_metadata(s: Services) -> None:
                 logger.exception("recording a version of %s %s failed", kind, aid)
             s.bi_catalog.changed(kind, aid, actor)
         s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = bi_changed
+        # Embedded dashboards: portals sign a token for one of their users; the tiles run as that user.
+        embed_clients = os.environ.get("CAIRN_EMBED_CLIENTS_FILE")
+        if embed_clients:
+            from cairn.embed.dashboards import EmbeddedDashboards, load_clients
+
+            s.embedded_dashboards = EmbeddedDashboards(s.engine, s.sql_boards, load_clients(embed_clients), s.audit)
         # The AI builder: a question becomes a dashboard of metric and workbook tiles, each checked as the person.
         from cairn.sqlworkspace.builder import Builder
 

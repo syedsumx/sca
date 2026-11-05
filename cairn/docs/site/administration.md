@@ -685,6 +685,57 @@ Table `cairn_bi_lineage` (migration 0084). Tested on real Trino
 `DROP COLUMN` named exactly the query and dashboard that then failed; the other query and the workbook kept
 working.
 
+### Embedded dashboards
+
+A portal can show a Cairn dashboard to its own users, each seeing their own data.
+
+**1. Register the portal as an embed client.** An operator does this in `CAIRN_EMBED_CLIENTS_FILE` (JSON):
+
+```json
+{"portal": {"secret_file": "/run/secrets/portal-embed", "origins": ["https://portal.example.com"],
+            "dashboards": ["<dashboard id>"], "users": ["urn:li:corpuser:portal-*"]}}
+```
+
+The secret needs at least 32 bytes; keep it in a Kubernetes Secret. `dashboards` may be `["*"]`. `users` lists
+the patterns of Cairn users the portal may sign for, for example people provisioned by SCIM.
+
+**2. Sign a token on the portal's server.** It is never signed in the browser. The token is HMAC-SHA256 over
+base64url JSON:
+
+```python
+claims = {"client": "portal", "sub": "urn:li:corpuser:portal-ana", "dashboard": "<id>",
+          "origin": "https://portal.example.com", "exp": int(time.time()) + 300, "jti": uuid.uuid4().hex}
+body = b64url(json.dumps(claims)); token = body + "." + b64url(hmac.new(secret, body.encode(), "sha256").digest())
+```
+
+`cairn.embed.dashboards.sign(secret, claims)` does the same.
+
+**3. Frame it.** The portal's page uses `<iframe src="https://cairn.example.com/embed/v1/dashboards/<id>?token=…">`.
+
+**What Cairn checks.** Each of these is refused with 403 and audited as `embed.refused`:
+* the signature;
+* that the client exists;
+* that the user and the dashboard are ones the client may use;
+* that the origin is one of the client's;
+* the expiry, which can be at most 10 minutes ahead;
+* that the `jti` was never used before.
+
+If all hold, Cairn serves the page with an embed session of its own (`CAIRN_EMBED_SESSION_TTL`, default 3600
+seconds), audited as `embed.session_started`.
+
+**What the page can do.** It may be framed only by the token's origin (`frame-ancestors`). It runs only its own
+inline script (a nonce). It talks only to Cairn. Every tile runs **as the token's user**, so their policies, masks
+and row filters apply. A session follows what the client allows now: take a dashboard or a user off the client
+and its sessions stop working.
+
+Tables `cairn_embed_nonces` and `cairn_embed_sessions` (migration 0086). Tested on real Trino, in Chromium
+(`test_an_embedded_dashboard_shows_each_portal_user_their_own_rows`):
+* Bob's portal page shows only his rows;
+* a page on another origin cannot frame the dashboard;
+* reused, expired, too-long-lived, tampered tokens, and tokens for another user, origin or dashboard, are refused.
+
+The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIGINS`) are separate and unchanged.
+
 ### Version history
 
 Every save of a saved query, workbook or dashboard is kept as a numbered version. A save that changes nothing
