@@ -1,5 +1,5 @@
 import { CairnApiError, CairnClient, CairnClientOptions, RequestOptions } from '../../api/client';
-import type {
+import type { BiImpact, BiKind, BiShares, BiVersion, BiVersionDiff,
     CompiledPolicy,
     DbtRun,
     LineageGraph,
@@ -1031,6 +1031,31 @@ export class ConsumerClient extends CairnClient {
     runReport(id: string) {
         return this.request<{ sent: { recipient: string; file: string }[]; skipped: { recipient: string; reason: string }[] }>(
             'POST', `/sql/reports/${enc(id)}/run`);
+    }
+
+    biShares(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiShares>('GET', `/sql/shares/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    shareBi(kind: BiKind, id: string, principal: string, role: 'VIEWER' | 'EDITOR' | null) {
+        return this.request<BiShares>('PUT', `/sql/shares/${kind}/${enc(id)}`, { principal, role });
+    }
+
+    biVersions(kind: BiKind, id: string, opts?: RequestOptions) {
+        return this.request<BiVersion[]>('GET', `/sql/versions/${kind}/${enc(id)}`, undefined, opts);
+    }
+
+    biVersionDiff(kind: BiKind, id: string, a: number, b: number, opts?: RequestOptions) {
+        return this.request<BiVersionDiff>('GET', `/sql/versions/${kind}/${enc(id)}/diff?a=${a}&b=${b}`, undefined, opts);
+    }
+
+    restoreBiVersion(kind: BiKind, id: string, version: number) {
+        return this.request<{ restored: number }>('POST', `/sql/versions/${kind}/${enc(id)}/${version}/restore`);
+    }
+
+    biImpact(dataset: string, column?: string, opts?: RequestOptions) {
+        const q = `dataset=${encodeURIComponent(dataset)}${column ? `&column=${encodeURIComponent(column)}` : ''}`;
+        return this.request<BiImpact>('GET', `/sql/impact?${q}`, undefined, opts);
     }
 
     dashboardActions(id: string, opts?: RequestOptions) {

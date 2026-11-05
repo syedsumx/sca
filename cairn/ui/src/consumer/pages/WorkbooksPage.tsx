@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DataResult, SchemaTable, Workbook, WorkbookElement, WorkbookFilter } from '../api/types';
 import { toCsv } from '../components/ResultChart';
+import { BiAssetButtons } from '../components/BiAdmin';
 import { Muted, Page, Surface } from '../components/tokens';
 
 const OPS: { value: WorkbookFilter['op']; label: string; arity: 0 | 1 | 2 | 'list' }[] = [
@@ -144,6 +145,10 @@ export function WorkbooksPage() {
                         {(saved.data ?? []).map((w) => (
                             <li key={w.id}>
                                 <a onClick={() => open(w)} role="button">{w.name}</a> {w.shared && <Tag color="blue">shared</Tag>}
+                                {w.role && w.role !== 'OWNER' && <Tag>{w.role.toLowerCase()}</Tag>}
+                                <span style={{ marginLeft: 6 }}>
+                                    <BiAssetButtons kind="workbook" id={w.id} name={w.name} role={w.role} onRestored={() => setTick((x) => x + 1)} />
+                                </span>
                             </li>
                         ))}
                     </ul>

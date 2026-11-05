@@ -1,5 +1,6 @@
 import { Alert, Button, Empty, Table, Tabs, Tag, Timeline, message } from 'antd';
 import React, { useEffect, useState } from 'react';
+import { BiImpactPanel } from '../components/BiAdmin';
 import { Link, useParams } from 'react-router-dom';
 import styled from 'styled-components';
 
@@ -302,6 +303,11 @@ export function AssetPage() {
                             />
                         ),
                     },
+                    ...(urn.startsWith('urn:li:dataset:') ? [{
+                        key: 'bi-impact',
+                        label: 'BI impact',
+                        children: <BiImpactPanel dataset={urn} columns={columns.map((c) => c.fieldPath)} />,
+                    }] : []),
                     {
                         key: 'discussion',
                         label: `${t('asset.discussion')}${e?.threads_open ? ` (${e.threads_open})` : ''}`,

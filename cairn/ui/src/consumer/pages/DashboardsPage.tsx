@@ -4,6 +4,7 @@ import React, { useEffect, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
 import type { BuiltDashboard, ChartSpec, Dashboard, DashboardAction, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
+import { BiAssetButtons } from '../components/BiAdmin';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 
@@ -182,6 +183,8 @@ function Board({ id }: { id: string }) {
                     <Space wrap data-testid="controls">
                         <Actions board={id} row={row} onDone={() => { setRow(null); setRefresh((r) => r + 1); }} />
                         <ScheduleExport board={id} name={board.name} />
+                        <BiAssetButtons kind="dashboard" id={id} name={board.name} role={board.role}
+                            onRestored={() => setRefresh((r) => r + 1)} />
                         {(board.controls ?? []).map((c) => (
                             <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
                                 onChange={(v) => setState({ ...state, controls: { ...(state.controls ?? {}), [c.id]: v } })} />

@@ -659,6 +659,9 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 
 ### BI assets in the catalog, and the impact of a change
 
+In the web UI: a dataset's page has a **BI impact** tab, with what breaks if the table or a chosen column goes.
+
+
 Every save publishes the asset to the catalog. A saved query or a workbook becomes a **chart**
 (`urn:li:chart:(cairn,query.<id>)`, `…workbook.<id>`), with `chartInfo.inputs` naming the tables it reads and
 `inputFields` naming the columns. A dashboard becomes a **dashboard** (`urn:li:dashboard:(cairn,<id>)`), listing its
@@ -738,6 +741,9 @@ The older embeds of catalog cards (`/embed/v1/tokens`, `CAIRN_EMBED_ALLOWED_ORIG
 
 ### Version history
 
+In the web UI: **History** on a dashboard, a workbook or a saved query lists its versions, shows what changed and restores one.
+
+
 Every save of a saved query, workbook or dashboard is kept as a numbered version. A save that changes nothing
 is not a new version.
 
@@ -761,6 +767,9 @@ Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_versi
 * a viewer may read the history but not restore it.
 
 ### Sharing with people and groups
+
+In the web UI: **Share** on a dashboard, a workbook or a saved query (owners and editors) lists who has it; its owner adds a person or `group:name` as viewer or editor, or removes them.
+
 
 Saved queries, workbooks and dashboards are shared with people or groups (`PUT /sql/shares/<kind>/<id>`, kind
 `query`, `workbook` or `dashboard`, body `{"principal": "urn:li:corpGroup:finance", "role": "VIEWER"}`; `"role":

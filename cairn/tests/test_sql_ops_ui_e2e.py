@@ -363,3 +363,38 @@ def test_a_dashboard_is_filtered_and_cross_filtered_in_the_browser(cairn):
             assert errors == [], errors
         finally:
             browser.close()
+
+
+def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
+    """The Share and History buttons in Chromium against Cairn: a broken edit is found by comparing versions and
+    restored, and the query is shared with a person, each written by Cairn as the signed-in owner."""
+    from playwright.sync_api import expect, sync_playwright
+
+    s, url, _, _ = cairn
+    good = "SELECT region, sum(amount) AS total FROM main.orders GROUP BY region"
+    q = s.sql_workspace.save(ANA, {"name": "Totals", "connection": "wh", "sql": good})
+    s.sql_workspace.save(ANA, {"name": "Totals", "connection": "wh", "sql": good.replace("sum(amount)", "sum(amount_eur)")}, q["id"])
+    with sync_playwright() as pw:
+        browser, page, errors = _browser(pw, url)
+        try:
+            page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
+            page.get_by_role("tab", name="Saved").click()
+            row = page.locator(".ant-table-row", has_text="Totals")
+            row.get_by_role("button", name="History").click()
+            dialog = page.get_by_role("dialog", name="History of “Totals”")
+            dialog.get_by_role("button", name="Changes").click()
+            expect(dialog.get_by_test_id("version-diff")).to_contain_text("amount_eur", timeout=15_000)
+            dialog.get_by_role("button", name="Restore version 1").click()
+            expect(page.get_by_text("Version 1 restored")).to_be_visible(timeout=15_000)
+            assert s.sql_workspace.get(ANA, q["id"])["sql"] == good
+            assert [v["version"] for v in s.bi_versions.list(ANA, "query", q["id"])] == [3, 2, 1]
+            page.keyboard.press("Escape")
+            row.get_by_role("button", name="Share").click()
+            share = page.get_by_role("dialog", name="Share saved query “Totals”")
+            share.get_by_label("Share with").fill("bob")
+            share.get_by_role("button", name="Share", exact=True).click()
+            expect(share.get_by_text("bob", exact=True)).to_be_visible(timeout=15_000)
+            assert s.bi_sharing.shares(ANA, "query", q["id"])["shares"][0]["principal"] == "urn:li:corpuser:bob"
+            assert errors == [], errors
+        finally:
+            browser.close()

@@ -1,6 +1,7 @@
 import { Alert, Button, Checkbox, Collapse, Empty, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
+import { BiAssetButtons } from '../components/BiAdmin';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
@@ -229,6 +230,12 @@ export function SqlWorkspacePage() {
                                                 { title: 'Owner', render: (_, q) => q.owner.replace('urn:li:corpuser:', '') },
                                                 { title: '', render: (_, q) => (q.shared ? <Tag color="blue">shared</Tag> : null) },
                                                 { title: 'Changed', render: (_, q) => ago(q.updated_ms) },
+                                                { title: '', render: (_, q) => (
+                                                    <Space size={4}>
+                                                        <BiAssetButtons kind="query" id={q.id} name={q.name} role={q.role}
+                                                            onRestored={() => setTick((x) => x + 1)} />
+                                                    </Space>
+                                                ) },
                                             ]}
                                         />
                                     ) : (

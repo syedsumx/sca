@@ -728,6 +728,7 @@ export interface SqlRun {
 export interface SavedQuery {
     id: string;
     owner: string;
+    role?: BiRole | null;
     name: string;
     description: string;
     connection: string;
@@ -749,6 +750,7 @@ export interface SchemaTable {
 export interface Dashboard {
     id: string;
     owner: string;
+    role?: BiRole | null;
     name: string;
     description: string;
     shared: boolean;
@@ -1735,6 +1737,7 @@ export interface WorkbookElement {
 export interface Workbook {
     id: string;
     owner: string;
+    role?: BiRole | null;
     name: string;
     description: string;
     connection: string;
@@ -1821,4 +1824,36 @@ export interface ReportSchedule {
     last_ms: number | null;
     last_status: string | null;
     enabled: boolean;
+}
+
+/** BI sharing, version history and impact (/sql/shares, /sql/versions, /sql/impact). */
+export type BiKind = 'query' | 'workbook' | 'dashboard';
+export type BiRole = 'OWNER' | 'EDITOR' | 'VIEWER';
+
+export interface BiShares {
+    kind: BiKind;
+    id: string;
+    owner: string;
+    shares: { principal: string; role: 'VIEWER' | 'EDITOR'; granted_by: string; granted_ms: number }[];
+}
+
+export interface BiVersion {
+    version: number;
+    name: string | null;
+    saved_by: string;
+    saved_ms: number;
+}
+
+export interface BiVersionDiff {
+    a: number;
+    b: number;
+    changed: string[];
+    diff: string;
+}
+
+export interface BiImpact {
+    dataset: string;
+    column: string | null;
+    assets: { kind: BiKind; id: string; name: string; owner: string; columns: string[]; through_queries: string[] }[];
+    others: { owner: string; assets: number }[];
 }
