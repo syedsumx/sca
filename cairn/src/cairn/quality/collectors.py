@@ -135,6 +135,7 @@ class ConnectionRegistry:
     def __init__(self, connections: Optional[dict[str, dict]] = None, path: Optional[str] = None):
         self._defs = connections or {}
         self._engines: dict[str, Engine] = {}
+        self.trino_tokens = None        # cairn.dataaccess.trino_tokens.TrinoTokens: Cairn's own sign-in to Trino
         self._path = path
         self._stamp: Optional[tuple] = None
 
@@ -180,8 +181,58 @@ class ConnectionRegistry:
             d = self._defs.get(name)
             if d is None:
                 raise CollectorError(f"unknown connection {name!r}")
-            self._engines[name] = create_engine(_expand_env(d["url"]), pool_pre_ping=True, future=True)
+            url = _expand_env(d["url"])
+            self._engines[name] = (self._trino(name, d, url) if url.startswith("trino://")
+                                   else create_engine(url, pool_pre_ping=True, future=True))
         return self._engines[name]
+
+    def _trino(self, name: str, d: dict, raw: str) -> Engine:
+        """A Trino connection for Cairn's own reads (monitors, profiling): over the connection's TLS with its own CA,
+        signed in with the URL's password or, on a governed (``run_as_user``) connection, as its ``service_user``
+        (default ``cairn-quality``) with a short Cairn token made for each connection, so Trino asks Cairn's policies
+        about that user like anyone else."""
+        from urllib.parse import parse_qs, unquote, urlsplit
+
+        from sqlalchemy.pool import NullPool
+
+        try:
+            import trino
+        except ImportError:
+            raise CollectorError(f"connection {name!r} needs the trino client (pip install 'cairn-platform[trino]')")
+        u = urlsplit(raw)
+        opts = {k: v[-1] for k, v in parse_qs(u.query).items()}
+        scheme = opts.get("protocol", "http")
+        if scheme not in ("http", "https"):
+            raise CollectorError(f"connection {name!r}: protocol must be http or https")
+        verify: Any = opts.get("verify", "true")
+        verify = False if verify == "false" else (True if verify == "true" else verify)
+        path = [p for p in u.path.split("/") if p]
+        service = str(d.get("service_user") or "urn:li:corpuser:cairn-quality")
+        if not service.startswith("urn:li:corpuser:"):
+            service = f"urn:li:corpuser:{service}"
+
+        def connect():
+            auth, headers, user = None, {}, unquote(u.username or "") or service.removeprefix("urn:li:corpuser:")
+            if u.password:
+                auth = trino.auth.BasicAuthentication(unquote(u.username or ""), unquote(u.password))
+            elif d.get("run_as_user"):
+                if self.trino_tokens is None:            # fail closed: a governed connection is never used unsigned
+                    raise CollectorError(f"connection {name!r} needs Cairn's Trino sign-in (CAIRN_TRINO_ACCESS_KEY)")
+                user = service.removeprefix("urn:li:corpuser:")
+                headers["Authorization"] = "Bearer " + self.trino_tokens.mint(service, 900)["token"]
+            session = None
+            if isinstance(verify, str):                  # the connection's own CA, not one from the environment
+                import requests
+
+                session = requests.Session()
+                session.trust_env = False
+                session.verify = verify
+            return trino.dbapi.connect(host=u.hostname, port=u.port or (443 if scheme == "https" else 8080), user=user,
+                                       catalog=path[0] if path else None, schema=path[1] if len(path) > 1 else None,
+                                       http_scheme=scheme, auth=auth, http_headers=headers or None, verify=verify,
+                                       http_session=session, source="cairn-quality")
+
+        return create_engine("trino://", creator=connect, poolclass=NullPool, future=True)
 
 
 class SqlCollector:
@@ -199,6 +250,8 @@ class SqlCollector:
             if monitor.type == "custom_sql":
                 row = conn.execute(text(c["sql"])).first()
                 return Sample(_f(row[0]) if row else None)
+            if monitor.type == "volume" and c.get("partition_column"):
+                return self._partitions(conn, engine.dialect.name, table, q.quote(c["partition_column"]), c, now_ms)
             if monitor.type == "volume":
                 return Sample(_f(conn.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar()))
             if monitor.type == "freshness":
@@ -222,6 +275,40 @@ class SqlCollector:
                 samples = [float(r[0]) for r in rows]
                 return Sample(float(len(samples)), {"samples": samples})
         raise CollectorError(f"monitor type {monitor.type!r} is not supported with source=sql")
+
+    @staticmethod
+    def _partitions(conn, dialect: str, table: str, col: str, c: dict, now_ms: int) -> Sample:
+        """Rows per day (or hour) over the monitor's window, read in one grouped query bounded by time; the value is
+        the newest complete partition's rows."""
+        from datetime import datetime, timezone
+
+        from cairn.quality.detectors import GRAIN_MS
+
+        grain = c.get("grain", "day")
+        g = GRAIN_MS[grain]
+        span = int(c.get("partitions", 28)) + int(c.get("check", 3)) + int(c.get("lag", 1))
+        since = datetime.fromtimestamp(((now_ms // g) - span) * g / 1000, tz=timezone.utc)
+        if c.get("truncate", True):
+            key = {"sqlite": {"day": f"date({col})", "hour": f"strftime('%Y-%m-%d %H:00:00', {col})"},
+                   "mysql": {"day": f"DATE({col})", "hour": f"DATE_FORMAT({col}, '%Y-%m-%d %H:00:00')"},
+                   }.get(dialect, {"day": f"date_trunc('day', {col})", "hour": f"date_trunc('hour', {col})"})[grain]
+            bound = f"'{since:%Y-%m-%d %H:%M:%S}'" if dialect in ("sqlite", "mysql") else f"TIMESTAMP '{since:%Y-%m-%d %H:%M:%S}'"
+        else:                       # already a partition value: a date, or text like 2026-11-05 (day) / 2026-11-05 13 (hour)
+            key = col
+            bound = f"'{since:%Y-%m-%d}'" if grain == "day" else f"'{since:%Y-%m-%d %H}'"
+        rows = conn.execute(text(f"SELECT {key} AS p, COUNT(*) AS n FROM {table} WHERE {col} >= {bound} GROUP BY {key}")).all()
+        counts: dict[int, float] = {}
+        for p, n in rows:
+            if p is None:
+                continue
+            if isinstance(p, str) and grain == "hour" and len(p) == 13:      # 2026-11-05 13
+                p = p + ":00:00"
+            ms = _to_epoch_ms(p)
+            if ms is not None:
+                start = (ms // g) * g
+                counts[start] = counts.get(start, 0.0) + float(n)
+        newest = counts.get(((now_ms // g) - int(c.get("lag", 1))) * g, 0.0)
+        return Sample(newest, {"partitions": {str(k): v for k, v in counts.items()}})
 
     @staticmethod
     def _field_metric(conn, table: str, col: str, metric: str) -> Optional[float]:

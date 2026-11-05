@@ -65,6 +65,14 @@ export const MONITOR_CONFIG_FIELDS: Record<MonitorType, ConfigField[]> = {
         { name: 'min_rows', label: 'Minimum rows', kind: 'number', min: 0 },
         { name: 'max_rows', label: 'Maximum rows', kind: 'number', min: 0 },
         { name: 'max_change_pct', label: 'Max change vs previous (%)', kind: 'number', min: 0 },
+        { name: 'partition_column', label: 'Count per partition of', kind: 'text', help: 'SQL source: a date or timestamp column. Counts rows per day (or hour) and fails on a missing or thin one, whatever the total; the threshold settings above do not apply.' },
+        {
+            name: 'grain',
+            label: 'Partition',
+            kind: 'select',
+            options: [{ label: 'Day', value: 'day' }, { label: 'Hour', value: 'hour' }],
+        },
+        { name: 'min_rows_per_partition', label: 'Minimum rows per partition', kind: 'number', min: 0 },
     ],
     field_metric: [
         SOURCE('Query the column'),
@@ -146,6 +154,17 @@ export function cleanConfig(config: Record<string, unknown> | undefined): Record
     return out;
 }
 
+/** A volume monitor counting per partition learns each partition's usual size itself: no learned model, no
+ * total-row bounds; the partition grain defaults to the day. */
+export function partitioned(type: MonitorType, config: Record<string, unknown>): Record<string, unknown> {
+    if (type !== 'volume' || !config.partition_column) {
+        const { grain: _g, min_rows_per_partition: _m, ...rest } = config;
+        return type === 'volume' ? rest : config;
+    }
+    const { model: _model, band: _band, learn_days: _days, min_rows: _min, max_rows: _max, max_change_pct: _chg, ...rest } = config;
+    return { ...rest, source: 'sql', grain: config.grain ?? 'day' };
+}
+
 export function toMonitorInput(values: FormValues): MonitorInput {
     return {
         name: values.name.trim(),
@@ -155,7 +174,7 @@ export function toMonitorInput(values: FormValues): MonitorInput {
             values.schedule_mode === 'cron'
                 ? { cron: values.cron?.trim() }
                 : { interval_seconds: values.interval_seconds },
-        config: cleanConfig(values.config),
+        config: partitioned(values.type, cleanConfig(values.config)),
         sensitivity: values.sensitivity,
         severity: values.severity,
         enabled: values.enabled,

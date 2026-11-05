@@ -70,6 +70,25 @@ class MonitorSpec(BaseModel):
                 raise ValueError("config.learn_days must be between 0 and 90")
             if c.get("seasonality", "auto") not in ("auto", None, "hour_of_week", "day_of_week", "hour_of_day"):
                 raise ValueError("config.seasonality must be auto, hour_of_week, day_of_week, hour_of_day or null")
+        if c.get("partition_column") is not None:
+            if self.type != "volume" or source != "sql":
+                raise ValueError("config.partition_column applies to volume monitors with source='sql'")
+            if not isinstance(c["partition_column"], str) or not c["partition_column"].strip():
+                raise ValueError("config.partition_column is a column name")
+            if c.get("model") == "learned":
+                raise ValueError("a partitioned volume monitor learns each partition's usual size itself; omit config.model")
+            if c.setdefault("grain", "day") not in ("day", "hour"):
+                raise ValueError("config.grain must be 'day' or 'hour'")
+            for k, lo, hi, default in (("partitions", 3, 400, 28), ("check", 1, 48, 3), ("lag", 0, 48, 1),
+                                       ("min_history", 1, 400, 3)):
+                v = c.setdefault(k, default)
+                if not isinstance(v, int) or isinstance(v, bool) or not lo <= v <= hi:
+                    raise ValueError(f"config.{k} must be a whole number from {lo} to {hi}")
+            if c.get("min_ratio") is not None and not 0 < float(c["min_ratio"]) <= 1:
+                raise ValueError("config.min_ratio must be above 0 and at most 1")
+            if c.get("min_rows_per_partition") is not None and float(c["min_rows_per_partition"]) < 0:
+                raise ValueError("config.min_rows_per_partition must not be negative")
+            c.setdefault("truncate", True)
         if self.type == "freshness" and source == "sql" and not c.get("timestamp_column"):
             raise ValueError("SQL freshness requires config.timestamp_column")
         return self

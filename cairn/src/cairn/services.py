@@ -1317,6 +1317,8 @@ def _build_data_access(s: Services) -> None:
         s.trino_tokens = TrinoTokens(s.engine, trino_key, os.environ.get("CAIRN_TRINO_TOKEN_ISSUER", "cairn"),
                                      int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
         s.data_access.trino_tokens = s.trino_tokens
+        if s.connections is not None:          # monitors and profiling sign in to Trino as their service user
+            s.connections.trino_tokens = s.trino_tokens
         # Sign-in to Trino's web UI and clients' external authentication, with Cairn as the OAuth2 server.
         # Cairn's OAuth2 sign-in for Trino and Airflow: each client its own secret, redirects and audience.
         oauth_secret = _secret_env("CAIRN_TRINO_OAUTH_SECRET")

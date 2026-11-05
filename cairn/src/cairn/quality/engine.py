@@ -179,6 +179,13 @@ class QualityEngine:
         if monitor.type == "distribution":
             return self._detect_distribution(monitor, sample)
 
+        if monitor.type == "volume" and c.get("partition_column"):
+            counts = {int(k): float(v) for k, v in (sample.payload.get("partitions") or {}).items()}
+            return d.detect_partitions(counts, now, c.get("grain", "day"), sens, window=int(c.get("partitions", 28)),
+                                       lag=int(c.get("lag", 1)), check=int(c.get("check", 3)),
+                                       min_ratio=c.get("min_ratio"), min_rows=c.get("min_rows_per_partition"),
+                                       min_history=int(c.get("min_history", 3)))
+
         if sample.value is None:
             return d.Detection("ERROR", "collector returned no value")
         learned = c.get("model") == "learned"
@@ -285,4 +292,5 @@ def _slim_payload(payload: dict) -> Optional[dict]:
     """Keep stored history small: raw samples / histograms live in monitor state only."""
     if not payload:
         return None
-    return {k: v for k, v in payload.items() if k not in ("samples", "histogram", "update_times_ms", "fields")} or None
+    return {k: v for k, v in payload.items()
+            if k not in ("samples", "histogram", "update_times_ms", "fields", "partitions")} or None

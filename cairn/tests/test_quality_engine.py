@@ -258,3 +258,103 @@ def test_assertions_from_labelled_creators_carry_a_urn_actor():
     assert assertion_info(m)["source"]["created"]["actor"].startswith("urn:li:corpuser:")
     m.created_by = "urn:li:corpuser:ana"
     assert assertion_info(m)["source"]["created"]["actor"] == "urn:li:corpuser:ana"
+
+
+DAY = 86_400_000
+
+
+def _days(e, counts: dict, now_ms: int):
+    """Rows per day back from today (0 = today), stamped through the day as a pipeline would write them."""
+    from datetime import datetime, timezone
+
+    with e.begin() as c:
+        c.execute(text("DELETE FROM orders"))
+        for back, n in counts.items():
+            start = (now_ms // DAY - back) * DAY
+            for i in range(n):
+                ts = datetime.fromtimestamp((start + i * 60_000) / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                c.execute(text("INSERT INTO orders VALUES (:i, 'x', 'card', :ts)"), {"i": i, "ts": ts})
+
+
+def test_a_missing_day_fails_a_partitioned_volume_monitor_though_the_total_looks_normal(engine, graph, warehouse):
+    url, wh = warehouse
+    now = T0                                     # 08:53 UTC: today's partition is still filling, and never judged
+    qe = _engine(engine, graph, url)
+    with pytest.raises(ValueError):              # partitions need SQL, a volume monitor and sane numbers
+        MonitorSpec(name="x", dataset_urn=DS, type="volume", config={"partition_column": "ts"})
+    with pytest.raises(ValueError):
+        MonitorSpec(name="x", dataset_urn=DS, type="freshness",
+                    config={"source": "sql", "connection": "wh", "timestamp_column": "ts", "partition_column": "ts"})
+    with pytest.raises(ValueError):
+        MonitorSpec(name="x", dataset_urn=DS, type="volume",
+                    config={"source": "sql", "connection": "wh", "partition_column": "ts", "grain": "week"})
+    with pytest.raises(ValueError):
+        MonitorSpec(name="x", dataset_urn=DS, type="volume",
+                    config={"source": "sql", "connection": "wh", "partition_column": "ts", "check": 0})
+    whole = qe.store.create_monitor(MonitorSpec(
+        name="orders total", dataset_urn=DS, type="volume",
+        config={"source": "sql", "connection": "wh", "table": "orders", "seasonality": None, "min_history": 10}), "a")
+    daily = qe.store.create_monitor(MonitorSpec(
+        name="orders per day", dataset_urn=DS, type="volume", severity="HIGH",
+        config={"source": "sql", "connection": "wh", "table": "orders", "partition_column": "ts"}), "a")
+    assert daily.config["grain"] == "day" and daily.config["check"] == 3
+
+    # A young table is learnt, not judged.
+    _days(wh, {0: 5, 1: 20}, now)
+    assert qe.evaluate(qe.store.get_monitor(daily.id), now=now).status == "TRAINING"
+
+    # A month of about 20 rows a day: both monitors pass.
+    normal = {back: 20 + back % 3 for back in range(0, 29)}
+    for i in range(12):
+        _days(wh, normal, now) if i == 0 else None
+        assert qe.evaluate(qe.store.get_monitor(whole.id), now=now + i * HOUR).status in ("PASS", "TRAINING")
+    ok = qe.evaluate(qe.store.get_monitor(daily.id), now=now + HOUR)
+    assert ok.status == "PASS", ok.message
+    assert ok.metric_value == normal[1] and ok.expected_low == 0.5 * 21
+
+    # Yesterday never arrived, but a backfill doubled the day before: the total is as usual.
+    late = {**normal, 1: 0, 2: normal[1] + normal[2]}
+    _days(wh, late, now)
+    assert sum(late.values()) == sum(normal.values())
+    total = qe.evaluate(qe.store.get_monitor(whole.id), now=now + 13 * HOUR)
+    assert total.status == "PASS", total.message                         # the whole table looks fine
+    bad = qe.evaluate(qe.store.get_monitor(daily.id), now=now + 2 * HOUR)
+    assert bad.status == "FAIL" and "missing" in bad.message, bad.message
+    from datetime import datetime, timezone
+    yesterday = datetime.fromtimestamp((now // DAY - 1) * DAY / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+    assert bad.details["missing"] == [yesterday]
+    assert qe.store.get_state(daily.id)["open_incident_urn"]             # an incident is raised
+
+    # A thin day (a fifth of the usual) fails too; once it is back to normal the incident resolves.
+    _days(wh, {**normal, 1: 4}, now)
+    thin = qe.evaluate(qe.store.get_monitor(daily.id), now=now + 3 * HOUR)
+    assert thin.status == "FAIL" and thin.details["thin"] == [yesterday], thin.message
+    _days(wh, normal, now)
+    assert qe.evaluate(qe.store.get_monitor(daily.id), now=now + 4 * HOUR).status == "PASS"
+    assert not qe.store.get_state(daily.id).get("open_incident_urn")
+
+
+def test_partitions_by_hour_and_by_a_text_partition_value(engine, graph, warehouse):
+    """Hourly partitions, and a table whose partition column already holds the day as text (truncate: false)."""
+    from cairn.quality import detectors as d
+
+    url, wh = warehouse
+    now = T0 + 15 * HOUR
+    g = HOUR
+    hours = {now // g * g - k * g: 50.0 for k in range(1, 40) if k != 2}
+    det = d.detect_partitions(hours, now, "hour", window=24, check=3)
+    assert det.status == "FAIL" and len(det.details["missing"]) == 1
+
+    with wh.begin() as c:
+        c.execute(text("CREATE TABLE events (ds TEXT, v INTEGER)"))
+        from datetime import datetime, timezone
+        for back in range(1, 20):
+            ds = datetime.fromtimestamp((now // DAY - back) * DAY / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
+            for i in range(10 if back != 3 else 0):
+                c.execute(text("INSERT INTO events VALUES (:ds, :i)"), {"ds": ds, "i": i})
+    qe = _engine(engine, graph, url)
+    m = qe.store.create_monitor(MonitorSpec(
+        name="events per ds", dataset_urn=DS, type="volume",
+        config={"source": "sql", "connection": "wh", "table": "events", "partition_column": "ds", "truncate": False}), "a")
+    ev = qe.evaluate(qe.store.get_monitor(m.id), now=now)
+    assert ev.status == "FAIL" and len(ev.details["missing"]) == 1, ev.message      # three days ago

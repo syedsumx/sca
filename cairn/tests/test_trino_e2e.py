@@ -2649,3 +2649,57 @@ def test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author(trino,
     acts = {e["action"] for e in s.audit.entries(limit=3000)}
     assert {"input.reviewers_set", "input.change_requested", "input.change_applied", "input.change_rejected",
             "input.change_failed"} <= acts
+
+
+def test_a_missing_day_in_an_iceberg_table_fails_its_partitioned_volume_monitor(trino, cairn):
+    """L43 on Trino: an Iceberg table partitioned by day(ts) holds a month of rows. Yesterday's partition goes
+    missing while a backfill puts as many rows on the day before, so the table's total stays the same; the monitor
+    counting rows per day fails on yesterday and recovers when it is loaded."""
+    from datetime import datetime, timezone
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.engine import QualityEngine
+    from cairn.quality.models import MonitorSpec
+    from cairn.quality.store import QualityStore
+
+    _, s = cairn
+    day = 86_400_000
+    now = int(time.time() * 1000)
+    start = lambda back: datetime.fromtimestamp((now // day - back) * day / 1000, tz=timezone.utc)  # noqa: E731
+
+    def load(counts):
+        rows = ", ".join(f"(TIMESTAMP '{start(b):%Y-%m-%d %H:%M:%S}', {n})" for b, n in counts.items() if n)
+        trino("DELETE FROM lake.sales.daily_events")
+        trino("INSERT INTO lake.sales.daily_events SELECT n, d + n * INTERVAL '1' MINUTE "
+              f"FROM (VALUES {rows}) AS v(d, c) CROSS JOIN UNNEST(sequence(1, c)) AS u(n)")
+
+    trino("CREATE TABLE IF NOT EXISTS lake.sales.daily_events (id integer, ts timestamp(6)) WITH (partitioning = ARRAY['day(ts)'])")
+    normal = {back: 20 + back % 3 for back in range(1, 29)}
+    load(normal)
+    # The monitor reads through a governed connection as its service user, signed in with a fresh Cairn token
+    # (Trino asks Cairn's policies about that user). Without Cairn's sign-in it refuses to run at all.
+    lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
+                 "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
+    unsigned = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(ConnectionRegistry({"lake": lake_conn}))})
+    reg = ConnectionRegistry({"lake": lake_conn})
+    reg.trino_tokens = s.trino_tokens
+    qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
+    m = qe.store.create_monitor(MonitorSpec(
+        name="daily events", dataset_urn="urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.daily_events,PROD)",
+        type="volume", config={"source": "sql", "connection": "lake", "table": "sales.daily_events", "partition_column": "ts"}),
+        "urn:li:corpuser:admin")
+    refused = unsigned.evaluate(unsigned.store.get_monitor(m.id), now=now - 1)
+    assert refused.status == "ERROR" and "sign-in" in refused.message, refused.message
+    ok = qe.evaluate(qe.store.get_monitor(m.id), now=now)
+    assert ok.status == "PASS", ok.message
+    assert ok.metric_value == normal[1]
+
+    late = {**normal, 1: 0, 2: normal[1] + normal[2]}
+    load(late)
+    assert trino("SELECT count(*) AS n FROM lake.sales.daily_events")[0]["n"] == sum(normal.values())   # the same total
+    bad = qe.evaluate(qe.store.get_monitor(m.id), now=now + 1)
+    assert bad.status == "FAIL" and bad.details["missing"] == [f"{start(1):%Y-%m-%d}"], bad.message
+
+    load(normal)
+    assert qe.evaluate(qe.store.get_monitor(m.id), now=now + 2).status == "PASS"
+    trino("DROP TABLE lake.sales.daily_events")

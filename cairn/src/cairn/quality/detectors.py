@@ -13,6 +13,8 @@ Detectors
 * :func:`detect_learned`: trend-adjusted seasonal baseline that learns for a few weeks before it
   alerts, with automatic seasonality and a band people can widen or narrow.
 * :func:`detect_freshness`: learned update cadence (p95 of inter-arrival gaps) or SLA.
+* :func:`detect_partitions`: rows per day (or hour) of a partitioned table: a missing or thin partition fails
+  even when the table's total looks normal.
 * :func:`detect_distribution`: Population Stability Index + two-sample KS statistic.
 * :func:`detect_schema_change`: breaking vs additive schema diffs.
 """
@@ -416,3 +418,63 @@ def detect_schema_change(
     if added:
         return Detection("WARN", f"non-breaking: columns added {added}", score=float(len(added)), details=details)
     return Detection("PASS", "schema unchanged", details=details)
+
+
+# A partition is "thin" below this fraction of the usual partition (the median of the window before it).
+PARTITION_RATIOS: dict[str, float] = {"low": 0.25, "medium": 0.5, "high": 0.7}
+GRAIN_MS = {"day": 86_400_000, "hour": 3_600_000}
+
+
+def _partition_label(start_ms: int, grain: str) -> str:
+    t = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc)
+    return t.strftime("%Y-%m-%d") if grain == "day" else t.strftime("%Y-%m-%d %H:00")
+
+
+def detect_partitions(
+    counts: dict[int, float],
+    now_ms: int,
+    grain: str = "day",
+    sensitivity: Sensitivity = "medium",
+    window: int = 28,
+    lag: int = 1,
+    check: int = 3,
+    min_ratio: Optional[float] = None,
+    min_rows: Optional[float] = None,
+    min_history: int = 3,
+) -> Detection:
+    """``counts``: rows per partition, by the partition's start (UTC ms). The ``check`` partitions ending ``lag``
+    grains before the current one must each be present and not thin; thin is below ``min_ratio`` of the median of
+    the ``window`` partitions before them (from the first partition the table has), or below ``min_rows``. The
+    current, still filling, partition is never judged."""
+    g = GRAIN_MS[grain]
+    current = (now_ms // g) * g
+    checked = [current - (lag + k) * g for k in range(check)]
+    before = [current - (lag + check + k) * g for k in range(window)]
+    first = min(counts) if counts else None
+    seen = [counts.get(s, 0.0) for s in before if first is not None and s >= first]
+    usual = median([v for v in seen if v > 0]) if any(v > 0 for v in seen) else None
+    ratio = PARTITION_RATIOS[sensitivity] if min_ratio is None else float(min_ratio)
+    floor = max(ratio * usual if usual is not None and len(seen) >= min_history else 0.0, float(min_rows or 0))
+    missing = [s for s in checked if counts.get(s, 0.0) <= 0 and (first is not None and s > first or min_rows)]
+    thin = [s for s in checked if s not in missing and 0 < counts.get(s, 0.0) < floor]
+    newest = counts.get(checked[0], 0.0)
+    details = {"grain": grain, "partitions": {_partition_label(s, grain): counts.get(s, 0.0) for s in reversed(checked)},
+               "usual": usual}
+    if first is None:
+        return Detection("FAIL" if min_rows else "TRAINING",
+                         "the table has no rows in the window" if min_rows else "no partitions yet", details=details)
+    if missing or thin:
+        parts = []
+        if missing:
+            parts.append("missing " + ", ".join(_partition_label(s, grain) for s in sorted(missing)))
+        if thin:
+            parts.append("thin " + ", ".join(f"{_partition_label(s, grain)} ({counts[s]:,.0f} rows)" for s in sorted(thin)))
+        usual_txt = f"; a {grain} usually has {usual:,.0f} rows" if usual is not None else ""
+        return Detection("FAIL", f"partitions {'; '.join(parts)}{usual_txt}", expected_low=floor or None,
+                         score=newest, details={**details, "missing": [_partition_label(s, grain) for s in sorted(missing)],
+                                                "thin": [_partition_label(s, grain) for s in sorted(thin)]})
+    if usual is None or len(seen) < min_history:
+        return Detection("TRAINING", f"learning the usual {grain} ({len(seen)} of {min_history} partitions seen)",
+                         details=details)
+    return Detection("PASS", f"the last {check} {grain}s are present, each ≥ {floor:,.0f} rows (usual {usual:,.0f})",
+                     expected_low=floor, score=newest, details=details)

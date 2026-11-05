@@ -5,7 +5,7 @@ import { CairnClient } from '../api/client';
 import { CairnClientProvider } from '../api/hooks';
 import type { Evaluation, Monitor } from '../api/types';
 import { MonitorDetail } from '../quality/MonitorDetail';
-import { MONITOR_CONFIG_FIELDS, cleanConfig } from '../quality/MonitorEditor';
+import { MONITOR_CONFIG_FIELDS, cleanConfig, partitioned } from '../quality/MonitorEditor';
 import { installMatchMedia } from '../consumer/__tests__/setup';
 
 beforeAll(installMatchMedia);
@@ -46,4 +46,13 @@ it('an alert can be marked as the new normal', async () => {
     fireEvent.click(await screen.findByRole('button', { name: 'New normal' }));
     await waitFor(() => expect(posted).toEqual([['/cairn/api/quality/evaluations/e1/feedback', { feedback: 'NEW_NORMAL' }]]));
     expect(await screen.findByText('New normal', { selector: '.ant-tag' })).toBeTruthy();
+});
+
+describe('a volume monitor counting per partition', () => {
+    it('drops the learned model and total-row bounds, and defaults to days', () => {
+        expect(partitioned('volume', { source: 'catalog', model: 'learned', band: 3, min_rows: 5, partition_column: 'ts', table: 't', connection: 'wh' }))
+            .toEqual({ source: 'sql', partition_column: 'ts', table: 't', connection: 'wh', grain: 'day' });
+        expect(partitioned('volume', { model: 'learned', grain: 'hour', min_rows_per_partition: 3 })).toEqual({ model: 'learned' });
+        expect(partitioned('freshness', { timestamp_column: 'ts', grain: 'x' })).toEqual({ timestamp_column: 'ts', grain: 'x' });
+    });
 });

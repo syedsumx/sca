@@ -22,6 +22,33 @@ and that closes automatically when the data recovers.
 SQL sources run through a named connection that your administrator configures; credentials never
 appear in monitor definitions.
 
+## Volume per partition
+
+A table loaded day by day can lose a day and still look normal in total: a backfill on the next day, or late
+rows, can make up the count. Give a SQL `volume` monitor a `partition_column` and it counts rows per day (or hour)
+instead, and fails on a missing or thin partition whatever the total says.
+
+```json
+{"type": "volume", "config": {"source": "sql", "connection": "lakehouse", "table": "sales.orders",
+                              "partition_column": "order_ts", "grain": "day"}}
+```
+
+* **What is checked.** The `check` (default 3) partitions before the current one: with `lag` 1 (the default),
+  yesterday and the two days before. The current partition is still filling and is never judged; set `lag`
+  higher for tables that land later.
+* **Missing** is a partition with no rows after the table's first one. **Thin** is a partition below `min_ratio`
+  of the usual partition, the median of the `partitions` (default 28) before the checked ones, or below
+  `min_rows_per_partition`. `min_ratio` defaults by `sensitivity`: 0.25 (low), 0.5 (medium), 0.7 (high).
+* **Learning.** Until `min_history` (default 3) partitions have been seen it reports `TRAINING`, but a missing
+  partition after the first fails at once.
+* **One query.** Rows are counted in one grouped query bounded to the window, so on a table partitioned by that
+  column (Iceberg `day(ts)`, for example) only the window's partitions are read. Days and hours are UTC.
+* **Partition values.** By default the column is truncated to the day or hour (`date_trunc` on Trino, PostgreSQL
+  and most warehouses, `date()` on SQLite, `DATE()` on MySQL). When the column already holds the partition, such
+  as a `ds` text column `2026-11-05` (or `2026-11-05 13` for hours), set `truncate: false`.
+* The value recorded is the newest checked partition's rows; the result lists each checked partition's rows, and
+  `missing` and `thin` when it fails. It cannot be combined with `model: learned`.
+
 ## Learned thresholds
 
 New monitors start in `TRAINING`: they learn the normal range from history, then switch to `ACTIVE`.

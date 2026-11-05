@@ -10,4 +10,5 @@ connections:
   lakehouse:
     url: trino://cairn@cairn-trino:8443/lakehouse?protocol=https&verify=/etc/cairn/trino-tls/ca.pem
     run_as_user: true
+    service_user: urn:li:corpuser:cairn-quality    # who Cairn's monitors and profiling read as
     catalog: {platform: trino, database: lakehouse}
