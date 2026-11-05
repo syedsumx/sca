@@ -23,6 +23,9 @@ import httpx
 import pytest
 
 IMAGE = os.environ.get("CAIRN_KEYCLOAK_IMAGE", "keycloak/keycloak:26.0.7")
+# The saml extra (signxml, lxml): installed in CI's trino job, which runs this test; skipped where it is not.
+pytest.importorskip("signxml", reason="needs the saml extra")
+pytest.importorskip("lxml", reason="needs the saml extra")
 pytestmark = pytest.mark.skipif(shutil.which("docker") is None, reason="needs docker")
 REDIRECT = "http://127.0.0.1:9/callback/oidc"
 
