@@ -2236,3 +2236,72 @@ def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, 
     acts = {e["action"] for e in s.audit.entries(limit=3000)}
     assert {"privacy.hold_placed", "privacy.hold_released", "privacy.retention_deleted", "privacy.erasure_run",
             "privacy.erasure_proved"} <= acts
+
+
+def test_bi_assets_are_catalog_entities_and_a_dropped_column_shows_what_breaks(trino, cairn):
+    """Saved queries, workbooks and dashboards published to the catalog with the tables and columns they read;
+    the impact of dropping a column, asked before it is dropped, names exactly the assets that then fail on Trino."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+    from cairn.sqlworkspace.bi_catalog import chart_urn, dashboard_urn
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.imp_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0, 'a'), (2, 'US', 20e0, 'b')) "
+          "AS t(id, region, amount, note)")
+    ds = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.imp_orders,PROD)"
+    s.graph.aspects[(ds, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "amount", "note")]}
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    c = httpx.Client(base_url=url, timeout=120)
+    by_region = c.post("/sql/saved", headers=admin, json={
+        "name": "imp revenue by region", "connection": "lakehouse",
+        "sql": "SELECT o.region, SUM(o.amount) AS revenue FROM sales.imp_orders o GROUP BY o.region"}).json()
+    ids_only = c.post("/sql/saved", headers=admin, json={
+        "name": "imp ids", "connection": "lakehouse", "sql": "SELECT id FROM sales.imp_orders"}).json()
+    wb = c.post("/sql/workbooks", headers=admin, json={"name": "imp notes", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.imp_orders"}, "columns": [{"name": "loud", "formula": "Upper([note])"}],
+                      "group_by": ["loud"], "aggregates": [{"name": "n", "formula": "Count()"}]}]}}).json()
+    board = c.post("/sql/dashboards", headers=admin, json={"name": "imp board", "tiles": [
+        {"query": by_region["id"], "title": "Revenue"}, {"query": ids_only["id"], "title": "Ids"}]}).json()
+
+    # In the catalog: charts with their input tables and columns, a dashboard over its charts.
+    chart = s.graph.get_aspect(chart_urn("query", by_region["id"]), "chartInfo")
+    assert chart["title"] == "imp revenue by region" and chart["inputs"] == [{"string": ds}]
+    fields = s.graph.get_aspect(chart_urn("query", by_region["id"]), "inputFields")["fields"]
+    assert {f["schemaFieldUrn"].rsplit(",", 1)[-1].rstrip(")") for f in fields} == {"region", "amount"}
+    info = s.graph.get_aspect(dashboard_urn(board["id"]), "dashboardInfo")
+    assert set(info["charts"]) == {chart_urn("query", by_region["id"]), chart_urn("query", ids_only["id"])}
+    assert info["datasets"] == [ds]
+    assert s.graph.get_aspect(chart_urn("workbook", wb["id"]), "chartInfo")["inputs"] == [{"string": ds}]
+
+    # Before dropping `amount`: the revenue query and the dashboard using it break; the ids query and the
+    # workbook (which reads note) do not.
+    imp = c.get("/sql/impact", params={"dataset": ds, "column": "amount"}, headers=admin).json()
+    hit = {(a["kind"], a["id"]) for a in imp["assets"]}
+    assert hit == {("query", by_region["id"]), ("dashboard", board["id"])}, imp
+    assert next(a for a in imp["assets"] if a["kind"] == "dashboard")["through_queries"] == [by_region["id"]]
+    note = c.get("/sql/impact", params={"dataset": ds, "column": "note"}, headers=admin).json()
+    assert {(a["kind"], a["id"]) for a in note["assets"]} == {("workbook", wb["id"])}
+    table = c.get("/sql/impact", params={"dataset": ds}, headers=admin).json()
+    assert len(table["assets"]) == 4
+    # Someone the assets are not shared with learns only how many, and whose.
+    other = c.get("/sql/impact", params={"dataset": ds, "column": "amount"}, headers=ana).json()
+    assert other["assets"] == [] and other["others"] == [{"owner": "urn:li:corpuser:admin", "assets": 2}]
+
+    # Drop it: exactly the predicted ones fail.
+    trino("ALTER TABLE lake.sales.imp_orders DROP COLUMN amount")
+    assert c.post(f"/sql/saved/{by_region['id']}/run", headers=admin).status_code >= 400
+    assert c.post(f"/sql/saved/{ids_only['id']}/run", headers=admin).status_code == 200
+    tiles = c.post(f"/sql/dashboards/{board['id']}/render", headers=admin, json={}).json()["tiles"]
+    assert "error" in tiles[0] and "error" not in tiles[1], tiles
+
+    # A deleted asset leaves the catalog and the impact.
+    assert c.delete(f"/sql/saved/{ids_only['id']}", headers=admin).status_code == 204
+    assert s.graph.get_aspect(chart_urn("query", ids_only["id"]), "status") == {"removed": True}
+    assert ("query", ids_only["id"]) not in {(a["kind"], a["id"]) for a in c.get(
+        "/sql/impact", params={"dataset": ds}, headers=admin).json()["assets"]}
+    assert c.post("/sql/catalog/sync", headers=ana).status_code == 403
+    assert c.post("/sql/catalog/sync", headers=admin).json()["published"] >= 3

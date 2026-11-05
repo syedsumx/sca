@@ -487,6 +487,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 from cairn.sqlworkspace.boards import build_boards_router
 
                 app.include_router(build_boards_router(services.sql_boards, cp))
+                if getattr(services, "bi_catalog", None) is not None:
+                    from cairn.sqlworkspace.bi_catalog import build_bi_catalog_router
+
+                    app.include_router(build_bi_catalog_router(services.bi_catalog, cp))
                 if getattr(services, "bi_sharing", None) is not None:
                     from cairn.sqlworkspace.sharing import build_sharing_router
 

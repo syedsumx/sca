@@ -87,6 +87,7 @@ class SqlWorkspace:
         self.cache = None                                  # cairn.sqlworkspace.cache.ResultCache (dashboards, workbooks)
         self.matviews = None                               # cairn.pipelines.matviews, set when derived tables are
         self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
+        self.on_change: Optional[Callable[[str, str], None]] = None   # (kind, id) after a save or delete
         self._schema_cache: dict[str, tuple[float, list[dict]]] = {}
 
     # ---- running ------------------------------------------------------------------------
@@ -197,6 +198,8 @@ class SqlWorkspace:
                 if level < OWNER:
                     values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
                 conn.execute(update(saved_queries).where(saved_queries.c.id == qid).values(**values))
+        if self.on_change is not None:
+            self.on_change("query", qid)
         return self.get(actor, qid)
 
     def delete(self, actor: str, qid: str) -> None:
@@ -206,6 +209,8 @@ class SqlWorkspace:
                 self.sharing.drop("query", qid, conn)
         if not n:
             raise WorkspaceError("no such saved query of yours", 404)
+        if self.on_change is not None:
+            self.on_change("query", qid)
 
     def run_saved(self, actor: str, qid: str, limit: int = 1000) -> dict:
         """Runs a saved query as the caller (never as its owner): shared queries show each person only

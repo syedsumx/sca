@@ -122,6 +122,7 @@ class Boards:
         self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
         self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
         self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
+        self.on_change = None        # (kind, id) after a save or delete
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -156,6 +157,8 @@ class Boards:
                     values["shared"] = bool(current.shared)     # who sees it is the owner's to decide
                 if not conn.execute(update(dashboards).where(dashboards.c.id == did).values(**values)).rowcount:
                     raise WorkspaceError("no such dashboard", 404)
+        if self.on_change is not None:
+            self.on_change("dashboard", did)
         return self.dashboard(actor, did)
 
     def dashboards(self, actor: str) -> list[dict]:
@@ -184,6 +187,8 @@ class Boards:
                 raise WorkspaceError("no such dashboard of yours", 404)
             if self.sharing is not None:
                 self.sharing.drop("dashboard", did, conn)
+        if self.on_change is not None:
+            self.on_change("dashboard", did)
 
     def _tile(self, actor: str, t: Any, keep: frozenset | set = frozenset()) -> dict:
         if not isinstance(t, dict):

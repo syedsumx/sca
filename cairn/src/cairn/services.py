@@ -87,6 +87,7 @@ class Services:
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
+    bi_catalog: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -918,6 +919,21 @@ def _build_active_metadata(s: Services) -> None:
         s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
             Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
         s.sql_boards.metrics = s.metrics
+        # BI assets in the catalog: charts and dashboards with lineage from the tables and columns they read.
+        from cairn.sqlworkspace.bi_catalog import BiCatalog
+        from cairn.sqlworkspace.sharing import access as _bi_access
+
+        def bi_can_open(actor: str, kind: str, aid: str) -> bool:
+            from cairn.sqlworkspace.sharing import _table
+
+            t = _table(kind)
+            with s.engine.connect() as conn:
+                row = conn.execute(t.select().where(t.c.id == aid)).first()
+            return bool(_bi_access(s.bi_sharing, actor, kind, row))
+        s.bi_catalog = BiCatalog(s.engine, s.graph, s.sql_workspace, s.workbooks, s.sql_boards, s.metrics, bi_can_open,
+                                 lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                                           raise_on_deny=False))
+        s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = s.bi_catalog.changed
         # The AI builder: a question becomes a dashboard of metric and workbook tiles, each checked as the person.
         from cairn.sqlworkspace.builder import Builder
 

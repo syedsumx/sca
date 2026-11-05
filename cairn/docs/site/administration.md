@@ -657,6 +657,34 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - a shared dashboard rendered for its owner and for someone refused one of its tiles, who saw that tile's refusal and the other tile's data;
   - an alert that stayed quiet on its first fine check, was told once (to its owner and recipient) when the condition began, again when it stopped, and once when its query failed. It was not checked before it was due.
 
+### BI assets in the catalog, and the impact of a change
+
+Every save publishes the asset to the catalog. A saved query or a workbook becomes a **chart**
+(`urn:li:chart:(cairn,query.<id>)`, `…workbook.<id>`), with `chartInfo.inputs` naming the tables it reads and
+`inputFields` naming the columns. A dashboard becomes a **dashboard** (`urn:li:dashboard:(cairn,<id>)`), listing its
+charts and tables. The catalog's lineage therefore runs from a table to the dashboards over it. Deleting an asset
+marks its entity removed. Ownership and the asset's link come along.
+
+**Impact before a change.** `GET /sql/impact?dataset=<urn>&column=<name>` lists the saved queries, workbooks and
+dashboards that break if that column goes; without `column`, the ones that read the table at all.
+
+* A dashboard is listed when one of its tiles uses an affected query (`through_queries`) or reads the column
+  itself.
+* A workbook element is compiled again against the table's columns each time it runs. It counts only when it
+  names the column, in a formula, grouping, filter or sort.
+* SQL is parsed: `SELECT *` reads every column. A column that cannot be tied to one table of a join counts for
+  each table, so impact over-reports rather than misses.
+* The caller sees the names of the assets they may open (operators see all). Others are counted per owner, so
+  the person planning the change knows whom to ask.
+
+`POST /sql/catalog/sync` (operators) publishes every asset again, for example after the catalog was away. A
+failed publish never fails the save.
+
+Table `cairn_bi_lineage` (migration 0084). Tested on real Trino
+(`test_bi_assets_are_catalog_entities_and_a_dropped_column_shows_what_breaks`). The impact asked before
+`DROP COLUMN` named exactly the query and dashboard that then failed; the other query and the workbook kept
+working.
+
 ### Sharing with people and groups
 
 Saved queries, workbooks and dashboards are shared with people or groups (`PUT /sql/shares/<kind>/<id>`, kind
