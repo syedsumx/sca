@@ -133,6 +133,9 @@ kubectl uncordon cairn-2
 **Upgrading:**
 - **k3s:** set `K3S_VERSION` and run `cluster.sh k3s`, one node at a time.
 - **Charts:** bump the versions at the top of `platform.sh`, read their upgrade notes, then run `cluster.sh platform`.
+  Each chart is downloaded first, with up to five tries (chart repositories and GitHub answer 5xx now and
+  then), and installed from the file; a download that keeps failing stops the run with the chart's name, and a
+  rollout that fails is never retried.
 - **Tenants:** `tenant.sh upgrade <id>`.
 
 **Monitoring:** Grafana's admin password is in the `grafana-admin` secret in the `monitoring` namespace. Open Grafana with:

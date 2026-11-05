@@ -47,7 +47,22 @@ ns() {   # namespace with its role label (network policies select namespaces by 
     kubectl create namespace "$1" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
     kubectl label namespace "$1" "cairn.io/role=$2" --overwrite >/dev/null
 }
-repo() { helm repo add "$1" "$2" --force-update >/dev/null; }
+retry() {   # a command that fetches from the internet: GitHub and chart repositories answer 5xx now and then
+    local i
+    for i in 1 2 3 4 5; do "$@" && return 0; [ "$i" = 5 ] && break; echo "  retrying in $((i * 10))s: $*" >&2; sleep $((i * 10)); done
+    return 1
+}
+repo() { retry helm repo add "$1" "$2" --force-update >/dev/null; }
+# A chart fetched first (retried), then installed from the file: a download that fails is tried again, a
+# rollout that fails is not.
+charts=$(mktemp -d)
+trap 'rm -rf "$charts"' EXIT
+chart() {   # repo/chart version -> the downloaded chart's path
+    local dir="$charts/${1//\//_}-$2"
+    mkdir -p "$dir"
+    retry helm pull "$1" --version "$2" -d "$dir" >/dev/null || die "could not download chart $1 $2"
+    ls "$dir"/*.tgz
+}
 # An operator's webhook can take a moment to serve after its chart is "ready".
 apply_retry() {
     local manifest; manifest=$(cat)
@@ -59,7 +74,7 @@ repo ingress-nginx https://kubernetes.github.io/ingress-nginx
 repo jetstack https://charts.jetstack.io
 repo cnpg https://cloudnative-pg.github.io/charts
 [ "$MONITORING" != true ] || repo prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo update >/dev/null
+retry helm repo update >/dev/null
 
 ns cairn-platform platform; ns ingress-nginx ingress; ns cert-manager platform; ns cnpg-system platform
 [ "$MONITORING" != true ] || ns monitoring monitoring
@@ -71,7 +86,7 @@ if [ "$MONITORING" = true ]; then
         kubectl -n monitoring create secret generic grafana-admin --from-literal=admin-user=admin \
             --from-file=admin-password=<(openssl rand -base64 24 | tr -d '\n') >/dev/null
     fi
-    helm upgrade --install monitoring prometheus-community/kube-prometheus-stack --version "$KPS_CHART" \
+    helm upgrade --install monitoring "$(chart prometheus-community/kube-prometheus-stack "$KPS_CHART")" \
         -n monitoring -f "$here/platform/monitoring.yaml" --wait --timeout 15m
 fi
 
@@ -80,17 +95,17 @@ echo "== ingress-nginx $INGRESS_NGINX_CHART" >&2
 REAL_IP_CIDRS=${LB_SOURCE_CIDRS:-0.0.0.0/32}
 REAL_IP_CIDRS=${REAL_IP_CIDRS// /}
 fill "$here/platform/ingress-nginx.yaml" REAL_IP_CIDRS MONITORING >"${TMPDIR:-/tmp}/cairn-ingress-values.yaml"
-helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx --version "$INGRESS_NGINX_CHART" \
+helm upgrade --install ingress-nginx "$(chart ingress-nginx/ingress-nginx "$INGRESS_NGINX_CHART")" \
     -n ingress-nginx -f "${TMPDIR:-/tmp}/cairn-ingress-values.yaml" --wait --timeout 10m
 rm -f "${TMPDIR:-/tmp}/cairn-ingress-values.yaml"
 
 echo "== cert-manager $CERT_MANAGER_CHART" >&2
-helm upgrade --install cert-manager jetstack/cert-manager --version "$CERT_MANAGER_CHART" -n cert-manager \
+helm upgrade --install cert-manager "$(chart jetstack/cert-manager "$CERT_MANAGER_CHART")" -n cert-manager \
     --set crds.enabled=true --set prometheus.enabled="$MONITORING" --wait --timeout 10m
 fill "$here/platform/cluster-issuers.yaml" ACME_EMAIL | apply_retry
 
 echo "== CloudNativePG $CNPG_CHART, PostgreSQL ($PG_INSTANCES instances, $PG_IMAGE)" >&2
-helm upgrade --install cnpg cnpg/cloudnative-pg --version "$CNPG_CHART" -n cnpg-system --wait --timeout 10m
+helm upgrade --install cnpg "$(chart cnpg/cloudnative-pg "$CNPG_CHART")" -n cnpg-system --wait --timeout 10m
 PG_ANTI_AFFINITY=required
 [ "$PG_INSTANCES" -gt 1 ] || PG_ANTI_AFFINITY=preferred
 if [ "$BACKUPS" = true ]; then
