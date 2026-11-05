@@ -88,6 +88,7 @@ class SqlWorkspace:
         self.matviews = None                               # cairn.pipelines.matviews, set when derived tables are
         self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change: Optional[Callable[[str, str, str], None]] = None   # (kind, id, actor) after a save or delete
+        self.on_view: Optional[Callable[[str, str, str], None]] = None     # (kind, id, actor) when a saved query is run
         self._schema_cache: dict[str, tuple[float, list[dict]]] = {}
 
     # ---- running ------------------------------------------------------------------------
@@ -216,7 +217,10 @@ class SqlWorkspace:
         """Runs a saved query as the caller (never as its owner): shared queries show each person only
         what they may see."""
         q = self.get(actor, qid)
-        return {**self.run(actor, q["sql"], q["connection"], limit), "query": q}
+        out = {**self.run(actor, q["sql"], q["connection"], limit), "query": q}
+        if self.on_view is not None:
+            self.on_view("query", qid, actor)
+        return out
 
     # ---- schema browser -----------------------------------------------------------------
     def schema(self, connection: str, can_view: Callable[[str], bool]) -> list[dict]:

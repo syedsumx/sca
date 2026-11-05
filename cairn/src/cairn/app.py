@@ -487,6 +487,15 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 from cairn.sqlworkspace.boards import build_boards_router
 
                 app.include_router(build_boards_router(services.sql_boards, cp))
+                if getattr(services, "bi_collab", None) is not None:
+                    from cairn.sqlworkspace.collab import build_collab_router
+                    from cairn.sqlworkspace.sharing import _table as _bi_table
+
+                    def _owner_of(kind: str, aid: str) -> str:
+                        t = _bi_table(kind)
+                        with services.engine.connect() as conn:
+                            return conn.execute(t.select().with_only_columns(t.c.owner).where(t.c.id == aid)).scalar() or ""
+                    app.include_router(build_collab_router(services.bi_collab, cp, _owner_of))
                 if getattr(services, "bi_versions", None) is not None:
                     from cairn.sqlworkspace.versions import build_versions_router
 

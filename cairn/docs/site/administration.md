@@ -783,6 +783,34 @@ Table `cairn_bi_versions` (migration 0085). Tested on real Trino (`test_bi_versi
 * a dashboard's earlier name and tiles are restored;
 * a viewer may read the history but not restore it.
 
+### Folders, comments and usage
+
+* **Folders** (`/sql/folders`).
+  - A person makes folders, nested up to 8 deep, and files dashboards, workbooks and saved queries they may
+    open in them (`PUT /sql/folders/<id>/items/<kind>/<id>`).
+  - A folder that is `shared` is listed for everyone.
+  - A folder shows each viewer only the assets they may open, so a folder never reveals what is not shared
+    with them.
+  - Only its owner changes or deletes a folder; a folder with folders in it is not deleted.
+* **Comments** (`/sql/comments/<kind>/<id>`).
+  - Anyone who may open an asset reads and writes its comments, optionally about one tile (`tile`) and as a
+    reply (`parent`).
+  - An `@name` mention tells that person (`bi.mentioned`), but only if they may open the asset. The owner is
+    told of new comments (`bi.commented`).
+  - Authors edit and delete their own comments, and the asset's owner may delete any. A deleted comment
+    keeps its place in the thread, without its text.
+  - Comments and deletions are audited.
+* **Usage** (`/sql/usage`).
+  - A dashboard rendered (embedded ones too), a saved query run or a workbook opened counts one view, per
+    person and day.
+  - `GET /sql/usage/<kind>/<id>` shows the asset's owner and editors its views and distinct viewers per day.
+  - `GET /sql/usage/popular` lists the most viewed assets the caller may open, and `GET /sql/usage/stale` the
+    caller's own assets nobody viewed in the last `days` (default 30) days.
+  - Views are kept `CAIRN_BI_USAGE_DAYS` (default 180) days.
+
+Tables `cairn_bi_folders`, `cairn_bi_folder_items`, `cairn_bi_comments` and `cairn_bi_views` (migration 0088). Tested
+over HTTP against a Cairn server and a SQLite warehouse (`tests/test_bi_collab.py`).
+
 ### Sharing with people and groups
 
 In the web UI: **Share** on a dashboard, a workbook or a saved query (owners and editors) lists who has it; its owner adds a person or `group:name` as viewer or editor, or removes them.

@@ -270,6 +270,7 @@ class Workbooks:
         self.engine, self.workspace, self.columns_of = engine, workspace, columns_of
         self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change = None                              # (kind, id, actor) after a save or delete
+        self.on_view = None                                # (kind, id, actor) when a workbook is opened
 
     def compile(self, actor: str, connection: str, spec: dict) -> dict:
         table = (spec.get("source") or {}).get("table", "")
@@ -325,6 +326,8 @@ class Workbooks:
         level = access(self.sharing, actor, "workbook", r)
         if not level:
             raise WorkbookError("no such workbook", 404)
+        if self.on_view is not None:
+            self.on_view("workbook", wid, actor)
         return self._row(r, level)
 
     def save(self, actor: str, body: dict, wid: Optional[str] = None) -> dict:

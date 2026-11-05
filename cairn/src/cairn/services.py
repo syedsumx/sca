@@ -90,6 +90,7 @@ class Services:
     bi_catalog: Optional[Any] = None
     bi_versions: Optional[Any] = None
     embedded_dashboards: Optional[Any] = None
+    bi_collab: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -956,6 +957,22 @@ def _build_active_metadata(s: Services) -> None:
                 logger.exception("recording a version of %s %s failed", kind, aid)
             s.bi_catalog.changed(kind, aid, actor)
         s.sql_workspace.on_change = s.workbooks.on_change = s.sql_boards.on_change = bi_changed
+        # Folders, comments and usage of BI assets.
+        from cairn.sqlworkspace.collab import BiCollab
+
+        def bi_level(actor: str, kind: str, aid: str) -> int:
+            from cairn.sqlworkspace.sharing import _table
+
+            t = _table(kind)
+            with s.engine.connect() as conn:
+                row = conn.execute(t.select().where(t.c.id == aid)).first()
+            return _bi_access(s.bi_sharing, actor, kind, row)
+
+        def tell_bi(type_, title, body, recipients, payload):
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                              url=f"/sql/{payload['kind']}s/{payload['id']}"))
+        s.bi_collab = BiCollab(s.engine, bi_level, tell_bi, s.audit, int(os.environ.get("CAIRN_BI_USAGE_DAYS", "180")))
+        s.sql_workspace.on_view = s.workbooks.on_view = s.sql_boards.on_view = s.bi_collab.viewed
         # Embedded dashboards: portals sign a token for one of their users; the tiles run as that user.
         embed_clients = os.environ.get("CAIRN_EMBED_CLIENTS_FILE")
         if embed_clients:

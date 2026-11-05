@@ -308,7 +308,12 @@ def trino(lake, cairn):
                              capture_output=True, text=True, timeout=300)
         if out.returncode != 0:
             why = [ln for ln in out.stderr.splitlines() if "failed:" in ln or "Error" in ln]
-            raise RuntimeError(why[0] if why else out.stderr.strip()[-500:] or out.stdout)
+            msg = why[0] if why else out.stderr.strip()[-500:] or out.stdout
+            if "OPA backend" in msg:                   # what Trino got back from Cairn, for the report
+                logs = subprocess.run(["docker", "logs", "--tail", "400", name], capture_output=True, text=True, timeout=60)
+                msg += "\n" + "\n".join(ln for ln in (logs.stdout + logs.stderr).splitlines()
+                                         if "opa" in ln.lower() or "OpaHttpClient" in ln or "Caused by" in ln)[-4000:]
+            raise RuntimeError(msg)
         return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
 
     # IF NOT EXISTS: the Spark tests bring their own lake with these tables in it.

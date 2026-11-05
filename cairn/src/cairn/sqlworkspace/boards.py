@@ -123,6 +123,7 @@ class Boards:
         self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
         self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change = None        # (kind, id, actor) after a save or delete
+        self.on_view = None          # (kind, id, actor) when someone looks at a dashboard
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -269,6 +270,8 @@ class Boards:
         something other than sharing (an embed client the operator allowed this dashboard); the data is still
         theirs."""
         board = self._granted(did) if granted else self.dashboard(actor, did)
+        if self.on_view is not None:
+            self.on_view("dashboard", did, actor)
         state = state if isinstance(state, dict) else {}
         values = state.get("controls") if isinstance(state.get("controls"), dict) else {}
         selection = state.get("selection") or []
