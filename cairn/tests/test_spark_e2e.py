@@ -670,7 +670,8 @@ def test_a_volume_shared_with_a_group_is_read_by_them_alone_in_spark(cairn, lake
         files = httpx.get(f"{url}/v1/volumes/landing/files", params={"prefix": "out/"}, headers=admin, timeout=30).json()
         parts = [f["path"] for f in files["files"] if "/part-" in f["path"]]
         assert parts, files
-        body = httpx.get(f"{url}/v1/volumes/landing/files/{parts[0]}", headers=admin, timeout=30).text
-        assert body.strip() == "written by spark"
+        # Spark writes a part file per partition (local[2]: two, one of them empty for a single row).
+        body = "".join(httpx.get(f"{url}/v1/volumes/landing/files/{p}", headers=admin, timeout=30).text for p in parts)
+        assert body.strip() == "written by spark", (parts, body)
     finally:
         vs.store, vs.endpoint, vs.groups_of, vs.may_create, vs._role = saved
