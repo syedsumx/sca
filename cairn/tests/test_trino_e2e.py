@@ -2438,7 +2438,8 @@ def test_an_embedded_dashboard_shows_each_portal_user_their_own_rows(trino, cair
     assert get(token(dashboard=other["id"]), other["id"]).status_code == 403               # not given to the client
     assert get(token(), other["id"]).status_code == 403                                     # for another dashboard
     body, sig = token().split(".")
-    assert get(f"{body}.{sig[:-2]}AA").status_code == 403                                   # tampered
+    forged = sig[:-2] + ("AA" if sig[-2:] != "AA" else "EA")                               # always differs from sig
+    assert get(f"{body}.{forged}").status_code == 403                                      # tampered
     assert httpx.post(f"{cairn_url}/embed/v1/dashboards/{board['id']}/render", json={}, timeout=30).status_code == 401
     page = get(token())
     assert page.headers["content-security-policy"].startswith(f"frame-ancestors {portal};")

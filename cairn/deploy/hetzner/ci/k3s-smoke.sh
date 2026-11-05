@@ -66,6 +66,8 @@ sudo cat /etc/rancher/k3s/k3s.yaml >"$work/state/kubeconfig"; chmod 600 "$work/s
 export KUBECONFIG=$work/state/kubeconfig
 for _ in $(seq 60); do kubectl get node ci-1 >/dev/null 2>&1 && break; sleep 5; done
 kubectl wait --for=condition=Ready node/ci-1 --timeout=300s
+# k3s applies its addons (CoreDNS among them) just after the node is Ready: wait for the deployment to exist first.
+for _ in $(seq 60); do kubectl -n kube-system get deployment/coredns >/dev/null 2>&1 && break; sleep 2; done
 kubectl -n kube-system rollout status deployment/coredns --timeout=300s
 sudo test -s /var/lib/rancher/k3s/server/logs/audit.log || fail "no API audit log"
 sudo k3s secrets-encrypt status | grep -q "Encryption Status: Enabled" || fail "secrets are not encrypted at rest"
