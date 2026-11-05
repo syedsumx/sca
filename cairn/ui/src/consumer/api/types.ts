@@ -1915,3 +1915,34 @@ export interface BiImpact {
     assets: { kind: BiKind; id: string; name: string; owner: string; columns: string[]; through_queries: string[] }[];
     others: { owner: string; assets: number }[];
 }
+
+/** One snapshot of a lakehouse table (GET /v1/lakehouse/tables/{schema}/{table}/snapshots). */
+export interface TableSnapshot {
+    /** The snapshot id as a string: a 64-bit id loses digits as a JavaScript number, so use this one. */
+    id: string;
+    snapshot: number;
+    parent: number | null;
+    committed_at: string;
+    operation: string;
+    records: number | null;
+    added: number;
+    deleted: number;
+    current: boolean;
+}
+
+export interface SnapshotRows {
+    id: string;
+    snapshot: number;
+    columns: string[];
+    rows: unknown[][];
+    truncated: boolean;
+}
+
+export interface RestoreResult {
+    table: string;
+    from_snapshot: number | null;
+    to_snapshot: number;
+    from_id: string | null;
+    to_id: string;
+    records: number;
+}

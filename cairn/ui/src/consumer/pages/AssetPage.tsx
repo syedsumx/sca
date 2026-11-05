@@ -18,6 +18,7 @@ import { KnowledgeDocs } from '../components/Knowledge';
 import { LineageGraphView } from '../components/LineageGraph';
 import { DataPreview } from '../components/DataPreview';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
+import { TableSnapshots } from '../components/Snapshots';
 import { TrustBadges } from '../components/TrustBadges';
 import { AssetHistory } from '../components/History';
 import { useDheSession } from '../context/CairnProvider';
@@ -424,6 +425,9 @@ export function AssetPage() {
                     },
                     ...(urn.startsWith('urn:li:dataset:')
                         ? [{ key: 'ai', label: t('asset.aiUsage'), children: <UsedByAi urn={urn} /> }]
+                        : []),
+                    ...(/dataPlatform:iceberg,/.test(urn)
+                        ? [{ key: 'snapshots', label: 'Snapshots', children: <TableSnapshots table={tableNameOf(urn)} /> }]
                         : []),
                     { key: 'history', label: t('asset.history'), children: <AssetHistory urn={urn} /> },
                     ...extensionAssetTabs(extensionTabs, urn),

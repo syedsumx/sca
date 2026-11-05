@@ -829,7 +829,7 @@ def _build_active_metadata(s: Services) -> None:
             def run_feed(actor: str, sql: str, limit: int):
                 definition = (s.data_access.registry.definitions() or {}).get(feed_conn) or {}
                 return s.data_access.run_on_trino(definition, actor, sql, limit)
-            s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"))
+            s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
         _build_data_access(s)
         _build_saml(s)
         _build_secret_scopes(s)

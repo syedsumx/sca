@@ -2984,3 +2984,60 @@ def test_a_scheduled_job_reads_the_lake_as_its_owner(trino, cairn):
             httpx.delete(f"{url}/v1/jobs/{name}", headers=who, timeout=60)
         s.jobs.runner = None
         trino("DROP TABLE lake.sales.job_orders")
+
+
+def test_a_person_browses_a_tables_snapshots_and_restores_yesterdays(trino, cairn):
+    """L59 on real Trino and Iceberg: the admin sees the table's snapshots with their record counts and which is
+    current, looks at the table as it was, and restores the earlier snapshot, audited with the reason; the
+    restore is undone the same way. Bob sees only his EU rows of an old snapshot and may not restore (no
+    MANAGE_DATASET): Trino refuses it as him and the table is unchanged."""
+    import datetime as dt
+
+    from cairn.pipelines.change_feed import ChangeFeed, ChangeFeedError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    audited = []
+
+    class Audit:
+        def record(self, *a):
+            audited.append(a)
+    feed = ChangeFeed(lambda actor, sql, limit: s.data_access.run_on_trino(definition, actor, sql, limit), "lake", Audit())
+    admin, bob = "urn:li:corpuser:admin", "urn:li:corpuser:bob"
+    trino("DROP TABLE IF EXISTS lake.sales.snap_orders")
+    trino("CREATE TABLE lake.sales.snap_orders (id integer, region varchar)")
+    trino("INSERT INTO lake.sales.snap_orders VALUES (1, 'EU'), (2, 'US'), (3, 'EU')")
+    yesterday = dt.datetime.now(dt.timezone.utc).isoformat()
+    time.sleep(1.1)
+    trino("DELETE FROM lake.sales.snap_orders WHERE id <> 2")               # today's mistake
+    snaps = feed.snapshots(admin, "sales", "snap_orders")
+    good, bad = snaps[-2], snaps[-1]
+    assert good["records"] == 3 and bad["records"] == 1 and bad["current"] and not good["current"], snaps
+    then = feed.rows(admin, "sales", "snap_orders", yesterday, 10)
+    assert sorted(r[0] for r in then["rows"]) == [1, 2, 3] and then["snapshot"] == good["snapshot"]
+    # Bob sees the old snapshot through his row filter, and may not restore.
+    assert sorted(r[0] for r in feed.rows(bob, "sales", "snap_orders", str(good["snapshot"]))["rows"]) == [1, 3]
+    with pytest.raises(Exception, match="Access Denied"):
+        feed.restore(bob, "sales", "snap_orders", yesterday, "bob tries")
+    assert len(trino("SELECT * FROM lake.sales.snap_orders")) == 1
+    with pytest.raises(ChangeFeedError, match="reason"):
+        feed.restore(admin, "sales", "snap_orders", yesterday, "")
+    # The admin restores yesterday's table, with a reason; it is audited.
+    done = feed.restore(admin, "sales", "snap_orders", yesterday, "deleted by mistake in ticket 42")
+    assert done == {"table": "sales.snap_orders", "from_snapshot": bad["snapshot"], "to_snapshot": good["snapshot"],
+                    "from_id": bad["id"], "to_id": good["id"], "records": 3}
+    assert sorted(r["id"] for r in trino("SELECT id FROM lake.sales.snap_orders")) == [1, 2, 3]
+    assert audited[-1][1:4] == ("table.restored", admin, "table:sales.snap_orders")
+    assert audited[-1][4] == {"from_snapshot": bad["snapshot"], "to_snapshot": good["snapshot"],
+                              "reason": "deleted by mistake in ticket 42"}
+    with pytest.raises(ChangeFeedError) as e:
+        feed.restore(admin, "sales", "snap_orders", str(good["snapshot"]), "again")
+    assert e.value.status == 409
+    # Later snapshots stay in the history: the restore is undone by restoring the one before it.
+    assert feed.restore(admin, "sales", "snap_orders", str(bad["snapshot"]), "undo")["records"] == 1
+    assert [r["id"] for r in trino("SELECT id FROM lake.sales.snap_orders")] == [2]
+    trino("DROP TABLE lake.sales.snap_orders")

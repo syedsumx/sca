@@ -5,6 +5,9 @@ import type { BiComment, BiFolder, BiFolderDetail, BiImpact, BiKind, BiPopular, 
     LineageGraph,
     StoreCluster,
     StoreClusterNode,
+    RestoreResult,
+    SnapshotRows,
+    TableSnapshot,
 } from './types';
 import type {
     GitFolder,
@@ -1256,6 +1259,25 @@ export class ConsumerClient extends CairnClient {
 
     queryProfile(id: string, opts?: RequestOptions) {
         return this.request<QueryProfile>('GET', `/v1/queries/${enc(id)}`, undefined, opts);
+    }
+
+    /** A lakehouse table's snapshots (L59): record counts, and which one is current. */
+    tableSnapshots(table: string, opts?: RequestOptions) {
+        const [schema, name] = table.split('.');
+        return this.request<TableSnapshot[]>('GET', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/snapshots`, undefined, opts);
+    }
+
+    /** The table as it was at a snapshot (or time), as the caller sees it. */
+    snapshotRows(table: string, at: string, limit = 50) {
+        const [schema, name] = table.split('.');
+        return this.request<SnapshotRows>('GET', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/snapshots/${enc(at)}/rows`,
+            undefined, { query: { limit: String(limit) } });
+    }
+
+    /** Makes a snapshot the table's current one again (needs MANAGE_DATASET on the table). Audited. */
+    restoreSnapshot(table: string, snapshot: string, reason: string) {
+        const [schema, name] = table.split('.');
+        return this.request<RestoreResult>('POST', `/v1/lakehouse/tables/${enc(schema)}/${enc(name)}/restore`, { snapshot, reason });
     }
 
     sqlWorkflows(opts?: RequestOptions) {

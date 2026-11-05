@@ -2273,7 +2273,17 @@ A lakehouse table's row changes between two of its snapshots, for consumers that
   - With `key`, a deletion and an insertion with the same key are an update: `update_preimage` and `update_postimage`.
   - `until_snapshot` is the snapshot to pass as the next `since`.
   - The changes are net between the two snapshots: a row added and removed in between does not appear.
-- **`GET …/snapshots`** lists the table's snapshots: id, parent, commit time and operation.
+- **`GET …/snapshots`** lists the table's snapshots: id (also as a string, `id`, since a 64-bit id loses digits as a JavaScript number), parent, commit time, operation, rows (`records`; unknown when the table has equality deletes), rows added and deleted, and which one is `current`.
+
+### Snapshot browser and restore
+
+A table's **Snapshots** tab (Iceberg tables) lists its snapshots, shows the table as it was at any of them, and restores one.
+
+- **`GET …/snapshots/<id or ISO time>/rows`** (`limit`, 100; at most 1,000) is the table at that snapshot, read as the caller, so their masks and row filters apply. A time means the last snapshot committed at or before it.
+- **`POST …/restore`** with `snapshot` (an id or an ISO time) and `reason` (required) makes that snapshot the table's current one again (Iceberg's `rollback_to_snapshot`). It runs on Trino as the caller, so it needs `MANAGE_DATASET` on the table, like any table procedure; others are refused by Trino and the table is unchanged. Restoring the current snapshot is refused (409).
+- **Undoing.** Later snapshots stay in the table's history, so a restore is undone by restoring the snapshot that was current before it, until snapshot expiry removes them.
+- **Audited** as `table.restored`, with the snapshot before and after, and the reason.
+- **Tested** on real Trino and Iceberg (`test_a_person_browses_a_tables_snapshots_and_restores_yesterdays`). A table had a mistaken delete. The admin saw yesterday's snapshot with 3 rows and today's with 1, viewed yesterday's rows, and restored it with a reason, which was audited. Then they undid the restore. Bob saw only his EU rows of the old snapshot, and his restore was refused with the table unchanged. The UI test covers the list, the rows view, the reason and the exact 64-bit id sent.
 - **Governed as a read.** Both snapshots are read as the caller, with ordinary time-travel queries on Trino, so their policies, masks and row filters apply. Someone masked sees masked values in the feed, and someone row-filtered sees only the changes to rows they may see at each snapshot. Trino's own `table_changes` is not offered, because its rows escape masks and row filters.
 - **Cost.** The feed compares the two snapshots (`EXCEPT ALL` both ways): exact, but it reads both. Keep feeds frequent on large tables.
 - **Settings.** `CAIRN_CHANGE_FEED_CONNECTION` is a run-as-user Trino connection (default: `CAIRN_DERIVED_CONNECTION`, then `CAIRN_MAINTENANCE_CONNECTION`). The catalog's name comes from `CAIRN_DERIVED_CATALOG`.
