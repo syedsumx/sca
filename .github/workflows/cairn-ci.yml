@@ -364,14 +364,14 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
           for b in kube-apiserver kube-controller-manager kubectl; do
-            curl -fsSL -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
-            echo "$(curl -fsSL "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
+            curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
+            echo "$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
           done
-          curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
             | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
           chmod +x kube-apiserver kube-controller-manager kubectl etcd
           # The Spark Operator's SparkApplication CRD, pinned (what SparkApplications are validated against).
-          curl -fsSL -o sparkapplications.yaml \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o sparkapplications.yaml \
             https://raw.githubusercontent.com/kubeflow/spark-operator/v2.2.1/charts/spark-operator-chart/crds/sparkoperator.k8s.io_sparkapplications.yaml
           echo "50d3eeb2d5a58e162ed06e9a6d849227ed3522b0887a51b705dc1af8a0d53371  sparkapplications.yaml" | sha256sum -c -
       - uses: azure/setup-helm@v4
@@ -565,7 +565,7 @@ jobs:
           version: v3.16.4
       - name: Install kubeconform
         run: |
-          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | tar -xz -C /usr/local/bin kubeconform
       - name: Lint and validate every values profile
         run: |
@@ -605,7 +605,7 @@ jobs:
           ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
               --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
           # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
-          curl -fsSL -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
           tar xzf /tmp/airflow-chart.tgz -C /tmp
           helm template airflow /tmp/airflow -f deploy/airflow/values-cairn.yaml \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
@@ -768,7 +768,7 @@ jobs:
           REGISTRY: ghcr.io/${{ github.repository_owner }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          curl -fsSL -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
           chmod +x /usr/local/bin/cosign
           for img in platform consumer-ui remote-agent store catalog authorizer core web setup executor; do
             ref="${REGISTRY,,}/${img}:${CAIRN_VERSION}"
