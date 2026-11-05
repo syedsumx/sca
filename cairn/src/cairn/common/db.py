@@ -40,7 +40,7 @@ def get_engine(url: str) -> Engine:
         if engine is None:
             kwargs: dict = {"future": True, "pool_pre_ping": True}
             if url.startswith("sqlite"):
-                kwargs["connect_args"] = {"check_same_thread": False}
+                kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}   # wait for a writer, not fail
                 if url in ("sqlite://", "sqlite:///:memory:"):
                     from sqlalchemy.pool import StaticPool
 

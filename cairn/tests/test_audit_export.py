@@ -97,3 +97,48 @@ def test_cli_export_and_verify_file(engine, tmp_path, settings):
     out.write_text("\n".join([lines[0], json.dumps(tampered), *lines[2:]]) + "\n")
     bad = subprocess.run(cli + ["audit", "verify-file", str(out)], env=env, capture_output=True, text=True)
     assert bad.returncode == 1 and not json.loads(bad.stdout)["valid"]
+
+
+def test_concurrent_appends_on_sqlite_neither_deadlock_nor_fork_the_chain(tmp_path):
+    """Writers that hold SQLite's write lock and append in their own transaction (conn=...), beside writers that
+    append on their own, at once: before the fix each side waited for the other's lock until SQLite gave up
+    ("database is locked"); now all finish quickly and the hash chain has every entry exactly once."""
+    import threading
+    import time
+
+    from sqlalchemy import text
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.db import get_engine, init_db
+
+    e = get_engine(f"sqlite:///{tmp_path}/a.db")
+    init_db(e)
+    with e.begin() as c:
+        c.execute(text("CREATE TABLE work (n INTEGER)"))
+    log = AuditLog(e)
+    errors: list[BaseException] = []
+
+    def in_txn(i):
+        try:
+            with e.begin() as c:
+                c.execute(text("INSERT INTO work VALUES (:n)"), {"n": i})      # holds the write lock now
+                time.sleep(0.01)
+                log.record("t", "in_txn", "u", None, {"i": i}, conn=c)
+        except BaseException as ex:  # noqa: BLE001
+            errors.append(ex)
+
+    def alone(i):
+        try:
+            log.record("t", "alone", "u", None, {"i": i})
+        except BaseException as ex:  # noqa: BLE001
+            errors.append(ex)
+    threads = [threading.Thread(target=in_txn if i % 2 else alone, args=(i,)) for i in range(40)]
+    started = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(60)
+    assert not errors, errors[:3]
+    assert time.monotonic() - started < 20
+    v = log.verify_chain()
+    assert v["valid"] and v["entries_checked"] == 40, v

@@ -81,17 +81,28 @@ class AuditLog:
         }
         metrics.AUDIT_EVENTS.labels(category).inc()
         if conn is not None:
-            with self._lock:
-                self._append(conn, body)
+            self._append(conn, body)
             return body["id"]
-        with self._lock, self.engine.begin() as c:
+        with self.engine.begin() as c:
             self._append(c, body)
         return body["id"]
 
-    @staticmethod
-    def _append(conn, body: dict) -> None:
+    def _append(self, conn, body: dict) -> None:
+        """Appends under the database's own write lock, taken before the chain's head is read, so two writers
+        (threads or replicas) never chain onto the same entry. A lock of this process's around it would deadlock
+        against a caller already holding the database's write lock (``conn``) and waiting for it."""
         if conn.dialect.name == "postgresql":
             conn.exec_driver_sql("LOCK TABLE cairn_audit_log IN SHARE ROW EXCLUSIVE MODE")
+        elif conn.dialect.name == "sqlite":
+            conn.exec_driver_sql("UPDATE cairn_audit_log SET seq = seq WHERE 0")   # takes the write lock now
+        else:
+            with self._lock:
+                self._append_locked(conn, body)
+            return
+        self._append_locked(conn, body)
+
+    @staticmethod
+    def _append_locked(conn, body: dict) -> None:
         head = conn.execute(select(audit_log.c.hash).order_by(audit_log.c.seq.desc()).limit(1)).scalar()
         prev = head or GENESIS
         conn.execute(audit_log.insert().values(**body, prev_hash=prev, hash=_entry_hash(prev, body)))
