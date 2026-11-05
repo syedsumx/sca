@@ -593,6 +593,38 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
   - a shared dashboard rendered for its owner and for someone refused one of its tiles, who saw that tile's refusal and the other tile's data;
   - an alert that stayed quiet on its first fine check, was told once (to its owner and recipient) when the condition began, again when it stopped, and once when its query failed. It was not checked before it was due.
 
+### Sharing with people and groups
+
+Saved queries, workbooks and dashboards are shared with people or groups (`PUT /sql/shares/<kind>/<id>`, kind
+`query`, `workbook` or `dashboard`, body `{"principal": "urn:li:corpGroup:finance", "role": "VIEWER"}`; `"role":
+null` stops sharing). A shared asset shows its `role` for the caller: `OWNER`, `EDITOR` or `VIEWER`.
+
+| Role | May |
+|---|---|
+| `VIEWER` | open and run it |
+| `EDITOR` | also change it (name, SQL, elements, tiles) |
+| owner | also share it, make it visible to everyone (`shared`), and delete it |
+
+* Someone it is not shared with gets 404, as if it did not exist. Membership of a group counts, so a dashboard
+  shared with Finance follows the group's members.
+* An editor's save keeps the owner and leaves `shared` as it was. Tiles already on a dashboard stay when an editor
+  saves it; any new tile must be a query the editor may open.
+* Sharing never shares data. Every query, element and tile runs as the person looking, under their own
+  policies, masks and row filters. A dashboard shared with someone lets them render the saved queries its tiles
+  are built on, but not open those queries on their own.
+* Who has it: `GET /sql/shares/<kind>/<id>` (the owner and editors). A person shared with is told (event
+  `bi.shared`).
+* Each change is audited (`bi.shared` and `bi.unshared`, category `sql`). Deleting an asset drops its shares.
+* Up to 500 people and groups per asset.
+* Metrics are not shared this way: they are platform-wide definitions (see the metrics layer).
+
+Table `cairn_bi_shares` (migration 0081). Tested on real Trino
+(`test_bi_sharing_with_people_and_groups_keeps_each_viewers_data`). The test covers:
+* a viewer who sees only their own rows through the owner's dashboard;
+* a group of editors;
+* refused reshares, deletes and new tiles;
+* removing access.
+
 ## Data apps
 
 Data apps are Streamlit apps (or any web app) that Cairn serves to people, each viewer signed in and governed as themselves.

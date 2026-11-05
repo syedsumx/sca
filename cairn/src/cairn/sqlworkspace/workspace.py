@@ -70,8 +70,11 @@ def _chart(chart: Optional[dict]) -> str:
     return json.dumps({"type": t, "x": str(chart.get("x") or ""), "y": y[:8]})
 
 
-def _saved(r) -> dict:
-    return {"id": r.id, "owner": r.owner, "name": r.name, "description": r.description, "connection": r.connection,
+def _saved(r, level: int = 0) -> dict:
+    from cairn.sqlworkspace.sharing import role_name
+
+    return {"id": r.id, "owner": r.owner, "role": role_name(level), "name": r.name, "description": r.description,
+            "connection": r.connection,
             "sql": r.sql, "shared": bool(r.shared), "chart": json.loads(r.chart or "{}"),
             "created_ms": r.created_ms, "updated_ms": r.updated_ms}
 
@@ -83,6 +86,7 @@ class SqlWorkspace:
         self.engine, self.data, self.graph = engine, data, graph
         self.cache = None                                  # cairn.sqlworkspace.cache.ResultCache (dashboards, workbooks)
         self.matviews = None                               # cairn.pipelines.matviews, set when derived tables are
+        self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self._schema_cache: dict[str, tuple[float, list[dict]]] = {}
 
     # ---- running ------------------------------------------------------------------------
@@ -141,18 +145,28 @@ class SqlWorkspace:
 
     # ---- saved queries ------------------------------------------------------------------
     def saved(self, actor: str) -> list[dict]:
-        """The caller's queries and everyone's shared ones."""
-        with self.engine.connect() as conn:
-            rows = conn.execute(select(saved_queries).where(or_(saved_queries.c.owner == actor, saved_queries.c.shared))
-                                .order_by(saved_queries.c.updated_ms.desc())).all()
-        return [_saved(r) for r in rows]
+        """The caller's queries, those shared with them (or a group of theirs) and those shared with everyone."""
+        from cairn.sqlworkspace.sharing import access
 
-    def get(self, actor: str, qid: str) -> dict:
+        visible = [saved_queries.c.owner == actor, saved_queries.c.shared]
+        if self.sharing is not None:
+            visible.append(saved_queries.c.id.in_(self.sharing.ids(actor, "query")))
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(saved_queries).where(or_(*visible))
+                                .order_by(saved_queries.c.updated_ms.desc())).all()
+        return [_saved(r, access(self.sharing, actor, "query", r)) for r in rows]
+
+    def get(self, actor: str, qid: str, through_dashboard: bool = False) -> dict:
+        """A saved query the actor may open. ``through_dashboard``: a tile of a dashboard they opened (its
+        definition is theirs to render; its rows are still read as them)."""
+        from cairn.sqlworkspace.sharing import access
+
         with self.engine.connect() as conn:
             r = conn.execute(select(saved_queries).where(saved_queries.c.id == qid)).first()
-        if r is None or (r.owner != actor and not r.shared):
+        level = access(self.sharing, actor, "query", r)
+        if r is None or (not level and not through_dashboard):
             raise WorkspaceError("no such saved query", 404)
-        return _saved(r)
+        return _saved(r, level)
 
     def save(self, actor: str, body: dict, qid: Optional[str] = None) -> dict:
         name = str(body.get("name") or "").strip()
@@ -168,20 +182,28 @@ class SqlWorkspace:
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000], "sql": sql,
                   "connection": connection, "shared": bool(body.get("shared")), "chart": _chart(body.get("chart")),
                   "updated_ms": _now()}
+        from cairn.sqlworkspace.sharing import OWNER, ROLES, access
+
         with self.engine.begin() as conn:
             if qid is None:
                 qid = uuid.uuid4().hex
                 conn.execute(saved_queries.insert().values(id=qid, owner=actor, created_ms=values["updated_ms"], **values))
             else:
-                n = conn.execute(update(saved_queries).where(and_(saved_queries.c.id == qid, saved_queries.c.owner == actor))
-                                 .values(**values)).rowcount
-                if not n:
-                    raise WorkspaceError("no such saved query of yours", 404)
+                r = conn.execute(select(saved_queries).where(saved_queries.c.id == qid)).first()
+                level = access(self.sharing, actor, "query", r)
+                if level < ROLES["EDITOR"]:
+                    raise WorkspaceError("no such saved query", 404) if not level else \
+                        WorkspaceError("only its owner and editors change a saved query", 403)
+                if level < OWNER:
+                    values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
+                conn.execute(update(saved_queries).where(saved_queries.c.id == qid).values(**values))
         return self.get(actor, qid)
 
     def delete(self, actor: str, qid: str) -> None:
         with self.engine.begin() as conn:
             n = conn.execute(delete(saved_queries).where(and_(saved_queries.c.id == qid, saved_queries.c.owner == actor))).rowcount
+            if n and self.sharing is not None:
+                self.sharing.drop("query", qid, conn)
         if not n:
             raise WorkspaceError("no such saved query of yours", 404)
 

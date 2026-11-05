@@ -468,6 +468,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 from cairn.sqlworkspace.boards import build_boards_router
 
                 app.include_router(build_boards_router(services.sql_boards, cp))
+                if getattr(services, "bi_sharing", None) is not None:
+                    from cairn.sqlworkspace.sharing import build_sharing_router
+
+                    app.include_router(build_sharing_router(services.bi_sharing, cp))
     if "governance" in modules and services.reports is not None:
         from cairn.reports.api import build_router as reports_router
 

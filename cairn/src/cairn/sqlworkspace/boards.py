@@ -73,8 +73,10 @@ def _now() -> int:
     return int(time.time() * 1000)
 
 
-def _board(r) -> dict:
-    return {"id": r.id, "owner": r.owner, "name": r.name, "description": r.description, "shared": bool(r.shared),
+def _board(r, level: int = 0) -> dict:
+    from cairn.sqlworkspace.sharing import role_name
+
+    return {"id": r.id, "owner": r.owner, "role": role_name(level), "name": r.name, "description": r.description, "shared": bool(r.shared),
             "tiles": json.loads(r.tiles), "controls": json.loads(r.controls or "[]"), "updated_ms": r.updated_ms}
 
 
@@ -119,6 +121,7 @@ class Boards:
         (:class:`cairn.sqlworkspace.workbooks.Workbooks`) runs element tiles."""
         self.engine, self.ws, self.notify, self.wb = engine, workspace, notify, workbooks
         self.metrics = None          # cairn.sqlworkspace.metrics.Metrics, for metric tiles (set when it is built)
+        self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -126,7 +129,20 @@ class Boards:
         tiles = body.get("tiles") or []
         if not name or not isinstance(tiles, list) or not tiles:
             raise WorkspaceError("a dashboard needs a name and at least one tile")
-        clean = [self._tile(actor, t) for t in tiles[:24]]
+        from cairn.sqlworkspace.sharing import OWNER, ROLES, access
+
+        current = None
+        if did is not None:
+            with self.engine.connect() as conn:
+                current = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
+            level = access(self.sharing, actor, "dashboard", current)
+            if level < ROLES["EDITOR"]:
+                raise WorkspaceError("no such dashboard", 404) if not level else \
+                    WorkspaceError("only its owner and editors change a dashboard", 403)
+        # Tiles already on the board stay (an editor need not be able to open the owner's queries); new ones
+        # are checked as the person saving.
+        keep = {t.get("query") for t in json.loads(current.tiles)} - {None} if current is not None else set()
+        clean = [self._tile(actor, t, keep) for t in tiles[:24]]
         controls = self._controls(body.get("controls") or [], len(clean))
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000],
                   "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "controls": json.dumps(controls),
@@ -135,30 +151,41 @@ class Boards:
             if did is None:
                 did = uuid.uuid4().hex
                 conn.execute(dashboards.insert().values(id=did, owner=actor, **values))
-            elif not conn.execute(update(dashboards).where(and_(dashboards.c.id == did, dashboards.c.owner == actor))
-                                  .values(**values)).rowcount:
-                raise WorkspaceError("no such dashboard of yours", 404)
+            else:
+                if level < OWNER:
+                    values["shared"] = bool(current.shared)     # who sees it is the owner's to decide
+                if not conn.execute(update(dashboards).where(dashboards.c.id == did).values(**values)).rowcount:
+                    raise WorkspaceError("no such dashboard", 404)
         return self.dashboard(actor, did)
 
     def dashboards(self, actor: str) -> list[dict]:
+        from cairn.sqlworkspace.sharing import access
+
+        visible = [dashboards.c.owner == actor, dashboards.c.shared]
+        if self.sharing is not None:
+            visible.append(dashboards.c.id.in_(self.sharing.ids(actor, "dashboard")))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(dashboards).where(or_(dashboards.c.owner == actor, dashboards.c.shared))
-                                .order_by(dashboards.c.updated_ms.desc())).all()
-        return [_board(r) for r in rows]
+            rows = conn.execute(select(dashboards).where(or_(*visible)).order_by(dashboards.c.updated_ms.desc())).all()
+        return [_board(r, access(self.sharing, actor, "dashboard", r)) for r in rows]
 
     def dashboard(self, actor: str, did: str) -> dict:
+        from cairn.sqlworkspace.sharing import access
+
         with self.engine.connect() as conn:
             r = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
-        if r is None or (r.owner != actor and not r.shared):
+        level = access(self.sharing, actor, "dashboard", r)
+        if not level:
             raise WorkspaceError("no such dashboard", 404)
-        return _board(r)
+        return _board(r, level)
 
     def delete_dashboard(self, actor: str, did: str) -> None:
         with self.engine.begin() as conn:
             if not conn.execute(delete(dashboards).where(and_(dashboards.c.id == did, dashboards.c.owner == actor))).rowcount:
                 raise WorkspaceError("no such dashboard of yours", 404)
+            if self.sharing is not None:
+                self.sharing.drop("dashboard", did, conn)
 
-    def _tile(self, actor: str, t: Any) -> dict:
+    def _tile(self, actor: str, t: Any, keep: frozenset | set = frozenset()) -> dict:
         if not isinstance(t, dict):
             raise WorkspaceError("a tile is an object")
         out: dict[str, Any] = {"width": 2 if t.get("width") == 2 else 1}
@@ -191,7 +218,8 @@ class Boards:
                 raise WorkspaceError("drill: the element is grouped by the first drill column")
             return {**out, "element": t["element"], "connection": connection, "drill": drill,
                     "title": str(t.get("title") or (t["element"].get("source") or {}).get("table") or "Tile")[:256]}
-        q = self.ws.get(actor, str(t.get("query") or ""))          # each tile: a query the owner may open
+        qid = str(t.get("query") or "")
+        q = self.ws.get(actor, qid, through_dashboard=qid in keep)  # a new tile: a query the person saving may open
         return {**out, "query": q["id"], "title": str(t.get("title") or q["name"])[:256]}
 
     @staticmethod
@@ -307,7 +335,7 @@ class Boards:
         return {**t, "chart": t.get("chart") or default, "result": out, "applied": applied}
 
     def _run_query(self, actor: str, t: dict, filters: list[dict], cache: bool = True) -> dict:
-        q = self.ws.get(actor, t["query"])
+        q = self.ws.get(actor, t["query"], through_dashboard=True)    # a tile of a board the viewer opened
         applied: list[dict] = []
         if filters:
             inner = q["sql"].strip().rstrip(";")
@@ -458,6 +486,10 @@ def build_boards_router(boards: Boards, current_principal) -> Any:
     @router.put("/dashboards/{did}")
     def change_board(did: str, body: dict = Body(...), p=Depends(current_principal)):
         return wrap(lambda: boards.save_dashboard(person(p), body, did))
+
+    @router.get("/dashboards/{did}")
+    def get_board(did: str, p=Depends(current_principal)):
+        return wrap(lambda: boards.dashboard(person(p), did))
 
     @router.delete("/dashboards/{did}", status_code=204)
     def delete_board(did: str, p=Depends(current_principal)):

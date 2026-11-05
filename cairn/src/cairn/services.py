@@ -84,6 +84,7 @@ class Services:
     report_schedules: Optional[Any] = None
     saml: Optional[Any] = None
     secret_scopes: Optional[Any] = None
+    bi_sharing: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -894,6 +895,17 @@ def _build_active_metadata(s: Services) -> None:
         def tell(type_, title, body, recipients, payload):
             hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload, url="/sql/workflows"))
         s.sql_boards = Boards(s.engine, s.sql_workspace, tell, s.workbooks)
+        # Sharing queries, workbooks and dashboards with people and groups (viewers, editors); data stays the viewer's.
+        from cairn.sqlworkspace.sharing import Sharing
+
+        def share_groups(actor: str) -> list[str]:
+            return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
+
+        def tell_shared(title, name, body, recipients, payload):
+            hub.publish(Event(type="bi.shared", title=title, body=body, recipients=recipients, payload=payload,
+                              url=f"/sql/{payload['kind']}s/{payload['id']}"))
+        s.bi_sharing = Sharing(s.engine, share_groups, s.audit, tell_shared)
+        s.sql_workspace.sharing = s.workbooks.sharing = s.sql_boards.sharing = s.bi_sharing
         # The metrics layer: measures defined once, queried as the person (through workbook elements).
         from cairn.sqlworkspace.metrics import Metrics
 

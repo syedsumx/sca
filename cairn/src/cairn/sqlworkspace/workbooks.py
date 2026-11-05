@@ -268,6 +268,7 @@ class Workbooks:
         """``workspace``: the SqlWorkspace (runs SQL as a person); ``columns_of(actor, connection, table)``:
         the table's columns as the person may see them."""
         self.engine, self.workspace, self.columns_of = engine, workspace, columns_of
+        self.sharing = None                                # cairn.sqlworkspace.sharing.Sharing (people and groups)
 
     def compile(self, actor: str, connection: str, spec: dict) -> dict:
         table = (spec.get("source") or {}).get("table", "")
@@ -299,22 +300,31 @@ class Workbooks:
         return {**out, "sql": compiled["sql"]}
 
     # ---- saved workbooks -----------------------------------------------------------------------
-    def _row(self, r) -> dict:
+    def _row(self, r, level: int = 0) -> dict:
+        from cairn.sqlworkspace.sharing import role_name
+
         d = dict(r._mapping)
-        return {**d, "spec": json.loads(d["spec"])}
+        return {**d, "spec": json.loads(d["spec"]), "role": role_name(level)}
 
     def list(self, actor: str) -> list[dict]:
+        from cairn.sqlworkspace.sharing import access
+
+        visible = [workbooks.c.owner == actor, workbooks.c.shared.is_(True)]
+        if self.sharing is not None:
+            visible.append(workbooks.c.id.in_(self.sharing.ids(actor, "workbook")))
         with self.engine.connect() as conn:
-            rows = conn.execute(select(workbooks).where(or_(workbooks.c.owner == actor, workbooks.c.shared.is_(True)))
-                                .order_by(workbooks.c.updated_ms.desc())).all()
-        return [self._row(r) for r in rows]
+            rows = conn.execute(select(workbooks).where(or_(*visible)).order_by(workbooks.c.updated_ms.desc())).all()
+        return [self._row(r, access(self.sharing, actor, "workbook", r)) for r in rows]
 
     def get(self, actor: str, wid: str) -> dict:
+        from cairn.sqlworkspace.sharing import access
+
         with self.engine.connect() as conn:
             r = conn.execute(select(workbooks).where(workbooks.c.id == wid)).first()
-        if r is None or (r.owner != actor and not r.shared):
+        level = access(self.sharing, actor, "workbook", r)
+        if not level:
             raise WorkbookError("no such workbook", 404)
-        return self._row(r)
+        return self._row(r, level)
 
     def save(self, actor: str, body: dict, wid: Optional[str] = None) -> dict:
         name = str(body.get("name") or "").strip()
@@ -329,11 +339,16 @@ class Workbooks:
                   "connection": str(body.get("connection") or ""), "shared": bool(body.get("shared")), "updated_ms": _now()}
         if not values["connection"]:
             raise WorkbookError("connection: where it runs")
+        from cairn.sqlworkspace.sharing import OWNER, ROLES, access
+
         with self.engine.begin() as conn:
             if wid:
-                r = conn.execute(select(workbooks.c.owner).where(workbooks.c.id == wid)).first()
-                if r is None or r.owner != actor:
-                    raise WorkbookError("only its owner changes a workbook", 404 if r is None else 403)
+                r = conn.execute(select(workbooks).where(workbooks.c.id == wid)).first()
+                level = access(self.sharing, actor, "workbook", r)
+                if level < ROLES["EDITOR"]:
+                    raise WorkbookError("only its owner and editors change a workbook", 403 if level else 404)
+                if level < OWNER:
+                    values["shared"] = bool(r.shared)       # who sees it is the owner's to decide
                 conn.execute(update(workbooks).where(workbooks.c.id == wid).values(**values))
             else:
                 wid = uuid.uuid4().hex
@@ -344,6 +359,8 @@ class Workbooks:
         with self.engine.begin() as conn:
             if not conn.execute(delete(workbooks).where(workbooks.c.id == wid, workbooks.c.owner == actor)).rowcount:
                 raise WorkbookError("no workbook of yours with that id", 404)
+            if self.sharing is not None:
+                self.sharing.drop("workbook", wid, conn)
 
 
 def build_workbooks_router(wb: Workbooks, current_principal) -> Any:

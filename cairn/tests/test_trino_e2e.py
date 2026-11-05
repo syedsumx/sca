@@ -2012,3 +2012,105 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         assert any(e["action"] == "clean_room.run" for e in s.audit.entries("sharing", limit=50))
     finally:
         s.pdp.set_bundle(b)
+
+
+def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn):
+    """Saved queries, workbooks and dashboards shared with a person or a group, as a viewer or an editor, on
+    real Trino: nobody else finds them, editors change but do not reshare or delete, and every viewer still sees
+    only their own rows (Bob's row filter) through a dashboard built on the owner's private query."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.sh_orders AS SELECT * FROM (VALUES (1, 'EU', 10e0), (2, 'US', 20e0), (3, 'EU', 5e0)) "
+          "AS t(id, region, amount)")
+    s.graph.aspects[("urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.sh_orders,PROD)", "schemaMetadata")] = {
+        "fields": [{"fieldPath": c} for c in ("id", "region", "amount")]}
+    team = "urn:li:corpGroup:sharing-analysts"
+    s.graph.aspects[("urn:li:corpuser:carol", "groupMembership")] = {"groups": [team]}
+    s.attributes.invalidate("urn:li:corpuser:carol")
+    admin, ana, bob, carol = ({"X-Cairn-Actor": f"urn:li:corpuser:{u}"} for u in ("admin", "ana", "bob", "carol"))
+    c = httpx.Client(base_url=url, timeout=120)
+
+    q = c.post("/sql/saved", headers=admin, json={"name": "sh orders", "connection": "lakehouse",
+                                                  "sql": "SELECT id, region, amount FROM sales.sh_orders ORDER BY id"})
+    assert q.status_code in (200, 201), q.text
+    qid = q.json()["id"]
+    d = c.post("/sql/dashboards", headers=admin, json={"name": "Shared orders", "tiles": [{"query": qid, "title": "Orders"}]})
+    assert d.status_code == 201, d.text
+    did = d.json()["id"]
+    assert d.json()["role"] == "OWNER"
+
+    # Not shared yet: as if it did not exist.
+    for h in (bob, carol):
+        assert c.get(f"/sql/dashboards/{did}", headers=h).status_code == 404
+        assert did not in [x["id"] for x in c.get("/sql/dashboards", headers=h).json()]
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=bob).status_code == 404
+
+    # Bob as a viewer: he opens it and sees only his rows, though the query under it stays the owner's.
+    r = c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "VIEWER"})
+    assert r.status_code == 200 and r.json()["shares"][0]["role"] == "VIEWER", r.text
+    assert c.get(f"/sql/dashboards/{did}", headers=bob).json()["role"] == "VIEWER"
+    told = [n for n in s.notify.inbox("urn:li:corpuser:bob") if n["type"] == "bi.shared"]
+    assert told and "Shared orders" in json.dumps(told), told                # Bob is told it is shared with him
+    assert did in [x["id"] for x in c.get("/sql/dashboards", headers=bob).json()]
+    tiles = c.post(f"/sql/dashboards/{did}/render", headers=bob, json={}).json()["tiles"]
+    assert {row[1] for row in tiles[0]["result"]["rows"]} == {"EU"}, tiles[0]
+    full = c.post(f"/sql/dashboards/{did}/render", headers=admin, json={}).json()["tiles"]
+    assert [row[0] for row in full[0]["result"]["rows"]] == [1, 2, 3]
+    assert c.get(f"/sql/saved/{qid}", headers=bob).status_code == 404          # the query itself is not shared
+    assert c.put(f"/sql/dashboards/{did}", headers=bob, json={"name": "mine", "tiles": [{"query": qid}]}).status_code == 403
+    assert c.put(f"/sql/shares/dashboard/{did}", headers=bob,
+                 json={"principal": "urn:li:corpuser:ana", "role": "VIEWER"}).status_code == 403
+
+    # A group as editor: Carol (a member) renames it, keeping the owner's tile, but cannot make it public,
+    # reshare it or delete it.
+    c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": team, "role": "EDITOR"})
+    r = c.put(f"/sql/dashboards/{did}", headers=carol, json={"name": "Orders (renamed)", "shared": True,
+                                                            "tiles": [{"query": qid, "title": "Orders"}]})
+    assert r.status_code == 200, r.text
+    assert r.json()["name"] == "Orders (renamed)" and r.json()["shared"] is False and r.json()["owner"].endswith(":admin")
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=carol).status_code == 200      # editors see who has it
+    assert c.put(f"/sql/shares/dashboard/{did}", headers=carol,
+                 json={"principal": "urn:li:corpuser:ana", "role": "EDITOR"}).status_code == 403
+    assert c.delete(f"/sql/dashboards/{did}", headers=carol).status_code == 404
+    # A new tile on a query Carol may not open is refused.
+    private = c.post("/sql/saved", headers=admin, json={"name": "private", "connection": "lakehouse",
+                                                        "sql": "SELECT 1 AS one"}).json()["id"]
+    assert c.put(f"/sql/dashboards/{did}", headers=carol, json={
+        "name": "x", "tiles": [{"query": qid}, {"query": private}]}).status_code == 404
+
+    # Saved queries and workbooks share the same way.
+    c.put(f"/sql/shares/query/{qid}", headers=admin, json={"principal": "urn:li:corpuser:ana", "role": "VIEWER"})
+    assert c.get(f"/sql/saved/{qid}", headers=ana).json()["role"] == "VIEWER"
+    assert qid in [x["id"] for x in c.get("/sql/saved", headers=ana).json()]
+    wb = c.post("/sql/workbooks", headers=admin, json={"name": "sh wb", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.sh_orders"}}]}})
+    assert wb.status_code in (200, 201), wb.text
+    wid = wb.json()["id"]
+    assert c.get(f"/sql/workbooks/{wid}", headers=bob).status_code == 404
+    c.put(f"/sql/shares/workbook/{wid}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": "EDITOR"})
+    r = c.put(f"/sql/workbooks/{wid}", headers=bob, json={"name": "sh wb 2", "connection": "lakehouse", "spec": {
+        "elements": [{"source": {"table": "sales.sh_orders"}}]}})
+    assert r.status_code == 200 and r.json()["role"] == "EDITOR", r.text
+
+    # Taking it away, and deleting, end access; the audit says who shared what.
+    c.put(f"/sql/shares/dashboard/{did}", headers=admin, json={"principal": "urn:li:corpuser:bob", "role": None})
+    assert c.get(f"/sql/dashboards/{did}", headers=bob).status_code == 404
+    assert c.delete(f"/sql/dashboards/{did}", headers=admin).status_code == 204
+    assert c.get(f"/sql/shares/dashboard/{did}", headers=admin).status_code == 404
+    from cairn.sqlworkspace.sharing import bi_shares
+
+    with s.engine.connect() as conn:
+        assert not conn.execute(bi_shares.select().where(bi_shares.c.asset_id == did)).all()
+    acts = [e["action"] for e in s.audit.entries(limit=2000)]
+    assert "bi.shared" in acts and "bi.unshared" in acts
+    # Bad requests.
+    assert c.put(f"/sql/shares/nope/{qid}", headers=admin, json={"principal": team, "role": "VIEWER"}).status_code == 404
+    assert c.put(f"/sql/shares/query/{qid}", headers=admin, json={"principal": "bob", "role": "VIEWER"}).status_code == 400
+    assert c.put(f"/sql/shares/query/{qid}", headers=admin,
+                 json={"principal": "urn:li:corpuser:bob", "role": "OWNER"}).status_code == 400
