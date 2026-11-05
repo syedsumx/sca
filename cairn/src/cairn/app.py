@@ -446,6 +446,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.identity.secret_scopes import build_secret_scopes_router
 
         app.include_router(build_secret_scopes_router(services.secret_scopes, cp))
+    if getattr(services, "reverse_syncs", None) is not None:  # reverse ETL: governed tables out to SaaS apps
+        from cairn.pipelines.reverse_etl import build_reverse_router
+
+        app.include_router(build_reverse_router(services.reverse_syncs, cp))
     if getattr(services, "saas", None) is not None:          # SaaS connectors: Salesforce, HubSpot into Iceberg
         from cairn.pipelines.saas import build_saas_router
 

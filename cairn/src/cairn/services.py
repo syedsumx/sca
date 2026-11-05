@@ -86,6 +86,7 @@ class Services:
     secret_scopes: Optional[Any] = None
     volumes: Optional[Any] = None
     saas: Optional[Any] = None
+    reverse_syncs: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -836,6 +837,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_secret_scopes(s)
         _build_volumes(s)
         _build_saas(s)
+        _build_reverse_etl(s)
         _build_records(s)
         from cairn.common.limits import ApiLimits
 
@@ -1898,6 +1900,34 @@ def _build_saas(s: Services) -> None:
                        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
                                                     raise_on_deny=False),
                        urn, s.audit, _Changes(), notify)
+
+
+def _build_reverse_etl(s: Services) -> None:
+    """Reverse ETL (cairn.pipelines.reverse_etl): governed tables out to SaaS apps, read on Trino as the owner."""
+    conn_name = (os.environ.get("CAIRN_REVERSE_ETL_CONNECTION") or os.environ.get("CAIRN_CHANGE_FEED_CONNECTION")
+                 or os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"))
+    if not conn_name or s.secret_scopes is None or getattr(s, "data_access", None) is None:
+        return
+    from cairn.pipelines.reverse_etl import PRIVILEGE, ReverseSyncs
+
+    def run_sql(owner: str, sql: str, limit: int):
+        definition = (s.data_access.registry.definitions() or {}).get(conn_name) or {}
+        return s.data_access.run_on_trino(definition, owner, sql, limit)
+
+    def urn(ns: str, t: str) -> str:
+        lake = getattr(s, "lakehouse", None)
+        return lake.urn([ns], t) if lake is not None else f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"
+
+    def notify(type_, title, body, recipients, payload):
+        hub = getattr(s, "notify", None)
+        if hub is not None:
+            from cairn.notify.hub import Event
+
+            hub.publish(Event(type=type_, title=title, body=body, recipients=recipients, payload=payload))
+    s.reverse_syncs = ReverseSyncs(
+        s.engine, run_sql, s.data_access.plan_for,
+        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), PRIVILEGE, u, raise_on_deny=False),
+        s.secret_scopes.read, urn, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit, notify)
 
 
 def _build_saml(s: Services) -> None:

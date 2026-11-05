@@ -117,6 +117,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.jobs.run_due)            # scheduled notebook and Python jobs
     if getattr(s, "saas", None) is not None:
         sch.extra.append(s.saas.run_due)            # SaaS connectors (Salesforce, HubSpot)
+    if getattr(s, "reverse_syncs", None) is not None:
+        sch.extra.append(s.reverse_syncs.run_due)   # reverse ETL out to SaaS apps
     if getattr(s, "report_schedules", None) is not None:
         sch.extra.append(s.report_schedules.run_due)   # scheduled exports of dashboards and workbooks
     if getattr(s, "git_folders", None) is not None:

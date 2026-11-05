@@ -88,9 +88,8 @@ def _next(cron: Optional[str], after_ms: int) -> Optional[int]:
 
 
 # --------------------------------------------------------------------------- the two APIs
-def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
-                       cursor: Optional[str]) -> Iterator[dict]:
-    """Records of ``obj`` modified at or after ``cursor`` (ISO time), oldest first: ``{id, modified, values}``."""
+def salesforce_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str, str]:
+    """(instance URL, access token): the given token, or one from a connected app's client credentials."""
     base = secrets.get("instance_url", "").rstrip("/")
     if not base.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
         raise SaasError("salesforce: instance_url must be https://")
@@ -102,6 +101,24 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
         if r.status_code != 200:
             raise SaasError(f"salesforce: sign-in refused ({r.status_code})", 502)
         token = r.json()["access_token"]
+    return base, token
+
+
+def hubspot_session(secrets: dict[str, str]) -> tuple[str, str]:
+    """(API base URL, private app token)."""
+    base = (secrets.get("base_url") or "https://api.hubapi.com").rstrip("/")
+    if not base.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
+        raise SaasError("hubspot: base_url must be https://")
+    token = secrets.get("access_token")
+    if not token:
+        raise SaasError("hubspot: the secret scope has no access_token", 400)
+    return base, token
+
+
+def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
+                       cursor: Optional[str]) -> Iterator[dict]:
+    """Records of ``obj`` modified at or after ``cursor`` (ISO time), oldest first: ``{id, modified, values}``."""
+    base, token = salesforce_session(http, secrets)
     version = os.environ.get("CAIRN_SAAS_SALESFORCE_API", "v61.0")
     cols = ", ".join(["Id", "SystemModstamp", *[f for f in fields if f not in ("Id", "SystemModstamp")]])
     soql = f"SELECT {cols} FROM {obj}"
@@ -126,12 +143,7 @@ def salesforce_records(http: httpx.Client, secrets: dict[str, str], obj: str, fi
 def hubspot_records(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
                     cursor: Optional[str]) -> Iterator[dict]:
     """Records of ``obj`` modified at or after ``cursor`` (epoch ms), oldest first."""
-    base = (secrets.get("base_url") or "https://api.hubapi.com").rstrip("/")
-    if not base.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
-        raise SaasError("hubspot: base_url must be https://")
-    token = secrets.get("access_token")
-    if not token:
-        raise SaasError("hubspot: the secret scope has no access_token", 400)
+    base, token = hubspot_session(secrets)
     headers = {"Authorization": f"Bearer {token}"}
     since = cursor
     while True:                                  # a search returns at most 10,000 records: then ask again from the last
@@ -176,6 +188,28 @@ def _hubspot_ms(v: str) -> str:
     if re.fullmatch(r"\d+", v or ""):
         return v
     return str(int(datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000))
+
+
+REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",)}
+OPTIONAL_KEYS = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",)}
+
+
+def connector_keys(read_secret: Callable[[str, str, str], str], owner: str, scope: str, kind: str) -> dict[str, str]:
+    """A connector's keys, read from ``scope`` as ``owner``. A required key (or the scope) the owner cannot read
+    stops the run before any request is made; an absent optional key is fine."""
+    out = {}
+    for k in REQUIRED_KEYS[kind]:
+        try:
+            out[k] = read_secret(owner, scope, k)
+        except Exception as e:  # noqa: BLE001 - no scope, no key, or no right: fail closed
+            raise SaasError(f"cannot read {k} from secret scope {scope} as {owner}: {e}", 403)
+    for k in OPTIONAL_KEYS[kind]:
+        try:
+            out[k] = read_secret(owner, scope, k)
+        except Exception as e:  # noqa: BLE001 - an absent optional key is fine; anything else is not
+            if str(e) != "no such secret":
+                raise SaasError(f"cannot read {k} from secret scope {scope}: {e}", 403)
+    return out
 
 
 # --------------------------------------------------------------------------- the service
@@ -297,25 +331,8 @@ class SaasSyncs:
 
         return RestCatalog("cairn-saas", **self.catalog_props)
 
-    REQUIRED = {"salesforce": ("instance_url",), "hubspot": ("access_token",)}
-    OPTIONAL = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",)}
-
     def _secrets(self, s: dict) -> dict[str, str]:
-        """The connector's keys, read as the owner. A required key (or the scope) the owner cannot read stops the
-        run before any request is made."""
-        out = {}
-        for k in self.REQUIRED[s["kind"]]:
-            try:
-                out[k] = self.read_secret(s["owner"], s["secret_scope"], k)
-            except Exception as e:  # noqa: BLE001 - no scope, no key, or no right: fail closed
-                raise SaasError(f"cannot read {k} from secret scope {s['secret_scope']} as {s['owner']}: {e}", 403)
-        for k in self.OPTIONAL[s["kind"]]:
-            try:
-                out[k] = self.read_secret(s["owner"], s["secret_scope"], k)
-            except Exception as e:  # noqa: BLE001 - an absent optional key is fine; anything else is not
-                if str(e) != "no such secret":
-                    raise SaasError(f"cannot read {k} from secret scope {s['secret_scope']}: {e}", 403)
-        return out
+        return connector_keys(self.read_secret, s["owner"], s["secret_scope"], s["kind"])
 
     def _run(self, s: dict) -> dict:
         rows, error, cursor = 0, None, s["cursor"]

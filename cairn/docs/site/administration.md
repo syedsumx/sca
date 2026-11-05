@@ -2406,6 +2406,35 @@ Salesforce and HubSpot objects load into governed lakehouse tables on a schedule
   - HubSpot: contacts loaded, a field added a column, and a failing API was recorded and told, with the cursor kept.
   - Refused: a sync the owner may not write, injection-shaped object and field names, keys the owner cannot read (no request was made), and another person's sync.
 
+## Reverse ETL
+
+Governed lakehouse tables sync out to SaaS apps (HubSpot, Salesforce) as their owner (`/v1/reverse-syncs`, `cairn.pipelines.reverse_etl`).
+
+- **Defining one.** `POST /v1/reverse-syncs` with:
+  - `name`, `source` (`schema.table` in the lakehouse), `kind` (`hubspot` or `salesforce`) and `object` (`contacts`, `Contact`);
+  - `key`: `{column, field}`. The source column matches records in the app by `field`: a HubSpot unique property such as `email`, or a Salesforce external id field such as `Cairn_Id__c`;
+  - `mapping`: `{source column: app field}`;
+  - `secret_scope`, and optionally `cron`.
+
+  `PUT`, `DELETE` and `POST …/{name}/run` (`?wait=true`) work as for the SaaS connectors. Only the owner sees a sync.
+- **As the owner.** Each run reads the source on Trino as the sync's owner, so their row filters decide which rows leave. Sending data out of the platform needs `EXPORT_DATASET` on the source, granted like any privilege and checked at save and at every run.
+- **Masked columns are never sent.** Before reading, the owner's masking plan for the source is checked. If the key or any mapped column is masked for them, the sync is refused and nothing is read or sent. Masked values would overwrite the app's real ones. If the plan cannot be decided, every column counts as masked.
+- **Only changes.** Cairn keeps a hash of each row's key and mapped values, never the values, and a run sends only new and changed rows:
+  - HubSpot: `batch/upsert` by the key property, 100 per call;
+  - Salesforce: composite upsert by the external id field, 200 per call.
+
+  Rows that disappear from the source are not deleted in the app. A source over `CAIRN_REVERSE_ETL_MAX_ROWS` (100,000) is refused.
+- **Failures.**
+  - Records the app rejects are counted and the first five reasons kept. The run is `partial`, and those records are sent again next run, since only accepted ones are remembered.
+  - A failed or partial run is audited (`reverse.sync_failed`, `reverse.sync_run`, with counts and never values) and told to the owner.
+- **Keys** come from a secret scope read as the owner, with the same keys and fail-closed rules as [SaaS connectors](#saas-connectors).
+- **Settings.** On when there is a run-as-user Trino connection: `CAIRN_REVERSE_ETL_CONNECTION`, or else the change feed's or derived tables' connection. The lakehouse catalog's name comes from `CAIRN_DERIVED_CATALOG`. Secret scopes must be on.
+- **Tested** on real Trino, against a local server answering the documented upsert endpoints (`tests/test_reverse_etl_e2e.py`). It is not a substitute for a run against a real account.
+  - A segment synced to HubSpot. A second run with nothing changed sent nothing. A changed score and a new row went alone, and a record the app rejected was sent again, alone, on the next run.
+  - Bob's syncs that sent, or were keyed on, his masked email were refused. Without email, only his EU rows left.
+  - Losing `EXPORT_DATASET` stopped the next run before any request.
+  - Salesforce upserted by external id.
+
 ## Governed volumes
 
 A volume is a folder of files (landing files, models, documents, exports) that Cairn's grants govern, not only the store's bucket policies (`/v1/volumes`, `cairn.dataaccess.volumes`).
