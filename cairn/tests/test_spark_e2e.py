@@ -127,6 +127,16 @@ JOB = textwrap.dedent('''
                 return [df.rdd.getNumPartitions(),
                         [list(r) for r in df.filter("region = 'EU'").select("id", "email").orderBy("id").collect()]]
             attempt(step, eu)
+        elif kind == "volread":          # a governed volume, with the credentials Cairn hands this user
+            from cairn_spark import use_volume
+            attempt(step, lambda: sorted(r.value for r in spark.read.text(use_volume(spark, arg) + "notes/").collect()))
+        elif kind == "volwrite":
+            from cairn_spark import use_volume
+            def write_volume():
+                path = use_volume(spark, arg, "write")
+                spark.createDataFrame([("written by spark",)], ["value"]).write.mode("overwrite").text(path + "out/")
+                return True
+            attempt(step, write_volume)
     print("CAIRN-RESULT " + json.dumps(out))
     spark.stop()
 ''')
@@ -628,3 +638,39 @@ def test_restricted_tables_are_read_through_trino_with_the_users_masks_and_filte
     assert "accessToken" not in log or "eyJ" not in log.split("accessToken", 1)[1][:200]  # the token stays out of logs
     res, _ = run_job(tmp_path, url, lake, BOB, "governed=sales.orders", docker_args=via)
     assert [r[0] for r in res["governed=sales.orders"]["ok"]] == [1, 3], res            # his row filter
+
+
+def test_a_volume_shared_with_a_group_is_read_by_them_alone_in_spark(cairn, lake, tmp_path):  # noqa: F811
+    """L58 in Spark: a volume shared with the analysts (ana, not bob) to read. Ana's job reads its files with
+    the credentials Cairn hands her, narrowed to that volume and to reading, and cannot write until she is
+    granted write; bob's job is refused by Cairn before it gets any credentials."""
+    from cairn.dataaccess.volumes import StoreClient
+
+    url, s = cairn
+    vs, admin = s.volumes, {"X-Cairn-Actor": "urn:li:corpuser:admin"}
+    saved = (vs.store, vs.endpoint, vs.groups_of, vs.may_create, vs._role)
+    vs.store, vs.endpoint, vs._role = StoreClient(lake["store"], *STORE_KEY), lake["store"], None
+    vs.groups_of = lambda a: ["urn:li:corpGroup:analysts"] if a == "urn:li:corpuser:ana" else []
+    vs.may_create = lambda a: a == "urn:li:corpuser:admin"
+    try:
+        assert httpx.post(f"{url}/v1/volumes", json={"name": "landing"}, headers=admin, timeout=30).status_code == 201
+        assert httpx.put(f"{url}/v1/volumes/landing/files/notes/a.txt", content=b"hello from cairn", headers=admin,
+                         timeout=30).status_code == 200
+        assert httpx.put(f"{url}/v1/volumes/landing/grants", json={"principal": "urn:li:corpGroup:analysts",
+                                                                   "access": "read"}, headers=admin, timeout=30).status_code == 200
+        res, _ = run_job(tmp_path, url, lake, ANA, "volread=landing", "volwrite=landing")
+        assert res["volread=landing"] == {"ok": ["hello from cairn"]}, res
+        assert "to read, not to write" in res["volwrite=landing"]["error"], res
+        res, _ = run_job(tmp_path, url, lake, BOB, "volread=landing")
+        assert "404" in res["volread=landing"]["error"] and "hello" not in json.dumps(res), res
+        httpx.put(f"{url}/v1/volumes/landing/grants", json={"principal": "urn:li:corpGroup:analysts", "access": "write"},
+                  headers=admin, timeout=30)
+        res, _ = run_job(tmp_path, url, lake, ANA, "volwrite=landing")
+        assert res["volwrite=landing"] == {"ok": True}, res
+        files = httpx.get(f"{url}/v1/volumes/landing/files", params={"prefix": "out/"}, headers=admin, timeout=30).json()
+        parts = [f["path"] for f in files["files"] if "/part-" in f["path"]]
+        assert parts, files
+        body = httpx.get(f"{url}/v1/volumes/landing/files/{parts[0]}", headers=admin, timeout=30).text
+        assert body.strip() == "written by spark"
+    finally:
+        vs.store, vs.endpoint, vs.groups_of, vs.may_create, vs._role = saved

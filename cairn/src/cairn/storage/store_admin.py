@@ -10,7 +10,7 @@ import hashlib
 import hmac
 import json
 from typing import Any, Optional
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 import httpx
 
@@ -22,23 +22,24 @@ def _sign(key: bytes, msg: str) -> bytes:
 
 
 def sigv4_headers(method: str, url: str, body: bytes, access_key: str, secret_key: str, region: str = "us-east-1",
-                  now: Optional[dt.datetime] = None) -> dict[str, str]:
-    """AWS Signature Version 4 headers (service "s3", signed payload) for one request."""
+                  now: Optional[dt.datetime] = None, service: str = "s3") -> dict[str, str]:
+    """AWS Signature Version 4 headers (``service``: s3, sts or iam; signed payload) for one request."""
     now = now or dt.datetime.now(dt.timezone.utc)
     amz_date, date = now.strftime("%Y%m%dT%H%M%SZ"), now.strftime("%Y%m%d")
     u = urlsplit(url)
     host = u.netloc
     payload = hashlib.sha256(body).hexdigest()
-    pairs = sorted((quote(k, safe="-_.~"), quote(v, safe="-_.~"))
+    # The query as sent may already be URL-encoded: decode first, so each value is encoded exactly once.
+    pairs = sorted((quote(unquote(k), safe="-_.~"), quote(unquote(v), safe="-_.~"))
                    for k, _, v in (p.partition("=") for p in u.query.split("&") if p))
     canonical_query = "&".join(f"{k}={v}" for k, v in pairs)
     headers = {"host": host, "x-amz-content-sha256": payload, "x-amz-date": amz_date}
     signed = ";".join(sorted(headers))
     canonical = "\n".join([method, quote(u.path or "/", safe="/-_.~"), canonical_query,
                            "".join(f"{k}:{headers[k]}\n" for k in sorted(headers)), signed, payload])
-    scope = f"{date}/{region}/s3/aws4_request"
+    scope = f"{date}/{region}/{service}/aws4_request"
     to_sign = f"AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hashlib.sha256(canonical.encode()).hexdigest()}"
-    k = _sign(_sign(_sign(_sign(f"AWS4{secret_key}".encode(), date), region), "s3"), "aws4_request")
+    k = _sign(_sign(_sign(_sign(f"AWS4{secret_key}".encode(), date), region), service), "aws4_request")
     sig = hmac.new(k, to_sign.encode(), hashlib.sha256).hexdigest()
     return {"x-amz-content-sha256": payload, "x-amz-date": amz_date,
             "authorization": f"AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed}, Signature={sig}"}

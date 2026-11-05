@@ -84,6 +84,7 @@ class Services:
     report_schedules: Optional[Any] = None
     saml: Optional[Any] = None
     secret_scopes: Optional[Any] = None
+    volumes: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -832,6 +833,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_data_access(s)
         _build_saml(s)
         _build_secret_scopes(s)
+        _build_volumes(s)
         _build_records(s)
         from cairn.common.limits import ApiLimits
 
@@ -1844,6 +1846,24 @@ def _build_secret_scopes(s: Services) -> None:
     def is_operator(actor: str) -> bool:
         return s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False)
     s.secret_scopes = SecretScopes(s.engine, groups_of, is_operator, s.audit)
+
+
+def _build_volumes(s: Services) -> None:
+    """Governed volumes (cairn.dataaccess.volumes): the routes are always there; without a store key they say 503."""
+    from cairn.dataaccess.volumes import PRIVILEGE, StoreClient, Volumes
+
+    key = os.environ.get("CAIRN_VOLUMES_ACCESS_KEY", "") or os.environ.get("CAIRN_STORE_ADMIN_ACCESS_KEY", "")
+    secret = _secret_env("CAIRN_VOLUMES_SECRET_KEY") or _secret_env("CAIRN_STORE_ADMIN_SECRET_KEY")
+    url = os.environ.get("CAIRN_STORE_URL", "http://cairn-store:8333")
+    store = StoreClient(url, key, secret, os.environ.get("CAIRN_STORE_REGION", "us-east-1")) if key and secret else None
+
+    def groups_of(actor: str) -> list[str]:
+        return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
+
+    def allowed(privilege: str):
+        return lambda actor: s.authorize(Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False)
+    s.volumes = Volumes(s.engine, store, groups_of, allowed(PRIVILEGE), allowed("MANAGE_SYSTEM_OPERATIONS"), s.audit,
+                        os.environ.get("CAIRN_VOLUMES_ENDPOINT", url))
 
 
 def _build_saml(s: Services) -> None:

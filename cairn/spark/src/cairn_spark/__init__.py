@@ -29,6 +29,9 @@ Configuration (environment, or keyword arguments)::
     CAIRN_SPARK_TOKEN_TTL seconds the first catalog token lasts (default: Cairn's, an hour); tokens are renewed
     CAIRN_TRINO_URL       Trino, for governed_read, e.g. https://trino.example.com:8443
     CAIRN_TRINO_CATALOG   the lakehouse catalog's name in Trino (default: lakehouse)
+
+Governed volumes (folders of files under Cairn's grants): ``volume_conf(name)`` / ``use_volume(spark, name)``
+in ``cairn_spark.volumes``.
 """
 
 from __future__ import annotations
@@ -220,3 +223,6 @@ def governed_read(spark, table: str, *, cairn_url: Optional[str] = None, token: 
                            upperBound=upper_bound, numPartitions=num_partitions, properties=props)
     return reader.jdbc(jdbc, dbtable, properties=props)
 
+
+
+from cairn_spark.volumes import use_volume, volume_conf, volume_credentials  # noqa: E402,F401  (governed volumes)

@@ -446,6 +446,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.identity.secret_scopes import build_secret_scopes_router
 
         app.include_router(build_secret_scopes_router(services.secret_scopes, cp))
+    if getattr(services, "volumes", None) is not None:       # governed volumes: files under Cairn's grants
+        from cairn.dataaccess.volumes import build_volumes_router
+
+        app.include_router(build_volumes_router(services.volumes, cp))
     if getattr(services, "saml", None) is not None:          # SAML sign-in, handed on as OIDC (public routes)
         from cairn.identity.saml import build_sso_router
 
