@@ -228,6 +228,8 @@ jobs:
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,streams,documents,saml]" "ipython>=8.20"   # ipython: the notebook test
+          pip install -q "playwright>=1.50"              # the embedded-dashboard test frames a dashboard in Chromium
+          python -m playwright install --with-deps chromium
           docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams
           docker pull -q keycloak/keycloak:26.0.7        # SAML sign-in against a real identity provider
           docker pull -q postgres:16-alpine            # the DR drill (primary and streaming standby)
