@@ -212,6 +212,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.governance.privacy_api import build_router as privacy_router
 
         app.include_router(privacy_router(services.privacy, cp, authz))
+        if getattr(services, "records", None) is not None:      # holds, retention that deletes, erasure
+            from cairn.governance.records import build_records_router
+
+            app.include_router(build_records_router(services.records, cp, authz))
     if services.sources is not None:
         from cairn.sources.api import build_router as sources_router
 

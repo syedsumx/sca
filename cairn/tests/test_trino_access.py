@@ -50,7 +50,9 @@ def client(settings, graph, monkeypatch):
                condition=sub(BOB)),
         Policy(id="no-eve", effect="deny", actions=["*"], condition=sub(EVE)),
     ]))
-    return TestClient(create_api_app(s))
+    c = TestClient(create_api_app(s))
+    c.services = s
+    return c
 
 
 def ask(c, path, user, op, resource=None, groups=(), **action):
@@ -85,6 +87,26 @@ def test_reads_writes_and_management(client):
     # Trino's metadata tables are read freely (their rows are filtered table by table), never changed.
     assert ask(c, "allow", "ana", "SelectFromColumns", table("tables", "information_schema", columns=["table_name"])) is True
     assert ask(c, "allow", "ana", "DeleteFromTable", table("tables", "information_schema")) is False
+
+
+def test_a_legal_hold_stops_removing_rows_for_everyone_and_fails_closed(client):
+    c, s = client, client.services
+    hold = s.records.place(ADMIN, {"dataset": ORDERS, "case": "C-1", "reason": "litigation"})
+    for op in ("DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "ExecuteTableProcedure",
+               "DropColumn", "SetTableProperties"):
+        assert ask(c, "allow", "admin", op, table("orders")) is False, op
+    assert ask(c, "allow", "admin", "RenameTable", table("orders"), targetResource=table("orders2")) is False
+    assert ask(c, "allow", "admin", "InsertIntoTable", table("orders")) is True          # adding rows is fine
+    assert ask(c, "allow", "admin", "SelectFromColumns", table("orders", columns=["id"])) is True
+    assert ask(c, "allow", "admin", "DeleteFromTable", table("salaries", "hr")) is True   # another table: no hold
+    s.records.release(ADMIN, hold["id"], "settled")
+    assert ask(c, "allow", "admin", "DeleteFromTable", table("orders")) is True
+    # A hold that cannot be checked holds.
+    def broken(urn):
+        raise RuntimeError("database away")
+    s.trino_access.held = broken
+    assert ask(c, "allow", "admin", "DeleteFromTable", table("orders")) is False
+    assert ask(c, "allow", "admin", "InsertIntoTable", table("orders")) is True
 
 
 def test_listings_are_filtered(client):

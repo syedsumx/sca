@@ -224,6 +224,8 @@ def notifier_tick(s) -> dict:
         _SWEEP_STATE["privacy_ms"] = now_ms
         try:
             out["privacy"] = {"retention": s.privacy.check_retention(), "reminded": s.privacy.remind(now_ms)}
+            if getattr(s, "records", None) is not None and s.records.actor:
+                out["privacy"]["enforced"] = s.records.enforce_retention(now_ms)
         except Exception as e:  # noqa: BLE001 - warehouses may be briefly away
             out["privacy"] = {"error": str(e)[:200]}
     if s.history is not None and now_ms - _SWEEP_STATE["history_ms"] >= 86_400_000:

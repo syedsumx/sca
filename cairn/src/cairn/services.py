@@ -85,6 +85,7 @@ class Services:
     saml: Optional[Any] = None
     secret_scopes: Optional[Any] = None
     bi_sharing: Optional[Any] = None
+    records: Optional[Any] = None
     costs: Optional[Any] = None
     data_access: Optional[Any] = None
     sql_workspace: Optional[Any] = None
@@ -822,6 +823,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_data_access(s)
         _build_saml(s)
         _build_secret_scopes(s)
+        _build_records(s)
         s.privacy.data = s.data_access
         from cairn.sqlworkspace import SqlWorkspace
 
@@ -1666,6 +1668,30 @@ def _hook_quality_events(s: Services, Event) -> None:
                 logger.exception("contract refresh failed")
 
     s.quality.notifier = notifier
+
+
+def _build_records(s: Services) -> None:
+    """Legal holds, retention that deletes and erasure with a signed proof (cairn.governance.records)."""
+    if s.privacy is None:
+        return
+    from cairn.governance.records import Records
+    from cairn.notify.hub import Event
+
+    signer = None
+    if getattr(s, "trino_key", None):
+        from cairn.dataaccess.trino_auth import TrinoTokens
+
+        signer = TrinoTokens(s.engine, s.trino_key, os.environ.get("CAIRN_TRINO_TOKEN_ISSUER", "cairn"), 3600,
+                             key_name="privacy-proof")
+
+    def proved(officer: str, rid: str) -> None:
+        if s.notify is not None:
+            s.notify.publish(Event(type="privacy.erasure_proved", title=f"Subject request {rid}: erased, with proof",
+                                   body="Every table is done; the signed report is ready.", recipients=[officer],
+                                   url=f"/governance/privacy/requests/{rid}/proof"))
+    s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
+    if getattr(s, "trino_access", None) is not None:
+        s.trino_access.held = s.records.held
 
 
 def _build_secret_scopes(s: Services) -> None:

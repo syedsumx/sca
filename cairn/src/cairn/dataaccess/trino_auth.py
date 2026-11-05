@@ -156,5 +156,38 @@ class TrinoTokens:
         return claims
 
 
+    # ---- signed documents (e.g. erasure proofs) ---------------------------------------------------
+    def sign_document(self, doc: dict, typ: str) -> str:
+        """``doc`` as a compact JWS (RS256, header ``typ``) that anyone can check with :meth:`jwks`; no expiry."""
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        key, kid = self._load()
+        header = {"alg": "RS256", "typ": typ, "kid": kid}
+        signing = _b64(json.dumps(header, separators=(",", ":")).encode()) + "." + \
+            _b64(json.dumps(doc, separators=(",", ":"), sort_keys=True).encode())
+        return f"{signing}.{_b64(key.sign(signing.encode(), padding.PKCS1v15(), hashes.SHA256()))}"
+
+    def verify_document(self, jws: str, typ: str) -> dict:
+        """The document of a JWS made by :meth:`sign_document` with this key; ValueError otherwise."""
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        try:
+            h, c, sig = jws.split(".")
+            header, doc = json.loads(_unb64(h)), json.loads(_unb64(c))
+        except (ValueError, TypeError) as e:
+            raise ValueError("not a document Cairn signed") from e
+        key, kid = self._load()
+        if header.get("alg") != "RS256" or header.get("kid") != kid or header.get("typ") != typ:
+            raise ValueError(f"not a {typ} signed with Cairn's key")
+        try:
+            key.public_key().verify(_unb64(sig), f"{h}.{c}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        except InvalidSignature as e:
+            raise ValueError("bad signature") from e
+        return doc
+
+
 def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))

@@ -115,6 +115,7 @@ class RetentionPolicy(BaseModel):
     days: int = Field(ge=1, le=36500)
     time_column: Optional[str] = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
     description: str = ""
+    enforce: bool = Field(default=False, description="delete rows older than the limit (cairn.governance.records)")
 
 
 def mask(value: str) -> str:

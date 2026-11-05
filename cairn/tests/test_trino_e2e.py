@@ -2114,3 +2114,125 @@ def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn)
     assert c.put(f"/sql/shares/query/{qid}", headers=admin, json={"principal": "bob", "role": "VIEWER"}).status_code == 400
     assert c.put(f"/sql/shares/query/{qid}", headers=admin,
                  json={"principal": "urn:li:corpuser:bob", "role": "OWNER"}).status_code == 400
+
+
+def test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof(trino, cairn):
+    """Records management on real Trino: a retention policy that deletes the rows older than its limit; a legal
+    hold that keeps a table's rows from everyone (retention, erasure and a direct DELETE alike) until it is
+    released; and an erasure request that deletes one person's rows, checks none remain, expires the history and
+    ends with a report signed by Cairn that anyone can check."""
+    import base64
+
+    import httpx
+
+    from cairn.governance.privacy import RequestIn, RetentionPolicy
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    member, retained = "urn:li:glossaryTerm:Test.MemberId", "urn:li:glossaryTerm:Test.Retained"
+    s.privacy.identifiers["member_id"] = {"labels": [member], "columns": []}
+    tables = {}
+    for name in ("rec_events", "rec_held"):
+        trino(f"CREATE TABLE lake.sales.{name} (id integer, member_id varchar, created_at timestamp(6) with time zone)")
+        trino(f"INSERT INTO lake.sales.{name} VALUES (1, 'm-1', TIMESTAMP '2019-01-01 00:00:00 UTC'), "
+              "(2, 'm-2', TIMESTAMP '2019-06-01 00:00:00 UTC'), (3, 'm-1', current_timestamp), (4, 'm-2', current_timestamp)")
+        urn = f"urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.{name},PROD)"
+        tables[name] = urn
+        s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+            {"fieldPath": "id"}, {"fieldPath": "member_id", "glossaryTerms": {"terms": [{"urn": member}]}},
+            {"fieldPath": "created_at"}]}
+        s.graph.aspects[(urn, "glossaryTerms")] = {"terms": [{"urn": retained}]}
+        s.graph.aspects[(urn, "ownership")] = {"owners": [{"owner": "urn:li:corpuser:ana"}]}
+    admin, ana = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:ana"}
+    c = httpx.Client(base_url=url, timeout=300)
+    s.records.actor = None
+    assert c.post("/governance/privacy/retention/enforce", headers=admin).status_code == 503   # who deletes, first
+    s.records.actor = "urn:li:corpuser:admin"
+
+    # A legal hold on one table: only an officer places it, and it needs its case and reason.
+    assert c.post("/governance/privacy/holds", headers=ana, json={"dataset": tables["rec_held"], "case": "x",
+                                                                 "reason": "y"}).status_code == 403
+    assert c.post("/governance/privacy/holds", headers=admin, json={"dataset": tables["rec_held"]}).status_code == 400
+    hold = c.post("/governance/privacy/holds", headers=admin, json={
+        "dataset": tables["rec_held"], "case": "ACME v. Example (2026-114)", "reason": "litigation: keep everything"})
+    assert hold.status_code == 201, hold.text
+    hid = hold.json()["id"]
+    # While it is on, nobody removes or rewrites its rows on Trino, not even an administrator.
+    for stmt in ("DELETE FROM lake.sales.rec_held WHERE id = 1", "UPDATE lake.sales.rec_held SET member_id = 'x'",
+                 "TRUNCATE TABLE lake.sales.rec_held", "DROP TABLE lake.sales.rec_held",
+                 "ALTER TABLE lake.sales.rec_held EXECUTE expire_snapshots(retention_threshold => '0s')"):
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(stmt)
+    trino("INSERT INTO lake.sales.rec_held VALUES (5, 'm-3', current_timestamp)")        # adding is still fine
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held") == [{"n": 5}]
+
+    # Retention that deletes: rows older than two years go from the table not on hold; the held one keeps them.
+    s.privacy.put_policy(RetentionPolicy(id="rec-2y", label=retained, days=730, enforce=True), "urn:li:corpuser:admin")
+    out = c.post("/governance/privacy/retention/enforce", headers=admin)
+    assert out.status_code == 200, out.text
+    assert out.json()["deleted"] >= 2 and out.json()["held"] >= 1, out.json()
+    assert [r["id"] for r in trino("SELECT id FROM lake.sales.rec_events ORDER BY id")] == [3, 4]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held") == [{"n": 5}]
+    runs = {r["dataset"]: r for r in c.get("/governance/privacy/retention/runs", headers=admin).json()}
+    assert runs[tables["rec_events"]]["state"] == "deleted" and runs[tables["rec_events"]]["deleted"] == 2
+    assert runs[tables["rec_held"]]["state"] == "held"
+
+    # Erasure: m-2 asks to be forgotten. The identifier is sent again (Cairn kept only its hash).
+    req = s.privacy.open(RequestIn(kind="deletion", identifier_kind="member_id", identifier="m-2", reference="DSR-9"),
+                         "urn:li:corpuser:admin")
+    rid = req["id"]
+    assert {p["dataset"] for p in req["parts"]} == set(tables.values())
+    assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-1"}).status_code == 403
+    assert c.post(f"/governance/privacy/requests/{rid}/erase", headers=ana, json={"identifier": "m-2"}).status_code == 403
+    r = c.post(f"/governance/privacy/requests/{rid}/erase", headers=admin, json={"identifier": "m-2"})
+    assert r.status_code == 200, r.text
+    by = {x["dataset"]: x for x in r.json()["results"]}
+    assert by[tables["rec_events"]]["state"] == "DONE" and by[tables["rec_events"]]["rows_deleted"] == 1
+    assert by[tables["rec_events"]]["rows_after"] == 0 and by[tables["rec_events"]]["history_expired"] is True
+    assert by[tables["rec_held"]]["state"] == "HELD" and by[tables["rec_held"]]["holds"] == [hid]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_events WHERE member_id = 'm-2'") == [{"n": 0}]
+    # History is gone too: the table's only snapshot is the one after the delete.
+    assert trino('SELECT count(*) AS n FROM lake.sales."rec_events$snapshots"') == [{"n": 1}]
+    assert trino("SELECT count(*) AS n FROM lake.sales.rec_held WHERE member_id = 'm-2'") == [{"n": 2}]
+
+    # The request is complete (the held table is listed as kept), and the proof is signed.
+    assert r.json()["request"]["state"] == "COMPLETED"
+    proof = c.get(f"/governance/privacy/requests/{rid}/proof", headers=admin).json()
+    rep = proof["report"]
+    assert rep["request"] == rid and rep["identifier_kind"] == "member_id" and "m-2" not in json.dumps(rep)
+    assert {t["dataset"]: t["state"] for t in rep["tables"]} == {tables["rec_events"]: "DONE", tables["rec_held"]: "HELD"}
+    assert c.post("/governance/privacy/proof/verify", json={"jws": proof["jws"]}).json()["valid"] is True
+    # Anyone can check it with the published key, without Cairn.
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding, rsa
+
+    jwk = c.get("/governance/privacy/proof-keys").json()["keys"][0]
+    un = lambda v: base64.urlsafe_b64decode(v + "=" * (-len(v) % 4))  # noqa: E731
+    pub = rsa.RSAPublicNumbers(int.from_bytes(un(jwk["e"]), "big"), int.from_bytes(un(jwk["n"]), "big")).public_key()
+    h, body, sig = proof["jws"].split(".")
+    pub.verify(un(sig), f"{h}.{body}".encode(), padding.PKCS1v15(), hashes.SHA256())
+    assert json.loads(un(body)) == rep
+    forged = json.loads(un(body))
+    forged["tables"][0]["rows_deleted"] = 99
+    tampered = f"{h}.{base64.urlsafe_b64encode(json.dumps(forged).encode()).decode().rstrip('=')}.{sig}"
+    assert c.post("/governance/privacy/proof/verify", json={"jws": tampered}).json()["valid"] is False
+    # The proof is not a token: Trino refuses it, and it is signed with a key of its own.
+    assert jwk["kid"] not in json.dumps(s.trino_tokens.jwks())
+    told = [n for n in s.notify.inbox("urn:li:corpuser:admin") if n["type"] == "privacy.erasure_proved"]
+    assert told
+
+    # Releasing the hold needs a reason; afterwards the table can be changed again.
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin, json={}).status_code == 400
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin,
+                  json={"note": "case settled"}).json()["released_by"] == "urn:li:corpuser:admin"
+    assert c.post(f"/governance/privacy/holds/{hid}/release", headers=admin, json={"note": "x"}).status_code == 404
+    trino("DELETE FROM lake.sales.rec_held WHERE id = 5")
+    assert c.get("/governance/privacy/holds", headers=admin).json() == [] or \
+        hid not in [x["id"] for x in c.get("/governance/privacy/holds", headers=admin).json()]
+    assert hid in [x["id"] for x in c.get("/governance/privacy/holds", params={"all": True}, headers=admin).json()]
+    acts = {e["action"] for e in s.audit.entries(limit=3000)}
+    assert {"privacy.hold_placed", "privacy.hold_released", "privacy.retention_deleted", "privacy.erasure_run",
+            "privacy.erasure_proved"} <= acts

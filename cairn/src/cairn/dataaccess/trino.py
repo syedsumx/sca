@@ -66,6 +66,9 @@ TABLE_OPS: dict[str, str] = {
     "RefreshMaterializedView": WRITE, "SetMaterializedViewProperties": MANAGE,
     "ExecuteTableProcedure": MANAGE,
 }
+# Operations that remove or rewrite a table's rows or its history: refused for everyone while a legal hold is on.
+HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "RenameTable", "DropColumn",
+            "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure"}
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
 OPEN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables",
             "ShowFunctions", "FilterFunctions", "SetSystemSessionProperty",
@@ -212,6 +215,8 @@ class TrinoAccess:
         self.cleanroom_tables: Optional[Callable[[str], set[str]]] = None
         # ai_admit(actor): budgets and daily caps for AI functions (cairn.ai.sql_gateway); None: none.
         self.ai_admit: Optional[Callable[[str], bool]] = None
+        # held(urn): a legal hold is on the table (cairn.governance.records); None: holds are not in use.
+        self.held: Optional[Callable[[str], bool]] = None
         self.plan_for = plan_for
         self.catalogs = catalogs
 
@@ -351,6 +356,15 @@ class TrinoAccess:
                 # carry column bounds that can reveal masked values: the table's managers only.
                 need = TABLE_OPS[op] if meta in SAFE_METADATA else MANAGE
                 return self.allowed(actor, groups, need, urn)
+            if op in HOLD_OPS and self.held is not None:
+                try:
+                    on_hold = self.held(self.table_urn(t))
+                except Exception as e:  # fail closed: a hold that cannot be checked holds
+                    logger.warning("legal hold check failed for %s: %s", self.table_urn(t), e)
+                    on_hold = True
+                if on_hold:
+                    logger.info("%s on %s refused: a legal hold is on", op, self.table_urn(t))
+                    return False
             ok = self.allowed(actor, groups, TABLE_OPS[op], self.table_urn(t))
             if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
                 target = (action.get("targetResource") or {}).get("table")

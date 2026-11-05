@@ -244,7 +244,7 @@ API:
 **Subject requests.** Open a request for one person, identified by email, phone or customer id. Cairn finds every column classified for that kind of identifier (`PII.Email`, `PII.Phone`, or the kinds configured in `CAIRN_PRIVACY`). Where a warehouse connection serves the dataset, it counts that person's rows through data access, as the officer. Emails are matched without regard to case. Datasets without a connection are listed so someone can check them by hand.
 
 - **Access requests** end with the report: datasets, columns, rows found and owners. Download it as CSV.
-- **Deletion requests** give each dataset with matches, or that couldn't be searched, to its owners. They get a `DELETE` statement to review and run: Cairn never deletes data itself. Owners mark their part **Done** or **Not applicable** in their inbox (Settings → Inbox). The request completes when every part is marked, and the officer is told.
+- **Deletion requests** give each dataset with matches, or that couldn't be searched, to its owners. They get a `DELETE` statement to review and run, unless the officer has Cairn erase the rows (see **Erasure with proof** below). Owners mark their part **Done** or **Not applicable** in their inbox (Settings → Inbox). The request completes when every part is marked, and the officer is told.
 - **Deadlines.** Requests are due in 30 days by default (`due_days`). Owners get one reminder a week before, and overdue requests are flagged.
 
 The person's identifier is never stored in clear: only a salted hash (`CAIRN_PRIVACY_SALT`), so a follow-up request finds earlier ones, and a masked hint such as `j•••@acme.com`. The officer sees the identifier once, in the response that opens the request. Notifications and statements carry only the masked hint.
@@ -254,6 +254,18 @@ The person's identifier is never stored in clear: only a salted hash (`CAIRN_PRI
 - The notifier checks daily as `CAIRN_PRIVACY_ACTOR`, an identity that may read the covered datasets. Without it, the daily check is skipped.
 - **Check now** checks immediately, as the officer.
 - A breach tells the dataset's owners once.
+- A policy with `"enforce": true` also deletes the rows older than its limit, on Trino, as `CAIRN_PRIVACY_ACTOR` (who needs write on the tables). It runs with the daily check, or with **Enforce now** (`POST /retention/enforce`). Each table's run is kept (`GET /retention/runs`): the cutoff, the rows deleted, or why not.
+
+**Legal holds.** A hold on a table names its case and reason (`POST /holds`). While it is on, Trino refuses everyone, administrators included, any statement that removes or rewrites the table's rows or history: `DELETE`, `UPDATE`, `MERGE`, `TRUNCATE`, `DROP`, renaming it, dropping or changing columns, changing its properties, and table procedures such as `expire_snapshots`. Adding rows is still allowed. Retention leaves the table alone and an erasure lists it as kept. If the hold cannot be checked, the statement is refused. A hold is released with a note (`POST /holds/{id}/release`), never deleted, and `GET /holds?all=true` lists past holds too. Placing and releasing are audited.
+
+**Erasure with proof.** For a deletion request, the officer sends the person's identifier again (`POST /requests/{id}/erase`). Cairn kept only its hash, and refuses an identifier that does not match. Then, for each table still to do on a Trino connection, Cairn:
+
+1. counts the person's rows;
+2. deletes them, as `CAIRN_PRIVACY_ACTOR`;
+3. counts again, which must give 0;
+4. expires the table's older snapshots, so the rows are gone from its history as well. This needs Trino's `iceberg.expire-snapshots.min-retention` to allow `CAIRN_ERASURE_SNAPSHOT_RETENTION` (default `0s`); if it does not, the report says the snapshots remain until maintenance.
+
+Tables on hold are kept and listed. Tables on other connections stay with their owners, as before. When every part is done, Cairn signs a report (`GET /requests/{id}/proof`). The report lists each table, its rows before, deleted and after, whether its history was expired, when, and by whom. The person appears only as the hash of their identifier. It is a JWS signed with a key of Cairn's own, published at `GET /proof-keys`, so an auditor can check it without Cairn; `POST /proof/verify` checks one too. The officer is told when it is ready (`privacy.erasure_proved`).
 
 **Record of processing.** **Record of processing**, or `GET /cairn/api/governance/privacy/ropa?format=csv`, lists per domain:
 
@@ -267,7 +279,9 @@ The API is `/cairn/api/governance/privacy`:
 
 - `POST /requests`, `GET /requests[/{id}]`, and `POST /requests/lookup` for earlier requests about a person;
 - `POST /requests/{id}/parts` for owners, and `GET /my-parts`;
-- `GET`, `PUT` or `DELETE /retention/{id}`, and `POST /retention/check`;
+- `GET`, `PUT` or `DELETE /retention/{id}`, `POST /retention/check`, `POST /retention/enforce` and `GET /retention/runs`;
+- `GET` and `POST /holds`, and `POST /holds/{id}/release`;
+- `POST /requests/{id}/erase`, `GET /requests/{id}/proof`, `GET /proof-keys` and `POST /proof/verify`;
 - `GET /ropa`.
 
 ## Change history

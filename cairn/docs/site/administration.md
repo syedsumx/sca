@@ -124,6 +124,33 @@ Limits: 1,000 secrets per scope, and 128 KB per value. Tables `cairn_secret_scop
 person and by group; the operator rule; a moved or altered ciphertext being refused; a notebook reading through
 the client; and rotation with the previous key.
 
+## Records: retention, legal holds and erasure
+
+The privacy officer's side is in the governance guide (Privacy). Operators set:
+
+* `CAIRN_PRIVACY_ACTOR`: the identity that deletes, for retention and erasure, on Trino. Give it `WRITE_DATASET`
+  on the covered tables, and `MANAGE_DATASET` for expiring snapshots after an erasure. Without it,
+  enforcement and erasure answer 503; checks still run.
+* `CAIRN_ERASURE_SNAPSHOT_RETENTION` (default `0s`): how far back an erasure expires a table's snapshots. Trino's
+  `iceberg.expire-snapshots.min-retention` must be at most this, or the proof says the history remains.
+* Proofs are signed with Cairn's key store (`CAIRN_TRINO_ACCESS_KEY`), under a key of their own (`privacy-proof`).
+  They cannot pass for Trino tokens.
+
+Legal holds are enforced where the data is changed: in Trino's access control (Cairn's OPA endpoint). They are
+read from the database on every check, so a hold applies at once on every replica, and a failed check refuses.
+Data changed outside Trino (Spark writing to the catalog directly, for example) is not held. Use the store's
+object lock for that.
+
+Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (migration 0082). Tested on real Trino
+(`test_legal_hold_retention_that_deletes_and_erasure_with_signed_proof`). The test covers:
+* a held table refusing `DELETE`, `UPDATE`, `TRUNCATE`, `DROP` and `expire_snapshots` to an administrator;
+* enforced retention deleting the two old rows of the other table;
+* an erasure leaving one snapshot and 0 rows, and listing the held table as kept;
+* the proof checked with the published key, and a forged copy refused;
+* release.
+
+The fail-closed hold check is tested in `tests/test_trino_access.py`.
+
 ## User provisioning (SCIM)
 
 With SCIM 2.0 the identity provider creates, updates and deactivates people and groups ahead of
