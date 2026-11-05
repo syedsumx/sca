@@ -939,8 +939,37 @@ def _build_active_metadata(s: Services) -> None:
         # The metrics layer: measures defined once, queried as the person (through workbook elements).
         from cairn.sqlworkspace.metrics import Metrics
 
+        def metric_ddl(actor: str, connection: str, sql: str):
+            # Statements for metric views run on the connection's Trino as the person (run_as_user connections).
+            from cairn.dataaccess.service import DataAccessError
+            from cairn.sqlworkspace.metrics import MetricError
+
+            d = (s.data_access.registry.definitions() or {}).get(connection) or {}
+            if not d.get("run_as_user"):
+                raise MetricError(f"connection {connection!r} is not a Trino connection that runs as the user", 400)
+            try:
+                return s.data_access.run_on_trino(d, actor, sql, 10)
+            except DataAccessError as e:
+                raise MetricError(str(e), getattr(e, "status", 400))
+
         s.metrics = Metrics(s.engine, s.workbooks, s.audit, lambda actor: s.authorize(
-            Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False))
+            Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False), ddl=metric_ddl)
+
+        def metric_view_source(t: dict):
+            # lake.metrics.<name> of a published metric → the metric's table in the same catalog.
+            if s.trino_access is None or str(t.get("schemaName") or "").lower() != s.metrics.view_schema:
+                return None
+            from cairn.sqlworkspace.metrics import MetricError
+
+            try:
+                m = s.metrics.get(str(t.get("tableName") or "").lower())
+            except MetricError:
+                return None
+            if not m["published"]:
+                return None
+            schema, _, table = m["table"].rpartition(".")
+            return s.trino_access.urn(str(t.get("catalogName") or ""), schema, table)
+        s.metric_view_source = metric_view_source
         s.sql_boards.metrics = s.metrics
         # Metric alerts: a metric watched per period as its alert's owner; told once on each change of state.
         from cairn.sqlworkspace.metric_alerts import MetricAlerts
@@ -1322,6 +1351,9 @@ def _build_data_access(s: Services) -> None:
         s.sql_ai = SqlAiGateway.from_env(s.ai_usage) if s.ai_usage is not None else None
         if s.sql_ai is not None:
             s.trino_access.ai_admit = s.sql_ai.admit
+        # Published metric views read on their table's terms; looked up when asked, whichever is built first.
+        s.trino_access.metric_view_source = lambda t: (s.metric_view_source(t) if getattr(s, "metric_view_source", None)
+                                                       else None)
         # Sign-in to Trino: Cairn's tokens (Trino checks them against /v1/trino/jwks.json).
         from cairn.dataaccess.trino_auth import TrinoTokens
 

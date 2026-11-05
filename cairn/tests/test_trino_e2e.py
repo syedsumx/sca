@@ -2873,3 +2873,65 @@ def test_a_metric_alert_tells_its_owner_once_as_they_see_the_metric(trino, cairn
     # The scheduler finds due alerts and checks each once.
     assert s.metric_alerts.run_due(now=int(time.time() * 1000) + 3_700_000) >= 2
     trino("DROP TABLE lake.sales.ma_orders")
+
+
+def test_a_published_metric_gives_outside_bi_tools_the_dashboards_number_as_the_person(trino, cairn):
+    """L56 on real Trino: a metric published as a view (SECURITY INVOKER) gives a BI tool signed in to Trino as a
+    person the same numbers as Cairn's metric query (and so a dashboard) gives them: the admin all regions, Bob
+    only EU (his row filter applies inside the view). An average is not published; a changed definition changes the
+    view; deleting the metric drops it."""
+    import httpx
+
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.mv_orders,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in ("id", "region", "status", "amount", "ordered_at")]}
+    trino("CREATE SCHEMA IF NOT EXISTS lake.metrics")
+    trino("CREATE TABLE lake.sales.mv_orders AS SELECT id, region, status, amount, CAST(d AS date) AS ordered_at FROM (VALUES "
+          "(1, 'EU', 'paid', 100e0, '2026-01-05'), (2, 'EU', 'refunded', 40e0, '2026-01-20'), (3, 'US', 'paid', 70e0, '2026-01-09'), "
+          "(4, 'EU', 'paid', 30e0, '2026-02-02'), (5, 'US', 'paid', 20e0, '2026-02-14'), (6, 'EU', 'paid', 5e0, '2026-02-14')) "
+          "AS t(id, region, status, amount, d)")
+    admin, bob = ({"X-Cairn-Actor": "urn:li:corpuser:" + u} for u in ("admin", "bob"))
+    base = f"{url}/sql/metrics"
+    revenue = {"name": "mv_revenue", "label": "Revenue", "connection": "lakehouse", "table": "sales.mv_orders",
+               "measure": "Sum([amount])", "filters": [{"column": "status", "op": "=", "value": "paid"}],
+               "time_column": "ordered_at", "dimensions": ["region"]}
+    assert httpx.post(base, json=revenue, headers=admin, timeout=60).status_code == 201
+    assert httpx.post(base, json={**revenue, "name": "mv_avg", "measure": "Avg([amount])"}, headers=admin, timeout=60).status_code == 201
+    r = httpx.post(f"{base}/mv_avg/publish", headers=admin, timeout=60)
+    assert r.status_code == 400 and "sum up again" in r.text
+    assert httpx.post(f"{base}/mv_revenue/publish", headers=bob, timeout=60).status_code == 403     # not his
+    r = httpx.post(f"{base}/mv_revenue/publish", headers=admin, timeout=120)
+    assert r.status_code == 200 and r.json()["view"] == "metrics.mv_revenue", r.text
+
+    def cairn_says(h):
+        r = httpx.post(f"{base}/query", json={"metrics": ["mv_revenue"], "dimensions": ["region"], "grain": "month"},
+                       headers=h, timeout=120)
+        assert r.status_code == 200, r.text
+        out = r.json()
+        return {(x[out["columns"].index("region")], str(x[out["columns"].index("period")])[:7]): x[out["columns"].index("mv_revenue")]
+                for x in out["rows"]}
+
+    def bi_tool_says(user):
+        # What Tableau or Power BI send, signed in to Trino as the person: sum the view up to month and region.
+        rows = trino("SELECT region, date_format(date_trunc('month', period), '%Y-%m') AS m, sum(mv_revenue) AS v "
+                     "FROM lake.metrics.mv_revenue GROUP BY 1, 2", user=user)
+        return {(x["region"], x["m"]): x["v"] for x in rows}
+
+    assert bi_tool_says("admin") == cairn_says(admin) == {("EU", "2026-01"): 100.0, ("US", "2026-01"): 70.0,
+                                                           ("EU", "2026-02"): 35.0, ("US", "2026-02"): 20.0}
+    assert bi_tool_says("bob") == cairn_says(bob) == {("EU", "2026-01"): 100.0, ("EU", "2026-02"): 35.0}
+    # A changed definition changes the view (refunds counted too now).
+    r = httpx.put(f"{base}/mv_revenue", json={**revenue, "filters": []}, headers=admin, timeout=120)
+    assert r.status_code == 200 and r.json()["published"], r.text
+    assert bi_tool_says("admin")[("EU", "2026-01")] == 140.0 == cairn_says(admin)[("EU", "2026-01")]
+    # Deleting the metric drops its view.
+    assert httpx.delete(f"{base}/mv_revenue", headers=admin, timeout=120).status_code == 204
+    with pytest.raises(RuntimeError, match="does not exist|not found"):
+        trino("SELECT count(*) FROM lake.metrics.mv_revenue")
+    httpx.delete(f"{base}/mv_avg", headers=admin, timeout=60)
+    trino("DROP TABLE lake.sales.mv_orders")

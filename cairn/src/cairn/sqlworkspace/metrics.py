@@ -14,6 +14,11 @@ tile, workbook and answer that uses it.
 
 * Only the dimensions a metric lists (when it lists any) may break it down, and every metric in one query reads the
   same table and connection.
+* **Over SQL, for outside BI tools**: ``POST /sql/metrics/<name>/publish`` makes the metric a Trino view
+  (``metrics.<name>``, ``SECURITY INVOKER``) of its measure per dimension and day, so Tableau or Power BI, signed in
+  to Trino as the person, get that person's number: their row filters and masks apply when they query it, and
+  summing it up gives the same number as a dashboard. Only measures that can be summed up again (``Sum``, ``Count``,
+  ``SumIf``, ``CountIf``) are published; the view follows each change of the definition and goes with the metric.
 * Defined by anyone; changed or deleted by the owner (or an operator). **Certified** metrics (by an operator) are
   marked as the trusted definition. Each change bumps ``version`` and is audited (``metric.saved``,
   ``metric.certified``, ``metric.deleted``).
@@ -53,6 +58,8 @@ metrics = Table(
     Column("certified", Boolean, nullable=False, default=False),
     Column("version", Integer, nullable=False, default=1),
     Column("updated_ms", BigInteger, nullable=False),
+    # Published as a SQL view for outside BI tools (Tableau, Power BI): <CAIRN_METRIC_VIEW_SCHEMA>.<name>.
+    Column("published", Boolean, nullable=False, default=False, server_default="0"),
 )
 
 
@@ -65,7 +72,7 @@ class MetricError(Exception):
 def _row(r) -> dict:
     d = dict(r._mapping)
     return {**d, "table": d.pop("table_name"), "filters": json.loads(d["filters"]), "dimensions": json.loads(d["dimensions"]),
-            "certified": bool(d["certified"])}
+            "certified": bool(d["certified"]), "published": bool(d.get("published"))}
 
 
 def element_for(defs: list[dict], query: dict) -> dict:
@@ -133,12 +140,24 @@ def sql_expression(m: dict) -> str:
     return out.sql.replace("count(*)", f"count_if({cond})") if cond else out.sql
 
 
+# Measures that stay right when a BI tool sums the per-dimension-and-day rows up again.
+ADDITIVE = re.compile(r"^\s*(Sum|Count|SumIf|CountIf)\s*\((?:[^()]|\([^()]*\))*\)\s*$", re.I)
+
+
 class Metrics:
-    def __init__(self, engine, workbooks, audit=None, is_operator: Optional[Callable[[str], bool]] = None):
+    def __init__(self, engine, workbooks, audit=None, is_operator: Optional[Callable[[str], bool]] = None,
+                 ddl: Optional[Callable[[str, str, str], Any]] = None):
         """``workbooks``: compiles and runs elements as a person; ``is_operator(actor)``: may certify and change
-        anyone's metric."""
+        anyone's metric; ``ddl(actor, connection, sql)``: runs a statement on the connection's Trino as ``actor``
+        (publishing metrics as views)."""
         self.engine, self.wb, self.audit = engine, workbooks, audit
         self.is_operator = is_operator or (lambda actor: False)
+        self.ddl = ddl
+        import os
+
+        self.view_schema = os.environ.get("CAIRN_METRIC_VIEW_SCHEMA", "metrics")
+        if not NAME.match(self.view_schema):
+            raise ValueError("CAIRN_METRIC_VIEW_SCHEMA: lowercase letters, digits and _")
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
@@ -207,6 +226,12 @@ class Metrics:
                 conn.execute(update(metrics).where(metrics.c.name == name).values(
                     version=metrics.c.version + 1, certified=False, **values))
         self._audit(actor, "metric.saved", name, {"measure": d["measure"], "table": d["table"]})
+        if before is not None and before.get("published"):
+            # The view follows the definition; one that can no longer be a view is taken away, not left stale.
+            try:
+                self.publish(actor, name)
+            except MetricError:
+                self.unpublish(actor, name)
         return self.get(name)
 
     def certify(self, actor: str, name: str, certified: bool) -> dict:
@@ -222,6 +247,8 @@ class Metrics:
         m = self.get(name)
         if m["owner"] != actor and not self.is_operator(actor):
             raise MetricError("only its owner or an operator deletes a metric", 403)
+        if m.get("published"):
+            self.unpublish(actor, name, m)                     # the view goes with the metric
         with self.engine.begin() as conn:
             conn.execute(delete(metrics).where(metrics.c.name == name))
         self._audit(actor, "metric.deleted", name, {})
@@ -243,6 +270,47 @@ class Metrics:
         except WorkbookError as e:
             raise MetricError(str(e), e.status)
         return {**out, "metrics": [{k: d[k] for k in ("name", "label", "version", "certified")} for d in defs]}
+
+    # ---- over SQL ---------------------------------------------------------------------------------
+    def view_sql(self, actor: str, m: dict) -> str:
+        """The SELECT a metric's view runs: its measure per dimension (and per day, with a time column)."""
+        if not ADDITIVE.match(m["measure"] or ""):
+            raise MetricError(f"{m['name']}: only measures that sum up again (Sum, Count, SumIf, CountIf) are published "
+                              "as views; an average or a distinct count per day cannot be summed by a BI tool")
+        element = element_for([m], {"dimensions": m["dimensions"][:6], "grain": "day" if m["time_column"] else None,
+                                    "limit": 1})
+        element["sort"] = []
+        try:
+            sql = self.wb.compile(actor, m["connection"], element)["sql"]
+        except WorkbookError as e:
+            raise MetricError(f"{m['name']}: {e}", e.status)
+        if not sql.endswith(" LIMIT 1"):
+            raise MetricError("the metric's query did not compile to a plain grouping")
+        return sql[: -len(" LIMIT 1")]
+
+    def publish(self, actor: str, name: str) -> dict:
+        m = self.get(name)
+        if m["owner"] != actor and not self.is_operator(actor):
+            raise MetricError("only its owner or an operator publishes a metric", 403)
+        if self.ddl is None:
+            raise MetricError("publishing metrics as views is not configured (needs Trino access)", 503)
+        view = f"{self.view_schema}.{name}"
+        # Run as the person publishing: Cairn's policies decide whether they may create views in that schema.
+        self.ddl(actor, m["connection"], f"CREATE OR REPLACE VIEW {view} SECURITY INVOKER AS {self.view_sql(actor, m)}")
+        with self.engine.begin() as conn:
+            conn.execute(update(metrics).where(metrics.c.name == name).values(published=True))
+        self._audit(actor, "metric.published", name, {"view": view})
+        return {**self.get(name), "view": view}
+
+    def unpublish(self, actor: str, name: str, m: Optional[dict] = None) -> None:
+        m = m or self.get(name)
+        if m["owner"] != actor and not self.is_operator(actor):
+            raise MetricError("only its owner or an operator unpublishes a metric", 403)
+        if self.ddl is not None:
+            self.ddl(actor, m["connection"], f"DROP VIEW IF EXISTS {self.view_schema}.{name}")
+        with self.engine.begin() as conn:
+            conn.execute(update(metrics).where(metrics.c.name == name).values(published=False))
+        self._audit(actor, "metric.unpublished", name, {})
 
     def _audit(self, actor: str, action: str, name: str, details: dict) -> None:
         if self.audit is not None:
@@ -297,6 +365,16 @@ def build_metrics_router(m: Metrics, current_principal) -> Any:
     async def certify(name: str, body: dict = Body(...), p=Depends(current_principal)):
         actor = person(p)
         return await call(lambda: m.certify(actor, name, bool(body.get("certified", True))))
+
+    @router.post("/{name}/publish")
+    async def publish(name: str, p=Depends(current_principal)):
+        actor = person(p)
+        return await call(lambda: m.publish(actor, name))
+
+    @router.delete("/{name}/publish", status_code=204)
+    async def unpublish(name: str, p=Depends(current_principal)):
+        actor = person(p)
+        await call(lambda: m.unpublish(actor, name))
 
     @router.delete("/{name}", status_code=204)
     async def delete_(name: str, p=Depends(current_principal)):

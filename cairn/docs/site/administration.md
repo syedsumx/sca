@@ -624,6 +624,19 @@ Trino runs two kinds of functions beyond SQL's own, both under Cairn's policies.
 - **Metrics** (**SQL → Metrics**, `/sql/metrics`): a business measure defined once, so "Revenue" is the same number in every dashboard and query. A metric names a measure over one table: `name`, `label`, `connection`, `table`, `measure` (a workbook aggregate formula, such as `Sum([amount])`), its own `filters` (the measure counts only those rows, such as `status = 'paid'`), an optional `time_column`, and `dimensions` (the columns it may be broken down by; none listed means any). Saving compiles the definition over the table as its owner sees it, so a measure that is not an aggregate, or a column that does not exist, is refused.
   - **Querying:** `POST /sql/metrics/query` with `{"metrics": [...], "dimensions": [...], "grain": "day|week|month|quarter|year", "filters": [...]}`. The metrics in one query read the same table and connection; each keeps its own filters, so several metrics are computed side by side in one query. It compiles to one workbook element and runs as the person asking: their policies, masks and row filters apply. Dashboards show metric tiles (`{"metric": {...the query...}}`; controls and clicks on the metric's table's columns filter them), and a change to a definition changes every tile that uses it.
   - **Ownership and trust:** anyone defines a metric. Only its owner or an operator (`MANAGE_SYSTEM_OPERATIONS`) changes or deletes it. Only an operator certifies it (`POST /sql/metrics/<name>/certify`), and changing a certified metric withdraws the certification until it is certified again. Each change bumps `version`. Audited (category `sql`): `metric.saved`, `metric.certified`, `metric.deleted`.
+  - **Over SQL, for Tableau, Power BI and other tools** (`POST /sql/metrics/<name>/publish`, `DELETE …/publish`; the
+    metric's owner or an operator): the metric becomes a Trino view, `metrics.<name>` (`CAIRN_METRIC_VIEW_SCHEMA`), of
+    its measure per listed dimension and per day (`period`), created `SECURITY INVOKER` on the metric's connection
+    as the person publishing (Cairn's policies decide whether they may create views in that schema; create the
+    schema once). A BI tool signed in to Trino as a person (OAuth2 through Cairn, or a Cairn token) sums it up and
+    gets that person's number, the same as a dashboard: the view runs as them, so their row filters and masks
+    apply, and Cairn decides reads of the view on the terms of the metric's table (whoever may read the table may
+    read its metric's view; nobody else). Only measures that stay right when summed again are published (`Sum`,
+    `Count`, `SumIf`, `CountIf`); an average or a distinct count is refused, as a BI tool cannot add up per-day
+    values of those. The view follows each change of the definition (or is dropped if it can no longer be one) and
+    is dropped with the metric. Audited (`metric.published`, `metric.unpublished`). Migration 0091. Tested on real
+    Trino: the admin's and Bob's sums over the view equal Cairn's metric query for each (Bob's row filter applying
+    inside it), a changed definition changed it, and deleting the metric dropped it (`tests/test_trino_e2e.py`).
   - **Metric alerts** (`/sql/metric-alerts`): a metric watched per `grain` (day, week, month, quarter), optionally
     filtered (`filters`), with a `rule`: `change` (the last complete period against the one before: `drop_pct`,
     `rise_pct`), `range` (against the usual range of the `periods` before it, median ± `band` robust standard

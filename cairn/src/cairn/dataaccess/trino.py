@@ -219,6 +219,21 @@ class TrinoAccess:
         self.held: Optional[Callable[[str], bool]] = None
         self.plan_for = plan_for
         self.catalogs = catalogs
+        # metric_view_source(table): a published metric's view (SECURITY INVOKER) is read on the terms of the
+        # metric's table, its source's urn; None otherwise (cairn.sqlworkspace.metrics).
+        self.metric_view_source: Optional[Callable[[dict], Optional[str]]] = None
+
+    def _decided_on(self, t: dict, need: str) -> str:
+        """The urn a read or view of ``t`` is decided on: a published metric view's source table, else ``t``."""
+        if need in (VIEW, READ) and self.metric_view_source is not None:
+            try:
+                src = self.metric_view_source(t)
+            except Exception as e:  # fail closed: decided on the view itself, which no policy names
+                logger.warning("metric view lookup failed for %s: %s", self._tkey(t), e)
+                src = None
+            if src:
+                return src
+        return self.table_urn(t)
 
     def dataset_name(self, catalog: str, schema: str, table: str) -> tuple[str, str, str]:
         """(platform, name, env) of a Trino table's dataset."""
@@ -365,7 +380,7 @@ class TrinoAccess:
                 if on_hold:
                     logger.info("%s on %s refused: a legal hold is on", op, self.table_urn(t))
                     return False
-            ok = self.allowed(actor, groups, TABLE_OPS[op], self.table_urn(t))
+            ok = self.allowed(actor, groups, TABLE_OPS[op], self._decided_on(t, TABLE_OPS[op]))
             if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
                 target = (action.get("targetResource") or {}).get("table")
                 ok = bool(target) and self.allowed(actor, groups, MANAGE, self.table_urn(target))
@@ -388,7 +403,7 @@ class TrinoAccess:
             base, meta = name.split("$", 1)
             return self.allowed(actor, groups, VIEW if meta in SAFE_METADATA else MANAGE,
                                 self.table_urn({**t, "tableName": base}))
-        return self.allowed(actor, groups, VIEW, self.table_urn(t))
+        return self.allowed(actor, groups, VIEW, self._decided_on(t, VIEW))
 
     def batch(self, inp: dict) -> list[int]:
         actor, groups = self.who(inp.get("context"))
