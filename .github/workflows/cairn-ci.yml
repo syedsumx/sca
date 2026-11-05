@@ -427,11 +427,18 @@ jobs:
           (cd catalog && cargo build --release --locked)
           (cd store && cargo build --release --locked)
           docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
-      - uses: helm/kind-action@v1
-        with:
-          cluster_name: cairn
-          version: v0.29.0
-          node_image: kindest/node:v1.33.1
+      - name: Kind cluster
+        # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
+        # GitHub (an empty checksum, run 269) failed the job before any test ran.
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind.sha256" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
+          (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind create cluster --name cairn --image kindest/node:v1.33.1 --wait 120s
+          kubectl cluster-info --context kind-cairn
       - name: Load the images into the cluster
         run: |
           # Data apps (test_data_apps_k8s.py): single-platform copies of their images, which kind can import
@@ -539,7 +546,8 @@ jobs:
         working-directory: cairn/deploy/hetzner/terraform
         run: |
           terraform fmt -check -recursive
-          terraform init -backend=false -input=false
+          # The registry and GitHub (provider signatures) answer 5xx now and then (run 269): try again.
+          for i in 1 2 3; do terraform init -backend=false -input=false && break; [ "$i" = 3 ] && exit 1; sleep 15; done
           terraform validate
       - name: Cluster, platform and a tenant on k3s
         run: |
