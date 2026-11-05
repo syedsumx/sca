@@ -29,6 +29,16 @@ class AgentState:
         if os.path.exists(self.path):
             self.identity, self.meta = crypto.Identity.load(self.path)
 
+    def _other(self, key: str) -> Optional[crypto.Identity]:
+        d = self.meta.get(key)
+        return crypto.Identity.from_dict(d) if isinstance(d, dict) else None
+
+    @property
+    def openers(self) -> list:
+        """Every key a task may have been sealed to: the current one, one being rotated to, and the one before it
+        (a poll answered while the keys changed)."""
+        return [i for i in (self.identity, self._other("next_identity"), self._other("previous_identity")) if i]
+
     @property
     def enrolled(self) -> bool:
         return self.identity is not None and bool(self.meta.get("agent_id"))
@@ -48,11 +58,13 @@ class AgentState:
 
 class GatewayClient:
     def __init__(self, gateway_url: str, state: AgentState, timeout: float = 60.0,
-                 http: Optional[httpx.Client] = None, verify: Any = True):
+                 http: Optional[httpx.Client] = None, verify: Any = True, cert: Any = None):
+        """``cert``: the agent's client certificate and key (``(cert_file, key_file)``) for a gateway that asks for
+        one (mTLS)."""
         self.base = gateway_url.rstrip("/")
         self.base_path = urlparse(self.base).path.rstrip("/")
         self.state = state
-        self.http = http or httpx.Client(timeout=timeout, verify=verify)
+        self.http = http or httpx.Client(timeout=timeout, verify=tls_context(verify, cert))
         self._seq_lock = threading.Lock()
 
     # ---- enrolment -------------------------------------------------------------------
@@ -66,11 +78,59 @@ class GatewayClient:
         _raise(resp)
         body = resp.json()
         self.state.identity = identity
-        self.state.meta = {"agent_id": body["agent_id"], "pool": body["pool"],
+        self.state.meta = {"agent_id": body["agent_id"], "pool": body["pool"], "enrolled_at": int(time.time()),
                            "gateway_encryption_public": body["gateway_encryption_public"],
                            "gateway_signing_public": body["gateway_signing_public"], "gateway_url": self.base}
         self.state.save()
         return body
+
+    # ---- key rotation ----------------------------------------------------------------
+    def rotate_keys(self) -> dict:
+        """New keys, without downtime: the new identity is written down first (so a crash cannot lose it), the
+        gateway is asked in a request signed with the current key and proven with the new one, then the new keys
+        become current and the old ones are kept a while to open what was sealed to them."""
+        from cairn.agent.gateway import rotation_proof_bytes
+
+        assert self.state.identity is not None
+        with self._seq_lock:
+            new = crypto.Identity.generate()
+            self.state.meta["next_identity"] = new.to_dict()
+            self.state.save()
+            proof = crypto.sign_bytes(new, rotation_proof_bytes(self.state.agent_id, new.signing_public,
+                                                                new.encryption_public))
+            out = self._signed_post(f"/agents/{self.state.agent_id}/keys/rotate", {
+                "signing_public": new.signing_public, "encryption_public": new.encryption_public, "proof": proof})
+            old = self.state.identity
+            self.state.identity = new
+            self.state.meta.pop("next_identity", None)
+            self.state.meta["previous_identity"] = old.to_dict()
+            self.state.meta["keys_rotated_at"] = int(time.time())
+            self.state.save()
+        return out
+
+    def finish_rotation(self) -> Optional[str]:
+        """After a crash during a rotation: the new keys were written down but the answer never came. If the gateway
+        took them they sign now, so they become current; otherwise they are dropped. Returns what happened."""
+        nxt = self.state._other("next_identity")
+        if nxt is None:
+            return None
+        old = self.state.identity
+        self.state.identity = nxt
+        try:
+            self._signed_post(f"/agents/{self.state.agent_id}/heartbeat", {"running_task_ids": [], "version": __version__})
+        except GatewayHTTPError as e:
+            if e.status != 401:
+                self.state.identity = old
+                raise
+            self.state.identity = old                       # the gateway never took them
+            self.state.meta.pop("next_identity", None)
+            self.state.save()
+            return "dropped"
+        self.state.meta.pop("next_identity", None)
+        self.state.meta["previous_identity"] = old.to_dict() if old else None
+        self.state.meta["keys_rotated_at"] = int(time.time())
+        self.state.save()
+        return "completed"
 
     # ---- signed calls ----------------------------------------------------------------
     def _signed_post(self, rel_path: str, payload: dict) -> Any:
@@ -90,10 +150,14 @@ class GatewayClient:
         out = self._signed_post(f"/agents/{self.state.agent_id}/tasks/poll", {})
         if not out or not out.get("task_id"):
             return None
-        assert self.state.identity is not None
-        plaintext = crypto.open_sealed(self.state.identity.encryption_key, out["envelope"],
-                                       crypto.aad_for(self.state.agent_id, out["task_id"]))
-        return json.loads(plaintext)
+        aad = crypto.aad_for(self.state.agent_id, out["task_id"])
+        for i, ident in enumerate(self.state.openers):
+            try:
+                return json.loads(crypto.open_sealed(ident.encryption_key, out["envelope"], aad))
+            except crypto.CryptoError:
+                if i == len(self.state.openers) - 1:
+                    raise
+        raise crypto.CryptoError("no key to open the task with")
 
     def seal_batch(self, run_id: str, seq: int, mcps: list[dict]) -> dict:
         """Encrypt a batch for the gateway (bound to this agent, run and sequence number)."""
@@ -115,6 +179,23 @@ class GatewayClient:
     def complete(self, run_id: str, status: str, report: dict, final_seq: int) -> dict:
         return self._signed_post(f"/agents/{self.state.agent_id}/runs/{run_id}/complete",
                                  {"status": status, "report": report, "final_seq": final_seq})
+
+
+def tls_context(verify: Any = True, cert: Any = None) -> Any:
+    """What httpx takes as ``verify``: an SSL context holding the CA to trust (a file, the system's, or none) and the
+    agent's client certificate. Built here because httpx drops a separate ``cert`` when ``verify`` is a file path."""
+    import ssl
+
+    if cert is None and not isinstance(verify, str):
+        return verify
+    if verify is False:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+    else:
+        ctx = ssl.create_default_context(cafile=verify if isinstance(verify, str) else None)
+    if cert is not None:
+        ctx.load_cert_chain(*cert) if isinstance(cert, (tuple, list)) else ctx.load_cert_chain(cert)
+    return ctx
 
 
 class GatewayHTTPError(RuntimeError):

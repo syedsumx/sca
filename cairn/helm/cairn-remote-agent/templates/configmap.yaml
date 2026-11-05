@@ -18,6 +18,13 @@ data:
     {{- if .Values.gateway.caBundle }}
     tls_ca_bundle: /etc/cairn-agent/ca.pem
     {{- end }}
+    {{- if .Values.gateway.clientCertSecret }}
+    tls_client_cert: /etc/cairn-agent-client/tls.crt
+    tls_client_key: /etc/cairn-agent-client/tls.key
+    {{- end }}
+    {{- if .Values.agent.keyRotateDays }}
+    key_rotate_days: {{ .Values.agent.keyRotateDays }}
+    {{- end }}
     secrets:
       {{- toYaml .Values.secretStores | nindent 6 }}
   {{- if .Values.gateway.caBundle }}

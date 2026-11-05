@@ -49,6 +49,31 @@ audit log. **Residual risk:** a token used before its real owner gets a working 
 so treat tokens like passwords and revoke unexpected agents
 (`POST /cairn/api/agents/<agent id>/revoke`).
 
+### A stolen agent key
+
+| Attack | Mitigation |
+|---|---|
+| Use a copied key for as long as it lasts | Agents rotate their keys: when the gateway's heartbeat answer asks (a key older than `CAIRN_AGENT_KEY_MAX_AGE_DAYS`, default 30; `0` turns it off), on the agent's own `key_rotate_days`, or on demand. A copy then stops working within the grace period (`CAIRN_AGENT_KEY_GRACE_SECONDS`, default 600), during which the old key signs requests already on their way. |
+| Rotate the agent to keys of the thief's own | A rotation is signed with the current key and carries a proof made with the new one; a retired key, even in its grace, cannot start another; a revoked agent cannot rotate. Each rotation is audited (`agent.keys_rotated`). |
+| Connect with a stolen key from another machine | With mutual TLS (below), the key alone is not enough: the agent must also present a client certificate from the gateway's CA. |
+
+**Rotation without downtime.** The agent writes its new keys down before asking, so a crash
+cannot lose them: on restart it finishes the rotation if the gateway took them, or drops them.
+Tasks sealed to the old key while the keys changed still open: the agent keeps the previous key
+for that.
+
+**Mutual TLS.** Give the gateway its own certificate (`CAIRN_GATEWAY_TLS_CERT`,
+`CAIRN_GATEWAY_TLS_KEY`) and the CA that issues agents' certificates (`CAIRN_GATEWAY_CLIENT_CA`):
+an agent without a certificate from that CA is refused in the TLS handshake, before any request is
+read. Settings that cannot work (a client CA without the gateway's own certificate, a missing file)
+stop the gateway at start. On the agent: `tls_client_cert` and `tls_client_key` (or
+`CAIRN_AGENT_TLS_CERT` and `_KEY`), and `tls_ca_bundle` for the gateway's CA. In Helm:
+`cairn.gateway.tls.secretName` and `clientCaSecret` (the gateway's probes then use TCP), and
+`gateway.clientCertSecret` in the remote-agent chart. The gateway must then be reached without a
+proxy that ends TLS (a LoadBalancer Service or TLS passthrough). Tested with a real TLS gateway:
+an agent with a certificate enrols, works and rotates; one without, or with a certificate from
+another CA, is refused (`tests/test_agent_rotation.py`).
+
 ### A compromised or malicious agent
 
 | Attack | Mitigation |
@@ -86,4 +111,5 @@ compromised: rotating the gateway key requires agents to re-enrol.
   encrypted: it protects the signed headers' metadata and the enrolment exchange.
 * Set `allowed_platforms` on every pool.
 * Keep enrolment tokens short-lived and revoke agents that are no longer used.
-* Watch the audit log for `agent.enrolled`, `agent.ip_changed` and `batch.rejected_mcps`.
+* Watch the audit log for `agent.enrolled`, `agent.ip_changed`, `agent.keys_rotated` and `batch.rejected_mcps`.
+* Where agents run on networks you do not fully control, require client certificates (mutual TLS).

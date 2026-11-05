@@ -11,6 +11,9 @@ gateway:
   url: https://cairn-gateway.example.com
   # Optional extra CA bundle (PEM) for TLS-inspecting egress proxies / private CAs.
   caBundle: ""
+  # For a gateway that requires client certificates (mutual TLS): a kubernetes.io/tls Secret with the agent's
+  # certificate and key (tls.crt, tls.key), issued by the CA the gateway trusts (e.g. by cert-manager).
+  clientCertSecret: ""
 
 # Agent pool label (informational: the pool is bound server-side to the enrolment token). Execution
 # requests with executorId=<pool> are routed to agents of that pool.
@@ -23,6 +26,8 @@ enrollment:
   token: ""                   # only for testing; rendered into a chart-managed Secret
 
 agent:
+  # Keys also rotate when the gateway asks (CAIRN_AGENT_KEY_MAX_AGE_DAYS there); set days to rotate sooner.
+  keyRotateDays: null
   heartbeatIntervalSeconds: 15
   pollIntervalSeconds: 5
   maxParallelTasks: 2

@@ -42,6 +42,9 @@ agents = Table(
     Column("last_heartbeat_ms", BigInteger, nullable=True),
     Column("last_ip", String(64), nullable=True),
     Column("running_tasks", Integer, nullable=False, default=0),
+    # Key rotation: the key before the current one stays valid for a short grace, for requests in flight.
+    Column("previous_signing_public", String(128), nullable=True),
+    Column("keys_rotated_at_ms", BigInteger, nullable=True),
 )
 
 tasks = Table(

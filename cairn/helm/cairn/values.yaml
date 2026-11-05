@@ -373,6 +373,14 @@ cairn:
     pdb:
       enabled: true
       minAvailable: 1
+    # TLS on the gateway itself (a kubernetes.io/tls Secret) and, with clientCaSecret (a Secret whose clientCaKey,
+    # default ca.crt, is the CA that issues agents' certificates), mutual TLS: an agent without a certificate from
+    # that CA is refused in the handshake. Expose it with a LoadBalancer Service or TLS passthrough; an Ingress that
+    # ends TLS would have to check client certificates itself.
+    tls:
+      secretName: ""
+      clientCaSecret: ""
+      clientCaKey: ca.crt
     # Public (or PrivateLink / VPC endpoint) exposure for remote agents.
     service:
       type: ClusterIP

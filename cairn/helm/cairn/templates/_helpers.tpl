@@ -299,6 +299,7 @@ Renders a Cairn Deployment. Arguments (dict):
   healthPath – optional probe path (default /health)
   metricsPath – optional Prometheus scrape path (default /metrics)
   extraEnv   – optional list of extra env entries for this component
+  tcpProbes  – optional: probe the port with TCP instead of GET (a port that speaks TLS)
   extraVolumes / extraVolumeMounts – optional lists
 */}}
 {{- define "cairn.deployment" -}}
@@ -376,18 +377,30 @@ spec:
               containerPort: {{ .port }}
               protocol: TCP
           readinessProbe:
+            {{- if .tcpProbes }}
+            tcpSocket: { port: http }      # TLS with client certificates: the kubelet cannot speak it
+            {{- else }}
             httpGet: { path: {{ $health }}, port: http }
+            {{- end }}
             periodSeconds: 5
             timeoutSeconds: 3
             failureThreshold: 3
           livenessProbe:
+            {{- if .tcpProbes }}
+            tcpSocket: { port: http }      # TLS with client certificates: the kubelet cannot speak it
+            {{- else }}
             httpGet: { path: {{ $health }}, port: http }
+            {{- end }}
             initialDelaySeconds: 20
             periodSeconds: 15
             timeoutSeconds: 5
             failureThreshold: 4
           startupProbe:
+            {{- if .tcpProbes }}
+            tcpSocket: { port: http }      # TLS with client certificates: the kubelet cannot speak it
+            {{- else }}
             httpGet: { path: {{ $health }}, port: http }
+            {{- end }}
             periodSeconds: 3
             failureThreshold: 40
           {{- end }}

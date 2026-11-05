@@ -80,6 +80,11 @@ spec:
               mountPath: /run/secrets/cairn
               readOnly: true
             {{- end }}
+            {{- if .Values.gateway.clientCertSecret }}
+            - name: client-cert
+              mountPath: /etc/cairn-agent-client
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -98,6 +103,12 @@ spec:
         - name: source-credentials
           secret:
             secretName: {{ .Values.sourceCredentialsSecret }}
+            defaultMode: 0400
+        {{- end }}
+        {{- if .Values.gateway.clientCertSecret }}
+        - name: client-cert
+          secret:
+            secretName: {{ .Values.gateway.clientCertSecret }}
             defaultMode: 0400
         {{- end }}
       {{- with .Values.nodeSelector }}

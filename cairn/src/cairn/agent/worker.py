@@ -36,6 +36,9 @@ class AgentConfig(BaseModel):
     heartbeat_interval_seconds: float = 15.0
     secrets: list[dict] = Field(default_factory=lambda: [{"type": "env"}])
     tls_ca_bundle: Optional[str] = None
+    tls_client_cert: Optional[str] = None     # for a gateway that requires client certificates (mTLS)
+    tls_client_key: Optional[str] = None
+    key_rotate_days: Optional[float] = Field(default=None, gt=0)   # rotate on this schedule too (the gateway may ask sooner)
     batch_max_items: int = 500
     batch_max_bytes: int = 1 << 20
     spool_max_bytes: int = 512 << 20       # sealed batches kept on disk while the gateway is unreachable
@@ -51,6 +54,9 @@ class AgentConfig(BaseModel):
             "gateway_url": os.environ.get("CAIRN_AGENT_GATEWAY_URL"),
             "state_dir": os.environ.get("CAIRN_AGENT_STATE_DIR"),
             "enrollment_token": os.environ.get("CAIRN_AGENT_ENROLLMENT_TOKEN"),
+            "tls_ca_bundle": os.environ.get("CAIRN_AGENT_TLS_CA"),
+            "tls_client_cert": os.environ.get("CAIRN_AGENT_TLS_CERT"),
+            "tls_client_key": os.environ.get("CAIRN_AGENT_TLS_KEY"),
         }
         data.update({k: v for k, v in env.items() if v})
         return cls.model_validate(data)
@@ -84,8 +90,11 @@ class AgentWorker:
                  client: Optional[GatewayClient] = None, tester: PipelineRunner = default_connection_tester):
         self.config = config
         self.state = AgentState(config.state_dir)
+        if bool(config.tls_client_cert) != bool(config.tls_client_key):
+            raise SystemExit("tls_client_cert and tls_client_key go together")
+        cert = (config.tls_client_cert, config.tls_client_key) if config.tls_client_cert else None
         self.client = client or GatewayClient(config.gateway_url, self.state,
-                                              verify=config.tls_ca_bundle or True)
+                                              verify=config.tls_ca_bundle or True, cert=cert)
         self.secrets = SecretResolver.from_config(config.secrets)
         self.runner = runner
         self.tester = tester
@@ -97,6 +106,9 @@ class AgentWorker:
 
     def ensure_enrolled(self) -> None:
         if self.state.enrolled:
+            outcome = with_backoff(self.client.finish_rotation)
+            if outcome:
+                logger.info("a key rotation interrupted earlier was %s", outcome)
             return
         if not self.config.enrollment_token:
             raise SystemExit("agent is not enrolled and no CAIRN_AGENT_ENROLLMENT_TOKEN was provided")
@@ -186,6 +198,22 @@ class AgentWorker:
             if task_id in self.running:
                 logger.info("task %s was cancelled in Cairn; stopping it", task_id)
                 self.cancels.setdefault(task_id, threading.Event()).set()
+        if self.rotation_due(reply):
+            try:
+                self.client.rotate_keys()
+                logger.info("rotated the agent's keys")
+            except Exception as e:  # tried again at the next heartbeat; the current keys still work
+                logger.warning("key rotation failed: %s", e)
+
+    def rotation_due(self, reply: Optional[dict]) -> bool:
+        if (reply or {}).get("rotate_key"):
+            return True
+        if not self.config.key_rotate_days:
+            return False
+        import time as _t
+
+        since = self.state.meta.get("keys_rotated_at") or self.state.meta.get("enrolled_at") or 0
+        return _t.time() - float(since) > self.config.key_rotate_days * 86400
 
     def _heartbeat_loop(self) -> None:
         while not self._stop.is_set():

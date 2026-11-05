@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from cairn.agent.crypto import CryptoError
 from cairn.agent.gateway import (
     CompleteRequest,
+    RotateRequest,
     EnqueueRequest,
     EnrollRequest,
     GatewayError,
@@ -132,6 +133,12 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
             _same(agent, agent_id)
             return _wrap(lambda: service.heartbeat(agent, HeartbeatRequest.model_validate_json(body or b"{}"),
                                                    _client_ip(request)))
+
+        @router.post("/{agent_id}/keys/rotate")
+        async def rotate(agent_id: str, request: Request):
+            agent, body = await _agent(request)
+            _same(agent, agent_id)
+            return _wrap(lambda: service.rotate_keys(agent, RotateRequest.model_validate_json(body)))
 
         @router.post("/{agent_id}/tasks/poll")
         async def poll(agent_id: str, request: Request):

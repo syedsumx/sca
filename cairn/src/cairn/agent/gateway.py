@@ -104,6 +104,18 @@ class EnrollResponse(BaseModel):
     heartbeat_interval_seconds: int = 15
 
 
+class RotateRequest(BaseModel):
+    """New keys for an agent, in a request signed with its current key. ``proof`` is the new signing key's signature
+    over :func:`rotation_proof_bytes`, so the agent shows it holds the key it is moving to."""
+    signing_public: str
+    encryption_public: str
+    proof: str
+
+
+def rotation_proof_bytes(agent_id: str, signing_public: str, encryption_public: str) -> bytes:
+    return "\n".join(["cairn-agent-key-rotation", agent_id, signing_public, encryption_public]).encode()
+
+
 class HeartbeatRequest(BaseModel):
     running_task_ids: list[str] = Field(default_factory=list)
     version: Optional[str] = None
@@ -172,13 +184,20 @@ class GatewayKeys:
 
 class GatewayService:
     def __init__(self, engine: Engine, keys: GatewayKeys, graph: Optional[MetadataGraph],
-                 audit: Optional[AuditLog] = None, max_skew_seconds: int = 300, lease_seconds: int = 300):
+                 audit: Optional[AuditLog] = None, max_skew_seconds: int = 300, lease_seconds: int = 300,
+                 key_grace_seconds: Optional[int] = None, key_max_age_days: Optional[float] = None):
         self.engine = engine
         self.keys = keys
         self.graph = graph
         self.audit = audit
         self.max_skew_ms = max_skew_seconds * 1000
         self.lease_ms = lease_seconds * 1000
+        # After a rotation the previous key signs for this long (requests in flight); keys older than the maximum
+        # age are asked, in the heartbeat's answer, to rotate (0 turns that off).
+        self.key_grace_ms = int((key_grace_seconds if key_grace_seconds is not None
+                                 else int(os.environ.get("CAIRN_AGENT_KEY_GRACE_SECONDS", "600"))) * 1000)
+        self.key_max_age_ms = int(float(key_max_age_days if key_max_age_days is not None
+                                        else os.environ.get("CAIRN_AGENT_KEY_MAX_AGE_DAYS", "30")) * 86_400_000)
 
     # ---- admin -----------------------------------------------------------------------
     def create_pool(self, spec: PoolSpec, actor: str) -> dict:
@@ -329,17 +348,25 @@ class GatewayService:
             agent = conn.execute(select(agents).where(agents.c.agent_id == agent_id)).first()
         if not agent or agent.status == "REVOKED":
             raise GatewayError("unknown or revoked agent", 401)
-        try:
-            crypto.verify_signature(agent.signing_public, method, path, ts, nonce, body, sig)  # type: ignore[arg-type]
-        except crypto.CryptoError:
-            raise GatewayError("invalid signature", 401)
+        keys = [agent.signing_public]
+        if agent.previous_signing_public and (agent.keys_rotated_at_ms or 0) + self.key_grace_ms > now:
+            keys.append(agent.previous_signing_public)          # just rotated: requests already on their way
+        signed_with = None
+        for i, key in enumerate(keys):
+            try:
+                crypto.verify_signature(key, method, path, ts, nonce, body, sig)  # type: ignore[arg-type]
+                signed_with = key
+                break
+            except crypto.CryptoError:
+                if i == len(keys) - 1:
+                    raise GatewayError("invalid signature", 401)
         try:
             with self.engine.begin() as conn:
                 conn.execute(nonces.insert().values(nonce=nonce, agent_id=agent_id, seen_at_ms=now))
                 conn.execute(delete(nonces).where(nonces.c.seen_at_ms < now - 2 * self.max_skew_ms))
         except IntegrityError:
             raise GatewayError("replayed request (nonce reuse)", 401)
-        return dict(agent._mapping)
+        return {**dict(agent._mapping), "signed_with": signed_with}
 
     def heartbeat(self, agent: dict, req: HeartbeatRequest, ip: Optional[str]) -> dict:
         now = _now()
@@ -356,7 +383,45 @@ class GatewayService:
                 tasks.c.task_id.in_(req.running_task_ids or [""]))))]
         if agent.get("last_ip") and ip and agent["last_ip"] != ip:
             self._audit("agent.ip_changed", agent["agent_id"], agent["pool"], {"from": agent["last_ip"], "to": ip})
-        return {"ok": True, "cancel_task_ids": cancelled, "server_time_ms": now}
+        since = agent.get("keys_rotated_at_ms") or agent.get("enrolled_at_ms") or now
+        rotate = bool(self.key_max_age_ms) and now - since > self.key_max_age_ms
+        return {"ok": True, "cancel_task_ids": cancelled, "server_time_ms": now, "rotate_key": rotate}
+
+    def rotate_keys(self, agent: dict, req: RotateRequest) -> dict:
+        """Moves an agent to new keys. The request is signed with its current key (``authenticate``) and carries a
+        proof made with the new one; the old key keeps signing for the grace period only, and a key just retired
+        cannot start another rotation."""
+        now = _now()
+        for key in (req.signing_public, req.encryption_public):
+            try:
+                ok = len(crypto.b64d(key)) == 32
+            except Exception:  # noqa: BLE001 - not base64
+                ok = False
+            if not ok:
+                raise GatewayError("public keys must be raw 32-byte Ed25519/X25519 keys", 400)
+        if agent.get("signed_with") != agent["signing_public"]:
+            raise GatewayError("only the agent's current key rotates its keys", 401)
+        if req.signing_public in (agent["signing_public"], agent.get("previous_signing_public")):
+            raise GatewayError("the new signing key must be a new key", 400)
+        from cryptography.exceptions import InvalidSignature
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+        try:
+            Ed25519PublicKey.from_public_bytes(crypto.b64d(req.signing_public)).verify(
+                crypto.b64d(req.proof), rotation_proof_bytes(agent["agent_id"], req.signing_public, req.encryption_public))
+        except (InvalidSignature, ValueError):
+            raise GatewayError("the proof was not made with the new signing key", 400)
+        with self.engine.begin() as conn:
+            # Only from the key now current: a request signed with the previous key (in its grace) cannot rotate.
+            n = conn.execute(update(agents).where(and_(
+                agents.c.agent_id == agent["agent_id"], agents.c.signing_public == agent["signing_public"],
+                agents.c.status != "REVOKED")).values(
+                previous_signing_public=agent["signing_public"], signing_public=req.signing_public,
+                encryption_public=req.encryption_public, keys_rotated_at_ms=now)).rowcount
+        if n != 1:
+            raise GatewayError("the agent's keys changed meanwhile, or it was revoked", 409)
+        self._audit("agent.keys_rotated", agent["agent_id"], agent["pool"], {"grace_seconds": self.key_grace_ms // 1000})
+        return {"agent_id": agent["agent_id"], "rotated_at_ms": now, "previous_key_valid_until_ms": now + self.key_grace_ms}
 
     def poll(self, agent: dict) -> Optional[dict]:
         """Lease the oldest runnable task in the agent's pool; returns a sealed envelope."""

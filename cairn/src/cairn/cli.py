@@ -23,7 +23,29 @@ def _services(**kwargs):
     return build_services(get_settings(), **kwargs)
 
 
-def _serve(app, host: str, port: int, root_path: str = "") -> None:
+def gateway_tls() -> dict:
+    """The gateway's own TLS (``CAIRN_GATEWAY_TLS_CERT`` and ``_KEY``) and, with ``CAIRN_GATEWAY_CLIENT_CA``, mutual
+    TLS: an agent without a client certificate signed by that CA is refused in the handshake. Settings that cannot
+    work stop the gateway at start."""
+    import ssl
+
+    cert, key = os.environ.get("CAIRN_GATEWAY_TLS_CERT", ""), os.environ.get("CAIRN_GATEWAY_TLS_KEY", "")
+    ca = os.environ.get("CAIRN_GATEWAY_CLIENT_CA", "")
+    if not (cert or key or ca):
+        return {}
+    if not (cert and key):
+        raise SystemExit("CAIRN_GATEWAY_TLS_CERT and CAIRN_GATEWAY_TLS_KEY go together"
+                         + (" (CAIRN_GATEWAY_CLIENT_CA needs them: mTLS is TLS first)" if ca else ""))
+    for f in (cert, key, ca):
+        if f and not os.path.isfile(f):
+            raise SystemExit(f"{f}: no such file")
+    out = {"ssl_certfile": cert, "ssl_keyfile": key}
+    if ca:
+        out.update(ssl_ca_certs=ca, ssl_cert_reqs=ssl.CERT_REQUIRED)
+    return out
+
+
+def _serve(app, host: str, port: int, root_path: str = "", **tls) -> None:
     import uvicorn
 
     # Idle connections are kept open longer than the clients that pool them (Trino's HTTP client keeps one for a
@@ -31,7 +53,7 @@ def _serve(app, host: str, port: int, root_path: str = "") -> None:
     # was closing at that moment, and Trino reported "Failed to query OPA backend" for it.
     uvicorn.run(app, host=host, port=port, root_path=root_path, proxy_headers=True,
                 forwarded_allow_ips=os.environ.get("CAIRN_FORWARDED_ALLOW_IPS", "127.0.0.1"),
-                timeout_keep_alive=keep_alive())
+                timeout_keep_alive=keep_alive(), **tls)
 
 
 def keep_alive() -> int:
@@ -62,6 +84,7 @@ def cmd_gateway(a) -> None:
 
     s = _services(with_ai=False)
     _ = s.gateway.keys.identity  # type: ignore[union-attr]  # fail fast if the key dir is unusable
+    tls = gateway_tls()                                       # and if the TLS settings cannot work
     if s.graph is not None and not a.no_dispatcher:
         dispatcher = ExecutionRequestDispatcher(s.gateway, s.graph)  # type: ignore[arg-type]
 
@@ -74,7 +97,7 @@ def cmd_gateway(a) -> None:
                 time.sleep(a.dispatch_interval)
 
         threading.Thread(target=loop, daemon=True, name="cairn-dispatcher").start()
-    _serve(create_gateway_app(s), a.host, a.port, a.root_path)
+    _serve(create_gateway_app(s), a.host, a.port, a.root_path, **tls)
 
 
 def cmd_scheduler(a) -> None:
