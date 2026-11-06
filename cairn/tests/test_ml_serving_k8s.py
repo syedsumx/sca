@@ -62,16 +62,18 @@ def port() -> int:
         return s.getsockname()[1]
 
 
-def wait(url: str, seconds: int = 90) -> None:
+def wait(url: str, seconds: int = 90, proc: subprocess.Popen | None = None, log: str = "") -> None:
     end = time.time() + seconds
     while time.time() < end:
+        if proc is not None and proc.poll() is not None:
+            raise RuntimeError(f"the server exited ({proc.returncode}):\n{open(log).read()[-4000:] if log else ''}")
         try:
             if httpx.get(url, timeout=2).status_code < 500:
                 return
         except httpx.HTTPError:
             pass
         time.sleep(0.5)
-    raise RuntimeError(f"{url} did not come up")
+    raise RuntimeError(f"{url} did not come up" + (f":\n{open(log).read()[-4000:]}" if log else ""))
 
 
 @pytest.fixture
@@ -111,7 +113,8 @@ def mlflow():
                                "--host", "0.0.0.0", "--port", str(p), "--workers", "1"],
                               stdout=open(f"{d}/mlflow.log", "w"), stderr=subprocess.STDOUT)
     url = f"http://{HOST}:{p}"
-    wait(f"{url}/health")
+    wait(f"http://127.0.0.1:{p}/health", 240, server, f"{d}/mlflow.log")   # a fresh environment's first start is slow
+    wait(f"{url}/health", 30, server, f"{d}/mlflow.log")                   # and where the pods reach it
     open(f"{d}/model.py", "w").write(MODEL)
     r = subprocess.run([PY, "-c", "import mlflow\nmlflow.set_experiment('doubler')\nwith mlflow.start_run():\n"
                                   " mlflow.pyfunc.log_model(name='model', python_model='model.py', registered_model_name='doubler')"],

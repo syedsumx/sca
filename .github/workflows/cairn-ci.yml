@@ -496,7 +496,7 @@ jobs:
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jobs_k8s.py | tee "$RUNNER_TEMP/jobs.log"
           ! grep -q "skipped" "$RUNNER_TEMP/jobs.log"
           # Model deployments as Deployments of MLflow's model server, scaled by Cairn, with only the chart's Role.
-          python -m venv "$RUNNER_TEMP/mlflow" && "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0"
+          python -m venv "$RUNNER_TEMP/mlflow" && "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_serving_k8s.py | tee "$RUNNER_TEMP/models.log"
           ! grep -q "skipped" "$RUNNER_TEMP/models.log"

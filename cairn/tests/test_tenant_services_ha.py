@@ -124,9 +124,12 @@ def test_kafka_survives_a_lost_broker_and_refuses_writes_it_could_lose(kafka):
     assert "ReplicationFactor: 3" in desc and "min.insync.replicas=2" in desc, desc
 
     def produce(i, text):
-        return k.exec(i, "bash", "-c", f"echo '{text}' | {KT}/kafka-console-producer.sh --bootstrap-server {BOOT} "
-                                       "--topic events --producer-property acks=all --producer-property "
-                                       "delivery.timeout.ms=20000 --producer-property request.timeout.ms=10000", timeout=90)
+        # Bounded inside the container (exit 124 when cut off): with brokers gone the client can wait on metadata
+        # and on names that no longer resolve well past its own timeouts.
+        return k.exec(i, "bash", "-c", f"echo '{text}' | timeout 100 {KT}/kafka-console-producer.sh --bootstrap-server "
+                                       f"{BOOT} --topic events --producer-property acks=all --producer-property "
+                                       "delivery.timeout.ms=20000 --producer-property request.timeout.ms=10000 "
+                                       "--producer-property max.block.ms=15000", timeout=150)
 
     def consume(i):
         r = k.exec(i, f"{KT}/kafka-console-consumer.sh", "--bootstrap-server", BOOT, "--topic", "events",
@@ -138,11 +141,13 @@ def test_kafka_survives_a_lost_broker_and_refuses_writes_it_could_lose(kafka):
     k.stop(0)
     wait(lambda: produce(1, "after").returncode == 0, "a write with one broker down", 120)
     assert consume(2) == ["after", "before"]
-    # Two gone: the write is not acknowledged rather than kept as the only copy (the console producer still exits
-    # 0, so the refusal is read from what it reports).
+    # Two gone: the write is not acknowledged rather than kept as the only copy. The console producer still exits
+    # 0 on a refused record, so the refusal is read from what it reports; cut off without an acknowledgement
+    # (124) is a refusal too.
     k.stop(2)
-    lone = produce(1, "unsafe").stderr
-    assert "NotEnoughReplicas" in lone or "Expiring 1 record" in lone, lone
+    lone = produce(1, "unsafe")
+    assert (lone.returncode == 124 or "NotEnoughReplicas" in lone.stderr or "Expiring 1 record" in lone.stderr
+            or "TimeoutException" in lone.stderr), (lone.returncode, lone.stderr)
 
 
 def _file_limit() -> int:

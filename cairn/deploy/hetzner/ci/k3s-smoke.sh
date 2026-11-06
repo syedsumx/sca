@@ -153,11 +153,12 @@ search="wget -q -T 5 -O- http://opensearch.cairn-ci-acme.svc:9200/_cluster/healt
 # A TCP connection to Kafka (BusyBox nc: 0 once connected; 1 when refused or dropped).
 kafka="nc -w 5 kafka.cairn-ci-acme.svc 9092 </dev/null >/dev/null"
 pg="psql 'host=cairn-pg-rw.cairn-platform.svc user=cairn_ci_acme dbname=cairn_ci_acme sslmode=require connect_timeout=5' -c 'select 1'"
-diagnose() {
-    echo "--- endpoints, policies and pods in cairn-ci-acme" >&2
-    kubectl -n cairn-ci-acme get endpoints -o wide >&2 || true
-    kubectl -n cairn-ci-acme get networkpolicy -o yaml >&2 || true
-    kubectl -n cairn-ci-acme get pods -o wide --show-labels >&2 || true
+diagnose() {   # [namespace]
+    local ns=${1:-cairn-ci-acme}
+    echo "--- endpoints, policies and pods in $ns" >&2
+    kubectl -n "$ns" get endpoints -o wide >&2 || true
+    kubectl -n "$ns" get networkpolicy -o yaml >&2 || true
+    kubectl -n "$ns" get pods -o wide --show-labels >&2 || true
 }
 # The release's paths, from one pod: each step says when it got through.
 kafka_pod=$(kubectl -n cairn-ci-acme get pod kafka-0 -o jsonpath='{.status.podIP}')
@@ -208,9 +209,14 @@ desc=$(kt 1 kafka-topics.sh --describe --topic cairn-ha-check 2>&1 || true)
 grep -q "ReplicationFactor: 3" <<<"$desc" || { echo "$desc"; cat "$work/ha-topic.err"; fail "topics do not get three copies"; }
 echo before | kt 1 kafka-console-producer.sh --topic cairn-ha-check --producer-property acks=all
 # The release reaches each broker by its own name (what Kafka's clients are sent to), through the policy.
+# Each hop says when it got through, and each try is bounded (a dropped connection must not hang the probe).
+kafka2_ip=$(kubectl -n cairn-ci-ha get pod kafka-2 -o jsonpath='{.status.podIP}')
 probe cairn-ci-ha "app.kubernetes.io/name=cairn,app.kubernetes.io/instance=cairn-ci-ha" ha-paths \
-    "nc -w 5 kafka-2.kafka-headless.cairn-ci-ha.svc 9092 </dev/null >/dev/null && wget -q -T 5 -O- http://opensearch.cairn-ci-ha.svc:9200/_cluster/health | grep -q status" \
-    || fail "the release cannot reach the replicated services"
+    "timeout 8 nslookup kafka-2.kafka-headless.cairn-ci-ha.svc.cluster.local >/dev/null && echo dns-ok && \
+     timeout 8 nc -w 5 $kafka2_ip 9092 </dev/null >/dev/null && echo kafka-pod-ok && \
+     timeout 8 nc -w 5 kafka-2.kafka-headless.cairn-ci-ha.svc 9092 </dev/null >/dev/null && echo kafka-name-ok && \
+     timeout 8 wget -q -T 5 -O- http://opensearch.cairn-ci-ha.svc:9200/_cluster/health | grep -q status && echo search-ok" \
+    || { diagnose cairn-ci-ha; fail "the release cannot reach the replicated services (see which hop got through above)"; }
 # A pod lost (its node gone): the others go on, with everything written so far.
 kubectl -n cairn-ci-ha delete pod opensearch-0 kafka-0 --wait=false >/dev/null
 sleep 5
