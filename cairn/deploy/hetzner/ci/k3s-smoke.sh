@@ -196,11 +196,16 @@ grep -qF "core.kafka.bootstrap=kafka-0.$d\\,kafka-1.$d\\,kafka-2.$d" "$work/ha-i
 grep -q "not done in place" "$work/ha-switch.err" || { cat "$work/ha-switch.err"; fail "the refusal does not say why"; }
 os() { kubectl -n cairn-ci-ha exec "opensearch-$1" -- curl -s -m 10 -H 'Content-Type: application/json' "${@:2}"; }
 kt() { kubectl -n cairn-ci-ha exec -i "kafka-$1" -- "/opt/kafka/bin/$2" --bootstrap-server "kafka-0.$d,kafka-1.$d,kafka-2.$d" "${@:3}"; }
-os 1 localhost:9200/_cluster/health | grep -q '"number_of_nodes":3' || fail "OpenSearch did not form a cluster of three"
+# Outputs are captured before they are searched: with pipefail, grep -q leaving early fails the kubectl before it.
+health=$(os 1 localhost:9200/_cluster/health || true)
+grep -q '"number_of_nodes":3' <<<"$health" || { echo "$health"; fail "OpenSearch did not form a cluster of three"; }
 os 1 -X PUT localhost:9200/cairn_ha_check -d '{"settings":{"number_of_shards":3,"number_of_replicas":1}}' >/dev/null
 for n in 1 2 3 4 5; do os 1 -X PUT "localhost:9200/cairn_ha_check/_doc/$n?refresh=true" -d '{"n":1}' >/dev/null; done
-kt 1 kafka-topics.sh --create --topic cairn-ha-check --partitions 3 >/dev/null
-kt 1 kafka-topics.sh --describe --topic cairn-ha-check | grep -q "ReplicationFactor: 3" || fail "topics do not get three copies"
+# Ready pods have their port open; the brokers may still be joining. A topic needing three copies waits for all three.
+for _ in $(seq 30); do kt 1 kafka-topics.sh --create --if-not-exists --topic cairn-ha-check --partitions 3 \
+    >/dev/null 2>"$work/ha-topic.err" && break; sleep 2; done
+desc=$(kt 1 kafka-topics.sh --describe --topic cairn-ha-check 2>&1 || true)
+grep -q "ReplicationFactor: 3" <<<"$desc" || { echo "$desc"; cat "$work/ha-topic.err"; fail "topics do not get three copies"; }
 echo before | kt 1 kafka-console-producer.sh --topic cairn-ha-check --producer-property acks=all
 # The release reaches each broker by its own name (what Kafka's clients are sent to), through the policy.
 probe cairn-ci-ha "app.kubernetes.io/name=cairn,app.kubernetes.io/instance=cairn-ci-ha" ha-paths \
@@ -212,10 +217,15 @@ sleep 5
 echo after | kt 1 kafka-console-producer.sh --topic cairn-ha-check --producer-property acks=all \
     --producer-property delivery.timeout.ms=60000 2>"$work/ha-produce.err" || true
 ! grep -qE "Expiring|NotEnoughReplicas" "$work/ha-produce.err" || { cat "$work/ha-produce.err"; fail "Kafka stopped taking writes with a broker down"; }
-got=$(kt 2 kafka-console-consumer.sh --topic cairn-ha-check --from-beginning --timeout-ms 20000 2>/dev/null | sort | tr '\n' ' ')
+got=$(kt 2 kafka-console-consumer.sh --topic cairn-ha-check --from-beginning --timeout-ms 20000 2>/dev/null || true)
+got=$(sort <<<"$got" | tr '\n' ' ')
 [ "$got" = "after before " ] || fail "Kafka lost a message with a broker down (got: $got)"
-for _ in $(seq 30); do os 2 localhost:9200/_cluster/health | grep -qE '"status":"(green|yellow)"' && break; sleep 2; done
-os 2 localhost:9200/cairn_ha_check/_count | grep -q '"count":5' || fail "OpenSearch lost documents with a node down"
+for _ in $(seq 30); do
+    health=$(os 2 localhost:9200/_cluster/health || true)
+    grep -qE '"status":"(green|yellow)"' <<<"$health" && break; sleep 2
+done
+count=$(os 2 localhost:9200/cairn_ha_check/_count || true)
+grep -q '"count":5' <<<"$count" || { echo "$count"; fail "OpenSearch lost documents with a node down"; }
 kubectl -n cairn-ci-ha rollout status statefulset/opensearch --timeout 5m >/dev/null || fail "OpenSearch node 0 did not come back"
 kubectl -n cairn-ci-ha rollout status statefulset/kafka --timeout 5m >/dev/null || fail "Kafka broker 0 did not come back"
 HELM="$work/helm-stub" HELM_STUB_LOG=/dev/null deploy/hosting/tenant.sh delete ci-ha --drop-data
