@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import glob
 import hashlib
 import json
@@ -23,6 +25,32 @@ from cairn.common.db import JSONText, metadata
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, RuleResult, evaluate_policy
 from cairn.governance.attributes import AttributeResolver
 from cairn.governance.rbac import RbacModel, translate_native_policy
+
+# Deny decisions are audited one by one, each in its own commit. A request that decides many resources at once (a
+# job's 1,000 tables) collects them here and writes them in one transaction before it answers.
+_deny_batch: contextvars.ContextVar[Optional[list]] = contextvars.ContextVar("cairn_deny_audit_batch", default=None)
+
+
+@contextlib.contextmanager
+def deny_audit_batch():
+    """Within the block, deny audits are kept and written together at its end (in one transaction per audit log),
+    including when the block raises: nothing decided goes unrecorded."""
+    if _deny_batch.get() is not None:            # already batching: the outer block writes them
+        yield
+        return
+    token = _deny_batch.set([])
+    try:
+        yield
+    finally:
+        pending = _deny_batch.get() or []
+        _deny_batch.reset(token)
+        by_log: dict[int, tuple[Any, list]] = {}
+        for audit, args in pending:
+            by_log.setdefault(id(audit), (audit, []))[1].append(args)
+        for audit, entries in by_log.values():
+            with audit.engine.begin() as conn:
+                for args in entries:
+                    audit.record(*args, conn=conn)
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +250,11 @@ class PolicyDecisionPoint:
                 if len(self._cache) > 50_000:
                     self._cache.clear()
         if self.audit and self.audit_denies and decision.decision == "DENY" and decision.policy_ids:
+            batch = _deny_batch.get()
+            if batch is not None and hasattr(self.audit, "engine"):
+                batch.append((self.audit, ("authz", "deny", req.actor, req.resource.urn if req.resource else None,
+                                           {"privilege": req.privilege, "policies": decision.policy_ids})))
+                return decision
             self.audit.record("authz", "deny", req.actor, req.resource.urn if req.resource else None,
                               {"privilege": req.privilege, "policies": decision.policy_ids})
         return decision

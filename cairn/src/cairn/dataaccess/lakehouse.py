@@ -279,6 +279,13 @@ class LakehouseAccess:
         except Exception:  # noqa: BLE001
             schemas = False
         out = []
+        from cairn.governance.pdp import deny_audit_batch
+
+        with deny_audit_batch():                  # every refusal still audited, in one commit for the whole job
+            self._decide_tables(actor, groups, tables, allowed, out)
+        return {"schemas": bool(schemas), "tables": out}
+
+    def _decide_tables(self, actor: str, groups: list[str], tables: list[dict], allowed, out: list) -> None:
         for t in tables:
             try:
                 urn = self.urn(list(t.get("namespace") or []), str(t.get("name") or ""))
@@ -290,7 +297,6 @@ class LakehouseAccess:
             except Exception as e:  # noqa: BLE001 - fail closed
                 logger.warning("lakehouse decision failed for %s on %s: %s", actor, t, e)
                 out.append(dict(NOTHING))
-        return {"schemas": bool(schemas), "tables": out}
 
     def _restricted(self, actor: str, groups: list[str], urn: str) -> bool:
         d = self.access.decide(actor, groups, READ, urn)
