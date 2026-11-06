@@ -48,7 +48,8 @@ Run everything from `cairn/`.
   `CAIRN_STORE_BIN=.../release/cairn-store CAIRN_CATALOG_BIN=.../release/cairn-catalog`. Trino, Kafka,
   PostgreSQL and the other services run as Docker containers that the tests start themselves.
 - **Rust:** `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` in `store/` and `catalog/`.
-- **UI:** `npm ci && npm run typecheck && npm test && npm run build` in `ui/`.
+- **UI:** `npm ci && npm run typecheck && npm test && npm run build` in `ui/`; accessibility: `npm run build:mfe`, then
+  `pytest -q -p no:cacheprovider -o addopts="" tests/test_accessibility_e2e.py` (axe on the main pages).
 - **Helm:** `helm lint helm/cairn` and `helm template` with each values profile; CI runs kubeconform.
 - **Terraform provider:** `gofmt -l . && go vet ./...` in `terraform-provider-cairn/`; the end-to-end test is
   `tests/test_terraform_provider.py`.

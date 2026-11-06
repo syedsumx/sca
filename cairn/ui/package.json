@@ -33,6 +33,7 @@
     "@types/react-router-dom": "5.3.3",
     "@types/styled-components": "5.1.34",
     "antd": "4.24.7",
+    "axe-core": "4.10.3",
     "esbuild": "^0.24.2",
     "esbuild-loader": "^4.2.2",
     "jsdom": "24.1.3",

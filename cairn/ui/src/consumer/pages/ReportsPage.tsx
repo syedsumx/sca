@@ -112,7 +112,7 @@ function CoverageTable({
                                 })
                             }
                         >
-                            <Progress percent={r[key]} size="small" format={(p) => `${p}%`} />
+                            <Progress aria-label={`${label}: ${r[key]}%`} percent={r[key]} size="small" format={(p) => `${p}%`} />
                         </Button>
                     ),
                 })),
@@ -308,6 +308,7 @@ export function ReportsPage() {
                             <Surface key={key} style={{ padding: 16 }} aria-label={`${label} overall`}>
                                 <Muted>{label}</Muted>
                                 <Progress
+                                    aria-label={`${label} overall: ${s.coverage.overall[key]}%`}
                                     type="circle"
                                     width={72}
                                     percent={s.coverage.overall[key]}

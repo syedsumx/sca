@@ -146,7 +146,7 @@ export function SqlWorkspacePage() {
                                 Run
                             </Button>
                             <span>
-                                Rows <InputNumber min={1} max={1000} value={limit} onChange={(v) => setLimit(Number(v) || 200)} />
+                                Rows <InputNumber aria-label="Rows" min={1} max={1000} value={limit} onChange={(v) => setLimit(Number(v) || 200)} />
                             </span>
                             <Button onClick={() => setSaving(true)} disabled={!sql.trim()}>
                                 {current ? 'Save changes' : 'Save'}

@@ -55,8 +55,8 @@ export function SqlEditor({ value, onChange, tables, onRun, placeholder }: Props
                 ref={ref}
                 aria-label="SQL"
                 aria-autocomplete="list"
-                aria-expanded={!!open}
-                aria-controls="sql-suggestions"
+                aria-controls={open ? 'sql-suggestions' : undefined}
+                aria-activedescendant={open ? `sql-suggestion-${active}` : undefined}
                 value={value}
                 onChange={(e) => {
                     const sql = e.target.value;
@@ -111,6 +111,7 @@ export function SqlEditor({ value, onChange, tables, onRun, placeholder }: Props
                     {open.items.map((s, i) => (
                         <li
                             key={s.kind + s.label}
+                            id={`sql-suggestion-${i}`}
                             role="option"
                             aria-selected={i === active}
                             onMouseDown={(e) => {

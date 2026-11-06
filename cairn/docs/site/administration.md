@@ -1263,6 +1263,19 @@ The catalog and the store with `CAIRN_*_FSYNC=false` (tests only) now still writ
 the process dying, though not the machine. Before, such commits stayed in memory until a later durable commit,
 so a killed process lost them; the chaos test found it.
 
+## Accessibility
+
+Cairn's pages are checked with axe (the WCAG 2.1 A and AA rules) on every change: discover, search, an asset,
+marketplace, requests, the assistant, context, governance, reports, pipelines, the SQL workspace and its
+workflows, workbooks, input tables, metrics and git folders, query insight, dashboards, settings and extensions.
+Each page is loaded in Chromium against a running Cairn with data in it, and none may show a serious or critical
+violation (`tests/test_accessibility_e2e.py`). The check covers each page as it first renders. Dialogs, drawers and
+other states opened from a page are not checked automatically.
+
+antd 4's Select, which several pages use, gives screen readers a broken combobox while it is closed. The UI
+bundle corrects it when it is built (`ui/scripts/rc-select-a11y-loader.js`), and the build stops if an antd
+upgrade changes the code the fix applies to.
+
 ## Monitoring
 
 Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an HTTP API (notifier, scheduler, context miner) serve them on `CAIRN_METRICS_PORT`; Helm sets it to 9108.

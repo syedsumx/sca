@@ -30,6 +30,11 @@ module.exports = (env = {}, argv = {}) => {
                     loader: 'esbuild-loader',
                     options: { target: 'es2019', jsx: 'automatic', tsconfig: path.resolve(__dirname, 'tsconfig.json') },
                 },
+                // Accessible ARIA on antd 4's Select (see the loader).
+                {
+                    test: /rc-select[\\/](es|lib)[\\/]Selector[\\/]Input\.js$/,
+                    loader: path.resolve(__dirname, 'scripts/rc-select-a11y-loader.js'),
+                },
                 // antd 4 ships CSS-in-less; we rely on the host's antd styles being present, and
                 // otherwise fall back to unstyled-but-functional components (no CSS loaders needed).
             ],
