@@ -851,6 +851,14 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.sqlworkspace import SqlWorkspace
 
         s.sql_workspace = SqlWorkspace(s.engine, s.data_access, s.graph)
+        # Sample datasets (queue row 26): written where pipes write; starter queries on the lakehouse connection.
+        from cairn.pipelines.samples import Samples
+
+        pipes = getattr(s, "pipes", None)
+        s.samples = Samples(s.engine, pipes.catalog_props if pipes is not None else None, s.graph, s.sql_workspace, s.audit,
+                            connection=os.environ.get("CAIRN_SAMPLES_CONNECTION", "lakehouse"),
+                            trino_catalog=os.environ.get("CAIRN_SAMPLES_TRINO_CATALOG", "lakehouse"),
+                            urn=pipes.urn if pipes is not None else None)
         # The shared result cache (dashboards, workbooks, metrics): shared only between people whose decisions on
         # every table read are the same, dropped when a table read changes.
         from cairn.governance.pdp import AuthorizeRequest as _AR, ResourceRef as _RR

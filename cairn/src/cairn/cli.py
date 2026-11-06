@@ -125,6 +125,15 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.git_folders.run_due)  # git folders pulled on a schedule
     if getattr(s, "maintenance", None) is not None:
         sch.extra.append(s.maintenance.run_due)  # lakehouse table maintenance
+    on_start = [n.strip() for n in os.environ.get("CAIRN_SAMPLES_ON_START", "").split(",") if n.strip()]
+    if on_start and getattr(s, "samples", None) is not None:
+        pending = list(on_start)
+
+        def samples_once():     # the leader loads each set once per tenant (cairn_sample_sets); retried if it fails
+            if pending:
+                s.samples.load_on_start(pending)
+                pending.clear()
+        sch.extra.append(samples_once)
     if getattr(s, "pipes", None) is not None:
         sch.extra.append(s.pipes.run_due)        # pipes: files events missed
     if getattr(s, "derived", None) is not None:
@@ -167,6 +176,22 @@ def cmd_dr_watch(a) -> None:
     from cairn.pipelines.dr_failover import main
 
     raise SystemExit(main(a))
+
+
+def cmd_samples(a) -> None:
+    """Sample datasets in the lakehouse: load or remove a set (cairn.pipelines.samples)."""
+    import json as _json
+
+    from cairn.pipelines.samples import SampleError
+
+    s = _services(with_gateway=False, with_ai=False)
+    actor = "urn:li:corpuser:cairn-samples"
+    try:
+        out = s.samples.list() if a.samples_cmd == "list" else \
+            (s.samples.load if a.samples_cmd == "load" else s.samples.remove)(actor, a.name)
+    except SampleError as e:
+        raise SystemExit(f"cairn samples: {e}")
+    print(_json.dumps(out, indent=2, default=str))
 
 
 def cmd_bundle(a) -> None:
@@ -782,6 +807,15 @@ def build_parser() -> argparse.ArgumentParser:
     wt.add_argument("--config", required=True, help="the failover settings (YAML; secrets are read from the files it names)")
     wt.add_argument("--once", action="store_true", help="one round, then exit (1 when failover was refused)")
     wt.set_defaults(fn=cmd_dr_watch)
+
+    sm = sub.add_parser("samples", help="sample datasets in the lakehouse (retail): list, load or remove")
+    sm_sub = sm.add_subparsers(dest="samples_cmd", required=True)
+    sm_sub.add_parser("list", help="the sets and whether they are loaded").set_defaults(fn=cmd_samples)
+    for verb, what in (("load", "write the set's tables, document them and save starter queries"),
+                       ("remove", "drop the set's tables and its starter queries")):
+        sp = sm_sub.add_parser(verb, help=what)
+        sp.add_argument("name", help="the set: retail")
+        sp.set_defaults(fn=cmd_samples)
 
     st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
     st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")

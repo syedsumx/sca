@@ -2276,6 +2276,74 @@ def test_an_outside_party_joins_a_clean_room_with_its_own_upload(trino, cairn, l
         cr.write_table, cr.default_catalog = None, catalog_was
 
 
+def test_sample_data_gives_a_new_tenant_a_documented_lakehouse(trino, cairn, lake):
+    """Queue row 26: the retail sample set lands in the lakehouse (Trino reads it), documented in the catalog, with
+    starter queries that run; reloading replaces the rows, removing drops it all, and the on-start load happens
+    once per tenant and never after a removal."""
+    import datetime as dt
+
+    import httpx
+
+    from cairn.pipelines.samples import DOCS, QUERIES, SampleError, retail
+    from sqlalchemy import delete
+
+    from cairn.pipelines.samples import sample_sets
+
+    url, s = cairn
+    sm, admin = s.samples, "urn:li:corpuser:admin"
+    was = (sm.catalog_props, sm.trino_catalog)
+    sm.catalog_props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                        "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                        "s3.path-style-access": "true"}
+    sm.trino_catalog = "lake"
+    try:
+        assert [x["state"] for x in sm.list()] == ["not loaded"]
+        with pytest.raises(SampleError, match="no sample set"):
+            sm.load(admin, "nonsense")
+        out = sm.load(admin, "retail")
+        assert out["rows"] == {"customers": 2000, "products": 120, "orders": 20000} and len(out["queries"]) == 3
+        assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
+        # The starter queries run on Trino and agree with the data generated (same seed: same rows everywhere).
+        data = retail(dt.datetime.now(dt.timezone.utc).date())["orders"].to_pylist()
+        delivered = round(sum(r["amount"] for r in data if r["status"] == "delivered"), 2)
+        by_month = trino(QUERIES[0][2].format(cat="lake"))
+        assert abs(sum(r["revenue"] for r in by_month) - delivered) < 1.0
+        assert {r["region"] for r in by_month} == {"EU", "US", "APAC", "LATAM"}
+        top = trino(QUERIES[1][2].format(cat="lake"))
+        assert len(top) == 10 and top[0]["units"] >= top[-1]["units"]
+        assert len(trino(QUERIES[2][2].format(cat="lake"))) == 6
+        # Documented in the catalog, and the starter queries are saved, shared, for everyone to open.
+        urn = sm.urn("samples", "orders")
+        assert s.graph.get_aspect(urn, "editableDatasetProperties")["description"] == DOCS["orders"][0]
+        cols = {c["fieldPath"]: c["description"] for c in s.graph.get_aspect(urn, "editableSchemaMetadata")["editableSchemaFieldInfo"]}
+        assert cols["amount"].startswith("What they paid")
+        saved = [q for q in s.sql_workspace.saved(admin) if q["name"].startswith("Sample: ")]
+        assert len(saved) == 3 and all(q["shared"] for q in saved)
+        # Loading again replaces the sample rows and the queries; nothing doubles.
+        sm.load(admin, "retail")
+        assert trino("SELECT count(*) AS n FROM lake.samples.orders") == [{"n": 20000}]
+        assert len([q for q in s.sql_workspace.saved(admin) if q["name"].startswith("Sample: ")]) == 3
+        assert sm.list()[0]["state"] == "loaded" and sm.list()[0]["by"] == admin
+        # Only an administrator manages them.
+        s.identity.dev_trust_actor_header = True
+        r = httpx.post(f"{url}/v1/samples/retail", headers={"X-Cairn-Actor": "urn:li:corpuser:nobody-special"})
+        assert r.status_code == 403, r.text
+        # Removed: tables and queries gone, and the on-start load does not bring them back.
+        gone = sm.remove(admin, "retail")
+        assert sorted(gone["tables_dropped"]) == sorted(DOCS) and gone["queries_removed"] == 3
+        with pytest.raises(RuntimeError, match="does not exist"):
+            trino("SELECT count(*) AS n FROM lake.samples.orders")
+        assert sm.load_on_start(["retail"]) == []
+        # A tenant that never had them gets them once on start.
+        with s.engine.begin() as c:
+            c.execute(delete(sample_sets))
+        assert sm.load_on_start(["retail"]) == ["retail"] and sm.load_on_start(["retail"]) == []
+        assert trino("SELECT count(*) AS n FROM lake.samples.customers") == [{"n": 2000}]
+        assert {"samples.loaded", "samples.removed"} <= {e["action"] for e in s.audit.entries("pipelines", limit=50)}
+    finally:
+        sm.catalog_props, sm.trino_catalog = was
+
+
 def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn):
     """Saved queries, workbooks and dashboards shared with a person or a group, as a viewer or an editor, on
     real Trino: nobody else finds them, editors change but do not reshare or delete, and every viewer still sees

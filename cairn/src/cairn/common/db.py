@@ -153,6 +153,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import boards as _sqlboards  # noqa: F401
     from cairn.pipelines import maintenance as _maintenance  # noqa: F401
     from cairn.pipelines import pipes as _pipes  # noqa: F401
+    from cairn.pipelines import samples as _samples  # noqa: F401
     from cairn.pipelines import streams as _streams  # noqa: F401
     from cairn.pipelines import derived as _derived  # noqa: F401
     from cairn.iac import state as _bundles  # noqa: F401

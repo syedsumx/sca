@@ -308,6 +308,10 @@ app.kubernetes.io/component: {{ .component }}
   valueFrom:
     secretKeyRef: { name: {{ $i.email.existingSecret }}, key: {{ $i.email.smtpUrlKey }} }
 {{- end }}
+{{- with (.Values.cairn.samples | default dict).onStart }}
+- name: CAIRN_SAMPLES_ON_START
+  value: {{ . | quote }}
+{{- end }}
 {{- with .Values.cairn.extraEnv }}
 {{ toYaml . }}
 {{- end }}

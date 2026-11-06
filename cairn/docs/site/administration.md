@@ -2418,6 +2418,28 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - **Sweep.** Files under a prefix with no event rule were loaded by the sweep, and the markers were skipped.
   - **Signature.** A bad signature got 401.
 
+## Sample datasets
+
+A new tenant can start with a small documented lakehouse to try search, SQL, dashboards and Ask-your-data on before its own data arrives.
+
+- **The retail set.** Three tables in the `samples` namespace: `customers` (2,000), `products` (120) and `orders` (20,000 over the last year).
+  - The rows come from a fixed seed, so every tenant gets the same data, and no person is behind them (addresses are at `example.com`).
+  - Each table and column is described in the catalog, and the tables carry the `sample-data` tag.
+  - Three starter queries are saved, shared, on the lakehouse connection: revenue by region and month, best-selling products, and return rate by category.
+- **Loading and removing.** `POST /v1/samples/retail`, `DELETE /v1/samples/retail` and `GET /v1/samples` (the sets and their state), all with `MANAGE_SYSTEM_OPERATIONS`; from a shell, `cairn samples load|remove|list`.
+  - Loading again replaces the sample rows and the starter queries; nothing doubles.
+  - Removing drops the tables, with their files, and the starter queries.
+  - Each load and removal is audited.
+- **For new tenants.** `CAIRN_TENANT_SAMPLES=retail deploy/hosting/tenant.sh create ...` sets the chart's `cairn.samples.onStart`, which sets `CAIRN_SAMPLES_ON_START`.
+  - The scheduler's leader then loads the set once, when the tenant first starts, and retries until it has.
+  - Once a set has been removed it is not loaded again.
+- **Where it goes.** The tables are written through the catalog pipes write to (`CAIRN_PIPES_CATALOG`); without one, loading is refused (503). `CAIRN_SAMPLES_TRINO_CATALOG` is Trino's name for that catalog (`lakehouse`), and `CAIRN_SAMPLES_CONNECTION` is the connection the starter queries use (`lakehouse`).
+- **Tested** with the real store, catalog and Trino (`tests/test_trino_e2e.py`).
+  - Trino read 20,000 orders, and the starter queries' revenue matched the generated rows.
+  - The tables and columns were documented, and reloading kept 20,000 rows and three queries.
+  - Someone without the right was refused (403).
+  - Removing dropped everything, and the on-start load brought nothing back. On a tenant that never had the set, it loaded it exactly once.
+
 ## Vector search on lakehouse data
 
 A vector index lets people search a lakehouse table's text by meaning: support articles, tickets, product descriptions, or the text of a files pipe.

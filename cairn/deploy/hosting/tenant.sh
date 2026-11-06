@@ -22,6 +22,7 @@
 #   CAIRN_TENANT_SERVICES_HA  1: those services replicated, three nodes each, so a lost node or pod is survived
 #                         (tenant-services-ha.yaml). Chosen when a tenant is created: an existing tenant is
 #                         not switched in place (see "Hosting tenants" in docs/site/administration.md)
+#   CAIRN_TENANT_SAMPLES   a sample set (retail) the new tenant's lakehouse starts with, loaded once (samples)
 #   CAIRN_TENANT_SERVICES_SPREAD  DoNotSchedule (default: one pod of each per node, needs three nodes) or
 #                         ScheduleAnyway (a single test node)
 #   CAIRN_TENANT_SEARCH_HEAP, CAIRN_TENANT_SEARCH_MEMORY, CAIRN_TENANT_KAFKA_HEAP, CAIRN_TENANT_KAFKA_MEMORY
@@ -180,7 +181,8 @@ helm_args() {
         --set "core.kafka.bootstrap=$(kafka_bootstrap | sed 's/,/\\,/g')" \
         --set "core.ingress.host=$id.$CAIRN_HOST_DOMAIN" \
         --set "cairn.publicUrl=https://$id.$CAIRN_HOST_DOMAIN" \
-        --set "cairn.licence.tenantId=$id" $(edge_args) $(metering_args)
+        --set "cairn.licence.tenantId=$id" $(edge_args) $(metering_args) \
+        ${CAIRN_TENANT_SAMPLES:+--set "cairn.samples.onStart=$CAIRN_TENANT_SAMPLES"}
 }
 
 metering_args() {   # usage reports to the control plane, once the tenant has its metering key
