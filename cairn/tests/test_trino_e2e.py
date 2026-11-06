@@ -2200,6 +2200,82 @@ def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(
         s.pdp.set_bundle(b)
 
 
+def test_an_outside_party_joins_a_clean_room_with_its_own_upload(trino, cairn, lake):
+    """Queue row 25: an organisation outside Cairn takes part in a room through the API with the secret it was
+    given: it uploads its data (written to the lakehouse, readable by the room alone), proposes and runs an
+    approved template; wrong or missing secrets, other rooms and Cairn parties' uploads are refused."""
+    import httpx
+
+    from cairn.dataaccess.cleanrooms import RoomError, catalog_writer
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.shop")
+    trino("CREATE TABLE lake.shop.customers (email varchar, tier varchar)")
+    trino("INSERT INTO lake.shop.customers VALUES " + ", ".join(f"('c{i}@x', '{'gold' if i < 4 else 'basic'}')" for i in range(10)))
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, Policy(
+        id="ana-shop", effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=["*shop.*"]),
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    cr, ana, acme = s.clean_rooms, "urn:li:corpuser:ana", "partner:acme-ads"
+    catalog_was, cr.default_catalog = cr.default_catalog, "lake"       # CAIRN_CLEANROOM_CATALOG: Trino's name for it
+    cr.write_table = catalog_writer({"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                                     "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1],
+                                     "s3.region": "us-east-1", "s3.path-style-access": "true"})
+    try:
+        with pytest.raises(RoomError, match="at least one Cairn"):
+            cr.create(ana, {"name": "only_partners", "parties": [acme, "partner:other"]})
+        room = cr.create(ana, {"name": "ads_lift", "parties": [ana, acme], "min_group": 2})
+        secret = room["partner_secrets"][acme]
+        assert "partners" not in room and cr.get(ana, "ads_lift").get("partner_secrets") is None
+        cr.contribute(ana, "ads_lift", "lake.shop.customers")
+        base, auth = f"{url}/v1/clean-rooms/ads_lift/partner", ("acme-ads", secret)       # Basic: the name after partner:
+        # Signed in as the partner, or nothing.
+        assert httpx.get(base).status_code == 401
+        assert httpx.get(base, auth=("acme-ads", "not-the-secret")).status_code == 401
+        assert httpx.get(base, auth=("other", secret)).status_code == 401
+        assert httpx.get(f"{url}/v1/clean-rooms/no_such_room/partner", auth=auth).status_code == 401
+        got = httpx.get(base, auth=auth)
+        assert got.status_code == 200 and acme in got.json()["parties"] and "partners" not in got.json()
+        # The partner's data, uploaded as CSV, becomes a table only the room reads.
+        csv = "email,campaign\n" + "".join(f"c{i}@x,autumn\n" for i in range(0, 10, 2)) + "z@x,autumn\n"
+        up = httpx.put(f"{base}/data/exposed", auth=auth, content=csv, headers={"Content-Type": "text/csv"})
+        assert up.status_code == 200, up.text
+        table = up.json()["table"]
+        assert table == "lake.cleanrooms.ads_lift__acme_ads__exposed" and up.json()["rows"] == 6
+        assert httpx.put(f"{base}/data/exposed", auth=auth, content="x", headers={"Content-Type": "text/plain"}).status_code == 415
+        with pytest.raises(RoomError, match="uploads are for outside parties"):
+            cr.upload(ana, "ads_lift", "mine", b"a\n1\n", "csv")
+        lake_table = table
+        with pytest.raises(RuntimeError, match="Access Denied"):
+            trino(f"SELECT count(*) AS n FROM {lake_table}", user="ana")
+        assert trino(f"SELECT count(*) AS n FROM {lake_table}", user="cleanroom-ads_lift") == [{"n": 6}]
+        # The partner proposes over both parties' data; it runs once Ana approves too.
+        sql = (f"SELECT c.tier, count(*) AS people FROM lake.shop.customers c JOIN {table} e ON c.email = e.email "
+               "GROUP BY c.tier")
+        prop = httpx.put(f"{base}/templates/by_tier", auth=auth, json={"sql": sql})
+        assert prop.status_code == 200 and prop.json()["approved_by"] == [acme], prop.text
+        assert httpx.post(f"{base}/templates/by_tier/run", auth=auth).status_code == 409
+        cr.approve(ana, "ads_lift", "by_tier")
+        run = httpx.post(f"{base}/templates/by_tier/run", auth=auth)
+        assert run.status_code == 200, run.text
+        assert {r[0]: r[1] for r in run.json()["rows"]} == {"gold": 2, "basic": 3}       # c0, c2 gold; c4, c6, c8 basic
+        # A second upload replaces the first.
+        csv2 = "email,campaign\n" + "".join(f"c{i}@x,winter\n" for i in range(10))
+        assert httpx.put(f"{base}/data/exposed", auth=auth, content=csv2, headers={"Content-Type": "text/csv"}).json()["rows"] == 10
+        assert trino(f"SELECT count(*) AS n FROM {lake_table}", user="cleanroom-ads_lift") == [{"n": 10}]
+        acts = [e for e in s.audit.entries("sharing", limit=100) if e["subject"] == "urn:li:cleanRoom:ads_lift"]
+        assert {"clean_room.data_uploaded", "clean_room.template_proposed", "clean_room.run"} <= {e["action"] for e in acts}
+        assert any(e["actor"] == acme for e in acts)
+    finally:
+        s.pdp.set_bundle(b)
+        cr.write_table, cr.default_catalog = None, catalog_was
+
+
 def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn):
     """Saved queries, workbooks and dashboards shared with a person or a group, as a viewer or an editor, on
     real Trino: nobody else finds them, editors change but do not reshare or delete, and every viewer still sees

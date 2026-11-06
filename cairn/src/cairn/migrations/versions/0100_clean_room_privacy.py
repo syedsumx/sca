@@ -1,4 +1,4 @@
-"""Differentially private clean rooms: the room's privacy settings and the epsilon it has spent
+"""Clean rooms: differential privacy (settings, epsilon spent) and outside parties (their secrets' hashes)
 
 Revision ID: 0100
 Revises: 0099
@@ -20,9 +20,11 @@ def upgrade() -> None:
     with op.batch_alter_table('cairn_clean_rooms') as t:
         t.add_column(sa.Column('privacy', sa.Text(), nullable=True))
         t.add_column(sa.Column('epsilon_spent', sa.Float(), nullable=False, server_default='0'))
+        t.add_column(sa.Column('partners', sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
     with op.batch_alter_table('cairn_clean_rooms') as t:
+        t.drop_column('partners')
         t.drop_column('epsilon_spent')
         t.drop_column('privacy')

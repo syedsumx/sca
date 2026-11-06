@@ -26,16 +26,33 @@ at least 0, and sums rounded to cents.
 The sensitivities assume each person is at most one row of the joined result: join on a key that is unique per
 person. The k floor still applies, to the true counts. It is defence in depth on top of the noise, and which
 groups appear is not itself noised, so group keys should be public values (regions, campaigns).
+
+**Outside parties** (queue row 25). A party may be an organisation outside Cairn, named ``partner:<name>``. When
+the room is made, each one gets a secret, shown once and kept only as a hash. With it (HTTP Basic: the name after
+``partner:``, and the secret) the partner reads the room and proposes, approves and runs templates at ``/v1/clean-rooms/<room>/
+partner/...``. It has no lakehouse tables, so it uploads its data instead (CSV or Parquet, ``PUT
+.../partner/data/<table>``). Cairn writes the file to ``<catalog>.cleanrooms.<room>__<partner>__<table>``, which
+only the room's identity reads; an upload replaces that table's earlier contents. A room is always made by a
+Cairn party, and needs one.
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import io
 import json
 import re
+import secrets
 import time
 import uuid
 from typing import Any, Callable, Optional
 
+try:  # module level: with postponed annotations FastAPI resolves the router's parameter types from here
+    from fastapi import Request
+    from fastapi.security import HTTPBasic, HTTPBasicCredentials
+except ImportError:  # the rooms themselves work without the server extra
+    Request = HTTPBasic = HTTPBasicCredentials = None  # type: ignore[assignment,misc]
 from sqlalchemy import BigInteger, Column, Float, Integer, String, Table, Text, select, update
 
 from cairn.common.db import metadata
@@ -52,11 +69,14 @@ rooms = Table(
     Column("created_ms", BigInteger, nullable=False),
     Column("privacy", Text, nullable=True),         # JSON {epsilon, budget}: differentially private answers only
     Column("epsilon_spent", Float, nullable=False, server_default="0"),
+    Column("partners", Text, nullable=True),        # JSON {partner:<name>: sha256 of its secret}
 )
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
 TABLE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+$")
 IDENTITY_PREFIX = "cleanroom-"
+PARTNER = re.compile(r"^partner:[a-z0-9][a-z0-9-]{1,39}$")
+MAX_UPLOAD = 100 * 1024 * 1024
 
 
 class RoomError(Exception):
@@ -68,11 +88,12 @@ class RoomError(Exception):
 class CleanRooms:
     def __init__(self, engine, run: Callable[[str, str], tuple[list[str], list[list[Any]]]],
                  member_of: Callable[[str, str], bool], may_read: Callable[[str, str], bool], audit=None,
-                 default_catalog: str = "lakehouse"):
+                 default_catalog: str = "lakehouse", write_table: Optional[Callable[[str, Any], None]] = None):
         """``run(actor, sql)``: a statement on Trino as ``actor``; ``member_of(actor, party)``: is the actor that
-        party (itself, or in that group); ``may_read(actor, table)``: may the actor read the table."""
+        party (itself, or in that group); ``may_read(actor, table)``: may the actor read the table;
+        ``write_table("cleanrooms.<table>", arrow_table)``: replaces a lakehouse table's contents (partners' uploads)."""
         self.engine, self.run, self.member_of, self.may_read, self.audit = engine, run, member_of, may_read, audit
-        self.default_catalog = default_catalog
+        self.default_catalog, self.write_table = default_catalog, write_table
 
     # ---- rooms ---------------------------------------------------------------------------
     def _row(self, name: str) -> dict:
@@ -84,11 +105,16 @@ class CleanRooms:
         for k in ("parties", "tables", "templates"):
             d[k] = json.loads(d[k])
         d["privacy"] = json.loads(d["privacy"]) if d.get("privacy") else None
+        d["partners"] = json.loads(d["partners"]) if d.get("partners") else {}
         return d
 
     def _party(self, room: dict, actor: str) -> str:
+        if actor.startswith("partner:"):                    # signed in with the room's partner secret
+            if actor in room["parties"]:
+                return actor
+            raise RoomError(f"you are not a party to {room['name']}", 403)
         for p in room["parties"]:
-            if p == actor or self.member_of(actor, p):
+            if p == actor or (not p.startswith("partner:") and self.member_of(actor, p)):
                 return p
         raise RoomError(f"you are not a party to {room['name']}", 403)
 
@@ -106,16 +132,21 @@ class CleanRooms:
         k = body.get("min_group", 10)
         if not NAME.match(name):
             raise RoomError("name: lowercase letters, digits and _")
-        if not isinstance(parties, list) or len(set(parties)) < 2 or not all(str(p).startswith("urn:li:corp") for p in parties):
-            raise RoomError("parties: at least two Cairn users or groups")
+        if not isinstance(parties, list) or len(set(parties)) < 2 or \
+                not all(str(p).startswith("urn:li:corp") or PARTNER.match(str(p)) for p in parties):
+            raise RoomError("parties: at least two, each a Cairn user or group, or partner:<name> for an outside party")
+        if not any(str(p).startswith("urn:li:corp") for p in parties):
+            raise RoomError("parties: at least one Cairn user or group")
         if isinstance(k, bool) or not isinstance(k, int) or not 2 <= k <= 1_000_000:
             raise RoomError("min_group is 2 or more")
         if actor not in parties and not any(self.member_of(actor, p) for p in parties):
             raise RoomError("a room is made by one of its parties", 403)
         privacy = _privacy(body.get("privacy"))
+        issued = {p: secrets.token_urlsafe(32) for p in sorted(set(parties)) if p.startswith("partner:")}
         row = {"id": uuid.uuid4().hex, "name": name, "parties": json.dumps(sorted(set(parties))), "min_group": k,
                "tables": "{}", "templates": "{}", "created_by": actor, "created_ms": int(time.time() * 1000),
-               "privacy": json.dumps(privacy) if privacy else None, "epsilon_spent": 0.0}
+               "privacy": json.dumps(privacy) if privacy else None, "epsilon_spent": 0.0,
+               "partners": json.dumps({p: _digest(v) for p, v in issued.items()})}
         try:
             with self.engine.begin() as conn:
                 conn.execute(rooms.insert().values(**row))
@@ -124,12 +155,58 @@ class CleanRooms:
                                       {"parties": sorted(set(parties)), "min_group": k, "privacy": privacy}, conn=conn)
         except IntegrityError:
             raise RoomError("a clean room of that name exists", 409)
-        return self.get(actor, name)
+        out = self.get(actor, name)
+        if issued:   # shown this once: give each partner its own; Cairn keeps only their hashes
+            out["partner_secrets"] = issued
+        return out
+
+    def partner(self, name: str, party: str, secret: str) -> str:
+        """The actor a partner acts as, once its secret checks out (401 otherwise, the same for every reason)."""
+        try:
+            room = self._row(name)
+        except RoomError:
+            room = None
+        want = (room or {}).get("partners", {}).get(party)
+        if not (want and secret and hmac.compare_digest(want, _digest(secret))):
+            raise RoomError("not signed in as a partner of this room", 401)
+        return party
 
     def get(self, actor: str, name: str) -> dict:
         room = self._row(name)
         self._party(room, actor)
-        return {k: v for k, v in room.items() if k != "id"}
+        return {k: v for k, v in room.items() if k not in ("id", "partners")}
+
+    def upload(self, actor: str, name: str, table: str, data: bytes, fmt: str) -> dict:
+        """A partner's data, as a table only the room reads (replacing what it uploaded there before)."""
+        import pyarrow as pa
+        import pyarrow.csv as pacsv
+        import pyarrow.parquet as pq
+
+        room = self._row(name)
+        party = self._party(room, actor)
+        if not party.startswith("partner:"):
+            raise RoomError("Cairn parties bring their tables (POST .../tables); uploads are for outside parties", 403)
+        if self.write_table is None:
+            raise RoomError("uploads need a lakehouse catalog to write to (CAIRN_PIPES_CATALOG)", 503)
+        if not NAME.match(table):
+            raise RoomError("table name: lowercase letters, digits and _")
+        if not data or len(data) > MAX_UPLOAD:
+            raise RoomError(f"an upload is 1 byte to {MAX_UPLOAD // (1024 * 1024)} MB", 413)
+        try:
+            arrow = pq.read_table(io.BytesIO(data)) if fmt == "parquet" else pacsv.read_csv(io.BytesIO(data))
+        except (pa.ArrowInvalid, OSError) as e:
+            raise RoomError(f"the {fmt} file does not read: {str(e)[:200]}")
+        cols = [c.lower() for c in arrow.column_names]
+        if len(set(cols)) != len(cols) or not all(NAME.match(c) for c in cols):
+            raise RoomError("column names: lowercase letters, digits and _, each once")
+        arrow = arrow.rename_columns(cols)
+        local = f"{name}__{party.split(':', 1)[1].replace('-', '_')}__{table}"
+        self.write_table(f"cleanrooms.{local}", arrow)
+        full = f"{self.default_catalog}.cleanrooms.{local}"
+        room["tables"][full] = party
+        self._save(room, "clean_room.data_uploaded", actor, {"table": full, "rows": arrow.num_rows,
+                                                             "columns": cols, "bytes": len(data)})
+        return {"table": full, "rows": arrow.num_rows, "columns": cols}
 
     def tables_of(self, name: str) -> set[str]:
         """The tables the room's identity may read (catalog.schema.table)."""
@@ -286,6 +363,21 @@ class CleanRooms:
             raise RoomError(f"the room's privacy budget is spent (epsilon {budget}): no more answers from it", 409)
 
 
+def _digest(secret: str) -> str:
+    return hashlib.sha256(secret.encode()).hexdigest()
+
+
+def catalog_writer(props: dict) -> Callable[[str, Any], None]:
+    """``write_table`` over a pyiceberg REST catalog: creates ``namespace.table`` when missing, replaces its rows."""
+    def write(target: str, data) -> None:
+        from pyiceberg.catalog.rest import RestCatalog
+
+        from cairn.pipelines.pipes import open_table
+
+        open_table(RestCatalog("cairn-cleanrooms", **props), target, data.schema, True).overwrite(data)
+    return write
+
+
 def _privacy(raw) -> Optional[dict]:
     if raw in (None, {}, False):
         return None
@@ -393,5 +485,45 @@ def build_clean_rooms_router(cr: CleanRooms, current_principal) -> Any:
     @router.post("/{name}/templates/{tname}/run")
     async def run(name: str, tname: str, body: dict = Body(default={}), p=Depends(current_principal)):
         return await call(cr.run_template, p.urn, name, tname, (body or {}).get("args") or {})
+
+    # ---- outside parties: HTTP Basic, the partner's name (after partner:) and the secret it was given ------
+    basic = HTTPBasic(auto_error=False)
+
+    def partner(name: str, cred: Optional[HTTPBasicCredentials] = Depends(basic)) -> str:
+        if cred is None:
+            raise HTTPException(401, "sign in as the room's partner (HTTP Basic)", headers={"WWW-Authenticate": "Basic"})
+        try:   # the username is the partner's name without "partner:" (a Basic username cannot hold a colon)
+            return cr.partner(name, f"partner:{cred.username}", cred.password)
+        except RoomError as e:
+            raise HTTPException(e.status, str(e), headers={"WWW-Authenticate": "Basic"})
+
+    @router.get("/{name}/partner")
+    async def p_get(name: str, who: str = Depends(partner)):
+        return await call(cr.get, who, name)
+
+    @router.put("/{name}/partner/templates/{tname}")
+    async def p_propose(name: str, tname: str, body: dict = Body(...), who: str = Depends(partner)):
+        return await call(cr.propose, who, name, {**body, "name": tname})
+
+    @router.post("/{name}/partner/templates/{tname}/approve")
+    async def p_approve(name: str, tname: str, who: str = Depends(partner)):
+        return await call(cr.approve, who, name, tname)
+
+    @router.post("/{name}/partner/templates/{tname}/run")
+    async def p_run(name: str, tname: str, body: dict = Body(default={}), who: str = Depends(partner)):
+        return await call(cr.run_template, who, name, tname, (body or {}).get("args") or {})
+
+    @router.put("/{name}/partner/data/{table}")
+    async def p_upload(name: str, table: str, request: Request, who: str = Depends(partner)):
+        kind = (request.headers.get("content-type") or "").split(";")[0].strip()
+        fmt = {"text/csv": "csv", "application/vnd.apache.parquet": "parquet"}.get(kind)
+        if fmt is None:
+            raise HTTPException(415, "send text/csv or application/vnd.apache.parquet")
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > MAX_UPLOAD:
+                raise HTTPException(413, "the upload is too large")
+        return await call(cr.upload, who, name, table, bytes(data), fmt)
 
     return router

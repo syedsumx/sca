@@ -1101,8 +1101,12 @@ def _build_active_metadata(s: Services) -> None:
                 cat, schema, name = table.split(".", 2)
                 return s.trino_access.allowed(actor, groups_of(actor), "VIEW_DATASET_PROFILE",
                                               s.trino_access.urn(cat, schema, name))
+            from cairn.dataaccess.cleanrooms import catalog_writer
+
+            pipes = getattr(s, "pipes", None)          # outside parties' uploads go where pipes write (CAIRN_PIPES_CATALOG)
             s.clean_rooms = CleanRooms(s.engine, run_room, lambda actor, party: party in groups_of(actor), may_read_table,
-                                       s.audit, os.environ.get("CAIRN_CLEANROOM_CATALOG", "lakehouse"))
+                                       s.audit, os.environ.get("CAIRN_CLEANROOM_CATALOG", "lakehouse"),
+                                       catalog_writer(pipes.catalog_props) if pipes is not None and pipes.catalog_props else None)
             s.trino_access.cleanroom_tables = s.clean_rooms.tables_of
         # Git folders: saved queries and notebooks kept in git (CAIRN_GIT_FOLDER_URLS: other URLs they may use).
         from cairn.sqlworkspace.gitfolders import GitFolders
