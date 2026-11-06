@@ -217,14 +217,26 @@ probe cairn-ci-ha "app.kubernetes.io/name=cairn,app.kubernetes.io/instance=cairn
      timeout 8 nc -w 5 kafka-2.kafka-headless.cairn-ci-ha.svc 9092 </dev/null >/dev/null && echo kafka-name-ok && \
      timeout 8 wget -q -T 5 -O- http://opensearch.cairn-ci-ha.svc:9200/_cluster/health | grep -q status && echo search-ok" \
     || { diagnose cairn-ci-ha; fail "the release cannot reach the replicated services (see which hop got through above)"; }
+# Consumers run before a node is ever lost: the first one makes Kafka create __consumer_offsets with three
+# copies, which it could not do with a broker gone (no group would find its coordinator).
+first=""
+for _ in $(seq 10); do
+    first=$(kt 2 kafka-console-consumer.sh --topic cairn-ha-check --from-beginning --timeout-ms 20000 2>/dev/null || true)
+    [ "$first" = before ] && break
+done
+[ "$first" = before ] || fail "Kafka's consumers do not work with every broker up (got: $first)"
 # A pod lost (its node gone): the others go on, with everything written so far.
 kubectl -n cairn-ci-ha delete pod opensearch-0 kafka-0 --wait=false >/dev/null
 sleep 5
 echo after | kt 1 kafka-console-producer.sh --topic cairn-ha-check --producer-property acks=all \
     --producer-property delivery.timeout.ms=60000 2>"$work/ha-produce.err" || true
 ! grep -qE "Expiring|NotEnoughReplicas" "$work/ha-produce.err" || { cat "$work/ha-produce.err"; fail "Kafka stopped taking writes with a broker down"; }
-got=$(kt 2 kafka-console-consumer.sh --topic cairn-ha-check --from-beginning --timeout-ms 20000 2>/dev/null || true)
-got=$(sort <<<"$got" | tr '\n' ' ')
+# Read again for a while: leadership moves as the lost broker comes back; a message that is gone stays gone.
+for _ in $(seq 5); do
+    got=$(kt 2 kafka-console-consumer.sh --topic cairn-ha-check --from-beginning --timeout-ms 20000 2>/dev/null || true)
+    got=$(sort <<<"$got" | tr '\n' ' ')
+    [ "$got" = "after before " ] && break
+done
 [ "$got" = "after before " ] || fail "Kafka lost a message with a broker down (got: $got)"
 for _ in $(seq 30); do
     health=$(os 2 localhost:9200/_cluster/health || true)
