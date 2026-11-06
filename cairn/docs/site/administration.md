@@ -630,6 +630,33 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
   - It served from two replicas, and went back to zero once idle.
   - The same account was refused in another namespace, and deleting the deployment removed its objects.
 
+### Training on Spark
+
+A Spark job's training runs are tracked in MLflow through Cairn, as the job's own Cairn identity
+(`cairn_spark.mlflow`, in the `cairn/spark` image; elsewhere `pip install "cairn-spark[mlflow]"`):
+
+```python
+from cairn_spark import lakehouse_session
+from cairn_spark.mlflow import use_mlflow, log_table_input
+
+spark = lakehouse_session("churn-training")
+mlflow = use_mlflow(experiment="churn")
+with mlflow.start_run():
+    log_table_input("sales.customers")   # lineage from the table to the model
+    ...                                  # train, then mlflow.spark.log_model / mlflow.sklearn.log_model
+```
+
+- **Which identity.** `use_mlflow()` sets MLflow's tracking and registry to `<CAIRN_URL>/v1/ml`, with the same token
+  `lakehouse_session()` uses: `CAIRN_TOKEN[_FILE]`, or the workload's platform token exchanged at Cairn
+  (`CAIRN_WORKLOAD_TOKEN_FILE`). Runs, models and registered versions are that user's, under Cairn's rights on
+  models, and audited.
+- **No secrets exposed.** The token reaches MLflow only through its environment, never a command line or a URL.
+- **Lineage.** `log_table_input(table)` records a lakehouse table as the run's input, so the model's lineage in
+  the catalog starts there.
+- **Tested** against a real MLflow through Cairn (`tests/test_ml_e2e.py`). A job given only `CAIRN_URL` and a token
+  file was tracked as its user: the run, the registered model's owner, and lineage from the table. Without a token
+  it was refused before reaching MLflow. Training with `pyspark.ml` inside the Spark image isn't run in CI yet.
+
 ## Delta Lake tables
 
 Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).

@@ -385,3 +385,43 @@ def test_the_scaling_rule():
     assert want(0.5, 2, 4, 0, 4, idle=False) == 3                 # down one at a time
     assert want(0, 2, 1, 0, 4, idle=False) == 1                   # in use lately: not below one
     assert want(0.1, 2, 0, 0, 4, idle=False) == 1                 # traffic from zero: one
+
+
+SPARK_TRAINING = textwrap.dedent('''
+    import json, pandas as pd
+    from sklearn.linear_model import LinearRegression
+    from cairn_spark.mlflow import use_mlflow, log_table_input
+    mlflow = use_mlflow(experiment="spend")              # the job's token from CAIRN_TOKEN_FILE, as a driver has it
+    df = pd.DataFrame({"tenure": [1, 2, 3, 4], "spend": [10, 20, 30, 40]})
+    with mlflow.start_run() as run:
+        log_table_input("sales.customers")
+        model = LinearRegression().fit(df[["tenure"]], df["spend"])
+        mlflow.sklearn.log_model(model, name="model", registered_model_name="spend")
+    print("CAIRN-RUN " + json.dumps({"run_id": run.info.run_id, "uri": mlflow.get_tracking_uri()}))
+''')
+
+
+def test_a_spark_jobs_training_is_tracked_through_cairn_as_the_job(ml, tmp_path):
+    """Queue row 20: cairn_spark.mlflow points MLflow at Cairn with the job's own token (from its token file, as a
+    Spark driver gets it); the run, the registered model and its lineage are the job's user's."""
+    spark_src = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "spark", "src")
+    token = tmp_path / "token"
+    token.write_text("tok-carol")                         # carol's job: no MLflow settings of its own
+    env = {k: v for k, v in os.environ.items() if not k.startswith("MLFLOW_")}
+    env.update({"CAIRN_URL": ml["cairn"], "CAIRN_TOKEN_FILE": str(token), "PYTHONPATH": spark_src,
+                "MLFLOW_HTTP_REQUEST_MAX_RETRIES": "0"})
+    r = subprocess.run([PY, "-c", SPARK_TRAINING], env=env, capture_output=True, text=True, timeout=300, cwd=ml["dir"])
+    assert r.returncode == 0, r.stderr[-3000:]
+    out = json.loads(r.stdout.split("CAIRN-RUN ", 1)[1])
+    assert out["uri"] == f"{ml['cairn']}/v1/ml"
+    run = httpx.get(f"{ml['mlflow']}/api/2.0/mlflow/runs/get", params={"run_id": out["run_id"]}).json()["run"]
+    assert {t["key"]: t["value"] for t in run["data"]["tags"]}["mlflow.user"] == "carol"
+    assert ml["gw"].owner("spend") == "urn:li:corpuser:carol"
+    props = ml["graph"].get_aspect("urn:li:mlModel:(urn:li:dataPlatform:mlflow,spend.v1,PROD)", "mlModelProperties")
+    (job,) = props["trainingJobs"]
+    assert ml["graph"].get_aspect(job, "dataJobInputOutput")["inputDatasets"] == \
+        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.customers,PROD)"]
+    # Without a token the helper refuses before anything reaches MLflow.
+    env.pop("CAIRN_TOKEN_FILE")
+    r = subprocess.run([PY, "-c", SPARK_TRAINING], env=env, capture_output=True, text=True, timeout=120, cwd=ml["dir"])
+    assert r.returncode != 0 and "CAIRN_TOKEN" in r.stderr

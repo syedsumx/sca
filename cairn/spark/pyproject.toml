@@ -10,6 +10,10 @@ requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 dependencies = ["httpx>=0.27"]
 
+[project.optional-dependencies]
+# Training tracked in MLflow through Cairn (cairn_spark.mlflow); the cairn/spark image has it.
+mlflow = ["mlflow-skinny==3.5.0", "pandas>=2.0"]
+
 [project.scripts]
 cairn-spark = "cairn_spark.cli:main"
 cairn-spark-driver = "cairn_spark.driver:main"

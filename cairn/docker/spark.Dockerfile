@@ -32,8 +32,8 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     done; \
     src="$(mktemp -d)"; cp -r /mnt/cairn/spark "$src/"; \
     python3 -m pip install --no-cache-dir --upgrade pip setuptools wheel; \
-    python3 -m pip install --no-cache-dir "$src/spark"; \
-    python3 -c "import cairn_spark, httpx"; \
+    python3 -m pip install --no-cache-dir "$src/spark[mlflow]"; \
+    python3 -c "import cairn_spark, cairn_spark.mlflow, httpx, mlflow"; \
     rm -rf "$src"
 # Trino's JDBC driver: Spark reads tables with masks or row filters through Trino, as the signed-in
 # user (cairn_spark.governed_read). Its own layer, checked against Maven's checksum.
