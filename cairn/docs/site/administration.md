@@ -2761,12 +2761,35 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
 5. **Point clients at the standby**: Cairn's API and Trino's catalogs, through DNS or configuration.
 6. **Afterwards**, rebuild the old primary as the new standby, the other way round.
 
+**Automatic failover (`cairn dr watch`).** Steps 2 and 5 can run by themselves. Run the watcher in the standby region, one replica, never in the primary (it must not share the primary's fate): `cairn dr watch --config failover.yaml`, from Cairn's image (the `dr` extra).
+
+- **When it acts.** Every `interval_s` (10) it probes the primary's checks. It fails over only when every primary check has failed `failures` rounds in a row (3; at least 2). One component failing is not a lost region, and a primary that answers again resets the count.
+- **Only onto a healthy standby.** Every standby check must pass and every standby database must answer. Otherwise it logs why and keeps watching: a region that stays down is better than two that both take writes.
+- **What it does, in order.**
+  1. Promotes each standby PostgreSQL (`pg_promote`) and waits until it takes writes. That covers the catalog's database and Cairn's own, whether they are on one cluster or two.
+  2. Points DNS at the standby. Each record is replaced by an RFC 2136 update signed with a TSIG key, then read back from the server. This works with BIND, PowerDNS, Knot and Windows DNS. For a hosted DNS service, use its own health-checked failover records instead.
+  3. Writes its state file. While the file exists it does nothing more, and it never fails back on its own. Rebuild the old primary as the new standby (step 6), then remove the file.
+- **Then** run step 4 (reconcile) and start Cairn Catalog and Cairn in the standby, or keep them running there against the standby database: they reconnect once it is promoted.
+- **Settings** (YAML):
+  - `primary_checks` and `standby_checks`: `http(s)://` URLs (any status below 500 counts) or `tcp://host:port`.
+  - Prefer HTTP for the standby. A hung process still completes TCP handshakes, so only an HTTP check tells that it works.
+  - `standby_databases`: each `url_file`, a file holding the PostgreSQL URL.
+  - `dns`: `server`, `port`, `zone`, `key_name`, `key_algorithm` (`hmac-sha256`/`384`/`512`), `key_secret_file`, and `records` (`name`, `type` A, AAAA or CNAME, `value`, `ttl` of at most 3600; keep it low).
+  - `state_file`, `failures`, `interval_s` and `timeout_s`.
+  - Secrets come only from files. Settings that could make it misfire are refused at start: fewer than 2 failures, an unknown check scheme or record type, a long TTL, or an unreadable secret.
+- **The DNS server's side** (BIND): `key "cairn-failover." { algorithm hmac-sha256; secret "..."; };` and, in the zone, `update-policy { grant cairn-failover. name api.example.com. A; ... };`. Grant only the records the watcher changes.
+
 **Measured** in the drill (`tests/test_dr_drill.py`, run in CI):
 
 - **Setup.** Two regions, each with a real store and PostgreSQL. The primary's store replicated to the standby's, and its database streamed to the standby's.
 - **The loss.** Ten commits were made. The standby's store was frozen for the last four, as over a slow link. Then the primary region was killed: store, catalog and database.
 - **Recovery.** The standby database was promoted and a catalog started on it. The report found one table to roll back by four commits, and left the other alone. `--apply` repaired it.
 - **Results.** RPO: 4 of 10 commits (4.3 s of writes). RTO: about 2 s from the loss to every table readable. The standby then took writes.
+- **Automatic failover**, with a real BIND server taking the updates. Cairn's own database had been migrated on the primary's cluster and had audited work.
+  - The primary region was lost while the standby store was hung, and the watcher refused to fail over.
+  - Once the standby answered, the next round promoted the standby database and switched `api` (A) and `lake` (CNAME), 1.4 s after the loss.
+  - Cairn's database came across with its audit chain whole (5 entries) and took the next write.
+  - A wrong TSIG key was refused by the DNS server, a partial outage of the primary never triggered, and nothing happened after the failover.
 - **Your figures** depend on replication lag (watch `x-amz-replication-status` and PostgreSQL's replication lag) and on how fast your DNS and clients follow.
 
 ## Upgrades

@@ -38,7 +38,9 @@ trino = ["trino>=0.330"]
 streams = ["kafka-python>=2.2,<3", "pyarrow>=15", "pyiceberg>=0.9", "fastavro>=1.9", "numpy>=1.26"]
 documents = ["pypdf>=5", "pillow>=10"]
 saml = ["signxml>=4,<5", "lxml>=5"]
-all = ["cairn-platform[server,postgres,ai,actions,agent,export,trino,streams,documents,saml]"]
+# cairn dr watch: promotes standby PostgreSQL and updates DNS (RFC 2136) when the primary region is lost.
+dr = ["dnspython>=2.6", "psycopg[binary]>=3.1", "pyyaml>=6"]
+all = ["cairn-platform[server,postgres,ai,actions,agent,export,trino,streams,documents,saml,dr]"]
 
 [project.scripts]
 cairn = "cairn.cli:main"

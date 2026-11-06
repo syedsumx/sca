@@ -162,6 +162,13 @@ def cmd_dr(a) -> None:
     raise SystemExit(main(a))
 
 
+def cmd_dr_watch(a) -> None:
+    """In the standby region: fail over by itself when the primary region is lost (cairn.pipelines.dr_failover)."""
+    from cairn.pipelines.dr_failover import main
+
+    raise SystemExit(main(a))
+
+
 def cmd_bundle(a) -> None:
     """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
     from cairn.iac.bundle import main
@@ -770,6 +777,11 @@ def build_parser() -> argparse.ArgumentParser:
     rc.add_argument("--region", default="us-east-1")
     rc.add_argument("--apply", action="store_true", help="make the repairs (default: report what they would be)")
     rc.set_defaults(fn=cmd_dr)
+    wt = dr_sub.add_parser("watch", help="in the standby region: when the primary is lost, promote the standby "
+                                         "databases and point DNS at the standby (never fails back by itself)")
+    wt.add_argument("--config", required=True, help="the failover settings (YAML; secrets are read from the files it names)")
+    wt.add_argument("--once", action="store_true", help="one round, then exit (1 when failover was refused)")
+    wt.set_defaults(fn=cmd_dr_watch)
 
     st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
     st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")

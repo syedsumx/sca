@@ -238,8 +238,12 @@ jobs:
           CAIRN_JOBS_TEST_IMAGE: cairn/jobs:ci
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
-          pip install -e ".[server,test,trino,streams,documents,saml]" "ipython>=8.20"   # ipython: the notebook test
+          pip install -e ".[server,test,trino,streams,documents,saml,dr]" "ipython>=8.20"   # ipython: the notebook test
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-eng >/dev/null   # OCR of scanned documents (pipes)
+          # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
+          sudo apt-get install -y -q bind9 >/dev/null
+          sudo systemctl stop named 2>/dev/null || true
+          sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.named 2>/dev/null || true
           pip install -q "playwright>=1.50"              # the embedded-dashboard test frames a dashboard in Chromium
           python -m playwright install --with-deps chromium
           docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams

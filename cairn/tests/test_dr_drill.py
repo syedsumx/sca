@@ -217,3 +217,139 @@ def test_a_region_is_lost_and_the_standby_serves_the_lakehouse(regions):
     # The standby takes writes.
     standby.load_table("ops.events").append(pa.table({"batch": ["after"], "n": [0]}, schema=SCHEMA))
     assert "after" in standby.load_table("ops.events").scan().to_arrow().column("batch").to_pylist()
+
+
+ZONE = "cairn.test"
+TSIG_NAME = "cairn-failover."
+
+
+@pytest.fixture
+def dns_server(tmp_path):
+    """A real BIND primary for cairn.test that takes TSIG-signed updates (RFC 2136) from one key."""
+    import base64
+
+    named = shutil.which("named") or "/usr/sbin/named"
+    if not os.path.exists(named):
+        pytest.skip("needs BIND (apt install bind9)")
+    d = tmp_path / "bind"
+    d.mkdir()
+    secret = base64.b64encode(os.urandom(32)).decode()
+    p = port()
+    (d / "zone").write_text(f"""$TTL 60
+@ IN SOA ns.{ZONE}. admin.{ZONE}. 1 60 60 600 60
+@ IN NS ns.{ZONE}.
+ns IN A 127.0.0.1
+api IN A 192.0.2.10
+lake IN CNAME lake-a.{ZONE}.
+""")
+    (d / "named.conf").write_text(f"""options {{
+  directory "{d}"; pid-file "{d}/named.pid"; listen-on port {p} {{ 127.0.0.1; }}; listen-on-v6 {{ none; }};
+  recursion no; allow-query {{ any; }}; dnssec-validation no;
+}};
+controls {{ }};
+key "{TSIG_NAME}" {{ algorithm hmac-sha256; secret "{secret}"; }};
+zone "{ZONE}" {{ type primary; file "{d}/zone"; update-policy {{ grant {TSIG_NAME} zonesub ANY; }}; }};
+""")
+    pr = subprocess.Popen([named, "-g", "-c", str(d / "named.conf")], stdout=open(d / "named.log", "w"), stderr=subprocess.STDOUT)
+    try:
+        end = time.time() + 30
+        while "running" not in (d / "named.log").read_text():
+            assert pr.poll() is None and time.time() < end, (d / "named.log").read_text()[-2000:]
+            time.sleep(0.2)
+        (tmp_path / "tsig").write_text(secret)
+        yield {"port": p, "secret_file": str(tmp_path / "tsig")}
+    finally:
+        pr.kill()
+
+
+def _resolve(dns_port, name, rtype):
+    import dns.message
+    import dns.query
+
+    ans = dns.query.tcp(dns.message.make_query(f"{name}.{ZONE}.", rtype), "127.0.0.1", port=dns_port, timeout=5)
+    return sorted(rd.to_text() for rrset in ans.answer for rd in rrset)
+
+
+def test_the_standby_takes_over_by_itself_with_cairns_database(regions, dns_server, tmp_path):
+    """Queue row 24: `cairn dr watch` in the standby region promotes the standby database (the catalog's and Cairn's
+    own) and points DNS at the standby once the primary region is lost, and only then; Cairn's database comes
+    across with its audit chain whole and takes writes."""
+    from sqlalchemy import create_engine, text
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.db import init_db
+    from cairn.pipelines.dr_failover import Config, FailoverError, Watcher, point_dns
+
+    a, b = regions["a"], regions["b"]
+    # Cairn's own database lives on the primary's cluster, next to the catalog's: migrated, with audited work.
+    subprocess.run(["docker", "exec", a["pg"], "psql", "-h", "127.0.0.1", "-p", str(a["pg_port"]), "-U", "postgres", "-c",
+                    "CREATE DATABASE cairn"], check=True, capture_output=True)
+    cairn_a = create_engine(f"postgresql+psycopg://postgres:pgpass@127.0.0.1:{a['pg_port']}/cairn")
+    init_db(cairn_a)
+    for i in range(5):
+        AuditLog(cairn_a).record("grants", "grant", "urn:li:corpuser:admin", subject=f"urn:li:dataset:t{i}")
+    cairn_a.dispose()
+    cairn_b = create_engine(f"postgresql+psycopg://postgres:pgpass@127.0.0.1:{b['pg_port']}/cairn")
+    end = time.time() + 60
+    while True:                                   # streamed to the standby (read-only there until promotion)
+        try:
+            with cairn_b.connect() as c:
+                if c.execute(text("SELECT count(*) FROM cairn_audit_log")).scalar() == 5:
+                    break
+        except Exception:  # noqa: BLE001 - not replayed yet
+            pass
+        assert time.time() < end, "Cairn's database did not reach the standby"
+        time.sleep(0.5)
+    (tmp_path / "standby-db").write_text(f"postgresql://postgres:pgpass@127.0.0.1:{b['pg_port']}/postgres")
+    raw = {"failures": 3, "timeout_s": 1, "state_file": str(tmp_path / "failover.json"),
+           "primary_checks": [f"tcp://127.0.0.1:{a['catalog_port']}", f"tcp://127.0.0.1:{a['store_port']}",
+                              f"tcp://127.0.0.1:{a['pg_port']}"],
+           # HTTP, not TCP: a hung process still completes TCP handshakes (the kernel's listen queue), it cannot answer.
+           "standby_checks": [f"http://127.0.0.1:{b['store_port']}/"],
+           "standby_databases": [{"url_file": str(tmp_path / "standby-db")}],
+           "dns": {"server": "127.0.0.1", "port": dns_server["port"], "zone": f"{ZONE}.", "key_name": TSIG_NAME,
+                   "key_secret_file": dns_server["secret_file"],
+                   "records": [{"name": "api", "type": "A", "value": "192.0.2.20", "ttl": 30},
+                               {"name": "lake", "type": "CNAME", "value": f"lake-b.{ZONE}.", "ttl": 30}]}}
+    w = Watcher(Config.parse(raw))
+    assert w.tick() == {"action": "none", "why": "primary healthy"}
+    # One component of the primary failing is not a lost region.
+    partial = Watcher(Config.parse({**raw, "primary_checks": raw["primary_checks"] + ["tcp://127.0.0.1:1"]}))
+    assert all(partial.tick()["why"].startswith("primary partly failing") for _ in range(4))
+    # A key the DNS server does not know is refused there.
+    (tmp_path / "wrong").write_text("d3Jvbmcga2V5IGZvciB0aGUgem9uZQ==")
+    with pytest.raises(FailoverError, match="refused|NOTAUTH"):
+        point_dns(Config.parse({**raw, "dns": {**raw["dns"], "key_secret_file": str(tmp_path / "wrong")}}).dns)
+    assert _resolve(dns_server["port"], "api", "A") == ["192.0.2.10"]
+
+    # Region A is lost while the standby's store is not answering either: no failover onto an unhealthy standby.
+    lost_at = time.time()
+    a["store"].kill()
+    a["catalog"].kill()
+    subprocess.run(["docker", "kill", a["pg"]], capture_output=True)
+    os.kill(b["store"].pid, signal.SIGSTOP)
+    seen = [w.tick() for _ in range(3)]
+    assert [s["action"] for s in seen] == ["none", "none", "refused"] and "standby checks failing" in seen[-1]["why"], seen
+    assert _resolve(dns_server["port"], "api", "A") == ["192.0.2.10"]
+    with cairn_b.connect() as c:
+        assert c.execute(text("SELECT pg_is_in_recovery()")).scalar() is True
+    # The standby is healthy again: the next round fails over.
+    os.kill(b["store"].pid, signal.SIGCONT)
+    report = w.tick()
+    switched_at = time.time()
+    assert report["action"] == "failed-over" and report["databases_promoted"] == [True], report
+    assert _resolve(dns_server["port"], "api", "A") == ["192.0.2.20"]
+    assert _resolve(dns_server["port"], "lake", "CNAME") == [f"lake-b.{ZONE}."]
+    cairn_b.dispose()
+    with cairn_b.connect() as c:
+        assert c.execute(text("SELECT pg_is_in_recovery()")).scalar() is False
+    log = AuditLog(cairn_b)
+    assert log.verify_chain()["valid"] and log.verify_chain()["entries_checked"] == 5
+    log.record("dr", "failover", "urn:li:corpuser:cairn-dr", details={"rto_s": round(switched_at - lost_at, 1)})
+    assert log.verify_chain() == {**log.verify_chain(), "valid": True, "entries_checked": 6}
+    print(f"\nDR failover: lost to DNS switched in {switched_at - lost_at:.1f} s (3 rounds, one refused for an unhealthy "
+          f"standby); Cairn's database promoted with its 5 audit entries")
+    # Never twice, and never back by itself.
+    again = w.tick()
+    assert again["action"] == "none" and "already failed over" in again["why"]
+    cairn_b.dispose()
