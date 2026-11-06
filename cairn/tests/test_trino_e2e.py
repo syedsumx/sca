@@ -292,6 +292,16 @@ def trino(lake, cairn):
         "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
     # Another database through Trino (federation): PostgreSQL, its password from the environment.
     pg, pgp = f"cairn-trino-pg-{os.getpid()}", port()
+    name = f"cairn-trino-acl-{os.getpid()}"
+    try:
+        yield from _start_trino(d, tp, tls, pg, pgp, name, services, model)
+    finally:                                      # also when setup fails, so the next module can start its own
+        subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def _start_trino(d, tp, tls, pg, pgp, name, services, model):
+    subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)   # left by a killed run
     subprocess.run(["docker", "run", "-d", "--rm", "--name", pg, "-e", "POSTGRES_PASSWORD=crm-secret", "-e", "POSTGRES_DB=crm",
                     "-p", f"127.0.0.1:{pgp}:5432", "postgres:16-alpine"], check=True, capture_output=True, timeout=300)
     end = time.time() + 90
@@ -309,7 +319,6 @@ def trino(lake, cairn):
         "connector.name=postgresql", f"connection-url=jdbc:postgresql://127.0.0.1:{pgp}/crm",
         "connection-user=postgres", "connection-password=${ENV:CAIRN_FED_CRM_PASSWORD}", ""]))
     os.chmod(d, 0o755)
-    name = f"cairn-trino-acl-{os.getpid()}"
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
                     "-e", "CAIRN_AI_API_KEY=stub-key",
                     "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
@@ -325,10 +334,13 @@ def trino(lake, cairn):
 
     def sql(statement, user="admin", token=None, as_user=None):
         token = token if token is not None else services.trino_tokens.mint(f"urn:li:corpuser:{user}")["token"]
-        out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"https://127.0.0.1:{tls}", "--insecure",
-                              *(["--access-token", token] if token else []), "--user", as_user or user,
-                              "--catalog", "lake", "--output-format", "JSON", "--execute", statement],
-                             capture_output=True, text=True, timeout=300)
+        try:
+            out = subprocess.run(["docker", "exec", "-e", "LANG=C.UTF-8", name, "trino", "--server", f"https://127.0.0.1:{tls}",
+                                  "--insecure", *(["--access-token", token] if token else []), "--user", as_user or user,
+                                  "--catalog", "lake", "--output-format", "JSON", "--execute", statement],
+                                 capture_output=True, text=True, timeout=300)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"Trino did not answer {statement[:80]!r} in 300 s\n" + _hang_report(name)) from None
         if out.returncode != 0:
             why = [ln for ln in out.stderr.splitlines() if "failed:" in ln or "Error" in ln]
             msg = why[0] if why else out.stderr.strip()[-500:] or out.stdout
@@ -347,8 +359,24 @@ def trino(lake, cairn):
     sql("CREATE TABLE IF NOT EXISTS lake.hr.salaries AS SELECT 'jane' AS name, 100 AS salary")
     sql.port, sql.tls, sql.dir, sql.model = tp, tls, d, model
     yield sql
-    subprocess.run(["docker", "rm", "-f", name, pg], capture_output=True, timeout=60)
-    shutil.rmtree(d, ignore_errors=True)
+
+
+def _hang_report(name: str) -> str:
+    """What Trino and this process (Cairn's API runs in it) were doing when a statement hung."""
+    import faulthandler
+    import io
+
+    logs = subprocess.run(["docker", "logs", "--tail", "150", name], capture_output=True, text=True, timeout=60)
+    stacks = io.StringIO()
+    try:
+        with tempfile.TemporaryFile("w+") as fh:
+            faulthandler.dump_traceback(fh, all_threads=True)
+            fh.seek(0)
+            stacks.write(fh.read())
+    except Exception as e:  # noqa: BLE001 - a report, best effort
+        stacks.write(f"(no stacks: {e})")
+    return ("--- Trino log ---\n" + (logs.stdout + logs.stderr)[-6000:] +
+            "\n--- threads of this process ---\n" + stacks.getvalue()[-12000:])
 
 
 def test_admin_sees_everything_as_it_is(trino):
