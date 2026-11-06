@@ -192,12 +192,11 @@ class PolicyDecisionPoint:
         return {"subject": subject, "resource": resource, "action": req.privilege, "environment": environment}
 
     def _cache_key(self, req: AuthorizeRequest) -> str:
-        payload = req.model_dump(mode="json", exclude={"environment"})
-        payload["_env_channel"] = req.environment.get("channel")
-        payload["_gen"] = self._generation
-        payload["_v"] = [self.resolver.version(req.actor),
-                         self.resolver.version(req.resource.urn if req.resource else None)]
-        return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        # The request as pydantic serialises it (in Rust), plus what else a decision depends on. A dict given in
+        # another order is another key: a cache miss, never a wrong decision.
+        tail = json.dumps([req.environment.get("channel"), self._generation, self.resolver.version(req.actor),
+                           self.resolver.version(req.resource.urn if req.resource else None)])
+        return hashlib.sha256(req.model_dump_json(exclude={"environment"}).encode() + b"|" + tail.encode()).hexdigest()
 
     def decide(self, req: AuthorizeRequest, explain: bool = False) -> Decision:
         if req.actor in SYSTEM_ACTORS or req.actor in self.root_users:

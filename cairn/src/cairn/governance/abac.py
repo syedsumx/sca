@@ -18,6 +18,7 @@ Paths address the request context: ``subject.urn``, ``subject.groups``,
 from __future__ import annotations
 
 import fnmatch
+import functools
 import ipaddress
 import re
 from datetime import datetime, time
@@ -244,16 +245,28 @@ def evaluate_condition(node: Optional[dict], ctx: dict, trace: Optional[list] = 
     return result
 
 
+@functools.lru_cache(maxsize=4096)
+def _glob(patterns: tuple[str, ...]):
+    """One compiled expression for a list of fnmatch patterns (case-sensitive, as fnmatchcase): a policy's
+    patterns are matched once per decision instead of one by one."""
+    return re.compile("|".join(f"(?:{fnmatch.translate(p)})" for p in patterns))
+
+
+@functools.lru_cache(maxsize=4096)
+def _lowered(types: tuple[str, ...]) -> frozenset:
+    return frozenset(t.lower() for t in types)
+
+
 def action_matches(patterns: list[str], privilege: str) -> bool:
-    return any(fnmatch.fnmatchcase(privilege, p) for p in patterns)
+    return bool(patterns) and _glob(tuple(patterns)).match(privilege) is not None
 
 
 def target_matches(target: Target, ctx: dict) -> tuple[bool, str]:
     res = ctx.get("resource") or {}
     subj = ctx.get("subject") or {}
-    if target.resource_types and (res.get("type") or "").lower() not in {t.lower() for t in target.resource_types}:
+    if target.resource_types and (res.get("type") or "").lower() not in _lowered(tuple(target.resource_types)):
         return False, f"resource type {res.get('type')!r} not in {target.resource_types}"
-    if target.resource_urns and not any(fnmatch.fnmatchcase(res.get("urn") or "", p) for p in target.resource_urns):
+    if target.resource_urns and _glob(tuple(target.resource_urns)).match(res.get("urn") or "") is None:
         return False, "resource urn does not match target patterns"
     if target.subjects and "*" not in target.subjects:
         ids = {subj.get("urn")} | set(subj.get("groups") or []) | set(subj.get("roles") or [])
