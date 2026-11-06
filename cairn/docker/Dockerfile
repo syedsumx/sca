@@ -4,9 +4,9 @@
 #   docker build -f docker/Dockerfile -t cairn/platform:0.1.0 .
 #   (or deploy/build-images.sh, which also handles proxies and registry mirrors)
 #
-# No OS packages are installed: every dependency ships as a manylinux wheel (psycopg[binary],
-# cryptography, uvloop, confluent-kafka), PID 1 is dumb-init from PyPI and health checks use
-# Python. This keeps the image small and its CVE surface to the base image only.
+# Python dependencies ship as manylinux wheels (psycopg[binary], cryptography, uvloop, confluent-kafka),
+# PID 1 is dumb-init from PyPI and health checks use Python. The one OS package is Tesseract, for OCR of
+# scanned documents (OCR_LANGUAGES adds language data, e.g. "eng deu"; OCR_LANGUAGES="" leaves it out).
 #
 # Behind a TLS-intercepting proxy pass its CA as a BuildKit secret (it is never stored in a layer):
 #   --secret id=extra_ca,src=/path/to/ca.crt --build-arg HTTPS_PROXY=...
@@ -26,6 +26,12 @@ RUN --mount=type=secret,id=extra_ca,required=false \
  && /opt/cairn/bin/pip install ".[${EXTRAS}]" dumb-init
 
 FROM ${BASE_IMAGE} AS runtime
+ARG OCR_LANGUAGES=eng
+RUN if [ -n "${OCR_LANGUAGES}" ]; then \
+      apt-get update \
+   && apt-get install -y --no-install-recommends tesseract-ocr $(for l in ${OCR_LANGUAGES}; do printf 'tesseract-ocr-%s ' "$l"; done) \
+   && rm -rf /var/lib/apt/lists/*; \
+    fi
 LABEL org.opencontainers.image.title="cairn" \
       org.opencontainers.image.description="Cairn control plane: DQ engine, PDP, agent gateway, AI/MCP" \
       org.opencontainers.image.licenses="Apache-2.0"

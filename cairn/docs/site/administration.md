@@ -2379,12 +2379,18 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - **Text** is extracted from:
     - plain text, Markdown, CSV, JSON, XML, YAML and logs;
     - HTML (the visible text, without scripts or styles);
-    - PDF (each page's text layer, with the `documents` extra; scanned pages without a text layer give nothing);
+    - PDF (each page's text layer, with the `documents` extra); a scanned page, one without a text layer, is read by OCR;
+    - images (PNG, JPEG, TIFF, BMP, GIF, WebP), by OCR, a page per frame;
     - Word `.docx` and PowerPoint `.pptx`.
 
     Other files get a row without text. Text is capped at `CAIRN_PIPES_MAX_TEXT` characters, and files over `CAIRN_PIPES_MAX_DOCUMENT_BYTES` (50 MB) are listed without it.
+  - **OCR of scanned documents.** Tesseract reads the pages a scanner made: the images a PDF page draws when the page has no text layer (fewer than 16 characters), and image files. Cairn's image includes Tesseract with English (build argument `OCR_LANGUAGES`, for example `"eng deu fra"`, adds others).
+    - **Settings.** `CAIRN_OCR` is `auto` (the default: on when Tesseract is installed), `on` (a document that needs OCR without Tesseract gets an `extract_error`) or `off`. `CAIRN_OCR_LANGUAGES` sets the languages (`eng`, or `eng+deu` for several; each needs its language data). `CAIRN_OCR_COMMAND` names the binary.
+    - **Limits.** Each page has `CAIRN_OCR_TIMEOUT` seconds (60) and each document `CAIRN_OCR_DOCUMENT_TIMEOUT` (600) and `CAIRN_OCR_MAX_PAGES` pages (100). An image is read only up to `CAIRN_OCR_MAX_PIXELS` (60 million; a 600 dpi A3 scan is about 35 million), checked from its declared size before it is decoded.
+    - **What a limit or a bad page does.** The page is skipped and named in the row's `extract_error`; the rest of the document is still read, and the pipe goes on.
+    - Tesseract runs as its own process per page, reading the image from its standard input. It gets no file paths and no environment beyond `PATH`.
   - **Changes.** A changed object replaces its row in one commit. A deleted object's row goes when the bucket's `s3:ObjectRemoved:*` event arrives, or at the next sweep.
-  - **Tested** in `tests/test_pipes_e2e.py`, with real stores and events: text, HTML, PDF, Word and binary files, a change and a deletion by event, and a deletion found by the sweep.
+  - **Tested** in `tests/test_pipes_e2e.py`, with real stores and events: text, HTML, PDF, Word and binary files, a change and a deletion by event, and a deletion found by the sweep. With Tesseract: a PDF with a text page and a scanned page, and a scanned image, read word for word; a page over the size limit named on the row while the rest is kept; and `CAIRN_OCR=on` without Tesseract reported.
 - **Once each.** A file (key, size, modification time) is loaded once. It is recorded with its outcome. A file that fails, such as one with columns the table lacks, is recorded as an error; the next file still loads. A failed file is retried when it changes. Markers such as `_SUCCESS` are skipped.
 - **Downstream.** Loaded tables are recorded as changed, so data-aware schedules (Airflow, dbt) see the new data.
 - **Settings.** `CAIRN_PIPES_STORE` holds `{"endpoint", "access_key", "secret_key", "region"}`; give it a key that can only read the pipes' prefixes. `CAIRN_PIPES_CATALOG` holds the pyiceberg REST catalog properties: `uri`, `token`, and the warehouse's `s3.*` settings. Each is JSON, or a path to a JSON file.

@@ -213,3 +213,59 @@ def test_the_sweep_also_forgets_objects_that_are_gone(world):
     s3.delete_object(Bucket="landing", Key="archive/a.md")                   # no event rule for archive/
     assert [(f["key"], f["status"]) for f in p.sweep(pipe["id"])] == [("archive/a.md", "removed")]
     assert p._catalog().load_table(("raw", "archive")).scan().to_arrow().num_rows == 0
+
+
+def _scan(*lines: str):
+    """A page as a scanner gives it: an image of text, at 200 dpi."""
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.new("L", (1700, 2200), 255)
+    draw, font = ImageDraw.Draw(img), ImageFont.load_default(size=48)
+    for i, line in enumerate(lines):
+        draw.text((150, 200 + i * 90), line, fill=0, font=font)
+    return img
+
+
+@pytest.mark.skipif(shutil.which("tesseract") is None, reason="needs Tesseract (apt install tesseract-ocr)")
+def test_scanned_documents_are_read_by_ocr(world, monkeypatch):
+    import io
+
+    from pypdf import PdfReader, PdfWriter
+
+    p, s3 = world["pipes"], world["s3"]
+    pipe = p.create({"name": "scans", "bucket": "landing", "prefix": "scans/", "format": "files", "target": "raw.scans",
+                     "create_table": True}, "urn:li:corpuser:admin")
+    # A PDF whose first page has a text layer and whose second is a scan; an image file; a page over the size limit.
+    scanned = io.BytesIO()
+    _scan("Invoice 4471 from Northwind Traders", "Total due: 1,250.00 EUR").save(scanned, format="PDF", resolution=200)
+    w = PdfWriter()
+    for src in (_pdf("Cover letter for the invoice"), scanned.getvalue()):
+        for page in PdfReader(io.BytesIO(src)).pages:
+            w.add_page(page)
+    mixed = io.BytesIO()
+    w.write(mixed)
+    note = io.BytesIO()
+    _scan("Delivery note 88", "Signed by the courier").save(note, format="PNG")
+    s3.put_object(Bucket="landing", Key="scans/invoice.pdf", Body=mixed.getvalue())
+    s3.put_object(Bucket="landing", Key="scans/note.png", Body=note.getvalue())
+    assert sorted(f["status"] for f in p.sweep(pipe["id"])) == ["ok", "ok"]
+    rows = {r["key"]: r for r in p._catalog().load_table(("raw", "scans")).scan().to_arrow().to_pylist()}
+    inv = rows["scans/invoice.pdf"]
+    assert inv["pages"] == 2 and inv["extract_error"] is None, inv["extract_error"]
+    assert inv["text"].startswith("Cover letter for the invoice")                 # the text layer, as it is
+    assert "Invoice 4471 from Northwind Traders" in inv["text"] and "1,250.00 EUR" in inv["text"]   # the scan, read
+    assert rows["scans/note.png"]["text"] == "Delivery note 88\nSigned by the courier" and rows["scans/note.png"]["pages"] == 1
+    # Limits are reported on the row, and the rest of the document is still read.
+    monkeypatch.setenv("CAIRN_OCR_MAX_PIXELS", "1000000")
+    s3.put_object(Bucket="landing", Key="scans/invoice.pdf", Body=mixed.getvalue() + b"\n")   # changed: read again
+    p.sweep(pipe["id"])
+    inv = {r["key"]: r for r in p._catalog().load_table(("raw", "scans")).scan().to_arrow().to_pylist()}["scans/invoice.pdf"]
+    assert inv["text"] == "Cover letter for the invoice"
+    assert "page 2" in inv["extract_error"] and "over the OCR limit" in inv["extract_error"]
+    # OCR asked for (CAIRN_OCR=on) and not installed: the row says so.
+    monkeypatch.setenv("CAIRN_OCR", "on")
+    monkeypatch.setenv("CAIRN_OCR_COMMAND", "no-such-tesseract")
+    s3.put_object(Bucket="landing", Key="scans/note.png", Body=note.getvalue() + b"\0")
+    p.sweep(pipe["id"])
+    note_row = {r["key"]: r for r in p._catalog().load_table(("raw", "scans")).scan().to_arrow().to_pylist()}["scans/note.png"]
+    assert note_row["text"] is None and "not installed" in note_row["extract_error"]
