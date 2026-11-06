@@ -1718,14 +1718,76 @@ def test_a_delta_table_is_converted_to_iceberg_in_place(trino, lake):
     assert trino("SELECT count(*) AS n FROM lake.converted.items")[0]["n"] == 5
     with pytest.raises(PipeError, match="exists"):
         conv.convert(loc, "converted.items", "urn:li:corpuser:admin")
-    # Partitioned tables keep values in paths, not files: refused (copy them with a derived table).
-    trino("CREATE TABLE delta.dconv.parts (id bigint, region varchar) WITH (partitioned_by = ARRAY['region'])")
-    trino("INSERT INTO delta.dconv.parts VALUES (1, 'EU')")
-    ploc = trino("SELECT \"$path\" AS p FROM delta.dconv.parts LIMIT 1")[0]["p"].rsplit("/", 2)[0]
-    with pytest.raises(PipeError, match="partitioned by region"):
-        conv.convert(ploc, "converted.parts", "urn:li:corpuser:admin")
     with pytest.raises(PipeError, match="no Delta log"):
         conv.inspect(loc + "-missing")
+
+
+def test_partitioned_delta_tables_with_deletion_vectors_are_converted(trino, lake):
+    """Queue row 21: a Delta table partitioned by two columns (values only in the log), with rows deleted by
+    deletion vectors Trino wrote, becomes an Iceberg table partitioned the same way, with the same rows."""
+    from cairn.pipelines.delta_convert import DeltaConversions, DeltaLog
+
+    conv = DeltaConversions({"endpoint": lake["store"], "access_key": STORE_KEY[0], "secret_key": STORE_KEY[1]},
+                            {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"],
+                             "s3.access-key-id": STORE_KEY[0], "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1",
+                             "s3.path-style-access": "true"})
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dconv")
+    trino("CREATE TABLE delta.dconv.events (id bigint, amount double, region varchar, day date) "
+          "WITH (partitioned_by = ARRAY['region', 'day'], deletion_vectors_enabled = true)")
+    trino("INSERT INTO delta.dconv.events VALUES (1, 1.5, 'EU', DATE '2026-01-01'), (2, 2.5, 'EU', DATE '2026-01-01'), "
+          "(3, 3.5, 'EU', DATE '2026-01-02'), (4, 4.5, 'US', DATE '2026-01-01'), (5, 5.5, 'US', DATE '2026-01-01'), "
+          "(6, 6.5, NULL, DATE '2026-01-03')")
+    trino("DELETE FROM delta.dconv.events WHERE id IN (2, 5)")          # deletion vectors, files left as they are
+    want = [(r["id"], r["amount"], r["region"], r["day"]) for r in
+            trino("SELECT id, amount, region, CAST(day AS varchar) AS day FROM delta.dconv.events ORDER BY id")]
+    assert [w[0] for w in want] == [1, 3, 4, 6]
+    path = trino("SELECT \"$path\" AS p FROM delta.dconv.events WHERE id = 1")[0]["p"]
+    loc = path.split("/region=")[0]
+    seen = conv.inspect(loc)
+    assert seen["problems"] == [] and seen["partitioned_by"] == ["region", "day"], seen
+    assert seen["files_with_deletes"] >= 1, seen
+    # The deletion vectors Trino wrote decode to the rows it deleted.
+    st = DeltaLog(conv._fs(), *loc.removeprefix("s3://").split("/", 1)).state()
+    assert sum(len(DeltaLog(conv._fs(), *loc.removeprefix("s3://").split("/", 1)).deletion_vector(f["deletion_vector"]))
+               for f in st["files"].values() if f["deletion_vector"]) == 2
+    trino("CALL delta.system.unregister_table('dconv', 'events')")
+    out = conv.convert(loc, "converted.events", "urn:li:corpuser:admin")
+    assert out["partitioned_by"] == ["region", "day"] and out["rewritten_for_deletes"] >= 1, out
+    got = [(r["id"], r["amount"], r["region"], r["day"]) for r in
+           trino("SELECT id, amount, region, CAST(day AS varchar) AS day FROM lake.converted.events ORDER BY id")]
+    assert got == want                                    # same rows, partition values and nulls included
+    # Partitioned in Iceberg too: a filter on the partition reads only its files.
+    parts = trino("SELECT CAST(partition.region AS varchar) AS region, record_count FROM lake.converted.\"events$partitions\"")
+    assert sorted((p["region"], p["record_count"]) for p in parts if p["region"] == "US") == [("US", 1)]
+    assert trino("SELECT count(*) AS n FROM lake.converted.events WHERE region = 'EU' AND day = DATE '2026-01-01'")[0]["n"] == 1
+    # Only the files with deletes were written again; the others are the Delta files themselves.
+    files = [r["file_path"] for r in trino("SELECT file_path FROM lake.converted.\"events$files\"")]
+    assert any("/cairn-converted/" in f for f in files) and any("/region=" in f for f in files), files
+    trino("INSERT INTO lake.converted.events VALUES (7, 7.5, 'US', DATE '2026-01-04')")
+    assert trino("SELECT count(*) AS n FROM lake.converted.events")[0]["n"] == 5
+
+
+def test_deletion_vector_formats():
+    """The Roaring layouts a deletion vector may use (array, bitmap and run containers, more than one key)."""
+    import struct
+
+    from cairn.pipelines.delta_convert import DV_MAGIC, deleted_rows, z85_decode
+
+    assert z85_decode("HelloWorld") == bytes([0x86, 0x4F, 0xD2, 0x6F, 0xB5, 0x59, 0xF7, 0x5B])   # the Z85 spec's example
+    # One bitmap (key 0) without runs: an array container {1, 7} and a bitmap container of 5000 values.
+    big = list(range(70_000, 75_000))
+    bits = bytearray(8192)
+    for v in big:
+        bits[(v - 65536) // 8] |= 1 << ((v - 65536) % 8)
+    roaring = struct.pack("<II", 12346, 2) + struct.pack("<HHHH", 0, 1, 1, len(big) - 1) + struct.pack("<II", 0, 0) \
+        + struct.pack("<HH", 1, 7) + bytes(bits)
+    data = struct.pack("<IQ", DV_MAGIC, 1) + struct.pack("<I", 0) + roaring
+    assert deleted_rows(data) == {1, 7, *big}
+    # Run containers, under a second key (positions past 2^32).
+    runs = struct.pack("<I", 12347 | (0 << 16)) + bytes([1]) + struct.pack("<HH", 0, 9) + struct.pack("<H", 1) \
+        + struct.pack("<HH", 100, 9)
+    data = struct.pack("<IQ", DV_MAGIC, 1) + struct.pack("<I", 1) + runs
+    assert deleted_rows(data) == {(1 << 32) + v for v in range(100, 110)}
 
 
 def test_stored_functions_and_procedures(trino, cairn):
