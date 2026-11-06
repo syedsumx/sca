@@ -307,7 +307,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/mlflow"
           "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
-            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py | tee "$RUNNER_TEMP/ml.log"
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py -k "not spark_image" | tee "$RUNNER_TEMP/ml.log"   # the Spark image test runs in the pipelines job
           ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
       - uses: actions/setup-node@v4
         with:
@@ -412,6 +412,17 @@ jobs:
             tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
+      - name: Spark training (pyspark.ml in the cairn/spark image) tracked in MLflow through Cairn
+        working-directory: cairn
+        env:
+          CAIRN_SPARK_IMAGE: cairn/spark:ci
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "scikit-learn>=1.4" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py -k spark_image | tee "$RUNNER_TEMP/spark-ml.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/spark-ml.log"
       - name: Cairn's warnings and errors, on failure (its access decisions, the catalog's callbacks)
         if: failure()
         run: tail -n 300 "$RUNNER_TEMP/cairn-pipelines.log" || true

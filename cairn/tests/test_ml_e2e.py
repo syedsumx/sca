@@ -425,3 +425,50 @@ def test_a_spark_jobs_training_is_tracked_through_cairn_as_the_job(ml, tmp_path)
     env.pop("CAIRN_TOKEN_FILE")
     r = subprocess.run([PY, "-c", SPARK_TRAINING], env=env, capture_output=True, text=True, timeout=120, cwd=ml["dir"])
     assert r.returncode != 0 and "CAIRN_TOKEN" in r.stderr
+
+
+PYSPARK_TRAINING = textwrap.dedent('''
+    import json
+    from pyspark.ml import Pipeline
+    from pyspark.ml.feature import VectorAssembler
+    from pyspark.ml.regression import LinearRegression
+    from pyspark.sql import SparkSession
+    from cairn_spark.mlflow import use_mlflow, log_table_input
+    spark = SparkSession.builder.master("local[1]").appName("spend-training").getOrCreate()
+    df = spark.createDataFrame([(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)], ["tenure", "spend"])
+    mlflow = use_mlflow(experiment="spend-spark")
+    with mlflow.start_run() as run:
+        log_table_input("sales.customers")
+        model = Pipeline(stages=[VectorAssembler(inputCols=["tenure"], outputCol="features"),
+                                 LinearRegression(featuresCol="features", labelCol="spend")]).fit(df)
+        mlflow.log_metric("coefficient", float(model.stages[-1].coefficients[0]))
+        mlflow.spark.log_model(model, artifact_path="model", registered_model_name="spend-spark")
+    print("CAIRN-RUN " + json.dumps({"run_id": run.info.run_id}))
+    spark.stop()
+''')
+
+
+@pytest.mark.skipif(not os.environ.get("CAIRN_SPARK_IMAGE"), reason="needs the cairn/spark image (CAIRN_SPARK_IMAGE)")
+def test_pyspark_ml_training_in_the_spark_image_is_tracked_through_cairn(ml, tmp_path):
+    """Queue row 20: a Spark job in Cairn's Spark image trains with pyspark.ml and registers the model through
+    Cairn's MLflow as the job's own user, with the table it trained on as the model's lineage."""
+    (tmp_path / "train.py").write_text(PYSPARK_TRAINING)
+    (tmp_path / "token").write_text("tok-carol")
+    os.chmod(tmp_path, 0o755)
+    for f in ("train.py", "token"):
+        os.chmod(tmp_path / f, 0o644)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{tmp_path}:/job:ro",
+                        "-e", f"CAIRN_URL={ml['cairn']}", "-e", "CAIRN_TOKEN_FILE=/job/token", "-e", "HOME=/tmp",
+                        "-e", "MLFLOW_HTTP_REQUEST_MAX_RETRIES=0", "--entrypoint", "/opt/spark/bin/spark-submit",
+                        os.environ["CAIRN_SPARK_IMAGE"], "--master", "local[1]", "/job/train.py"],
+                       capture_output=True, text=True, timeout=600)
+    assert r.returncode == 0 and "CAIRN-RUN " in r.stdout, (r.stdout[-2000:], r.stderr[-4000:])
+    run_id = json.loads(r.stdout.split("CAIRN-RUN ", 1)[1].splitlines()[0])["run_id"]
+    run = httpx.get(f"{ml['mlflow']}/api/2.0/mlflow/runs/get", params={"run_id": run_id}).json()["run"]
+    assert {t["key"]: t["value"] for t in run["data"]["tags"]}["mlflow.user"] == "carol"
+    assert abs({m["key"]: m["value"] for m in run["data"]["metrics"]}["coefficient"] - 10.0) < 1e-6
+    assert ml["gw"].owner("spend-spark") == "urn:li:corpuser:carol"
+    props = ml["graph"].get_aspect("urn:li:mlModel:(urn:li:dataPlatform:mlflow,spend-spark.v1,PROD)", "mlModelProperties")
+    (job,) = props["trainingJobs"]
+    assert ml["graph"].get_aspect(job, "dataJobInputOutput")["inputDatasets"] == \
+        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.customers,PROD)"]
