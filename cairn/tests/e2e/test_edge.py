@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import os
+import time
 
 import httpx
 import pytest
@@ -58,3 +59,7 @@ def test_api_is_rate_limited_per_client():
             statuses += list(pool.map(hit, range(1000)))
     assert 429 in statuses, {s: statuses.count(s) for s in set(statuses)}
     assert statuses.count(404) >= 400                              # the burst is served
+    # The limit is per client address, and the next tests come from this one: hand over a full bucket again
+    # (400 at 50/s refills in 8 s), or whatever runs next is throttled for what this test did.
+    time.sleep(10)
+    assert httpx.get(f"{EDGE}/cairn/api/__rate-probe", timeout=30).status_code == 404
