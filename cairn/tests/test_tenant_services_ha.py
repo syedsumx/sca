@@ -137,6 +137,10 @@ def test_kafka_survives_a_lost_broker_and_refuses_writes_it_could_lose(kafka):
         return sorted(r.stdout.split())
 
     assert produce(1, "before").returncode == 0
+    # Consumers are running before a node is ever lost: the first one makes Kafka create __consumer_offsets (three
+    # copies, which needs all three brokers). Created after a loss it could not be, and no group would find its
+    # coordinator.
+    assert wait(lambda: consume(2) == ["before"], "a consumer with every broker up", 120)
     # One broker gone (its node lost): writes still need two copies and get them; nothing written is lost.
     k.stop(0)
     wait(lambda: produce(1, "after").returncode == 0, "a write with one broker down", 120)
