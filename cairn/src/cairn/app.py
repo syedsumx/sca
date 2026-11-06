@@ -402,6 +402,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(agents_iam_router(services.agents, services, cp, authz))
     _include_active_metadata(app, services, modules, cp, authz)
+    from cairn.common.deprecation import install as install_deprecations
+
+    install_deprecations(app, principal=cp)       # Deprecation/Sunset headers, 410 after sunset, GET /deprecations
     return app
 
 

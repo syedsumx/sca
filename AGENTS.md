@@ -26,6 +26,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `spark/` | `cairn-spark`: governed Spark submit, Kubernetes pod templates | Python |
 | `airflow-provider/` | Airflow provider for Cairn | Python |
 | `terraform-provider-cairn/` | Terraform provider | Go |
+| `sdks/js`, `sdks/java` | Clients for the main APIs (no dependencies; `tests/test_sdk_clients.py`) | JavaScript, Java |
 | `ui/` | Web UI and micro-frontend | TypeScript, React |
 | `core/`, `plugins/` | Cairn Core (white-labelled DataHub engine) patches and Java plugins | Java |
 | `helm/cairn`, `helm/jupyterhub`, `helm/cairn-remote-agent` | Helm charts | YAML |

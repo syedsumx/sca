@@ -84,6 +84,15 @@ Keycloak (`tests/test_saml_e2e.py`), with both a signed assertion and a signed r
 tampered NameID, a second assertion smuggled beside the signed one, a replay, a response for another sign-in, a
 DTD, a wrong PKCE verifier and a wrong client secret.
 
+## API deprecations
+
+Routes being retired are listed in `cairn.common.deprecation.DEPRECATIONS` and at `GET /cairn/api/deprecations`.
+From the deprecation date they answer with `Deprecation`, `Sunset` and `Link: rel="successor-version"` headers;
+from the sunset date (at least 180 days later) they answer `410 Gone`. Before an upgrade past a sunset, see who
+still calls a retired route: `cairn_api_deprecated_requests_total{route}` counts calls to deprecated routes, and
+the clients in `sdks/` warn their callers once per route. The policy for callers is in the API docs
+(*Deprecation policy*).
+
 ## API quotas and the IP allowlist
 
 Each tenant (one Cairn deployment) can cap API use, and accept requests only from known networks.
