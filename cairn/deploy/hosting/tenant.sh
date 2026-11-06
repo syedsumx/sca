@@ -19,6 +19,13 @@
 #                         local socket (kubectl exec) instead of CAIRN_PG_ADMIN_URL
 #   CAIRN_TENANT_SERVICES 1: each tenant gets its own OpenSearch and Kafka in its namespace
 #                         (tenant-services.yaml); CAIRN_SEARCH_HOST and CAIRN_KAFKA_TEMPLATE are then unused
+#   CAIRN_TENANT_SERVICES_HA  1: those services replicated, three nodes each, so a lost node or pod is survived
+#                         (tenant-services-ha.yaml). Chosen when a tenant is created: an existing tenant is
+#                         not switched in place (see "Hosting tenants" in docs/site/administration.md)
+#   CAIRN_TENANT_SERVICES_SPREAD  DoNotSchedule (default: one pod of each per node, needs three nodes) or
+#                         ScheduleAnyway (a single test node)
+#   CAIRN_TENANT_SEARCH_HEAP, CAIRN_TENANT_SEARCH_MEMORY, CAIRN_TENANT_KAFKA_HEAP, CAIRN_TENANT_KAFKA_MEMORY
+#                         per-node sizes of the replicated services (defaults: 1g heap in 2Gi, 512m in 1Gi)
 #   CAIRN_INGRESS_NAMESPACE  the ingress controller's namespace: turns on namespace isolation (isolation.yaml)
 #   CAIRN_MONITORING_NAMESPACE  Prometheus's namespace, also admitted by the isolation
 #   CAIRN_TLS_ISSUER      a cert-manager ClusterIssuer: each tenant's host gets its certificate from it
@@ -54,8 +61,12 @@ die() { echo "tenant: $*" >&2; exit 1; }
 need() { for v in "$@"; do [ -n "${!v:-}" ] || die "set $v"; done; }
 ns() { echo "cairn-$id"; }
 services() { [ "${CAIRN_TENANT_SERVICES:-}" = 1 ]; }
+ha() { services && [ "${CAIRN_TENANT_SERVICES_HA:-}" = 1 ]; }
 search_host() { if services; then echo "opensearch.$(ns).svc"; else echo "$CAIRN_SEARCH_HOST"; fi; }
-kafka_bootstrap() { if services; then echo "kafka.$(ns).svc:9092"; else echo "${CAIRN_KAFKA_TEMPLATE//\{id\}/$id}"; fi; }
+kafka_bootstrap() {
+    if ha; then local d; d="kafka-headless.$(ns).svc:9092"; echo "kafka-0.$d,kafka-1.$d,kafka-2.$d"
+    elif services; then echo "kafka.$(ns).svc:9092"; else echo "${CAIRN_KAFKA_TEMPLATE//\{id\}/$id}"; fi
+}
 need_shared() {
     need CAIRN_HOST_DOMAIN CAIRN_PG_HOST
     services || need CAIRN_SEARCH_HOST CAIRN_KAFKA_TEMPLATE
@@ -82,7 +93,8 @@ fill() {
 }
 # shellcheck disable=SC2034  # the manifests use these through fill
 render_services() {   # isolation (CAIRN_INGRESS_NAMESPACE) and the tenant's own services (CAIRN_TENANT_SERVICES)
-    local NS RELEASE INGRESS_NAMESPACE MONITORING_FROM KAFKA_CLUSTER_ID SEARCH_STORAGE KAFKA_STORAGE
+    local NS RELEASE INGRESS_NAMESPACE MONITORING_FROM KAFKA_CLUSTER_ID SEARCH_STORAGE KAFKA_STORAGE MODE WAS
+    local SPREAD SEARCH_HEAP SEARCH_MEMORY KAFKA_HEAP KAFKA_MEMORY
     NS=$(ns); RELEASE="cairn-$id"
     if [ -n "${CAIRN_INGRESS_NAMESPACE:-}" ]; then
         INGRESS_NAMESPACE=$CAIRN_INGRESS_NAMESPACE; MONITORING_FROM=""
@@ -98,14 +110,31 @@ render_services() {   # isolation (CAIRN_INGRESS_NAMESPACE) and the tenant's own
         KAFKA_CLUSTER_ID=$(kubectl -n "$NS" get configmap cairn-tenant-services -o jsonpath='{.data.kafka-cluster-id}' 2>/dev/null || true)
         [ -n "$KAFKA_CLUSTER_ID" ] || KAFKA_CLUSTER_ID=$(openssl rand -base64 16 | tr '+/' '-_' | tr -d '=')
         SEARCH_STORAGE=${CAIRN_TENANT_SEARCH_STORAGE:-20Gi}; KAFKA_STORAGE=${CAIRN_TENANT_KAFKA_STORAGE:-20Gi}
+        # The services' layout is the tenant's: switching one in place would leave Kafka's quorum and the
+        # StatefulSets half-changed, so it is refused (recreate the services, see the operator manual).
+        if ha; then MODE=replicated; else MODE=single; fi
+        WAS=$(kubectl -n "$NS" get configmap cairn-tenant-services -o jsonpath='{.data.layout}' 2>/dev/null || true)
+        if [ -z "$WAS" ] && kubectl -n "$NS" get statefulset kafka >/dev/null 2>&1; then WAS=single; fi
+        [ -z "$WAS" ] || [ "$WAS" = "$MODE" ] \
+            || die "tenant $id has $WAS OpenSearch and Kafka; changing to $MODE is not done in place (see the operator manual)"
         cat <<YAML
 apiVersion: v1
 kind: ConfigMap
 metadata: { name: cairn-tenant-services, namespace: $NS }
-data: { kafka-cluster-id: "$KAFKA_CLUSTER_ID" }
+data: { kafka-cluster-id: "$KAFKA_CLUSTER_ID", layout: "$MODE" }
 ---
 YAML
-        fill deploy/hosting/tenant-services.yaml NS RELEASE KAFKA_CLUSTER_ID SEARCH_STORAGE KAFKA_STORAGE
+        if ha; then
+            SPREAD=${CAIRN_TENANT_SERVICES_SPREAD:-DoNotSchedule}
+            case "$SPREAD" in DoNotSchedule|ScheduleAnyway) ;; *) die "CAIRN_TENANT_SERVICES_SPREAD: DoNotSchedule or ScheduleAnyway" ;; esac
+            SEARCH_HEAP=${CAIRN_TENANT_SEARCH_HEAP:-1g}; SEARCH_MEMORY=${CAIRN_TENANT_SEARCH_MEMORY:-2Gi}
+            KAFKA_HEAP=${CAIRN_TENANT_KAFKA_HEAP:-512m}; KAFKA_MEMORY=${CAIRN_TENANT_KAFKA_MEMORY:-1Gi}
+            SEARCH_HEAP="-Xms$SEARCH_HEAP -Xmx$SEARCH_HEAP"; KAFKA_HEAP="-Xms$KAFKA_HEAP -Xmx$KAFKA_HEAP"
+            fill deploy/hosting/tenant-services-ha.yaml NS RELEASE KAFKA_CLUSTER_ID SEARCH_STORAGE KAFKA_STORAGE SPREAD \
+                SEARCH_HEAP SEARCH_MEMORY KAFKA_HEAP KAFKA_MEMORY
+        else
+            fill deploy/hosting/tenant-services.yaml NS RELEASE KAFKA_CLUSTER_ID SEARCH_STORAGE KAFKA_STORAGE
+        fi
     fi
 }
 apply_services() {
@@ -148,7 +177,7 @@ helm_args() {
         --set "core.database.host=$CAIRN_PG_HOST" --set "core.database.name=cairn_catalog_$db" \
         --set "core.database.user=cairn_$db" \
         --set "core.search.host=$(search_host)" --set "core.search.indexPrefix=${db}_" \
-        --set "core.kafka.bootstrap=$(kafka_bootstrap)" \
+        --set "core.kafka.bootstrap=$(kafka_bootstrap | sed 's/,/\\,/g')" \
         --set "core.ingress.host=$id.$CAIRN_HOST_DOMAIN" \
         --set "cairn.publicUrl=https://$id.$CAIRN_HOST_DOMAIN" \
         --set "cairn.licence.tenantId=$id" $(edge_args) $(metering_args)

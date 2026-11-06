@@ -1,0 +1,227 @@
+# A tenant's own OpenSearch and Kafka, replicated so the tenant keeps working when a node is lost
+# (tenant.sh with CAIRN_TENANT_SERVICES=1 and CAIRN_TENANT_SERVICES_HA=1 fills @...@).
+#
+# * OpenSearch: three cluster-manager-eligible data nodes. Cairn Core's indices have one replica, so every shard
+#   survives the loss of one node; the cluster turns yellow, then green once the replicas are rebuilt elsewhere.
+# * Kafka: three brokers that are also the KRaft controller quorum. Topics are created with three copies and need
+#   two in sync to accept writes (acks=all), so one broker can be lost without losing a write or stopping writes.
+# * The three pods of each are spread one per node (CAIRN_TENANT_SERVICES_SPREAD: DoNotSchedule, the default, on a
+#   cluster of three or more nodes; ScheduleAnyway lets a single test node run them), and a PodDisruptionBudget lets at most one go at a time, so a
+#   node drain or an upgrade never takes away the quorum.
+# Only the tenant's Cairn release reaches them (the NetworkPolicy at the end), as with the single-node services.
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+spec:
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+  ports: [{ name: http, port: 9200 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: opensearch-headless
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true      # nodes find each other before they are ready
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+  ports: [{ name: http, port: 9200 }, { name: transport, port: 9300 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: opensearch
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
+spec:
+  serviceName: opensearch-headless
+  replicas: 3
+  podManagementPolicy: Parallel       # all three start together, so the first cluster can form
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false     # no KAFKA_* / OPENSEARCH_* variables from Services: these images read them as settings
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: @SPREAD@
+          labelSelector: { matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch } }
+      containers:
+        - name: opensearch
+          image: opensearchproject/opensearch:2.19.3
+          env:
+            - name: node.name
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: cluster.name, value: "cairn-@NS@" }
+            - { name: discovery.seed_hosts, value: opensearch-headless }
+            - { name: cluster.initial_cluster_manager_nodes, value: "opensearch-0,opensearch-1,opensearch-2" }
+            - { name: network.host, value: "0.0.0.0" }
+            - { name: DISABLE_SECURITY_PLUGIN, value: "true" }     # reached only by the tenant's own pods
+            - { name: DISABLE_INSTALL_DEMO_CONFIG, value: "true" }
+            - { name: bootstrap.memory_lock, value: "false" }
+            # A cluster runs OpenSearch's production checks; without mmap the node needs no vm.max_map_count
+            # raised on the host (a privileged init container, which tenant namespaces do not allow).
+            - { name: node.store.allow_mmap, value: "false" }
+            - { name: OPENSEARCH_JAVA_OPTS, value: "@SEARCH_HEAP@ -Dlog4j2.formatMsgNoLookups=true" }
+          ports: [{ name: http, containerPort: 9200 }, { name: transport, containerPort: 9300 }]
+          readinessProbe:
+            httpGet: { path: "/_cluster/health?local=true", port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 250m, memory: @SEARCH_MEMORY@ }
+            limits: { memory: @SEARCH_MEMORY@ }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /usr/share/opensearch/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: @SEARCH_STORAGE@ } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: opensearch
+  namespace: @NS@
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+spec:
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+  ports: [{ name: kafka, port: 9092 }]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka-headless
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true      # the controllers find each other before they are ready
+  selector: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+  ports: [{ name: kafka, port: 9092 }, { name: controller, port: 9093 }]
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+  namespace: @NS@
+  labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
+spec:
+  serviceName: kafka-headless
+  replicas: 3
+  podManagementPolicy: Parallel       # the quorum needs two of three up to start
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false     # no KAFKA_* / OPENSEARCH_* variables from Services: these images read them as settings
+      securityContext: { runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000, seccompProfile: { type: RuntimeDefault } }
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: @SPREAD@
+          labelSelector: { matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka } }
+      containers:
+        - name: kafka
+          image: apache/kafka:3.9.1
+          # The node id is the pod's ordinal (kafka-2 is node 2), and each broker advertises its own stable name.
+          command:
+            - bash
+            - -c
+            - >-
+              export KAFKA_NODE_ID="${HOSTNAME##*-}"
+              KAFKA_ADVERTISED_LISTENERS="PLAINTEXT://${HOSTNAME}.kafka-headless.@NS@.svc:9092" &&
+              exec /etc/kafka/docker/run
+          env:
+            - { name: CLUSTER_ID, value: "@KAFKA_CLUSTER_ID@" }
+            - { name: KAFKA_PROCESS_ROLES, value: "broker,controller" }
+            - { name: KAFKA_CONTROLLER_QUORUM_VOTERS, value: "0@kafka-0.kafka-headless.@NS@.svc:9093,1@kafka-1.kafka-headless.@NS@.svc:9093,2@kafka-2.kafka-headless.@NS@.svc:9093" }
+            - { name: KAFKA_CONTROLLER_LISTENER_NAMES, value: CONTROLLER }
+            - { name: KAFKA_LISTENERS, value: "PLAINTEXT://:9092,CONTROLLER://:9093" }
+            - { name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP, value: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT" }
+            - { name: KAFKA_INTER_BROKER_LISTENER_NAME, value: PLAINTEXT }
+            - { name: KAFKA_DEFAULT_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_MIN_INSYNC_REPLICAS, value: "2" }
+            - { name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR, value: "3" }
+            - { name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR, value: "2" }
+            - { name: KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE, value: "false" }
+            - { name: KAFKA_MESSAGE_MAX_BYTES, value: "5242880" }
+            - { name: KAFKA_REPLICA_FETCH_MAX_BYTES, value: "5242880" }
+            - { name: KAFKA_LOG_DIRS, value: /var/lib/kafka/data }
+            - { name: KAFKA_LOG_RETENTION_HOURS, value: "168" }
+            - { name: KAFKA_HEAP_OPTS, value: "@KAFKA_HEAP@" }
+          ports: [{ name: kafka, containerPort: 9092 }, { name: controller, containerPort: 9093 }]
+          readinessProbe:
+            tcpSocket: { port: kafka }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: { cpu: 200m, memory: @KAFKA_MEMORY@ }
+            limits: { memory: @KAFKA_MEMORY@ }
+          securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+          volumeMounts: [{ name: data, mountPath: /var/lib/kafka/data }]
+  volumeClaimTemplates:
+    - metadata: { name: data }
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources: { requests: { storage: @KAFKA_STORAGE@ } }
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: kafka
+  namespace: @NS@
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka }
+---
+# Only the tenant's own release reaches its search and Kafka (not its Spark jobs or other workloads), and the
+# nodes of each reach each other (cluster transport, replication, the controller quorum).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cairn-tenant-services
+  namespace: @NS@
+spec:
+  podSelector:
+    matchExpressions:
+      - { key: app.kubernetes.io/component, operator: In, values: [opensearch, kafka] }
+      - { key: app.kubernetes.io/part-of, operator: In, values: [cairn-tenant] }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: cairn, app.kubernetes.io/instance: @RELEASE@ }
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: opensearch, app.kubernetes.io/part-of: cairn-tenant }
+      ports: [{ port: 9300 }, { port: 9200 }]
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/instance: @RELEASE@, app.kubernetes.io/component: kafka, app.kubernetes.io/part-of: cairn-tenant }
+      ports: [{ port: 9092 }, { port: 9093 }]

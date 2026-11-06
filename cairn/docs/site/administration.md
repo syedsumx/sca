@@ -1179,6 +1179,9 @@ The tenant's licence must name its id. The release runs with `cairn.licence.requ
 | Setting | Effect |
 |---|---|
 | `CAIRN_TENANT_SERVICES=1` | Each tenant gets its own OpenSearch and Kafka in its namespace (`deploy/hosting/tenant-services.yaml`). Only its own release reaches them. `CAIRN_SEARCH_HOST` and `CAIRN_KAFKA_TEMPLATE` are then not needed. |
+| `CAIRN_TENANT_SERVICES_HA=1` | With `CAIRN_TENANT_SERVICES`: those services replicated, three nodes each (`deploy/hosting/tenant-services-ha.yaml`), so the tenant keeps working when it loses a node or pod. See *Replicated tenant services* below. |
+| `CAIRN_TENANT_SERVICES_SPREAD` | `DoNotSchedule` (the default) puts one pod of each per node and needs three nodes. `ScheduleAnyway` lets fewer nodes run them, for tests. |
+| `CAIRN_TENANT_SEARCH_HEAP`, `_SEARCH_MEMORY`, `_KAFKA_HEAP`, `_KAFKA_MEMORY` | Per-node sizes of the replicated services. The defaults are a 1g heap in 2Gi for OpenSearch and 512m in 1Gi for Kafka. |
 | `CAIRN_INGRESS_NAMESPACE` | The ingress controller's namespace. Turns on namespace isolation (`deploy/hosting/isolation.yaml`): nothing in another tenant's namespace reaches this one. Add `CAIRN_MONITORING_NAMESPACE` to let Prometheus scrape it. |
 | `CAIRN_PG_KUBECTL=<namespace>/<cluster>` | Administer a CloudNativePG cluster through its primary's local socket (`kubectl exec`), instead of `CAIRN_PG_ADMIN_URL`. |
 | `CAIRN_TLS_ISSUER` | A cert-manager ClusterIssuer. Each tenant's host gets its certificate from it. |
@@ -1239,7 +1242,36 @@ Three AX42 servers (about €200–260 a month with the load balancer and backup
 **Known limits:**
 
 - **ingress-nginx:** Kubernetes retired the project in March 2026. It stays pinned because Cairn's chart uses its annotations.
-- **Tenant OpenSearch and Kafka:** each runs on one node and doesn't fail over to another.
+- **Tenant OpenSearch and Kafka:** by default each runs on one node and doesn't fail over to another. If that node
+  is down, the tenant waits for it; the search index can be rebuilt from the database. Use replicated services for
+  tenants that must not wait.
+
+### Replicated tenant services
+
+With `CAIRN_TENANT_SERVICES_HA=1`, a tenant gets a three-node OpenSearch cluster and three Kafka brokers. The brokers
+also form Kafka's controller quorum.
+
+- **What a lost node does.** OpenSearch keeps one replica of every shard (Cairn Core's default), so all documents
+  stay readable and writable with one node down. The cluster turns yellow, then green once the replicas are rebuilt.
+  Kafka topics get three copies and need two in sync (`acks=all`), so a lost broker loses no write and stops none.
+- **Two nodes lost.** Kafka refuses writes it could lose; they are not acknowledged. OpenSearch can't elect a
+  cluster manager and stops answering until a node is back. The tenant waits; nothing it was told was saved is lost.
+- **Spreading.** One pod of each per node (topology spread, `DoNotSchedule`), and a PodDisruptionBudget that lets
+  at most one of each go at a time. Node drains and upgrades therefore never take the quorum away. This needs three
+  nodes.
+- **Setting.** The OpenSearch nodes run with `node.store.allow_mmap: false`, so the hosts need no
+  `vm.max_map_count` raised (that would take a privileged init container, which tenant namespaces don't allow). This
+  costs some search speed on large indices.
+- **Chosen at creation.** `tenant.sh` records the layout and refuses to switch an existing tenant in place. To move a
+  tenant from one layout to the other:
+  1. Stop its release.
+  2. Delete the `opensearch` and `kafka` StatefulSets and their volume claims, and the `cairn-tenant-services`
+     ConfigMap.
+  3. Run `tenant.sh upgrade` with the new setting.
+  4. Rebuild the search index from the database (Cairn Core's reindex job). Events still in Kafka are lost, so
+     do this when nothing is pending.
+- **Tested.** CI runs the rendered manifest's containers, three of each in Docker, and stops nodes. It also runs the
+  manifest on k3s and deletes pods there.
 
 ## Outages: what fails closed and what is kept
 
