@@ -239,6 +239,8 @@ jobs:
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,streams,documents,saml,dr]" "ipython>=8.20"   # ipython: the notebook test
+          # The runner's package index can be older than the mirror (404 on a superseded package): refresh it first.
+          sudo apt-get update -q >/dev/null
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-eng >/dev/null   # OCR of scanned documents (pipes)
           # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
           sudo apt-get install -y -q bind9 >/dev/null
