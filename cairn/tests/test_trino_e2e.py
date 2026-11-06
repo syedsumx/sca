@@ -2132,6 +2132,74 @@ def test_clean_rooms_release_only_approved_aggregates(trino, cairn):
         s.pdp.set_bundle(b)
 
 
+def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(trino, cairn):
+    """Queue row 25: a room with a privacy budget answers with Laplace noise on clipped sums and counts, refuses
+    aggregates it cannot bound, and stops answering once its epsilon is spent, on real Trino."""
+    import statistics
+
+    from cairn.dataaccess.cleanrooms import RoomError, _laplace
+    from cairn.governance.abac import Policy, PolicyBundle, Target
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    trino("CREATE SCHEMA IF NOT EXISTS lake.dp")
+    trino("CREATE TABLE lake.dp.members (id varchar, region varchar, spend double)")
+    values = ", ".join(f"('m{i}', '{'EU' if i < 60 else 'US'}', {500.0 if i == 0 else 20.0})" for i in range(100))
+    trino(f"INSERT INTO lake.dp.members VALUES {values}")
+    trino("CREATE TABLE lake.dp.visits (id varchar, site varchar)")
+    trino("INSERT INTO lake.dp.visits VALUES " + ", ".join(f"('m{i}', 'shop')" for i in range(100)))
+    b = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    reads = lambda pid, pattern, user: Policy(  # noqa: E731
+        id=pid, effect="allow", actions=["VIEW_ENTITY_PAGE", "VIEW_DATASET_PROFILE"], target=Target(resource_urns=[pattern]),
+        condition={"attr": "subject.urn", "op": "eq", "value": f"urn:li:corpuser:{user}"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*b.policies, reads("ana-m", "*dp.members*", "ana"), reads("bob-v", "*dp.visits*", "bob")]))
+    ana, bob = "urn:li:corpuser:ana", "urn:li:corpuser:bob"
+    cr = s.clean_rooms
+    try:
+        with pytest.raises(RoomError, match="epsilon"):
+            cr.create(ana, {"name": "dp_bad", "parties": [ana, bob], "privacy": {"epsilon": 50, "budget": 100}})
+        room = cr.create(ana, {"name": "dp_reach", "parties": [ana, bob], "min_group": 5,
+                               "privacy": {"epsilon": 1.0, "budget": 3.0}})
+        assert room["privacy"] == {"epsilon": 1.0, "budget": 3.0} and room["epsilon_spent"] == 0
+        cr.contribute(ana, "dp_reach", "lake.dp.members")
+        cr.contribute(bob, "dp_reach", "lake.dp.visits")
+        sql = ("SELECT m.region, count(*) AS people, sum(m.spend) AS spend FROM lake.dp.members m "
+               "JOIN lake.dp.visits v ON m.id = v.id GROUP BY m.region")
+        for bad, msg in [(sql.replace("sum(m.spend)", "max(m.spend)"), r"count\(...\) and sum"),
+                         (sql.replace("sum(m.spend)", "avg(m.spend)"), r"count\(...\) and sum")]:
+            with pytest.raises(RoomError, match=msg):
+                cr.propose(ana, "dp_reach", {"name": "bad", "sql": bad, "bounds": {"m.spend": [0, 50]}})
+        with pytest.raises(RoomError, match="needs bounds"):
+            cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql})
+        cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql, "bounds": {"m.spend": [0, 50]}})
+        cr.approve(bob, "dp_reach", "by_region")
+        answers = [cr.run_template(bob, "dp_reach", "by_region") for _ in range(3)]
+        for out in answers:
+            got = {r[0]: (r[1], r[2]) for r in out["rows"]}
+            assert set(got) == {"EU", "US"}
+            # True answers: EU 60 people and 59 * 20 + 50 (m0's 500 clipped to 50) = 1230; US 40 and 800. Noise on
+            # each: count scale 2, sum scale 100 (epsilon 1 split over the two aggregates); far outside 10 scales is
+            # less likely than one in 20,000.
+            assert abs(got["EU"][0] - 60) < 20 and abs(got["US"][0] - 40) < 20 and isinstance(got["EU"][0], int)
+            assert abs(got["EU"][1] - 1230) < 1000 and abs(got["US"][1] - 800) < 1000
+            assert out["noise_scale"] == {"1": 2.0, "2": 100.0}
+        assert [o["epsilon_left"] for o in answers] == [2.0, 1.0, 0.0]
+        assert len({tuple(map(tuple, o["rows"])) for o in answers}) == 3                 # fresh noise every time
+        with pytest.raises(RoomError, match="privacy budget is spent"):
+            cr.run_template(ana, "dp_reach", "by_region")
+        assert cr.get(ana, "dp_reach")["epsilon_spent"] == 3.0
+        # The noise is Laplace at the scale stated.
+        draws = [_laplace(2.0) for _ in range(20000)]
+        assert abs(statistics.fmean(draws)) < 0.1 and abs(statistics.fmean(abs(x) for x in draws) - 2.0) < 0.1
+        assert any(e["action"] == "clean_room.run" and e["details"].get("epsilon") == 1.0
+                   for e in s.audit.entries("sharing", limit=50))
+    finally:
+        s.pdp.set_bundle(b)
+
+
 def test_bi_sharing_with_people_and_groups_keeps_each_viewers_data(trino, cairn):
     """Saved queries, workbooks and dashboards shared with a person or a group, as a viewer or an editor, on
     real Trino: nobody else finds them, editors change but do not reshare or delete, and every viewer still sees

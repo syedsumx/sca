@@ -14,6 +14,18 @@ A run (``POST .../templates/<name>/run``) binds the arguments as typed literals 
 room's own identity (``cleanroom-<room>``), which Cairn's access control lets read the contributed tables and
 nothing else: not the parties' other tables, and the parties never read each other's contributed tables
 directly. Every proposal, approval and run is audited with who asked.
+
+**Differential privacy** (queue row 25). A room made with ``privacy: {epsilon, budget}`` releases only noisy
+answers. Under it a template's results are group keys, ``count(...)`` and ``sum(column)``, and every summed column
+has declared ``bounds`` (``{"b.spend": [0, 100]}``). Before the run, Cairn clips each summed value to its bounds
+and takes ``epsilon`` from the room's ``budget``. It refuses the run once the budget is spent, and spends before
+running, so a failed run costs too. The epsilon is shared between the result's aggregates, and each gets Laplace
+noise scaled to its sensitivity (1 for a count, the larger bound for a sum). Counts come back as whole numbers of
+at least 0, and sums rounded to cents.
+
+The sensitivities assume each person is at most one row of the joined result: join on a key that is unique per
+person. The k floor still applies, to the true counts. It is defence in depth on top of the noise, and which
+groups appear is not itself noised, so group keys should be public values (regions, campaigns).
 """
 
 from __future__ import annotations
@@ -24,7 +36,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, select, update
+from sqlalchemy import BigInteger, Column, Float, Integer, String, Table, Text, select, update
 
 from cairn.common.db import metadata
 
@@ -38,6 +50,8 @@ rooms = Table(
     Column("templates", Text, nullable=False),      # JSON {name: {sql, params, proposed_by, approved_by}}
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
+    Column("privacy", Text, nullable=True),         # JSON {epsilon, budget}: differentially private answers only
+    Column("epsilon_spent", Float, nullable=False, server_default="0"),
 )
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,40}$")
@@ -69,6 +83,7 @@ class CleanRooms:
         d = dict(r._mapping)
         for k in ("parties", "tables", "templates"):
             d[k] = json.loads(d[k])
+        d["privacy"] = json.loads(d["privacy"]) if d.get("privacy") else None
         return d
 
     def _party(self, room: dict, actor: str) -> str:
@@ -97,14 +112,16 @@ class CleanRooms:
             raise RoomError("min_group is 2 or more")
         if actor not in parties and not any(self.member_of(actor, p) for p in parties):
             raise RoomError("a room is made by one of its parties", 403)
+        privacy = _privacy(body.get("privacy"))
         row = {"id": uuid.uuid4().hex, "name": name, "parties": json.dumps(sorted(set(parties))), "min_group": k,
-               "tables": "{}", "templates": "{}", "created_by": actor, "created_ms": int(time.time() * 1000)}
+               "tables": "{}", "templates": "{}", "created_by": actor, "created_ms": int(time.time() * 1000),
+               "privacy": json.dumps(privacy) if privacy else None, "epsilon_spent": 0.0}
         try:
             with self.engine.begin() as conn:
                 conn.execute(rooms.insert().values(**row))
                 if self.audit is not None:
                     self.audit.record("sharing", "clean_room.created", actor, f"urn:li:cleanRoom:{name}",
-                                      {"parties": sorted(set(parties)), "min_group": k}, conn=conn)
+                                      {"parties": sorted(set(parties)), "min_group": k, "privacy": privacy}, conn=conn)
         except IntegrityError:
             raise RoomError("a clean room of that name exists", 409)
         return self.get(actor, name)
@@ -136,7 +153,7 @@ class CleanRooms:
         return self.get(actor, name)
 
     # ---- templates --------------------------------------------------------------------------
-    def _check_sql(self, room: dict, sql: str, params: list[dict]) -> None:
+    def _check_sql(self, room: dict, sql: str, params: list[dict], bounds: Optional[dict] = None) -> None:
         import sqlglot
         from sqlglot import exp
 
@@ -163,6 +180,20 @@ class CleanRooms:
         used = {str(p.name) for p in tree.find_all(exp.Placeholder) if p.name}
         if used - declared:
             raise RoomError(f"undeclared parameter :{sorted(used - declared)[0]}")
+        if room.get("privacy"):
+            _dp_outputs(tree, bounds or {})
+
+    def _bounds(self, room: dict, body: dict) -> dict:
+        bounds = body.get("bounds") or {}
+        if not isinstance(bounds, dict):
+            raise RoomError("bounds: {column: [lowest, highest]}")
+        out = {}
+        for col, b in bounds.items():
+            ok = isinstance(b, list) and len(b) == 2 and all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in b)
+            if not ok or not b[0] < b[1] or max(abs(b[0]), abs(b[1])) > 1e12:
+                raise RoomError(f"bounds of {col}: [lowest, highest], lowest below highest")
+            out[str(col).lower()] = [float(b[0]), float(b[1])]
+        return out
 
     def propose(self, actor: str, name: str, body: dict) -> dict:
         from cairn.sqlworkspace.procedures import TYPES
@@ -175,10 +206,11 @@ class CleanRooms:
             raise RoomError("template name: lowercase letters, digits and _")
         if not isinstance(params, list) or not all(isinstance(p, dict) and p.get("type") in TYPES for p in params):
             raise RoomError(f"params: [{{name, type}}], type one of {', '.join(TYPES)}")
-        self._check_sql(room, sql, params)
+        bounds = self._bounds(room, body)
+        self._check_sql(room, sql, params, bounds)
         old = room["templates"].get(tname)
-        same = old is not None and old["sql"] == sql and old["params"] == params
-        room["templates"][tname] = {"sql": sql, "params": params, "proposed_by": party,
+        same = old is not None and old["sql"] == sql and old["params"] == params and old.get("bounds", {}) == bounds
+        room["templates"][tname] = {"sql": sql, "params": params, "bounds": bounds, "proposed_by": party,
                                     "approved_by": old["approved_by"] if same else [party]}
         self._save(room, "clean_room.template_proposed", actor, {"template": tname, "sql": sql})
         return room["templates"][tname]
@@ -209,7 +241,7 @@ class CleanRooms:
         waiting = sorted(set(room["parties"]) - set(t["approved_by"]))
         if waiting:
             raise RoomError(f"{tname} waits for approval by {', '.join(waiting)}", 409)
-        self._check_sql(room, t["sql"], t["params"])         # the room's tables may have changed since
+        self._check_sql(room, t["sql"], t["params"], t.get("bounds"))   # the room's tables may have changed since
         args = args or {}
         types = {p["name"]: p["type"] for p in t["params"]}
         if set(args) != set(types):
@@ -224,13 +256,106 @@ class CleanRooms:
         floor = exp.GTE(this=exp.Count(this=exp.Star()), expression=exp.Literal.number(room["min_group"]))
         having = tree.args.get("having")
         tree.set("having", exp.Having(this=exp.and_(having.this, floor) if having else floor))
+        privacy, noise = room.get("privacy"), None
+        if privacy:
+            outputs = _dp_outputs(tree, t.get("bounds") or {}, clip=True)
+            self._spend(room, privacy["epsilon"])               # before running: a failed run costs too
         sql = tree.sql(dialect="trino")
         identity = f"urn:li:corpuser:{IDENTITY_PREFIX}{name}"
         columns, rows = self.run(identity, sql)
+        result = {"room": name, "template": tname, "columns": columns, "rows": rows, "min_group": room["min_group"]}
+        if privacy:
+            rows, noise = _add_noise(rows, outputs, privacy["epsilon"])
+            spent = self._row(name)["epsilon_spent"]
+            result.update(rows=rows, epsilon=privacy["epsilon"], epsilon_spent=round(spent, 6),
+                          epsilon_left=round(privacy["budget"] - spent, 6), noise_scale=noise)
         if self.audit is not None:
             self.audit.record("sharing", "clean_room.run", actor, f"urn:li:cleanRoom:{name}",
-                              {"template": tname, "party": party, "args": args, "rows": len(rows)})
-        return {"room": name, "template": tname, "columns": columns, "rows": rows, "min_group": room["min_group"]}
+                              {"template": tname, "party": party, "args": args, "rows": len(rows),
+                               **({"epsilon": privacy["epsilon"]} if privacy else {})})
+        return result
+
+    def _spend(self, room: dict, epsilon: float) -> None:
+        """Takes epsilon from the room's budget, atomically: two runs cannot both take the last of it."""
+        budget = room["privacy"]["budget"]
+        with self.engine.begin() as conn:
+            done = conn.execute(update(rooms).where(rooms.c.id == room["id"])
+                                .where(rooms.c.epsilon_spent + epsilon <= budget + 1e-9)
+                                .values(epsilon_spent=rooms.c.epsilon_spent + epsilon)).rowcount
+        if not done:
+            raise RoomError(f"the room's privacy budget is spent (epsilon {budget}): no more answers from it", 409)
+
+
+def _privacy(raw) -> Optional[dict]:
+    if raw in (None, {}, False):
+        return None
+    if not isinstance(raw, dict):
+        raise RoomError("privacy: {epsilon, budget}")
+    try:
+        eps, budget = float(raw.get("epsilon")), float(raw.get("budget"))
+    except (TypeError, ValueError):
+        raise RoomError("privacy: epsilon and budget are numbers")
+    if not 0 < eps <= 10:
+        raise RoomError("privacy.epsilon: above 0, at most 10 (smaller is more private; 0.1 to 1 is usual)")
+    if not eps <= budget <= 1000:
+        raise RoomError("privacy.budget: at least one run's epsilon, at most 1000")
+    return {"epsilon": eps, "budget": budget}
+
+
+def _dp_outputs(tree, bounds: dict, clip: bool = False) -> list[Optional[tuple[str, float]]]:
+    """Under differential privacy: for each result column, None (a group key) or (kind, sensitivity) of its
+    count or bounded sum; with ``clip``, rewrites each summed value to its bounds."""
+    from sqlglot import exp
+
+    out: list[Optional[tuple[str, float]]] = []
+    for e in tree.expressions:
+        inner = e.this if isinstance(e, exp.Alias) else e
+        if inner.find(exp.AggFunc) is None:
+            out.append(None)
+            continue
+        if isinstance(inner, exp.Count) and not inner.args.get("distinct") and not isinstance(inner.this, exp.Distinct):
+            out.append(("count", 1.0))
+            continue
+        if isinstance(inner, exp.Sum) and isinstance(inner.this, exp.Column):
+            col = inner.this.sql(dialect="trino").lower()
+            b = bounds.get(col) or bounds.get(inner.this.name.lower())
+            if b is None:
+                raise RoomError(f"sum({col}) needs bounds: the room is differentially private")
+            if clip:
+                inner.set("this", exp.func("least", exp.func("greatest", inner.this.copy(), exp.Literal.number(b[0])),
+                                            exp.Literal.number(b[1])))
+            out.append(("sum", max(abs(b[0]), abs(b[1]))))
+            continue
+        raise RoomError("under differential privacy a template's results are group keys, count(...) and "
+                        f"sum(column); not {inner.sql(dialect='trino')[:80]}")
+    if not any(out):
+        raise RoomError("a template's result is an aggregate (count, sum)")
+    return out
+
+
+def _laplace(scale: float) -> float:
+    """Laplace noise from the operating system's random source (not a seeded generator)."""
+    import math
+    import secrets
+
+    u = (secrets.randbits(53) + 0.5) / (1 << 53) - 0.5          # in (-0.5, 0.5), never exactly 0 at the ends
+    return -scale * math.copysign(1.0, u) * math.log(1 - 2 * abs(u))
+
+
+def _add_noise(rows: list[list], outputs: list, epsilon: float) -> tuple[list[list], dict]:
+    n = sum(1 for o in outputs if o)
+    each = epsilon / n                                         # sequential composition across the aggregates
+    scales = {i: o[1] / each for i, o in enumerate(outputs) if o}
+    noisy = []
+    for r in rows:
+        r = list(r)
+        for i, o in enumerate(outputs):
+            if not o or r[i] is None:
+                continue
+            v = float(r[i]) + _laplace(scales[i])
+            r[i] = max(0, round(v)) if o[0] == "count" else round(v, 2)
+        noisy.append(r)
+    return noisy, {str(i): round(sc, 6) for i, sc in scales.items()}
 
 
 def build_clean_rooms_router(cr: CleanRooms, current_principal) -> Any:
