@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -89,6 +90,7 @@ class Services:
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
     custom_agents: Optional[Any] = None
+    consent: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -835,6 +837,7 @@ def _build_active_metadata(s: Services) -> None:
                 return s.data_access.run_on_trino(definition, actor, sql, limit)
             s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
         _build_data_access(s)
+        _build_consent(s)
         _build_saml(s)
         _build_secret_scopes(s)
         _build_volumes(s)
@@ -1858,6 +1861,48 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+
+
+def _build_consent(s: Services) -> None:
+    """Consent (cairn.governance.consent), and row filters on direct warehouse connections: policy row filters and
+    consent filters, which Trino applies itself for run_as_user connections."""
+    import sqlglot
+
+    from cairn.governance.consent import ConsentService
+    from cairn.governance.pdp import AuthorizeRequest, ResourceRef
+    from cairn.governance.privacy import load_identifiers
+
+    def membership(actor: str) -> tuple[list[str], list[str]]:
+        subject = s.attributes.subject(actor) if s.attributes is not None else {"urn": actor, "groups": []}
+        personas = (s.personas.enrich_subject(subject, int(time.time() * 1000)).get("personas") or []) \
+            if getattr(s, "personas", None) is not None else []
+        return list(subject.get("groups") or []), list(personas)
+
+    def resource(urn: str) -> dict:
+        return s.attributes.resource(urn) if s.attributes is not None else {}
+
+    def overflow(pid: str, state: str) -> None:
+        logger.warning("consent purpose %s: %s", pid, state)
+    identifiers = s.privacy.identifiers if getattr(s, "privacy", None) is not None else load_identifiers()
+    s.consent = ConsentService(s.engine, resource, membership, identifiers, s.audit, overflow)
+
+    def row_filters(actor: str, urn: str, dialect: str) -> list[str]:
+        d = s.pdp.decide(AuthorizeRequest(actor=actor, privilege="VIEW_DATASET_PROFILE",
+                                          resource=ResourceRef(type="dataset", urn=urn)))
+        user = "'" + actor.removeprefix("urn:li:corpuser:").replace("'", "''") + "'"
+        out = []
+        for o in d.obligations:
+            if o.type != "row_filter":
+                continue
+            expr = str(o.params.get("expression") or "").strip()
+            if not expr:
+                return ["1 = 0"]                          # a filter without an expression: nothing passes
+            out.append(sqlglot.transpile(expr.replace("{user}", user), read="trino", write=dialect)[0])
+        return out + s.consent.filters(actor, urn, dialect)
+    if getattr(s, "data_access", None) is not None:
+        s.data_access.row_filters = row_filters
+    if getattr(s, "trino_access", None) is not None:
+        s.trino_access.consent = lambda actor, urn, dialect, groups: s.consent.filters(actor, urn, dialect, groups)
 
 
 def _build_secret_scopes(s: Services) -> None:

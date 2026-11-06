@@ -197,6 +197,22 @@ Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (m
 
 The fail-closed hold check is tested in `tests/test_trino_access.py`.
 
+## Consent
+
+Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,
+`cairn_consents`; the privacy officer's guide is *Governance → Consent*). What operators need to know:
+
+- **Identity for the consent platform.** Give it a service identity with `MANAGE_CONSENT` only. It posts records
+  to `/cairn/api/governance/consent/purposes/{id}/records`, up to 10,000 subjects per call.
+- **Where filters run.** Trino applies them as row filters through Cairn's access control. On direct warehouse
+  connections Cairn rewrites the query. SQLite gets a hash function from Cairn on each connection. The engines with
+  a hash Cairn knows are Trino, PostgreSQL, DuckDB, Snowflake, Redshift, BigQuery, Databricks, MySQL and SQLite; on
+  any other engine, members of a purpose get no rows from a dataset holding that kind of identifier.
+- **Size.** A filter carries the purpose's records inline, up to 10,000 (withdrawals for `opt_out`, grants for
+  `opt_in`). Past that, members get no rows from the affected datasets until it is reduced. The purpose shows
+  `filter_state: over_limit` and the API logs a warning.
+- **Freshness.** A new record applies to queries within 5 seconds on each API node.
+
 ## User provisioning (SCIM)
 
 With SCIM 2.0 the identity provider creates, updates and deactivates people and groups ahead of

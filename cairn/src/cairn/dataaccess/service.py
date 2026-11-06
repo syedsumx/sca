@@ -159,6 +159,9 @@ class DataAccessService:
         self.audit = audit
         self.max_rows = max_rows
         self.timeout_ms = timeout_ms
+        # (actor, urn, dialect) -> row filters in that dialect (policy row filters, consent): applied here on
+        # direct connections; a run_as_user Trino connection gets them from Trino's own access control.
+        self.row_filters: Optional[Callable[[str, str, str], list[str]]] = None
 
     # ---- where datasets live ----------------------------------------------------------
     def sources(self) -> list[Source]:
@@ -190,6 +193,37 @@ class DataAccessService:
                 return s
         raise DataAccessError(f"unknown connection {connection!r}", 404)
 
+    # ---- row filters -------------------------------------------------------------------
+    def _conditions(self, actor: str, urn: str, dialect: str) -> Optional[exp.Expression]:
+        if self.row_filters is None:
+            return None
+        try:
+            found = [f for f in self.row_filters(actor, urn, dialect) if f and f.strip()]
+            conds = [sqlglot.condition(f, dialect=dialect) for f in found]
+        except Exception as e:  # noqa: BLE001 - fail closed: a filter nothing passes
+            logger.warning("row filters for %s on %s could not be built: %s", actor, urn, e)
+            return sqlglot.condition("1 = 0")
+        if not conds:
+            return None
+        out = conds[0]
+        for c in conds[1:]:
+            out = exp.and_(out, c)
+        return out
+
+    def _filter_tables(self, actor: str, source: Source, tree: exp.Expression, tables: list[exp.Table]) -> exp.Expression:
+        """Each filtered table becomes ``(SELECT * FROM table WHERE filters) AS <its alias or name>``."""
+        if self.row_filters is None or ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
+            return tree
+        for t in tables:
+            cond = self._conditions(actor, source.urn(t.db or "", t.name, t.catalog or None), source.dialect)
+            if cond is None:
+                continue
+            alias = t.alias or t.name
+            bare = exp.table_(t.name, db=t.db or None, catalog=t.catalog or None, quoted=True)
+            t.replace(exp.Subquery(this=exp.select("*").from_(bare).where(cond),
+                                   alias=exp.TableAlias(this=exp.to_identifier(alias, quoted=True))))
+        return tree
+
     # ---- running ----------------------------------------------------------------------
     def _execute(self, source: Source, sql: str, limit: int, actor: str = "") -> tuple[list[str], list[list[Any]], bool]:
         definition = (self.registry.definitions() or {}).get(source.connection) or {}
@@ -197,6 +231,10 @@ class DataAccessService:
             return self._execute_as(definition, sql, limit, actor)
         engine = self.registry.engine(source.connection)
         with engine.connect() as conn:
+            if engine.dialect.name == "sqlite":           # the hash consent filters use (cairn.governance.consent)
+                from cairn.governance.consent import sqlite_sha256
+
+                conn.connection.dbapi_connection.create_function("cairn_sha256", 1, sqlite_sha256, deterministic=True)
             with conn.begin():
                 if engine.dialect.name == "postgresql":
                     conn.execute(text(f"SET LOCAL statement_timeout = {int(self.timeout_ms)}"))
@@ -302,8 +340,10 @@ class DataAccessService:
         source, parts = self.source_for(urn)
         schema, table = parts[-2], parts[-1]
         database = parts[0] if len(parts) == 3 and not source.database else None
-        sql = exp.select("*").from_(exp.table_(table, db=schema, catalog=database, quoted=True)) \
-            .limit(min(limit, self.max_rows) + 1).sql(dialect=source.dialect)    # one more: was it cut?
+        tree = exp.select("*").from_(exp.table_(table, db=schema, catalog=database, quoted=True)) \
+            .limit(min(limit, self.max_rows) + 1)                                # one more: was it cut?
+        tree = self._filter_tables(actor, source, tree, list(tree.find_all(exp.Table)))
+        sql = tree.sql(dialect=source.dialect)
         started = time.monotonic()
         columns, rows, truncated = self._execute(source, sql, min(limit, self.max_rows), actor)
         masked = self._mask(actor, [urn], columns, rows, [None] * len(columns))
@@ -341,6 +381,7 @@ class DataAccessService:
                 raise DataAccessError(f"you may not query {t.db}.{t.name}", 403)
             urns.append(u)
         limit = max(1, min(limit, self.max_rows))
+        tree = self._filter_tables(actor, source, tree, tables)
         wrapped = capped(tree, limit + 1, source.dialect)
         started = time.monotonic()
         try:

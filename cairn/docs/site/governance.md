@@ -227,6 +227,7 @@ Use a role that can only `SELECT`. Cairn also opens each Postgres session read-o
 **Rules:**
 
 - **Authorization.** Every table a query reads must be in the catalog, and the caller needs `VIEW_DATASET_PROFILE` on it. That is the same privilege that guards sample values, so a policy that hides profiles from contractors hides rows too.
+- **Row filters.** Policy row filters (`row_filter` obligations) and consent filters apply here as they do on Trino: Cairn rewrites each filtered table in the query to the rows the caller may use. If a filter can't be built, no row passes.
 - **Masking.** Results are masked with the caller's masking plan, as profiles are. For a query, an output column is masked when it is computed from a masked column, so `upper(email) AS who` is masked as well. `SELECT *` is masked by column name. Aggregates that reveal no value, such as `count(*)`, are not.
 - **What can run.** Only one `SELECT` (or `WITH … SELECT`) statement at a time, with schema-qualified table names. A query returns at most 1,000 rows and runs for at most 15 seconds.
 - **Audit.** Every preview and query is recorded in the audit log under `data`, with the SQL (literals masked), the tables and the masked columns. Refused queries are recorded too.
@@ -283,6 +284,34 @@ The API is `/cairn/api/governance/privacy`:
 - `GET` and `POST /holds`, and `POST /holds/{id}/release`;
 - `POST /requests/{id}/erase`, `GET /requests/{id}/proof`, `GET /proof-keys` and `POST /proof/verify`;
 - `GET /ropa`.
+
+## Consent
+
+Some purposes need a person's consent: marketing, for example. When someone withdraws it, their rows leave every
+dataset the people working for that purpose query. This applies on Trino and on direct warehouse connections,
+in the SQL editor, dashboards, notebooks, reverse ETL syncs and anything else that reads as those people.
+
+- **A purpose that needs consent** (`MANAGE_POLICIES`): its name, the kind of identifier that links a row to a
+  person (`email`, `phone`, `customer_id`, or a kind set in `CAIRN_PRIVACY`), its mode, and its members. Members
+  are the users, groups and personas who process data for it. The mode is `opt_out`, where rows count unless the
+  person withdrew, or `opt_in`, where only the rows of people who said yes count.
+- **Records** come from the consent platform or a person, with `MANAGE_POLICIES` or `MANAGE_CONSENT`:
+  `POST /records` with `{"subjects": [{"value": "kim@acme.com", "state": "withdrawn"}], "source": "crm"}`. A
+  `hash` (SHA-256 of the trimmed, lower-cased identifier) can be sent instead of a value.
+- **Identifiers are never stored**, only their hash. The hash is unsalted because each warehouse computes it from
+  its own column to match it. The audit log records counts, never identifiers.
+- **Which columns count.** In each dataset, the columns classified for that kind of identifier (`PII.Email`…) or
+  named like one (`email`, `email_address`…). Rows with no identifier are kept. A dataset with no such column is
+  not filtered.
+- **Fail closed.** When a filter can't be built, no row passes. That covers a warehouse with no hash function
+  Cairn knows, a lookup failure, and a purpose with more than 10,000 relevant records (its `filter_state` says
+  `over_limit`).
+
+The API is `/cairn/api/governance/consent`:
+
+- `GET` and `POST /purposes`, and `GET`, `PUT` or `DELETE /purposes/{id}`;
+- `POST /purposes/{id}/records`, and `POST /purposes/{id}/check` with `{"value"}` or `{"hash"}`;
+- `GET /mine`: the purposes whose filters apply to the caller.
 
 ## Change history
 

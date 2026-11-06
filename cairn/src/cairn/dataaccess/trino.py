@@ -461,6 +461,13 @@ class TrinoAccess:
             if not expr:
                 return [{"expression": "false"}]  # a filter without an expression: nothing passes
             out.append({"expression": expr.replace("{user}", quote(user))})
+        consent = getattr(self, "consent", None)  # (actor, urn, dialect, groups) -> filters (cairn.governance.consent)
+        if consent is not None:
+            try:
+                out += [{"expression": e} for e in consent(actor, urn, "trino", groups)]
+            except Exception as e:  # noqa: BLE001 - fail closed: a filter nothing passes
+                logger.warning("consent filters failed for %s on %s: %s", actor, urn, e)
+                return [{"expression": "false"}]
         return out
 
     def column_mask(self, inp: dict) -> Optional[dict]:

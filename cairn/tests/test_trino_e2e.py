@@ -3084,3 +3084,26 @@ def test_trino_costs_come_from_real_queries(trino, cairn, monkeypatch):
     # The table cost report counts Trino's compute and reads too.
     exp = httpx.get(f"{url}/reports/costs/expensive", params={"min_cost_usd": 0}, headers=admin, timeout=30).json()
     assert any(t["urn"] == orders["key"] and t["compute_usd"] >= 0 and t["reads"] >= 4 for t in exp), exp
+
+
+def test_withdrawn_consent_takes_a_persons_rows_out_of_the_purpose(trino, cairn):
+    """L66: a member of a purpose that needs consent does not get the rows of people who withdrew it, on Trino."""
+    from cairn.governance.consent import PurposeIn, RecordsIn
+
+    _, s = cairn
+    cs = s.consent
+    cs.ttl = 0
+    everyone = {r["id"] for r in trino("SELECT id FROM sales.orders")}
+    cs.put_purpose("urn:li:corpuser:admin", PurposeIn(name="Marketing", identifier="email",
+                                                      members={"users": ["urn:li:corpuser:ana"]}))
+    try:
+        cs.record("urn:li:corpuser:admin", "marketing", RecordsIn(subjects=[{"value": "Jane@acme.com", "state": "withdrawn"}]))
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders", user="ana")} == everyone - {1}
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders")} == everyone          # not a member: all rows
+        # The filter reads the stored value, not the mask ana sees, and joins keep it.
+        assert trino("SELECT count(*) AS n FROM sales.orders a JOIN sales.orders b ON a.id = b.id WHERE a.id = 1",
+                     user="ana") == [{"n": 0}]
+        cs.record("urn:li:corpuser:admin", "marketing", RecordsIn(subjects=[{"value": "jane@acme.com", "state": "granted"}]))
+        assert {r["id"] for r in trino("SELECT id FROM sales.orders", user="ana")} == everyone
+    finally:
+        cs.delete_purpose("urn:li:corpuser:admin", "marketing")
