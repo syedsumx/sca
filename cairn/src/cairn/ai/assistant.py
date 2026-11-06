@@ -159,7 +159,13 @@ class Assistant:
             return conn.execute(conversations.delete().where(conversations.c.updated_at_ms < cutoff)).rowcount
 
     # ---- tools ----------------------------------------------------------------------------
-    def _run_tool(self, principal, name: str, args: dict) -> tuple[dict, str]:
+    def _run_tool(self, principal, name: str, args: dict, allowed_tools: Optional[set[str]] = None) -> tuple[dict, str]:
+        from cairn.identity.agents import tool_scope
+
+        if allowed_tools is not None and name not in allowed_tools:
+            raise ValueError(f"tool {name} is not one of this agent's tools")
+        if getattr(principal, "via", "") == "agent" and tool_scope(name) not in principal.scopes:
+            raise PermissionError(f"this agent's scopes do not include {tool_scope(name)}")
         tools = self.tools_factory(principal)
         if name == "explain_lineage":
             if self.explainer_factory is None:
@@ -177,13 +183,16 @@ class Assistant:
         params = inspect.signature(fn).parameters
         allowed = {k: v for k, v in args.items() if k in params}
         from cairn.ai.traces import ai_channel, datasets_in
-        from cairn.identity.agents import tool_scope
+        from cairn.services import Forbidden
 
         started, flagged, status = time.monotonic(), [], "error"
         channel = ai_channel.set("assistant")
         try:
             out = screen(fn(**allowed), flagged)
             status = "refused" if isinstance(out, dict) and out.get("refused") and not out.get("queued") else "ok"
+        except Forbidden:
+            status = "forbidden"
+            raise
         finally:
             ai_channel.reset(channel)
             traces = getattr(getattr(tools, "s", None), "traces", None)
@@ -213,13 +222,24 @@ class Assistant:
             self._save(cid, principal.urn, history[-40:])
             return self._response(cid, reply, citations, calls)
 
-        client = self.llm.client
         messages = history + [{"role": "user", "content": clean}]
+        reply, messages, tool_calls = self.run_loop(principal, SYSTEM, TOOL_SPECS, messages, self.max_iterations,
+                                                    "assistant.chat")
+        self._save(cid, principal.urn, messages[-60:])
+        return self._response(cid, reply, sorted(set(_URN.findall(reply))), tool_calls)
+
+    def run_loop(self, principal, system: str, tool_specs: list[dict], messages: list[dict], max_iterations: int,
+                 purpose: str, allowed_tools: Optional[set[str]] = None, model: Optional[str] = None
+                 ) -> tuple[str, list[dict], list[dict]]:
+        """The model's tool-use loop: (reply, messages, tool calls). Tools run as ``principal``; with
+        ``allowed_tools``, only those (custom agents)."""
+        client = self.llm.client
+        metered = hasattr(self.llm, "check") and hasattr(self.llm, "record")
         tool_calls: list[dict] = []
         reply = ""
-        for _ in range(self.max_iterations):
-            kwargs: dict[str, Any] = {"model": self.model, "max_tokens": 16000, "system": SYSTEM, "tools": TOOL_SPECS,
-                                      "messages": messages, "thinking": {"type": "adaptive"},
+        for _ in range(max_iterations):
+            kwargs: dict[str, Any] = {"model": model or self.model, "max_tokens": 16000, "system": system,
+                                      "tools": tool_specs, "messages": messages, "thinking": {"type": "adaptive"},
                                       "output_config": {"effort": self.effort}}
             if getattr(self.llm, "server_side_fallback", False):
                 resp = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
@@ -228,12 +248,12 @@ class Assistant:
                 resp = client.messages.create(**kwargs)
             if metered:
                 usage = getattr(resp, "usage", None)
-                self.llm.record(LLMUsage(model=getattr(resp, "model", self.model),
+                self.llm.record(LLMUsage(model=getattr(resp, "model", model or self.model),
                                          input_tokens=getattr(usage, "input_tokens", 0) or 0,
                                          output_tokens=getattr(usage, "output_tokens", 0) or 0,
                                          cache_read_tokens=getattr(usage, "cache_read_input_tokens", 0) or 0,
                                          cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0),
-                                "assistant.chat")
+                                purpose)
             content = [_block_to_dict(b) for b in resp.content]
             messages.append({"role": "assistant", "content": content})
             if resp.stop_reason == "refusal":
@@ -247,7 +267,7 @@ class Assistant:
                 if block.get("type") != "tool_use":
                     continue
                 try:
-                    out, summary = self._run_tool(principal, block["name"], block.get("input") or {})
+                    out, summary = self._run_tool(principal, block["name"], block.get("input") or {}, allowed_tools)
                     text = json.dumps(out, default=str)[:_MAX_TOOL_RESULT]
                     results.append({"type": "tool_result", "tool_use_id": block["id"], "content": redact(text)})
                     tool_calls.append({"name": block["name"], "summary": summary})
@@ -258,8 +278,7 @@ class Assistant:
             messages.append({"role": "user", "content": results})
         else:
             reply = reply or "I ran out of steps before finishing; try a more specific question."
-        self._save(cid, principal.urn, messages[-60:])
-        return self._response(cid, reply, sorted(set(_URN.findall(reply))), tool_calls)
+        return reply, messages, tool_calls
 
     def _response(self, cid: str, reply: str, citations: list[str], calls: list[dict]) -> dict:
         actions = []

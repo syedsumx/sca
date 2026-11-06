@@ -251,6 +251,37 @@ class AgentService:
                                                         "owner": spec.owner or actor})
         return {**self.get(agent_id), "key": key}
 
+    def create_built_agent(self, name: str, owner: str, scopes: list[str], ai_system: Optional[str],
+                           description: str, actor: str) -> dict:
+        """The identity of an agent built and run in Cairn (``cairn.ai.custom_agents``): no key or token; it acts
+        only for whoever runs it, narrowed to ``scopes``, under the same pause, quotas and AI system checks."""
+        agent_id = f"agt_{uuid.uuid4().hex[:12]}"
+        with self.engine.begin() as conn:
+            conn.execute(agent_clients.insert().values(
+                id=agent_id, name=name, kind="built", owner=owner, scopes=_check_scopes(scopes), redirect_uris=[],
+                ai_system=ai_system, key_hash=None, enabled=True, details={"description": description},
+                created_by=actor, created_ms=_now()))
+        self._record("agent.created", actor, agent_id, {"name": name, "scopes": scopes, "kind": "built"})
+        return self.get(agent_id)
+
+    def runnable(self, agent_id: str) -> Optional[str]:
+        """Why the agent may not act now (paused, disabled, its AI system not approved), or None."""
+        if self.paused():
+            return "AI agents are paused by an administrator"
+        with self.engine.connect() as conn:
+            client = conn.execute(select(agent_clients).where(agent_clients.c.id == agent_id)).first()
+        if client is None or not client.enabled:
+            return "this agent is disabled"
+        if client.ai_system and (self.ai_system_state is None or self.ai_system_state(client.ai_system) != "APPROVED"):
+            return f"its AI system {client.ai_system} is not approved"
+        return None
+
+    def set_scopes(self, agent_id: str, scopes: list[str], ai_system: Optional[str], actor: str) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(agent_clients).where(agent_clients.c.id == agent_id)
+                         .values(scopes=_check_scopes(scopes), ai_system=ai_system))
+        self._record("agent.updated", actor, agent_id, {"scopes": scopes, "ai_system": ai_system})
+
     def register_client(self, req: ClientRegistration) -> dict:
         """RFC 7591: a public client (PKCE, no secret). With registration ``admin`` it starts disabled
         until an administrator enables it."""

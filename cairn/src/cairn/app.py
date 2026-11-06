@@ -313,6 +313,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                 import asyncio
 
                 services.ml_serving._task = asyncio.get_running_loop().create_task(services.ml_serving.run())
+    if getattr(services, "custom_agents", None) is not None:
+        from cairn.ai.custom_agents import build_custom_agents_router
+
+        app.include_router(build_custom_agents_router(services.custom_agents, cp))
     if getattr(services, "ml", None) is not None:
         from cairn.ml.mlflow_gateway import build_ml_router
 

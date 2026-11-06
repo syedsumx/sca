@@ -20,7 +20,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `src/cairn/iac/` | `cairn bundle` (resources from git) | Python |
 | `src/cairn/ml/`, `ai/`, `agent/`, `context/` | MLflow integration, feature tables, AI functions, assistants, context agents | Python |
 | `src/cairn/quality/`, `marketplace/`, `identity/`, `notify/`, `export/` | Quality, access requests, SSO/SCIM, notifications, metadata export | Python |
-| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0096) | Python |
+| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0097) | Python |
 | `store/` | Cairn Store: S3-compatible object store | Rust |
 | `catalog/` | Cairn Catalog: Iceberg REST catalog | Rust |
 | `spark/` | `cairn-spark`: governed Spark submit, Kubernetes pod templates | Python |

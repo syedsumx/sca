@@ -88,6 +88,7 @@ class Services:
     saas: Optional[Any] = None
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
+    custom_agents: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -1146,6 +1147,19 @@ def _build_active_metadata(s: Services) -> None:
 
     s.assistant = Assistant(s.engine, s.tools_for, s.llm, s.explainer_for, s.nlq, products_for,
                             s.settings.ai.model, cfg.assistant_effort)
+
+    # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
+    if getattr(s, "agents", None) is not None:
+        from cairn.ai.assistant import TOOL_SPECS
+        from cairn.ai.custom_agents import CustomAgents
+
+        def agent_groups(actor: str) -> list[str]:
+            return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])] if s.attributes is not None else []
+        s.custom_agents = CustomAgents(
+            s.engine, s.agents, s.assistant, TOOL_SPECS,
+            lambda actor, privilege, urn: s.authorize(Principal(urn=actor, via="delegated"), privilege, urn,
+                                                      raise_on_deny=False),
+            agent_groups, s.audit)
 
     # ---- inline actions (Slack buttons, Teams/email signed links, in-app) -----------
     if s.marketplace is not None:

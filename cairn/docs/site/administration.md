@@ -288,6 +288,28 @@ it. To make an agent depend on the AI system register, link it to an AI system
   down-voted questions as `cairn ai eval` cases. Fill in what a right answer must contain and add
   them to the eval suite, so mistakes people saw stay fixed.
 
+**Custom agents (built in Cairn):** a team builds an agent from Cairn's own tools, deploys it, and people run it.
+
+- `POST /cairn/api/v1/custom-agents` with `{"name", "description", "instructions", "tools": [...], "scopes": [...],
+  "team": "urn:li:corpGroup:…", "ai_system": "...", "max_steps": 8}`. The tools are the assistant's (search, lineage,
+  quality, ask-your-data, suggestions and the rest); the scopes are `read`, `query_data` and `propose` (built agents
+  never get `write`), and every tool's scope must be among them.
+- Building one needs `BUILD_AGENTS`. Its owner changes, deploys (`POST …/{name}/deploy`), undeploys and deletes it.
+  It is run (`POST …/{name}/run` with `{"input": "..."}`) by its owner, members of its `team`, and people granted
+  `USE_AGENT` on `urn:li:cairnAgent:<name>`; for anyone else it does not exist (404).
+- Only a deployed agent runs. Changing a deployed agent's instructions, tools, scopes, steps or AI system takes it
+  back to draft until its owner deploys it again; `version` and `deployed_version` show which is live.
+- A run is made **as the person who starts it**, through an agent identity registered in the agent hub (kind
+  `built`, no key or sign-in of its own): their permissions, narrowed to the agent's scopes and tools. A tool it was
+  not given, or one outside its scopes, is refused and the model is told so; the run is marked `refused`.
+- The administrators' pause switch, the agent's request quotas and, when `ai_system` is set, that system's approval
+  in the AI register all apply: an agent linked to an unapproved system cannot be deployed or run. The AI budget and
+  rate limits apply too (429 when spent).
+- Each tool call appears in the agent's **Activity** like any other agent's; `GET …/{name}/runs` lists runs (input,
+  answer, tools called, status). The owner sees every run; others see their own. Building, changing, deploying,
+  running and deleting are audited.
+- Runs need a model that runs tools (`CAIRN_LLM_PROVIDER=anthropic`); without one, `run` answers 503.
+
 ## Sources
 
 **Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
