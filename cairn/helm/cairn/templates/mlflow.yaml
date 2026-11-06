@@ -97,6 +97,13 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "cairn.selectorLabels" (dict "root" $ "component" "api" "cfg" .Values.cairn.api) | nindent 14 }}
+        {{- if .Values.cairn.mlflow.servingKubernetes.enabled }}
+        # Model servers fetch their model (artifacts served by MLflow) when they start.
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: {{ .Values.cairn.mlflow.servingKubernetes.namespace }} }
+          podSelector:
+            matchExpressions: [{ key: cairn.io/model-deployment, operator: Exists }]
+        {{- end }}
       ports:
         - port: http
 {{- end }}

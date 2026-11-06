@@ -599,13 +599,36 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
   - It then scales the deployment to `ceil(concurrency / target_concurrency)` replicas, within the minimum and maximum: up at once, down one replica per tick.
   - After `idle_minutes` without a call it goes to `min_replicas`. At zero, the next call starts a replica and waits for it, up to `CAIRN_ML_COLD_START_SECONDS` (180), then answers 503.
   - Scaling is audited (`ml.model_deployed`, `ml.model_scaled`, `ml.model_undeployed`).
-- **Runtime.** `CAIRN_ML_SERVING_RUNTIME=process` runs MLflow's own model server (`mlflow models serve` from `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. A Kubernetes runtime, with a Deployment per model deployment, is not available yet. Without a runtime, deployments are refused (503).
+- **Runtimes.** Without a runtime, deployments are refused (503).
+  - `CAIRN_ML_SERVING_RUNTIME=process` runs MLflow's own model server (`mlflow models serve` from
+    `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with
+    `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica.
+  - `CAIRN_ML_SERVING_RUNTIME=kubernetes` (in Helm, `cairn.mlflow.servingKubernetes.enabled`) runs a Deployment,
+    a Service and a NetworkPolicy per model deployment in `CAIRN_ML_SERVING_K8S_NAMESPACE` (`cairn-models`). Any
+    number of API replicas may run.
+    - **Replicas.** Cairn's scaling sets them.
+    - **Pods.** They run MLflow's model server from `CAIRN_ML_SERVING_K8S_IMAGE`: MLflow's image, or one of your
+      own with the libraries your models need. They fetch the version from Cairn's MLflow, which serves the
+      artifacts, so they hold no store keys, no registry credentials and no Kubernetes token. They run as a
+      non-root user without privileges.
+    - **Who reaches them.** Only Cairn's API pods (`CAIRN_ML_SERVING_K8S_INGRESS_FROM`, by default the API pods
+      in Cairn's namespace), so every prediction goes through Cairn's checks. MLflow's network policy admits the
+      model servers so they can fetch their models.
+    - **Rights.** Cairn's account gets a Role for those three kinds in that namespace only.
+    - **Reaching the cluster from outside.** When Cairn runs outside the cluster, set
+      `CAIRN_ML_SERVING_K8S_API`, `_TOKEN_FILE` and `_CA_FILE`, plus `_ACCESS=node-port` and `_NODE_ADDRESS`.
 - **Tested** with a real MLflow server and MLflow's model server (`tests/test_ml_e2e.py`):
   - Someone without `MANAGE_ML_MODEL` could not deploy, and an unknown version was refused.
   - The deployment started at zero, and the first call started a replica and returned the model's predictions.
   - Someone without `USE_ML_MODEL` neither saw nor called it.
   - Eight clients in parallel scaled it to its maximum of two replicas, both serving.
   - Once idle, it went back to zero, and only the model's manager could delete it.
+- **Tested on Kubernetes** (kind, `tests/test_ml_serving_k8s.py`):
+  - A deployment applied with only the chart's Role started from zero on the first call, and its pod (no token, a
+    user without privileges) answered with the model's predictions.
+  - Another pod in the cluster could not reach it.
+  - It served from two replicas, and went back to zero once idle.
+  - The same account was refused in another namespace, and deleting the deployment removed its objects.
 
 ## Delta Lake tables
 

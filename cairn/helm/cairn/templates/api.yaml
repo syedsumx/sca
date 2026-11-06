@@ -109,6 +109,21 @@
 {{- with .Values.cairn.mlflow.serving }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING" "value" (toJson .)) }}
 {{- end }}
+{{- with .Values.cairn.mlflow.servingKubernetes }}
+{{- if .enabled }}
+{{- if and (eq .access "node-port") (not .nodeAddress) }}{{ fail "cairn.mlflow.servingKubernetes.nodeAddress: where Cairn reaches node ports" }}{{ end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_RUNTIME" "value" "kubernetes") }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_NAMESPACE" "value" .namespace) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_IMAGE" "value" .image) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_ACCESS" "value" .access) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_NODE_ADDRESS" "value" .nodeAddress) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_CAIRN_NAMESPACE" "value" $.Release.Namespace) }}
+{{- if .ingressFrom }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_INGRESS_FROM" "value" (toJson .ingressFrom)) }}
+{{- end }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING_K8S_RESOURCES" "value" (toJson .resources)) }}
+{{- end }}
+{{- end }}
 {{- end }}
 {{- /* Warehouse status (GET /v1/warehouses): the warehouse proxy and each warehouse's port. */ -}}
 {{- if and .Values.cairn.trino.enabled .Values.cairn.trino.warehouses.list }}

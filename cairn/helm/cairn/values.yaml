@@ -1066,6 +1066,20 @@ cairn:
     artifacts: { bucket: ml, prefix: artifacts, credentialsSecret: "" }
     # Model servers (mlflow models serve) Cairn forwards predictions to: {"<model>": "http://..."}.
     serving: {}
+    # Managed model serving (/v1/ml/deployments) on Kubernetes: a Deployment per model deployment in `namespace`,
+    # scaled by Cairn with its load, reached by Cairn only. The chart gives Cairn's API a Role there for those
+    # objects only, and lets the model servers fetch their models from this MLflow (which serves the artifacts).
+    servingKubernetes:
+      enabled: false
+      namespace: cairn-models
+      # MLflow's image by default; an image of your own when models need libraries it does not have.
+      image: ghcr.io/mlflow/mlflow:v3.5.0
+      # cluster-ip: Cairn reaches models at their Service; node-port: at nodeAddress (Cairn outside the cluster).
+      access: cluster-ip
+      nodeAddress: ""
+      # Network policy peers that may reach the models (default: Cairn's API pods in this release's namespace).
+      ingressFrom: []
+      resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }
     resources:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { memory: 2Gi }

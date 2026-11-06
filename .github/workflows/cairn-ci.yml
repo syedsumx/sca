@@ -462,7 +462,9 @@ jobs:
           # (a pulled multi-platform image holds only this platform's layers).
           echo "FROM python:3.12-slim" | docker build -q -t cairn-test/python:ci -
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
-          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn-test/python:ci cairn-test/git:ci --name cairn
+          # Model serving (test_ml_serving_k8s.py): MLflow's model server.
+          echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -493,6 +495,11 @@ jobs:
           CAIRN_JOBS_TEST_IMAGE=cairn/jobs:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jobs_k8s.py | tee "$RUNNER_TEMP/jobs.log"
           ! grep -q "skipped" "$RUNNER_TEMP/jobs.log"
+          # Model deployments as Deployments of MLflow's model server, scaled by Cairn, with only the chart's Role.
+          python -m venv "$RUNNER_TEMP/mlflow" && "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0"
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_serving_k8s.py | tee "$RUNNER_TEMP/models.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/models.log"
       - name: Cluster state on failure
         if: failure()
         run: |
@@ -501,6 +508,8 @@ jobs:
           kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
           kubectl -n cairn-jobs-test get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
+          kubectl -n cairn-models get events --sort-by=.lastTimestamp || true
+          for p in $(kubectl -n cairn-models get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-models logs "$p" --tail=100 || true; done
 
   ui:
     runs-on: ubuntu-latest

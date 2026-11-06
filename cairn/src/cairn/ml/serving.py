@@ -12,9 +12,10 @@ caller (L63).
   ``ceil(total concurrency / target_concurrency)`` replicas within ``[min_replicas, max_replicas]``: up at once,
   down one replica per tick. With no request for ``idle_minutes`` it goes to ``min_replicas``, which may be zero;
   the next call then starts one replica and waits for it (``CAIRN_ML_COLD_START_SECONDS``, 180).
-* **Runtime** (``CAIRN_ML_SERVING_RUNTIME=process``): MLflow's own model server (``mlflow models serve``,
-  ``CAIRN_ML_SERVING_MLFLOW``) as local processes on the API's host, so one API node. A Kubernetes runtime
-  (a Deployment per model deployment) is not available yet.
+* **Runtimes.** ``CAIRN_ML_SERVING_RUNTIME=process``: MLflow's own model server (``mlflow models serve``,
+  ``CAIRN_ML_SERVING_MLFLOW``) as local processes on the API's host, so one API node.
+  ``CAIRN_ML_SERVING_RUNTIME=kubernetes``: a Deployment per model deployment in ``CAIRN_ML_SERVING_K8S_NAMESPACE``
+  (:class:`KubeRuntime`), its replicas set by Cairn's scaling, its pods reached by Cairn only.
 """
 
 from __future__ import annotations
@@ -143,13 +144,166 @@ class ProcessRuntime:
         self.procs.pop(d["id"], None)
 
 
+SA = "/var/run/secrets/kubernetes.io/serviceaccount"
+LABEL = "cairn.io/model-deployment"
+SERVE_PORT = 8080
+
+
+class KubeRuntime:
+    """A Deployment, a Service and a NetworkPolicy per model deployment, in one namespace, applied by Cairn
+    (server-side apply, field manager ``cairn``) with the chart's Role, which allows these kinds there only.
+
+    * The pods run MLflow's model server (``image``: MLflow's, or one with the models' own libraries) on the
+      registered version (``models:/<model>/<version>``), fetching it from Cairn's MLflow, which serves the
+      artifacts: the pods hold no store or registry credentials and no Kubernetes token, and run as a non-root
+      user without privileges.
+    * Only Cairn reaches them (the NetworkPolicy's ``ingress_from``): every prediction goes through Cairn's checks.
+    * Cairn sets the replicas (its scaling); a model server is ready once its ``/ping`` answers.
+    """
+
+    def __init__(self, namespace: str, tracking_uri: str, image: str, ingress_from: list, api: str = "",
+                 token_file: str = "", ca_file: str = "", access: str = "cluster-ip", node_address: str = "",
+                 resources: Optional[dict] = None, workers: int = 1):
+        host, port = os.environ.get("KUBERNETES_SERVICE_HOST"), os.environ.get("KUBERNETES_SERVICE_PORT", "443")
+        self.api = (api or (f"https://{host}:{port}" if host else "")).rstrip("/")
+        if not self.api:
+            raise ValueError("model serving on Kubernetes: no API server (not in a cluster, and no CAIRN_ML_SERVING_K8S_API)")
+        if not tracking_uri:
+            raise ValueError("model serving on Kubernetes needs Cairn's MLflow (CAIRN_MLFLOW_URL)")
+        if not ingress_from:
+            raise ValueError("model serving on Kubernetes needs the peers that may reach the models (CAIRN_ML_SERVING_K8S_INGRESS_FROM)")
+        if access not in ("cluster-ip", "node-port") or (access == "node-port" and not node_address):
+            raise ValueError("CAIRN_ML_SERVING_K8S_ACCESS: cluster-ip, or node-port with CAIRN_ML_SERVING_K8S_NODE_ADDRESS")
+        self.namespace, self.tracking_uri, self.image, self.ingress_from = namespace, tracking_uri, image, ingress_from
+        self.token_file = token_file or f"{SA}/token"
+        self.verify: Any = ca_file or (f"{SA}/ca.crt" if os.path.exists(f"{SA}/ca.crt") else True)
+        self.access, self.node_address, self.workers = access, node_address, workers
+        self.resources = resources or {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}}
+
+    @classmethod
+    def from_env(cls) -> "KubeRuntime":
+        import json
+
+        ns = os.environ.get("CAIRN_ML_SERVING_K8S_NAMESPACE", "")
+        if not ns:
+            raise ValueError("CAIRN_ML_SERVING_RUNTIME=kubernetes needs CAIRN_ML_SERVING_K8S_NAMESPACE")
+        peers = os.environ.get("CAIRN_ML_SERVING_K8S_INGRESS_FROM", "")
+        if peers:
+            ingress = json.loads(peers)
+        else:
+            cairn_ns = os.environ.get("CAIRN_ML_SERVING_K8S_CAIRN_NAMESPACE", "")
+            if not cairn_ns:
+                raise ValueError("set CAIRN_ML_SERVING_K8S_INGRESS_FROM, or CAIRN_ML_SERVING_K8S_CAIRN_NAMESPACE for Cairn's API pods")
+            ingress = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": cairn_ns}},
+                        "podSelector": {"matchLabels": {"app.kubernetes.io/component": "api"}}}]
+        res = os.environ.get("CAIRN_ML_SERVING_K8S_RESOURCES", "")
+        return cls(ns, os.environ.get("CAIRN_MLFLOW_URL", ""),
+                   os.environ.get("CAIRN_ML_SERVING_K8S_IMAGE", "ghcr.io/mlflow/mlflow:v3.5.0"), ingress,
+                   os.environ.get("CAIRN_ML_SERVING_K8S_API", ""), os.environ.get("CAIRN_ML_SERVING_K8S_TOKEN_FILE", ""),
+                   os.environ.get("CAIRN_ML_SERVING_K8S_CA_FILE", ""), os.environ.get("CAIRN_ML_SERVING_K8S_ACCESS", "cluster-ip"),
+                   os.environ.get("CAIRN_ML_SERVING_K8S_NODE_ADDRESS", ""), json.loads(res) if res else None,
+                   int(os.environ.get("CAIRN_ML_SERVING_WORKERS", "1")))
+
+    # ---- the API --------------------------------------------------------------------------------
+    def _call(self, method: str, path: str, body: Any = None, ok404: bool = False, ctype: str = "") -> Optional[dict]:
+        import json
+
+        import httpx
+
+        try:
+            token = open(self.token_file).read().strip()
+        except OSError as e:
+            raise ServingError(f"kubernetes: the service account token: {e}", 503)
+        content = None if body is None else json.dumps(body)
+        r = httpx.request(method, self.api + path, content=content, verify=self.verify, timeout=30,
+                          headers={"Authorization": f"Bearer {token}", **({"Content-Type": ctype} if ctype else {})})
+        if r.status_code == 404 and ok404:
+            return None
+        if r.status_code >= 300:
+            raise ServingError(f"kubernetes: {method} {path}: {r.status_code} {r.text[:300]}", 502)
+        return r.json() if r.content else {}
+
+    def _name(self, d: dict) -> str:
+        return f"cairn-model-{d['name']}"
+
+    def _paths(self, d: dict) -> dict[str, str]:
+        n, ns = self._name(d), self.namespace
+        return {"Deployment": f"/apis/apps/v1/namespaces/{ns}/deployments/{n}",
+                "Service": f"/api/v1/namespaces/{ns}/services/{n}",
+                "NetworkPolicy": f"/apis/networking.k8s.io/v1/namespaces/{ns}/networkpolicies/{n}"}
+
+    def manifests(self, d: dict, replicas: int) -> list[dict]:
+        n = self._name(d)
+        labels = {LABEL: d["name"], "app.kubernetes.io/managed-by": "cairn"}
+        meta = {"name": n, "namespace": self.namespace, "labels": labels}
+        secure = {"runAsNonRoot": True, "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]},
+                  "seccompProfile": {"type": "RuntimeDefault"}}
+        container = {
+            "name": "model", "image": self.image,
+            "command": ["mlflow", "models", "serve", "-m", f"models:/{d['model']}/{d['version']}", "-h", "0.0.0.0",
+                        "-p", str(SERVE_PORT), "--env-manager", "local", "-w", str(self.workers)],
+            "env": [{"name": "MLFLOW_TRACKING_URI", "value": self.tracking_uri}, {"name": "HOME", "value": "/tmp"}],
+            "ports": [{"name": "http", "containerPort": SERVE_PORT}],
+            "readinessProbe": {"httpGet": {"path": "/ping", "port": "http"}, "periodSeconds": 3, "failureThreshold": 3},
+            "resources": self.resources, "securityContext": secure,
+            "volumeMounts": [{"name": "tmp", "mountPath": "/tmp"}]}
+        spec = {"automountServiceAccountToken": False, "enableServiceLinks": False,
+                "securityContext": {"runAsUser": 10001, "runAsGroup": 10001, "fsGroup": 10001},
+                "containers": [container], "volumes": [{"name": "tmp", "emptyDir": {}}]}
+        return [
+            {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
+             "spec": {"replicas": replicas, "selector": {"matchLabels": {LABEL: d["name"]}}, "revisionHistoryLimit": 2,
+                      "template": {"metadata": {"labels": labels,
+                                                "annotations": {"cairn.io/model": f"{d['model']}/{d['version']}"}},
+                                   "spec": spec}}},
+            {"apiVersion": "v1", "kind": "Service", "metadata": meta,
+             "spec": {"selector": {LABEL: d["name"]}, "ports": [{"name": "http", "port": SERVE_PORT, "targetPort": SERVE_PORT}],
+                      **({"type": "NodePort", "externalTrafficPolicy": "Local"} if self.access == "node-port"
+                         else {"type": "ClusterIP"})}},
+            {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta,
+             # In: Cairn only. Out stays open: the server fetches the model from Cairn's MLflow at start.
+             "spec": {"podSelector": {"matchLabels": {LABEL: d["name"]}}, "policyTypes": ["Ingress"],
+                      "ingress": [{"from": self.ingress_from, "ports": [{"port": SERVE_PORT, "protocol": "TCP"}]}]}},
+        ]
+
+    def _deployment(self, d: dict) -> Optional[dict]:
+        return self._call("GET", self._paths(d)["Deployment"], ok404=True)
+
+    # ---- the runtime interface ------------------------------------------------------------------
+    def scale(self, d: dict, n: int) -> None:
+        """Applies the objects (so a version or image change rolls out) with ``n`` replicas."""
+        paths = self._paths(d)
+        for obj in self.manifests(d, n):
+            self._call("PATCH", f"{paths[obj['kind']]}?fieldManager=cairn&force=true", obj,
+                       ctype="application/apply-patch+yaml")
+
+    def running(self, d: dict) -> int:
+        dep = self._deployment(d)
+        return int(((dep or {}).get("spec") or {}).get("replicas") or 0)
+
+    def endpoints(self, d: dict) -> list[str]:
+        dep = self._deployment(d)
+        if not dep or int((dep.get("status") or {}).get("readyReplicas") or 0) < 1:
+            return []
+        if self.access == "node-port":
+            svc = self._call("GET", self._paths(d)["Service"])
+            return [f"http://{self.node_address}:{svc['spec']['ports'][0]['nodePort']}"]
+        return [f"http://{self._name(d)}.{self.namespace}.svc:{SERVE_PORT}"]     # the Service spreads the requests
+
+    def delete(self, d: dict) -> None:
+        for path in self._paths(d).values():
+            self._call("DELETE", path, ok404=True)
+
+
 def runtime_from_env() -> Optional[Any]:
     rt = os.environ.get("CAIRN_ML_SERVING_RUNTIME", "")
     if rt == "process":
         return ProcessRuntime(os.environ.get("CAIRN_ML_SERVING_MLFLOW", "mlflow"),
                               os.environ.get("CAIRN_MLFLOW_URL", ""), int(os.environ.get("CAIRN_ML_SERVING_WORKERS", "1")))
+    if rt == "kubernetes":
+        return KubeRuntime.from_env()
     if rt:
-        raise ValueError("CAIRN_ML_SERVING_RUNTIME: process (a Kubernetes runtime is not available yet)")
+        raise ValueError("CAIRN_ML_SERVING_RUNTIME: process or kubernetes")
     return None
 
 
