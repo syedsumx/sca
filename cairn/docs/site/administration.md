@@ -2406,9 +2406,27 @@ A vector index lets people search a lakehouse table's text by meaning: support a
   - The caller needs read access to the source table.
   - It is refused when a mask or row filter applies to them there, because the index holds the raw text.
   - Each API replica keeps one index in memory per table version.
+- **Approximate search (IVF).** `ann` on an index (in `POST` or `PUT`):
+  - `{"lists": 256, "probes": 8}` sets the index's shape.
+  - `"auto"`, the default, uses IVF once the index has `CAIRN_VECTORS_ANN_MIN` chunks (20,000), with about √n
+    lists and a sixteenth of them probed (at least 4).
+  - `false` keeps search exact.
+
+  Each refresh trains cluster centres on a sample of the vectors (spherical k-means), assigns every chunk to its
+  nearest centre, and stores that index beside the vectors (`<vectors table>/cairn-ann/<snapshot>.npz`, numeric
+  and text arrays only) for the snapshot it was built from. A search scores the query against the centres, then
+  compares it only with the chunks in the `probes` nearest lists. More probes find more true neighbours at more
+  cost. If the stored index isn't for the table's current snapshot (another writer, a failed build), the search
+  is exact and still right. Each result says which way it was searched (`method`, and `searched` for IVF).
 - **Change or remove** an index with `PUT /v1/vectors/<name>` (key, text, chunking, schedule, enabled; a changed key, text or chunking is embedded again on the next refresh) and `DELETE /v1/vectors/<name>`, which also drops its vectors table, since it holds the raw text. An index keeps its source: to index another table, create another index.
 - **Settings.** `CAIRN_VECTORS_CATALOG` (default: the pipes' catalog, `CAIRN_PIPES_CATALOG`).
 - **Tested** in `tests/test_vectors_e2e.py`, with the real store and catalog. Questions found the right articles. A refresh re-embedded only the changed and new rows and dropped the removed one. Someone without read access, and someone with a row filter, were refused.
+
+- **Approximate search, tested.** 6,000 clustered vectors with 64 lists and 6 probes:
+  - Recall@10 against exact search was 1.0 over 30 queries, while each query compared about a tenth of the chunks.
+  - With a stored index for another snapshot, search was exact.
+  - A refresh after the table changed built the index again for the new snapshot, and turning `ann` off made
+    search exact on the next refresh.
 
 ## Streams (Kafka and change data capture)
 
