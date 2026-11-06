@@ -22,6 +22,7 @@ import time
 import httpx
 import pytest
 import yaml
+from starlette.requests import Request  # module level: with postponed annotations FastAPI must resolve it
 
 KUBECONFIG = os.environ.get("CAIRN_KIND_KUBECONFIG", "")
 HOST = os.environ.get("CAIRN_KIND_HOST_IP", "")
@@ -129,7 +130,6 @@ def test_a_model_deployment_on_kubernetes(cluster, mlflow, monkeypatch):
     import uvicorn
     from fastapi import FastAPI, HTTPException
     from sqlalchemy import create_engine, update
-    from starlette.requests import Request
 
     from cairn.common.audit import AuditLog
     from cairn.common.core import InMemoryGraph
