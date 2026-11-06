@@ -69,7 +69,7 @@ pipe_files = Table(
     Column("loaded_ms", BigInteger, nullable=False),
 )
 
-FORMATS = ("csv", "json", "parquet", "files")
+FORMATS = ("csv", "json", "parquet", "xlsx", "files")
 TARGET = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 BUCKET = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 
@@ -103,6 +103,68 @@ def _pipe(r) -> dict:
     return {"id": r.id, "name": r.name, "bucket": r.bucket, "prefix": r.prefix, "format": r.format, "target": r.target,
             "create_table": bool(r.create_table), "enabled": bool(r.enabled), "created_by": r.created_by,
             "created_ms": r.created_ms}
+
+
+def column_name(header, i: int) -> str:
+    """A sheet's header as a column name: lowercase letters, digits and _ ("Order ID" is order_id)."""
+    name = re.sub(r"[^a-z0-9]+", "_", str(header if header is not None else "").strip().lower()).strip("_")
+    if not name:
+        name = f"column_{i + 1}"
+    return name if name[0].isalpha() or name[0] == "_" else f"c_{name}"
+
+
+def rows_to_arrow(header: list, rows: list[list]):
+    """Sheet rows under a header row, as Arrow: each column typed by its values, text where they mix."""
+    import datetime as _dt
+
+    import pyarrow as pa
+
+    names, seen = [], set()
+    for i, h in enumerate(header):
+        n, k = column_name(h, i), 2
+        while n in seen:
+            n, k = f"{column_name(h, i)}_{k}", k + 1
+        seen.add(n)
+        names.append(n)
+    cols = {}
+    for i, n in enumerate(names):
+        vals = [r[i] if i < len(r) else None for r in rows]
+        vals = [None if (v is None or v == "") else v for v in vals]
+        kinds = {type(v) for v in vals if v is not None}
+        if kinds <= {int, bool} and bool not in kinds:
+            cols[n] = pa.array(vals, pa.int64())
+        elif kinds <= {int, float} and kinds:
+            cols[n] = pa.array([None if v is None else float(v) for v in vals], pa.float64())
+        elif kinds == {bool}:
+            cols[n] = pa.array(vals, pa.bool_())
+        elif kinds and kinds <= {_dt.datetime}:
+            cols[n] = pa.array(vals, pa.timestamp("us"))
+        elif kinds and kinds <= {_dt.date}:
+            cols[n] = pa.array(vals, pa.date32())
+        else:
+            cols[n] = pa.array([None if v is None else str(v) for v in vals], pa.string())
+    return pa.table(cols)
+
+
+def read_xlsx(data: bytes, sheet: Optional[str] = None):
+    """An Excel workbook's sheet (the first, unless named) as Arrow; its first row is the header. Formulas give
+    the values Excel last saved, not the formulas; rows that are entirely empty are skipped."""
+    import io as _io
+
+    try:
+        from openpyxl import load_workbook
+    except ImportError as e:
+        raise PipeError("Excel files need openpyxl (the streams extra)") from e
+    wb = load_workbook(_io.BytesIO(data), read_only=True, data_only=True)
+    try:
+        ws = wb[sheet] if sheet else wb.worksheets[0]
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+    finally:
+        wb.close()
+    rows = [r for r in rows if any(v not in (None, "") for v in r)]
+    if not rows:
+        raise PipeError("the sheet is empty")
+    return rows_to_arrow(rows[0], rows[1:])
 
 
 def open_table(cat, target: str, schema, create: bool):
@@ -265,6 +327,8 @@ class Pipes:
         if fmt == "parquet":
             return pq.read_table(path, filesystem=fs)
         with fs.open_input_stream(path) as f:
+            if fmt == "xlsx":
+                return read_xlsx(f.read())
             return pacsv.read_csv(f) if fmt == "csv" else pajson.read_json(f)
 
     def _catalog(self):

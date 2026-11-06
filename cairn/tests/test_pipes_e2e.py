@@ -269,3 +269,38 @@ def test_scanned_documents_are_read_by_ocr(world, monkeypatch):
     p.sweep(pipe["id"])
     note_row = {r["key"]: r for r in p._catalog().load_table(("raw", "scans")).scan().to_arrow().to_pylist()}["scans/note.png"]
     assert note_row["text"] is None and "not installed" in note_row["extract_error"]
+
+
+def test_excel_workbooks_land_as_typed_tables(world):
+    """Queue row 27: an Excel workbook that lands under a pipe's prefix becomes rows of its table: the first sheet,
+    headers as column names, each column typed by its values, formulas as the values Excel saved."""
+    import datetime as dt
+    import io
+
+    from openpyxl import Workbook
+
+    p, s3 = world["pipes"], world["s3"]
+    pipe = p.create({"name": "sheets", "bucket": "landing", "prefix": "excel/", "format": "xlsx", "target": "raw.regional",
+                     "create_table": True}, "urn:li:corpuser:admin")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Orders"
+    ws.append(["Order ID", "Region", "Amount (EUR)", "Ordered", "Paid?", "Note"])
+    ws.append([1, "EU", 12.5, dt.datetime(2026, 10, 1, 9, 30), True, "first"])
+    ws.append([2, "US", 20, dt.datetime(2026, 10, 2, 14, 0), False, None])
+    ws.append([None, None, None, None, None, None])                      # an empty row: skipped
+    ws.append([3, "EU", 7.25, dt.datetime(2026, 10, 3, 8, 15), True, 42])  # a number in a text column: text
+    wb.create_sheet("Notes").append(["not loaded"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    s3.put_object(Bucket="landing", Key="excel/october.xlsx", Body=buf.getvalue())
+    s3.put_object(Bucket="landing", Key="excel/broken.xlsx", Body=b"not a workbook")
+    done = {f["key"]: f for f in p.sweep(pipe["id"])}
+    assert done["excel/october.xlsx"]["status"] == "ok" and done["excel/october.xlsx"]["rows"] == 3, done
+    assert done["excel/broken.xlsx"]["status"] == "error"                 # recorded; the good file still loaded
+    t = p._catalog().load_table(("raw", "regional"))
+    assert [f.name for f in t.schema().fields] == ["order_id", "region", "amount_eur", "ordered", "paid", "note"]
+    rows = sorted(t.scan().to_arrow().to_pylist(), key=lambda r: r["order_id"])
+    assert [r["order_id"] for r in rows] == [1, 2, 3] and [r["amount_eur"] for r in rows] == [12.5, 20.0, 7.25]
+    assert rows[0]["ordered"] == dt.datetime(2026, 10, 1, 9, 30) and rows[1]["paid"] is False
+    assert [r["note"] for r in rows] == ["first", None, "42"]

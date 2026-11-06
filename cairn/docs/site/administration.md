@@ -2386,7 +2386,7 @@ Cairn keeps lakehouse tables healthy with Iceberg's own procedures, run through 
 
 ## Pipes (automatic file loading)
 
-A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines or `parquet`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.
+A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines, `parquet` or `xlsx`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.
 
 - **Create** with `POST /v1/pipes` (`MANAGE_SYSTEM_OPERATIONS`). List, delete, and see each file's outcome (`GET /v1/pipes/{id}/files`). Changes are audited.
 - **As files arrive.** Point a store event target (a webhook) at `POST /v1/pipes/events`, with the secret in `CAIRN_PIPES_WEBHOOK_SECRET`. Then add the bucket's `s3:ObjectCreated:*` rule for the prefix. Cairn takes only bodies the store signed with that secret (`X-Cairn-Signature`); anything else gets 401.
@@ -2409,6 +2409,12 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - **Changes.** A changed object replaces its row in one commit. A deleted object's row goes when the bucket's `s3:ObjectRemoved:*` event arrives, or at the next sweep.
   - **Tested** in `tests/test_pipes_e2e.py`, with real stores and events: text, HTML, PDF, Word and binary files, a change and a deletion by event, and a deletion found by the sweep. With Tesseract: a PDF with a text page and a scanned page, and a scanned image, read word for word; a page over the size limit named on the row while the rest is kept; and `CAIRN_OCR=on` without Tesseract reported.
 - **Once each.** A file (key, size, modification time) is loaded once. It is recorded with its outcome. A file that fails, such as one with columns the table lacks, is recorded as an error; the next file still loads. A failed file is retried when it changes. Markers such as `_SUCCESS` are skipped.
+- **Excel (`format: xlsx`).** Each workbook loads its first sheet.
+  - The first non-empty row is the header. Headers become column names ("Amount (EUR)" becomes `amount_eur`; a repeated header gets `_2`).
+  - Each column is typed by its values: whole numbers, decimals, true/false, dates and times; a column whose values mix types is text.
+  - Formulas load as the values Excel last saved. Rows that are entirely empty are skipped.
+  - A file that is not a workbook is recorded as an error, and the next one still loads.
+  - Tested in `tests/test_pipes_e2e.py` with a workbook written by openpyxl: three typed rows from the first sheet, an empty row skipped, a number in a text column kept as text, and a broken file recorded.
 - **Downstream.** Loaded tables are recorded as changed, so data-aware schedules (Airflow, dbt) see the new data.
 - **Settings.** `CAIRN_PIPES_STORE` holds `{"endpoint", "access_key", "secret_key", "region"}`; give it a key that can only read the pipes' prefixes. `CAIRN_PIPES_CATALOG` holds the pyiceberg REST catalog properties: `uri`, `token`, and the warehouse's `s3.*` settings. Each is JSON, or a path to a JSON file.
 - **Tested** with real Cairn Stores and Cairn Catalog (`tests/test_pipes_e2e.py`):
@@ -2621,14 +2627,21 @@ A notebook or Python script can run on a schedule (or on demand) as its owner, i
 
 ## SaaS connectors
 
-Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally (`/v1/saas-syncs`, `cairn.pipelines.saas`).
+Salesforce and HubSpot objects load into governed lakehouse tables on a schedule, incrementally, and Google Sheets load whole (`/v1/saas-syncs`, `cairn.pipelines.saas`).
 
-- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce` or `hubspot`), `object` (an API name: `Account`, `contacts`), `fields` (API names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
+- **Defining one.** `POST /v1/saas-syncs` with `name`, `kind` (`salesforce`, `hubspot` or `google_sheets`), `object` (an API name: `Account`, `contacts`; for a sheet `<spreadsheet id>/<sheet name>`), `fields` (API names; for a sheet, column names), `target` (`namespace.table`), `secret_scope`, and optionally `cron` (UTC). `PUT …/{name}` changes it; `POST …/{name}/run` runs it now (202; `?wait=true` waits); `DELETE …/{name}` removes it. Only the owner sees and changes a sync.
 - **Keys.** They live in a [secret scope](#secret-scopes) the owner may read, and are read as the owner at each run. They are never stored on the sync, sent to the browser, logged or audited. A required key the owner cannot read stops the run before any request.
   - Salesforce: `instance_url` and a connected app's `client_id` and `client_secret` (OAuth client credentials flow), or an `access_token`. API version `CAIRN_SAAS_SALESFORCE_API` (`v61.0`).
   - HubSpot: a private app's `access_token`, and optionally `base_url` (default `https://api.hubapi.com`).
-  - Both must be `https://`.
+  - Google Sheets: either a service account's JSON key as `service_account_json`, or an `api_key` for a sheet shared with anyone who has the link. Optionally `base_url` (default `https://sheets.googleapis.com`).
+    - With a service account, share the spreadsheet with its address; viewer is enough.
+    - Cairn signs a JWT with the key, for the read-only Sheets scope, and exchanges it at the key's `token_uri`.
+  - All must be `https://`.
 - **Incremental.** Each run asks only for records modified since the last one it loaded (Salesforce `SystemModstamp`, HubSpot `hs_lastmodifieddate`), oldest first, and upserts them by `id`: the batch's ids are deleted and the batch is appended, in one commit. The cursor advances after each committed batch (`CAIRN_SAAS_BATCH_ROWS`, 5,000), so a failed run resumes where it stopped. Records modified within the cursor's own second are asked for again and upserted again, so none is skipped. HubSpot's search stops at 10,000 records, so a longer run asks again from the last one it got. Changing a sync's object or table starts it from the beginning.
+- **Google Sheets load whole.** A sheet's rows have no ids or modification times, so each run replaces the table with the sheet as it is now, in one commit. A deleted row goes, and an emptied sheet gives an empty table.
+  - The sheet's first row is its header, turned into column names as for Excel ("Target (EUR)" becomes `target_eur`), and `fields` names the columns to load.
+  - A field the sheet does not have fails the run with the columns it does have.
+  - `id` is the row number in the sheet. Values are read unformatted (numbers as numbers) and stored as text.
 - **The table.** It is created on the first run, with `id`, the fields (lowercased, as text, as the APIs return them), `_modified` and `_synced_ms`. A field added to the sync adds a column. Deleted records are not removed, because neither API's incremental query returns them.
 - **Governed.** The table is an ordinary lakehouse table: Cairn's policies, masks and row filters apply to everyone who reads it. The owner needs `WRITE_DATASET` on it, checked when the sync is saved and at every run. Loads are recorded as dataset changes, so data-aware schedules follow.
 - **Runs** go to a pool of `CAIRN_SAAS_CONCURRENCY` (2) beside the scheduler's tick, and each sync is claimed, so one scheduler runs it. A failed run is recorded on the sync (`last_status`, `last_error`), audited (`saas.sync_failed`) and told to the owner. Successful runs are audited as `saas.sync_run`, with the rows and the cursor.
@@ -2636,6 +2649,7 @@ Salesforce and HubSpot objects load into governed lakehouse tables on a schedule
 - **Tested** with the real store, catalog and Trino, a real secret scope, and a local server answering the endpoints the connectors call (`tests/test_saas_e2e.py`). It is not a substitute for a run against a real Salesforce org or HubSpot account.
   - Salesforce: five accounts loaded over three pages. A change and an addition were then asked from the cursor and upserted, with no duplicates. Bob's row filter applied to the loaded table.
   - HubSpot: contacts loaded, a field added a column, and a failing API was recorded and told, with the cursor kept.
+  - Google Sheets: a sheet read with a service account, whose signed JWT the test's token endpoint verified (signature, audience, read-only scope), and with an API key. An edited sheet, a deleted row and an emptied sheet were each followed exactly. A missing column and a key the sheet refused were reported as failed runs.
   - Refused: a sync the owner may not write, injection-shaped object and field names, keys the owner cannot read (no request was made), and another person's sync.
 
 ## Reverse ETL

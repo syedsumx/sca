@@ -1,4 +1,12 @@
-"""SaaS data connectors: Salesforce and HubSpot objects loaded into governed Iceberg tables, incrementally (L61).
+"""SaaS data connectors: Salesforce and HubSpot objects loaded into governed Iceberg tables, incrementally (L61);
+Google Sheets ranges loaded whole (queue row 27).
+
+**Google Sheets** (``"kind": "google_sheets"``): ``object`` is ``<spreadsheet id>/<sheet name>``. The sheet's first
+row is its header, turned into column names ("Order ID" is ``order_id``), and ``fields`` names the columns to
+load. A sheet's rows have no ids or modification times, so each run replaces the table with the sheet as it is
+(in one commit); ``id`` is the row number. The keys: ``service_account_json`` (a service account's JSON key; share
+the spreadsheet with its address, read-only is enough) or ``api_key`` (a sheet shared with anyone with the link),
+and optionally ``base_url``.
 
 ``POST /v1/saas-syncs`` with ``{"name", "kind": "salesforce" | "hubspot", "object": "Account" | "contacts",
 "fields": [...], "target": "crm.accounts", "secret_scope": "crm-keys", "cron": "0 * * * *"}``.
@@ -44,7 +52,8 @@ logger = logging.getLogger(__name__)
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
 IDENT = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,79}$")           # Salesforce/HubSpot object and field names
 TARGET = re.compile(r"^[a-z_][a-z0-9_]{0,63}\.[a-z_][a-z0-9_]{0,63}$")
-KINDS = ("salesforce", "hubspot")
+KINDS = ("salesforce", "hubspot", "google_sheets")
+SHEET = re.compile(r"^[A-Za-z0-9_-]{10,100}/[^/\\]{1,60}$")    # <spreadsheet id>/<sheet name>
 
 saas_syncs = Table(
     "cairn_saas_syncs", metadata,
@@ -190,8 +199,80 @@ def _hubspot_ms(v: str) -> str:
     return str(int(datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp() * 1000))
 
 
-REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",)}
-OPTIONAL_KEYS = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",)}
+REQUIRED_KEYS = {"salesforce": ("instance_url",), "hubspot": ("access_token",), "google_sheets": ()}
+OPTIONAL_KEYS = {"salesforce": ("client_id", "client_secret", "access_token"), "hubspot": ("base_url",),
+                 "google_sheets": ("service_account_json", "api_key", "base_url")}
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
+
+
+def _https(url: str, what: str) -> str:
+    if not url.startswith("https://") and not os.environ.get("CAIRN_SAAS_ALLOW_HTTP"):
+        raise SaasError(f"{what} must be https://")
+    return url
+
+
+def google_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str, dict, dict]:
+    """(API base URL, headers, query parameters): a service account's token (a JWT it signs, exchanged at its
+    token_uri), or an API key."""
+    import base64
+    import json as _json
+
+    base = _https((secrets.get("base_url") or "https://sheets.googleapis.com").rstrip("/"), "google_sheets: base_url")
+    if secrets.get("service_account_json"):
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        try:
+            sa = _json.loads(secrets["service_account_json"])
+            key = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
+            email, token_uri = sa["client_email"], sa.get("token_uri") or "https://oauth2.googleapis.com/token"
+        except Exception as e:  # noqa: BLE001 - never echo the key
+            raise SaasError(f"google_sheets: service_account_json is not a service account key ({type(e).__name__})")
+        _https(token_uri, "google_sheets: the key's token_uri")
+
+        def b64(b: bytes) -> str:
+            return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+        now = int(time.time())
+        head = b64(_json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        claims = b64(_json.dumps({"iss": email, "scope": SHEETS_SCOPE, "aud": token_uri, "iat": now, "exp": now + 3600}).encode())
+        sig = key.sign(f"{head}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
+        r = http.post(token_uri, data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+                                       "assertion": f"{head}.{claims}.{b64(sig)}"})
+        if r.status_code != 200:
+            raise SaasError(f"google_sheets: sign-in refused ({r.status_code})", 502)
+        return base, {"Authorization": f"Bearer {r.json()['access_token']}"}, {}
+    if secrets.get("api_key"):
+        return base, {}, {"key": secrets["api_key"]}
+    raise SaasError("google_sheets: the secret scope has neither service_account_json nor api_key", 400)
+
+
+def google_sheets_records(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
+                          cursor: Optional[str]) -> Iterator[dict]:
+    """Every row of the sheet (row 1 is the header), as records keyed by row number."""
+    from urllib.parse import quote
+
+    from cairn.pipelines.pipes import column_name
+
+    base, headers, params = google_session(http, secrets)
+    sheet_id, sheet = obj.split("/", 1)
+    r = http.get(f"{base}/v4/spreadsheets/{quote(sheet_id)}/values/{quote(sheet, safe='')}", headers=headers,
+                 params={**params, "valueRenderOption": "UNFORMATTED_VALUE", "dateTimeRenderOption": "FORMATTED_STRING"})
+    if r.status_code != 200:
+        raise SaasError(f"google_sheets: reading {sheet} failed ({r.status_code})", 502)
+    values = r.json().get("values") or []
+    if not values:
+        return
+    cols = {column_name(h, i): i for i, h in enumerate(values[0])}
+    missing = [f for f in fields if f.lower() not in cols]
+    if missing:
+        raise SaasError(f"google_sheets: no column {', '.join(missing)} in {sheet} (it has {', '.join(cols)})")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+    for n, row in enumerate(values[1:], start=2):
+        if not any(v not in (None, "") for v in row):
+            continue
+        yield {"id": str(n), "modified": stamp,
+               "values": {f: (row[cols[f.lower()]] if cols[f.lower()] < len(row) and row[cols[f.lower()]] != "" else None)
+                          for f in fields}}
 
 
 def connector_keys(read_secret: Callable[[str, str, str], str], owner: str, scope: str, kind: str) -> dict[str, str]:
@@ -230,9 +311,12 @@ class SaasSyncs:
     def _check(self, body: dict) -> dict:
         kind = body.get("kind")
         if kind not in KINDS:
-            raise SaasError("kind: salesforce or hubspot")
+            raise SaasError("kind: salesforce, hubspot or google_sheets")
         obj = str(body.get("object") or "")
-        if not IDENT.match(obj):
+        if kind == "google_sheets":
+            if not SHEET.match(obj) or len(obj) > 80:
+                raise SaasError("object: <spreadsheet id>/<sheet name> (at most 80 characters)")
+        elif not IDENT.match(obj):
             raise SaasError("object: an object's API name (letters, digits and _)")
         fields = body.get("fields")
         if not isinstance(fields, list) or not fields or not all(isinstance(f, str) and IDENT.match(f) for f in fields):
@@ -339,17 +423,19 @@ class SaasSyncs:
         try:
             self._need_write(s["owner"], s["target"])        # the owner may since have lost the right
             secrets = self._secrets(s)
-            fetch = salesforce_records if s["kind"] == "salesforce" else hubspot_records
+            fetch = {"salesforce": salesforce_records, "hubspot": hubspot_records,
+                     "google_sheets": google_sheets_records}[s["kind"]]
+            whole = s["kind"] == "google_sheets"            # no ids or times to go by: the sheet replaces the table
             with httpx.Client(timeout=self.timeout) as http:
                 batch: list[dict] = []
                 for rec in fetch(http, secrets, s["object"], s["fields"], cursor):
                     batch.append(rec)
-                    if len(batch) >= self.batch:
+                    if len(batch) >= self.batch and not whole:
                         cursor = self._commit(s, batch)
                         rows += len(batch)
                         batch = []
-                if batch:
-                    cursor = self._commit(s, batch)
+                if batch or whole:
+                    cursor = self._commit(s, batch, replace=whole)
                     rows += len(batch)
         except Exception as e:  # noqa: BLE001 - recorded on the sync and told, never raised into the scheduler
             error = str(e)[:1000]
@@ -369,8 +455,9 @@ class SaasSyncs:
                 logger.exception("could not tell about sync %s", s["name"])
         return {"sync": s["name"], "status": status, "rows": rows, "cursor": cursor, "error": error}
 
-    def _commit(self, s: dict, batch: list[dict]) -> str:
-        """Upserts one batch by id, then advances the cursor (only once the table has committed)."""
+    def _commit(self, s: dict, batch: list[dict], replace: bool = False) -> str:
+        """Upserts one batch by id (with ``replace``, the batch becomes the whole table), then advances the cursor
+        (only once the table has committed)."""
         import pyarrow as pa
         from pyiceberg.exceptions import NoSuchTableError
 
@@ -419,10 +506,13 @@ class SaasSyncs:
         # Upsert by id in one commit: the batch's ids out, the batch in. (pyiceberg's own upsert compares against
         # the files' older schema once a column was added, and refuses.)
         rows = fit(table, data, s["target"])
+        from pyiceberg.expressions import AlwaysTrue
+
         with table.transaction() as tx:
-            tx.delete(In("id", [r["id"] for r in recs]))
-            tx.append(rows)
-        cursor = max(r["modified"] for r in recs)
+            tx.delete(AlwaysTrue() if replace else In("id", [r["id"] for r in recs]))
+            if recs:
+                tx.append(rows)
+        cursor = max(r["modified"] for r in recs) if recs else datetime.now(timezone.utc).isoformat()
         if s["kind"] == "hubspot":
             cursor = _hubspot_ms(cursor)
         with self.engine.begin() as conn:

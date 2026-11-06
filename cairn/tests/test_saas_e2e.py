@@ -36,6 +36,17 @@ class Saas:
         self.hub_token = "pat-na1-" + "h" * 24
         self.pages: dict[str, list] = {}
         self.fail_hubspot = False
+        # Google Sheets: spreadsheets by id and sheet name; a service account (its public key checks the JWT).
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        self.sheets: dict[str, dict[str, list]] = {}
+        self.sa_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        self.sa_pem = self.sa_key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                serialization.NoEncryption()).decode()
+        self.google_token = "ya29." + "g" * 30
+        self.api_key = "AIza" + "k" * 35
+        self.google_claims: list[dict] = []
 
 
 def handler(saas: Saas):
@@ -57,6 +68,24 @@ def handler(saas: Saas):
         def do_POST(self):
             body = self.rfile.read(int(self.headers.get("Content-Length") or 0)).decode()
             u = urlsplit(self.path)
+            if u.path == "/google/token":                         # a service account's JWT, checked as Google does
+                f = parse_qs(body)
+                try:
+                    from cryptography.hazmat.primitives import hashes
+                    from cryptography.hazmat.primitives.asymmetric import padding
+
+                    head, claims, sig = f["assertion"][0].split(".")
+                    pad = lambda x: base64.urlsafe_b64decode(x + "=" * (-len(x) % 4))  # noqa: E731
+                    saas.sa_key.public_key().verify(pad(sig), f"{head}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
+                    c = json.loads(pad(claims))
+                    saas.google_claims.append(c)
+                    ok = (f["grant_type"] == ["urn:ietf:params:oauth:grant-type:jwt-bearer"]
+                          and c["aud"].endswith("/google/token") and c["scope"].endswith("spreadsheets.readonly")
+                          and c["iss"] == "cairn-loader@example.iam.gserviceaccount.com" and c["exp"] > c["iat"])
+                except Exception:  # noqa: BLE001 - a bad signature or shape
+                    ok = False
+                return self._send(200, {"access_token": saas.google_token, "expires_in": 3600}) if ok else \
+                    self._send(400, {"error": "invalid_grant"})
             if u.path == "/services/oauth2/token":
                 f = parse_qs(body)
                 ok = f.get("grant_type") == ["client_credentials"] and f.get("client_secret") == [saas.secret]
@@ -88,6 +117,19 @@ def handler(saas: Saas):
 
         def do_GET(self):
             u = urlsplit(self.path)
+            m = re.fullmatch(r"/v4/spreadsheets/([^/]+)/values/([^/]+)", u.path)
+            if m:
+                from urllib.parse import unquote
+
+                q = parse_qs(u.query)
+                if not (self._authed(saas.google_token) or q.get("key") == [saas.api_key]):
+                    return self._send(403, {"error": {"code": 403, "status": "PERMISSION_DENIED"}})
+                assert q.get("valueRenderOption") == ["UNFORMATTED_VALUE"]
+                sheet = saas.sheets.get(unquote(m.group(1)), {}).get(unquote(m.group(2)))
+                if sheet is None:
+                    return self._send(404, {"error": {"code": 404, "status": "NOT_FOUND"}})
+                saas.asked.append(f"sheets {unquote(m.group(2))}")
+                return self._send(200, {"range": unquote(m.group(2)), "majorDimension": "ROWS", "values": sheet})
             if not self._authed(saas.token):
                 return self._send(401, [{"errorCode": "INVALID_SESSION_ID"}])
             if u.path == "/services/data/v61.0/query":
@@ -138,6 +180,14 @@ def world(cairn, lake, monkeypatch, tmp_path):  # noqa: F811
     scopes.create(OWNER, {"name": "hubspot-keys"})             # HubSpot: a private app's token
     for k, v in {"access_token": saas.hub_token, "base_url": f"http://127.0.0.1:{p}"}.items():
         scopes.put(OWNER, "hubspot-keys", k, v)
+    scopes.create(OWNER, {"name": "sheets-keys"})              # Google Sheets: a service account's JSON key
+    scopes.put(OWNER, "sheets-keys", "service_account_json", json.dumps({
+        "type": "service_account", "client_email": "cairn-loader@example.iam.gserviceaccount.com",
+        "private_key": saas.sa_pem, "token_uri": f"http://127.0.0.1:{p}/google/token"}))
+    scopes.put(OWNER, "sheets-keys", "base_url", f"http://127.0.0.1:{p}")
+    scopes.create(OWNER, {"name": "sheets-public"})            # a sheet shared with anyone with the link: an API key
+    for k, v in {"api_key": saas.api_key, "base_url": f"http://127.0.0.1:{p}"}.items():
+        scopes.put(OWNER, "sheets-public", k, v)
     _, s = cairn
     audited, told = [], []
 
@@ -250,3 +300,51 @@ def test_rights_and_keys_are_checked(world):
     with pytest.raises(SaasError) as e:
         syncs.get(BOB, "no-keys")
     assert e.value.status == 404
+
+
+SHEET_ID = "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms"
+
+
+def test_a_google_sheet_lands_whole_and_follows_the_sheet(world, trino):  # noqa: F811
+    """Queue row 27: a Google Sheet's rows land in a governed table, signed in as a service account (a JWT it
+    signs) or with an API key; each run replaces the table with the sheet as it is now."""
+    saas, syncs = world["saas"], world["syncs"]
+    saas.sheets[SHEET_ID] = {"Q4 Targets": [["Region", "Target (EUR)", "Owner", "Notes"],
+                                            ["EU", 120000, "ana", "stretch"], ["US", 95000.5, "bob"],
+                                            [], ["APAC", 40000, "", "new"]]}
+    trino("DROP TABLE IF EXISTS lake.sales.q4_targets")
+    syncs.save(OWNER, {"name": "q4-targets", "kind": "google_sheets", "object": f"{SHEET_ID}/Q4 Targets",
+                       "fields": ["region", "target_eur", "owner"], "target": "sales.q4_targets",
+                       "secret_scope": "sheets-keys", "cron": "*/15 * * * *"})
+    first = syncs.run_now(OWNER, "q4-targets", wait=True)
+    assert first["status"] == "ok" and first["rows"] == 3, first
+    assert saas.google_claims and saas.google_claims[-1]["scope"] == "https://www.googleapis.com/auth/spreadsheets.readonly"
+    rows = trino("SELECT id, region, target_eur, owner FROM lake.sales.q4_targets ORDER BY id")
+    assert [(r["id"], r["region"], r["target_eur"], r["owner"]) for r in rows] == \
+        [("2", "EU", "120000", "ana"), ("3", "US", "95000.5", "bob"), ("5", "APAC", "40000", None)]
+    # The sheet changes (a row deleted, one edited): the table follows it, nothing left behind.
+    saas.sheets[SHEET_ID]["Q4 Targets"] = [["Region", "Target (EUR)", "Owner"], ["EU", 125000, "ana"]]
+    assert syncs.run_now(OWNER, "q4-targets", wait=True)["rows"] == 1
+    assert trino("SELECT region, target_eur FROM lake.sales.q4_targets") == [{"region": "EU", "target_eur": "125000"}]
+    # Emptied: an empty table, not the old rows.
+    saas.sheets[SHEET_ID]["Q4 Targets"] = [["Region", "Target (EUR)", "Owner"]]
+    assert syncs.run_now(OWNER, "q4-targets", wait=True)["status"] == "ok"
+    assert trino("SELECT count(*) AS n FROM lake.sales.q4_targets") == [{"n": 0}]
+    # A public sheet, by API key; a column that is not there is reported, not guessed.
+    saas.sheets[SHEET_ID]["Public"] = [["Region", "Target (EUR)"], ["EU", 1]]
+    syncs.save(OWNER, {"name": "public-targets", "kind": "google_sheets", "object": f"{SHEET_ID}/Public",
+                       "fields": ["region", "owner"], "target": "sales.public_targets", "secret_scope": "sheets-public"})
+    bad = syncs.run_now(OWNER, "public-targets", wait=True)
+    assert bad["status"] == "failed" and "no column owner" in bad["error"], bad
+    # A key the sheet does not know is refused there, and the run says so.
+    world["scopes"].put(OWNER, "sheets-public", "api_key", "AIza-not-the-key")
+    syncs.save(OWNER, {"name": "public-targets", "kind": "google_sheets", "object": f"{SHEET_ID}/Public",
+                       "fields": ["region"], "target": "sales.public_targets", "secret_scope": "sheets-public"},
+               name="public-targets")
+    denied = syncs.run_now(OWNER, "public-targets", wait=True)
+    assert denied["status"] == "failed" and "403" in denied["error"], denied
+    from cairn.pipelines.saas import SaasError
+
+    with pytest.raises(SaasError, match="spreadsheet id"):
+        syncs.save(OWNER, {"name": "bad-sheet", "kind": "google_sheets", "object": "no-slash", "fields": ["region"],
+                           "target": "sales.x", "secret_scope": "sheets-keys"})

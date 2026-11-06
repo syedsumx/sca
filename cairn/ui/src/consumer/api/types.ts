@@ -1475,7 +1475,7 @@ export interface Pipe {
     name: string;
     bucket: string;
     prefix: string;
-    format: 'csv' | 'json' | 'parquet';
+    format: 'csv' | 'json' | 'parquet' | 'xlsx' | 'files';
     target: string;
     create_table: boolean;
     enabled: boolean;
