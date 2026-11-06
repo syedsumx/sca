@@ -87,6 +87,7 @@ class Services:
     volumes: Optional[Any] = None
     saas: Optional[Any] = None
     reverse_syncs: Optional[Any] = None
+    ml_serving: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
     limits: Optional[Any] = None
@@ -1511,6 +1512,11 @@ def _build_data_access(s: Services) -> None:
             s.engine, lambda p, m: gw.may_view(p, m), lambda p, m: gw.may_manage(p, m), gw.owner, read_table,
             tell_ml, s.audit)
         gw.monitoring = s.ml_monitoring
+    # Managed model serving: registered versions deployed from Cairn, scaled with their load (CAIRN_ML_SERVING_RUNTIME).
+    if s.ml is not None:
+        from cairn.ml.serving import ModelServing, runtime_from_env
+
+        s.ml_serving = ModelServing(s.engine, runtime_from_env(), s.ml, s.audit)
     # Feature tables: lakehouse tables declared as ML features, in the catalog with their lineage.
     if s.graph is not None:
         from cairn.ml.features import FeatureTables

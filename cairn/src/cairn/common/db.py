@@ -137,6 +137,7 @@ def load_models() -> MetaData:
     from cairn.dataaccess import volumes as _volumes  # noqa: F401
     from cairn.pipelines import saas as _saas  # noqa: F401
     from cairn.pipelines import reverse_etl as _reverse_etl  # noqa: F401
+    from cairn.ml import serving as _ml_serving  # noqa: F401
     from cairn.sqlworkspace import reports as _bi_reports  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401

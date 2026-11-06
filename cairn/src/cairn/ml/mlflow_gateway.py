@@ -286,6 +286,10 @@ class MlflowGateway:
             raise MlError(f"model {name} is not served", 404)
         if not self.may_use(p, name):
             raise MlError(f"using model {name} needs {USE_ML_MODEL} on it", 403)
+        return await self.forward_invocation(p, name, url, body, content_type)
+
+    async def forward_invocation(self, p, name: str, url: str, body: bytes, content_type: str) -> tuple[int, dict, bytes]:
+        """One prediction from the model server at ``url``, for a caller already allowed: monitored and audited."""
         import httpx
         from starlette.concurrency import run_in_threadpool
 
@@ -309,6 +313,16 @@ class MlflowGateway:
         if self.audit is not None:
             self.audit.record("ml", "ml.model_invoked", p.urn, group_urn(name), {"name": name, "status": r.status_code})
         return r.status_code, headers, r.content
+
+    def registry_get(self, p, name: str, version: str) -> tuple[int, dict, bytes]:
+        """A registered model version, if ``p`` may see the model (MLflow's model-versions/get)."""
+        import httpx
+
+        if not (self.may_view(p, name) or self.may_use(p, name)):
+            return 404, {}, b""
+        r = httpx.get(f"{self.upstream}/api/2.0/mlflow/model-versions/get", params={"name": name, "version": version},
+                      timeout=30)
+        return r.status_code, {}, r.content
 
 
 USE_ML_MODEL = USE

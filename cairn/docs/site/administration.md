@@ -536,6 +536,30 @@ export MLFLOW_TRACKING_TOKEN=<your Cairn token>   # a person's, or a pipeline us
   - another person could neither see, change nor take the model until a policy let them see it, and seeing still did not let them change it;
   - predictions went through Cairn only for the owner, or with `USE_ML_MODEL`.
 
+### Managed model serving
+
+A registered model version is deployed from Cairn, scaled with its load, and invoked as the caller (`/v1/ml/deployments`, `cairn.ml.serving`).
+
+- **Deploying.** `POST /v1/ml/deployments` takes:
+  - `name`, `model`, and `version` (a registered version number);
+  - `min_replicas` (0 to scale to zero) and `max_replicas`;
+  - `target_concurrency` (requests in flight per replica, default 2) and `idle_minutes` (10).
+
+  It needs `MANAGE_ML_MODEL` on the model, or owning it. `PUT …/{name}` changes a deployment; a new version replaces its servers. `DELETE …/{name}` removes it. Unknown versions are refused (404).
+- **Invoking.** `POST /v1/ml/deployments/{name}/invocations` takes MLflow's scoring format. It needs `USE_ML_MODEL` on the model, checked on every call as the caller, and the call is monitored and audited like any served model (`X-Cairn-Inference-Id`). A deployment is listed and described only to those who may use the model. Its servers listen on localhost, reached only through Cairn.
+- **Scaling.**
+  - Cairn counts the requests it has in flight to each deployment. Every `CAIRN_ML_SCALE_SECONDS` (10) it records the average concurrency.
+  - It then scales the deployment to `ceil(concurrency / target_concurrency)` replicas, within the minimum and maximum: up at once, down one replica per tick.
+  - After `idle_minutes` without a call it goes to `min_replicas`. At zero, the next call starts a replica and waits for it, up to `CAIRN_ML_COLD_START_SECONDS` (180), then answers 503.
+  - Scaling is audited (`ml.model_deployed`, `ml.model_scaled`, `ml.model_undeployed`).
+- **Runtime.** `CAIRN_ML_SERVING_RUNTIME=process` runs MLflow's own model server (`mlflow models serve` from `CAIRN_ML_SERVING_MLFLOW`, against `CAIRN_MLFLOW_URL`) as processes on the API's host, with `CAIRN_ML_SERVING_WORKERS` workers each. It therefore needs a single API replica. A Kubernetes runtime, with a Deployment per model deployment, is not available yet. Without a runtime, deployments are refused (503).
+- **Tested** with a real MLflow server and MLflow's model server (`tests/test_ml_e2e.py`):
+  - Someone without `MANAGE_ML_MODEL` could not deploy, and an unknown version was refused.
+  - The deployment started at zero, and the first call started a replica and returned the model's predictions.
+  - Someone without `USE_ML_MODEL` neither saw nor called it.
+  - Eight clients in parallel scaled it to its maximum of two replicas, both serving.
+  - Once idle, it went back to zero, and only the model's manager could delete it.
+
 ## Delta Lake tables
 
 Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).

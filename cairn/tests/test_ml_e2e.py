@@ -21,7 +21,7 @@ import pytest
 PY = os.environ.get("CAIRN_MLFLOW_PYTHON", "")
 pytestmark = pytest.mark.skipif(not (PY and os.path.exists(PY)), reason="needs CAIRN_MLFLOW_PYTHON (mlflow, scikit-learn)")
 
-TOKENS = {"tok-ana": "urn:li:corpuser:ana", "tok-bob": "urn:li:corpuser:bob"}
+TOKENS = {"tok-ana": "urn:li:corpuser:ana", "tok-bob": "urn:li:corpuser:bob", "tok-carol": "urn:li:corpuser:carol"}
 
 
 def port():
@@ -274,3 +274,114 @@ def test_a_served_model_is_monitored_for_drift_and_accuracy(ml, served):
         assert conn.execute(select(func.count()).select_from(ml_inferences).where(
             ml_inferences.c.inputs.is_not(None))).scalar() == 0
     assert call(ml, "tok-ana", "GET", "models/churn/monitor").status_code == 404
+
+
+@pytest.fixture(scope="module")
+def serving(ml):
+    """Managed serving (L63) on the same MLflow: deployments of registered versions, MLflow's model server as local
+    processes, scaled by Cairn."""
+    import uvicorn
+    from fastapi import FastAPI, HTTPException
+    from starlette.requests import Request
+
+    from cairn.common.audit import AuditLog
+    from cairn.common.security import Principal
+    from cairn.ml.serving import ModelServing, ProcessRuntime, build_serving_router
+
+    os.environ.setdefault("CAIRN_ML_SERVING_LOG_DIR", ml["dir"])
+    ms = ModelServing(ml["engine"], ProcessRuntime(f"{os.path.dirname(PY)}/mlflow", ml["mlflow"]), ml["gw"],
+                      AuditLog(ml["engine"]))
+    ms.tick_s, ms.cold_s = 1.0, 150.0
+
+    def who(request: Request) -> Principal:
+        urn = TOKENS.get(request.headers.get("authorization", "").removeprefix("Bearer "))
+        if urn is None:
+            raise HTTPException(401, "sign in")
+        return Principal(urn, "token")
+    app = FastAPI()
+    app.include_router(build_serving_router(ms, who))
+    cp = port()
+    api = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=cp, timeout_keep_alive=75, log_level="warning"))
+    threading.Thread(target=api.run, daemon=True).start()
+    wait(f"http://127.0.0.1:{cp}/docs")
+    yield {"url": f"http://127.0.0.1:{cp}/v1/ml/deployments", "ms": ms}
+    for d in list(ms.runtime.procs):
+        ms.runtime.scale({"id": d}, 0)
+    api.should_exit = True
+
+
+def dep(serving, token, method, path="", **kw):
+    return httpx.request(method, serving["url"] + path, headers={"Authorization": f"Bearer {token}"}, timeout=200, **kw)
+
+
+def test_a_registered_model_is_deployed_scales_with_load_and_is_invoked_as_the_caller(ml, serving):
+    from concurrent.futures import ThreadPoolExecutor
+
+    ms = serving["ms"]
+    rows = {"dataframe_split": {"columns": ["tenure", "spend"], "data": [[2, 6], [35, 65]]}}
+    body = {"name": "churn-prod", "model": "churn", "version": "1", "min_replicas": 0, "max_replicas": 2,
+            "target_concurrency": 1, "idle_minutes": 1}
+    # Deploying needs MANAGE_ML_MODEL (ana owns churn; carol has no grant); an unknown version is refused.
+    assert dep(serving, "tok-carol", "POST", json=body).status_code == 403
+    assert dep(serving, "tok-ana", "POST", json={**body, "version": "99"}).status_code == 404
+    r = dep(serving, "tok-ana", "POST", json=body)
+    assert r.status_code == 201, r.text
+    assert (r.json()["replicas"], r.json()["running"]) == (0, 0)              # scaled to zero until used
+    # The first call starts a replica and waits for it; predictions are the model's.
+    r = dep(serving, "tok-ana", "POST", "/churn-prod/invocations", json=rows)
+    assert r.status_code == 200, r.text
+    assert r.json()["predictions"] == [1, 0] and len(r.headers["x-cairn-inference-id"]) == 32
+    assert dep(serving, "tok-ana", "GET", "/churn-prod").json()["running"] == 1
+    # Invoked as the caller: carol has no USE_ML_MODEL and neither sees nor calls it.
+    assert dep(serving, "tok-carol", "POST", "/churn-prod/invocations", json=rows).status_code == 403
+    assert dep(serving, "tok-carol", "GET", "/churn-prod").status_code == 404
+    # Sustained concurrent load: the deployment scales to its maximum.
+    ms.sample()
+    stop = time.time() + 4
+
+    def hammer():
+        n = 0
+        while time.time() < stop:
+            assert dep(serving, "tok-ana", "POST", "/churn-prod/invocations", json=rows).status_code == 200
+            n += 1
+        return n
+    with ThreadPoolExecutor(8) as pool:
+        futs = [pool.submit(hammer) for _ in range(8)]
+        time.sleep(3)
+        ms.sample()                                    # concurrency measured while the load runs
+        assert sum(f.result() for f in futs) > 8
+    assert ms.autoscale()["churn-prod"] == 2
+    end = time.time() + 120
+    while time.time() < end and len(ms.runtime.endpoints(ms._get("churn-prod"))) < 2:
+        time.sleep(1)
+    assert len(ms.runtime.endpoints(ms._get("churn-prod"))) == 2
+    assert dep(serving, "tok-ana", "POST", "/churn-prod/invocations", json=rows).status_code == 200
+    # Idle past idle_minutes: one replica at a time back to zero.
+    from sqlalchemy import update
+
+    from cairn.ml.serving import model_deployments
+    ms.last_request.clear()
+    with ml["engine"].begin() as conn:
+        conn.execute(update(model_deployments).where(model_deployments.c.name == "churn-prod")
+                     .values(last_request_ms=int(time.time() * 1000) - 120_000))
+    ms.sample()
+    assert ms.autoscale()["churn-prod"] == 0 and ms.runtime.running(ms._get("churn-prod")) == 0
+    # Only those who may manage the model delete the deployment.
+    assert dep(serving, "tok-carol", "DELETE", "/churn-prod").status_code in (403, 404)
+    assert dep(serving, "tok-ana", "DELETE", "/churn-prod").status_code == 204
+    from cairn.common.audit import AuditLog
+
+    actions = {e["action"] for e in AuditLog(ml["engine"]).entries(category="ml", limit=500)}
+    assert {"ml.model_deployed", "ml.model_scaled", "ml.model_undeployed", "ml.model_invoked"} <= actions
+
+
+def test_the_scaling_rule():
+    from cairn.ml.serving import desired_replicas as want
+
+    assert want(0, 2, 0, 0, 4, idle=True) == 0                    # idle: the minimum
+    assert want(0, 2, 3, 1, 4, idle=True) == 1
+    assert want(5, 2, 1, 0, 4, idle=False) == 3                   # up at once: ceil(5 / 2)
+    assert want(50, 2, 1, 0, 4, idle=False) == 4                  # never past the maximum
+    assert want(0.5, 2, 4, 0, 4, idle=False) == 3                 # down one at a time
+    assert want(0, 2, 1, 0, 4, idle=False) == 1                   # in use lately: not below one
+    assert want(0.1, 2, 0, 0, 4, idle=False) == 1                 # traffic from zero: one
