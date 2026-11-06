@@ -211,17 +211,21 @@ class DataAccessService:
         return out
 
     def _filter_tables(self, actor: str, source: Source, tree: exp.Expression, tables: list[exp.Table]) -> exp.Expression:
-        """Each filtered table becomes ``(SELECT * FROM table WHERE filters) AS <its alias or name>``."""
+        """Each filtered table becomes ``(SELECT * FROM table WHERE filters) AS <its alias or name>``.
+
+        The table and its alias keep the identifiers as written (quoted or not: engines fold unquoted names, e.g.
+        Snowflake to upper case) and the table keeps its other clauses (time travel, sampling)."""
         if self.row_filters is None or ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
             return tree
         for t in tables:
             cond = self._conditions(actor, source.urn(t.db or "", t.name, t.catalog or None), source.dialect)
             if cond is None:
                 continue
-            alias = t.alias or t.name
-            bare = exp.table_(t.name, db=t.db or None, catalog=t.catalog or None, quoted=True)
+            alias = t.args.get("alias")
+            bare = t.copy()
+            bare.set("alias", None)
             t.replace(exp.Subquery(this=exp.select("*").from_(bare).where(cond),
-                                   alias=exp.TableAlias(this=exp.to_identifier(alias, quoted=True))))
+                                   alias=alias.copy() if alias is not None else exp.TableAlias(this=t.this.copy())))
         return tree
 
     # ---- running ----------------------------------------------------------------------

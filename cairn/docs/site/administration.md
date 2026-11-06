@@ -202,6 +202,7 @@ The fail-closed hold check is tested in `tests/test_trino_access.py`.
 Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,
 `cairn_consents`; the privacy officer's guide is *Governance → Consent*). What operators need to know:
 
+- **Purposes** are made with `POST /cairn/api/governance/consent/purposes` and changed with `PUT .../purposes/{id}`. A new purpose whose name gives an existing id is refused (409), so it cannot take over another purpose's members and records.
 - **Identity for the consent platform.** Give it a service identity with `MANAGE_CONSENT` only. It posts records
   to `/cairn/api/governance/consent/purposes/{id}/records`, up to 10,000 subjects per call.
 - **Where filters run.** Trino applies them as row filters through Cairn's access control. On direct warehouse
@@ -616,7 +617,7 @@ A registered model version is deployed from Cairn, scaled with its load, and inv
       model servers so they can fetch their models.
     - **Rights.** Cairn's account gets a Role for those three kinds in that namespace only.
     - **Reaching the cluster from outside.** When Cairn runs outside the cluster, set
-      `CAIRN_ML_SERVING_K8S_API`, `_TOKEN_FILE` and `_CA_FILE`, plus `_ACCESS=node-port` and `_NODE_ADDRESS`.
+      `CAIRN_ML_SERVING_K8S_API`, `_TOKEN_FILE` and `_CA_FILE`, plus `_ACCESS=node-port`. Cairn then sends each request to a node that runs a ready model server (its Role may list the namespace's pods): the Service keeps the caller's address, so the network policy still admits only Cairn, and only such a node answers.
 - **Tested** with a real MLflow server and MLflow's model server (`tests/test_ml_e2e.py`):
   - Someone without `MANAGE_ML_MODEL` could not deploy, and an unknown version was refused.
   - The deployment started at zero, and the first call started a replica and returned the model's predictions.
@@ -1999,10 +2000,11 @@ A multi-table transaction changes every table or none.
   - **Its data.** It has no lakehouse tables, so it uploads a file: `PUT .../partner/data/<table>`, with `Content-Type: text/csv` or `application/vnd.apache.parquet`, up to 100 MB.
     - Cairn writes it to `<catalog>.cleanrooms.<room>__<partner>__<table>`, through the catalog pipes write to (`CAIRN_PIPES_CATALOG`; without one, uploads are refused). `<catalog>` is `CAIRN_CLEANROOM_CATALOG`, Trino's name for the lakehouse.
     - The table joins the room, and only the room's identity reads it. The other parties can't read it directly.
-    - An upload replaces that table's earlier contents. Column names are lowercase letters, digits and `_`.
+    - An upload replaces that table's earlier contents, columns included. Column names are lowercase letters, digits and `_`.
+    - A table name that another party or another room already holds is refused (409). Names joined with `__` can coincide, and no upload writes over another room's data.
   - **Uploads are for partners.** Cairn parties bring their tables with `POST .../tables`. Every partner action is audited with `partner:<name>` as the actor.
 - **Differential privacy.** A room created with `"privacy": {"epsilon": 1, "budget": 10}` releases only noisy answers.
-  - **What a template may return.** Group keys, `count(...)` and `sum(column)`, and each summed column needs `bounds` in the template (`"bounds": {"b.spend": [0, 100]}`). Other aggregates, such as `max` and `avg`, are refused when the template is proposed. Compute an average from a noisy sum and a noisy count.
+  - **What a template may return.** Group keys, `count(...)` and `sum(column)`, and each summed column needs `bounds` in the template (`"bounds": {"b.spend": [0, 100]}`). Other aggregates, such as `max` and `avg`, are refused when the template is proposed. Compute an average from a noisy sum and a noisy count. So are `HAVING`, `ORDER BY`, `LIMIT` and aggregates in subqueries, CTEs or `WHERE`: they act on the true answers (which groups appear, in what order), so sort and filter the noisy result instead.
   - **Each run** clips the summed values to their bounds and takes `epsilon` from the budget. The epsilon is split between the result's aggregates, and each gets Laplace noise scaled to its sensitivity: 1 for a count, the larger bound for a sum.
     - Counts come back as whole numbers, never below 0, and sums rounded to cents.
     - The answer states the noise scales, the epsilon spent and the epsilon left.
@@ -2822,6 +2824,7 @@ A standby region keeps a copy of the lakehouse, so losing the primary region cos
   1. Promotes each standby PostgreSQL (`pg_promote`) and waits until it takes writes. That covers the catalog's database and Cairn's own, whether they are on one cluster or two.
   2. Points DNS at the standby. Each record is replaced by an RFC 2136 update signed with a TSIG key, then read back from the server. This works with BIND, PowerDNS, Knot and Windows DNS. For a hosted DNS service, use its own health-checked failover records instead.
   3. Writes its state file. While the file exists it does nothing more, and it never fails back on its own. Rebuild the old primary as the new standby (step 6), then remove the file.
+  - **A failover stopped half-way** (say, the DNS server did not answer after the databases were promoted) is finished in the next round, whatever the primary does by then. The state file records it before anything changes. Sending clients back to a returned primary would leave two regions taking writes.
 - **Then** run step 4 (reconcile) and start Cairn Catalog and Cairn in the standby, or keep them running there against the standby database: they reconnect once it is promoted.
 - **Settings** (YAML):
   - `primary_checks` and `standby_checks`: `http(s)://` URLs (any status below 500 counts) or `tcp://host:port`.

@@ -201,12 +201,22 @@ class CleanRooms:
             raise RoomError("column names: lowercase letters, digits and _, each once")
         arrow = arrow.rename_columns(cols)
         local = f"{name}__{party.split(':', 1)[1].replace('-', '_')}__{table}"
-        self.write_table(f"cleanrooms.{local}", arrow)
         full = f"{self.default_catalog}.cleanrooms.{local}"
+        # Names joined with "__" can coincide (room a__b's partner c and room a's partner b--c): never write over
+        # a table another party or another room holds.
+        if room["tables"].get(full) not in (None, party) or self._held_elsewhere(name, full):
+            raise RoomError(f"the table name {local} is taken by another party's upload: choose another name", 409)
+        self.write_table(f"cleanrooms.{local}", arrow)
         room["tables"][full] = party
         self._save(room, "clean_room.data_uploaded", actor, {"table": full, "rows": arrow.num_rows,
                                                              "columns": cols, "bytes": len(data)})
         return {"table": full, "rows": arrow.num_rows, "columns": cols}
+
+    def _held_elsewhere(self, name: str, full: str) -> bool:
+        """Is ``full`` among another room's tables."""
+        with self.engine.connect() as conn:
+            others = conn.execute(select(rooms.c.tables).where(rooms.c.name != name)).all()
+        return any(full in json.loads(t or "{}") for (t,) in others)
 
     def tables_of(self, name: str) -> set[str]:
         """The tables the room's identity may read (catalog.schema.table)."""
@@ -259,6 +269,15 @@ class CleanRooms:
             raise RoomError(f"undeclared parameter :{sorted(used - declared)[0]}")
         if room.get("privacy"):
             _dp_outputs(tree, bounds or {})
+            # Only the noised result leaves: a HAVING, ORDER BY or LIMIT acts on the true aggregates (which groups
+            # appear, and in what order), and an aggregate in a subquery or CTE is released un-noised.
+            if any(tree.args.get(k) is not None for k in ("having", "order", "limit", "offset")):
+                raise RoomError("under differential privacy a template has no HAVING, ORDER BY or LIMIT "
+                                "(they act on the true answers): sort and filter the noisy result instead")
+            released = {id(a) for e in tree.expressions for a in e.find_all(exp.AggFunc)}
+            if any(id(a) not in released for a in tree.find_all(exp.AggFunc)):
+                raise RoomError("under differential privacy aggregates are only in the template's result "
+                                "(not in subqueries, CTEs or WHERE)")
 
     def _bounds(self, room: dict, body: dict) -> dict:
         bounds = body.get("bounds") or {}
@@ -368,13 +387,19 @@ def _digest(secret: str) -> str:
 
 
 def catalog_writer(props: dict) -> Callable[[str, Any], None]:
-    """``write_table`` over a pyiceberg REST catalog: creates ``namespace.table`` when missing, replaces its rows."""
+    """``write_table`` over a pyiceberg REST catalog: creates ``namespace.table`` when missing, replaces its rows
+    (and its columns, when an upload brings other ones than the last)."""
     def write(target: str, data) -> None:
         from pyiceberg.catalog.rest import RestCatalog
 
         from cairn.pipelines.pipes import open_table
 
-        open_table(RestCatalog("cairn-cleanrooms", **props), target, data.schema, True).overwrite(data)
+        cat = RestCatalog("cairn-cleanrooms", **props)
+        try:
+            open_table(cat, target, data.schema, True).overwrite(data)
+        except ValueError:                      # pyiceberg: the data's schema is not the table's
+            cat.purge_table(tuple(target.split(".")))
+            open_table(cat, target, data.schema, True).overwrite(data)
     return write
 
 

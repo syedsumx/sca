@@ -36,6 +36,9 @@ sample_sets = Table(
 
 NAMESPACE = "samples"
 SEED = 20261106
+# The starter queries' owner, whoever loads the set: any administrator can then replace or remove them (a saved
+# query is changed and deleted by its owner only).
+OWNER = "urn:li:corpuser:cairn-samples"
 REGIONS = ["EU", "US", "APAC", "LATAM"]
 CATEGORIES = ["Outdoor", "Kitchen", "Books", "Garden", "Toys", "Office"]
 FIRST = ["Ada", "Ben", "Chloe", "Dev", "Ema", "Finn", "Gita", "Hugo", "Iris", "Jon", "Kai", "Lena", "Milo", "Nia"]
@@ -205,7 +208,7 @@ class Samples:
         self._set_state(name, "removed", actor, {"tables": dropped, "queries": removed})
         return {"name": name, "tables_dropped": dropped, "queries_removed": removed}
 
-    def load_on_start(self, names: list[str], actor: str = "urn:li:corpuser:cairn-samples") -> list[str]:
+    def load_on_start(self, names: list[str], actor: str = OWNER) -> list[str]:
         """``CAIRN_SAMPLES_ON_START``: each named set, once per tenant; never again once loaded or removed."""
         done = []
         for name in names:
@@ -220,7 +223,7 @@ class Samples:
             return
         from cairn.common.proposals import audit_stamp, make_mcp
 
-        stamp = audit_stamp("urn:li:corpuser:cairn-samples")
+        stamp = audit_stamp(OWNER)
         mcps = []
         for table, (desc, cols) in DOCS.items():
             urn = self.urn(NAMESPACE, table)
@@ -237,7 +240,7 @@ class Samples:
         self._remove_queries(actor)
         out = []
         for qname, desc, sql in QUERIES:
-            q = self.workspace.save(actor, {"name": qname, "description": desc, "sql": sql.format(cat=self.trino_catalog),
+            q = self.workspace.save(OWNER, {"name": qname, "description": desc, "sql": sql.format(cat=self.trino_catalog),
                                             "connection": self.connection, "shared": True})
             out.append(q["id"])
         return out
@@ -247,9 +250,9 @@ class Samples:
             return 0
         names = {q[0] for q in QUERIES}
         removed = 0
-        for q in self.workspace.saved(actor):
-            if q.get("name") in names:
-                self.workspace.delete(actor, q["id"])
+        for q in self.workspace.saved(OWNER):             # the set's own queries, not people's of the same name
+            if q.get("name") in names and q.get("owner") == OWNER:
+                self.workspace.delete(OWNER, q["id"])
                 removed += 1
         return removed
 

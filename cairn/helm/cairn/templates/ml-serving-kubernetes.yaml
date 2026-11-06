@@ -18,6 +18,9 @@ rules:
   - apiGroups: [""]
     resources: ["services"]
     verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]                   # node-port access: which nodes run a ready model server
+    verbs: ["get", "list"]
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "create", "patch", "update", "delete"]

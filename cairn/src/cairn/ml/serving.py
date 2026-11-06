@@ -172,8 +172,8 @@ class KubeRuntime:
             raise ValueError("model serving on Kubernetes needs Cairn's MLflow (CAIRN_MLFLOW_URL)")
         if not ingress_from:
             raise ValueError("model serving on Kubernetes needs the peers that may reach the models (CAIRN_ML_SERVING_K8S_INGRESS_FROM)")
-        if access not in ("cluster-ip", "node-port") or (access == "node-port" and not node_address):
-            raise ValueError("CAIRN_ML_SERVING_K8S_ACCESS: cluster-ip, or node-port with CAIRN_ML_SERVING_K8S_NODE_ADDRESS")
+        if access not in ("cluster-ip", "node-port"):
+            raise ValueError("CAIRN_ML_SERVING_K8S_ACCESS: cluster-ip or node-port")
         self.namespace, self.tracking_uri, self.image, self.ingress_from = namespace, tracking_uri, image, ingress_from
         self.token_file = token_file or f"{SA}/token"
         self.verify: Any = ca_file or (f"{SA}/ca.crt" if os.path.exists(f"{SA}/ca.crt") else True)
@@ -286,8 +286,19 @@ class KubeRuntime:
         if not dep or int((dep.get("status") or {}).get("readyReplicas") or 0) < 1:
             return []
         if self.access == "node-port":
+            # The Service keeps the caller's address (externalTrafficPolicy Local, so the NetworkPolicy sees Cairn),
+            # and then only a node running a ready pod answers: send the requests to those nodes.
             svc = self._call("GET", self._paths(d)["Service"])
-            return [f"http://{self.node_address}:{svc['spec']['ports'][0]['nodePort']}"]
+            port = svc["spec"]["ports"][0]["nodePort"]
+            from urllib.parse import quote
+
+            selector = quote(f"{LABEL}={d['name']}")
+            pods = self._call("GET", f"/api/v1/namespaces/{self.namespace}/pods?labelSelector={selector}")
+            nodes = sorted({p["status"]["hostIP"] for p in pods.get("items", [])
+                            if p.get("status", {}).get("hostIP") and any(
+                                c.get("type") == "Ready" and c.get("status") == "True"
+                                for c in p["status"].get("conditions") or [])})
+            return [f"http://{n}:{port}" for n in nodes]
         return [f"http://{self._name(d)}.{self.namespace}.svc:{SERVE_PORT}"]     # the Service spreads the requests
 
     def delete(self, d: dict) -> None:

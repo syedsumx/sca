@@ -74,6 +74,12 @@ def ids(s, actor, sql):
 def _check(s, schema: str):
     cs = s.consent
     cs.put_purpose(DPO, PurposeIn(name="Marketing", identifier="email", members={"groups": [MARKETING]}))
+    # A second purpose of the same name never takes over the first (its members, its records): 409.
+    from cairn.governance.consent import ConsentError
+
+    with pytest.raises(ConsentError) as dup:
+        cs.put_purpose(DPO, PurposeIn(name="Marketing", identifier="email", mode="opt_in", members={"users": [ADMIN]}))
+    assert dup.value.status == 409
     cs.record(SYNC, "marketing", RecordsIn(subjects=[{"value": " KIM@acme.com", "state": "withdrawn"},
                                                      {"value": "lee@acme.com", "state": "granted"}], source="crm"))
     q = f"SELECT id FROM {schema}.users ORDER BY id"

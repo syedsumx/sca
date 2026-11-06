@@ -126,7 +126,7 @@ class VectorIndexes:
         """``may_read(principal, table) -> (read, restricted)``: Cairn's decision on the source table."""
         self.engine, self.catalog_props, self.embedder, self.audit = engine, catalog, embedder, audit
         self.may_read = may_read
-        self._cache: dict[str, tuple] = {}       # index id -> (snapshot, matrix, rows, ivf or None)
+        self._cache: dict[str, tuple] = {}       # index id -> (snapshot, matrix, rows, ivf or None, ann_snapshot)
         self._locks: dict[str, threading.Lock] = {}
 
     def _catalog(self):
@@ -359,7 +359,8 @@ class VectorIndexes:
         snap = vt.current_snapshot()
         sid = snap.snapshot_id if snap else 0
         hit = self._cache.get(ix["id"])
-        if hit and hit[0] == sid:
+        # Read again when the recorded IVF index changed (a refresh elsewhere writes the vectors, then the index).
+        if hit and hit[0] == sid and hit[4] == ix.get("ann_snapshot"):
             return hit[1], hit[2], hit[3]
         rows = vt.scan(selected_fields=("key", "chunk", "text", "embedding")).to_arrow().to_pylist()
         m = np.array([r["embedding"] for r in rows], dtype=np.float32) if rows else np.zeros((0, 1), np.float32)
@@ -379,7 +380,7 @@ class VectorIndexes:
                     ivf = (z["centres"], members)
             except Exception as e:  # noqa: BLE001 - a missing or unreadable index: exact search
                 logger.warning("vector index %s: its IVF index could not be read (%s); searching exactly", ix["name"], e)
-        self._cache[ix["id"]] = (sid, m, meta, ivf)
+        self._cache[ix["id"]] = (sid, m, meta, ivf, ix.get("ann_snapshot"))
         return m, meta, ivf
 
     def search(self, p, name: str, q: str, k: int = 10) -> dict:

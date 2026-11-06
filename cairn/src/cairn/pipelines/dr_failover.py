@@ -255,6 +255,12 @@ class Watcher:
     def tick(self) -> dict:
         """One round: a report of what was seen and done."""
         if (state := self.done()) is not None:
+            if state.get("in_progress"):
+                # A failover that started (databases may already take writes) is finished whatever the primary
+                # does now: sending clients back to it would leave two regions taking writes.
+                log.warning("finishing the failover started at %s", state.get("started_at"))
+                self.first_failed_at = self.first_failed_at or state.get("primary_lost_since")
+                return self.fail_over()
             return {"action": "none", "why": "already failed over (remove the state file once the old primary is rebuilt)",
                     "state": state}
         down = [u for u in self.cfg.primary_checks if not self.probe(u, self.cfg.timeout_s)]
@@ -272,16 +278,21 @@ class Watcher:
             return {"action": "refused", "why": why}
         return self.fail_over()
 
-    def fail_over(self) -> dict:
-        started = self.clock()
-        promoted = [promote(url) for url in self.cfg.standby_databases]
-        records = point_dns(self.cfg.dns)
-        state = {"failed_over_at": self.clock(), "primary_lost_since": self.first_failed_at, "databases_promoted": promoted,
-                 "dns": records, "seconds": round(self.clock() - started, 2)}
+    def _write_state(self, state: dict) -> None:
         tmp = f"{self.cfg.state_file}.tmp"
         with open(tmp, "w") as f:
             json.dump(state, f)
         os.replace(tmp, self.cfg.state_file)
+
+    def fail_over(self) -> dict:
+        started = self.clock()
+        # Recorded before anything changes: a round that fails half-way is resumed, never abandoned (see tick).
+        self._write_state({"in_progress": True, "started_at": started, "primary_lost_since": self.first_failed_at})
+        promoted = [promote(url) for url in self.cfg.standby_databases]
+        records = point_dns(self.cfg.dns)
+        state = {"failed_over_at": self.clock(), "primary_lost_since": self.first_failed_at, "databases_promoted": promoted,
+                 "dns": records, "seconds": round(self.clock() - started, 2)}
+        self._write_state(state)
         log.warning("failed over to the standby: %s", state)
         return {"action": "failed-over", **state}
 

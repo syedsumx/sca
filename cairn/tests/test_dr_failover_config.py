@@ -82,3 +82,28 @@ def test_a_failed_round_is_retried_and_the_next_one_finishes(raw, monkeypatch):
         return {"action": "failed-over"}
     monkeypatch.setattr(w, "fail_over", flaky)
     assert w.run() == 0 and len(tries) == 2
+
+
+def test_a_failover_stopped_half_way_is_finished_even_if_the_primary_returns(raw, monkeypatch):
+    """Promoted, then the DNS update failed: the next round finishes the failover (DNS to the standby) whatever the
+    primary does now; sending clients back to it would leave two regions taking writes."""
+    from cairn.pipelines import dr_failover
+
+    up = {"tcp://a:1": False, "https://a/health": False, "http://b/health": True}
+    w = Watcher(Config.parse({**raw, "standby_databases": [], "failures": 2}), probe_fn=lambda u, t: up[u])
+    calls = {"dns": 0}
+
+    def dns(_d):
+        calls["dns"] += 1
+        if calls["dns"] == 1:
+            raise FailoverError("DNS update of api failed: Timeout")
+        return ["api A 192.0.2.2"]
+    monkeypatch.setattr(dr_failover, "point_dns", dns)
+    assert w.tick()["action"] == "none"
+    with pytest.raises(FailoverError):
+        w.tick()                                           # the second round fails over, and the DNS step fails
+    assert json.load(open(raw["state_file"]))["in_progress"] is True
+    up["tcp://a:1"] = up["https://a/health"] = True        # the old primary answers again
+    done = w.tick()
+    assert done["action"] == "failed-over" and done["dns"] == ["api A 192.0.2.2"] and calls["dns"] == 2
+    assert w.tick()["action"] == "none"                    # and then never again

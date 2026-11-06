@@ -2174,6 +2174,11 @@ def test_a_differentially_private_clean_room_adds_noise_and_stops_at_its_budget(
                 cr.propose(ana, "dp_reach", {"name": "bad", "sql": bad, "bounds": {"m.spend": [0, 50]}})
         with pytest.raises(RoomError, match="needs bounds"):
             cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql})
+        # Nothing acts on the true answers: no HAVING, ORDER BY or LIMIT, no aggregate outside the result.
+        for bad in [sql + " HAVING sum(m.spend) > 1000", sql + " ORDER BY spend DESC LIMIT 1",
+                    "WITH x AS (SELECT avg(spend) AS v FROM lake.dp.members) SELECT x.v, count(*) AS n FROM x GROUP BY x.v"]:
+            with pytest.raises(RoomError, match="under differential privacy"):
+                cr.propose(ana, "dp_reach", {"name": "bad", "sql": bad, "bounds": {"m.spend": [0, 50]}})
         cr.propose(ana, "dp_reach", {"name": "by_region", "sql": sql, "bounds": {"m.spend": [0, 50]}})
         cr.approve(bob, "dp_reach", "by_region")
         answers = [cr.run_template(bob, "dp_reach", "by_region") for _ in range(3)]
@@ -2250,6 +2255,14 @@ def test_an_outside_party_joins_a_clean_room_with_its_own_upload(trino, cairn, l
         assert httpx.put(f"{base}/data/exposed", auth=auth, content="x", headers={"Content-Type": "text/plain"}).status_code == 415
         with pytest.raises(RoomError, match="uploads are for outside parties"):
             cr.upload(ana, "ads_lift", "mine", b"a\n1\n", "csv")
+        # Names joined with "__" can coincide: room co__lab's partner mid and room co's partner lab--mid both make
+        # cleanrooms.co__lab__mid__d. The second is refused, so no party writes over another room's data.
+        cr.create(ana, {"name": "co__lab", "parties": [ana, "partner:mid"], "min_group": 2})
+        cr.create(ana, {"name": "co", "parties": [ana, "partner:lab--mid"], "min_group": 2})
+        assert cr.upload("partner:mid", "co__lab", "d", b"email\nx@x\n", "csv")["table"] == "lake.cleanrooms.co__lab__mid__d"
+        with pytest.raises(RoomError, match="taken by another party"):
+            cr.upload("partner:lab--mid", "co", "d", b"email\ny@y\n", "csv")
+        assert trino("SELECT email FROM lake.cleanrooms.co__lab__mid__d", user="cleanroom-co__lab") == [{"email": "x@x"}]
         lake_table = table
         with pytest.raises(RuntimeError, match="Access Denied"):
             trino(f"SELECT count(*) AS n FROM {lake_table}", user="ana")

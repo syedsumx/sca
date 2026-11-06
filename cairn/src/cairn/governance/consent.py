@@ -153,12 +153,14 @@ class ConsentService:
     def put_purpose(self, actor: str, body: PurposeIn, pid: Optional[str] = None) -> dict:
         if body.identifier not in self.identifiers:
             raise ConsentError(f"identifier: one of {sorted(self.identifiers)}")
-        pid = pid or self._slug(body.name)
+        creating, pid = pid is None, pid or self._slug(body.name)
         row = {"name": body.name, "description": body.description, "identifier": body.identifier, "mode": body.mode,
                "members": body.members.model_dump(), "enabled": body.enabled, "updated_by": actor,
                "updated_ms": _now()}
         with self.engine.begin() as conn:
             if conn.execute(select(consent_purposes.c.id).where(consent_purposes.c.id == pid)).first():
+                if creating:     # a new purpose never takes over one of the same name (its members, its records)
+                    raise ConsentError(f"a purpose {pid} exists: change it with PUT /governance/consent/purposes/{pid}", 409)
                 conn.execute(update(consent_purposes).where(consent_purposes.c.id == pid).values(**row))
             else:
                 conn.execute(insert(consent_purposes).values(id=pid, **row))
