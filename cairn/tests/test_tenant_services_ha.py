@@ -75,6 +75,18 @@ class Cluster:
         return subprocess.run(["docker", "exec", f"{self.net}-{self.name}-{i}", *cmd], capture_output=True, text=True,
                               timeout=timeout)
 
+    def diagnose(self) -> str:
+        """Each node's state and the end of its log, for a failure message (a node that exited is gone: --rm)."""
+        out = []
+        for i in range(3):
+            name = f"{self.net}-{self.name}-{i}"
+            state = subprocess.run(["docker", "inspect", "-f", "{{.State.Status}} oom={{.State.OOMKilled}}", name],
+                                   capture_output=True, text=True)
+            logs = subprocess.run(["docker", "logs", "--tail", "15", name], capture_output=True, text=True)
+            out.append(f"--- {self.name}-{i}: {(state.stdout or state.stderr).strip()}\n"
+                       f"{(logs.stdout + logs.stderr).strip()[-2500:]}")
+        return "\n".join(out)
+
     def close(self) -> None:
         for i in range(3):
             self.stop(i)
@@ -185,7 +197,11 @@ def test_opensearch_survives_a_lost_node_with_every_document(opensearch):
         r = o.exec(i, *cmd)
         return json.loads(r.stdout) if r.returncode == 0 and r.stdout.strip().startswith("{") else None
 
-    health = wait(lambda: (h := curl(1, "/_cluster/health")) and h.get("number_of_nodes") == 3 and h, "a three-node cluster")
+    try:
+        health = wait(lambda: (h := curl(1, "/_cluster/health")) and h.get("number_of_nodes") == 3 and h,
+                      "a three-node cluster")
+    except AssertionError as e:                      # say why: nodes gone, not started, or not joined
+        raise AssertionError(f"{e}\nlast health: {curl(1, '/_cluster/health')}\n{o.diagnose()}") from None
     assert health["status"] in ("green", "yellow")
     # An index made as Cairn Core makes them (one replica, its default), with documents in it.
     assert curl(1, "/cairn_datasetindex_v2", "PUT", {"settings": {"number_of_shards": 3, "number_of_replicas": 1}})["acknowledged"]
