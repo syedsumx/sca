@@ -46,17 +46,17 @@ class Trino:
     """A Trino server in a container on the host network, with catalogs `lake` (admin token) and
     `lake_ro` (a read-only token)."""
 
-    def __init__(self, stack):
+    def __init__(self, stack, tag: str = ""):
         self.dir = tempfile.mkdtemp(prefix="trino-")
         os.makedirs(f"{self.dir}/catalog")
         open(f"{self.dir}/catalog/lake.properties", "w").write(catalog_props(stack, ADMIN_TOKEN))
         open(f"{self.dir}/catalog/lake_ro.properties", "w").write(catalog_props(stack, READER_TOKEN))
         os.chmod(self.dir, 0o755)
-        self.port = 18000 + os.getpid() % 1000
+        self.port = 18000 + (os.getpid() + (500 if tag else 0)) % 1000   # each tag its own port and node
         open(f"{self.dir}/config.properties", "w").write(
             f"coordinator=true\nnode-scheduler.include-coordinator=true\nhttp-server.http.port={self.port}\n"
             f"discovery.uri=http://127.0.0.1:{self.port}\n")
-        self.name = f"cairn-trino-{os.getpid()}"
+        self.name = f"cairn-trino-{tag}{os.getpid()}"
         subprocess.run(["docker", "run", "-d", "--rm", "--name", self.name, "--network", "host",
                         "-v", f"{self.dir}/catalog:/etc/trino/catalog:ro",
                         "-v", f"{self.dir}/config.properties:/etc/trino/config.properties:ro", TRINO],

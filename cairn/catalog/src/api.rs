@@ -762,7 +762,7 @@ impl Catalog {
                 match m {
                     Method::GET => {
                         let d = self.need(&principal, &levels, &name, Need::Read).await?;
-                        let row = self.db.table(&levels, &name)?;
+                        let row = table_in(&self.db, &levels, &name)?;
                         self.load_result(
                             &row.metadata_location,
                             serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?,
@@ -773,7 +773,7 @@ impl Catalog {
                     }
                     Method::HEAD => {
                         self.need(&principal, &levels, &name, Need::View).await?;
-                        self.db.table(&levels, &name)?;
+                        table_in(&self.db, &levels, &name)?;
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
                     Method::POST => {
@@ -1051,7 +1051,7 @@ impl Catalog {
                         "config": self.client_config(&location, false).await?}),
             ));
         }
-        let loc = MetadataLocation::new_with_metadata(metadata.location(), &metadata).to_string();
+        let loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
         self.store.put_new(&loc, json.as_bytes().to_vec(), "application/json").await?;
         let change = Change {
             namespace: db::ns_key(levels),
@@ -1166,7 +1166,7 @@ impl Catalog {
             .build()
             .map_err(iceberg_err)?
             .metadata;
-        let clone_loc = MetadataLocation::new_with_metadata(metadata.location(), &metadata).to_string();
+        let clone_loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
         let clone_json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         self.store.put_new(&clone_loc, clone_json.as_bytes().to_vec(), "application/json").await?;
         // The source records what the clone shares, in the same commit.
@@ -1364,8 +1364,8 @@ impl Catalog {
         let metadata = builder.build().map_err(iceberg_err)?.metadata;
         self.resident(levels, metadata.location(), metadata.properties())?;
         let location = match base_location.as_deref().map(MetadataLocation::from_str) {
-            Some(Ok(cur)) => cur.with_next_version().with_new_metadata(&metadata),
-            _ => MetadataLocation::new_with_metadata(metadata.location(), &metadata),
+            Some(Ok(cur)) => cur.with_next_version().try_with_new_metadata(&metadata).map_err(iceberg_err)?,
+            _ => MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?,
         }
         .to_string();
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
@@ -1403,5 +1403,15 @@ impl Catalog {
                 Err(e.into())
             }
         }
+    }
+}
+
+/// A table looked up for loading: a missing namespace is reported as a missing table, as Iceberg's own catalogs do.
+/// Engines name a metadata table as `<namespace>.<table>.<metadata table>` (Spark's `t.snapshots`, `t.delete_files`)
+/// and try it as a table first: only "no such table" makes them read the metadata table instead.
+fn table_in(db: &db::Db, levels: &[String], name: &str) -> Result<db::TableRow, db::Error> {
+    match db.table(levels, name) {
+        Err(db::Error::NoSuchNamespace) => Err(db::Error::NoSuchTable),
+        other => other,
     }
 }

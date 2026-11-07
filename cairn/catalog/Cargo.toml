@@ -2,7 +2,7 @@
 name = "cairn-catalog"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "Apache-2.0"
 description = "Cairn Catalog: Cairn's Iceberg REST catalog"
 publish = false
@@ -16,7 +16,7 @@ hmac = "0.12"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
-iceberg = "0.10"
+iceberg = "0.11"
 percent-encoding = "2"
 postgres = "0.19"
 rand = "0.8"

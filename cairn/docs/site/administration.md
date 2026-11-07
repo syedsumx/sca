@@ -2645,6 +2645,45 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Teams** (`tests/test_spark_teams_k8s.py`, with the API server's quota controller). The chart's team objects were applied. A pod stating nothing got the team's default requests. A pod over the per-container cap was refused, and so were pods past the team's CPU and pod quotas. The drivers' account could manage pods and ConfigMaps in its namespace, not in another, and could not read Secrets.
   - **Airflow.** `CairnSparkApplicationOperator`, in the `cairn/airflow` image, created an application and followed it to `COMPLETED`, and failed on `FAILED` with the driver's error message. Executors had no identity.
 
+## Iceberg v3 tables
+
+Cairn Catalog keeps Iceberg format v3 tables:
+
+- A table is created as v3 with the property `format-version=3`, or upgraded in place with
+  `ALTER TABLE … SET TBLPROPERTIES ('format-version'='3')`. An upgrade cannot be undone, which is Iceberg's rule.
+- The catalog understands the v3 types (`variant`, `timestamp_ns`, `timestamptz_ns`) and keeps the v3
+  metadata: row lineage (`next-row-id`, each snapshot's first row id) and deletion vectors.
+
+Spark 4 with Iceberg 1.10 (the `cairn/spark` image) writes v3 tables:
+
+- deletes and merges with deletion vectors (`'write.delete.mode'='merge-on-read'`);
+- row lineage (`_row_id`, `_last_updated_sequence_number`);
+- `VARIANT` columns (`parse_json`, `variant_get`).
+
+Spark's metadata tables (`t.snapshots`, `t.delete_files`) work too: loading a table in a namespace that does not
+exist answers "no such table". Spark tries `<namespace>.<table>.<metadata table>` as a table before it reads the
+metadata table, so it needs that answer.
+
+**Readers.** What each engine can read depends on its version:
+
+| Reader | v3 tables | Deletion vectors | `VARIANT` |
+|---|---|---|---|
+| Spark 4 / Iceberg 1.10 | ✅ | ✅ | ✅ |
+| pyiceberg 0.12 (Cairn's own reads) | ✅ reads | ✅ applied on read | — |
+| Trino 476 (the pinned Trino, governed SQL) | ✅ | ❌ query fails | ❌ query fails |
+
+Iceberg's default delete mode is copy-on-write, which writes no deletion vectors. A v3 table written that way,
+without `VARIANT` columns, stays queryable through Trino and so through Cairn's governed SQL, masks and row
+filters.
+
+When a table does hold deletion vectors or `VARIANT` columns, a Trino query on it fails with Trino's own error.
+It never returns deleted rows. The weekly upgrade matrix tests newer Trino releases against such tables.
+
+Cairn's own writers (files and stream pipes, derived tables) write through pyiceberg, which does not write v3
+yet. Keep their target tables on v2. A pipe whose table was upgraded fails with "Cannot write manifest for table
+version: 3" until pyiceberg can.
+
+
 ## Table maintenance
 
 Cairn keeps lakehouse tables healthy with Iceberg's own procedures, run through Trino on a schedule:
