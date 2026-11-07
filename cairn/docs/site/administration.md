@@ -846,6 +846,44 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 - delete, which dropped the slot and the publication;
 - refusals of a table without a primary key and of a server without logical WAL.
 
+## Document sources: SharePoint and Google Drive
+
+A document source keeps a SharePoint (or OneDrive) folder, or a Google Drive folder, in a Cairn Store prefix. A
+files pipe on that prefix then indexes the files (text, pages, AI description and fields), so they join SQL, search
+and AI under Cairn's policies. Operators (`MANAGE_SYSTEM_OPERATIONS`) manage them at `/v1/document-sources`:
+
+```json
+{"name": "contracts", "kind": "sharepoint", "location": {"drive_id": "b!x…", "folder": "Contracts/2026"},
+ "bucket": "landing", "prefix": "sharepoint/contracts/", "secret_scope": "sharepoint-keys", "cron": "0 * * * *"}
+```
+
+- **SharePoint** (Microsoft Graph): keys `tenant_id`, `client_id` and `client_secret` (an app registration with
+  `Sites.Selected` granted on the site, or `Files.Read.All`); optionally `graph_url` and `login_url`.
+- **Google Drive**: `"location": {"folder_id": "…"}` and the key `service_account_json` (share the folder with the
+  service account as a viewer); optionally `base_url`. Google Docs, Sheets and Slides are exported as Word, CSV and
+  PowerPoint files; forms and other Google-only items are skipped.
+
+Each run (on its `cron`, or `POST …/<name>/run`) lists the folder and its subfolders and writes new and changed
+files (by ETag, checksum or modification time) to `<bucket>/<prefix><path>`. It removes the objects of files that
+were deleted or moved away, and writes a moved file at its new path. Files over `CAIRN_DOC_SOURCES_MAX_BYTES`
+(100 MB) are skipped and listed. The store is written with `CAIRN_DOC_SOURCES_STORE`
+(`{"endpoint", "access_key", "secret_key", "region"}`, a key that may write the sources' prefixes). The keys are
+read from the secret scope as the source's owner at every run, and never stored on the source or logged. A failed
+run is recorded on the source and audited. `GET …/<name>` lists the files kept.
+
+Who may read the files is decided in Cairn, not in SharePoint or Drive: everyone the files pipe's table is shared
+with sees every file synced. Point a source at a folder whose files that audience may see. Audited:
+`document_source.saved`, `document_source.deleted`, `document_source.synced` and `document_source.failed`.
+
+Tested with the real store, catalog and files pipe, against a local stand-in for Microsoft Graph and the Google
+Drive API (`tests/test_doc_sources_e2e.py`):
+
+- an app's sign-in, files in subfolders and on a second page, indexed with their text;
+- a changed file rewritten, a moved one written at its new path, a deleted one removed, a second run writing nothing;
+- a service account's signed token, a Google Doc exported as Word, a form skipped;
+- a file over the limit skipped;
+- a wrong secret and an unreadable scope failing the run.
+
 ## Mirrors from MySQL
 
 A connection whose URL is `mysql://user:password@host:3306/db` is mirrored through MySQL's row-based binary log.

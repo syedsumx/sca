@@ -530,6 +530,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.pipelines.reverse_etl import build_reverse_router
 
         app.include_router(build_reverse_router(services.reverse_syncs, cp))
+    if getattr(services, "doc_sources", None) is not None:   # SharePoint and Google Drive folders into a store prefix
+        from cairn.pipelines.doc_sources import build_document_sources_router
+
+        app.include_router(build_document_sources_router(services.doc_sources, cp, authz))
     if getattr(services, "saas", None) is not None:          # SaaS connectors: Salesforce, HubSpot into Iceberg
         from cairn.pipelines.saas import build_saas_router
 

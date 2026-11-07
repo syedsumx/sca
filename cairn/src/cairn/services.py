@@ -160,6 +160,7 @@ class Services:
     autopilot: Optional[Any] = None
     pipeline_agent: Optional[Any] = None
     cowork: Optional[Any] = None
+    doc_sources: Optional[Any] = None
     builder: Optional[Any] = None
     bi_actions: Optional[Any] = None
     reports: Optional[Any] = None
@@ -875,6 +876,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_volumes(s)
         _build_saas(s)
         _build_reverse_etl(s)
+        _build_doc_sources(s)
         _build_branches(s)
         _build_records(s)
         _wire_residency(s)
@@ -2215,6 +2217,17 @@ def _build_saas(s: Services) -> None:
                        lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), "WRITE_DATASET", u,
                                                     raise_on_deny=False),
                        urn, s.audit, _Changes(), notify)
+
+
+def _build_doc_sources(s: Services) -> None:
+    """Document sources (cairn.pipelines.doc_sources): SharePoint and Google Drive folders kept in a store prefix."""
+    from cairn.pipelines.pipes import _settings
+
+    if not os.environ.get("CAIRN_DOC_SOURCES_STORE") or s.secret_scopes is None:
+        return
+    from cairn.pipelines.doc_sources import DocumentSources
+
+    s.doc_sources = DocumentSources(s.engine, _settings("CAIRN_DOC_SOURCES_STORE"), s.secret_scopes.read, s.audit)
 
 
 def _build_reverse_etl(s: Services) -> None:

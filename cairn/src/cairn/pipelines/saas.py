@@ -211,13 +211,16 @@ def _https(url: str, what: str) -> str:
     return url
 
 
-def google_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str, dict, dict]:
+def google_session(http: httpx.Client, secrets: dict[str, str], scope: Optional[str] = None,
+                   default_base: str = "https://sheets.googleapis.com",
+                   what: str = "google_sheets") -> tuple[str, dict, dict]:
     """(API base URL, headers, query parameters): a service account's token (a JWT it signs, exchanged at its
-    token_uri), or an API key."""
+    token_uri, for ``scope``), or an API key."""
     import base64
     import json as _json
 
-    base = _https((secrets.get("base_url") or "https://sheets.googleapis.com").rstrip("/"), "google_sheets: base_url")
+    scope = scope or SHEETS_SCOPE
+    base = _https((secrets.get("base_url") or default_base).rstrip("/"), f"{what}: base_url")
     if secrets.get("service_account_json"):
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
@@ -227,23 +230,23 @@ def google_session(http: httpx.Client, secrets: dict[str, str]) -> tuple[str, di
             key = serialization.load_pem_private_key(sa["private_key"].encode(), password=None)
             email, token_uri = sa["client_email"], sa.get("token_uri") or "https://oauth2.googleapis.com/token"
         except Exception as e:  # noqa: BLE001 - never echo the key
-            raise SaasError(f"google_sheets: service_account_json is not a service account key ({type(e).__name__})")
-        _https(token_uri, "google_sheets: the key's token_uri")
+            raise SaasError(f"{what}: service_account_json is not a service account key ({type(e).__name__})")
+        _https(token_uri, f"{what}: the key's token_uri")
 
         def b64(b: bytes) -> str:
             return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
         now = int(time.time())
         head = b64(_json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
-        claims = b64(_json.dumps({"iss": email, "scope": SHEETS_SCOPE, "aud": token_uri, "iat": now, "exp": now + 3600}).encode())
+        claims = b64(_json.dumps({"iss": email, "scope": scope, "aud": token_uri, "iat": now, "exp": now + 3600}).encode())
         sig = key.sign(f"{head}.{claims}".encode(), padding.PKCS1v15(), hashes.SHA256())
         r = http.post(token_uri, data={"grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
                                        "assertion": f"{head}.{claims}.{b64(sig)}"})
         if r.status_code != 200:
-            raise SaasError(f"google_sheets: sign-in refused ({r.status_code})", 502)
+            raise SaasError(f"{what}: sign-in refused ({r.status_code})", 502)
         return base, {"Authorization": f"Bearer {r.json()['access_token']}"}, {}
     if secrets.get("api_key"):
         return base, {}, {"key": secrets["api_key"]}
-    raise SaasError("google_sheets: the secret scope has neither service_account_json nor api_key", 400)
+    raise SaasError(f"{what}: the secret scope has neither service_account_json nor api_key", 400)
 
 
 def google_sheets_records(http: httpx.Client, secrets: dict[str, str], obj: str, fields: list[str],
