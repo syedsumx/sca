@@ -420,7 +420,7 @@ class Adaptive:
     def big(self, profile: Optional[dict]) -> bool:
         if not profile or not profile.get("runs"):
             return False
-        return any(int(profile.get(k) or 0) >= int(v) for k, v in self.large_when.items())
+        return any(float(profile.get(k) or 0) >= float(v) for k, v in self.large_when.items())
 
     @staticmethod
     def busy(w: Warehouse) -> int:
@@ -488,7 +488,7 @@ def load_adaptive(raw: dict, warehouses: list[Warehouse]) -> list[Adaptive]:
             raise WarehouseError(f"adaptive warehouse {name}: tiers name two or more warehouses, smallest first")
         large = a.get("large_when") or {}
         if not large or set(large) - {"cpu_ms", "input_bytes", "peak_memory_bytes", "wall_ms"} or \
-                not all(isinstance(v, (int, float)) and v > 0 for v in large.values()):
+                not all(isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 for v in large.values()):
             raise WarehouseError(f"adaptive warehouse {name}: large_when gives cpu_ms, input_bytes, peak_memory_bytes "
                                  "or wall_ms, each above 0")
         overflow = int(a.get("overflow_at", 8))

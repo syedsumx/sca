@@ -945,7 +945,8 @@ finished runs, from query history. The answer holds no SQL and no user.
 
 The query then goes:
 
-- to the largest tier, when an earlier run reached any `largeWhen` figure;
+- to the largest tier, when an earlier run reached any `largeWhen` figure (figures and thresholds are compared
+  as given, fractions included);
 - to the largest tier, when the smallest already has `overflowAt` queries running or queued and the largest
   has fewer ("overflow");
 - otherwise to the smallest tier.

@@ -169,9 +169,22 @@ def test_configs_are_checked():
                 {"name": "a", "port": 9003, "tiers": ["s", "z"], "large_when": {"cpu_ms": 1}},      # unknown tier
                 {"name": "a", "port": 9003, "tiers": ["s", "l"], "large_when": {}},                 # no threshold
                 {"name": "a", "port": 9003, "tiers": ["s", "l"], "large_when": {"rows": 5}},        # unknown figure
+                {"name": "a", "port": 9003, "tiers": ["s", "l"], "large_when": {"cpu_ms": True}},   # not a number
                 {"name": "a", "port": 9003, "tiers": ["s", "l"], "large_when": {"cpu_ms": 1}, "overflow_at": 0}]:
         with pytest.raises(WarehouseError):
             load_adaptive({**raw, "adaptive": [bad]}, whs)
     a = load_adaptive({**raw, "adaptive": [{"name": "a", "port": 9003, "tiers": ["s", "l"],
                                             "large_when": {"cpu_ms": 60000}}]}, whs)[0]
     assert [w.name for w in a.tiers] == ["s", "l"] and a.overflow_at == 8 and a.hint is None
+
+
+def test_thresholds_are_compared_as_given():
+    """Review finding: thresholds and figures were cut to whole numbers, so a fractional threshold under 1 sent
+    every query with history to the large warehouse, and 100.5 counted as reaching 100.7."""
+    from cairn.dataaccess.warehouses import Adaptive
+
+    a = Adaptive("a", 1, [None, None], {"cpu_ms": 0.5})
+    assert not a.big({"runs": 2, "cpu_ms": 0.2}) and a.big({"runs": 2, "cpu_ms": 0.5})
+    b = Adaptive("b", 1, [None, None], {"wall_ms": 100.7})
+    assert not b.big({"runs": 1, "wall_ms": 100.5}) and b.big({"runs": 1, "wall_ms": 101})
+    assert not b.big({"runs": 0, "wall_ms": 10_000}) and not b.big(None)
