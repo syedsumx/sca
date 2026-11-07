@@ -188,6 +188,7 @@ jobs:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
         run: |
           pip install requests httpx pytest "boto3>=1.36" "pyarrow>=17" "pyiceberg[pyarrow]>=0.10" "psycopg[binary]>=3.1"
+          pip install -e ..        # Cairn itself: the v3 test writes through Cairn's pyiceberg v3 writers
           cd conformance && pytest -q -p no:cacheprovider
       - name: Conformance again, with the state in PostgreSQL (and several replicas)
         env:

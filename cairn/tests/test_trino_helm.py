@@ -131,7 +131,8 @@ def start_cluster(lake, cairn, extra=()):  # noqa: F811
     def run(name, spec, alias=None):
         c = spec["containers"][0]
         cname = f"{net}-{name}"
-        subprocess.run(["docker", "run", "-d", "--rm", "--name", cname, "--network", net,
+        # Not --rm: a container that exits keeps its log for the failure message; teardown removes them all.
+        subprocess.run(["docker", "run", "-d", "--name", cname, "--network", net,
                         *(["--network-alias", alias] if alias else []), *hosts, "--user", "1000", *env_of(c),
                         *mounts(c, cm, name), c["image"]], check=True, capture_output=True, timeout=600)
         started.append(cname)
@@ -145,7 +146,7 @@ def start_cluster(lake, cairn, extra=()):  # noqa: F811
             if "SERVER STARTED" in logs:
                 return name
             assert "Configuration errors" not in logs and "Error injecting" not in logs, logs[-4000:]
-            assert time.time() < end, "the coordinator did not start"
+            assert time.time() < end, "the coordinator did not start:\n" + logs[-4000:]
             time.sleep(1)
 
     https = cm["config.properties"].split("http-server.https.port=")[1].split()[0]
@@ -260,7 +261,8 @@ def test_a_worker_drains_before_it_leaves_and_a_new_coordinator_takes_over(clust
     assert json.loads(out.strip().splitlines()[-1]) == {"n": 800000000}  # finished on the draining worker
     drain.wait(timeout=180)
     end = time.time() + 120
-    while subprocess.run(["docker", "inspect", sql.worker], capture_output=True).returncode == 0:
+    while subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", sql.worker], capture_output=True,
+                         text=True).stdout.strip() == "true":                 # the worker's process has exited
         if time.time() > end:
             logs = subprocess.run(["docker", "logs", "--tail", "40", sql.worker], capture_output=True, text=True)
             raise AssertionError(f"the drained worker did not leave: hook rc={drain.returncode} {drain.stdout.read()} "

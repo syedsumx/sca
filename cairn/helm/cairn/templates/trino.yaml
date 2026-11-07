@@ -43,6 +43,10 @@ data:
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
     # Sign-in: tokens Cairn issues (and with sso, people through Cairn), checked against Cairn's public key.
     {{- if $u.sso.enabled }}
     http-server.authentication.type=OAUTH2,JWT
@@ -84,6 +88,16 @@ data:
     {{- end }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
+  {{- if $u.cache.enabled }}
+  cache-manager.properties: |
+    cache-manager.name=alluxio
+    fs.cache.directories=/var/trino/cache
+    fs.cache.max-sizes={{ $u.cache.maxSize }}
+  {{- end }}
   {{- if $u.faultTolerance.enabled }}
   exchange-manager.properties: |
     exchange-manager.name=filesystem
@@ -192,8 +206,6 @@ data:
     s3.path-style-access=true
     {{- if $u.cache.enabled }}
     fs.cache.enabled=true
-    fs.cache.directories=/var/trino/cache
-    fs.cache.max-sizes={{ $u.cache.maxSize }}
     {{- end }}
     {{- if $cat.vendRole }}
     # No store key: the catalog hands Trino temporary keys for one table at a time.
@@ -403,6 +415,10 @@ spec:
             {{- end }}
             {{- if $u.cache.enabled }}
             - { name: cache, mountPath: /var/trino/cache }
+            - name: config
+              mountPath: /etc/trino/cache-manager.properties
+              subPath: cache-manager.properties
+              readOnly: true
             {{- end }}
             {{- if $tls }}
             - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
@@ -465,6 +481,10 @@ data:
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
     # Clients reach it only through the warehouse proxy, which says what URL they used.
     http-server.process-forwarded=true
     http-server.authentication.type=JWT
@@ -485,6 +505,10 @@ data:
     query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.cache.enabled }}
+    # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
+    cache-manager.config-files=/etc/trino/cache-manager.properties
+    {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -663,6 +687,10 @@ spec:
             {{- end }}
             {{- if $u.cache.enabled }}
             - { name: cache, mountPath: /var/trino/cache }
+            - name: config
+              mountPath: /etc/trino/cache-manager.properties
+              subPath: cache-manager.properties
+              readOnly: true
             {{- end }}
           resources:
             {{- toYaml $u.resources | nindent 12 }}
