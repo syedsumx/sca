@@ -222,6 +222,37 @@ A.5.18) ask for this evidence.
   - At the due date, the grant nobody answered for was revoked. A `keep` campaign kept it.
   - The audit chain stayed whole.
 
+## Security posture
+
+Cairn checks its own configuration and state for the mistakes that expose data, and says how to fix each one. It is Cairn's counterpart to Snowflake's Trust Center scanners.
+
+- **Scans.** `POST /governance/posture/scan` (`MANAGE_SYSTEM_OPERATIONS`) runs every check now; the scheduler runs it once a day after the last scan. `GET /governance/posture` returns the latest result, and `GET /governance/posture/history` the scores over time.
+- **Findings.** Each finding has a `check`, a `severity` (critical, high, medium or low), the `evidence` and the `fix`.
+- **The score.** It starts at 100 and loses 25 per critical, 10 per high, 4 per medium and 1 per low finding.
+- **Notifications.** A high or critical finding that is new since the last scan is sent to `CAIRN_SECURITY_CONTACTS` (people or groups, comma-separated) as `security.posture_finding`. Every scan is audited (`posture.scanned`).
+- **The checks:**
+
+  | Check | Severity | What it finds |
+  |---|---|---|
+  | `trusted_header` | critical | `CAIRN_DEV_TRUST_ACTOR_HEADER` is on: anyone who reaches the API can say who they are |
+  | `open_policy` | critical / high | An allow policy for every action, or for reading or writing data on every dataset, with no condition and no subjects |
+  | `audit_chain` | critical | The audit log's hash chain does not verify: an entry was changed or removed |
+  | `pii_unmasked` | high | Datasets have columns classified sensitive and no policy masks anything |
+  | `residency_region` | high | Namespaces are pinned to regions and `CAIRN_REGION` is unset |
+  | `authz_mode` | medium | `CAIRN_AUTHZ_MODE` is not `authoritative` |
+  | `long_shares` / `idle_shares` | medium / low | Active shares to outside recipients that last over 180 more days, or have not been used for 90 |
+  | `no_access_review` | medium | Active grants and no access review closed in 180 days |
+  | `secrets_key` | high / medium / low | The secret scopes' key is unusable, secrets are still under the previous key, or the previous key lingers after the rotation finished |
+  | `ai_budget` | low | A model is configured and there is no daily AI budget |
+
+- **Fail closed.** A check that cannot run (say, the catalog is down) is reported as `error: …` in `checks`, never as passed.
+- **Tested** in `tests/test_posture.py`, with the real database, audit chain, policy decision point, shares and grants:
+  - every check finding exactly what it is for, and a policy with a condition not flagged;
+  - the score, and the findings going once fixed;
+  - new high findings told once;
+  - a tampered audit entry caught as critical;
+  - a failing check reported as an error.
+
 ## Data residency
 
 Data residency pins lakehouse namespaces to a region. Their tables are then stored only in that region's storage, are read and written only by a deployment in a region the pin allows, and are sent out only to such regions.

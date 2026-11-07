@@ -861,6 +861,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_records(s)
         _wire_residency(s)
         _build_tokens(s)
+        _build_posture(s)
         from cairn.common.limits import ApiLimits
 
         s.limits = ApiLimits(s.engine, s.audit)
@@ -1894,6 +1895,40 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+
+
+def _build_posture(s: Services) -> None:
+    """The security posture scan (cairn.governance.posture): Cairn's own configuration and state, checked daily."""
+    from cairn.governance.posture import Posture
+    from cairn.governance.residency import Residency
+
+    def sensitive_datasets() -> int:
+        """Datasets with a column classified sensitive (a PII term on a field)."""
+        from cairn.governance.pii import TERM_PREFIX
+
+        n = 0
+        for row in s.graph.scroll_entities("dataset", ["schemaMetadata", "editableSchemaMetadata"]):
+            fields = [*((row.get("schemaMetadata") or {}).get("fields") or []),
+                      *((row.get("editableSchemaMetadata") or {}).get("editableSchemaFieldInfo") or [])]
+            if any(t.get("urn", "").startswith(TERM_PREFIX) for f in fields
+                   for t in (f.get("glossaryTerms") or {}).get("terms") or []):
+                n += 1
+        return n
+
+    contacts = [c.strip() for c in os.environ.get("CAIRN_SECURITY_CONTACTS", "").split(",") if c.strip()]
+
+    def tell(findings: list[dict]) -> None:
+        hub = getattr(s, "notify", None)
+        if hub is None or not contacts:
+            logger.warning("security posture: %d new finding(s); set CAIRN_SECURITY_CONTACTS to be told", len(findings))
+            return
+        from cairn.notify.hub import Event
+
+        for f in findings:
+            hub.publish(Event(type="security.posture_finding", title=f"[{f['severity']}] {f['title']}",
+                              body=f["fix"], recipients=contacts, payload=f))
+    s.posture = Posture(s.engine, s.settings, s.pdp, s.audit, getattr(s, "residency", None) or Residency({}, None),
+                        sensitive_datasets, getattr(s, "llm", None) is not None, tell)
 
 
 def _build_tokens(s: Services) -> None:

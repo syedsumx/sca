@@ -136,6 +136,16 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(samples_once)
     if getattr(s, "access_reviews", None) is not None:
         sch.extra.append(s.access_reviews.run_due)   # access reviews: close the due ones, remind reviewers
+    if getattr(s, "posture", None) is not None:
+        posture = s.posture
+
+        def daily_posture() -> None:                 # the security posture scan, a day after the last one kept
+            import time as _t
+
+            last = posture.latest()
+            if last is None or _t.time() * 1000 - last["ts_ms"] >= 86_400_000:
+                posture.scan()
+        sch.extra.append(daily_posture)
     if getattr(s, "pipes", None) is not None:
         sch.extra.append(s.pipes.run_due)        # pipes: files events missed
     if getattr(s, "derived", None) is not None:

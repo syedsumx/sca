@@ -361,6 +361,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.branches import build_branches_router
 
         app.include_router(build_branches_router(services.branches, cp))
+    if getattr(services, "posture", None) is not None:
+        from cairn.governance.posture import build_posture_router
+
+        app.include_router(build_posture_router(services.posture, cp, authz))
     if getattr(services, "tokens", None) is not None:
         from cairn.governance.tokens import build_tokens_router
 
