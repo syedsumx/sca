@@ -197,6 +197,31 @@ Tables `cairn_legal_holds`, `cairn_retention_runs` and `cairn_erasure_proofs` (m
 
 The fail-closed hold check is tested in `tests/test_trino_access.py`.
 
+## Access reviews
+
+Owners recertify the access people hold, and access nobody vouches for does not survive the due date
+(`/cairn/api/governance/access-reviews`, `cairn.governance.access_reviews`). Auditors (SOC 2 CC6.2/CC6.3, ISO 27001
+A.5.18) ask for this evidence.
+
+- **A campaign** (`POST`, `MANAGE_POLICIES`): `name`, `personas` (whose grants are reviewed; empty for all), `reviewers`, `due_days` (14) and `on_no_response` (`revoke`, the default, or `keep`).
+  - It takes every active, time-boxed persona grant in scope, which is the access approved marketplace requests create. Lapsed grants are left out.
+- **Who reviews.**
+  - A grant from an access request goes to the data product's owners; any other grant to the campaign's `reviewers`.
+  - Nobody reviews their own access.
+  - A campaign in which some grant would have no reviewer is refused (422): name more reviewers.
+- **Deciding.** Each reviewer sees only their own items (`GET .../{id}`) and keeps or revokes each one (`POST .../{id}/items/{item}`), with a comment.
+  - A revoke takes the access away at once.
+  - An item is decided once.
+- **The due date.** The scheduler's leader closes due campaigns and settles undecided items by `on_no_response`. It also reminds reviewers with open items once a day; they were told when the campaign started.
+  - `POST .../{id}/close` closes a campaign early, the same way.
+- **The record.** Every start, decision and close is audited, with who decided and why. `GET .../{id}` gives an administrator the progress (items, decided, kept, revoked) and every item's outcome.
+- **Tested** in `tests/test_access_reviews.py`, on SQLite and PostgreSQL, with the real policy decision point and persona grants.
+  - A request-based grant was reviewed by its product's owner and kept.
+  - Another was revoked, and access was refused at once.
+  - A reviewer's own grant went to the other reviewer, and a campaign that would have left a grant unreviewed was refused.
+  - At the due date, the grant nobody answered for was revoked. A `keep` campaign kept it.
+  - The audit chain stayed whole.
+
 ## Consent
 
 Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,

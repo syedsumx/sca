@@ -195,6 +195,12 @@ class MarketplaceService:
         return policy
 
     # ---- catalog -------------------------------------------------------------------------
+    def request_owners(self, rid: str) -> list[str]:
+        """The owners of the data product an access request was for (its access reviewers)."""
+        r = self.get_request(rid)
+        p = (self.graph.graphql(PRODUCT_QUERY, {"urn": r["product_urn"]}) or {}).get("dataProduct") or {}
+        return self._owners(p)
+
     def _owners(self, product: dict) -> list[str]:
         return [o["owner"]["urn"] for o in ((product.get("ownership") or {}).get("owners") or []) if o.get("owner")]
 

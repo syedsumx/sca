@@ -145,6 +145,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import procedures as _procedures  # noqa: F401
     from cairn.dataaccess import dataapps as _dataapps  # noqa: F401
     from cairn.dataaccess import cleanrooms as _cleanrooms  # noqa: F401
+    from cairn.governance import access_reviews as _access_reviews  # noqa: F401
     from cairn.sqlworkspace import workflows as _workflows  # noqa: F401
     from cairn.identity import workload as _workload  # noqa: F401
     from cairn.pipelines import changes as _changes  # noqa: F401

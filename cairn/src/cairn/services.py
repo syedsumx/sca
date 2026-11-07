@@ -719,6 +719,19 @@ def _build_active_metadata(s: Services) -> None:
 
             s.marketplace.provisioner = Provisioner(targets, s.connections, person, s.audit)
     _build_forms(s, hub, Event)
+    # Access reviews: owners recertify the access people hold (persona grants), fail closed at the due date.
+    from cairn.governance.access_reviews import AccessReviews
+
+    def tell_reviewers(type_, title, body, recipients, payload):
+        from cairn.notify.hub import Event as _Event
+
+        if s.notify is not None:
+            s.notify.publish(_Event(type=type_, title=title, body=body, recipients=recipients, payload=payload,
+                                    url=f"/governance/access-reviews/{payload.get('review', '')}"))
+    market = getattr(s, "marketplace", None)
+    s.access_reviews = AccessReviews(s.engine, s.personas,
+                                     market.request_owners if market is not None else (lambda rid: []),
+                                     s.audit, tell_reviewers)
     from cairn.governance.ai_systems import AISystemService
 
     s.ai_systems = AISystemService(

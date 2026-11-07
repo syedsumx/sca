@@ -134,6 +134,8 @@ def cmd_scheduler(a) -> None:
                 s.samples.load_on_start(pending)
                 pending.clear()
         sch.extra.append(samples_once)
+    if getattr(s, "access_reviews", None) is not None:
+        sch.extra.append(s.access_reviews.run_due)   # access reviews: close the due ones, remind reviewers
     if getattr(s, "pipes", None) is not None:
         sch.extra.append(s.pipes.run_due)        # pipes: files events missed
     if getattr(s, "derived", None) is not None:
