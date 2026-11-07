@@ -592,7 +592,7 @@ def test_masks_keep_every_type(trino):
     mask that does not) and keeps NULL as NULL; numbers keep one significant figure, dates the month."""
     from cairn.dataaccess.trino import mask_expression
 
-    strategies = ("partial", "hash", "redact", "null")
+    strategies = ("partial", "hash", "redact", "null", "geo")
     got = {}
     for typ, lit in MASK_CASES:
         cols = ", ".join(f"typeof({mask_expression('c', typ, st)}) = typeof(c) AS t_{st}, "
@@ -630,6 +630,48 @@ def test_numbers_and_dates_are_masked_for_the_caller(trino, cairn):
     assert rows[0]["t"] == "decimal(7,2)"
     admin = trino("SELECT CAST(salary AS varchar) AS salary FROM sales.people ORDER BY id")
     assert admin[0]["salary"] == "98765.43"
+
+
+def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
+    """The geo mask: coordinates rounded, WKT shapes and Geometry values reduced to a rounded centre point, for a
+    caller under a geo policy; the admin sees the exact values; Trino's spatial functions work on both."""
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.visits AS SELECT * FROM (VALUES "
+          "(1, DOUBLE '48.137154', DOUBLE '11.576124', 'POINT (11.576124 48.137154)', 'jane@acme.com'), "
+          "(2, DOUBLE '52.520008', DOUBLE '13.404954', 'POLYGON ((13.40 52.52, 13.42 52.52, 13.42 52.54, 13.40 52.54, "
+          "13.40 52.52))', 'li@acme.com')) AS t(id, lat, lon, place, email)")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.visits,PROD)"
+    loc = "urn:li:glossaryTerm:Classification.PII.Location"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "lat", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "lon", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "place", "glossaryTerms": {"terms": [{"urn": loc}]}},
+        {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}}]}
+    s.attributes.invalidate(urn)
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="ana-locations-coarse", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        obligations=[Obligation(type="mask_columns", params={"labels": ["PII.Location"], "strategy": "geo"})],
+        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    try:
+        q = ("SELECT id, lat, lon, place, email, ST_AsText(ST_Centroid(ST_GeometryFromText(place))) AS c, "
+             "round(great_circle_distance(lat, lon, 52.520008, 13.404954)) AS km FROM sales.visits ORDER BY id")
+        ana = trino(q, user="ana")
+        assert [(r["lat"], r["lon"]) for r in ana] == [(48.14, 11.58), (52.52, 13.4)]
+        assert ana[0]["place"] == "POINT (11.58 48.14)" and ana[1]["place"] == "POINT (13.41 52.53)"
+        assert ana[0]["email"] == "j•••@•••.com"                     # other labels: partial, as before
+        assert ana[0]["km"] == 504 and ana[1]["km"] == 0             # spatial SQL on the coarse values
+        admin = trino(q)
+        assert admin[0]["lat"] == 48.137154 and admin[1]["place"].startswith("POLYGON")
+        assert admin[1]["c"] == "POINT (13.41 52.53)" and admin[0]["km"] == 504
+        # Spatial functions over the masked text see only the coarse point.
+        geom = trino("SELECT ST_AsText(ST_GeometryFromText(place)) AS g FROM sales.visits WHERE id = 2", user="ana")
+        assert geom[0]["g"] == "POINT (13.41 52.53)"
+    finally:
+        s.pdp.set_bundle(bundle)
 
 
 def test_trino_tables_are_synced_into_the_catalog(trino, cairn):

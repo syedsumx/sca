@@ -37,6 +37,11 @@ def mask_scalar(value: Any, strategy: str) -> Any:
         return None
     if strategy == "null":
         return None
+    if strategy == "geo":
+        geo = _geo_scalar(value)
+        if geo is not None:
+            return geo
+        strategy = "partial"
     text = str(value)
     if strategy == "hash":
         return "sha256:" + hashlib.sha256(text.encode()).hexdigest()[:12]
@@ -49,6 +54,29 @@ def mask_scalar(value: Any, strategy: str) -> Any:
             return "•" * len(text)
         return f"{text[:1]}{'•' * min(len(text) - 2, 8)}{text[-1:]}"
     return "••••"
+
+
+_WKT_POINTS = re.compile(r"(-?\d+(?:\.\d+)?)\s+(-?\d+(?:\.\d+)?)")
+
+
+def _geo_scalar(value: Any) -> Any:
+    """A sample value under the ``geo`` mask (as Trino's): a coordinate rounded; a WKT shape as its centre point,
+    rounded; anything else None (masked as partial)."""
+    from cairn.dataaccess.trino import geo_decimals
+
+    d = geo_decimals()
+    if isinstance(value, float):
+        return round(value, d)
+    text = str(value).strip()
+    if re.fullmatch(r"-?\d+\.\d+", text):
+        return str(round(float(text), d))
+    if re.match(r"(?i)^(MULTI)?(POINT|LINESTRING|POLYGON)\s*\(|^GEOMETRYCOLLECTION\s*\(", text):
+        pts = [(float(x), float(y)) for x, y in _WKT_POINTS.findall(text)]
+        pts = [p for i, p in enumerate(pts) if i == 0 or p != pts[0]] if len(pts) > 1 else pts   # rings close on themselves
+        if pts:
+            x, y = sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts)
+            return f"POINT ({round(x, d)} {round(y, d)})"
+    return None
 
 
 def mask_sql(sql: str) -> str:
@@ -84,7 +112,7 @@ class DatasetPlan:
 
 
 NO_MASK = DatasetPlan()
-_STRATEGY_STRENGTH = {"partial": 0, "hash": 1, "redact": 2, "null": 3}
+_STRATEGY_STRENGTH = {"partial": 0, "geo": 0.5, "hash": 1, "redact": 2, "null": 3}   # geo: partial, locations coarsened
 
 
 def label_matches(pattern: str, labels: Iterable[str]) -> bool:

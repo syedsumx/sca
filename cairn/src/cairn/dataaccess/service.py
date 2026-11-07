@@ -319,7 +319,7 @@ class DataAccessService:
         active = [p for p in plans if p.active]
         if not active:
             return []
-        strategy = max((p.strategy for p in active), key=lambda s: {"partial": 0, "hash": 1, "redact": 2, "null": 3}[s])
+        strategy = max((p.strategy for p in active), key=lambda s: {"partial": 0, "geo": 0.5, "hash": 1, "redact": 2, "null": 3}.get(s, 2))
         masked = []
         for i, col in enumerate(columns):
             names = sources[i] if i < len(sources) and sources[i] is not None else {col.lower()}

@@ -73,6 +73,10 @@ _VALUE_DETECTORS: dict[str, Callable[[str], bool]] = {
     if re.fullmatch(r"[\d \-]{13,23}", v) else False,
     "IBAN": _iban_ok,
     "IPAddress": _is_ip,
+    # A shape as WKT, or a "lat, lon" pair in range: where someone is, or was.
+    "Location": lambda v: bool(re.match(r"(?i)^(MULTI)?(POINT|LINESTRING|POLYGON)\s*\(|^GEOMETRYCOLLECTION\s*\(", v))
+    or (lambda m: bool(m) and abs(float(m.group(1))) <= 90 and abs(float(m.group(2))) <= 180)(
+        re.fullmatch(r"(-?\d{1,2}\.\d{3,})\s*,\s*(-?\d{1,3}\.\d{3,})", v)),
 }
 
 _NAME_PATTERNS: list[tuple[str, str, float]] = [
@@ -86,6 +90,8 @@ _NAME_PATTERNS: list[tuple[str, str, float]] = [
     (r"(^|_)(first_?name|last_?name|full_?name|surname|given_name)($|_)", "Name", 0.75),
     (r"(^|_)(street|address(_line)?\d?|postal_?code|zip(_?code)?)($|_)", "Address", 0.7),
     (r"(^|_)(passport(_no|_number)?)($|_)", "Passport", 0.9),
+    (r"(^|_)(lat|latitude|lon|lng|long|longitude|geo_?point|geom|geometry|geog|wkt|coordinates?|gps)($|_)",
+     "Location", 0.7),
 ]
 
 

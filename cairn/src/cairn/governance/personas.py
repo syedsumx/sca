@@ -140,7 +140,7 @@ class Allowed(BaseModel):
 
 class Mask(BaseModel):
     enabled: bool = True
-    strategy: Literal["redact", "partial", "hash", "null"] = "partial"
+    strategy: Literal["redact", "partial", "hash", "null", "geo"] = "partial"
 
 
 class PurposeSpec(BaseModel):

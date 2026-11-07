@@ -379,6 +379,7 @@ function PurposeEditor({ purpose, bundles, personas, onSaved, onDeleted }: { pur
                             { label: 'Redact', value: 'redact' },
                             { label: 'Hash', value: 'hash' },
                             { label: 'Null', value: 'null' },
+                            { label: 'Location (coarsened)', value: 'geo' },
                         ]}
                     />
                 </Space>

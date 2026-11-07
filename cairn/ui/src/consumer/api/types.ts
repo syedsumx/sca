@@ -206,7 +206,7 @@ export interface PersonaPreview {
     sample_assets: { urn: string; name: string }[];
 }
 
-export type MaskStrategy = 'redact' | 'partial' | 'hash' | 'null';
+export type MaskStrategy = 'redact' | 'partial' | 'hash' | 'null' | 'geo';
 
 export interface Purpose {
     id: string;

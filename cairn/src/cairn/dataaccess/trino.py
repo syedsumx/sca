@@ -121,6 +121,38 @@ def _hash64(c: str) -> str:
     return f"from_big_endian_64(substr(sha256(to_utf8(CAST({c} AS varchar))), 1, 8))"
 
 
+def geo_decimals() -> int:
+    """Decimal places a location keeps under the ``geo`` mask (2: about 1 km; 1: about 11 km)."""
+    import os
+
+    try:
+        return min(6, max(0, int(os.environ.get("CAIRN_GEO_MASK_DECIMALS", "2"))))
+    except ValueError:
+        return 2
+
+
+def _geo_mask(c: str, t: str, base: str, typed) -> Optional[str]:
+    """The ``geo`` mask: a location kept, coarsened. Coordinates are rounded; a shape (WKT text, Geometry,
+    SphericalGeography) becomes its centre point, rounded. Other values: None (they get the partial mask)."""
+    d = geo_decimals()
+
+    def point(g: str) -> str:
+        return f"ST_Point(round(ST_X(ST_Centroid({g})), {d}), round(ST_Y(ST_Centroid({g})), {d}))"
+    if base in ("double", "real", "decimal"):
+        return typed(f"round({c}, {d})")
+    if base in ("varchar", "char"):
+        g = f"try(ST_GeometryFromText(CAST({c} AS varchar)))"
+        partial = mask_expression(c.strip('"').replace('""', '"'), t, "partial")
+        return (f"CASE WHEN {c} IS NULL THEN NULL WHEN {g} IS NOT NULL AND NOT ST_IsEmpty({g}) "
+                f"THEN CAST(ST_AsText({point(g)}) AS {t}) ELSE {partial} END")
+    if base == "geometry":
+        return f"CASE WHEN {c} IS NULL OR ST_IsEmpty({c}) THEN {c} ELSE {point(c)} END"
+    if base == "sphericalgeography":
+        g = f"to_geometry({c})"
+        return f"CASE WHEN {c} IS NULL THEN NULL ELSE to_spherical_geography({point(g)}) END"
+    return None
+
+
 def mask_expression(column: str, column_type: str, strategy: str) -> str:
     """A Trino expression that masks ``column`` and keeps its type (Trino requires the mask's type to be
     the column's). Text: partial (``j•••@•••.com``), hash, redact. Numbers: partial keeps one significant
@@ -137,6 +169,11 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
 
     if strategy == "null":
         return null
+    if strategy == "geo":
+        geo = _geo_mask(c, t, base, typed)
+        if geo is not None:
+            return geo
+        strategy = "partial"                   # not a location: masked as partial is
     if base in ("varchar", "char"):
         v = f"CAST({c} AS varchar)"
         if strategy == "redact":
