@@ -627,7 +627,7 @@ class TrinoAccess:
         name = col.get("columnName", "")
         if not plan.masks_field(name):
             return None
-        return {"expression": mask_expression(name, col.get("columnType", "varchar"), plan.strategy)}
+        return {"expression": mask_expression(name, col.get("columnType", "varchar"), plan.strategy_for(name))}
 
 
 LINEAGE_ACTOR = "urn:li:corpuser:cairn-trino"

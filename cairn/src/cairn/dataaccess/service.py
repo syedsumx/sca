@@ -326,13 +326,15 @@ class DataAccessService:
             return []
         from cairn.coreproxy.masking import STRATEGY_STRENGTH
 
-        strategy = max((p.strategy for p in active), key=lambda s: STRATEGY_STRENGTH.get(s, 2))
         masked = []
         for i, col in enumerate(columns):
             names = sources[i] if i < len(sources) and sources[i] is not None else {col.lower()}
             if not names:      # a literal or an expression over no column
                 continue
-            if any(p.all_fields or any(p.masks_field(n) for n in names) for p in active):
+            # The strongest mask of every plan that covers a column this one comes from.
+            hits = [p.strategy_for(n) for p in active for n in names if p.all_fields or p.masks_field(n)]
+            if hits:
+                strategy = max(hits, key=lambda st: STRATEGY_STRENGTH.get(st, 2))
                 masked.append(col)
                 for r in rows:
                     r[i] = mask_scalar(r[i], strategy)

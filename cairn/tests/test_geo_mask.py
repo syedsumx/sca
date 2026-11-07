@@ -40,3 +40,24 @@ def test_location_columns_are_found_and_partial_outranks_geo():
     assert build_plan([ob("geo", "PII.Location"), ob("partial")], resource).strategy == "partial"
     assert build_plan([ob("geo", "PII.Location")], resource).strategy == "geo"
     assert build_plan([ob("geo", "PII.Location"), ob("hash")], resource).strategy == "hash"
+
+
+def test_each_column_takes_the_strongest_mask_of_the_policies_that_hit_it():
+    """CI finding on the review fix: with one strategy per dataset, a partial mask on an e-mail column took the geo
+    mask away from the location columns of the same table. Each column now takes the strongest mask among the
+    policies that hit that column."""
+    loc, mail = "urn:li:glossaryTerm:Classification.PII.Location", "urn:li:glossaryTerm:Classification.PII.Email"
+    resource = {"field_labels": {"lat": [loc], "place": [loc], "email": [mail]}}
+
+    def ob(strategy, label):
+        return {"type": "mask_columns", "params": {"labels": [label], "strategy": strategy}}
+    plan = build_plan([ob("partial", "PII.Email"), ob("geo", "PII.Location")], resource)
+    assert plan.strategy_for("lat") == "geo" and plan.strategy_for("place") == "geo"
+    assert plan.strategy_for("email") == "partial" and plan.strategy == "partial"
+    # A broad PII policy covers the location columns too: there the stronger partial wins.
+    plan = build_plan([ob("partial", "PII"), ob("geo", "PII.Location")], resource)
+    assert plan.strategy_for("lat") == "partial" and plan.strategy_for("email") == "partial"
+    # A mask on the whole dataset (its own labels) covers every column at least that strongly.
+    plan = build_plan([ob("geo", "PII.Location"), ob("hash", "Confidential")],
+                      {**resource, "tags": ["Confidential"]})
+    assert plan.all_fields and plan.strategy_for("lat") == "hash" and plan.strategy_for("other") == "hash"

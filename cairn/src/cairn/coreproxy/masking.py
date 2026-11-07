@@ -91,9 +91,13 @@ class DatasetPlan:
 
     fields: set[str] = field(default_factory=set)
     all_fields: bool = False
-    strategy: str = "partial"
+    strategy: str = "partial"                       # the strongest strategy of every policy that hit the dataset
     mask_queries: bool = False
     policies: set[str] = field(default_factory=set)
+    # Per column: the strongest strategy among the policies that hit that column (a geo policy on a location
+    # column does not weaken another column's mask, and is itself overridden on a column a stronger one also hits).
+    field_strategies: dict[str, str] = field(default_factory=dict)
+    dataset_strategy: Optional[str] = None          # policies that hit the whole dataset (its own labels)
 
     @property
     def active(self) -> bool:
@@ -109,6 +113,20 @@ class DatasetPlan:
         # v2 field paths ("[version=2.0].[type=struct].customer.email") end with the simple path.
         simple = field_path.split("].")[-1] if "]." in field_path else field_path
         return simple in self.fields or any(f.endswith("." + simple) or simple.endswith("." + f) for f in self.fields)
+
+    def strategy_for(self, field_path: Optional[str]) -> str:
+        """The mask for one column: the strongest of the policies that hit it (or hit the whole dataset)."""
+        found = []
+        if field_path:
+            simple = field_path.split("].")[-1] if "]." in field_path else field_path
+            for f, st in self.field_strategies.items():
+                if f in (field_path, simple) or f.endswith("." + simple) or simple.endswith("." + f):
+                    found.append(st)
+        if self.all_fields and self.dataset_strategy:
+            found.append(self.dataset_strategy)
+        if not found:
+            return self.strategy
+        return max(found, key=lambda st: STRATEGY_STRENGTH.get(st, 0))
 
 
 NO_MASK = DatasetPlan()
@@ -152,13 +170,18 @@ def build_plan(obligations: list[dict], resource: dict) -> DatasetPlan:
             patterns = [patterns]
         strategy = params.get("strategy", "partial")
         hit = False
+
+        def stronger(cur: Optional[str], strategy: str = strategy) -> str:
+            return strategy if cur is None or _STRATEGY_STRENGTH.get(strategy, 0) > _STRATEGY_STRENGTH.get(cur, 0) else cur
         if any(label_matches(p, dataset_labels) for p in patterns):
             plan.all_fields = True
+            plan.dataset_strategy = stronger(plan.dataset_strategy)
             hit = True
         for path in set(field_labels) | set(sensitive):
             labels = set(field_labels.get(path, [])) | set(sensitive.get(path, []))
             if any(label_matches(p, labels) for p in patterns):
                 plan.fields.add(path)
+                plan.field_strategies[path] = stronger(plan.field_strategies.get(path))
                 hit = True
         if hit:
             plan.mask_queries = True
@@ -210,20 +233,21 @@ def _find_dataset_urns(obj: Any, out: set[str], depth: int = 0) -> None:
 def _mask_profile(profile: dict, plan: DatasetPlan, result: MaskResult) -> None:
     if not plan.masks_field(profile.get("fieldPath")):
         return
+    strategy = plan.strategy_for(profile.get("fieldPath"))
     for key in PROFILE_VALUE_KEYS:
         if key not in profile or profile[key] is None:
             continue
         value = profile[key]
         if key == "quantiles" and isinstance(value, list):
-            profile[key] = [{**q, "value": mask_scalar(q.get("value"), plan.strategy)} if isinstance(q, dict) else q
+            profile[key] = [{**q, "value": mask_scalar(q.get("value"), strategy)} if isinstance(q, dict) else q
                             for q in value]
         elif key in ("distinctValueFrequencies", "histogram") and isinstance(value, list):
-            profile[key] = [{**f, "value": mask_scalar(f.get("value"), plan.strategy)} if isinstance(f, dict) else f
+            profile[key] = [{**f, "value": mask_scalar(f.get("value"), strategy)} if isinstance(f, dict) else f
                             for f in value]
         elif isinstance(value, list):
-            profile[key] = [mask_scalar(v, plan.strategy) for v in value]
+            profile[key] = [mask_scalar(v, strategy) for v in value]
         else:
-            profile[key] = mask_scalar(value, plan.strategy)
+            profile[key] = mask_scalar(value, strategy)
         result.masked_values += 1
     result.policies |= plan.policies
 

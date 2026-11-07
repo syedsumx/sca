@@ -634,7 +634,8 @@ def test_numbers_and_dates_are_masked_for_the_caller(trino, cairn):
 
 def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
     """The geo mask: coordinates rounded, WKT shapes and Geometry values reduced to a rounded centre point, for a
-    caller under a geo policy; the admin sees the exact values; Trino's spatial functions work on both."""
+    caller under a geo policy; the admin sees the exact values; Trino's spatial functions work on both. Geo is the
+    weakest mask: while a broader PII policy also masks the location columns (partially), that one wins."""
     from cairn.governance.abac import Obligation, Policy, PolicyBundle
 
     _, s = cairn
@@ -652,11 +653,19 @@ def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
     s.attributes.invalidate(urn)
     bundle = s.pdp.bundle
     bundle = bundle() if callable(bundle) else bundle
-    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
-        id="ana-locations-coarse", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
-        obligations=[Obligation(type="mask_columns", params={"labels": ["PII.Location"], "strategy": "geo"})],
-        condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})]))
+    geo = Policy(id="ana-locations-coarse", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+                 obligations=[Obligation(type="mask_columns", params={"labels": ["PII.Location"], "strategy": "geo"})],
+                 condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"})
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, geo]))
     try:
+        # The fixture's PII policy (partial, every label under PII) covers the location columns too: it wins.
+        place = trino("SELECT place FROM sales.visits ORDER BY id", user="ana")[0]["place"]
+        assert place != "POINT (11.58 48.14)" and "•" in place, place
+        # With the broad policy narrowed to e-mail addresses, the geo policy is the one that applies.
+        s.pdp.set_bundle(PolicyBundle(policies=[*(p if p.id != "mask-pii" else p.model_copy(update={
+            "obligations": [Obligation(type="mask_columns", params={"labels": ["PII.Email"], "strategy": "partial"})]})
+            for p in bundle.policies), geo]))
+        s.attributes.invalidate(urn)
         q = ("SELECT id, lat, lon, place, email, ST_AsText(ST_Centroid(ST_GeometryFromText(place))) AS c, "
              "round(great_circle_distance(lat, lon, 52.520008, 13.404954)) AS km FROM sales.visits ORDER BY id")
         ana = trino(q, user="ana")
