@@ -184,6 +184,8 @@ class Registry:
 def parse(stream: dict, key: Optional[bytes], value: Optional[bytes],
           registry: Optional[Registry] = None) -> Optional[tuple[str, dict]]:
     """A message as ``("upsert" | "delete", row)``; None for a tombstone with nothing to do."""
+    if stream["format"] == "pgmirror":                    # a PostgreSQL mirror's change, decoded already
+        return value  # type: ignore[return-value]
     def obj(raw: bytes, what: str) -> dict:
         if stream.get("encoding") == "avro":
             if registry is None:
@@ -420,7 +422,8 @@ class Streams:
         out: dict[int, int] = {}
         for snap in sorted(table.metadata.snapshots, key=lambda s: s.timestamp_ms):
             for k, v in (snap.summary.additional_properties if snap.summary else {}).items():
-                if k.startswith(prefix):
+                # Only "<prefix><partition>": a topic whose name extends this one (orders.eu after orders) is not it.
+                if k.startswith(prefix) and k[len(prefix):].isdigit():
                     out[int(k[len(prefix):])] = int(v)
         return out
 

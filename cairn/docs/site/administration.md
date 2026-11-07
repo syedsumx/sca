@@ -757,6 +757,56 @@ Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
 - dropping removed everything;
 - no password reached the audit log.
 
+## Mirrors: PostgreSQL tables in the lakehouse
+
+A mirror keeps a PostgreSQL table in a lakehouse table, change by change, with no Kafka or Debezium in between.
+
+`POST /v1/mirrors {"name", "connection", "table": "schema.table", "target": "namespace.table"}`
+(`MANAGE_INGESTION`) starts one. `connection` names one of Cairn's PostgreSQL connections
+(`CAIRN_QUALITY_CONNECTIONS`). The source needs:
+
+- `wal_level = logical`;
+- a role that may replicate (`REPLICATION`) and create a publication for the table;
+- a primary key on the table.
+
+Mirrors run where streams run (`CAIRN_STREAMS_ENABLED=true` and the streams' catalog settings).
+
+**How it works.**
+
+1. Cairn creates a publication for the table and a logical replication slot with PostgreSQL's own `pgoutput`
+   decoder, so there is nothing to install on the server.
+2. It copies the table's rows.
+3. Each scheduler tick reads whole transactions from the slot and writes them as one Iceberg commit through
+   the streams' writer. Inserts and updates are upserts by key, a key change removes the old row, and deletes
+   delete. A `TRUNCATE` empties the lakehouse table, and a column added at the source is added to the table.
+
+The commit records the last change's log position (LSN), and only then is the slot advanced. A crash between
+the two replays changes the table already has, and they are skipped, so nothing is written twice or lost.
+
+Values keep their PostgreSQL types: integers, floats, `numeric` (as a float), booleans, dates and timestamps
+(`timestamptz` in UTC). JSON, UUID and other types arrive as text. A large value an update did not touch (an
+unchanged TOASTed column) is read back from the source by key.
+
+**Status and stopping.**
+
+- `GET /v1/mirrors/<name>` shows the status, rows written, last LSN, and `retained_bytes`: the WAL the slot holds
+  back on the server.
+- `POST .../sync` runs one now.
+- `POST .../pause` keeps the slot and stops reading, while WAL piles up on the server. `POST .../resume`
+  carries on.
+- `DELETE` drops the slot and the publication. Delete mirrors you no longer need: a slot nobody reads keeps the
+  server's WAL forever.
+
+Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e.py`):
+
+- the copy, then inserts, updates, a key change, deletes, a new column, NULLs, dates, timestamps and numerics;
+- an unchanged 9 kB TOASTed value kept;
+- a `TRUNCATE`;
+- a crash after the commit and before the slot advanced, which wrote nothing twice;
+- pause, with WAL retained, and resume;
+- delete, which dropped the slot and the publication;
+- refusals of a table without a primary key and of a server without logical WAL.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:

@@ -119,6 +119,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.ai_workspace.recover)    # research runs cut off by a restart
     if getattr(s, "databases", None) is not None:
         sch.extra.append(s.databases.expire)        # database logins that have expired
+    if getattr(s, "mirrors", None) is not None:
+        sch.extra.append(s.mirrors.run_due)         # PostgreSQL tables mirrored into the lakehouse
     if getattr(s, "saas", None) is not None:
         sch.extra.append(s.saas.run_due)            # SaaS connectors (Salesforce, HubSpot)
     if getattr(s, "reverse_syncs", None) is not None:

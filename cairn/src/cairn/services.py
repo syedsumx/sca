@@ -78,6 +78,7 @@ class Services:
     ai_workspace: Optional[Any] = None
     checked_queries: Optional[Any] = None
     databases: Optional[Any] = None
+    mirrors: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -816,6 +817,14 @@ def _build_active_metadata(s: Services) -> None:
             s.streams = Streams(s.engine, _settings("CAIRN_STREAMS_KAFKA"),
                                 _settings("CAIRN_STREAMS_CATALOG") or _settings("CAIRN_PIPES_CATALOG"), s.audit,
                                 graph=getattr(s, "graph", None), registry=_settings("CAIRN_STREAMS_SCHEMA_REGISTRY"))
+            # Mirrors of PostgreSQL tables (cairn.pipelines.mirror), written through the streams' writer.
+            from cairn.pipelines.mirror import Mirrors
+            from cairn.quality.collectors import _expand_env
+
+            def source_url(name: str) -> str:
+                d = (s.connections.definitions() or {}).get(name) if s.connections is not None else None
+                return _expand_env(str(d.get("url") or "")) if d else ""
+            s.mirrors = Mirrors(s.engine, s.streams, source_url, s.audit)
         if os.environ.get("CAIRN_MAINTENANCE_CONNECTION"):
             from cairn.pipelines.maintenance import TableMaintenance
 
