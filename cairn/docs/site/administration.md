@@ -2473,6 +2473,34 @@ Cairn keeps lakehouse tables healthy with Iceberg's own procedures, run through 
   - **Real tables.** Five small inserts became one file. Snapshots were expired to one. A stray file in the table's location was deleted. The rows were unchanged, every step was recorded, and the table was not maintained again before it was due.
   - **Logic.** The table-level policy beat the schema's, and the schema's beat `*`. A refused step was recorded and the others ran. Bad scopes, names and values were refused, and only operators could set policies.
 
+## Table branches, tags and data diff
+
+Iceberg tables in the lakehouse can have branches (refs that move) and tags (refs that stay). Cairn manages them under its policies, gates publishing on checks (write-audit-publish), and compares any two refs or snapshots.
+
+- **Turning it on.** It needs the lakehouse catalog Cairn writes through (`CAIRN_PIPES_CATALOG`) and a Trino connection with `run_as_user` (`CAIRN_BRANCHES_CONNECTION`, by default the derived tables' or maintenance connection). The Trino catalog name is `CAIRN_DERIVED_CATALOG` (`lakehouse`).
+- **Refs.** Tables are named `namespace.table` in these paths.
+  - `GET /v1/tables/{table}/refs` lists branches and tags (`VIEW_ENTITY_PAGE`).
+  - `POST /v1/tables/{table}/refs` with `{"name": "etl", "type": "branch" | "tag", "from": "main" | <tag> | <snapshot id>, "max_ref_age_days": 30}` makes one.
+  - `DELETE /v1/tables/{table}/refs/{name}` removes one. `main` is never removed.
+  - Making and removing refs needs `MANAGE_DATASET` on the table. Each is audited (`table.branch_created`, `table.tag_removed`, …).
+- **Writing to a branch.** Engines write as usual: Spark `INSERT INTO t.branch_etl`, or pyiceberg `append(df, branch="etl")`, `overwrite(…, branch=…)` and `delete(…, branch=…)`. Read a ref with `FOR VERSION AS OF 'etl'`. It is the same table to Cairn's policies, masks and row filters.
+- **Write-audit-publish.** `POST /v1/tables/{table}/refs/{branch}/publish` with `{"checks": ["SELECT id FROM {table} WHERE amount < 0"]}` (`WRITE_DATASET`).
+  - Each check runs on Trino as the caller, against the branch (`{table}`). A check passes when it returns no rows.
+  - When every check passes, `main` is fast-forwarded to the branch's head.
+  - A failed check refuses the publish (409, with each check's outcome), and so does a `main` that moved on since the branch was made. In both cases `main` stays where it was.
+  - Audited as `table.published` or `table.publish_refused`, with the checks.
+- **Data diff.** `GET /v1/tables/{table}/diff?from=v1&to=etl&key=id&limit=20` (`VIEW_DATASET_PROFILE`).
+  - **The schema:** columns added, removed and retyped.
+  - **With `key`:** rows added, removed and changed by key. A changed row shows each column's `before_…` and `after_…`.
+  - **Without a key:** rows only in one side (`EXCEPT ALL`).
+  - Counts and up to 100 sample rows, as the caller on Trino: their masks and row filters apply to both sides.
+- **Tested** in `tests/test_trino_e2e.py`, with real Trino and Cairn Catalog:
+  - branch writes that leave `main` alone, and refs refused without `MANAGE_DATASET`;
+  - keyed and plain diffs;
+  - a failed check holding `main`, then a publish;
+  - a stale branch refused;
+  - a diff masked for a reader.
+
 ## Pipes (automatic file loading)
 
 A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines, `parquet` or `xlsx`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.

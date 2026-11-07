@@ -856,6 +856,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_volumes(s)
         _build_saas(s)
         _build_reverse_etl(s)
+        _build_branches(s)
         _build_records(s)
         _wire_residency(s)
         _build_tokens(s)
@@ -2056,6 +2057,29 @@ def _build_reverse_etl(s: Services) -> None:
         s.engine, run_sql, s.data_access.plan_for,
         lambda owner, u: s.authorize(Principal(urn=owner, via="delegated"), PRIVILEGE, u, raise_on_deny=False),
         s.secret_scopes.read, urn, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit, notify)
+
+
+def _build_branches(s: Services) -> None:
+    """Table branches, tags, write-audit-publish and data diff (cairn.pipelines.branches): refs through the
+    lakehouse catalog as Cairn (CAIRN_PIPES_CATALOG), rows on Trino as the person asking."""
+    conn_name = (os.environ.get("CAIRN_BRANCHES_CONNECTION") or os.environ.get("CAIRN_DERIVED_CONNECTION")
+                 or os.environ.get("CAIRN_MAINTENANCE_CONNECTION"))
+    pipes = getattr(s, "pipes", None)
+    if not conn_name or pipes is None or getattr(s, "data_access", None) is None:
+        return
+    from cairn.pipelines.branches import Branches
+
+    def run_sql(actor: str, sql: str, limit: int):
+        definition = (s.data_access.registry.definitions() or {}).get(conn_name) or {}
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+
+    def urn(ns: str, t: str) -> str:
+        lake = getattr(s, "lakehouse", None)
+        return lake.urn([ns], t) if lake is not None else pipes.urn(ns, t)
+    s.branches = Branches(
+        pipes.catalog_props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u,
+                                                                raise_on_deny=False),
+        urn, run_sql, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
 
 
 def _build_saml(s: Services) -> None:

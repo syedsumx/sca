@@ -3422,3 +3422,97 @@ def test_withdrawn_consent_takes_a_persons_rows_out_of_the_purpose(trino, cairn)
         assert {r["id"] for r in trino("SELECT id FROM sales.orders", user="ana")} == everyone
     finally:
         cs.delete_purpose("urn:li:corpuser:admin", "marketing")
+
+
+def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
+    """Table branches and tags on Cairn Catalog: data written to a branch leaves main alone; publish runs the
+    checks on the branch, as the caller on Trino, and fast-forwards main only when they pass; a diff of two refs
+    is counted and sampled as the caller, so their masks and row filters apply to both sides."""
+    import pyarrow as pa
+    from pyiceberg.catalog.rest import RestCatalog
+
+    from cairn.common.security import Principal
+    from cairn.pipelines.branches import BranchError, Branches
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"], "s3.access-key-id": STORE_KEY[0],
+             "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1", "s3.path-style-access": "true"}
+    b = Branches(props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u, raise_on_deny=False),
+                 lambda ns, t: s.trino_access.urn("lake", ns, t), run, "lake", s.audit)
+    admin, ana = "urn:li:corpuser:admin", "urn:li:corpuser:ana"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.wap",
+                 "CREATE TABLE lake.wap.orders (id bigint, region varchar, amount double)",
+                 "INSERT INTO lake.wap.orders VALUES (1, 'EU', 10.0), (2, 'US', 5.0), (3, 'EU', 7.0)"]:
+        run(admin, stmt)
+    with pytest.raises(BranchError) as e:
+        b.create_ref(ana, "wap.orders", "etl")                                   # MANAGE_DATASET is needed
+    assert e.value.status == 403
+    assert b.create_ref(admin, "wap.orders", "etl")["type"] == "branch"
+    b.create_ref(admin, "wap.orders", "v1", "tag")
+    with pytest.raises(BranchError) as e:
+        b.create_ref(admin, "wap.orders", "etl")
+    assert e.value.status == 409
+    assert {r["name"]: r["type"] for r in b.refs(admin, "wap.orders")} == {"main": "branch", "etl": "branch", "v1": "tag"}
+
+    # The ETL writes to its branch: main is untouched.
+    t = RestCatalog("admin", **props).load_table(("wap", "orders"))
+    t.delete("id == 3", branch="etl")
+    t.overwrite(pa.table({"id": pa.array([2], pa.int64()), "region": ["US"], "amount": [6.0]}), "id == 2", branch="etl")
+    t.append(pa.table({"id": pa.array([4], pa.int64()), "region": ["EU"], "amount": [-1.0]}), branch="etl")
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders FOR VERSION AS OF 'etl'")[1]) == [1, 2, 4]
+
+    # The diff, by key and without one.
+    d = b.diff(admin, "wap.orders", "main", "etl", key=["id"])
+    assert (d["added"]["count"], d["removed"]["count"], d["changed"]["count"]) == (1, 1, 1), d
+    assert d["added"]["sample"][0]["id"] == 4 and d["removed"]["sample"][0]["id"] == 3
+    assert d["changed"]["sample"][0] == {"id": 2, "before_region": "US", "after_region": "US",
+                                         "before_amount": 5.0, "after_amount": 6.0}
+    assert d["schema"] == {"added": [], "removed": [], "retyped": []}
+    plain = b.diff(admin, "wap.orders", "v1", "etl")
+    assert (plain["added"]["count"], plain["removed"]["count"]) == (2, 2)      # 2 changed + 4 new; 2 old + 3 gone
+
+    # Write-audit-publish: a failing check keeps main where it is; a fixed branch publishes.
+    checks = ["SELECT id FROM {table} WHERE amount < 0"]
+    with pytest.raises(BranchError) as e:
+        b.publish(admin, "wap.orders", "etl", checks)
+    assert e.value.status == 409 and e.value.detail["checks"][0]["passed"] is False
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2, 3]
+    t = RestCatalog("admin", **props).load_table(("wap", "orders"))
+    t.delete("amount < 0", branch="etl")
+    out = b.publish(admin, "wap.orders", "etl", checks)
+    assert out["published"] and out["checks"][0]["passed"]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders")[1]) == [1, 2]
+    assert sorted(r[0] for r in run(admin, "SELECT id FROM lake.wap.orders FOR VERSION AS OF 'v1'")[1]) == [1, 2, 3]
+    # A branch made before main moved on cannot be published over it.
+    b.create_ref(admin, "wap.orders", "stale", "branch", "v1")
+    with pytest.raises(BranchError) as e:
+        b.publish(admin, "wap.orders", "stale")
+    assert e.value.status == 409 and "moved on" in str(e.value)
+    with pytest.raises(BranchError):
+        b.drop_ref(admin, "wap.orders", "main")
+    assert b.drop_ref(admin, "wap.orders", "stale") == {"removed": "stale"}
+
+    # A diff as ana: her mask on email applies to both sides (sales.orders, PII masked for everyone but the admin).
+    b.create_ref(admin, "sales.orders", "diffcheck")
+    o = RestCatalog("admin", **props).load_table(("sales", "orders"))
+    o.append(pa.table({"id": pa.array([9], pa.int32() if str(o.schema().find_field("id").field_type) == "int" else pa.int64()),
+                       "email": ["new@acme.com"], "region": ["EU"]}), branch="diffcheck")
+    try:
+        seen = b.diff(ana, "sales.orders", "main", "diffcheck", key=["id"])
+        assert seen["added"]["count"] == 1 and seen["added"]["sample"][0]["email"] != "new@acme.com"
+        full = b.diff(admin, "sales.orders", "main", "diffcheck", key=["id"])
+        assert full["added"]["sample"][0]["email"] == "new@acme.com"
+    finally:
+        b.drop_ref(admin, "sales.orders", "diffcheck")
+    actions = {e["action"] for e in s.audit.entries(category="lakehouse", limit=300)}
+    assert {"table.branch_created", "table.tag_created", "table.published", "table.publish_refused", "table.diffed",
+            "table.branch_removed"} <= actions
