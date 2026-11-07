@@ -271,6 +271,45 @@ def test_scanned_documents_are_read_by_ocr(world, monkeypatch):
     assert note_row["text"] is None and "not installed" in note_row["extract_error"]
 
 
+def test_recordings_are_transcribed_locally(world, monkeypatch, tmp_path):
+    """Speech to text: audio and video files under a files pipe get what they say in the text column, transcribed
+    on this host (Whisper), with the recording's length in seconds; a file that is not a recording, or one over the
+    length limit, is noted on its row and the pipe goes on. Needs faster-whisper, a model in
+    CAIRN_TRANSCRIBE_MODEL_DIR (the CI job downloads tiny.en) and espeak-ng to speak the test's sentence."""
+    import shutil as _shutil
+    import subprocess as _sp
+
+    from cairn.pipelines import transcribe
+
+    if not (transcribe.installed() and os.environ.get("CAIRN_TRANSCRIBE_MODEL_DIR") and _shutil.which("espeak-ng")
+            and _shutil.which("ffmpeg")):
+        pytest.skip("needs faster-whisper, CAIRN_TRANSCRIBE_MODEL_DIR (a Whisper model), espeak-ng and ffmpeg")
+    p, s3 = world["pipes"], world["s3"]
+    wav, mp3, mp4 = tmp_path / "note.wav", tmp_path / "note.mp3", tmp_path / "clip.mp4"
+    _sp.run(["espeak-ng", "-w", str(wav), "The invoice for the Berlin office is due on Friday."], check=True)
+    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-c:a", "libmp3lame", str(mp3)], check=True)
+    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10",
+             "-i", str(wav), "-shortest", "-c:v", "libx264", "-c:a", "aac", str(mp4)], check=True)
+    pipe = p.create({"name": "calls", "bucket": "landing", "prefix": "calls/", "format": "files", "target": "raw.calls",
+                     "create_table": True}, "urn:li:corpuser:admin")
+    for name, path in (("note.wav", wav), ("note.mp3", mp3), ("clip.mp4", mp4)):
+        s3.put_object(Bucket="landing", Key=f"calls/{name}", Body=path.read_bytes())
+    s3.put_object(Bucket="landing", Key="calls/broken.mp3", Body=b"not a recording")
+    assert {f["status"] for f in p.sweep(pipe["id"])} == {"ok"}
+    rows = {r["key"]: r for r in p._catalog().load_table(("raw", "calls")).scan().to_arrow().to_pylist()}
+    for key in ("calls/note.wav", "calls/note.mp3", "calls/clip.mp4"):
+        text = (rows[key]["text"] or "").lower()
+        assert rows[key]["extract_error"] is None and "office" in text and "friday" in text, rows[key]
+        assert rows[key]["pages"] in (3, 4)                                          # its length in seconds
+    assert rows["calls/broken.mp3"]["text"] is None and "not a recording" in rows["calls/broken.mp3"]["extract_error"]
+    # Over the length limit: noted, not read.
+    monkeypatch.setenv("CAIRN_TRANSCRIBE_MAX_SECONDS", "2")
+    s3.put_object(Bucket="landing", Key="calls/note.wav", Body=wav.read_bytes() + b"\0")
+    p.sweep(pipe["id"])
+    row = {r["key"]: r for r in p._catalog().load_table(("raw", "calls")).scan().to_arrow().to_pylist()}["calls/note.wav"]
+    assert row["text"] is None and "over the transcription limit" in row["extract_error"]
+
+
 def test_excel_workbooks_land_as_typed_tables(world):
     """Queue row 27: an Excel workbook that lands under a pipe's prefix becomes rows of its table: the first sheet,
     headers as column names, each column typed by its values, formulas as the values Excel saved."""

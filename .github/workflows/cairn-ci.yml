@@ -236,12 +236,16 @@ jobs:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
           CAIRN_JOBS_TEST_IMAGE: cairn/jobs:ci
+          CAIRN_TRANSCRIBE_MODEL: tiny.en                       # speech to text in files pipes (local Whisper)
+          CAIRN_TRANSCRIBE_MODEL_DIR: ${{ runner.temp }}/whisper
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
-          pip install -e ".[server,test,trino,streams,documents,saml,dr]" "ipython>=8.20"   # ipython: the notebook test
+          pip install -e ".[server,test,trino,streams,documents,media,saml,dr]" "ipython>=8.20"   # ipython: the notebook test
+          cairn transcribe-model download                       # the model files pipes transcribe with
           # The runner's package index can be older than the mirror (404 on a superseded package): refresh it first.
           sudo apt-get update -q >/dev/null
           sudo apt-get install -y -q tesseract-ocr tesseract-ocr-eng >/dev/null   # OCR of scanned documents (pipes)
+          sudo apt-get install -y -q espeak-ng ffmpeg >/dev/null   # speech for the transcription test, and its MP3/MP4
           # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
           sudo apt-get install -y -q bind9 >/dev/null
           sudo systemctl stop named 2>/dev/null || true

@@ -7,7 +7,10 @@
 * PDF: each page's text (``pypdf``, the ``documents`` extra); a scanned page (no text layer) is read by OCR
   (``ocr.py``: Tesseract, when it is installed);
 * images (PNG, JPEG, TIFF, BMP, GIF, WebP): read by OCR, a page per frame;
-* Word (``.docx``) and PowerPoint (``.pptx``): the text of their paragraphs and slides.
+* Word (``.docx``) and PowerPoint (``.pptx``): the text of their paragraphs and slides;
+* audio and video (WAV, MP3, M4A, OGG, FLAC, WebM, MP4, MOV …): what is said, transcribed locally
+  (``transcribe.py``: Whisper, when ``faster-whisper`` and a model are installed); ``pages`` is then the
+  recording's length in whole seconds.
 
 Anything else has no text (``None``). Text is capped at ``CAIRN_PIPES_MAX_TEXT`` characters (1,000,000).
 A document that cannot be read gives the reason in ``error``; it never stops the pipe.
@@ -23,7 +26,7 @@ import zipfile
 from html.parser import HTMLParser
 from typing import Optional
 
-from cairn.pipelines import ocr
+from cairn.pipelines import ocr, transcribe
 
 TEXT = {".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".jsonl", ".xml", ".log", ".yaml", ".yml", ".sql", ".rst"}
 HTML = {".html", ".htm"}
@@ -140,6 +143,11 @@ def extract(name: str, data: bytes) -> tuple[Optional[str], Optional[int], Optio
             if total > len(pages) and not problems:
                 problems.append(f"OCR read the first {len(pages)} of {total} pages (CAIRN_OCR_MAX_PAGES)")
             return _cap("\n\n".join(pages).strip()), total, "; ".join(problems) or None
+        if ext in transcribe.MEDIA:
+            if not transcribe.available():
+                return None, None, transcribe.unavailable()
+            text, seconds, error = transcribe.transcribe(name, data)
+            return (_cap(text) if text is not None else None), (int(round(seconds)) if seconds else None), error
         if ext == ".docx":
             return _cap(_office(data, re.compile(r"^word/(document|header\d*|footer\d*)\.xml$"))), None, None
         if ext == ".pptx":

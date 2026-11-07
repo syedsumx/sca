@@ -196,6 +196,21 @@ def cmd_samples(a) -> None:
     print(_json.dumps(out, indent=2, default=str))
 
 
+def cmd_transcribe_model(a) -> None:
+    """Puts a Whisper model where files pipes read it (CAIRN_TRANSCRIBE_MODEL_DIR): loads never download one."""
+    import os as _os
+
+    from cairn.pipelines import transcribe
+
+    root = a.dir or transcribe.model_dir()
+    if not root:
+        raise SystemExit("cairn transcribe-model: give --dir or set CAIRN_TRANSCRIBE_MODEL_DIR")
+    _os.makedirs(root, exist_ok=True)
+    model = a.model or transcribe.model_name()
+    transcribe.download(model, root)
+    print(f"{model} is in {root}")
+
+
 def cmd_bundle(a) -> None:
     """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
     from cairn.iac.bundle import main
@@ -818,6 +833,13 @@ def build_parser() -> argparse.ArgumentParser:
         sp = sm_sub.add_parser(verb, help=what)
         sp.add_argument("name", help="the set: retail")
         sp.set_defaults(fn=cmd_samples)
+
+    tm = sub.add_parser("transcribe-model", help="speech to text for files pipes: put a Whisper model in place")
+    tm_sub = tm.add_subparsers(dest="transcribe_cmd", required=True)
+    td = tm_sub.add_parser("download", help="download a model into CAIRN_TRANSCRIBE_MODEL_DIR (or --dir)")
+    td.add_argument("--model", help="the model (CAIRN_TRANSCRIBE_MODEL, default base)")
+    td.add_argument("--dir", help="where to put it (CAIRN_TRANSCRIBE_MODEL_DIR)")
+    td.set_defaults(fn=cmd_transcribe_model)
 
     st = sub.add_parser("streams", help="Kafka topics (CDC included) into lakehouse tables")
     st.add_argument("--interval", type=float, default=15.0, help="seconds between re-reading the stream definitions")
