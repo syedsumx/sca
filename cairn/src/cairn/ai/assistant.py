@@ -46,6 +46,10 @@ metrics, ownership, quality, access and lineage using the tools. Rules:
 - Be concise: short paragraphs or bullets, markdown allowed. If tools return nothing, say so.
 {UNTRUSTED_NOTICE}"""
 
+WORKSPACE_RULES = """
+- Save a note with remember only when the person asks you to remember something or states a lasting preference,
+  and say what you saved. Save an output with save_artifact only when they ask to save or keep it."""
+
 TOOL_SPECS: list[dict] = [
     {"name": "search_assets", "description": "Keyword search over the catalog (datasets, dashboards, charts, products).",
      "input_schema": {"type": "object", "properties": {
@@ -134,6 +138,7 @@ class Assistant:
         self.model = model
         self.effort = effort
         self.max_iterations = max_iterations
+        self.workspace = None                      # cairn.ai.workspace.Workspace: memory, artifacts, research
 
     # ---- persistence ------------------------------------------------------------------
     def _load(self, cid: Optional[str], actor: str) -> tuple[str, list[dict]]:
@@ -166,6 +171,9 @@ class Assistant:
             raise ValueError(f"tool {name} is not one of this agent's tools")
         if getattr(principal, "via", "") == "agent" and tool_scope(name) not in principal.scopes:
             raise PermissionError(f"this agent's scopes do not include {tool_scope(name)}")
+        from cairn.ai.workspace import _DATA_TOOLS, turn_reads
+
+        reads = turn_reads.get()
         tools = self.tools_factory(principal)
         if name == "explain_lineage":
             if self.explainer_factory is None:
@@ -201,6 +209,8 @@ class Assistant:
                               int((time.monotonic() - started) * 1000), len(flagged))
                 if status == "ok" and tool_scope(name) == "read" and (read := datasets_in(allowed)):
                     traces.record_reads(principal.urn, principal.agent, "assistant", read, "metadata")
+        if reads is not None:   # the datasets this turn used: an artifact saved from it is made from them
+            reads.extend(datasets_in(allowed) + (datasets_in(out) if name in _DATA_TOOLS else []))
         return out, f"{name.replace('_', ' ')}({', '.join(f'{k}={str(v)[:40]}' for k, v in allowed.items())})"
 
     # ---- main entry ---------------------------------------------------------------------
@@ -222,25 +232,43 @@ class Assistant:
             self._save(cid, principal.urn, history[-40:])
             return self._response(cid, reply, citations, calls)
 
+        from cairn.ai.workspace import WORKSPACE_TOOL_SPECS, current_conversation, turn_reads
+
         messages = history + [{"role": "user", "content": clean}]
-        reply, messages, tool_calls = self.run_loop(principal, SYSTEM, TOOL_SPECS, messages, self.max_iterations,
-                                                    "assistant.chat")
+        system, specs = SYSTEM, TOOL_SPECS
+        person = getattr(principal, "via", "") not in ("agent", "service")
+        if self.workspace is not None and person:
+            system = SYSTEM + WORKSPACE_RULES + self.workspace.memory_prompt(principal.urn)
+            specs = TOOL_SPECS + WORKSPACE_TOOL_SPECS
+        reads_token, conv_token = turn_reads.set([]), current_conversation.set(cid)
+        try:
+            reply, messages, tool_calls = self.run_loop(principal, system, specs, messages, self.max_iterations,
+                                                        "assistant.chat")
+        finally:
+            turn_reads.reset(reads_token)
+            current_conversation.reset(conv_token)
         self._save(cid, principal.urn, messages[-60:])
-        return self._response(cid, reply, sorted(set(_URN.findall(reply))), tool_calls)
+        out = self._response(cid, reply, sorted(set(_URN.findall(reply))), tool_calls)
+        out["saved"] = [c["saved"] for c in tool_calls if c.get("saved")]   # notes and artifacts, shown to the person
+        return out
 
     def run_loop(self, principal, system: str, tool_specs: list[dict], messages: list[dict], max_iterations: int,
                  purpose: str, allowed_tools: Optional[set[str]] = None, model: Optional[str] = None
                  ) -> tuple[str, list[dict], list[dict]]:
         """The model's tool-use loop: (reply, messages, tool calls). Tools run as ``principal``; with
         ``allowed_tools``, only those (custom agents)."""
+        from cairn.ai.workspace import WORKSPACE_TOOLS, current_conversation
+
         client = self.llm.client
         metered = hasattr(self.llm, "check") and hasattr(self.llm, "record")
         tool_calls: list[dict] = []
         reply = ""
         for _ in range(max_iterations):
             kwargs: dict[str, Any] = {"model": model or self.model, "max_tokens": 16000, "system": system,
-                                      "tools": tool_specs, "messages": messages, "thinking": {"type": "adaptive"},
+                                      "messages": messages, "thinking": {"type": "adaptive"},
                                       "output_config": {"effort": self.effort}}
+            if tool_specs:
+                kwargs["tools"] = tool_specs
             if getattr(self.llm, "server_side_fallback", False):
                 resp = client.beta.messages.create(betas=["server-side-fallback-2026-07-01"], fallbacks="default",
                                                    **kwargs)
@@ -267,10 +295,17 @@ class Assistant:
                 if block.get("type") != "tool_use":
                     continue
                 try:
-                    out, summary = self._run_tool(principal, block["name"], block.get("input") or {}, allowed_tools)
+                    saved = None
+                    if block["name"] in WORKSPACE_TOOLS and allowed_tools is None and self.workspace is not None:
+                        out, summary = self.workspace.run_tool(principal, block["name"], block.get("input") or {},
+                                                               current_conversation.get())
+                        saved = {"kind": "note" if block["name"] == "remember" else "artifact", **out}
+                    else:
+                        out, summary = self._run_tool(principal, block["name"], block.get("input") or {},
+                                                      allowed_tools)
                     text = json.dumps(out, default=str)[:_MAX_TOOL_RESULT]
                     results.append({"type": "tool_result", "tool_use_id": block["id"], "content": redact(text)})
-                    tool_calls.append({"name": block["name"], "summary": summary})
+                    tool_calls.append({"name": block["name"], "summary": summary, **({"saved": saved} if saved else {})})
                 except Exception as e:  # report to the model, do not crash the turn
                     results.append({"type": "tool_result", "tool_use_id": block["id"], "is_error": True,
                                     "content": f"{type(e).__name__}: {e}"})

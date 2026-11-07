@@ -75,6 +75,7 @@ class Services:
     context: Optional[Any] = None
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
+    ai_workspace: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -1181,6 +1182,18 @@ def _build_active_metadata(s: Services) -> None:
 
     s.assistant = Assistant(s.engine, s.tools_for, s.llm, s.explainer_for, s.nlq, products_for,
                             s.settings.ai.model, cfg.assistant_effort)
+
+    # The assistant's workspace (cairn.ai.workspace): memory, artifacts shared fail-closed, deep research.
+    from cairn.ai.workspace import Workspace
+
+    def may_read(actor: str, urn: str) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), "VIEW_DATASET_PROFILE", urn, raise_on_deny=False)
+
+    def person_groups(actor: str) -> list[str]:
+        return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])] if s.attributes is not None else []
+    s.ai_workspace = Workspace(s.engine, may_read, person_groups, s.audit)
+    s.ai_workspace.assistant = s.assistant
+    s.assistant.workspace = s.ai_workspace
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:

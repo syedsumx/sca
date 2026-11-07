@@ -482,6 +482,58 @@ it. To make an agent depend on the AI system register, link it to an AI system
   running and deleting are audited.
 - Runs need a model that runs tools (`CAIRN_LLM_PROVIDER=anthropic`); without one, `run` answers 503.
 
+## The assistant's memory, artifacts and deep research
+
+The assistant keeps three things for each person. Agents and service accounts have none of them.
+
+**Memory.** These are short notes the assistant reads at the start of each conversation, such as "reports revenue
+in EUR, fiscal year starts in April". It saves a note only when the person asks it to, or states a lasting
+preference, and every saved note is listed in the reply.
+
+- People see and delete their notes at `GET /ai/memory` and `DELETE /ai/memory/{id}` (or `DELETE /ai/memory` for
+  all of them). They add notes themselves with `POST /ai/memory`.
+- `PUT /ai/memory/settings {"enabled": false}` switches memory off. The assistant then neither reads nor saves
+  notes.
+- Each note is at most 500 characters, and each person has at most 50. PII is redacted before a note is stored.
+- A note that reads like instructions to an AI is refused and audited (`assistant.memory.refused`). This is what a
+  poisoned tool result would try to plant.
+- Notes go to the model inside a `<user_memory>` wrapper, as background data. They never override the
+  assistant's rules.
+
+**Artifacts.** These are outputs worth keeping: markdown, a table, a chart spec (JSON), a SQL query, or a research
+report. The assistant saves one when asked (`save_artifact`); people can also create one with
+`POST /ai/artifacts`.
+
+- Each edit (`PATCH /ai/artifacts/{id}`, with `expected_version`) makes a new version. The last 20 versions are
+  kept and readable with `?version=`.
+- An artifact remembers the datasets it was made from: those the conversation read data from, and any dataset
+  urn cited in its content.
+- `POST /ai/artifacts/{id}/share {"add": [...], "remove": [...]}` shares it with users or groups.
+- Anyone other than the owner can open it only if, at that moment, they hold `VIEW_DATASET_PROFILE` on every
+  source. If not, they get 403. If an access decision cannot be made, the answer is also 403.
+- People it is not shared with get 404. Only the owner edits, shares or deletes.
+
+**Deep research.** `POST /ai/research {"question": ..., "max_steps": 1-6}` returns 202 and runs in the
+background, in three stages:
+
+1. The model plans the sub-questions.
+2. It works through each one with the read-only tools, as the person who asked: search, lineage, quality,
+   knowledge, metrics and `ask_data`. It cannot suggest changes, request access or save anything.
+3. It writes a report, which is saved as a `report` artifact with citations.
+
+`GET /ai/research/{id}` shows the plan and each step's finding and tool calls as they happen. A run:
+
+- can be stopped between steps with `POST /ai/research/{id}/cancel`;
+- stops with `failed` when the AI budget is spent;
+- counts towards the person's AI usage (`assistant.research`).
+
+Each person may have two runs at a time. The scheduler marks a run that a restart left `running` for over two
+hours as failed.
+
+Deep research needs the Anthropic provider. Without it the endpoint answers 503.
+
+Everything above is audited: `assistant.memory.*`, `assistant.artifact.*` and `assistant.research.*`.
+
 ## Sources
 
 **Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
