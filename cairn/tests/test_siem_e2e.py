@@ -7,10 +7,12 @@ import json
 import os
 import shutil
 import socket
+import ssl
 import subprocess
 import tempfile
 import time
 
+import httpx
 import pytest
 
 from cairn.common.audit import AuditLog, verify_entries
@@ -73,12 +75,19 @@ def vector():
                         "-p", f"127.0.0.1:{ports['hec']}:8088", "-p", f"127.0.0.1:{ports['tcp']}:5514",
                         "-p", f"127.0.0.1:{ports['tls']}:6514", "-p", f"127.0.0.1:{ports['http']}:8080",
                         IMAGE, "--config", "/etc/vector/vector.yaml"], check=True, capture_output=True)
+        # Docker's port proxy accepts connections before Vector listens, so wait for real answers from each source.
         end = time.time() + 60
         while time.time() < end:
             try:
+                httpx.get(f"http://127.0.0.1:{ports['hec']}/services/collector/health", timeout=2)
+                httpx.get(f"http://127.0.0.1:{ports['http']}/", timeout=2)
+                ctx = ssl.create_default_context(cafile=f"{d}/certs/server.pem")
+                with socket.create_connection(("127.0.0.1", ports["tls"]), timeout=2) as raw, \
+                        ctx.wrap_socket(raw, server_hostname="localhost"):
+                    pass
                 with socket.create_connection(("127.0.0.1", ports["tcp"]), timeout=1):
                     return
-            except OSError:
+            except (OSError, httpx.HTTPError):
                 time.sleep(0.5)
         raise RuntimeError(subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr[-2000:])
 
