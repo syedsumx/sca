@@ -3141,9 +3141,14 @@ filters.
 When a table does hold deletion vectors or `VARIANT` columns, a Trino query on it fails with Trino's own error.
 It never returns deleted rows. The weekly upgrade matrix tests newer Trino releases against such tables.
 
-Cairn's own writers (files and stream pipes, derived tables) write through pyiceberg, which does not write v3
-yet. Keep their target tables on v2. A pipe whose table was upgraded fails with "Cannot write manifest for table
-version: 3" until pyiceberg can.
+Cairn's own writers (files and stream pipes, mirrors, SaaS syncs, synthetic tables, samples) write through
+pyiceberg, which reads v3 but has no v3 manifest writers (0.12). Cairn adds them (`cairn.pipelines.iceberg_v3`,
+applied only while pyiceberg lacks its own): their appends, deletes, upserts and overwrites work on v3 tables, and
+row lineage follows the v3 spec. Each new data manifest takes the next row ids, manifests carried into a later
+snapshot keep theirs, and each snapshot records its first row id and added rows so the catalog moves
+`next-row-id` on. A rewrite by these writers (a delete, an upsert) writes the rows it keeps into new files, and
+those rows take new ids; Spark and Trino keep ids when they rewrite. pyiceberg cannot upgrade a table to v3;
+upgrade with Spark (or Trino). Tested on the real store and catalog (`tests/test_iceberg_v3_writes.py`).
 
 
 ## Table maintenance

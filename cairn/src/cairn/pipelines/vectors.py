@@ -132,6 +132,9 @@ class VectorIndexes:
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-vectors", **self.catalog_props)
 
     # ---- definitions --------------------------------------------------------------------------

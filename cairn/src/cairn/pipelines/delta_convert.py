@@ -234,6 +234,9 @@ class DeltaConversions:
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-delta", **self.catalog_props)
 
     def inspect(self, location: str) -> dict:

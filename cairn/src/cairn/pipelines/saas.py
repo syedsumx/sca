@@ -416,6 +416,9 @@ class SaasSyncs:
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-saas", **self.catalog_props)
 
     def _secrets(self, s: dict) -> dict[str, str]:

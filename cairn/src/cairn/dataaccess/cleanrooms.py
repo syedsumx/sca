@@ -392,8 +392,10 @@ def catalog_writer(props: dict) -> Callable[[str, Any], None]:
     def write(target: str, data) -> None:
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
         from cairn.pipelines.pipes import open_table
 
+        enable()                                         # pyiceberg writes v3 tables too
         cat = RestCatalog("cairn-cleanrooms", **props)
         try:
             open_table(cat, target, data.schema, True).overwrite(data)

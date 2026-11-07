@@ -82,6 +82,9 @@ class Synthetic:
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-synthetic", **self.catalog_props)
 
     def _need(self, actor: str, privilege: str, ns: str, t: str) -> None:

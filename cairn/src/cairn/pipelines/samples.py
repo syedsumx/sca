@@ -149,6 +149,9 @@ class Samples:
 
         if not self.catalog_props:
             raise SampleError("sample data needs the lakehouse catalog Cairn writes to (CAIRN_PIPES_CATALOG)", 503)
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-samples", **self.catalog_props)
 
     def _state(self, name: str) -> Optional[dict]:

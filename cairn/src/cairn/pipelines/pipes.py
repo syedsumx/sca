@@ -466,6 +466,9 @@ class Pipes:
     def _catalog(self):
         from pyiceberg.catalog.rest import RestCatalog
 
+        from cairn.pipelines.iceberg_v3 import enable
+
+        enable()                                         # pyiceberg writes v3 tables too
         return RestCatalog("cairn-pipes", **self.catalog_props)
 
     def _append(self, pipe: dict, data) -> tuple[int, list]:
