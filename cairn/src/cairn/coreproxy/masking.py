@@ -112,7 +112,10 @@ class DatasetPlan:
 
 
 NO_MASK = DatasetPlan()
-_STRATEGY_STRENGTH = {"partial": 0, "geo": 0.5, "hash": 1, "redact": 2, "null": 3}   # geo: partial, locations coarsened
+# How much each mask hides, for choosing the strongest when several policies hit a dataset. geo is the weakest: it
+# keeps coordinates to geo_decimals() places and shapes as a rounded centre, where partial keeps one figure or letter.
+STRATEGY_STRENGTH = {"geo": -1, "partial": 0, "hash": 1, "redact": 2, "null": 3}
+_STRATEGY_STRENGTH = STRATEGY_STRENGTH
 
 
 def label_matches(pattern: str, labels: Iterable[str]) -> bool:

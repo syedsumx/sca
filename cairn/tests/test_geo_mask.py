@@ -1,5 +1,6 @@
 """The geo mask and location classification: coordinates rounded, shapes reduced to a rounded centre point, other
-values masked as partial; location columns found by name and by value; geo outranks partial, not hash."""
+values masked as partial; location columns found by name and by value;
+geo is the weakest mask, so partial and hash outrank it (it reveals more)."""
 
 from __future__ import annotations
 
@@ -24,7 +25,7 @@ def test_trino_expressions_keep_the_type_and_fall_back_to_partial():
     assert "ST_GeometryFromText" in mask_expression("place", "varchar", "geo")
 
 
-def test_location_columns_are_found_and_geo_outranks_partial():
+def test_location_columns_are_found_and_partial_outranks_geo():
     assert [c.kind for c in classify_field("pickup_lat", [])] == ["Location"]
     assert "Location" in [c.kind for c in classify_field("where", ["POINT (1 2)", "POINT (3 4)"])]
     assert "Location" in [c.kind for c in classify_field("pos", ["48.137, 11.575", "52.520, 13.404"])]
@@ -33,5 +34,9 @@ def test_location_columns_are_found_and_geo_outranks_partial():
 
     def ob(strategy, label="PII"):
         return {"type": "mask_columns", "params": {"labels": [label], "strategy": strategy}}
-    assert build_plan([ob("partial"), ob("geo", "PII.Location")], resource).strategy == "geo"
+    # Partial hides more than geo (51.5074 → "5•••••4" against 51.51): with both, partial wins (review finding).
+    assert mask_scalar(51.5074, "partial") == "5•••••4" and mask_scalar(51.5074, "geo") == 51.51
+    assert build_plan([ob("partial"), ob("geo", "PII.Location")], resource).strategy == "partial"
+    assert build_plan([ob("geo", "PII.Location"), ob("partial")], resource).strategy == "partial"
+    assert build_plan([ob("geo", "PII.Location")], resource).strategy == "geo"
     assert build_plan([ob("geo", "PII.Location"), ob("hash")], resource).strategy == "hash"
