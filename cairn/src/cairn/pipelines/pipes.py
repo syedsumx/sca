@@ -57,6 +57,7 @@ pipes = Table(
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
     Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
+    Column("tokenize", Text, nullable=True),                # JSON {column: token domain} (cairn.governance.tokens)
 )
 
 pipe_files = Table(
@@ -116,7 +117,8 @@ def _now() -> int:
 def _pipe(r) -> dict:
     return {"id": r.id, "name": r.name, "bucket": r.bucket, "prefix": r.prefix, "format": r.format, "target": r.target,
             "create_table": bool(r.create_table), "enabled": bool(r.enabled), "created_by": r.created_by,
-            "created_ms": r.created_ms, "bad_rows": getattr(r, "bad_rows", None) or "fail"}
+            "created_ms": r.created_ms, "bad_rows": getattr(r, "bad_rows", None) or "fail",
+            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {}}
 
 
 def column_name(header, i: int) -> str:
@@ -261,6 +263,25 @@ def fit_rows(table, rows: list, schema, target: str):
     return fit(table, pa.Table.from_pylist(keep, schema=schema), target), bad
 
 
+def check_tokenize(tokens, spec, actor: str, files: bool, error):
+    """A pipe's or stream's ``tokenize`` ({column: token domain}): the domains exist and the actor may tokenise."""
+    if not spec:
+        return {}
+    if files:
+        raise error("tokenize: not for files pipes")
+    if tokens is None or not tokens.enabled:
+        raise error("tokenize: tokenisation is not configured (CAIRN_TOKENS_KEY)", 503)
+    from cairn.governance.tokens import TokenError
+
+    try:
+        spec = tokens.check_columns(spec)
+        for domain in set(spec.values()):
+            tokens._may(actor, "TOKENIZE", domain)
+    except TokenError as e:
+        raise error(f"tokenize: {e}", e.status)
+    return spec
+
+
 def split_rows(table, data, target: str):
     """An Arrow table fitted to the table, and the rows that cannot be: ``(good, [(row, reason, values)])``."""
     try:
@@ -284,6 +305,7 @@ class Pipes:
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
         self.webhook_secret = webhook_secret
         self._locks: dict[str, threading.Lock] = {}
+        self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
@@ -294,7 +316,7 @@ class Pipes:
             conn.execute(pipes.insert().values(**row))
             if self.audit is not None:
                 self.audit.record("lakehouse", "pipe.created", actor, self.urn(*row["target"].split(".")), row, conn=conn)
-        return row
+        return _pipe(type("R", (), row))
 
     def update(self, pid: str, body: dict, actor: str) -> dict:
         """Changes a pipe in place: files already loaded stay loaded."""
@@ -306,7 +328,7 @@ class Pipes:
             conn.execute(pipes.update().where(pipes.c.id == pid).values(**row))
             if self.audit is not None:
                 self.audit.record("lakehouse", "pipe.updated", actor, self.urn(*row["target"].split(".")), row, conn=conn)
-        return row
+        return _pipe(type("R", (), row))
 
     def _values(self, body: dict, actor: str) -> dict:
         name, bucket = str(body.get("name") or "").strip(), str(body.get("bucket") or "")
@@ -322,9 +344,11 @@ class Pipes:
         bad_rows = str(body.get("bad_rows") or "fail")
         if bad_rows not in BAD_ROWS or (bad_rows == "quarantine" and fmt == "files"):
             raise PipeError("bad_rows: fail, or quarantine (not for files pipes)")
+        tokenize = check_tokenize(self.tokens, body.get("tokenize"), actor, fmt == "files", PipeError)
         row = {"id": uuid.uuid4().hex, "name": name[:256], "bucket": bucket, "prefix": prefix, "format": fmt, "target": target,
                "create_table": bool(body.get("create_table")), "enabled": bool(body.get("enabled", True)),
-               "created_by": actor, "created_ms": _now(), "bad_rows": bad_rows}
+               "created_by": actor, "created_ms": _now(), "bad_rows": bad_rows,
+               "tokenize": json.dumps(tokenize) if tokenize else None}
         return row
 
     def list(self) -> list[dict]:
@@ -423,6 +447,10 @@ class Pipes:
 
     def _append(self, pipe: dict, data) -> tuple[int, list]:
         """Rows loaded, and (with bad_rows: quarantine) the rows set aside."""
+        if pipe.get("tokenize"):
+            if self.tokens is None:
+                raise PipeError("this pipe tokenises columns, and tokenisation is not configured", 503)
+            data = self.tokens.tokenize_table(data, pipe["tokenize"])   # before the table is made: tokens are text
         table = open_table(self._catalog(), pipe["target"], data.schema, pipe["create_table"])
         if pipe["format"] == "files":
             from pyiceberg.expressions import EqualTo

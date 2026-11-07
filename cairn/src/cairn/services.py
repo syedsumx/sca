@@ -858,6 +858,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_reverse_etl(s)
         _build_records(s)
         _wire_residency(s)
+        _build_tokens(s)
         from cairn.common.limits import ApiLimits
 
         s.limits = ApiLimits(s.engine, s.audit)
@@ -1887,6 +1888,19 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+
+
+def _build_tokens(s: Services) -> None:
+    """Reversible tokenisation (cairn.governance.tokens): on with CAIRN_TOKENS_KEY; pipes and streams tokenise the
+    columns they are told to as data lands."""
+    from cairn.governance.tokens import Tokens
+
+    def may(actor: str, privilege: str, urn: str) -> bool:
+        return bool(s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False))
+    s.tokens = Tokens(s.engine, s.audit, may)
+    for attr in ("pipes", "streams"):
+        if getattr(s, attr, None) is not None:
+            getattr(s, attr).tokens = s.tokens
 
 
 def _wire_residency(s: Services) -> None:

@@ -348,3 +348,37 @@ def test_bad_rows_are_set_aside_with_quarantine_and_the_rest_load(world):
         assert r.status_code == 400, r.text
     p.delete(pid, "urn:li:corpuser:admin")
     assert p.rejects(pid) == []
+
+
+def test_columns_are_tokenised_as_they_land(world, monkeypatch):
+    """Tokenisation: a pipe with ``tokenize`` writes tokens, never the values, into the lakehouse; the same value is
+    the same token in every file (joins still work), and the values come back only through the vault."""
+    import base64
+
+    from cairn.governance.tokens import TOKEN, Tokens
+    from cairn.pipelines.pipes import PipeError
+
+    p, s3 = world["pipes"], world["s3"]
+    monkeypatch.setenv("CAIRN_TOKENS_KEY", base64.b64encode(os.urandom(32)).decode())
+    p.tokens = Tokens(p.engine, None, lambda actor, privilege, urn: privilege == "TOKENIZE" or actor.endswith(":ana"))
+    try:
+        p.tokens.create_domain("urn:li:corpuser:admin", "email")
+        pipe = p.create({"name": "tokenised", "bucket": "landing", "prefix": "tok/", "format": "csv",
+                         "target": "raw.customers_tok", "create_table": True, "tokenize": {"email": "email"}},
+                        "urn:li:corpuser:admin")
+        assert pipe["tokenize"] == {"email": "email"}
+        s3.put_object(Bucket="landing", Key="tok/a.csv", Body=b"id,email\n1,jane@acme.com\n2,bo@example.org\n")
+        s3.put_object(Bucket="landing", Key="tok/b.csv", Body=b"id,email\n3,jane@acme.com\n")
+        assert {f["status"] for f in p.sweep(pipe["id"])} == {"ok"}
+        t = p._catalog().load_table(("raw", "customers_tok"))
+        got = sorted(t.scan().to_arrow().to_pylist(), key=lambda r: r["id"])
+        emails = [r["email"] for r in got]
+        assert all(TOKEN.match(e) for e in emails) and emails[0] == emails[2] != emails[1]
+        assert "jane" not in repr(got) and t.schema().find_field("email").field_type.__class__.__name__ == "StringType"
+        assert p.tokens.detokenize("urn:li:corpuser:ana", "email", emails, "support ticket 991") == [
+            "jane@acme.com", "bo@example.org", "jane@acme.com"]
+        with pytest.raises(PipeError, match="tokenize"):
+            p.create({"name": "t2", "bucket": "landing", "prefix": "t2/", "format": "csv", "target": "raw.t2",
+                      "tokenize": {"email": "nope"}}, "urn:li:corpuser:admin")
+    finally:
+        p.tokens = None

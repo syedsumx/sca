@@ -53,7 +53,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import BAD_ROWS, TARGET, PipeError, fit, fit_rows, open_table
+from cairn.pipelines.pipes import BAD_ROWS, TARGET, PipeError, check_tokenize, fit, fit_rows, open_table
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +77,7 @@ streams = Table(
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
     Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
+    Column("tokenize", Text, nullable=True),                # JSON {column: token domain} (cairn.governance.tokens)
 )
 
 stream_status = Table(
@@ -125,7 +126,8 @@ def _stream(r) -> dict:
             "encoding": getattr(r, "encoding", None) or "json", "start": r.start, "source": r.source,
             "batch_rows": r.batch_rows, "batch_seconds": r.batch_seconds,
             "enabled": bool(r.enabled), "created_by": r.created_by, "created_ms": r.created_ms,
-            "bad_rows": getattr(r, "bad_rows", None) or "fail"}
+            "bad_rows": getattr(r, "bad_rows", None) or "fail",
+            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {}}
 
 
 class Reject(Exception):
@@ -250,6 +252,7 @@ class Streams:
         self.engine, self.kafka, self.catalog_props, self.audit, self.changes = engine, kafka, catalog, audit, changes
         self.graph = graph
         self.registry = registry or {}
+        self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
         self._registry = Registry(self.registry) if self.registry.get("url") else None
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
@@ -320,6 +323,7 @@ class Streams:
         bad_rows = str(body.get("bad_rows") or "fail")
         if bad_rows not in BAD_ROWS:
             raise StreamError("bad_rows is fail (the stream stops on a row the table refuses) or quarantine")
+        tokenize = check_tokenize(self.tokens, body.get("tokenize"), actor, False, StreamError)
         rows, secs = body.get("batch_rows", 5000), body.get("batch_seconds", 10)
         if not isinstance(rows, int) or not 1 <= rows <= 1_000_000 or not isinstance(secs, int) or not 1 <= secs <= 3600:
             raise StreamError("batch_rows is 1-1000000 and batch_seconds 1-3600")
@@ -328,7 +332,7 @@ class Streams:
                "evolve": bool(body.get("evolve")),
                "encoding": encoding, "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
                "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now(),
-               "bad_rows": bad_rows}
+               "bad_rows": bad_rows, "tokenize": json.dumps(tokenize) if tokenize else None}
         return row
 
     def _lineage(self, urn: str, source: str, actor: str) -> None:
@@ -456,6 +460,12 @@ class Streams:
         props = {f"{PROP}{sid}.{stream['topic']}.{p}": str(o) for p, o in nxt.items()}
         if not ops:
             return 0                                       # only tombstones or rejects: offsets go to Kafka
+        if stream.get("tokenize"):
+            # Tokenised as they land, keys included (so a delete finds the row its upsert wrote).
+            if self.tokens is None:
+                raise StreamError("this stream tokenises columns, and tokenisation is not configured", 503)
+            done = self.tokens.tokenize_rows([r for _, r, _, _ in ops], stream["tokenize"])
+            ops = [(op, r, p, o) for (op, _, p, o), r in zip(ops, done)]
         cat = self._catalog()
         ident = tuple(stream["target"].split("."))
         for attempt in range(5):

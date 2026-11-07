@@ -257,6 +257,33 @@ Data residency pins lakehouse namespaces to a region. Their tables are then stor
   - reads from an allowed and a refused region, through the catalog and through Trino's access decisions;
   - shares by region, rechecked when the rules change, and reverse syncs.
 
+## Tokenisation
+
+Reversible tokenisation replaces sensitive values with tokens where data lands. The lakehouse then holds only tokens, so every engine, share, export and copy carries only tokens. People allowed to can get the values back from the vault, for a stated purpose, audited.
+
+- **Turning it on.** Set `CAIRN_TOKENS_KEY` to 32 random bytes in base64 (`openssl rand -base64 32`). In Kubernetes, pass it from a Secret through `cairn.extraEnv` (`valueFrom.secretKeyRef`); `CAIRN_TOKENS_KEY_FILE` also works. Without a key, tokenisation is off (503), and values are never kept unencrypted.
+- **Token domains.** A domain is a kind of value, such as `email`, `iban` or `patient_id`, with its own random keys. Create one with `POST /governance/tokens/domains` and `{"name": "email", "description": "…"}` (`MANAGE_POLICIES`). The domain's keys are kept wrapped by the master key.
+- **Tokens.** A token is `tok_` followed by 26 characters, a keyed HMAC of the value.
+  - Within a domain, the same value is always the same token, so joins, counts and group-bys still work.
+  - Without the key, nobody can find a value's token by trying candidates, as they could with a plain hash of an e-mail address.
+  - Tokenised columns are text.
+- **Tokenising as data lands.** Give a pipe or a stream `"tokenize": {"email": "email"}` (column to domain). Rows are tokenised before they are written. The upsert key may be tokenised too: the same value finds the same row.
+  - Whoever sets the pipe or stream up needs `TOKENIZE` on each domain (`urn:li:tokenDomain:<name>`).
+  - Changing `tokenize` on a pipe that has already loaded files leaves those rows as they were.
+- **Tokenising through the API.** `POST /governance/tokens/domains/{d}/tokenize` with `{"values": [...]}` (`TOKENIZE`), for applications.
+- **Getting values back.** `POST /governance/tokens/domains/{d}/detokenize` with `{"tokens": [...], "purpose": "fraud case 4471"}`.
+  - It needs `DETOKENIZE` on the domain, granted by a Cairn policy (`actions: [DETOKENIZE]`, `resource_urns: [urn:li:tokenDomain:email]`).
+  - The purpose is required (8 to 500 characters).
+  - At most `CAIRN_TOKENS_MAX_BATCH` tokens (1,000) per call. A token the vault does not hold gives `null`.
+  - Every call is audited (`token.detokenized`) with who, the purpose and the count. The audit never holds values or tokens, and the answer is not cached.
+- **Forgetting (erasure).** `POST /governance/tokens/domains/{d}/forget` with `{"values": [...]}` or `{"tokens": [...]}` (`MANAGE_POLICIES`) deletes their entries from the vault. The tokens stay in the tables, but can never be turned back into the values. Use it for subject erasure requests on tokenised data.
+- **Rotating the master key.** Put the new key in `CAIRN_TOKENS_KEY` and the old one in `CAIRN_TOKENS_KEY_PREVIOUS`, then call `POST /governance/tokens/rotate` (`MANAGE_POLICIES`). It re-wraps every domain's keys; tokens and the vault do not change. Afterwards, remove the old key.
+- **The vault.** Each value is kept encrypted with AES-256-GCM under its domain's own key, bound to the domain and the token, in Cairn's database (`cairn_token_vault`). Back the database up as usual; without the master key, the backup reveals nothing.
+- **Tested** in `tests/test_tokens.py`, on SQLite and PostgreSQL with the real policy decision point:
+  - tokens per domain, encrypted storage, privileges and purposes, audit without values, rotation and forgetting.
+
+  Also tested in `tests/test_pipes_e2e.py` and `tests/test_streams_e2e.py`, with the real store and catalog: tokenised files and a tokenised upsert key.
+
 ## Consent
 
 Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,

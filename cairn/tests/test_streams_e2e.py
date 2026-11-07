@@ -311,6 +311,31 @@ def test_bad_rows_quarantine_sets_aside_what_the_table_refuses(streams):
     assert [r["offset"] for r in s.rejects(s.by_name("q-upsert")["id"])] == [2]
 
 
+def test_streams_tokenise_columns_keys_included(streams, monkeypatch):
+    """Tokenisation in a stream: the tokenised column lands as tokens; when it is the upsert key, a later change of
+    the same value finds the same row (the same token)."""
+    import base64
+    import os
+
+    from cairn.governance.tokens import TOKEN, Tokens
+
+    s = streams
+    monkeypatch.setenv("CAIRN_TOKENS_KEY", base64.b64encode(os.urandom(32)).decode())
+    s.tokens = Tokens(s.engine, None, lambda actor, privilege, urn: True)
+    try:
+        s.tokens.create_domain("urn:li:corpuser:admin", "customer")
+        s.create({"name": "q-tok", "format": "http", "mode": "upsert", "key": "email", "target": "raw.qtok",
+                  "create_table": True, "tokenize": {"email": "customer"}}, "urn:li:corpuser:admin")
+        s.ingest("q-tok", "a", [{"email": "jane@acme.com", "tier": "gold"}, {"email": "bo@x.org", "tier": "silver"}])
+        s.ingest("q-tok", "a", [{"email": "jane@acme.com", "tier": "platinum"}])
+        got = sorted(table_rows(s, "raw.qtok"), key=lambda r: r["tier"])
+        assert [r["tier"] for r in got] == ["platinum", "silver"] and all(TOKEN.match(r["email"]) for r in got)
+        assert s.tokens.detokenize("urn:li:corpuser:admin", "customer", [got[0]["email"]], "checking the stream") == [
+            "jane@acme.com"]
+    finally:
+        s.tokens = None
+
+
 REDPANDA = "redpandadata/redpanda:v25.2.9"
 
 
