@@ -736,7 +736,9 @@ The endpoints:
   (`cdb_u_<id>`) is recorded with who asked, and audited (`database.credentials`, with no password).
 - `GET .../logins` lists the open logins: your own, or all of them for a database's managers.
   `DELETE .../logins/<user>` ends one now, and its sessions with it.
-- The scheduler drops logins once they expire, ending their sessions.
+- The scheduler drops logins once they expire, ending their sessions. One it cannot drop (say, something outside
+  Cairn made it own an object) is set to `NOLOGIN`, its sessions are ended, a warning is logged, and it is tried
+  again on the next run; the others expire as usual.
 - `POST /v1/databases/<name>/branches {"name"}` (`MANAGE_DATABASE` on the source, and `CREATE_DATABASE`) makes
   a copy with roles of its own, for a test or a migration rehearsal. Its objects are handed to the copy's
   owner one by one, and the source's roles lose every grant and default privilege in the copy: a branch never
@@ -760,6 +762,7 @@ Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
 - revoked and expired logins were dropped, and their open sessions ended;
 - a branch, with a `serial` table, was its own copy, and a busy source answered 409;
 - the source of a branch could be dropped, and the branch kept working;
+- an expired login that could not be dropped was locked out and retried, and the others still expired;
 - dropping removed everything;
 - no password reached the audit log.
 

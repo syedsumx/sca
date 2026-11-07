@@ -316,12 +316,29 @@ class Databases:
                 logins_table.c.expires_ms <= now, logins_table.c.dropped.is_(False)))]
         if not roles:
             return 0
+        done: list[str] = []
         with self._admin() as conn:
-            for role in roles:
-                self._drop_login(conn, role)
-        with self.engine.begin() as c:
-            c.execute(update(logins_table).where(logins_table.c.role.in_(roles)).values(dropped=True))
-        return len(roles)
+            for role in roles:                         # one login that cannot be dropped does not hold up the rest
+                try:
+                    self._drop_login(conn, role)
+                except Exception as e:  # noqa: BLE001 - kept, unable to log in, and tried again next time
+                    logger.warning("expired database login %s could not be dropped: %s", role, type(e).__name__)
+                    self._disable_login(conn, role)
+                    continue
+                done.append(role)
+                with self.engine.begin() as c:
+                    c.execute(update(logins_table).where(logins_table.c.role == role).values(dropped=True))
+        return len(done)
+
+    def _disable_login(self, conn, role: str) -> None:
+        """Takes away an expired login it could not drop: it may no longer log in, and its sessions end."""
+        from psycopg import sql
+
+        try:
+            conn.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(role)))
+            conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = %s", (role,))
+        except Exception as e:  # noqa: BLE001 - the next run tries again
+            logger.warning("expired database login %s could not be disabled: %s", role, type(e).__name__)
 
     def revoke(self, actor: str, name: str, role: str) -> None:
         """Ends one login now: its owner may, and so may the database's managers."""

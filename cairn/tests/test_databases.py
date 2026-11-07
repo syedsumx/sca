@@ -193,3 +193,35 @@ def test_the_source_of_a_branch_can_be_dropped(dbs):
     d.drop(ANA, copy)
     dbs["made"].remove(copy)
 
+
+
+def test_one_login_that_cannot_be_dropped_does_not_stop_the_others_expiring(dbs):
+    """Review finding: expire() dropped the logins in one loop and marked them only at the end, so one role that
+    could not be dropped stopped every expiry, for good."""
+    import psycopg
+    from psycopg import sql
+
+    d = dbs["d"]
+    name = "app_" + uuid.uuid4().hex[:8]
+    d.create(ANA, name)
+    dbs["made"].append(name)
+    stuck, gone = d.credentials(ANA, name, "write", 30), d.credentials(BOB, name, "read", 30)
+    # Something outside Cairn makes the first login own an object, so DROP ROLE fails for it.
+    with d._admin() as conn:
+        tbl = "stuck_" + uuid.uuid4().hex[:6]
+        conn.execute(sql.SQL("CREATE TABLE {} (x int)").format(sql.Identifier(tbl)))
+        conn.execute(sql.SQL("ALTER TABLE {} OWNER TO {}").format(sql.Identifier(tbl), sql.Identifier(stuck["user"])))
+    try:
+        dbs["clock"]["now"] += 31 * 60_000
+        assert d.expire() == 1                                          # the other one expired
+        with pytest.raises(psycopg.OperationalError):
+            connect(gone)
+        with pytest.raises(psycopg.OperationalError):
+            connect(stuck)                                              # the stuck one can no longer log in
+        assert [x["user"] for x in d.logins(ANA, name)] == [stuck["user"]]   # and is tried again
+        with d._admin() as conn:
+            conn.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(tbl)))
+        assert d.expire() == 1 and d.logins(ANA, name) == []
+    finally:
+        with d._admin() as conn:
+            conn.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(sql.Identifier(tbl)))
