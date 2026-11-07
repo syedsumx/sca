@@ -118,7 +118,7 @@ def test_tokens_on_postgres(graph, monkeypatch):
 
 
 def test_tables_and_rows_are_tokenised_column_by_column(graph, tmp_path, monkeypatch):
-    import pyarrow as pa
+    pa = pytest.importorskip("pyarrow")      # (the python CI job has no pyarrow; pipes and streams cover it there too)
 
     engine = create_engine(f"sqlite:///{tmp_path}/c.db")
     init_db(engine)
