@@ -188,3 +188,35 @@ def test_thresholds_are_compared_as_given():
     b = Adaptive("b", 1, [None, None], {"wall_ms": 100.7})
     assert not b.big({"runs": 1, "wall_ms": 100.5}) and b.big({"runs": 1, "wall_ms": 101})
     assert not b.big({"runs": 0, "wall_ms": 10_000}) and not b.big(None)
+
+
+def test_a_query_keeps_its_warehouse_when_the_proxy_forgets_it(stack):
+    """Review finding: query routes lived only in the proxy's memory, so after a restart a query's follow-up polls
+    went to the smallest tier, which does not know it. The tiers that are up are now asked in turn."""
+    auto = stack["auto"]
+    assert running(stack["small"]) and running(stack["large"])
+    h = {"X-Trino-User": "ana"}
+    r = httpx.post(f"http://127.0.0.1:{auto.port}/v1/statement", content=HEAVY.format(11), headers=h, timeout=300)
+    assert r.status_code == 200, r.text
+    out = r.json()
+    assert auto.routes[out["id"]][0] == 1                       # it started on the large warehouse
+    auto.routes.clear()                                          # as after a restart of the proxy
+    rows = list(out.get("data") or [])
+    while out.get("nextUri"):
+        r = httpx.get(out["nextUri"], headers=h, timeout=300)
+        assert r.status_code == 200, (r.status_code, r.text[:300])
+        out = r.json()
+        assert "error" not in out, out["error"]
+        rows += out.get("data") or []
+    assert rows == [[14993]]
+    assert out["id"] not in auto.tiers[0].queries and auto.routes[out["id"]][0] == 1   # the small one was not charged
+    assert busy_settles(auto)                                    # the probes left no request counted in flight
+
+
+def busy_settles(a, seconds=10):
+    end = time.time() + seconds
+    while time.time() < end:
+        if all(w.inflight == 0 for w in a.tiers):
+            return True
+        time.sleep(0.2)
+    return False

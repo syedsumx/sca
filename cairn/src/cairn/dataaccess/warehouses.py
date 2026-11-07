@@ -449,15 +449,22 @@ class Adaptive:
                 del self.routes[q]
         self.routes[qid] = (tier, now)
 
-    def tier_of(self, path: str) -> int:
+    @staticmethod
+    def query_id(path: str) -> Optional[str]:
         m = STATEMENT.match(path) or QUERY_PATH.match(path)
-        if m:
-            qid = m.group(m.lastindex)
-            if qid in self.routes:
-                tier, _ = self.routes[qid]
-                self.routes[qid] = (tier, time.monotonic())
-                return tier
-        return 0
+        return m.group(m.lastindex) if m else None
+
+    def tier_of(self, path: str) -> Optional[int]:
+        """The tier a query was sent to; None for a query id this proxy does not know (it restarted, or another
+        replica took the query), 0 for a request that names no query."""
+        qid = self.query_id(path)
+        if qid is None:
+            return 0
+        if qid in self.routes:
+            tier, _ = self.routes[qid]
+            self.routes[qid] = (tier, time.monotonic())
+            return tier
+        return None
 
 
 def http_hint(url: str, key: str, timeout: float = 1.0):
@@ -659,7 +666,23 @@ def adaptive_app(a: Adaptive):
         return Response(content, status_code=resp.status_code, headers=headers)
 
     async def follow(request: Request):
-        return await forwards[a.tier_of(request.url.path)](request)
+        tier = a.tier_of(request.url.path)
+        if tier is not None:
+            return await forwards[tier](request)
+        # A query this proxy does not know (it restarted, or another replica took it). Only the coordinator that
+        # runs it knows it; the others answer 404 and change nothing. Tiers that are not up are not woken for it.
+        for i, w in enumerate(a.tiers):
+            if not await w.ready():
+                continue
+            resp = await forwards[i](request)
+            if resp.status_code != 404:
+                a.remember(a.query_id(request.url.path) or "", i)
+                return resp
+            if hasattr(resp, "body_iterator"):
+                async for _ in resp.body_iterator:     # read to the end, so the tier stops counting it in flight
+                    pass
+            w.queries.pop(a.query_id(request.url.path) or "", None)    # not this tier's load
+        return JSONResponse({"error": "query not found"}, status_code=404)
 
     return Starlette(routes=[Route("/cairn/warehouse", health), Route("/v1/statement", statement, methods=["POST"]),
                              Route("/{path:path}", follow, methods=["GET", "POST", "PUT", "DELETE", "HEAD"])])

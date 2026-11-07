@@ -951,7 +951,9 @@ The query then goes:
   has fewer ("overflow");
 - otherwise to the smallest tier.
 
-A query stays where it started: its follow-up requests are routed by query id.
+A query stays where it started: its follow-up requests are routed by query id. If the proxy no longer knows a
+query (it restarted, or another replica took the query), it asks the tiers that are up in turn; only the one
+running the query knows it, the others answer 404 and are neither woken nor charged for it.
 
 Each tier is still a warehouse of its own. It starts on demand, scales its workers, stops when idle, is billed
 as itself, and admits only its members, so give the tiers the same groups.
@@ -968,6 +970,7 @@ Tested with two real Trino warehouses and the hint endpoint served over HTTP fro
 - a query never seen went to the small one;
 - while a slow query held the small one, the next query overflowed to the large one;
 - with no hint to be had, queries went to the small one;
+- after the proxy forgot a running query, its polls still reached the large warehouse and it came back whole;
 - the hint endpoint answered only with the key.
 
 ## Notebooks: JupyterHub with Cairn sign-in
