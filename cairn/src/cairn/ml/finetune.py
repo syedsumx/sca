@@ -17,7 +17,9 @@
   none of Cairn's environment: a LoRA adapter (default) or the whole model. The status moves queued → running →
   done | failed, with each epoch's loss.
 * **Used through Cairn.** ``POST /v1/ml/finetunes/<name>/generate`` ``{"prompts": [...]}`` needs
-  ``USE_FINETUNE`` on ``urn:li:finetune:<name>`` (its owner has it); every call is audited with the number of
+  ``USE_FINETUNE`` on ``urn:li:finetune:<name>`` (its owner has it) and, for anyone but its owner, read access
+  (``VIEW_DATASET_PROFILE``) to every dataset it was trained on, decided at each call (the same for the examples);
+  every call is audited with the number of
   prompts, not their text. ``DELETE`` removes the model and its examples.
 """
 
@@ -281,10 +283,23 @@ class FineTunes:
             rows = c.execute(select(finetunes_table).order_by(finetunes_table.c.created_ms.desc())).all()
         return [self._public(r) for r in rows if r.created_by == actor or self.allowed(actor, "USE_FINETUNE", urn(r.name))]
 
+    def _may_read_sources(self, actor: str, row) -> None:
+        """The model holds what its creator could read: anyone else must be allowed to read every dataset it was
+        trained on, decided now (fail closed: a decision that cannot be made refuses)."""
+        for src in json.loads(row.sources):
+            try:
+                ok = self.allowed(actor, "VIEW_DATASET_PROFILE", src)
+            except Exception:  # noqa: BLE001 - fail closed
+                ok = False
+            if not ok:
+                self._audit("finetune.refused", actor, row.name, {"source": src})
+                raise FineTuneError("this model was trained on data you are not allowed to read", 403)
+
     def examples(self, actor: str, name: str, limit: int = 50) -> list[dict]:
         row = self._row(name)
         if row.created_by != actor:
             self._need(actor, "MANAGE_FINETUNE", urn(name))
+            self._may_read_sources(actor, row)
         out = []
         with open(os.path.join(self._dir(row), "train.jsonl")) as fh:
             for line in fh:
@@ -297,6 +312,7 @@ class FineTunes:
         row = self._row(name)
         if row.created_by != actor:
             self._need(actor, "USE_FINETUNE", urn(name))
+            self._may_read_sources(actor, row)
         if row.status != "done":
             raise FineTuneError(f"{name} is {row.status}, not ready", 409)
         if not isinstance(prompts, list) or not 1 <= len(prompts) <= MAX_PROMPTS or \

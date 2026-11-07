@@ -107,7 +107,15 @@ def test_a_model_is_tuned_on_governed_data_and_used_through_cairn(world, monkeyp
     with pytest.raises(FineTuneError) as e:
         ft.generate(BOB, "triage", ["refund my order"])
     assert e.value.status == 403
-    world["grants"][BOB].add("USE_FINETUNE")
+    # With USE_FINETUNE but no read access to the tickets the model was trained on, still refused (review finding:
+    # the model and its examples hold what the creator could read).
+    world["grants"][BOB].update({"USE_FINETUNE", "MANAGE_FINETUNE"})
+    for call in (lambda: ft.generate(BOB, "triage", ["late delivery"]), lambda: ft.examples(BOB, "triage")):
+        with pytest.raises(FineTuneError) as e:
+            call()
+        assert e.value.status == 403 and "not allowed to read" in str(e.value)
+    world["grants"][BOB].add("VIEW_DATASET_PROFILE")
+    assert len(ft.examples(BOB, "triage", 5)) == 5
     assert len(ft.generate(BOB, "triage", ["late delivery"], max_new_tokens=2)["outputs"]) == 1
     with world["engine"].connect() as c:
         used = [json.loads(r.details) if isinstance(r.details, str) else r.details
