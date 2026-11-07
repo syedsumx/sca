@@ -159,6 +159,7 @@ class Services:
     metrics: Optional[Any] = None
     autopilot: Optional[Any] = None
     pipeline_agent: Optional[Any] = None
+    cowork: Optional[Any] = None
     builder: Optional[Any] = None
     bi_actions: Optional[Any] = None
     reports: Optional[Any] = None
@@ -1236,6 +1237,17 @@ def _build_active_metadata(s: Services) -> None:
     s.ai_workspace = Workspace(s.engine, may_read, person_groups, s.audit)
     s.ai_workspace.assistant = s.assistant
     s.assistant.workspace = s.ai_workspace
+    # CoWork (cairn.ai.cowork): the assistant's scheduled tasks for a person, and an outbox they approve.
+    from cairn.ai.cowork import CoWork
+
+    def cowork_authorize(actor: str, privilege: str, urn: Optional[str]) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+
+    def cowork_active(person: str) -> bool:
+        if s.graph is None:
+            return True
+        return (s.graph.get_aspect(person, "corpUserStatus") or {}).get("status", "ACTIVE") != "SUSPENDED"
+    s.cowork = CoWork(s.engine, s.ai_workspace, s.notify, cowork_authorize, s.audit, active=cowork_active)
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:

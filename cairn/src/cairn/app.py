@@ -338,6 +338,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.workspace import build_workspace_router
 
         app.include_router(build_workspace_router(services.ai_workspace, cp))
+        if getattr(services, "cowork", None) is not None:
+            from cairn.ai.cowork import build_cowork_router
+
+            app.include_router(build_cowork_router(services.cowork, cp))
     if getattr(services, "custom_agents", None) is not None:
         from cairn.ai.custom_agents import build_custom_agents_router
 

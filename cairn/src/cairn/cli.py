@@ -117,6 +117,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.jobs.run_due)            # scheduled notebook and Python jobs
     if getattr(s, "ai_workspace", None) is not None:
         sch.extra.append(s.ai_workspace.recover)    # research runs cut off by a restart
+    if getattr(s, "cowork", None) is not None:
+        sch.extra.append(s.cowork.run_due)          # people's scheduled assistant tasks; outbox items expire
     if getattr(s, "databases", None) is not None:
         sch.extra.append(s.databases.expire)        # database logins that have expired
     if getattr(s, "mirrors", None) is not None:

@@ -592,6 +592,36 @@ Deep research needs the Anthropic provider. Without it the endpoint answers 503.
 
 Everything above is audited: `assistant.memory.*`, `assistant.artifact.*` and `assistant.research.*`.
 
+## CoWork: scheduled tasks and an approved outbox
+
+The assistant can work for one person on a schedule, and send its results to Slack or email only once they approve.
+
+- **Scheduled tasks** (`/ai/scheduled-tasks`: `POST` with `name`, `prompt`, `cron` (five fields, UTC, at most hourly),
+  optional `max_steps` (1 to 8) and `send`; `GET`, `PUT` (including `enabled`), `DELETE`, `POST …/<id>/run`). Each run
+  is a deep-research run as the owner: their policies, masks and row filters apply, their AI budget pays, only
+  read-only tools are offered, and the report is saved as their artifact with the datasets it read. The owner is
+  told in Cairn and on their own channels. A person keeps up to `CAIRN_COWORK_MAX_TASKS` (20) tasks. A task whose
+  owner's account is suspended fails rather than runs, and three failures in a row pause it. The scheduler
+  (`cairn scheduler`) runs due tasks; each is claimed by moving its next run, so it runs once.
+- **Where results may go:** `send` is `{"slack": "<channel>"}` with a channel listed in `CAIRN_COWORK_SLACK_CHANNELS`,
+  or `{"email": [addresses]}` in domains listed in `CAIRN_COWORK_EMAIL_DOMAINS` (comma-separated). With neither set,
+  nothing is sent anywhere. Slack uses the bot token (`CAIRN_SLACK_BOT_TOKEN`), email the SMTP relay (`CAIRN_SMTP_URL`).
+- **The outbox** (`/ai/outbox`): a run never sends by itself. It puts the report in the owner's outbox and notifies
+  them with **Send** / **Don't send** buttons (Slack) or signed links (email); `POST /ai/outbox` queues any artifact
+  they may read. `POST /ai/outbox/<id>/approve` (the owner only; anyone else gets 404) checks again that the target
+  is allowed, that the owner may still read the report and may export every dataset it was made from
+  (`EXPORT_DATASET`, fail closed: otherwise `refused`), redacts PII from the text, and sends it once. `…/reject`
+  closes an item; unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
+- Audited (category `ai`): `cowork.task.saved`, `cowork.task.deleted`, `cowork.task.ran`, `cowork.outbound.sent`,
+  `cowork.outbound.rejected`, `cowork.outbound.refused`, with targets and ids, never the text.
+
+Tested through the real services, policy decision point, database and HTTP API, with Mailpit as the SMTP server, a
+local stand-in for Slack's Web API and a scripted model (`tests/test_cowork.py`): schedules more often than hourly
+and unlisted targets were refused; a due task ran once as its owner and nothing was sent until she approved from
+the notification's button; someone else could not decide it; the email arrived through SMTP; PII was redacted; a
+person who may read but not export the dataset was refused; rejected and expired items were not sent; a suspended
+owner's task was paused after three failures.
+
 ## Sources
 
 **Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.
