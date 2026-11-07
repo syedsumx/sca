@@ -169,13 +169,15 @@ def cmd_warehouses(a) -> None:
     """The warehouse proxy: one port per team warehouse, started on demand and stopped when idle."""
     import asyncio
 
-    from cairn.dataaccess.warehouses import WarehouseError, load, serve
+    from cairn.dataaccess.warehouses import WarehouseError, load, load_adaptive, read_config, serve
 
     try:
-        warehouses = load()
+        raw = read_config()
+        warehouses = load(raw)
+        adaptive = load_adaptive(raw, warehouses)
     except WarehouseError as e:
         raise SystemExit(f"cairn warehouses: {e}")
-    asyncio.run(serve(warehouses, a.host, a.reap_every))
+    asyncio.run(serve(warehouses, a.host, a.reap_every, adaptive))
 
 
 def cmd_dr(a) -> None:

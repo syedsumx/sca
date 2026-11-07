@@ -767,6 +767,59 @@ A warehouse is a Trino of a team's own: its own size, its own queue, its own bil
     With Kubernetes (`tests/test_warehouses_k8s.py`), the proxy's account scaled the workers Deployment 0 → 3 → 1 → 0 with the load.
   - **Admission** (`tests/test_trino_access.py`). Only the team's members and operators ran queries on a warehouse.
 
+### Adaptive warehouses
+
+An adaptive warehouse has no size of its own. It is one port in front of several of the warehouses above,
+listed smallest first, and for each query it picks which one runs it. People connect to one place and nobody
+picks a size:
+
+```yaml
+cairn:
+  trino:
+    warehouses:
+      list:
+        - { name: sales, port: 8443 }
+        - { name: sales-xl, port: 8444, workers: { min: 0, max: 8 } }
+      adaptive:
+        - name: auto
+          port: 8450
+          tiers: [sales, sales-xl]
+          largeWhen: { cpu_ms: 600000, input_bytes: 100000000000, peak_memory_bytes: 8000000000 }
+          overflowAt: 8
+```
+
+For each new query, the proxy asks Cairn how earlier runs of the same query went (`POST /v1/warehouses/hint`,
+with the Trino access key). "The same query" means the same fingerprint: comments, literals and the length of
+`IN` lists are left out, and case and spacing are folded. So a report run with another date or customer id is
+the same query. Cairn answers with the median CPU time, bytes read, peak memory and wall time of the last 20
+finished runs, from query history. The answer holds no SQL and no user.
+
+The query then goes:
+
+- to the largest tier, when an earlier run reached any `largeWhen` figure;
+- to the largest tier, when the smallest already has `overflowAt` queries running or queued and the largest
+  has fewer ("overflow");
+- otherwise to the smallest tier.
+
+A query stays where it started: its follow-up requests are routed by query id.
+
+Each tier is still a warehouse of its own. It starts on demand, scales its workers, stops when idle, is billed
+as itself, and admits only its members, so give the tiers the same groups.
+
+If Cairn cannot be asked (the API is away, or `CAIRN_WAREHOUSES_HINT_URL` is unset), queries are routed by
+load alone. `GET /cairn/warehouse` on the adaptive port shows each tier's load and how many queries went where
+and why (`small:history`, `large:overflow`, …).
+
+Tested with two real Trino warehouses and the hint endpoint served over HTTP from a real query history
+(`tests/test_warehouses_adaptive_e2e.py`):
+
+- a light query started only the small warehouse;
+- a heavy report with new literals started the large one and came back whole;
+- a query never seen went to the small one;
+- while a slow query held the small one, the next query overflowed to the large one;
+- with no hint to be had, queries went to the small one;
+- the hint endpoint answered only with the key.
+
 ## Notebooks: JupyterHub with Cairn sign-in
 
 JupyterHub runs from the official JupyterHub chart with `helm/jupyterhub/values-cairn.yaml`. Its hub and notebook images include `cairn-lakehouse`.

@@ -18,9 +18,11 @@ The SQL may hold literals people typed, so only its author and operators see a q
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
+import re
 import time
 from datetime import datetime
 from typing import Any, Callable, Optional
@@ -55,7 +57,25 @@ query_history = Table(
     Column("plan", Text, nullable=True),
     Column("server", String(256), nullable=False, default=""),
     Column("splits", Integer, nullable=False, default=0),
+    Column("fingerprint", String(32), nullable=True, index=True),   # the query's shape, literals left out
 )
+
+_STRINGS = re.compile(r"'(?:[^']|'')*'")
+_NUMBERS = re.compile(r"(?<![\w.])-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?![\w.])", re.IGNORECASE)
+_IN_LISTS = re.compile(r"\(\s*\?(?:\s*,\s*\?)+\s*\)")
+_COMMENTS = re.compile(r"--[^\n]*|/\*.*?\*/", re.DOTALL)
+_PUNCT = re.compile(r"\s*([=<>!,()+*/;-])\s*")
+
+
+def fingerprint(sql: str) -> str:
+    """The shape of a query: comments, literals and IN-list lengths left out, case and spacing folded. The same
+    report with another date or customer id has the same fingerprint."""
+    s = _COMMENTS.sub(" ", sql or "")
+    s = _STRINGS.sub("?", s)
+    s = _NUMBERS.sub("?", s)
+    s = _IN_LISTS.sub("(?)", s)
+    s = _PUNCT.sub(r"\1", " ".join(s.lower().split())).rstrip(";").strip()
+    return hashlib.sha256(s.encode()).hexdigest()[:32]
 
 
 def trino_rates() -> tuple[Optional[float], Optional[float]]:
@@ -141,7 +161,8 @@ class QueryHistory:
                "output_rows": int(st.get("outputRows") or 0),
                "peak_memory_bytes": int(st.get("peakUserMemoryBytes") or 0),
                "tables": json.dumps(sorted(set(tables))), "plan": (str(meta.get("plan"))[:200_000] if meta.get("plan") else None),
-               "server": str(ctx.get("serverAddress") or "")[:256], "splits": int(st.get("completedSplits") or 0)}
+               "server": str(ctx.get("serverAddress") or "")[:256], "splits": int(st.get("completedSplits") or 0),
+               "fingerprint": fingerprint(str(meta.get("query") or ""))}
         try:
             with self.engine.begin() as conn:
                 conn.execute(query_history.insert().values(**row))
@@ -153,6 +174,24 @@ class QueryHistory:
                 conn.execute(delete(query_history).where(
                     query_history.c.create_ms < int(time.time() * 1000) - self.retention_days * DAY_MS))
         return qid
+
+    def profile(self, sql: str, runs: int = 20) -> Optional[dict]:
+        """How earlier runs of a query of this shape went: the median CPU time, bytes read and peak memory of its last
+        ``runs`` finished runs (None: never seen)."""
+        fp = fingerprint(sql)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(query_history.c.cpu_ms, query_history.c.input_bytes,
+                                       query_history.c.peak_memory_bytes, query_history.c.wall_ms)
+                                .where(query_history.c.fingerprint == fp, query_history.c.state == "FINISHED")
+                                .order_by(query_history.c.create_ms.desc()).limit(runs)).all()
+        if not rows:
+            return None
+
+        def median(i: int) -> int:
+            vals = sorted(int(r[i] or 0) for r in rows)
+            return vals[len(vals) // 2]
+        return {"fingerprint": fp, "runs": len(rows), "cpu_ms": median(0), "input_bytes": median(1),
+                "peak_memory_bytes": median(2), "wall_ms": median(3)}
 
     def reading(self, table_urn: str, since_ms: int, limit: int = 5000) -> list[tuple[str, int]]:
         """(SQL, bytes read) of the finished queries since ``since_ms`` that read ``table_urn``, newest first."""

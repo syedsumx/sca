@@ -78,7 +78,7 @@ USAGE_ID = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 def build_warehouses_router(status: WarehouseStatus, current_principal, authorize, audit=None, costs=None,
-                            key: str = "") -> Any:
+                            key: str = "", history=None) -> Any:
     from fastapi import APIRouter, Body, Depends, Header, HTTPException
 
     router = APIRouter(prefix="/v1/warehouses", tags=["trino"])
@@ -111,6 +111,16 @@ def build_warehouses_router(status: WarehouseStatus, current_principal, authoriz
         out = costs.record_run(f"warehouse:{id}", None, f"urn:li:warehouse:{warehouse}", "warehouse", start_ms, end_ms,
                                [], node_seconds / seconds, rate)
         return {"recorded": out is not None}
+
+    @router.post("/hint")
+    def hint(sql: str = Body(..., embed=True, max_length=200_000), x_cairn_trino_key: str = Header("")):
+        """For the adaptive warehouse proxy: how earlier runs of a query of this shape went (median CPU time, bytes
+        read and peak memory; no SQL, no user). ``{"runs": 0}`` for a shape not seen."""
+        if not key or not hmac.compare_digest(x_cairn_trino_key.encode(), key.encode()):
+            raise HTTPException(404)
+        if history is None:
+            return {"runs": 0}
+        return history.profile(sql) or {"runs": 0}
 
     @router.post("/{name}/start")
     async def start(name: str, p=Depends(current_principal)):

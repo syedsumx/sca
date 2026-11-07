@@ -390,7 +390,8 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     warehouse_status = WarehouseStatus.from_env()
     if warehouse_status is not None:
         app.include_router(build_warehouses_router(warehouse_status, cp, authz, services.audit,
-                                                   getattr(services, "costs", None), services.trino_key))
+                                                   getattr(services, "costs", None), services.trino_key,
+                                                   getattr(services, "query_history", None)))
     if getattr(services, "sql_ai", None) is not None and services.trino_key:
         from cairn.ai.sql_gateway import build_sql_ai_router
 

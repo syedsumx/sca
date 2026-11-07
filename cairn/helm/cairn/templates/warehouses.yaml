@@ -30,6 +30,20 @@
 {{- end }}
 {{- $list = append $list $one }}
 {{- end }}
+{{- /* Adaptive warehouses: one port in front of several of the warehouses above (smallest first), choosing
+       one per query from how earlier runs of the same query went (Cairn's /v1/warehouses/hint). */}}
+{{- $adaptive := list }}
+{{- $whNames := list }}{{ range $wh := $w.list }}{{ $whNames = append $whNames $wh.name }}{{ end }}
+{{- range $a := ($w.adaptive | default list) }}
+{{- $port := int (required (printf "cairn.trino.warehouses.adaptive[%s].port" $a.name) $a.port) }}
+{{- if has $port $ports }}{{ fail (printf "cairn.trino.warehouses.adaptive[%s]: port %d is taken" $a.name $port) }}{{ end }}
+{{- $ports = append $ports $port }}
+{{- range $t := $a.tiers }}{{ if not (has $t $whNames) }}{{ fail (printf "cairn.trino.warehouses.adaptive[%s]: tier %s is not a warehouse" $a.name $t) }}{{ end }}{{ end }}
+{{- $one := dict "name" $a.name "port" $port "tiers" $a.tiers "large_when" (required (printf "cairn.trino.warehouses.adaptive[%s].largeWhen" $a.name) $a.largeWhen)
+    "overflow_at" (int ($a.overflowAt | default 8)) }}
+{{- if $tls }}{{ $_ := set $one "tls" (dict "cert" "/etc/cairn/tls/tls.crt" "key" "/etc/cairn/tls/tls.key") }}{{ end }}
+{{- $adaptive = append $adaptive $one }}
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -100,7 +114,7 @@ spec:
           args: ["warehouses"]
           env:
             - name: CAIRN_WAREHOUSES
-              value: {{ toJson (dict "warehouses" $list) | quote }}
+              value: {{ toJson (dict "warehouses" $list "adaptive" $adaptive) | quote }}
             # "Start now" from Cairn, and node-seconds reported to Cairn's cost report.
             - name: CAIRN_WAREHOUSES_CONTROL_KEY
               valueFrom:
@@ -110,9 +124,14 @@ spec:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
             - name: CAIRN_WAREHOUSES_REPORT_URL
               value: {{ printf "http://%s:%v/v1/warehouses/usage" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
+            - name: CAIRN_WAREHOUSES_HINT_URL
+              value: {{ printf "http://%s:%v/v1/warehouses/hint" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api)) $.Values.cairn.api.port | quote }}
           ports:
             {{- range $one := $list }}
             - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }
+            {{- end }}
+            {{- range $one := $adaptive }}
+            - { name: {{ printf "wa-%s" $one.name | trunc 15 | trimSuffix "-" }}, containerPort: {{ $one.port }}, protocol: TCP }
             {{- end }}
           readinessProbe:
             tcpSocket: { port: {{ (index $list 0).port }} }
@@ -145,5 +164,8 @@ spec:
   ports:
     {{- range $one := $list }}
     - { name: {{ printf "wh-%s" $one.name | trunc 15 | trimSuffix "-" }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
+    {{- end }}
+    {{- range $one := $adaptive }}
+    - { name: {{ printf "wa-%s" $one.name | trunc 15 | trimSuffix "-" }}, port: {{ $one.port }}, targetPort: {{ $one.port }} }
     {{- end }}
 {{- end }}

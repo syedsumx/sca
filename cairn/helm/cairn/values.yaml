@@ -800,6 +800,15 @@ cairn:
       #    resources: { requests: { cpu: "2", memory: 8Gi }, limits: { memory: 8Gi } }
       #    # Workers, scaled by the proxy with the queries running and queued (none while stopped):
       #    workers: { min: 0, max: 4, queriesPerWorker: 4, scaleDownMinutes: 5 }
+      # Adaptive warehouses: one port in front of several warehouses above, smallest first. Each query goes to
+      # the largest when its earlier runs (same shape, any literals; from query history) reached a largeWhen
+      # figure, else to the smallest, overflowing to the largest while the smallest has overflowAt queries.
+      adaptive: []
+      #  - name: auto
+      #    port: 8450
+      #    tiers: [sales, sales-xl]
+      #    largeWhen: { cpu_ms: 600000, input_bytes: 100000000000, peak_memory_bytes: 8000000000 }
+      #    overflowAt: 8
     # Delta Lake tables (catalog "delta") in Cairn Store, their metastore files beside them
     # (s3://<bucket>/<prefix>/), governed by Cairn like the lakehouse (datasets on the delta-lake platform).
     # A store key that can reach only that prefix, from a Secret (access-key, secret-key). Commits are

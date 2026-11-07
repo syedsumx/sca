@@ -27,6 +27,17 @@ bill. ``cairn warehouses`` listens on one port per warehouse and forwards Trino'
   ``CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR``. A report that fails is sent again with the same id, so
   nothing is counted twice.
 
+* **Adaptive warehouses.** An adaptive warehouse (``"adaptive": [{"name", "port", "tiers": ["small", "large"],
+  "large_when": {"cpu_ms", "input_bytes", "peak_memory_bytes"}, "overflow_at"}]``) has no size of its own: it is
+  one port in front of several warehouses, smallest first, and picks one for each query. Cairn says how earlier
+  runs of a query of the same shape went (``POST <api>/v1/warehouses/hint``: median CPU time, bytes read and
+  peak memory from query history, by a fingerprint with the literals left out), and a query whose earlier runs
+  reached any ``large_when`` figure goes to the largest tier. Every other query goes to the smallest, unless
+  that one already has ``overflow_at`` queries running or queued and the largest has fewer: then it overflows
+  there. A query stays on the tier it started on: its follow-up requests are routed by its query id. Each tier
+  starts, scales and stops on its own as before, and is billed as itself. A routing hint that cannot be had
+  (Cairn away, ``CAIRN_WAREHOUSES_HINT_URL`` unset) routes by load alone.
+
 Trino builds the URLs it hands back from the forwarded headers (``http-server.process-forwarded=true``),
 so clients keep talking to the proxy.
 
@@ -53,6 +64,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 STATEMENT = re.compile(r"^/v1/statement/(queued|executing)/([A-Za-z0-9_]+)/")
+QUERY_PATH = re.compile(r"^/v1/query/([A-Za-z0-9_]+)")
 ACTIVE_SECONDS = 10   # a query whose client has not polled for this long is over (clients poll every second)
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding",
        "upgrade", "host", "content-length"}
@@ -328,12 +340,17 @@ class Warehouse:
             return True
 
 
+def read_config() -> dict:
+    """``CAIRN_WAREHOUSES``: JSON, or a file holding it."""
+    text = os.environ.get("CAIRN_WAREHOUSES", "").strip()
+    if not text:
+        raise WarehouseError("set CAIRN_WAREHOUSES")
+    return json.loads(open(text).read() if not text.startswith("{") else text)
+
+
 def load(raw: Optional[dict] = None) -> list[Warehouse]:
     if raw is None:
-        text = os.environ.get("CAIRN_WAREHOUSES", "").strip()
-        if not text:
-            raise WarehouseError("set CAIRN_WAREHOUSES")
-        raw = json.loads(open(text).read() if not text.startswith("{") else text)
+        raw = read_config()
     out, ports, names = [], set(), set()
     for w in raw.get("warehouses") or []:
         name, port, upstream = str(w.get("name") or ""), w.get("port"), str(w.get("upstream") or "").rstrip("/")
@@ -386,45 +403,111 @@ def load(raw: Optional[dict] = None) -> list[Warehouse]:
     return out
 
 
-def app_for(w: Warehouse):
-    """The proxy in front of one warehouse (an ASGI app)."""
+@dataclass
+class Adaptive:
+    """One port in front of several warehouses (smallest first), choosing one per query."""
+    name: str
+    port: int
+    tiers: list
+    large_when: dict
+    overflow_at: int = 8
+    hint: Any = None                                   # async (sql) -> profile dict or None
+    tls_cert: str = ""
+    tls_key: str = ""
+    routes: dict = field(default_factory=dict)         # query id -> (tier index, last seen)
+    routed: dict = field(default_factory=dict)         # "<tier>:<reason>" -> count
+
+    def big(self, profile: Optional[dict]) -> bool:
+        if not profile or not profile.get("runs"):
+            return False
+        return any(int(profile.get(k) or 0) >= int(v) for k, v in self.large_when.items())
+
+    @staticmethod
+    def busy(w: Warehouse) -> int:
+        running, queued = w.load()
+        return running + queued
+
+    async def choose(self, sql: str) -> tuple[int, str]:
+        """(tier index, why) for a new query."""
+        profile = None
+        if self.hint is not None:
+            try:
+                profile = await self.hint(sql)
+            except Exception as e:  # noqa: BLE001 - routing without history: by load alone
+                logger.info("adaptive %s: no routing hint (%s)", self.name, e)
+        last = len(self.tiers) - 1
+        if self.big(profile):
+            return last, "history"
+        if last and self.busy(self.tiers[0]) >= self.overflow_at and self.busy(self.tiers[last]) < self.overflow_at:
+            return last, "overflow"
+        return 0, "default" if not profile or not profile.get("runs") else "history"
+
+    def remember(self, qid: str, tier: int) -> None:
+        now = time.monotonic()
+        if len(self.routes) > 10_000:
+            for q in [q for q, (_, t) in self.routes.items() if now - t > 3600]:
+                del self.routes[q]
+        self.routes[qid] = (tier, now)
+
+    def tier_of(self, path: str) -> int:
+        m = STATEMENT.match(path) or QUERY_PATH.match(path)
+        if m:
+            qid = m.group(m.lastindex)
+            if qid in self.routes:
+                tier, _ = self.routes[qid]
+                self.routes[qid] = (tier, time.monotonic())
+                return tier
+        return 0
+
+
+def http_hint(url: str, key: str, timeout: float = 1.0):
+    """The routing hint from Cairn (``POST <api>/v1/warehouses/hint``), waited for at most ``timeout`` seconds."""
     import httpx
-    from starlette.applications import Starlette
+
+    async def hint(sql: str) -> Optional[dict]:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(url, json={"sql": sql}, headers={"X-Cairn-Trino-Key": key})
+        r.raise_for_status()
+        return r.json()
+    return hint
+
+
+def load_adaptive(raw: dict, warehouses: list[Warehouse]) -> list[Adaptive]:
+    by_name = {w.name: w for w in warehouses}
+    ports = {w.port for w in warehouses}
+    out = []
+    url, key = os.environ.get("CAIRN_WAREHOUSES_HINT_URL", ""), os.environ.get("CAIRN_TRINO_ACCESS_KEY", "")
+    for a in raw.get("adaptive") or []:
+        name, port = str(a.get("name") or ""), a.get("port")
+        if not NAME.match(name) or name in by_name or any(x.name == name for x in out):
+            raise WarehouseError(f"adaptive warehouse name {name!r}: lowercase letters, digits and '-', not a warehouse's")
+        if not isinstance(port, int) or not 1 <= port <= 65535 or port in ports:
+            raise WarehouseError(f"adaptive warehouse {name}: a port of its own")
+        tiers = a.get("tiers") or []
+        if len(tiers) < 2 or len(set(tiers)) != len(tiers) or any(t not in by_name for t in tiers):
+            raise WarehouseError(f"adaptive warehouse {name}: tiers name two or more warehouses, smallest first")
+        large = a.get("large_when") or {}
+        if not large or set(large) - {"cpu_ms", "input_bytes", "peak_memory_bytes", "wall_ms"} or \
+                not all(isinstance(v, (int, float)) and v > 0 for v in large.values()):
+            raise WarehouseError(f"adaptive warehouse {name}: large_when gives cpu_ms, input_bytes, peak_memory_bytes "
+                                 "or wall_ms, each above 0")
+        overflow = int(a.get("overflow_at", 8))
+        if overflow < 1:
+            raise WarehouseError(f"adaptive warehouse {name}: overflow_at is 1 or more")
+        tls = a.get("tls") or {}
+        ports.add(port)
+        out.append(Adaptive(name, port, [by_name[t] for t in tiers], dict(large), overflow,
+                            http_hint(url, key) if url and key else None, str(tls.get("cert") or ""),
+                            str(tls.get("key") or "")))
+    return out
+
+
+def forwarder(w: Warehouse, client):
+    """Forwards a request to ``w`` (starting it if stopped), counting it as in flight until its answer is sent."""
     from starlette.requests import Request
     from starlette.responses import JSONResponse, Response, StreamingResponse
-    from starlette.routing import Route
 
-    client = httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=600, pool=30), verify=w.upstream_ca)
-
-    async def health(_request: Request):
-        try:
-            running = await w.scaler.running()
-        except Exception:  # noqa: BLE001 - shown as unknown
-            running = None
-        q_running, q_queued = w.load()
-        out = {"warehouse": w.name, "ready": await w.ready(), "running": running, "starts": w.starts,
-               "stops": w.stops, "inflight": w.inflight, "idle_minutes": w.idle_minutes,
-               "idle_seconds": round(time.monotonic() - w.last_seen), "queries_running": q_running,
-               "queries_queued": q_queued}
-        if w.workers is not None:
-            wk = w.workers
-            out["workers"] = {"wanted": wk.wanted, "ready": wk.ready, "min": wk.min, "max": wk.max,
-                              "scale_ups": wk.scale_ups, "scale_downs": wk.scale_downs}
-        return JSONResponse(out)
-
-    async def start(request: Request):
-        given = request.headers.get("x-cairn-warehouse-key", "")
-        if not w.control_key or not hmac.compare_digest(given.encode(), w.control_key.encode()):
-            return JSONResponse({"error": "not allowed"}, status_code=403)
-        w.last_seen = time.monotonic()                 # counts as use: not stopped before its idle time
-
-        async def go():
-            try:
-                await w.wake()
-            except Exception:  # noqa: BLE001 - shown by the status
-                logger.exception("warehouse %s: start failed", w.name)
-        asyncio.get_running_loop().create_task(go())
-        return JSONResponse({"warehouse": w.name, "starting": True}, status_code=202)
+    import httpx
 
     async def forward(request: Request):
         w.inflight += 1
@@ -459,7 +542,7 @@ def app_for(w: Warehouse):
         headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP}
         host = request.headers.get("host", "")
         headers["X-Forwarded-Host"] = host                        # Trino's nextUri points back here
-        headers["X-Forwarded-Proto"] = "https" if w.tls_cert else "http"
+        headers["X-Forwarded-Proto"] = "https" if w.tls_cert or request.url.scheme == "https" else "http"
         url = w.upstream + request.url.path + (f"?{request.url.query}" if request.url.query else "")
         req = client.build_request(request.method, url, headers=headers, content=await request.body())
         try:
@@ -480,12 +563,110 @@ def app_for(w: Warehouse):
             finally:
                 await up.aclose()
         return StreamingResponse(body(), status_code=up.status_code, headers=out_headers)
+    return forward
+
+
+def _client(ca):
+    import httpx
+
+    return httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=600, write=600, pool=30), verify=ca)
+
+
+def app_for(w: Warehouse):
+    """The proxy in front of one warehouse (an ASGI app)."""
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse
+    from starlette.routing import Route
+
+    forward = forwarder(w, _client(w.upstream_ca))
+
+    async def health(_request: Request):
+        try:
+            running = await w.scaler.running()
+        except Exception:  # noqa: BLE001 - shown as unknown
+            running = None
+        q_running, q_queued = w.load()
+        out = {"warehouse": w.name, "ready": await w.ready(), "running": running, "starts": w.starts,
+               "stops": w.stops, "inflight": w.inflight, "idle_minutes": w.idle_minutes,
+               "idle_seconds": round(time.monotonic() - w.last_seen), "queries_running": q_running,
+               "queries_queued": q_queued}
+        if w.workers is not None:
+            wk = w.workers
+            out["workers"] = {"wanted": wk.wanted, "ready": wk.ready, "min": wk.min, "max": wk.max,
+                              "scale_ups": wk.scale_ups, "scale_downs": wk.scale_downs}
+        return JSONResponse(out)
+
+    async def start(request: Request):
+        given = request.headers.get("x-cairn-warehouse-key", "")
+        if not w.control_key or not hmac.compare_digest(given.encode(), w.control_key.encode()):
+            return JSONResponse({"error": "not allowed"}, status_code=403)
+        w.last_seen = time.monotonic()                 # counts as use: not stopped before its idle time
+
+        async def go():
+            try:
+                await w.wake()
+            except Exception:  # noqa: BLE001 - shown by the status
+                logger.exception("warehouse %s: start failed", w.name)
+        asyncio.get_running_loop().create_task(go())
+        return JSONResponse({"warehouse": w.name, "starting": True}, status_code=202)
 
     return Starlette(routes=[Route("/cairn/warehouse", health), Route("/cairn/warehouse/start", start, methods=["POST"]),
                              Route("/{path:path}", forward, methods=["GET", "POST", "PUT", "DELETE", "HEAD"])])
 
 
-async def serve(warehouses: list[Warehouse], host: str = "0.0.0.0", reap_every: float = 30) -> None:
+def adaptive_app(a: Adaptive):
+    """The proxy of an adaptive warehouse: each new query to the tier chosen for it, its follow-ups to the same."""
+    from starlette.applications import Starlette
+    from starlette.requests import Request
+    from starlette.responses import JSONResponse, Response
+    from starlette.routing import Route
+
+    forwards = [forwarder(w, _client(w.upstream_ca)) for w in a.tiers]
+
+    async def health(_request: Request):
+        tiers = []
+        for w in a.tiers:
+            r, q = w.load()
+            tiers.append({"warehouse": w.name, "queries_running": r, "queries_queued": q, "ready": await w.ready()})
+        return JSONResponse({"adaptive": a.name, "tiers": tiers, "routed": a.routed, "large_when": a.large_when,
+                             "overflow_at": a.overflow_at})
+
+    async def statement(request: Request):
+        body = await request.body()
+        tier, why = await a.choose(body.decode("utf-8", "replace"))
+        key = f"{a.tiers[tier].name}:{why}"
+        a.routed[key] = a.routed.get(key, 0) + 1
+        resp = await forwards[tier](request)
+        if not hasattr(resp, "body_iterator"):
+            return resp
+        chunks = [c async for c in resp.body_iterator]          # a new query's first answer is small
+        content = b"".join(c if isinstance(c, bytes) else c.encode() for c in chunks)
+        try:
+            raw = content
+            if (resp.headers.get("content-encoding") or "").lower() == "gzip":
+                import gzip
+
+                raw = gzip.decompress(content)          # passed on as it came; read here for the query id only
+            qid = json.loads(raw).get("id")
+        except (ValueError, AttributeError, OSError):
+            qid = None
+        if qid:
+            a.remember(str(qid), tier)
+            # The tier's own count of the query starts now, not at the client's first poll.
+            a.tiers[tier].queries[str(qid)] = ("queued", time.monotonic())
+        headers = {k: v for k, v in resp.headers.items() if k.lower() not in HOP}
+        return Response(content, status_code=resp.status_code, headers=headers)
+
+    async def follow(request: Request):
+        return await forwards[a.tier_of(request.url.path)](request)
+
+    return Starlette(routes=[Route("/cairn/warehouse", health), Route("/v1/statement", statement, methods=["POST"]),
+                             Route("/{path:path}", follow, methods=["GET", "POST", "PUT", "DELETE", "HEAD"])])
+
+
+async def serve(warehouses: list[Warehouse], host: str = "0.0.0.0", reap_every: float = 30,
+                adaptive: Optional[list[Adaptive]] = None) -> None:
     import uvicorn
 
     from cairn.cli import keep_alive
@@ -494,6 +675,10 @@ async def serve(warehouses: list[Warehouse], host: str = "0.0.0.0", reap_every: 
                                              timeout_keep_alive=keep_alive(),
                                              ssl_certfile=w.tls_cert or None, ssl_keyfile=w.tls_key or None))
                for w in warehouses]
+    servers += [uvicorn.Server(uvicorn.Config(adaptive_app(a), host=host, port=a.port, log_level="warning",
+                                              proxy_headers=False, timeout_keep_alive=keep_alive(),
+                                              ssl_certfile=a.tls_cert or None, ssl_keyfile=a.tls_key or None))
+                for a in adaptive or []]
 
     report_url = os.environ.get("CAIRN_WAREHOUSES_REPORT_URL", "")
     report_key = os.environ.get("CAIRN_TRINO_ACCESS_KEY", "")
