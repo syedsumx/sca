@@ -22,6 +22,9 @@ and owns the table or may create a publication for it. The server runs with ``wa
 * **SQL Server.** A connection whose URL is ``mssql://`` is mirrored through change data capture
   (``cairn.pipelines.mirror_mssql``), which a database administrator turns on for the table: a copy from the highest
   captured LSN, then whole transactions in commit order. CDC's cleanup must outlast a paused mirror.
+* **MongoDB.** A connection whose URL is ``mongodb://`` mirrors a ``database.collection`` through change streams
+  (``cairn.pipelines.mirror_mongo``): a copy from the cluster's operation time, then each change, keyed by ``_id``,
+  with resume tokens as positions. The oplog must outlast a paused mirror.
 * **Stopping.** ``DELETE /v1/mirrors/<name>`` drops the slot and the publication: a slot nobody reads keeps the
   server's WAL forever, so the status shows how much WAL the slot holds back (``retained_bytes``).
   ``POST .../pause`` keeps the slot; ``POST .../resume`` carries on from it.
@@ -60,7 +63,7 @@ mirrors_table = Table(
     Column("status", String(16), nullable=False),           # starting | running | paused | failed
     Column("error", Text, nullable=True),
     Column("rows", BigInteger, nullable=False),
-    Column("last_lsn", String(32), nullable=True),
+    Column("last_lsn", String(1024), nullable=True),          # an LSN, a binary log position or a resume token
     Column("last_commit_ms", BigInteger, nullable=True),
     Column("created_by", String(512), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
@@ -218,6 +221,8 @@ class Mirrors:
         url = self.source_url(connection) or ""
         if re.match(r"^mysql(\+\w+)?://", url):
             return "mysql"
+        if re.match(r"^mongodb(\+srv)?://", url):
+            return "mongo"
         return "mssql" if re.match(r"^(mssql(\+\w+)?|sqlserver)://", url) else "postgres"
 
     def _connect(self, connection: str):
@@ -273,6 +278,9 @@ class Mirrors:
         if self._kind(connection) == "mssql":
             key = self._create_mssql(connection, parts)
             return self._created(actor, mid, name, connection, source, target, key)
+        if self._kind(connection) == "mongo":
+            key = self._create_mongo(connection, parts)
+            return self._created(actor, mid, name, connection, source, target, key)
         slot, pub = self._names(mid)
         ident = sql.Identifier(*parts)
         with self._connect(connection) as conn:
@@ -326,6 +334,19 @@ class Mirrors:
             raise MirrorError(f"{'.'.join(parts)} has no primary key: a mirror applies changes by key", 409)
         return key
 
+    def _create_mongo(self, connection: str, parts: list[str]) -> list[str]:
+        from cairn.pipelines import mirror_mongo as mg
+
+        client = mg.connect(self.source_url(connection))
+        try:
+            return mg.check(client, parts[0], parts[1])
+        except ValueError as e:
+            raise MirrorError(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - say why
+            raise MirrorError(f"the source could not be reached: {e}", 502)
+        finally:
+            client.close()
+
     def _created(self, actor: str, mid: str, name: str, connection: str, source: str, target: str,
                  key: list[str]) -> dict:
         with self.engine.begin() as c:
@@ -342,7 +363,7 @@ class Mirrors:
     def get(self, name: str) -> dict:
         r = self._row(name)
         retained = None
-        if self._kind(r.connection) in ("mysql", "mssql"):
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo"):
             return self._public(r)                   # no slot: the server's log retention holds its place
         try:
             with self._connect(r.connection) as conn:
@@ -373,7 +394,7 @@ class Mirrors:
 
         r = self._row(name)
         slot, pub = self._names(r.id)
-        if self._kind(r.connection) in ("mysql", "mssql"):   # nothing kept on the server for a mirror
+        if self._kind(r.connection) in ("mysql", "mssql", "mongo"):   # nothing kept on the server for a mirror
             with self.engine.begin() as c:
                 c.execute(mirrors_table.delete().where(mirrors_table.c.id == r.id))
             if self.audit is not None:
@@ -454,6 +475,8 @@ class Mirrors:
             return self._run_mysql(r)
         if self._kind(r.connection) == "mssql":
             return self._run_mssql(r)
+        if self._kind(r.connection) == "mongo":
+            return self._run_mongo(r)
         slot, pub = self._names(r.id)
         try:
             with self._connect(r.connection) as conn:
@@ -599,6 +622,44 @@ class Mirrors:
                       "rows": mirrors_table.c.rows + written}
             if end is not None:
                 values["last_lsn"] = ms.lsn_hex(end)
+            with self.engine.begin() as c:
+                c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
+            return written
+        except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
+            msg = f"{type(e).__name__}: {e}"
+            logger.warning("mirror %s failed: %s", r.name, msg)
+            self._status(r, "failed", msg[:2000])
+            return 0
+
+    def _run_mongo(self, r) -> int:
+        """Brings a MongoDB mirror up to date from its change stream."""
+        from cairn.pipelines import mirror_mongo as mg
+
+        database, collection = r.source.split(".", 1)
+        try:
+            client = mg.connect(self.source_url(r.connection))
+            try:
+                if not r.snapshot_done:
+                    start = mg.position(client)          # changes after it follow the copy and converge on it
+                    copied, offset = 0, 0
+                    for rows in mg.copy(client, database, collection):
+                        copied += self._write(r, [(offset + i, "upsert", d) for i, d in enumerate(rows)],
+                                              topic=f"pg.{r.id}.copy")
+                        offset += len(rows)
+                    with self.engine.begin() as c:
+                        c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                            snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=start))
+                    r = self._row(r.name)
+                committed = self.streams.offsets(self._stream(r)).get(0, 0)
+                got, end = mg.changes(client, database, collection, r.last_lsn)
+            finally:
+                client.close()
+            got = [c for c in got if c[0] >= committed]
+            written = self._write(r, got) if got else 0
+            values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
+                      "rows": mirrors_table.c.rows + written}
+            if end is not None:
+                values["last_lsn"] = end
             with self.engine.begin() as c:
                 c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
             return written

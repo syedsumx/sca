@@ -916,6 +916,34 @@ Tested with SQL Server 2022 (SQL Server Agent running the capture job) and the r
 - a replay from an older LSN, which left the table right;
 - refusals of a table without CDC and of one without a primary key.
 
+## Mirrors from MongoDB
+
+A connection whose URL is `mongodb://` (or `mongodb+srv://`) mirrors a `database.collection` through change
+streams, with `pymongo` (the `streams` extra). Change streams need a replica set or a sharded cluster (a single
+node started with `--replSet` will do). The connection's user needs the `read` role on the database. Cairn
+changes nothing on the server.
+
+Each document becomes a row keyed by `_id` (an ObjectId as its hex string). Top-level fields are columns, and a
+field that appears later is added as a column; embedded documents and arrays are kept as JSON text; decimals are
+floats and dates are UTC timestamps. Give a field the same type in every document: a value that does not fit its
+column fails the mirror rather than being dropped.
+
+The copy starts from the cluster's operation time read before it, so the changes after it converge on the copy.
+Inserts, replacements and updates write the document as it is now (an update reads the current document), and
+deletes delete. A multi-document transaction arrives whole; an aborted one leaves nothing. The mirror records its
+resume token after each lakehouse commit; cluster times are the offsets, so a crash in between replays changes that
+leave the table the same. A dropped or renamed collection ends the stream: the mirror fails and says to recreate
+it. The oplog must outlast a paused mirror; if its token is gone, the mirror fails and says so.
+
+Tested with MongoDB 7 (a single-node replica set) and the real store and catalog (`tests/test_mirror_mongo_e2e.py`):
+
+- the copy, then inserts (one with a new field), updates, a replacement and deletes; ObjectIds, decimals, dates
+  and embedded documents;
+- a transaction of five inserts arriving whole, and an aborted one leaving nothing;
+- a replay from an older position, which left the table right;
+- a dropped collection failing the mirror; refusals of a missing collection and of a server that is not a replica
+  set.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:
