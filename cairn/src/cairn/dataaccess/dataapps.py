@@ -115,6 +115,10 @@ class DataApps:
         self.workdir = workdir or os.path.join(os.environ.get("CAIRN_DATA_DIR", "/tmp/cairn"), "apps")
         self.git_urls = [u for u in (git_urls or []) if u]
         self._running: dict[str, _Running] = {}
+        # Apps installed from an app package (cairn.dataaccess.app_packages): another party's code. They run with
+        # a minimal environment, never Cairn's, and get a Trino token of their own (app_token(name)).
+        self.isolated: Callable[[str], bool] = lambda name: False
+        self.app_token: Optional[Callable[[str], Optional[str]]] = None
         self._lock = asyncio.Lock()
         self._swept = time.monotonic()
 
@@ -143,7 +147,11 @@ class DataApps:
             raise AppError("git.branch: a branch name")
         if not SUBPATH.match(path) or ".." in path.split("/"):
             raise AppError("git.path: a folder in the repository")
-        return json.dumps({"url": str(url) if url else None, "repo": str(repo) if repo else None, "branch": branch, "path": path})
+        commit = raw.get("commit")
+        if commit is not None and not re.fullmatch(r"[0-9a-f]{40,64}", str(commit)):
+            raise AppError("git.commit: a full commit id")
+        return json.dumps({"url": str(url) if url else None, "repo": str(repo) if repo else None, "branch": branch, "path": path,
+                           **({"commit": str(commit)} if commit else {})})
 
     def _check(self, body: dict) -> dict:
         url, command = body.get("url"), body.get("command")
@@ -264,8 +272,8 @@ class DataApps:
             raise AppError(f"git {args[0]}: {(r.stderr or r.stdout).strip()[-500:]}", 502)
         return r.stdout
 
-    def _checkout(self, name: str, url: str, header: Optional[str], branch: str) -> str:
-        """The app's clone, at the tip of its branch; its commit."""
+    def _checkout(self, name: str, url: str, header: Optional[str], branch: str, commit: Optional[str] = None) -> str:
+        """The app's clone, at the tip of its branch (or at ``commit`` on it); its commit."""
         import shutil
 
         d = os.path.join(self.workdir, name)
@@ -277,6 +285,10 @@ class DataApps:
             self._git(d, "remote", "set-url", "origin", url)
             self._git(d, "fetch", "--quiet", "--no-tags", "origin", branch, header=header)
         self._git(d, "checkout", "--quiet", "--force", "-B", branch, f"origin/{branch}")
+        if commit:
+            # A pinned commit must be on the branch (a package version cannot point anywhere else).
+            self._git(d, "merge-base", "--is-ancestor", commit, "HEAD")
+            self._git(d, "checkout", "--quiet", "--force", commit)
         self._git(d, "clean", "-fdqx")
         return self._git(d, "rev-parse", "HEAD").strip()
 
@@ -306,9 +318,9 @@ class DataApps:
             url, header = self._remote(git)
             if app["runtime"] == "local":
                 self.stop(name)                          # the next visit starts the new commit
-                commit = await asyncio.to_thread(self._checkout, name, url, header, git["branch"])
+                commit = await asyncio.to_thread(self._checkout, name, url, header, git["branch"], git.get("commit"))
             else:
-                commit = await asyncio.to_thread(self._head, url, header, git["branch"])
+                commit = git.get("commit") or await asyncio.to_thread(self._head, url, header, git["branch"])
             info = {"url": url, "branch": git["branch"], "commit": commit, "path": git["path"], "header": header}
         if app["runtime"] == "kubernetes":
             await self._kube(self.kube.deploy(app, self.key(name), info))
@@ -342,9 +354,14 @@ class DataApps:
                 port = _free_port()
                 base = f"apps/{name}"
                 cmd = [c.replace("{port}", str(port)).replace("{base}", base) for c in app["command"]]
-                env = {**os.environ, "PORT": str(port), "CAIRN_APP_BASE": f"/{base}/", "CAIRN_APP_KEY": self.key(name)}
-                for k in ("CAIRN_APPS_SECRET", "CAIRN_SERVICE_TOKEN"):
-                    env.pop(k, None)                  # the app gets its own key, never Cairn's secrets
+                if self.isolated(name):              # another party's code: nothing of Cairn's environment
+                    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+                    env.update({"HOME": cwd or self.workdir, "PORT": str(port), "CAIRN_APP_BASE": f"/{base}/",
+                                "CAIRN_APP_KEY": self.key(name)})
+                else:
+                    env = {**os.environ, "PORT": str(port), "CAIRN_APP_BASE": f"/{base}/", "CAIRN_APP_KEY": self.key(name)}
+                    for k in ("CAIRN_APPS_SECRET", "CAIRN_SERVICE_TOKEN"):
+                        env.pop(k, None)              # the app gets its own key, never Cairn's secrets
                 proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                 run = _Running(proc, port)
                 self._running[name] = run
@@ -408,6 +425,10 @@ class DataApps:
             tok = self.viewer_token(viewer)
             if tok:
                 out["X-Cairn-Trino-Token"] = tok
+        if self.app_token is not None:
+            tok = self.app_token(name)                 # an installed app: its own identity, its bound tables only
+            if tok:
+                out["X-Cairn-App-Trino-Token"] = tok
         return out
 
 

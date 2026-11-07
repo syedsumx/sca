@@ -731,6 +731,47 @@ def test_aggregation_and_projection_policies_hold_on_trino(trino, cairn):
         s.pdp.set_bundle(bundle)
 
 
+def test_an_installed_apps_identity_reads_its_bound_tables_only(trino, cairn):
+    """An app installed from an app package queries Trino as cairnapp-<install>: the table its installer bound,
+    with the installer's row filter, and no other table, not even one the installer may read."""
+    import json as _json
+    import types
+
+    from sqlalchemy import insert
+
+    from cairn.dataaccess.app_packages import AppPackages, installs_table
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+
+    _, s = cairn
+    trino("CREATE TABLE lake.sales.app_bound AS SELECT * FROM (VALUES (1, 'EU'), (2, 'US')) AS t(id, region)")
+    trino("CREATE TABLE lake.sales.app_other AS SELECT 1 AS id")
+    bound = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.app_bound,PROD)"
+    with s.engine.begin() as c:
+        c.execute(insert(installs_table).values(name="churn-x", package="churn", version="1.0.0",
+                                                references=_json.dumps({"orders": bound}),
+                                                installed_by="urn:li:corpuser:ana", created_ms=0, updated_ms=0))
+    before = s.trino_access.app_identity
+    s.trino_access.app_identity = lambda user: AppPackages.identity(types.SimpleNamespace(engine=s.engine), user)
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="ana-eu-apps", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        target={"resource_urns": [bound]}, condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"},
+        obligations=[Obligation(type="row_filter", params={"expression": "region = 'EU'"})])]))
+    try:
+        assert trino("SELECT id FROM lake.sales.app_bound ORDER BY id", user="cairnapp-churn-x") == [{"id": 1}]
+        assert len(trino("SELECT id FROM lake.sales.app_other", user="ana")) == 1          # Ana may read it...
+        with pytest.raises(Exception, match="Access Denied"):
+            trino("SELECT id FROM lake.sales.app_other", user="cairnapp-churn-x")       # ...her app may not
+        with pytest.raises(Exception, match="Access Denied"):
+            trino("INSERT INTO lake.sales.app_bound VALUES (3, 'EU')", user="cairnapp-churn-x")
+        with pytest.raises(Exception, match="Access Denied|403|not installed"):
+            trino("SELECT id FROM lake.sales.app_bound", user="cairnapp-not-installed")
+    finally:
+        s.pdp.set_bundle(bundle)
+        s.trino_access.app_identity = before
+
+
 def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
     """Cairn reads the connection's tables as its crawler (structure only) and writes them to the catalog
     under the URNs access control uses; dropped tables are marked removed; the SQL editor can then query

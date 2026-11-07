@@ -79,6 +79,7 @@ class Services:
     checked_queries: Optional[Any] = None
     databases: Optional[Any] = None
     mirrors: Optional[Any] = None
+    app_packages: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -1684,6 +1685,19 @@ def _build_data_access(s: Services) -> None:
         s.data_apps = DataApps(s.engine, apps_secret, s.audit, viewer_token, git=getattr(s, "git", None),
                                kube=KubeApps.from_env(),
                                git_urls=[u.strip() for u in os.environ.get("CAIRN_APP_GIT_URLS", "").split(",") if u.strip()])
+        # App packages (cairn.dataaccess.app_packages): apps others install on their own data; each install reads
+        # through Trino as its own identity, bound tables only.
+        from cairn.dataaccess.app_packages import AppPackages
+
+        def app_identity_token(identity: str):
+            tt = getattr(s, "trino_tokens", None)
+            return tt.mint(identity, 600)["token"] if tt is not None else None
+        s.app_packages = AppPackages(s.engine, s.data_apps,
+                                     lambda actor, priv, urn: s.authorize(Principal(urn=actor, via="delegated"), priv,
+                                                                          urn, raise_on_deny=False),
+                                     s.audit, app_identity_token)
+        if getattr(s, "trino_access", None) is not None:
+            s.trino_access.app_identity = s.app_packages.identity
 
     # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
     from cairn.pipelines.delta_convert import from_env as delta_from_env

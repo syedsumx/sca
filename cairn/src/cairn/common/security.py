@@ -48,7 +48,7 @@ class AuthenticationError(Exception):
     pass
 
 
-RESERVED_PREFIXES = ("cleanroom-", "checked-")   # clean rooms; checked queries (aggregation policies)
+RESERVED_PREFIXES = ("cleanroom-", "checked-", "cairnapp-")   # clean rooms; checked queries; installed apps
 
 
 class IdentityResolver:

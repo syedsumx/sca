@@ -265,6 +265,9 @@ class TrinoAccess:
         # checked(user): a one-query identity ``checked-<id>`` Cairn registered after checking a query against
         # aggregation and projection policies -> {actor, groups, tables}; None: not one (cairn.governance.aggregation).
         self.checked: Optional[Callable[[str], Optional[dict]]] = None
+        # app_identity(user): an installed app's identity ``cairnapp-<install>`` -> {actor: its installer, tables:
+        # the dataset urns bound to it}; None: not one (cairn.dataaccess.app_packages).
+        self.app_identity: Optional[Callable[[str], Optional[dict]]] = None
 
     def _decided_on(self, t: dict, need: str) -> str:
         """The urn a read or view of ``t`` is decided on: a published metric view's source table, else ``t``."""
@@ -330,7 +333,25 @@ class TrinoAccess:
             if reg is None:
                 raise HTTPException(403, "unknown or expired checked query")
             return reg["actor"], sorted(set(groups) | set(reg["groups"]))
+        app = self._app(user)
+        if app is not None:                            # an installed app reads as its installer, bound tables only
+            if not app.get("actor"):
+                raise HTTPException(403, "this app is not installed")
+            return app["actor"], []
         return f"urn:li:corpuser:{user}", groups
+
+    def _app(self, user: str) -> Optional[dict]:
+        if self.app_identity is None or not user.startswith("cairnapp-"):
+            return None
+        try:
+            return self.app_identity(user) or {"actor": None, "tables": set()}
+        except Exception as e:  # noqa: BLE001 - fail closed: an app that cannot be looked up reads nothing
+            logger.warning("app identity lookup failed: %s", e)
+            return {"actor": None, "tables": set()}
+
+    @staticmethod
+    def _raw_user(inp: dict) -> str:
+        return str((((inp or {}).get("context") or {}).get("identity") or {}).get("user") or "")
 
     def _checked(self, user: str) -> Optional[dict]:
         if self.checked is None or not user.startswith("checked-"):
@@ -415,6 +436,19 @@ class TrinoAccess:
                     and not self._raw_rows(f)              # no connector table functions: only aggregates leave
             t = res.get("table") or {}
             return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and self._tkey(t) in room
+        app = self._app(self._raw_user(inp))
+        if app is not None:                           # an installed app: its bound tables, read-only, nothing else
+            if op in ("ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables"):
+                return True
+            if op == "ExecuteFunction":
+                f = res.get("function") or {}
+                return str(f.get("catalogName") or "") not in self.ai_catalogs | self.routine_catalogs \
+                    and not self._raw_rows(f)
+            t = res.get("table") or {}
+            if not (op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and t and "$" not in str(t.get("tableName") or "")
+                    and self.table_urn(t) in app["tables"]):
+                return False
+            # Bound: decided below as the installer (their policies, residency, holds, query policies).
         if op == "ExecuteQuery" and warehouse is not None:   # a team's warehouse: its members (and operators)
             return user == CRAWLER or self.allowed(actor, groups, WAREHOUSE, f"urn:li:warehouse:{warehouse}")
         if op in OPEN_OPS:
@@ -519,6 +553,15 @@ class TrinoAccess:
                 t = (items[0] if items else {}).get("table") or {}
                 return list(range(len(t.get("columns") or []))) if self._tkey(t) in room else []
             return [i for i, r in enumerate(items) if self.allow({**inp, "action": {"operation": op, "resource": r}})]
+        app = self._app(self._raw_user(inp))
+        if app is not None and op in ("FilterTables", "FilterColumns"):
+            bound = app["tables"]
+            if op == "FilterTables":
+                return [i for i, r in enumerate(items) if r.get("table") and self.table_urn(r["table"]) in bound
+                        and self._may_view(actor, groups, r["table"])]
+            t = (items[0] if items else {}).get("table") or {}
+            ok = t and self.table_urn(t) in bound and self._may_view(actor, groups, t)
+            return list(range(len(t.get("columns") or []))) if ok else []
         if op in ("FilterCatalogs", "FilterSchemas", "FilterFunctions"):
             return list(range(len(items)))
         if user == CRAWLER and op in ("FilterTables", "FilterColumns"):

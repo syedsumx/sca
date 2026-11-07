@@ -1463,6 +1463,75 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
   - The headers her browser forged (`X-Cairn-User: root`) never reached the app, and Cairn's secrets were not in its environment.
   - The idle app was stopped, and the next visit started it again.
 
+## App packages: apps others install on their own data
+
+An app package is a data app one team publishes and other teams install on their own datasets. Each install
+reads only the tables its installer binds to it.
+
+**Publishing.**
+
+1. Register the package from git: `POST /v1/app-packages {"name", "git": {url | repo, branch, path}}`
+   (`CREATE_APP_PACKAGE`, from the same repositories and URLs as data apps).
+2. Release versions: `POST /v1/app-packages/<name>/versions {"version": "1.2.0"}` (`MANAGE_APP_PACKAGE` on
+   `urn:li:appPackage:<name>`).
+
+A version is the branch's commit at that moment plus the manifest found in the package's folder,
+`cairn-app.json`:
+
+```json
+{"title": "Churn explorer",
+ "command": ["streamlit", "run", "app.py", "--server.port", "{port}", "--server.baseUrlPath", "{base}"],
+ "references": [{"name": "customers", "privilege": "VIEW_DATASET_PROFILE",
+                 "description": "one row per customer, with its plan and signup date"}]}
+```
+
+A reference may only ask to read. A version never changes: a fix is a new version.
+
+**Installing.** `POST /v1/app-installs {"name", "package", "version", "references": {"customers": "<dataset urn>"}}`
+needs `USE_APP_PACKAGE` on the package. Every declared reference must be bound to one of the installer's
+datasets, and binding is consent: the installer must hold the reference's privilege on that dataset
+themselves. The install becomes a data app pinned to the version's commit, opened at `/apps/<name>/` with
+`USE_APP` as usual.
+
+An installed app is another party's code, so it runs with none of Cairn's environment: only `PATH`, `PORT`,
+`CAIRN_APP_BASE` and its own `CAIRN_APP_KEY`.
+
+**What it may read.** Each request to the app carries two Trino tokens:
+
+- `X-Cairn-Trino-Token`, for the viewer, as for any data app;
+- `X-Cairn-App-Trino-Token`, for the install's own identity, `cairnapp-<name>`.
+
+Trino lets the app's identity:
+
+- read the bound datasets and nothing else, not even other tables the installer can read;
+- do no writes, use no AI or stored functions, and read no metadata tables.
+
+Its reads are decided as the installer's, with the installer's masks, row filters and query policies.
+`cairnapp-` is a reserved user name: nobody signs in as one, and an identity whose install is gone reads
+nothing.
+
+**Upgrading.** `POST /v1/app-installs/<name>/upgrade {"version", "references"}` moves an install to another
+version and redeploys it. It can go to a later version or back to an earlier one:
+
+- references the new version adds are bound then;
+- bindings the target version no longer asks for are dropped.
+
+`DELETE /v1/app-installs/<name>` unbinds and removes the install (the installer, or `MANAGE_DATA_APP`).
+
+Releases, installs, upgrades and uninstalls are audited.
+
+Tested with a real git repository and the app as a real process reached through Cairn
+(`tests/test_app_packages.py`). The test covered:
+
+- consent refusals;
+- the app's own token, and no leaked environment;
+- the identity's reads, refusals, row filter and mask (Trino's protocol against the policy engine);
+- immutable versions, an upgrade binding a new reference, and a rollback that unbinds it;
+- uninstalling.
+
+On a real Trino, the app's identity read the bound table with the installer's filter and was refused another
+table and a write (`test_an_installed_apps_identity_reads_its_bound_tables_only`).
+
 ## Git folders
 
 A Git folder keeps a person's saved queries and notebooks in a git repository, reviewed like code. Cairn works on a clone of its own with the `git` command, so any host works.

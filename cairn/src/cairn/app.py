@@ -318,6 +318,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_consent_router(services.consent, cp, lambda p, priv, urn: services.authorize(
             p, priv, urn, raise_on_deny=False)))
+    if getattr(services, "app_packages", None) is not None:
+        from cairn.dataaccess.app_packages import build_app_packages_router
+
+        app.include_router(build_app_packages_router(services.app_packages, cp))
     if getattr(services, "mirrors", None) is not None:
         from cairn.pipelines.mirror import build_mirrors_router
 
