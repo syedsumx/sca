@@ -214,3 +214,31 @@ def test_a_failed_install_or_uninstall_never_leaves_package_code_unisolated(worl
     assert bob.post("/v1/app-installs", json={**inst, "name": "taken"}).status_code == 409
     assert apps.isolated("taken") is False
 
+
+def test_only_the_installer_binds_data_to_an_app(world):
+    """Review finding: a manager who was not the installer could rebind references to data they may read, and the
+    app then read it as the installer, with the installer's (weaker) masks."""
+    ana, bob, s = world["ana"], world["bob"], world["s"]
+    commit(world["dev"], "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    commit(world["dev"], "v2", ["orders", "regions"])
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.1.0"}).status_code == 201
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    assert bob.post("/v1/app-installs", json=inst).status_code == 201
+    # Ana manages Bob's install (USE_APP_PACKAGE and MANAGE_DATA_APP), but may not bind data to it.
+    s.pdp.set_bundle(PolicyBundle(policies=[*s.pdp.bundle.policies, Policy(
+        id="ana-manages", effect="allow", actions=["MANAGE_DATA_APP", "USE_APP_PACKAGE"],
+        condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
+    r = ana.post("/v1/app-installs/bob-churn/upgrade", json={"version": "1.0.0", "references": {"orders": REGIONS}})
+    assert r.status_code == 403 and "installer" in r.text
+    r = ana.post("/v1/app-installs/bob-churn/upgrade", json={"version": "1.1.0", "references": {"regions": REGIONS}})
+    assert r.status_code == 403                                    # a new reference needs the installer too
+    assert bob.get("/v1/app-installs/bob-churn").json()["references"] == {"orders": ORDERS}
+    # Within what Bob bound, Ana may move it between versions; Bob may bind more himself.
+    r = bob.post("/v1/app-installs/bob-churn/upgrade", json={"version": "1.1.0", "references": {"regions": REGIONS}})
+    assert r.status_code == 200
+    r = ana.post("/v1/app-installs/bob-churn/upgrade", json={"version": "1.0.0"})
+    assert r.status_code == 200 and r.json()["references"] == {"orders": ORDERS}
+

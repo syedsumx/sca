@@ -310,7 +310,12 @@ class AppPackages:
         declared = {r["name"] for r in manifest["references"]}
         # Bindings the target version does not ask for are dropped (a rollback unbinds what it no longer uses).
         kept = {k: v for k, v in json.loads(irow.references).items() if k in declared}
-        refs = self._bind(actor, manifest, {**kept, **(references or {})})
+        # The app reads as its installer, so bindings are the installer's consent: only they bind data to it. A
+        # manager may move it between versions within what the installer bound, re-checked as the installer.
+        if actor != irow.installed_by and (references or set(declared) - set(kept)):
+            raise PackageError("only the installer binds data to an app: this version needs bindings "
+                               f"({', '.join(sorted(set(references or {}) | (set(declared) - set(kept))))})", 403)
+        refs = self._bind(irow.installed_by, manifest, {**kept, **(references or {})})
         from cairn.dataaccess.dataapps import AppError
 
         body = self._app_body(prow, vrow, name)
