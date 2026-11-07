@@ -61,10 +61,27 @@ def test_only_groups_of_the_minimum_size_come_back(db):
     ("select dept, sum(salary) over (partition by dept) from pay group by dept", "window"),
     ("select x from (select salary as x from pay) t", "aggregate"),
     ("select count(*) from pay p join visits v on p.person_id = v.person_id", "entity key"),
+    # Aggregates that hand back a row's own value (review finding: array_agg returned every salary).
+    ("select dept, array_agg(salary) from pay group by dept", "row's own value"),
+    ("select dept, max(salary) from pay group by dept", "row's own value"),
+    ("select dept, min(salary) from pay group by dept", "row's own value"),
+    ("select dept, arbitrary(salary) from pay group by dept", "row's own value"),
+    ("select dept, listagg(email, ',') from pay group by dept", "row's own value"),
+    ("select dept, approx_percentile(salary, 0.5) from pay group by dept", "row's own value"),
+    ("select dept, min_by(email, salary) from pay group by dept", "row's own value"),
+    ("select dept, count(*) from pay group by dept having max(salary) > 100", "row's own value"),
+    ("select dept, histogram(salary) from pay group by dept", "does not know"),
+    ("select dept, sum(salary) + cardinality(map_agg(person_id, salary)) from pay group by dept", "does not know"),
 ])
 def test_what_would_release_rows_is_refused(sql, why):
     with pytest.raises(PolicyViolation, match=why):
         check(sql, {"pay": PAY})
+
+
+def test_reducing_aggregates_are_allowed(db):
+    sql = check("select dept, count(*), count(distinct person_id), sum(salary), avg(salary), stddev(salary), "
+                "variance(salary), approx_distinct(email), count_if(salary > 100) from pay group by dept", {"pay": PAY})
+    assert "HAVING COUNT(*) >= 3" in sql
 
 
 def test_with_an_entity_key_joins_count_people_not_rows(db):

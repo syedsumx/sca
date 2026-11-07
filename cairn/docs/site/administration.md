@@ -363,7 +363,11 @@ exemptions as any other policy:
 ```
 
 **Aggregation.** Every query block that reads the table must aggregate: a `GROUP BY`, or aggregates only. It
-may not use `*` or window functions, and every column it returns is aggregated or grouped. Cairn adds
+may not use `*` or window functions, and every column it returns is aggregated or grouped. The aggregates allowed
+are the ones that reduce a group to a figure: `count`, `count_if`, `sum`, `avg`, `approx_distinct`, `stddev` and
+`variance`. `min`, `max`, `arbitrary`, `array_agg`, `listagg`, percentiles, `min_by`/`max_by` and functions Cairn
+does not know are refused anywhere in such a block, `HAVING` and `ORDER BY` included, because they return a row's
+own value. Cairn adds
 `HAVING count(*) >= min_group` to that block, so no group smaller than `min_group` rows is returned. This holds
 in subqueries, CTEs and each branch of a `UNION` too.
 

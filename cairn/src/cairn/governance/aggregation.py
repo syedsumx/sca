@@ -45,6 +45,11 @@ checked_queries = Table(
 )
 
 IDENTITY_PREFIX = "checked-"
+# The aggregates that reduce a group to a figure no single row can be read back from. min, max, arbitrary,
+# array_agg, listagg, percentiles, min_by and their kind return a row's own value: never allowed over a protected
+# table, and neither is a function Cairn does not know (it may be an aggregate of that kind).
+SAFE_AGGREGATES = (exp.Count, exp.CountIf, exp.Sum, exp.Avg, exp.ApproxDistinct, exp.Stddev, exp.StddevPop,
+                   exp.StddevSamp, exp.Variance, exp.VariancePop)
 CHECKED_TTL_MS = 10 * 60_000
 
 
@@ -161,8 +166,17 @@ def enforce(tree: exp.Expression, policy_of: Callable[[exp.Table], Optional[Tabl
         for part in ("expressions", "having", "order"):
             val = sel.args.get(part)
             for node in (val if isinstance(val, list) else [val]):
-                if node is not None and node.find(exp.Window):
+                if node is None:
+                    continue
+                if node.find(exp.Window):
                     raise PolicyViolation(f"no window functions over {names}: it may only be read in aggregate")
+                for agg in node.find_all(exp.AggFunc):
+                    if not isinstance(agg, SAFE_AGGREGATES):
+                        raise PolicyViolation(f"{agg.sql()[:60]} returns a row's own value: over {names} use count, "
+                                              "sum, avg, approx_distinct, stddev or variance")
+                if node.find(exp.Anonymous):
+                    raise PolicyViolation(f"{node.find(exp.Anonymous).sql()[:60]}: a function Cairn does not know is "
+                                          f"not allowed over {names} (it may return a row's own value)")
         group = sel.args.get("group")
         grouped = {g.sql().lower() for g in (group.expressions if group is not None else [])}
         positions = {int(g.name) for g in (group.expressions if group is not None else [])
