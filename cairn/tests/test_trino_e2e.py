@@ -1011,10 +1011,14 @@ def test_point_lookups_get_bloom_filters_from_what_queries_look_up(trino, cairn)
         m_ = _re.search(r"Input: ([0-9,]+) rows", scan)
         assert m_, scan[:2000]
         return int(m_.group(1).replace(",", ""))
-    filtered = rows_scanned("SELECT n FROM lake.look.events WHERE id = '7fffffff-0000-4000-8000-000000000000'")
-    plain = rows_scanned("SELECT n FROM lake.look.events WHERE other = '7fffffff-0000-4000-8000-000000000000'")
-    # A value inside every file's min/max range: only the Bloom filter can skip it.
-    assert filtered == 0 and plain == 180000, (filtered, plain)
+    # Values inside every file's min/max range: only the Bloom filter can skip them. A Bloom filter answers "maybe"
+    # for some absent values (its false-positive rate: 0 to 2 in 10 here, with random ids), so twenty are looked up
+    # and most must read nothing; without the filter every one reads all 180000 rows (CI run 307 lost one probe).
+    probes = [f"{h:x}{h:x}{h:x}{h:x}-0000-4000-8000-000000000000"[:36] for h in range(0x61, 0x75)]
+    filtered = [rows_scanned(f"SELECT n FROM lake.look.events WHERE id = '{p}'") for p in probes]
+    plain = rows_scanned(f"SELECT n FROM lake.look.events WHERE other = '{probes[0]}'")
+    print("rows scanned per lookup:", filtered)
+    assert plain == 180000 and sum(1 for f in filtered if f == 0) >= 12, (filtered, plain)
     # Floating-point and boolean columns are refused: Bloom filters are for exact values.
     execute("ALTER TABLE lake.look.events ADD COLUMN score double")
     m.set_policy("look.events", {"optimize": False, "lookup": ["score"]}, "urn:li:corpuser:admin")
