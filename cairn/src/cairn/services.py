@@ -157,6 +157,7 @@ class Services:
     workbooks: Optional[Any] = None
     input_tables: Optional[Any] = None
     metrics: Optional[Any] = None
+    autopilot: Optional[Any] = None
     builder: Optional[Any] = None
     bi_actions: Optional[Any] = None
     reports: Optional[Any] = None
@@ -1112,6 +1113,11 @@ def _build_active_metadata(s: Services) -> None:
                 return None
         s.builder = Builder(s.llm, s.settings.ai.model_nlq or s.settings.ai.model, s.ask, s.metrics, s.sql_boards,
                             urn_of, s.audit)
+        # Semantic model autopilot: tables profiled as the person and query history's shapes → draft metrics.
+        from cairn.sqlworkspace.autopilot import Autopilot
+
+        s.autopilot = Autopilot(s.engine, s.workbooks, s.metrics, lambda: getattr(s, "query_history", None), urn_of,
+                                s.llm, s.settings.ai.model_nlq or s.settings.ai.model, s.audit)
         # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
         from cairn.sqlworkspace.procedures import Procedures
         from cairn.sqlworkspace.workspace import WorkspaceError

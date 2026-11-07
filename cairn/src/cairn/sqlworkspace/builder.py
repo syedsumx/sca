@@ -96,7 +96,8 @@ class Builder:
             parts.append(f"- {m['name']} ({m['label']}{', certified' if m['certified'] else ''}) on {m['table']}: "
                          f"{m['measure']}" + (f", dimensions {', '.join(m['dimensions'])}" if m["dimensions"] else "")
                          + (f", over time by {m['time_column']}" if m["time_column"] else "")
-                         + (f". {m['description']}" if m["description"] else ""))
+                         + (f". {m['description']}" if m["description"] else "")
+                         + (f" Also called: {', '.join(m.get('synonyms') or [])}." if m.get("synonyms") else ""))
         parts.append("Tables:")
         for ref, cols in tables.items():
             parts.append(f"- {ref} ({', '.join(cols)})")

@@ -60,6 +60,8 @@ metrics = Table(
     Column("updated_ms", BigInteger, nullable=False),
     # Published as a SQL view for outside BI tools (Tableau, Power BI): <CAIRN_METRIC_VIEW_SCHEMA>.<name>.
     Column("published", Boolean, nullable=False, default=False, server_default="0"),
+    # Other words people use for it (Ask-your-data and the AI builder are told them).
+    Column("synonyms", Text, nullable=False, default="[]", server_default="[]"),
 )
 
 
@@ -72,6 +74,7 @@ class MetricError(Exception):
 def _row(r) -> dict:
     d = dict(r._mapping)
     return {**d, "table": d.pop("table_name"), "filters": json.loads(d["filters"]), "dimensions": json.loads(d["dimensions"]),
+            "synonyms": json.loads(d.get("synonyms") or "[]"),
             "certified": bool(d["certified"]), "published": bool(d.get("published"))}
 
 
@@ -180,7 +183,8 @@ class Metrics:
                     out.append({"name": m["name"], "kind": "metric", "version": m["version"],
                                 "doc": {"expression": sql_expression(m), "table": m["table"],
                                         "description": (m["description"] or m["label"]) +
-                                        (" (certified)" if m["certified"] else "")}})
+                                        (" (certified)" if m["certified"] else "") +
+                                        (f"; also called {', '.join(m['synonyms'])}" if m["synonyms"] else "")}})
                 except MetricError:
                     continue
         return out
@@ -198,11 +202,16 @@ class Metrics:
         d = {"name": name, "label": str(body.get("label") or name)[:200], "description": str(body.get("description") or ""),
              "connection": str(body.get("connection") or ""), "table": str(body.get("table") or ""),
              "measure": str(body.get("measure") or ""), "filters": body.get("filters") or [],
-             "time_column": body.get("time_column") or None, "dimensions": body.get("dimensions") or []}
+             "time_column": body.get("time_column") or None, "dimensions": body.get("dimensions") or [],
+             "synonyms": body.get("synonyms") or []}
         _table(d["table"])
         if not isinstance(d["filters"], list) or not isinstance(d["dimensions"], list) or \
                 not all(isinstance(x, str) and x for x in d["dimensions"]):
             raise MetricError("filters and dimensions are lists")
+        if not isinstance(d["synonyms"], list) or len(d["synonyms"]) > 10 or \
+                not all(isinstance(x, str) and 0 < len(x.strip()) <= 60 for x in d["synonyms"]):
+            raise MetricError("synonyms: up to 10 words or phrases, each up to 60 characters")
+        d["synonyms"] = [x.strip() for x in d["synonyms"]]
         # Checked by compiling it, as its owner, over the table as they see it: the measure is an aggregate, the
         # filters, the time column and the dimensions name real columns.
         probe = element_for([d], {"dimensions": d["dimensions"][:6], "grain": "day" if d["time_column"] else None,
@@ -214,6 +223,7 @@ class Metrics:
         values = {"label": d["label"], "description": d["description"], "connection": d["connection"],
                   "table_name": d["table"], "measure": d["measure"], "filters": json.dumps(d["filters"]),
                   "time_column": d["time_column"], "dimensions": json.dumps(d["dimensions"]),
+                  "synonyms": json.dumps(d["synonyms"]),
                   "updated_ms": int(time.time() * 1000)}
         with self.engine.begin() as conn:
             if new:

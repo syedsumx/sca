@@ -3801,3 +3801,102 @@ def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino,
     assert again["rows"] == 500
     cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
     assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed
+
+
+def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, cairn):
+    """Semantic model autopilot on real Trino, its query history fed by Trino's event listener, the model scripted:
+    tables are profiled as the person (Bob's row filter applies), history's shapes become candidates (aggregates
+    with their filters, group-bys, joins), a filter literal the person cannot read is dropped, the model names
+    candidates by id only, every proposal is run as the person, and accepted ones become metrics with synonyms."""
+    import json as _json
+    import re as _re
+
+    import httpx
+
+    from cairn.ai.llm import StaticProvider
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.sp_orders AS SELECT * FROM (VALUES "
+          "(1, 10, 'EU', 'paid', 100e0, DATE '2026-01-03'), (2, 11, 'EU', 'refunded', 40e0, DATE '2026-01-04'), "
+          "(3, 12, 'US', 'paid', 70e0, DATE '2026-02-01'), (4, 12, 'US', 'gold', 30e0, DATE '2026-02-02')) "
+          "AS t(id, customer_id, region, status, amount, ordered_at)")
+    trino("CREATE TABLE lake.sales.sp_customers AS SELECT * FROM (VALUES (10, 'retail', 'EU'), (11, 'retail', 'EU'), "
+          "(12, 'wholesale', 'US')) AS t(id, segment, region)")
+    orders = s.trino_access.urn("lake", "sales", "sp_orders")
+    since = int(time.time() * 1000) - 60_000
+    for _ in range(3):
+        trino("SELECT region, sum(amount) AS s FROM lake.sales.sp_orders WHERE status = 'paid' GROUP BY region")
+    trino("SELECT count(DISTINCT customer_id) AS n FROM lake.sales.sp_orders")
+    trino("SELECT c.segment, sum(o.amount) AS s FROM lake.sales.sp_orders o JOIN lake.sales.sp_customers c "
+          "ON o.customer_id = c.id GROUP BY c.segment")
+    for _ in range(2):
+        trino("SELECT sum(amount) AS s FROM lake.sales.sp_orders WHERE status = 'gold'")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(orders, since)) < 7 and time.time() < deadline:
+        time.sleep(1)
+    assert len(s.query_history.reading(orders, since)) >= 7
+
+    prompts = []
+
+    def responder(system, user, schema):
+        prompts.append(user)
+        ids = dict((m, i) for i, m in _re.findall(r"- (c\d+): (.+?) \(history", user))
+        rev = next(i for m, i in ids.items() if m.startswith("Sum([amount]) on sales.sp_orders where status = \"paid\""))
+        cust = next(i for m, i in ids.items() if m.startswith("CountDistinct([customer_id])"))
+        return {"metrics": [{"candidate": rev, "name": "sp_revenue", "label": "Revenue", "description": "Paid sales.",
+                             "synonyms": ["sales", "turnover"]},
+                            {"candidate": cust, "name": "Buying Customers!", "label": "Customers"},
+                            {"candidate": "c999", "name": "invented", "label": "Not a candidate"}],
+                "dimensions": [{"table": "sales.sp_orders", "column": "region", "description": "Sales region."}]}
+    s.autopilot.llm = StaticProvider(responder)
+    admin, bob = {"X-Cairn-Actor": "urn:li:corpuser:admin"}, {"X-Cairn-Actor": "urn:li:corpuser:bob"}
+    body = {"connection": "lakehouse", "tables": ["sales.sp_orders", "sales.sp_customers"]}
+    r = httpx.post(f"{url}/sql/semantic-models", json=body, headers=admin, timeout=180)
+    assert r.status_code == 201, r.text
+    d = r.json()
+    by = {m["name"]: m for m in d["metrics"]}
+    assert set(by) == {"sp_revenue", "buying_customers"}, by                 # c999 ignored; the bad name slugged
+    assert by["sp_revenue"]["filters"] == [{"column": "status", "op": "=", "value": "paid"}]
+    assert by["sp_revenue"]["total"] == 170.0 and by["sp_revenue"]["runs"] == 3
+    assert by["sp_revenue"]["synonyms"] == ["sales", "turnover"] and by["buying_customers"]["total"] == 3
+    meta = d["table_meta"]["sales.sp_orders"]
+    assert meta["time_column"] == "ordered_at" and {"region", "status"} <= set(meta["dimensions"])
+    assert "id" not in meta["dimensions"] and meta["dimension_descriptions"] == {"region": "Sales region."}
+    assert {"from": {"table": "sales.sp_customers", "column": "id"}, "to": {"table": "sales.sp_orders",
+            "column": "customer_id"}, "runs": 1} in d["relationships"], d["relationships"]
+    # The model saw shapes and figures, never SQL text; the draft holds none either.
+    assert "GROUP BY" not in prompts[0] and "SELECT" not in prompts[0] and "GROUP BY" not in _json.dumps(d)
+
+    # Without the model, as Bob (row filter region = 'EU'): his figures, and no filter on a value he cannot read.
+    a2 = httpx.post(f"{url}/sql/semantic-models", json={**body, "use_model": False}, headers=admin, timeout=180).json()
+    b2 = httpx.post(f"{url}/sql/semantic-models", json={**body, "use_model": False}, headers=bob, timeout=180).json()
+    gold = lambda x: [m for m in x["metrics"] if {"column": "status", "op": "=", "value": "gold"} in m["filters"]]  # noqa: E731
+    assert gold(a2) and not gold(b2)
+    paid = lambda x: next(m for m in x["metrics"] if m["filters"] == [{"column": "status", "op": "=", "value": "paid"}])  # noqa: E731
+    assert paid(a2)["total"] == 170.0 and paid(b2)["total"] == 100.0
+    assert httpx.get(f"{url}/sql/semantic-models/{d['id']}", headers=bob, timeout=30).status_code == 404
+    hidden = httpx.post(f"{url}/sql/semantic-models", json={"connection": "lakehouse", "tables": ["clus.events"]},
+                        headers=bob, timeout=60)
+    assert hidden.status_code == 404, hidden.text
+
+    # Accepted: metrics owned by the person, synonyms kept, used like any metric; a second accept skips them.
+    acc = httpx.post(f"{url}/sql/semantic-models/{d['id']}/accept",
+                     json={"metrics": ["sp_revenue", "buying_customers"],
+                           "edits": {"buying_customers": {"name": "sp_customers_buying"}}}, headers=admin, timeout=120)
+    assert acc.status_code == 200 and acc.json()["saved"] == ["sp_revenue", "sp_customers_buying"], acc.text
+    m = s.metrics.get("sp_revenue")
+    assert m["owner"] == "urn:li:corpuser:admin" and m["synonyms"] == ["sales", "turnover"]
+    assert m["time_column"] == "ordered_at" and "region" in m["dimensions"]
+    q = s.metrics.query("urn:li:corpuser:bob", {"metrics": ["sp_revenue"], "dimensions": ["region"]})
+    assert [list(r) for r in q["rows"]] == [["EU", 100.0]], q
+    defs = {x["name"]: x for x in s.metrics.for_tables({"sales.sp_orders"})}
+    assert "also called sales, turnover" in defs["sp_revenue"]["doc"]["description"]
+    again = httpx.post(f"{url}/sql/semantic-models/{d['id']}/accept", json={"metrics": ["sp_revenue"]},
+                       headers=admin, timeout=60).json()
+    assert again["saved"] == [] and again["skipped"][0]["status"] == 409
+    actions = [e["action"] for e in s.audit.entries("sql", limit=200)]
+    assert "semantic_model.drafted" in actions and "semantic_model.accepted" in actions
