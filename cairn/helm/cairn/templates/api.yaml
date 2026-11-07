@@ -137,6 +137,13 @@
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR" "value" (toString .)) }}
 {{- end }}
 {{- end }}
+{{- /* Operational databases (POST /v1/databases): a PostgreSQL server Cairn administers. */ -}}
+{{- with .Values.cairn.databases }}{{ if .enabled }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_DATABASES_ADMIN_URL" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.databases.adminUrlSecret.name" .adminUrlSecret.name) "key" (.adminUrlSecret.key | default "url")))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_DATABASES_HOST" "value" (required "cairn.databases.host" .host)) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_DATABASES_PORT" "value" (toString (.port | default 5432))) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_DATABASES_SSLMODE" "value" (.sslmode | default "require")) }}
+{{- end }}{{ end }}
 {{- $ctx := dict "root" $ "component" "api" "cfg" .Values.cairn.api "replicas" .Values.cairn.api.replicas "port" (int .Values.cairn.api.port) "args" (list "api" "--host" "0.0.0.0" "--port" (toString .Values.cairn.api.port)) "extraEnv" $scimEnv "extraVolumeMounts" $mounts "extraVolumes" $vols }}
 {{ include "cairn.deployment" $ctx }}
 ---

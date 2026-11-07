@@ -525,6 +525,15 @@ cairn:
   # Credentials come from a Secret you create:
   #   kubectl create secret generic cairn-store \
   #     --from-literal=access-key=cairn-store --from-literal=secret-key=$(openssl rand -hex 24)
+  # Operational databases: PostgreSQL databases made through Cairn (POST /v1/databases), reached only with
+  # short-lived logins Cairn hands out. The admin URL (a role with CREATEDB and CREATEROLE) comes from a Secret;
+  # host and port are where clients reach the server.
+  databases:
+    enabled: false
+    adminUrlSecret: { name: "", key: url }
+    host: ""
+    port: 5432
+    sslmode: require
   store:
     enabled: false
     port: 8333

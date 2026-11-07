@@ -1,6 +1,12 @@
 {{- if .Values.cairn.scheduler.enabled }}
 {{- /* No port: leader election through a Postgres advisory lock, liveness via process supervision. */}}
-{{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.cairn.scheduler "replicas" .Values.cairn.scheduler.replicas "metricsPort" 9108 "args" (list "scheduler") }}
+{{- $env := list }}
+{{- /* Operational databases: the scheduler drops expired logins, so it administers the same server. */ -}}
+{{- with .Values.cairn.databases }}{{ if .enabled }}
+{{- $env = append $env (dict "name" "CAIRN_DATABASES_ADMIN_URL" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.databases.adminUrlSecret.name" .adminUrlSecret.name) "key" (.adminUrlSecret.key | default "url")))) }}
+{{- $env = append $env (dict "name" "CAIRN_DATABASES_HOST" "value" (required "cairn.databases.host" .host)) }}
+{{- end }}{{ end }}
+{{- $ctx := dict "root" $ "component" "scheduler" "cfg" .Values.cairn.scheduler "replicas" .Values.cairn.scheduler.replicas "metricsPort" 9108 "args" (list "scheduler") "extraEnv" $env }}
 {{ include "cairn.deployment" $ctx }}
 {{- with (include "cairn.pdb" $ctx) }}
 ---

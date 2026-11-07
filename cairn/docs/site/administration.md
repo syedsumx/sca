@@ -704,6 +704,59 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - an HR table was refused;
   - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
 
+## Operational databases
+
+Applications need a database they can write to row by row, with low latency, next to the lakehouse. Cairn makes
+PostgreSQL databases on a server it administers, and hands out the only way in: a login per person that works
+for at most a day.
+
+Settings, which Helm sets from `cairn.databases`, in both the API and the scheduler:
+
+- `CAIRN_DATABASES_ADMIN_URL` (or `_FILE`): a role with `CREATEDB` and `CREATEROLE`.
+- `CAIRN_DATABASES_HOST`, `CAIRN_DATABASES_PORT`: where clients reach the server.
+- `CAIRN_DATABASES_SSLMODE` (default `require`).
+
+The endpoints:
+
+- `POST /v1/databases {"name"}` (`CREATE_DATABASE`) makes the database. It has an owner role and a reader role,
+  `cdb_<name>_owner` and `cdb_<name>_read`. Neither can log in, and only they may connect: `PUBLIC` loses
+  `CONNECT` and the `public` schema.
+- `POST /v1/databases/<name>/credentials {"access": "write" | "read", "ttl_minutes": 5-1440}` answers with
+  host, port, database, user, password and expiry:
+  - `write` needs `USE_DATABASE` on `urn:li:pgDatabase:<name>`. The login acts as the owner role, so what it
+    creates belongs to the database and outlives the login.
+  - `read` needs `VIEW_DATABASE`. Its sessions are read-only, and it may read every table, including future
+    ones.
+
+  The password is shown once. Cairn keeps neither the password nor a connection URL with it in. The login
+  (`cdb_u_<id>`) is recorded with who asked, and audited (`database.credentials`, with no password).
+- `GET .../logins` lists the open logins: your own, or all of them for a database's managers.
+  `DELETE .../logins/<user>` ends one now, and its sessions with it.
+- The scheduler drops logins once they expire, ending their sessions.
+- `POST /v1/databases/<name>/branches {"name"}` (`MANAGE_DATABASE` on the source, and `CREATE_DATABASE`) makes
+  a copy with roles of its own, for a test or a migration rehearsal. Its objects are handed to the copy's
+  owner one by one: a branch never touches the source. PostgreSQL copies only a database nobody is connected
+  to, so a busy source answers 409.
+- `DELETE /v1/databases/<name>` (`MANAGE_DATABASE`) ends the sessions and drops the database, its roles and its
+  logins.
+
+Nothing here runs SQL a caller wrote. Names are lowercase letters, digits and `_`, are checked, and are always
+quoted.
+
+Also revoke `CONNECT` on the server's `postgres` database from `PUBLIC`, so a login reaches only its own
+database.
+
+Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
+
+- a write login created and filled a table owned by the database;
+- a read login read it and could not write;
+- someone without the privilege got 403;
+- a login could not reach another database;
+- revoked and expired logins were dropped, and their open sessions ended;
+- a branch, with a `serial` table, was its own copy, and a busy source answered 409;
+- dropping removed everything;
+- no password reached the audit log.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:

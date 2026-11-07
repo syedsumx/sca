@@ -318,6 +318,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_consent_router(services.consent, cp, lambda p, priv, urn: services.authorize(
             p, priv, urn, raise_on_deny=False)))
+    if getattr(services, "databases", None) is not None:
+        from cairn.dataaccess.databases import build_databases_router
+
+        app.include_router(build_databases_router(services.databases, cp))
     if getattr(services, "ai_workspace", None) is not None:
         from cairn.ai.workspace import build_workspace_router
 

@@ -77,6 +77,7 @@ class Services:
     assistant: Optional[Any] = None
     ai_workspace: Optional[Any] = None
     checked_queries: Optional[Any] = None
+    databases: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -853,6 +854,7 @@ def _build_active_metadata(s: Services) -> None:
                 return s.data_access.run_on_trino(definition, actor, sql, limit)
             s.change_feed = ChangeFeed(run_feed, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
         _build_data_access(s)
+        _build_databases(s)
         _build_consent(s)
         _build_saml(s)
         _build_secret_scopes(s)
@@ -1376,6 +1378,20 @@ def _secret_env(name: str) -> str:
         with open(path) as fh:
             return fh.read().strip()
     return os.environ.get(name, "")
+
+
+def _build_databases(s: Services) -> None:
+    """Operational PostgreSQL databases made and handed out through Cairn (cairn.dataaccess.databases)."""
+    admin = _secret_env("CAIRN_DATABASES_ADMIN_URL")
+    if not admin:
+        return
+    from cairn.dataaccess.databases import Databases
+
+    def allowed(actor: str, privilege: str, urn: Optional[str]) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+    s.databases = Databases(s.engine, admin, os.environ.get("CAIRN_DATABASES_HOST", "localhost"),
+                            int(os.environ.get("CAIRN_DATABASES_PORT", "5432")), allowed, s.audit,
+                            os.environ.get("CAIRN_DATABASES_SSLMODE", "require"))
 
 
 def _build_data_access(s: Services) -> None:
