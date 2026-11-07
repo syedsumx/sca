@@ -883,6 +883,39 @@ Tested with MySQL 8.4 and the real store and catalog (`tests/test_mirror_mysql_e
 - a replay from an older position, which wrote only the new change;
 - refusals of a table without a primary key and of a statement-based log.
 
+## Mirrors from SQL Server
+
+A connection whose URL is `mssql://user:password@host:1433/database` (or `mssql+pymssql://`, `sqlserver://`) is
+mirrored through SQL Server's change data capture (CDC), with the `pymssql` driver (the `streams` extra). Cairn
+changes nothing on the server. A database administrator turns CDC on and keeps SQL Server Agent running (it runs
+the capture and cleanup jobs):
+
+```sql
+EXEC sys.sp_cdc_enable_db;
+EXEC sys.sp_cdc_enable_table @source_schema = N'dbo', @source_name = N'orders', @role_name = NULL;
+```
+
+The connection's user needs `SELECT` on the table and its change table (`db_owner`, or the gating role if one was
+named). A table without CDC, or without a primary key, is refused with what to do.
+
+The copy is taken after reading the highest LSN the capture job has recorded (or, right after CDC was turned on
+for the table, from the start of its capture instance). Changes after it are then applied in commit order, whole
+transactions at a time; updates come with their old values, so a key change deletes the old row. A change
+replayed over the copy writes the same row again, so the lakehouse table converges on the source. Commit LSNs are
+the offsets, and the mirror records the last one it applied, so a crash between the lakehouse commit and that
+record replays changes that leave the table the same.
+
+CDC's cleanup job keeps changes for three days by default. A mirror paused for longer finds them gone, fails and
+says to recreate it, which copies the table again.
+
+Tested with SQL Server 2022 (SQL Server Agent running the capture job) and the real store and catalog
+(`tests/test_mirror_mssql_e2e.py`):
+
+- the copy, then inserts, updates, a key change, deletes, `DECIMAL`, `BIT`, `DATE` and `DATETIME2`;
+- a rolled-back transaction, which left nothing;
+- a replay from an older LSN, which left the table right;
+- refusals of a table without CDC and of one without a primary key.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:
