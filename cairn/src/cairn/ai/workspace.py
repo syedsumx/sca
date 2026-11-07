@@ -403,7 +403,7 @@ class Workspace:
             raise WorkspaceError(403, "deep research is started by people")
         a = self.assistant
         if a is None or a.llm is None or getattr(a.llm, "name", "") != "anthropic":
-            raise WorkspaceError(503, "deep research needs the Anthropic model provider")
+            raise WorkspaceError(503, "deep research is not configured: it needs the Anthropic model provider")
         question = redact(" ".join(strip_invisible(question or "").split()))
         if len(question) < 5:
             raise WorkspaceError(422, "ask a question")
