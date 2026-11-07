@@ -2501,6 +2501,25 @@ Iceberg tables in the lakehouse can have branches (refs that move) and tags (ref
   - a stale branch refused;
   - a diff masked for a reader.
 
+## Synthetic test data
+
+`POST /v1/synthetic` makes a lakehouse table shaped like a real one, with none of its people in it, for development, tests and demos.
+
+- **The request.** `{"source": "sales.orders", "target": "dev.orders_synthetic", "rows": 10000, "seed": 7, "replace": false}`. Reading the source needs `VIEW_DATASET_PROFILE` on it, and making the target needs `MANAGE_DATASET` on it. A target that exists is refused (409) unless `replace` is true. It uses the same settings as table branches (`CAIRN_PIPES_CATALOG`, the Trino connection).
+- **Where the statistics come from.** They are computed on Trino as the caller, so the caller's masks and row filters apply: what they may not see does not shape the data either.
+- **Sensitive columns.** No real value of a sensitive column is copied. A column is sensitive when it is classified sensitive (a PII glossary term and the like) or masked for the caller. Its values are made from its type and shape alone: an e-mail column gets `user123@example.com`. Its numbers stay between the 5th and 95th percentiles, never the extremes.
+- **Categories.** A column with few distinct values (50 at most) keeps its values and their shares, but only values that occur at least `CAIRN_SYNTHETIC_MIN_COUNT` times (10). Rare values, which can identify people, never appear.
+- **What is kept, column by column:**
+  - the share of nulls;
+  - numbers drawn from the source's percentiles;
+  - date and time ranges;
+  - text lengths;
+  - unique columns stay unique.
+  
+  Relations between columns are not kept: each column is drawn on its own.
+- **The answer and the record.** The answer says what each column was made from (`unique`, `categories`, `distribution`, `shape` or `null`). The same `seed` gives the same table. The table carries `cairn.synthetic.source`, and the run is audited (`synthetic.generated`).
+- **Tested** in `tests/test_trino_e2e.py`, on real Trino and Cairn Catalog: no PII value copied, rare categories absent, sensitive extremes never reached, nulls, ranges, uniqueness and shares kept, and the same seed giving the same table.
+
 ## Pipes (automatic file loading)
 
 A pipe loads the files that land in a Cairn Store prefix into a lakehouse table, once each. It names a `bucket`, a `prefix`, a `format` (`csv`, `json` lines, `parquet` or `xlsx`) and the Iceberg `target` (`namespace.table`). With `create_table`, the table is created from the first file.

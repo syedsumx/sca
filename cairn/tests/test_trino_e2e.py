@@ -3516,3 +3516,80 @@ def test_branches_tags_write_audit_publish_and_diff(trino, cairn, lake):
     actions = {e["action"] for e in s.audit.entries(category="lakehouse", limit=300)}
     assert {"table.branch_created", "table.tag_created", "table.published", "table.publish_refused", "table.diffed",
             "table.branch_removed"} <= actions
+
+
+def test_synthetic_data_is_shaped_like_the_source_with_none_of_its_people(trino, cairn, lake):
+    """Synthetic test data on real Trino and Cairn Catalog: the same columns and types, the share of nulls, numeric
+    ranges, unique keys and common categories kept; no value of the PII column copied, rare categories never seen,
+    a sensitive column's extremes never reached; the same seed, the same table."""
+    import random as _random
+
+    from cairn.common.security import Principal
+    from cairn.pipelines.synthetic import Synthetic, SyntheticError
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    props = {"uri": lake["catalog"], "token": CATALOG_TOKEN, "s3.endpoint": lake["store"], "s3.access-key-id": STORE_KEY[0],
+             "s3.secret-access-key": STORE_KEY[1], "s3.region": "us-east-1", "s3.path-style-access": "true"}
+    urn = lambda ns, t: s.trino_access.urn("lake", ns, t)  # noqa: E731
+    src = urn("syn", "people")
+    s.graph.aspects[(src, "schemaMetadata")] = {"fields": [
+        {"fieldPath": "id"}, {"fieldPath": "email", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "region"}, {"fieldPath": "age"}, {"fieldPath": "salary", "glossaryTerms": {"terms": [{"urn": EMAIL}]}},
+        {"fieldPath": "joined"}, {"fieldPath": "vip"}]}
+    rnd = _random.Random(1)
+    regions = ["EU"] * 120 + ["US"] * 70 + ["APAC"] * 7 + ["ZZ-rare"] * 3     # APAC and ZZ-rare: under 10 each
+    rnd.shuffle(regions)
+    values = []
+    for i in range(200):
+        email = "NULL" if i % 10 == 0 else f"'person{i}@acme.com'"
+        values.append(f"({i + 1}, {email}, '{regions[i]}', {18 + rnd.randint(0, 60)}, {30000 + i * 500}.0, "
+                      f"DATE '2020-01-01' + INTERVAL '{i}' DAY, {str(i % 4 == 0).lower()})")
+    admin = "urn:li:corpuser:admin"
+    for stmt in ["CREATE SCHEMA IF NOT EXISTS lake.syn",
+                 "CREATE TABLE lake.syn.people (id bigint, email varchar, region varchar, age integer, salary double, "
+                 "joined date, vip boolean)",
+                 "INSERT INTO lake.syn.people VALUES " + ", ".join(values)]:
+        run(admin, stmt)
+    syn = Synthetic(props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u,
+                                                              raise_on_deny=False),
+                    urn, run, "lake", lambda u: set((s.attributes.resource(u) or {}).get("sensitive_fields") or {}),
+                    s.data_access.plan_for, s.audit)
+    with pytest.raises(SyntheticError) as e:
+        syn.generate("urn:li:corpuser:ana", "syn.people", "syn.people_fake", 100)       # no rights on either
+    assert e.value.status == 403
+    out = syn.generate(admin, "syn.people", "syn.people_fake", 500, seed=42)
+    # (distinct e-mails: unique, still made up; the flag's two values are both common: categories)
+    assert out["columns"] == {"id": "unique", "email": "unique", "region": "categories", "age": "distribution",
+                              "salary": "shape", "joined": "distribution", "vip": "categories"}, out
+    cols, rows, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
+    fake = [dict(zip(cols, r)) for r in rows]
+    assert len(fake) == 500 and cols == ["id", "email", "region", "age", "salary", "joined", "vip"]
+    real_emails = {f"person{i}@acme.com" for i in range(200)}
+    assert not {f["email"] for f in fake} & real_emails                                       # none copied
+    assert all(f["email"] is None or f["email"].endswith("@example.com") for f in fake)
+    assert 0.03 < sum(f["email"] is None for f in fake) / 500 < 0.2                            # ~10% nulls kept
+    assert {f["region"] for f in fake} <= {"EU", "US"}                                         # rare ones never seen
+    assert abs(sum(f["region"] == "EU" for f in fake) / 500 - 120 / 190) < 0.1
+    assert len({f["id"] for f in fake}) == 500                                                 # unique stays unique
+    assert all(18 <= f["age"] <= 78 for f in fake)
+    sal = [f["salary"] for f in fake if f["salary"] is not None]
+    assert 30000 + 0.04 * 99500 <= min(sal) and max(sal) <= 30000 + 0.96 * 99500               # no extremes
+    import datetime as _dt
+
+    assert all(_dt.date(2020, 1, 1) <= f["joined"] <= _dt.date(2020, 7, 19) for f in fake)
+    assert 0.1 < sum(bool(f["vip"]) for f in fake) / 500 < 0.4
+    with pytest.raises(SyntheticError) as e:
+        syn.generate(admin, "syn.people", "syn.people_fake", 10)
+    assert e.value.status == 409
+    again = syn.generate(admin, "syn.people", "syn.people_fake", 500, seed=42, replace=True)
+    assert again["rows"] == 500
+    cols2, rows2, _ = run(admin, "SELECT * FROM lake.syn.people_fake")
+    assert sorted(map(str, rows2)) == sorted(map(str, rows))                                  # the same seed

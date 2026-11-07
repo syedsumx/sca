@@ -2080,6 +2080,13 @@ def _build_branches(s: Services) -> None:
         pipes.catalog_props, lambda actor, priv, u: s.authorize(Principal(urn=actor, via="delegated"), priv, u,
                                                                 raise_on_deny=False),
         urn, run_sql, os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), s.audit)
+    # Synthetic test data (cairn.pipelines.synthetic): statistics on Trino as the person, written as Cairn.
+    from cairn.pipelines.synthetic import Synthetic
+
+    def sensitive(u: str) -> set:
+        return set((s.attributes.resource(u) or {}).get("sensitive_fields") or {})
+    s.synthetic = Synthetic(pipes.catalog_props, s.branches.authorize, urn, run_sql,
+                            os.environ.get("CAIRN_DERIVED_CATALOG", "lakehouse"), sensitive, s.data_access.plan_for, s.audit)
 
 
 def _build_saml(s: Services) -> None:

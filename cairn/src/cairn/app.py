@@ -353,6 +353,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.governance.access_reviews import build_access_reviews_router
 
         app.include_router(build_access_reviews_router(services.access_reviews, cp, authz))
+    if getattr(services, "synthetic", None) is not None:
+        from cairn.pipelines.synthetic import build_synthetic_router
+
+        app.include_router(build_synthetic_router(services.synthetic, cp))
     if getattr(services, "branches", None) is not None:
         from cairn.pipelines.branches import build_branches_router
 
