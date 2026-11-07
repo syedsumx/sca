@@ -242,3 +242,22 @@ def test_only_the_installer_binds_data_to_an_app(world):
     r = ana.post("/v1/app-installs/bob-churn/upgrade", json={"version": "1.0.0"})
     assert r.status_code == 200 and r.json()["references"] == {"orders": ORDERS}
 
+
+def test_installs_are_seen_only_by_those_who_may_use_them(world):
+    """Review finding: any signed-in person could list every install, its installer and its bound datasets."""
+    ana, bob, s = world["ana"], world["bob"], world["s"]
+    from fastapi.testclient import TestClient
+
+    from cairn.app import create_api_app
+    cal = TestClient(create_api_app(s), headers={"X-Cairn-Actor": "urn:li:corpuser:cal"})
+    commit(world["dev"], "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    assert bob.post("/v1/app-installs", json=inst).status_code == 201
+    assert [i["name"] for i in bob.get("/v1/app-installs").json()["installs"]] == ["bob-churn"]
+    assert bob.get("/v1/app-installs/bob-churn").json()["references"] == {"orders": ORDERS}
+    assert cal.get("/v1/app-installs").json()["installs"] == []
+    assert cal.get("/v1/app-installs/bob-churn").status_code == 404
+

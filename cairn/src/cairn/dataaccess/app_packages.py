@@ -353,19 +353,30 @@ class AppPackages:
             c.execute(installs_table.delete().where(installs_table.c.name == name))
         self._audit("app.uninstalled", actor, self.apps.urn(name), {"package": irow.package, "version": irow.version})
 
+    def _may_see(self, actor: str, irow) -> bool:
+        """Its installer, and whoever may open or manage the app; to anyone else an install does not exist."""
+        if irow.installed_by == actor:
+            return True
+        try:
+            return any(self.allowed(actor, p, self.apps.urn(irow.name)) for p in ("USE_APP", "MANAGE_DATA_APP"))
+        except Exception:  # noqa: BLE001 - fail closed
+            return False
+
     def get_install(self, actor: str, name: str) -> dict:
         irow = self._install(name)
+        if not self._may_see(actor, irow):
+            raise PackageError("no such install", 404)
         app = self.apps.get(name)
         return {"name": name, "package": irow.package, "version": irow.version,
                 "references": json.loads(irow.references), "installed_by": irow.installed_by,
                 "commit": app.get("commit"), "identity": f"urn:li:corpuser:{IDENTITY_PREFIX}{name}",
                 "created_ms": irow.created_ms, "updated_ms": irow.updated_ms}
 
-    def installs(self) -> list[dict]:
+    def installs(self, actor: str) -> list[dict]:
         with self.engine.connect() as c:
             rows = c.execute(select(installs_table).order_by(installs_table.c.name)).all()
         return [{"name": r.name, "package": r.package, "version": r.version, "installed_by": r.installed_by}
-                for r in rows]
+                for r in rows if self._may_see(actor, r)]
 
     # ---- what the app's own identity may read ---------------------------------------------------------
     def is_install(self, name: str) -> bool:
@@ -421,7 +432,7 @@ def build_app_packages_router(pk: AppPackages, current_principal) -> Any:
 
     @router.get("/app-installs")
     async def installs(p=Depends(current_principal)):
-        return {"installs": await call(pk.installs)}
+        return {"installs": await call(lambda: pk.installs(p.urn))}
 
     @router.post("/app-installs", status_code=201)
     async def install(body: dict = Body(...), p=Depends(current_principal)):
