@@ -860,6 +860,70 @@ def test_tables_are_clustered_by_what_their_queries_filter_on(trino, cairn):
         m.set_policy("clus", {"cluster": "sometimes"}, "urn:li:corpuser:admin")
 
 
+def test_point_lookups_get_bloom_filters_from_what_queries_look_up(trino, cairn):
+    """Point-lookup acceleration on real Trino: queries look rows up by id (random UUIDs, so min/max statistics cannot
+    skip anything), Cairn gives id a Parquet Bloom filter and rewrites the files; a lookup of a missing id then reads
+    a fraction of what the same lookup on an unfiltered column of the same kind reads."""
+    from cairn.pipelines.maintenance import TableMaintenance
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+
+    def execute(sql):
+        return s.data_access.run_on_trino(definition, "urn:li:corpuser:admin", sql, 100_000)[1]
+    execute("CREATE SCHEMA IF NOT EXISTS lake.look")
+    execute("CREATE TABLE lake.look.events (id varchar, other varchar, n integer)")
+    for _ in range(3):
+        execute("INSERT INTO lake.look.events SELECT CAST(uuid() AS varchar), CAST(uuid() AS varchar), CAST(x * 1000 + y AS integer) "
+                "FROM UNNEST(sequence(1, 300)) AS a(x) CROSS JOIN UNNEST(sequence(1, 200)) AS b(y)")
+    urn = s.trino_access.urn("lake", "look", "events")
+    since = int(time.time() * 1000) - 60_000
+    some = trino("SELECT id FROM lake.look.events LIMIT 3")
+    for r in some:
+        trino(f"SELECT n FROM lake.look.events WHERE id = '{r['id']}'")
+    trino("SELECT count(*) AS c FROM lake.look.events WHERE id IN ('a', 'b') AND n > 3")
+    trino("SELECT count(*) AS c FROM lake.look.events WHERE n > 100")
+    deadline = time.time() + 60
+    while len(s.query_history.reading(urn, since)) < 6 and time.time() < deadline:
+        time.sleep(1)
+
+    m = TableMaintenance(s.engine, execute, "lake", s.audit,
+                         lambda schema, table, since_ms: s.query_history.reading(
+                             s.trino_access.urn("lake", schema, table), since_ms))
+    m.set_policy("look.events", {"optimize": False, "lookup": "auto"}, "urn:li:corpuser:admin")
+    [run] = m.maintain("look", "events")
+    assert run["operation"] == "lookup" and run["status"] == "ok", run
+    assert run["detail"].startswith("Bloom filters on id (was none)"), run["detail"]
+    props = {r["key"]: r["value"] for r in trino('SELECT key, value FROM lake.look."events$properties"')}
+    assert props.get("write.parquet.bloom-filter-enabled.column.id") == "true", props
+    assert trino("SELECT count(*) AS c FROM lake.look.events")[0]["c"] == 180000           # nothing lost
+    [again] = m.maintain("look", "events")
+    assert again["detail"] == "Bloom filters on id, as before"
+
+    def rows_scanned(sql: str) -> int:
+        """The rows the table scan read (EXPLAIN ANALYZE's ScanFilterProject ``Input: N rows``)."""
+        import re as _re
+
+        text = "\n".join(str(v) for row in trino("EXPLAIN ANALYZE " + sql) for v in row.values())
+        scan = text[text.index("ScanFilterProject"):]
+        m_ = _re.search(r"Input: ([0-9,]+) rows", scan)
+        assert m_, scan[:2000]
+        return int(m_.group(1).replace(",", ""))
+    filtered = rows_scanned("SELECT n FROM lake.look.events WHERE id = '7fffffff-0000-4000-8000-000000000000'")
+    plain = rows_scanned("SELECT n FROM lake.look.events WHERE other = '7fffffff-0000-4000-8000-000000000000'")
+    # A value inside every file's min/max range: only the Bloom filter can skip it.
+    assert filtered == 0 and plain == 180000, (filtered, plain)
+    # Floating-point and boolean columns are refused: Bloom filters are for exact values.
+    execute("ALTER TABLE lake.look.events ADD COLUMN score double")
+    m.set_policy("look.events", {"optimize": False, "lookup": ["score"]}, "urn:li:corpuser:admin")
+    [bad] = m.maintain("look", "events")
+    assert bad["status"] == "error" and "exact values" in bad["detail"]
+
+
 def test_workbooks_compile_spreadsheet_formulas_to_sql_run_as_the_viewer(trino, cairn):
     """A workbook (calculated columns, filters, grouping, a pivot) compiled to one query on real Trino and run as
     whoever looks: the admin sees the values, Ana's emails are masked inside formulas too, Bob sees only EU rows."""

@@ -10,6 +10,12 @@ Table maintenance (``cairn.pipelines.maintenance``) runs this for tables whose p
   Types that do not sort usefully (booleans, binary, arrays, maps, rows, JSON) are never chosen.
 * **The sort order** is set on the Iceberg table (``sorted_by``): every later write through Trino sorts
   its files by it.
+* **Point lookups** (``lookup``: ``"auto"`` or a list of columns): columns queries look up by value
+  (``col = …``, ``col IN (…)``) get Parquet Bloom filters (Trino's ``parquet_bloom_filter_columns``), so a lookup
+  skips every file that cannot hold the value, which min/max statistics cannot do for random keys such as UUIDs.
+  ``"auto"`` takes the columns at least 10% of the table's queries (and two) look up by value, up to three, and
+  never floating-point or boolean ones. When they change, the table's files are rewritten once so the data already
+  there gets them too.
 * **Clustering depth**: how many files, on average, a file's range of the first column overlaps (itself
   included), from the files' column bounds (``$files``). 1 is perfectly clustered; a table whose files all
   span every value has a depth equal to its file count. When the sort order changed, or the depth is above
@@ -68,6 +74,65 @@ def filter_columns(sql: str, schema: str, table: str, columns: Iterable[str]) ->
                     if (q and sources.get(q)) or (not q and only_ours):
                         out.add(name)
     return out
+
+
+NO_BLOOM = ("boolean", "real", "double", "array", "map", "row", "json", "varbinary")
+MAX_LOOKUP = 3
+
+
+def lookup_columns(sql: str, schema: str, table: str, columns: Iterable[str]) -> set[str]:
+    """The columns of ``schema.table`` that ``sql`` looks up by value: ``col = <literal>`` or ``col IN (<literals>)``."""
+    import sqlglot
+    from sqlglot import exp
+
+    cols = {c.lower() for c in columns}
+    try:
+        trees = sqlglot.parse(sql, read="trino")
+    except Exception:  # noqa: BLE001
+        return set()
+    out: set[str] = set()
+    for tree in trees:
+        if tree is None:
+            continue
+        for select in tree.find_all(exp.Select):
+            names = {(t.alias_or_name or t.name).lower(): t.name.lower() == table.lower() and (not t.db or t.db.lower() == schema.lower())
+                     for t in select.find_all(exp.Table) if t.find_ancestor(exp.Select) is select}
+            if not any(names.values()):
+                continue
+            where = select.args.get("where")
+            if where is None:
+                continue
+            def literal(v) -> bool:                    # 'x', 42, -1, CAST('x' AS ...), DATE '...'
+                while isinstance(v, (exp.Cast, exp.Neg, exp.Paren)):
+                    v = v.this
+                return isinstance(v, exp.Literal)
+            for node in where.find_all(exp.EQ, exp.In):
+                if node.find_ancestor(exp.Select) is not select:
+                    continue
+                if isinstance(node, exp.EQ):
+                    a, b = node.this, node.expression
+                    col = a if isinstance(a, exp.Column) and literal(b) else b if isinstance(b, exp.Column) and literal(a) else None
+                else:
+                    col = node.this if isinstance(node.this, exp.Column) and node.expressions and all(
+                        literal(v) for v in node.expressions) else None
+                if col is None:
+                    continue
+                q = (col.table or "").lower()
+                if col.name.lower() in cols and ((q and names.get(q)) or (not q and all(names.values()))):
+                    out.add(col.name.lower())
+    return out
+
+
+def choose_lookup(queries: list[tuple[str, int]], schema: str, table: str, types: dict[str, str]) -> tuple[list[str], dict]:
+    """The columns to give Bloom filters, from ``(sql, bytes read)`` of the table's queries, and the evidence."""
+    usable = {c for c, t in types.items() if not t.lower().startswith(NO_BLOOM)}
+    used: dict[str, int] = defaultdict(int)
+    for sql, _ in queries:
+        for c in lookup_columns(sql, schema, table, usable):
+            used[c] += 1
+    floor = max(2, int(len(queries) * MIN_SHARE + 0.999))
+    ranked = sorted((c for c in used if used[c] >= floor), key=lambda c: (-used[c], c))
+    return ranked[:MAX_LOOKUP], {"queries": len(queries), "lookups": dict(used)}
 
 
 def choose(queries: list[tuple[str, int]], schema: str, table: str, types: dict[str, str]) -> tuple[list[str], dict]:

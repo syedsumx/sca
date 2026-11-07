@@ -6,7 +6,9 @@ For each table, the policy that applies (the table's own, else its schema's, els
 * ``expire_days``: expire snapshots older than that (``expire_snapshots``), so old data files can go;
 * ``orphan_days``: delete files no snapshot references, older than that (``remove_orphan_files``);
 * ``cluster``: ``"auto"`` or a list of columns: keep the table sorted by what its queries filter on, and
-  rewrite it when its files overlap too much (``cluster_depth``); see ``cairn.pipelines.clustering``.
+  rewrite it when its files overlap too much (``cluster_depth``); see ``cairn.pipelines.clustering``;
+* ``lookup``: ``"auto"`` or a list of columns: Parquet Bloom filters on the columns queries look up by value, so
+  point lookups skip the files that cannot hold the value (``cairn.pipelines.clustering``).
 
 It runs every ``every_hours`` per table on a run-as-user Trino connection (CAIRN_MAINTENANCE_CONNECTION)
 as the Cairn user CAIRN_MAINTENANCE_USER (default svc-maintenance), so Cairn's policy decides as for
@@ -40,6 +42,7 @@ maintenance_policies = Table(
     Column("every_hours", Integer, nullable=False, default=24),
     Column("cluster", String(512), nullable=True),                 # null: off; "auto"; or "col1,col2"
     Column("cluster_depth", Float, nullable=False, default=4.0),
+    Column("lookup", String(512), nullable=True),                  # null: off; "auto"; or "col1,col2"
     Column("enabled", Boolean, nullable=False, default=True),
     Column("updated_by", String(256), nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
@@ -90,7 +93,9 @@ def _policy(r) -> dict:
     return {"scope": r.scope, "optimize": bool(r.optimize), "optimize_threshold": r.optimize_threshold,
             "expire_days": r.expire_days, "orphan_days": r.orphan_days, "every_hours": r.every_hours,
             "cluster": (r.cluster if r.cluster in (None, "auto") else r.cluster.split(",")),
-            "cluster_depth": r.cluster_depth, "enabled": bool(r.enabled), "updated_by": r.updated_by,
+            "cluster_depth": r.cluster_depth,
+            "lookup": (lambda v: v if v in (None, "auto") else v.split(","))(getattr(r, "lookup", None)),
+            "enabled": bool(r.enabled), "updated_by": r.updated_by,
             "updated_ms": r.updated_ms}
 
 
@@ -132,12 +137,20 @@ class TableMaintenance:
                 raise MaintenanceError('cluster is "auto", a list of up to 4 columns, or null')
             if cluster == "auto" and self.queries is None:
                 raise MaintenanceError("automatic clustering needs Trino's query history (CAIRN_TRINO_ACCESS_KEY)", 409)
+        lookup = body.get("lookup")
+        if lookup is not None:
+            if lookup != "auto" and not (isinstance(lookup, list) and 1 <= len(lookup) <= 5
+                                         and all(isinstance(c, str) and NAME.match(c) for c in lookup)):
+                raise MaintenanceError('lookup is "auto", a list of up to 5 columns, or null')
+            if lookup == "auto" and self.queries is None:
+                raise MaintenanceError("automatic lookup filters need Trino's query history (CAIRN_TRINO_ACCESS_KEY)", 409)
         depth = body.get("cluster_depth", 4)
         if isinstance(depth, bool) or not isinstance(depth, (int, float)) or not 1 <= depth <= 1000:
             raise MaintenanceError("cluster_depth is between 1 and 1000")
         values = {"optimize": bool(body.get("optimize", True)), "optimize_threshold": threshold,
                   "cluster": cluster if cluster in (None, "auto") else ",".join(c.lower() for c in cluster),
                   "cluster_depth": float(depth),
+                  "lookup": lookup if lookup in (None, "auto") else ",".join(c.lower() for c in lookup),
                   "expire_days": days("expire_days"), "orphan_days": days("orphan_days"), "every_hours": every,
                   "enabled": bool(body.get("enabled", True)), "updated_by": actor, "updated_ms": _now()}
         with self.engine.begin() as conn:
@@ -145,7 +158,7 @@ class TableMaintenance:
             conn.execute(maintenance_policies.insert().values(scope=scope, **values))
             if self.audit is not None:
                 self.audit.record("lakehouse", "maintenance.policy_set", actor, None, {"scope": scope, **values}, conn=conn)
-        return {"scope": scope, **values, "cluster": cluster}
+        return {"scope": scope, **values, "cluster": cluster, "lookup": lookup}
 
     def delete_policy(self, scope: str, actor: str) -> None:
         with self.engine.begin() as conn:
@@ -183,6 +196,8 @@ class TableMaintenance:
                                                f"remove_orphan_files(retention_threshold => '{policy['orphan_days']}d')"))
         if policy.get("cluster"):
             ops.append(("cluster", lambda: self.cluster(schema, table, policy)))
+        if policy.get("lookup"):
+            ops.append(("lookup", lambda: self.lookup(schema, table, policy)))
         out = []
         for op, sql in ops:
             started = _now()
@@ -248,6 +263,45 @@ class TableMaintenance:
         self._clustering(f"{schema}.{table}", want, chosen_by, evidence, after, len(files), now, rewritten)
         what = f"sorted by {', '.join(want)}" + (f" (was {', '.join(current) or 'unsorted'})" if changed else "")
         return what + (f"; rewritten, depth {before} -> {after}" if rewritten else f"; depth {before}, not rewritten")
+
+    def lookup(self, schema: str, table: str, policy: dict) -> str:
+        """Parquet Bloom filters on the columns the table's queries look up by value (or the policy's); the
+        table's files are rewritten once when they change, so the data already there gets them. Says what it did."""
+        from cairn.pipelines import clustering as cl
+
+        target = f'"{self.catalog}"."{schema}"."{table}"'
+        meta = lambda kind: f'"{self.catalog}"."{schema}"."{table}${kind}"'  # noqa: E731
+        types = {r[0].lower(): str(r[1]) for r in self.execute(
+            f"SELECT column_name, data_type FROM \"{self.catalog}\".information_schema.columns "
+            f"WHERE table_schema = '{schema}' AND table_name = '{table}'")}
+        want = policy["lookup"]
+        if want == "auto":
+            if self.queries is None:
+                raise MaintenanceError("automatic lookup filters need Trino's query history")
+            days = int(os.environ.get("CAIRN_CLUSTER_LOOKBACK_DAYS", "14"))
+            want, evidence = cl.choose_lookup(self.queries(schema, table, _now() - days * 86_400_000), schema, table, types)
+        else:
+            missing = [c for c in want if c not in types]
+            if missing:
+                raise MaintenanceError(f"{schema}.{table} has no column {missing[0]}")
+            unusable = [c for c in want if types[c].lower().startswith(cl.NO_BLOOM)]
+            if unusable:
+                raise MaintenanceError(f"{unusable[0]} is {types[unusable[0]]}: Bloom filters are for exact values")
+            evidence = {}
+        prefix = "write.parquet.bloom-filter-enabled.column."
+        current = sorted(r[0][len(prefix):].lower() for r in self.execute(
+            f"SELECT key FROM {meta('properties')} WHERE key LIKE '{prefix}%' AND value = 'true'"))
+        if not want:
+            return f"no column is looked up by value yet ({evidence.get('queries', 0)} queries read it)"
+        if sorted(want) == current:
+            return f"Bloom filters on {', '.join(want)}, as before"
+        self.execute(f"ALTER TABLE {target} SET PROPERTIES parquet_bloom_filter_columns = "
+                     f"ARRAY[{', '.join(_lit(c) for c in want)}]")
+        files = self._files(meta)
+        if files:
+            biggest = max(int(f.get("file_size_in_bytes") or 0) for f in files)
+            self.execute(f"ALTER TABLE {target} EXECUTE optimize(file_size_threshold => '{biggest // 1_048_576 + 2}MB')")
+        return f"Bloom filters on {', '.join(want)} (was {', '.join(current) or 'none'}); {len(files)} file(s) rewritten"
 
     def _files(self, meta) -> list[dict]:
         return [{"file_size_in_bytes": r[0], "readable_metrics": r[1]}
