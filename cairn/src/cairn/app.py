@@ -561,6 +561,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 from cairn.sqlworkspace.builder import build_builder_router
 
                 app.include_router(build_builder_router(services.builder, cp, services.can_view))
+            if getattr(services, "pipeline_agent", None) is not None:
+                from cairn.ai.pipeline_agent import build_pipeline_agent_router
+
+                app.include_router(build_pipeline_agent_router(services.pipeline_agent, cp, services.can_view))
             if getattr(services, "autopilot", None) is not None:
                 from cairn.sqlworkspace.autopilot import build_autopilot_router
 

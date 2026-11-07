@@ -3900,3 +3900,100 @@ def test_the_semantic_autopilot_drafts_metrics_from_tables_and_their_use(trino, 
     assert again["saved"] == [] and again["skipped"][0]["status"] == 409
     actions = [e["action"] for e in s.audit.entries("sql", limit=200)]
     assert "semantic_model.drafted" in actions and "semantic_model.accepted" in actions
+
+
+def test_the_pipeline_agent_writes_tries_fixes_and_ships_as_the_person(trino, cairn):
+    """The pipeline agent on real Trino, the model scripted: a goal becomes a derived table; each try is planned,
+    previewed and checked on Trino as the person, writing nothing, and what fails (Trino's error, a check that found
+    rows) goes back to the model; the person approves and it ships as theirs, checked again on the table it made. A
+    broken pipeline is fixed from its failed runs. Tables the person may not see are refused."""
+    from cairn.ai.llm import StaticProvider
+    from cairn.ai.pipeline_agent import PipelineAgent, PipelineAgentError
+    from cairn.common.security import Principal
+    from cairn.pipelines.derived import DerivedTables
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    definition = s.data_access.registry.definitions()["lakehouse"]
+    admin, ana, bob = "urn:li:corpuser:admin", "urn:li:corpuser:ana", "urn:li:corpuser:bob"
+
+    def run(actor, sql, limit=100_000):
+        return s.data_access.run_on_trino(definition, actor, sql, limit)
+    run(admin, "CREATE TABLE lake.sales.pa_orders AS SELECT * FROM (VALUES (1, 'EU', 'paid', 100e0, 1), "
+               "(2, 'EU', 'refunded', -40e0, 2), (3, 'US', 'paid', 70e0, 3)) AS t(id, region, status, amount, seq)")
+    dt = DerivedTables(s.engine, lambda owner, sql: run(owner, sql)[1], "lake", s.audit)
+    plans = []
+    prompts = []
+
+    def responder(system, user, schema):
+        prompts.append(user)
+        return plans.pop(0)
+
+    def context(actor, goal, urns, can_view):
+        return {"sales.pa_orders": ["id", "region", "status", "amount", "seq"]}
+    agent = PipelineAgent(s.engine, StaticProvider(responder), None, dt, run, context, s.audit)
+    view = lambda who: s.can_view(Principal(urn=who, via="token"))  # noqa: E731
+    good = {"sql": "SELECT region, sum(amount) AS revenue FROM lake.sales.pa_orders WHERE status = 'paid' GROUP BY region",
+            "mode": "merge", "key": ["region"], "watermark": None, "every_minutes": None, "on_change": True,
+            "checks": [{"name": "region_known", "sql": "SELECT count(*) FROM candidate WHERE region IS NULL"}],
+            "explanation": "Paid revenue per region."}
+    plans += [{**good, "sql": "SELECT region, sum(total_amount) AS revenue FROM lake.sales.pa_orders GROUP BY region"},
+              {**good, "sql": "SELECT region, sum(amount) AS revenue FROM lake.sales.pa_orders GROUP BY region "
+                              "UNION ALL SELECT 'XX', -1e0"},
+              good]
+    t = agent.create(admin, {"goal": "Revenue per region from paid orders", "target": "sales.pa_revenue",
+                             "checks": [{"name": "no_negative", "sql": "SELECT count(*) FROM candidate WHERE revenue < 0"}]},
+                     view(admin))
+    assert t["status"] == "ready" and len(t["steps"]) == 3, t["steps"]
+    assert "Trino refused the query" in t["steps"][0]["error"] and "total_amount" in t["steps"][0]["error"]
+    assert t["steps"][1]["error"] == "check no_negative found 1 wrong rows"
+    assert "total_amount" in prompts[1] and "check no_negative found 1" in prompts[2]   # the model was told why
+    assert sorted(map(tuple, t["preview"]["rows"])) == [("EU", 100.0), ("US", 70.0)]
+    assert {c["name"]: c["by"] for c in t["proposal"]["checks"]} == {
+        "key_is_unique": "cairn", "no_negative": "person", "region_known": "agent"}
+    assert not any("100.0" in p for p in prompts)                       # the model never sees rows
+    assert trino("SHOW TABLES FROM sales LIKE 'pa_revenue'") == []       # trying wrote nothing
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(bob, t["id"])                                       # someone else's task
+    assert e.value.status == 404
+
+    shipped = agent.approve(admin, t["id"])
+    assert shipped["status"] == "shipped", shipped["outcome"]
+    assert all(c["passed"] for c in shipped["outcome"]["checks"]) and shipped["outcome"]["run"]["status"] == "ok"
+    assert {r["region"]: r["revenue"] for r in trino("SELECT * FROM sales.pa_revenue")} == {"EU": 100.0, "US": 70.0}
+    d = dt.get(shipped["outcome"]["derived_id"])
+    assert d["owner"] == admin and d["mode"] == "merge" and d["on_change"]
+    assert shipped["outcome"]["as_code"]["derived"][0]["target"] == "sales.pa_revenue"
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(admin, t["id"])
+    assert e.value.status == 409
+
+    # Ana may not see hr.salaries: a plan reading it is refused on every try, and nothing ships.
+    plans += [{**good, "sql": "SELECT name, salary FROM lake.hr.salaries", "mode": "full", "key": [],
+               "every_minutes": 60, "checks": []}] * 3
+    denied = agent.create(ana, {"goal": "Salaries per person", "target": "sales.pa_pay"}, view(ana))
+    assert denied["status"] == "failed" and all("a table you may not see" in x["error"] for x in denied["steps"])
+    with pytest.raises(PipelineAgentError) as e:
+        agent.approve(ana, denied["id"])
+    assert e.value.status == 409
+
+    # A broken pipeline is fixed from its failed run, and ships as an update rebuilt in full.
+    broken = dt.create({"name": "pa_usd", "target": "sales.pa_usd", "every_minutes": 60, "mode": "full",
+                        "sql": "SELECT id, amount * fx AS amount_usd FROM lake.sales.pa_orders"}, admin, admin)
+    assert dt.refresh(broken["id"])["status"] == "error"
+    with pytest.raises(PipelineAgentError) as e:
+        agent.create(bob, {"fix": broken["id"]}, view(bob))               # only its owner's
+    assert e.value.status == 404
+    plans.append({**good, "sql": "SELECT id, amount * 1.1e0 AS amount_usd FROM lake.sales.pa_orders", "mode": "full",
+                  "key": [], "every_minutes": 60, "on_change": False, "checks": []})
+    fix = agent.create(admin, {"fix": broken["id"]}, view(admin))
+    assert fix["kind"] == "fix" and fix["status"] == "ready"
+    assert "A refresh failed" in prompts[-1] and "fx" in prompts[-1]
+    done = agent.approve(admin, fix["id"])
+    assert done["status"] == "shipped" and done["outcome"]["derived_id"] == broken["id"]
+    assert sorted(r["id"] for r in trino("SELECT id FROM sales.pa_usd")) == [1, 2, 3]
+    actions = [e["action"] for e in s.audit.entries("lakehouse", limit=200)]
+    assert {"pipeline_agent.drafted", "pipeline_agent.shipped"} <= set(actions)

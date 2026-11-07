@@ -3316,6 +3316,36 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
   - **Owner.** A table owned by a user without access to its source failed its run, recorded, and nothing was created.
   - **Checks.** Statements that are not one SELECT, a query reading its own target, and bad columns were refused. Owners saw and ran only their own. A running refresh blocked a second one.
 
+## Pipeline agent
+
+The pipeline agent writes, fixes and ships derived tables from a goal in plain words, as the person asking. It needs
+an LLM provider and derived tables (`CAIRN_DERIVED_CONNECTION`).
+
+- **Write:** `POST /v1/pipeline-agent/tasks` with `goal`, `target` (`schema.table`), optional `datasets` (urns) and
+  `checks` (`{"name", "sql"}`, each a SELECT over `candidate` that counts wrong rows; 0 passes). The model is given
+  the tables the person may see (as Ask-your-data chooses them, or the datasets named) with their column names, and
+  proposes a derived table (one SELECT, `full`, `append` by watermark or `merge` by key, `every_minutes` and/or
+  `on_change`) and checks of its own, as structured output. It never sees rows.
+- **Try, writing nothing:** each proposal is checked as a derived table would be, every table it reads must be one
+  the person may see, it is planned (`EXPLAIN`) and previewed on Trino as the person (masks and row filters apply),
+  a merge key must be unique (a check Cairn adds) and an append watermark a column, then every check runs over the
+  result. What fails (Trino's error, redacted, or a check that found rows) goes back to the model, up to
+  `CAIRN_PIPELINE_AGENT_ATTEMPTS` (3) tries; each try is kept as a step. The task ends `ready` or `failed`.
+- **Fix:** `{"fix": "<derived table id>"}` (its owner only, otherwise 404) gives the model the current definition and
+  its latest failed runs' errors.
+- **Ship:** `POST …/tasks/<id>/approve` (the task's owner, a `ready` task) creates the derived table as theirs, or
+  updates the broken one and rebuilds it in full, refreshes it once on Trino as them, and runs the checks on the
+  table it made: `shipped`, or `ship_failed` with the run's error or the failing checks (ask for a fix).
+  The outcome carries the pipeline as a `cairn bundle` resource (`as_code`), to commit to git.
+  `…/reject` closes a task. Tasks are visible only to their owner (`GET /v1/pipeline-agent/tasks`).
+- Model calls are metered to the person (AI budget). Audited (category `lakehouse`): `pipeline_agent.drafted`,
+  `pipeline_agent.shipped`, `pipeline_agent.rejected`.
+
+Tested on real Trino and Cairn Catalog with a scripted model (`tests/test_trino_e2e.py`): a query naming a missing
+column and one failing the person's check went back to the model and the third try was ready; trying wrote
+nothing; the approved pipeline was built as its owner and its checks passed on the table; a plan reading a table
+the person may not see was refused on every try; a broken pipeline was fixed from its failed run.
+
 ## Notebooks
 
 Notebooks (Jupyter, JupyterHub, VS Code) work on the lakehouse as the person signed in, with `cairn-lakehouse` (`lakehouse-client/`).

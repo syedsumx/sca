@@ -158,6 +158,7 @@ class Services:
     input_tables: Optional[Any] = None
     metrics: Optional[Any] = None
     autopilot: Optional[Any] = None
+    pipeline_agent: Optional[Any] = None
     builder: Optional[Any] = None
     bi_actions: Optional[Any] = None
     reports: Optional[Any] = None
@@ -1118,6 +1119,27 @@ def _build_active_metadata(s: Services) -> None:
 
         s.autopilot = Autopilot(s.engine, s.workbooks, s.metrics, lambda: getattr(s, "query_history", None), urn_of,
                                 s.llm, s.settings.ai.model_nlq or s.settings.ai.model, s.audit)
+        # The pipeline agent: a goal becomes a derived table and checks, tried on Trino as the person, shipped on
+        # their approval (needs derived tables).
+        if getattr(s, "derived", None) is not None:
+            from cairn.ai.pipeline_agent import PipelineAgent
+
+            agent_conn = os.environ.get("CAIRN_DERIVED_CONNECTION") or os.environ.get("CAIRN_MAINTENANCE_CONNECTION")
+
+            def agent_run(actor: str, sql: str, limit: int):
+                definition = (s.data_access.registry.definitions() or {}).get(agent_conn) or {}
+                return s.data_access.run_on_trino(definition, actor, sql, limit)
+
+            def agent_context(actor: str, goal: str, urns: list, can_view) -> dict:
+                from cairn.dataaccess.ask import AskError
+
+                try:
+                    _source, chosen = s.ask._tables(goal, urns, can_view)
+                except AskError:
+                    return {}
+                return {ref: cols for ref, cols in chosen.values()}
+            s.pipeline_agent = PipelineAgent(s.engine, s.llm, s.settings.ai.model, s.derived, agent_run, agent_context,
+                                             s.audit)
         # Stored procedures: parameterized SQL scripts on a Trino connection, run as their caller.
         from cairn.sqlworkspace.procedures import Procedures
         from cairn.sqlworkspace.workspace import WorkspaceError
