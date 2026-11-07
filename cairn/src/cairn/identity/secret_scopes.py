@@ -25,6 +25,8 @@ from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Column, PrimaryKeyConstraint, String, Table, Text, and_, delete, func, insert, select, update
 
+from starlette.requests import Request  # module level: FastAPI resolves the handlers' annotations here
+
 from cairn.common.db import metadata
 
 LEVELS = {"READ": 1, "WRITE": 2, "MANAGE": 3}
@@ -93,6 +95,7 @@ class SecretScopes:
         self.engine, self.groups_of, self.is_operator, self.audit = engine, groups_of, is_operator, audit
         self.key = _master("CAIRN_SECRETS_KEY")
         self.previous = _master("CAIRN_SECRETS_KEY_PREVIOUS")
+        self.step_up = None      # (principal, request, action): a passkey check (cairn.identity.passkeys)
 
     @property
     def enabled(self) -> bool:
@@ -328,7 +331,14 @@ def build_secret_scopes_router(ss: SecretScopes, current_principal) -> Any:
         return call(lambda: ss.put(p.urn, scope, key, body.get("value")), p)
 
     @router.get("/{scope}/secrets/{key}")
-    def read(scope: str, key: str, p=Depends(current_principal)):
+    def read(scope: str, key: str, request: Request, p=Depends(current_principal)):
+        if ss.step_up is not None:
+            from cairn.identity.passkeys import PasskeyError
+
+            try:
+                ss.step_up(p, request, "secret.read")
+            except PasskeyError as e:
+                raise HTTPException(e.status, str(e), headers=e.headers)
         value = call(lambda: ss.read(p.urn, scope, key), p)
         return JSONResponse({"scope": scope, "key": key, "value": value}, headers={"Cache-Control": "no-store"})
 

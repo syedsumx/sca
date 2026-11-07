@@ -37,6 +37,8 @@ from typing import Any, Callable, Iterable, Optional
 
 from sqlalchemy import BigInteger, Column, PrimaryKeyConstraint, String, Table, Text, delete, select, update
 
+from starlette.requests import Request  # module level: FastAPI resolves the handlers' annotations here
+
 from cairn.common.db import metadata
 
 DOMAIN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -110,6 +112,7 @@ class Tokens:
         self.key = _master("CAIRN_TOKENS_KEY")
         self.previous = _master("CAIRN_TOKENS_KEY_PREVIOUS")
         self.max_batch = int(os.environ.get("CAIRN_TOKENS_MAX_BATCH", "1000"))
+        self.step_up = None      # (principal, request, action): a passkey check (cairn.identity.passkeys)
         self._keys: dict[str, tuple[bytes, bytes]] = {}
 
     @property
@@ -366,6 +369,16 @@ def build_tokens_router(tokens: Tokens, current_principal, authorize) -> Any:
         except TokenError as e:
             raise HTTPException(e.status, str(e))
 
+    def step_up(p, request, action: str) -> None:
+        if tokens.step_up is None:
+            return
+        from cairn.identity.passkeys import PasskeyError
+
+        try:
+            tokens.step_up(p, request, action)
+        except PasskeyError as e:
+            raise HTTPException(e.status, str(e), headers=e.headers)
+
     @router.get("/domains")
     def domains(p=Depends(current_principal)):
         return {"domains": call(tokens.domains)}
@@ -380,15 +393,17 @@ def build_tokens_router(tokens: Tokens, current_principal, authorize) -> Any:
         return {"tokens": call(tokens.tokenize_as, p.urn, domain, values)}
 
     @router.post("/domains/{domain}/detokenize")
-    def detokenize(domain: str, tokens_: list = Body(..., alias="tokens"),
+    def detokenize(domain: str, request: Request, tokens_: list = Body(..., alias="tokens"),
                    purpose: str = Body(...), p=Depends(current_principal)):
+        step_up(p, request, "detokenize")
         values = call(tokens.detokenize, p.urn, domain, tokens_, purpose)
         return JSONResponse({"values": values}, headers={"Cache-Control": "no-store"})
 
     @router.post("/domains/{domain}/forget")
-    def forget(domain: str, values: Optional[list] = Body(None), tokens_: Optional[list] = Body(None, alias="tokens"),
-               p=Depends(current_principal)):
+    def forget(domain: str, request: Request, values: Optional[list] = Body(None),
+               tokens_: Optional[list] = Body(None, alias="tokens"), p=Depends(current_principal)):
         authorize(p, "MANAGE_POLICIES", None)
+        step_up(p, request, "tokens.forget")
         return call(tokens.forget, p.urn, domain, values, tokens_)
 
     @router.post("/rotate")

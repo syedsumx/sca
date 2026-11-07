@@ -222,6 +222,34 @@ A.5.18) ask for this evidence.
   - At the due date, the grant nobody answered for was revoked. A `keep` campaign kept it.
   - The audit chain stayed whole.
 
+## Passkeys and step-up
+
+People sign in through their identity provider (OIDC or SAML), where multi-factor sign-in is set up. On top of that, Cairn asks for a passkey before the actions that matter most. A passkey (WebAuthn: a laptop's, phone's or security key's own key) is phishing-resistant and can't be replayed.
+
+- **Turning it on.** Set `CAIRN_PASSKEY_RP_ID` (the site, such as `cairn.example.com`) and `CAIRN_PASSKEY_ORIGIN` (`https://cairn.example.com`). Without them, passkeys and step-up are off.
+- **Actions that need a step-up.** `CAIRN_STEP_UP_ACTIONS`, by default `detokenize`, `tokens.forget` and `share.create`.
+  - Add `secret.read` where secrets are only read interactively: notebooks and jobs read them as the person, with no one there to touch a key.
+  - Service principals are never asked.
+- **Registering.** `POST /v1/passkeys/register/options` gives the browser the options for `navigator.credentials.create`, and `POST /v1/passkeys/register` keeps the result: the public key only. `GET /v1/passkeys` lists one's own.
+  - Someone who already has a passkey needs a step-up to add or remove one, so a stolen session cannot swap in the thief's own key.
+  - The person is told of every new passkey (`security.passkey_added`).
+- **Stepping up.** `POST /v1/passkeys/step-up/options`, then `POST /v1/passkeys/step-up` with the browser's assertion (`navigator.credentials.get`).
+  - The answer is a step-up token for that person only, good for `CAIRN_STEP_UP_SECONDS` (300).
+  - The client sends it as `X-Cairn-Step-Up`. Without a valid one, a listed action is refused with 401 and `WWW-Authenticate: step-up`.
+- **People without a passkey** are refused the listed actions until they register one. `CAIRN_STEP_UP_ALLOW_UNENROLLED=true` lets them through during a roll-out.
+- **Security.**
+  - Challenges last five minutes and are used once.
+  - User verification (PIN or biometric) is required.
+  - The origin must match, so a phishing site's assertion fails.
+  - A signature counter that goes backwards (a cloned authenticator) is refused.
+  - Only hashes of step-up tokens are kept.
+  - Registrations, removals, step-ups, refusals and each use are audited.
+- **Tested** in `tests/test_passkeys.py`, over HTTP, with a software authenticator (a real P-256 key and WebAuthn data) checked by the `webauthn` library:
+  - detokenising refused without a step-up and allowed with one;
+  - someone else's, an expired or a made-up step-up refused;
+  - a stolen session unable to add or remove a passkey;
+  - a replayed challenge, a phishing origin and a cloned counter refused.
+
 ## Security posture
 
 Cairn checks its own configuration and state for the mistakes that expose data, and says how to fix each one. It is Cairn's counterpart to Snowflake's Trust Center scanners.

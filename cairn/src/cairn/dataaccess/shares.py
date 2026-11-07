@@ -93,6 +93,7 @@ class Shares:
         self.catalog_url = catalog_url or os.environ.get("CAIRN_SHARES_CATALOG_URL", "")
         self.token_url = token_url or os.environ.get("CAIRN_SHARES_TOKEN_URL", "")
         self.residency = None                  # cairn.governance.residency.Residency, when rules are in force
+        self.step_up = None                    # (principal, request, action): a passkey check (cairn.identity.passkeys)
 
     # ---- the share's own records -----------------------------------------------------------------
     def _row(self, conn, sid: str) -> Optional[dict]:
@@ -278,11 +279,18 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
             raise HTTPException(e.status, str(e))
 
     @router.post("")
-    def create(name: str = Body(...), recipient: str = Body(...), tables: list[str] = Body(...),
+    def create(request: Request, name: str = Body(...), recipient: str = Body(...), tables: list[str] = Body(...),
                expires_days: int = Body(30), region: Optional[str] = Body(None), p=Depends(current_principal)):
         """Shares tables with a recipient outside the organisation. The credential is shown once. ``region``:
         where the recipient keeps what it reads (needed for tables pinned to a region)."""
         person(p)
+        if shares.step_up is not None:
+            from cairn.identity.passkeys import PasskeyError
+
+            try:
+                shares.step_up(p, request, "share.create")
+            except PasskeyError as e:
+                raise HTTPException(e.status, str(e), headers=e.headers)
         return call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region)
 
     @router.get("")

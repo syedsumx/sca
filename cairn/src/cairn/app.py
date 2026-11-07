@@ -361,6 +361,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.branches import build_branches_router
 
         app.include_router(build_branches_router(services.branches, cp))
+    if getattr(services, "passkeys", None) is not None:
+        from cairn.identity.passkeys import build_passkeys_router
+
+        app.include_router(build_passkeys_router(services.passkeys, cp))
     if getattr(services, "posture", None) is not None:
         from cairn.governance.posture import build_posture_router
 

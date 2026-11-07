@@ -862,6 +862,7 @@ def _build_active_metadata(s: Services) -> None:
         _wire_residency(s)
         _build_tokens(s)
         _build_posture(s)
+        _build_passkeys(s)
         from cairn.common.limits import ApiLimits
 
         s.limits = ApiLimits(s.engine, s.audit)
@@ -1895,6 +1896,25 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+
+
+def _build_passkeys(s: Services) -> None:
+    """Passkeys and step-up (cairn.identity.passkeys): on with CAIRN_PASSKEY_RP_ID and CAIRN_PASSKEY_ORIGIN; the
+    listed actions (detokenising, forgetting tokens, sharing outside) then need a fresh passkey check."""
+    from cairn.identity.passkeys import Passkeys
+
+    def tell(user: str, text: str) -> None:
+        hub = getattr(s, "notify", None)
+        if hub is not None:
+            from cairn.notify.hub import Event
+
+            hub.publish(Event(type="security.passkey_added", title="A passkey was added", body=text, recipients=[user]))
+    s.passkeys = Passkeys(s.engine, s.audit, tell)
+    if s.passkeys.enabled:
+        for attr in ("tokens", "shares", "secret_scopes"):
+            svc = getattr(s, attr, None)
+            if svc is not None:
+                svc.step_up = s.passkeys.require
 
 
 def _build_posture(s: Services) -> None:
