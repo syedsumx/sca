@@ -113,6 +113,7 @@ def load_models() -> MetaData:
     from cairn.ml import online as _online  # noqa: F401
     from cairn.ml import monitoring as _monitoring  # noqa: F401
     from cairn.reports import budgets as _budgets  # noqa: F401
+    from cairn.reports import chargeback as _chargeback  # noqa: F401
     from cairn.common import siem as _siem  # noqa: F401
     from cairn.hosting import signup as _signup  # noqa: F401
     from cairn.hosting import metering as _metering  # noqa: F401

@@ -602,6 +602,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.reports.budgets import build_budgets_router
 
         app.include_router(build_budgets_router(services.budgets, cp))
+    if getattr(services, "chargeback", None) is not None:
+        from cairn.reports.chargeback import build_chargeback_router
+
+        app.include_router(build_chargeback_router(services.chargeback, cp, authz))
     if "governance" in modules and services.automations is not None:
         from cairn.governance.automations_api import build_router as automations_router
 

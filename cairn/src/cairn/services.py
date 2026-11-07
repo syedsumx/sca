@@ -1742,6 +1742,10 @@ def _build_costs(s: Services, hub, Event) -> None:
     s.budgets = Budgets(s.engine, s.graph, tell_budget,
                         lambda p: s.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False),
                         warehouse_names, s.audit)
+    # Chargeback statements per cost centre (cairn.reports.chargeback): the same figures, frozen monthly.
+    from cairn.reports.chargeback import Chargeback
+
+    s.chargeback = Chargeback(s.engine, lambda u: s.attributes.subject(u).get("groups", []), s.graph, s.audit)
 
 
 def _build_automations(s: Services, hub, Event) -> None:

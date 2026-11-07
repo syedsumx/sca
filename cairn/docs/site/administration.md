@@ -1255,6 +1255,32 @@ A budget is what one part of the platform may spend each period, with alerts bef
 - **Alerts.** The scheduler checks each budget hourly (`POST …/budgets/<id>/check` checks one now). Each threshold, and the forecast (the spend so far at its daily rate over the whole period, once a fifth of it has passed, when that would exceed the amount), is sent at most once a period to the budget's creator and `notify`: `budget.threshold_crossed` (one message for the highest threshold just crossed) and `budget.forecast_exceeded`, through the notification hub (in-app, and any routes for those types).
 - `GET …/budgets/<id>` shows the period's spend by day, the ten largest contributors, the forecast and the alerts sent. Budgets are visible to operators, their creators and the people they notify. `PATCH` changes one and `DELETE` removes it; changes are audited (`budget.created`, `budget.changed`, `budget.deleted`). Tables `cairn_budgets` and `cairn_budget_alerts` (migration 0068). Tested through the API in `tests/test_budgets.py`.
 
+### Chargeback statements
+
+A chargeback statement is the month's bill per cost centre: every cost Cairn knows, charged to whoever caused it. It adds up to the month's total, and is frozen when issued.
+
+- **Cost centres.** `PUT /cairn/api/v1/chargeback/cost-centres/{code}` with `{"name": "Finance", "teams": ["urn:li:corpGroup:finance"]}` (`MANAGE_SYSTEM_OPERATIONS`). The code is the one finance knows, such as `CC-4100`. A team pays from one cost centre.
+- **What is charged, and to whom.** These are the same figures as the cost report and budgets, and nothing is counted twice:
+  - **SQL:** each Trino query's CPU and scanned bytes, at `CAIRN_COST_TRINO_USD_PER_CPU_HOUR` and `CAIRN_COST_TRINO_USD_PER_TB_SCANNED`, to the cost centres of the person who ran it. It is split evenly when their teams pay from several.
+  - **AI:** each model call's cost, to the cost centres of the person it was for.
+  - **Storage and table compute:** from the warehouse collectors and Spark runs, to the cost centres of the table's owners in the catalog: a group's own, or a person's teams.
+  - **Runs charged to no table** (warehouse node-hours, Spark runs that wrote nothing): to the cost centres of the run's owner.
+  - **Unallocated:** what cannot be placed (someone in no cost centre's team, a table with no owner) is its own line, `unallocated`, with the reasons. So the statement always adds up to the month's total.
+- **Preview.** `GET /cairn/api/v1/chargeback/preview/2026-10` shows a month as it stands, current or past. Nothing is kept.
+- **Issue.** `POST /cairn/api/v1/chargeback/statements` with `{"month": "2026-10"}`, once the month (UTC) is over.
+  - The statement is frozen: its lines and totals do not change when late figures arrive.
+  - It is audited (`chargeback.issued`, with each cost centre's total).
+  - Issuing the month again makes a new version, and the old one is kept.
+- **Read.** `GET /cairn/api/v1/chargeback/statements/{id}`, or `?format=csv` for finance, with one row per cost centre and source, and CPU hours and TB scanned for SQL.
+  - Operators see the whole statement.
+  - Members of a cost centre's teams see their own lines only.
+- **Tested** in `tests/test_chargeback.py`, on SQLite and PostgreSQL:
+  - every source charged to the right cost centre, split for people in two;
+  - the unallocated line with its reasons, and the total reconciling;
+  - refused before the month ends;
+  - frozen against a late figure, with a second version;
+  - a member's own view, and the CSV.
+
 ## One database
 
 By default the catalog stores its metadata in MySQL, and Cairn's own data is in PostgreSQL. You can put the catalog in PostgreSQL too. Then you have one database server to run, back up and patch, and no MySQL licence to review.
