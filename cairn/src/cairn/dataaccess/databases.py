@@ -160,6 +160,44 @@ class Databases:
                 # A copy keeps the source's objects, owned by the source's owner: they become this database's.
                 # Object by object: REASSIGN OWNED would also hand over the source database itself.
                 self._own_objects(conn, self._roles(template)[0], owner)
+                # And it no longer grants anything to the source's roles, which would keep them from being dropped.
+                self._forget_roles(conn, list(self._roles(template)))
+
+    @staticmethod
+    def _forget_roles(conn, roles: list[str]) -> None:
+        """Revokes, in the connected database only, what is granted to ``roles`` and the default privileges they
+        set (DROP OWNED BY would also revoke their rights on other databases, the source among them)."""
+        from psycopg import sql
+
+        exist = [r for (r,) in conn.execute("SELECT rolname FROM pg_roles WHERE rolname = ANY(%s)", (roles,)).fetchall()]
+        if not exist:
+            return
+        idents = sql.SQL(", ").join(sql.Identifier(r) for r in exist)
+        schemas = [s for (s,) in conn.execute(
+            "SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'"
+        ).fetchall()]
+        for s in schemas:
+            sch = sql.Identifier(s)
+            for what in ("TABLES", "SEQUENCES", "FUNCTIONS"):
+                conn.execute(sql.SQL("REVOKE ALL ON ALL {} IN SCHEMA {} FROM {}").format(sql.SQL(what), sch, idents))
+            conn.execute(sql.SQL("REVOKE ALL ON SCHEMA {} FROM {}").format(sch, idents))
+        # Default privileges set by these roles, and ones granted to them by others.
+        rows = conn.execute(
+            "SELECT pg_get_userbyid(d.defaclrole), n.nspname, d.defaclobjtype, "
+            "CASE WHEN a.grantee = 0 THEN '-' ELSE pg_get_userbyid(a.grantee) END "
+            "FROM pg_default_acl d LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace, "
+            "LATERAL aclexplode(d.defaclacl) a "
+            "WHERE pg_get_userbyid(d.defaclrole) = ANY(%s) OR pg_get_userbyid(a.grantee) = ANY(%s)",
+            (exist, exist)).fetchall()
+        kinds = {"r": "TABLES", "S": "SEQUENCES", "f": "FUNCTIONS", "T": "TYPES", "n": "SCHEMAS"}
+        for role, nsp, kind, grantee in rows:
+            if kind not in kinds or grantee is None:
+                continue
+            q = sql.SQL("ALTER DEFAULT PRIVILEGES FOR ROLE {} ").format(sql.Identifier(role))
+            if nsp:
+                q += sql.SQL("IN SCHEMA {} ").format(sql.Identifier(nsp))
+            to = sql.SQL("PUBLIC") if grantee == "-" else sql.Identifier(grantee)
+            conn.execute(q + sql.SQL("REVOKE ALL ON {} FROM {}").format(sql.SQL(kinds[kind]), to))
 
     @staticmethod
     def _own_objects(conn, old: str, new: str) -> None:
@@ -323,6 +361,16 @@ class Databases:
             conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
             for role in roles:
                 self._drop_login(conn, role)
+        # Branches made before their source cleaned up may still grant to its roles: forgotten there first.
+        with self.engine.connect() as c:
+            others = [r.name for r in c.execute(select(databases_table.c.name).where(databases_table.c.name != name))]
+        for other in others:
+            try:
+                with self._admin(other) as oc:
+                    self._forget_roles(oc, [owner, reader])
+            except Exception:  # noqa: BLE001 - a database gone from the server: nothing to forget there
+                logger.warning("database %s: could not clear grants to %s's roles", other, name, exc_info=True)
+        with self._admin() as conn:
             for role in (owner, reader):
                 conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
         with self.engine.begin() as c:

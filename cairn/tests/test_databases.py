@@ -167,3 +167,29 @@ def test_names_are_checked(dbs):
     for bad in ["Bad", "1x", "a-b", "x" * 32, "postgres", "template1", 'x"; drop', ""]:
         with pytest.raises(DatabaseError):
             dbs["d"].create(ANA, bad)
+
+
+def test_the_source_of_a_branch_can_be_dropped(dbs):
+    """Review finding: a branch kept the source roles' grants and default privileges, so dropping the source
+    failed at DROP ROLE after the database itself was gone, and Cairn kept listing it."""
+    d = dbs["d"]
+    name, copy = "app_" + uuid.uuid4().hex[:8], "app_" + uuid.uuid4().hex[:8]
+    d.create(ANA, name)
+    dbs["made"] += [copy, name]
+    w = d.credentials(ANA, name, "write", 30)
+    with connect(w) as c:
+        c.execute("CREATE TABLE t (id serial PRIMARY KEY, v int)")
+        c.execute("INSERT INTO t (v) VALUES (1)")
+    d.branch(ANA, name, copy)
+    d.drop(ANA, name)                                          # was: DependentObjectsStillExist, a 500
+    dbs["made"].remove(name)
+    assert name not in [x["name"] for x in d.list(ANA)]
+    bw, br = d.credentials(ANA, copy, "write", 30), d.credentials(ANA, copy, "read", 30)
+    with connect(bw) as c:                                      # the branch is whole without its source
+        c.execute("INSERT INTO t (v) VALUES (2)")
+    with connect(br) as c:
+        assert c.execute("SELECT count(*) FROM t").fetchone()[0] == 2
+        c.execute("SELECT 1")
+    d.drop(ANA, copy)
+    dbs["made"].remove(copy)
+

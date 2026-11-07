@@ -739,7 +739,8 @@ The endpoints:
 - The scheduler drops logins once they expire, ending their sessions.
 - `POST /v1/databases/<name>/branches {"name"}` (`MANAGE_DATABASE` on the source, and `CREATE_DATABASE`) makes
   a copy with roles of its own, for a test or a migration rehearsal. Its objects are handed to the copy's
-  owner one by one: a branch never touches the source. PostgreSQL copies only a database nobody is connected
+  owner one by one, and the source's roles lose every grant and default privilege in the copy: a branch never
+  touches the source, and either can be dropped without the other. PostgreSQL copies only a database nobody is connected
   to, so a busy source answers 409.
 - `DELETE /v1/databases/<name>` (`MANAGE_DATABASE`) ends the sessions and drops the database, its roles and its
   logins.
@@ -758,6 +759,7 @@ Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
 - a login could not reach another database;
 - revoked and expired logins were dropped, and their open sessions ended;
 - a branch, with a `serial` table, was its own copy, and a busy source answered 409;
+- the source of a branch could be dropped, and the branch kept working;
 - dropping removed everything;
 - no password reached the audit log.
 
