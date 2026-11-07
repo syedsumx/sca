@@ -16,6 +16,9 @@ and owns the table or may create a publication for it. The server runs with ``wa
   table. Values are typed from PostgreSQL's types: integers, floats, numeric as float, booleans, dates,
   timestamps, and the rest as text. A column added at the source is added to the table. An unchanged TOASTed
   value (a large value an update did not touch) is read back from the source by key.
+* **MySQL.** A connection whose URL is ``mysql://`` is mirrored through MySQL's row-based binary log instead
+  (``cairn.pipelines.mirror_mysql``): a copy from a recorded log position, then whole transactions, with log
+  positions as offsets. MySQL keeps no slot, so the server's log retention must outlast a paused mirror.
 * **Stopping.** ``DELETE /v1/mirrors/<name>`` drops the slot and the publication: a slot nobody reads keeps the
   server's WAL forever, so the status shows how much WAL the slot holds back (``retained_bytes``).
   ``POST .../pause`` keeps the slot; ``POST .../resume`` carries on from it.
@@ -208,6 +211,10 @@ class Mirrors:
     def _names(mid: str) -> tuple[str, str]:
         return f"cairn_mirror_{mid}", f"cairn_mirror_{mid}"     # slot, publication
 
+    def _kind(self, connection: str) -> str:
+        url = self.source_url(connection) or ""
+        return "mysql" if re.match(r"^mysql(\+\w+)?://", url) else "postgres"
+
     def _connect(self, connection: str):
         import psycopg
 
@@ -253,6 +260,11 @@ class Mirrors:
             if c.execute(select(mirrors_table.c.id).where(mirrors_table.c.name == name)).first():
                 raise MirrorError(f"{name} exists", 409)
         mid = uuid.uuid4().hex[:16]
+        if not self.source_url(connection):
+            raise MirrorError(f"no connection {connection!r}", 404)
+        if self._kind(connection) == "mysql":
+            key = self._create_mysql(connection, parts)
+            return self._created(actor, mid, name, connection, source, target, key)
         slot, pub = self._names(mid)
         ident = sql.Identifier(*parts)
         with self._connect(connection) as conn:
@@ -270,6 +282,27 @@ class Mirrors:
             except Exception:
                 conn.execute(sql.SQL("DROP PUBLICATION IF EXISTS {}").format(sql.Identifier(pub)))
                 raise
+        return self._created(actor, mid, name, connection, source, target, key)
+
+    def _create_mysql(self, connection: str, parts: list[str]) -> list[str]:
+        from cairn.pipelines import mirror_mysql as my
+
+        try:
+            conn = my.connect(self.source_url(connection))
+        except Exception as e:  # noqa: BLE001 - say why
+            raise MirrorError(f"the source could not be reached: {e}", 502)
+        try:
+            key = my.check(conn, parts[0], parts[1])
+        except ValueError as e:
+            raise MirrorError(str(e), 409)
+        finally:
+            conn.close()
+        if not key:
+            raise MirrorError(f"{'.'.join(parts)} has no primary key: a mirror applies changes by key", 409)
+        return key
+
+    def _created(self, actor: str, mid: str, name: str, connection: str, source: str, target: str,
+                 key: list[str]) -> dict:
         with self.engine.begin() as c:
             c.execute(insert(mirrors_table).values(
                 id=mid, name=name, connection=connection, source=source, target=target, key=",".join(key),
@@ -284,6 +317,8 @@ class Mirrors:
     def get(self, name: str) -> dict:
         r = self._row(name)
         retained = None
+        if self._kind(r.connection) == "mysql":
+            return self._public(r)                   # no slot: the server's log retention holds its place
         try:
             with self._connect(r.connection) as conn:
                 got = conn.execute("SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), confirmed_flush_lsn)::bigint "
@@ -313,6 +348,12 @@ class Mirrors:
 
         r = self._row(name)
         slot, pub = self._names(r.id)
+        if self._kind(r.connection) == "mysql":      # nothing kept on a MySQL server for a mirror
+            with self.engine.begin() as c:
+                c.execute(mirrors_table.delete().where(mirrors_table.c.id == r.id))
+            if self.audit is not None:
+                self.audit.record("data", "mirror.deleted", actor, f"urn:li:mirror:{name}", {})
+            return
         with self._connect(r.connection) as conn:
             conn.execute("SELECT pg_drop_replication_slot(slot_name) FROM pg_replication_slots WHERE slot_name = %s",
                          (slot,))
@@ -384,6 +425,8 @@ class Mirrors:
         r = self._row(name)
         if not r.enabled:
             return 0
+        if self._kind(r.connection) == "mysql":
+            return self._run_mysql(r)
         slot, pub = self._names(r.id)
         try:
             with self._connect(r.connection) as conn:
@@ -442,6 +485,60 @@ class Mirrors:
         except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
             logger.warning("mirror %s failed: %s", name, e)
             self._status(r, "failed", f"{type(e).__name__}: {e}"[:2000])
+            return 0
+
+    def _run_mysql(self, r) -> int:
+        """Brings a MySQL mirror up to date from the binary log, whole transactions per commit."""
+        from cairn.pipelines import mirror_mysql as my
+
+        url = self.source_url(r.connection)
+        schema, table = r.source.split(".")
+        try:
+            if not r.snapshot_done:
+                conn = my.connect(url)
+                try:
+                    log_file, pos = my.position(conn)    # changes from here on follow the copy and converge on it
+                    copied, offset = 0, 0
+                    for rows in my.copy(conn, schema, table):
+                        batch = [(offset + i, "upsert", {k: _plain(v) for k, v in row.items()})
+                                 for i, row in enumerate(rows)]
+                        copied += self._write(r, batch, topic=f"pg.{r.id}.copy")
+                        offset += len(rows)
+                finally:
+                    conn.close()
+                with self.engine.begin() as c:
+                    c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(
+                        snapshot_done=True, rows=mirrors_table.c.rows + copied, last_lsn=f"{log_file}:{pos}"))
+                r = self._row(r.name)
+            log_file, pos = r.last_lsn.rsplit(":", 1)
+            committed = self.streams.offsets(self._stream(r)).get(0, 0)
+            got, end = my.changes(url, schema, table, log_file, int(pos), r.key.split(","))
+            got = [(o, op, {k: _plain(v) for k, v in row.items()}) for o, op, row in got if o >= committed]
+            written = 0
+            batch: list = []
+            for o, op, row in got + [(None, "end", None)]:
+                if op in ("truncate", "end"):
+                    if batch:
+                        written += self._write(r, batch)
+                        batch = []
+                    if op == "truncate":
+                        self._truncate(r)
+                    continue
+                batch.append((o, op, row))
+            values = {"status": "running", "error": None, "last_commit_ms": self.clock(),
+                      "rows": mirrors_table.c.rows + written}
+            if end is not None:
+                values["last_lsn"] = f"{end[0]}:{end[1]}"
+            with self.engine.begin() as c:
+                c.execute(update(mirrors_table).where(mirrors_table.c.id == r.id).values(**values))
+            return written
+        except Exception as e:  # noqa: BLE001 - shown on the mirror, tried again next tick
+            msg = f"{type(e).__name__}: {e}"
+            if "1236" in msg or "purged" in msg.lower():
+                msg = ("the binary log this mirror had read to is gone from the server (purged): delete the mirror "
+                       "and create it again to copy the table afresh. " + msg)
+            logger.warning("mirror %s failed: %s", r.name, msg)
+            self._status(r, "failed", msg[:2000])
             return 0
 
     def _truncate(self, r) -> None:

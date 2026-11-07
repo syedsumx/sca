@@ -807,6 +807,43 @@ Tested with PostgreSQL 16 and the real store and catalog (`tests/test_mirror_e2e
 - delete, which dropped the slot and the publication;
 - refusals of a table without a primary key and of a server without logical WAL.
 
+## Mirrors from MySQL
+
+A connection whose URL is `mysql://user:password@host:3306/db` is mirrored through MySQL's row-based binary log.
+The API is the same (`POST /v1/mirrors` with `"table": "db.table"`).
+
+The server needs:
+
+- `log_bin` on, `binlog_format = ROW` and `binlog_row_image = FULL`, which are MySQL 8's defaults;
+- `binlog_row_metadata = FULL`, which is not a default: it makes each change carry its column names.
+
+The user needs `REPLICATION SLAVE`, `REPLICATION CLIENT` and `SELECT` on the table, and the table needs a primary
+key. A server without these settings is refused when the mirror is made.
+
+**How it works.**
+
+1. Cairn records the log's current position.
+2. It copies the table.
+3. It reads the log from that position, so changes made during the copy are applied after it and converge on
+   it.
+4. Each run applies whole transactions, up to the transaction's XID event, so a rolled-back transaction leaves
+   no trace. A `TRUNCATE` empties the lakehouse table.
+
+Log positions are the offsets. Each lakehouse commit records the next one, and the mirror records its position
+after the commit, so a crash in between replays changes that are then skipped.
+
+MySQL keeps no replication slot, so a mirror's position is only its own record. The server must keep its logs
+(`binlog_expire_logs_seconds`) longer than a mirror may be paused. If the position it had read to has been
+purged, the mirror fails and says to recreate it, which copies the table again.
+
+Tested with MySQL 8.4 and the real store and catalog (`tests/test_mirror_mysql_e2e.py`):
+
+- the copy, then inserts, updates, a key change, deletes, `DECIMAL`, `DATE` and `DATETIME`;
+- a rolled-back transaction, which left nothing;
+- `TRUNCATE`;
+- a replay from an older position, which wrote only the new change;
+- refusals of a table without a primary key and of a statement-based log.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:
