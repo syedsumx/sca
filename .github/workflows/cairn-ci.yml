@@ -319,6 +319,15 @@ jobs:
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py -k "not spark_image" | tee "$RUNNER_TEMP/ml.log"   # the Spark image test runs in the pipelines job
           ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
+      - name: Fine-tuning on governed data (real LoRA training on PyTorch CPU)
+        run: |
+          set -o pipefail
+          pip install -q torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -q -e ".[finetune]"
+          export CAIRN_FINETUNE_MODEL_DIR="$RUNNER_TEMP/finetune-models"
+          cairn finetune-model download distilbert/distilgpt2
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_finetune.py | tee "$RUNNER_TEMP/finetune.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/finetune.log"
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

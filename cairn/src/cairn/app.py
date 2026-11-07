@@ -318,6 +318,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_consent_router(services.consent, cp, lambda p, priv, urn: services.authorize(
             p, priv, urn, raise_on_deny=False)))
+    if getattr(services, "finetunes", None) is not None:
+        from cairn.ml.finetune import build_finetunes_router
+
+        app.include_router(build_finetunes_router(services.finetunes, cp))
     if getattr(services, "app_packages", None) is not None:
         from cairn.dataaccess.app_packages import build_app_packages_router
 

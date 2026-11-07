@@ -39,6 +39,9 @@ streams = ["kafka-python>=2.2,<3", "pyarrow>=15", "pyiceberg>=0.9", "fastavro>=1
 documents = ["pypdf>=5", "pillow>=10"]
 # Speech to text for audio and video files (files pipes), run locally: Whisper through faster-whisper.
 media = ["faster-whisper>=1.1", "numpy>=1.26"]
+# Fine-tuning workers (cairn.ml.finetune). Install PyTorch first from its CPU index (or the GPU one you need):
+# pip install torch --index-url https://download.pytorch.org/whl/cpu
+finetune = ["torch>=2.4", "transformers>=4.45", "peft>=0.13", "huggingface-hub>=0.24"]
 saml = ["signxml>=4,<5", "lxml>=5"]
 # cairn dr watch: promotes standby PostgreSQL and updates DNS (RFC 2136) when the primary region is lost.
 dr = ["dnspython>=2.6", "psycopg[binary]>=3.1", "pyyaml>=6"]

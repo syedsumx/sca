@@ -80,6 +80,7 @@ class Services:
     databases: Optional[Any] = None
     mirrors: Optional[Any] = None
     app_packages: Optional[Any] = None
+    finetunes: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -1698,6 +1699,15 @@ def _build_data_access(s: Services) -> None:
                                      s.audit, app_identity_token)
         if getattr(s, "trino_access", None) is not None:
             s.trino_access.app_identity = s.app_packages.identity
+
+    # Fine-tuning (cairn.ml.finetune): models tuned on data read through the governed query path, as the asker.
+    if os.environ.get("CAIRN_FINETUNE_MODEL_DIR"):
+        from cairn.ml.finetune import FineTunes
+
+        s.finetunes = FineTunes(
+            s.engine, lambda actor, sql, conn, limit: s.data_access.query(actor, sql, conn, None, limit),
+            lambda actor, priv, urn: s.authorize(Principal(urn=actor, via="delegated"), priv, urn, raise_on_deny=False),
+            s.audit)
 
     # Delta Lake tables converted to Iceberg in place (CAIRN_DELTA_STORE / CAIRN_DELTA_CATALOG, or the pipes').
     from cairn.pipelines.delta_convert import from_env as delta_from_env

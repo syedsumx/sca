@@ -229,6 +229,19 @@ def cmd_transcribe_model(a) -> None:
     print(f"{model} is in {root}")
 
 
+def cmd_finetune_model(a) -> None:
+    """Puts a base model where fine-tuning jobs read it (CAIRN_FINETUNE_MODEL_DIR): jobs never download one."""
+    import os as _os
+
+    from cairn.ml import finetune
+
+    root = a.dir or finetune.model_dir()
+    if not root:
+        raise SystemExit("cairn finetune-model: give --dir or set CAIRN_FINETUNE_MODEL_DIR")
+    _os.makedirs(root, exist_ok=True)
+    print(f"{a.model} is in {finetune.download(a.model, root)}")
+
+
 def cmd_bundle(a) -> None:
     """Declared resources (pipes, streams, derived tables, maintenance) from a YAML file in git."""
     from cairn.iac.bundle import main
@@ -852,6 +865,12 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("name", help="the set: retail")
         sp.set_defaults(fn=cmd_samples)
 
+    fm = sub.add_parser("finetune-model", help="fine-tuning: put a base model in place")
+    fm_sub = fm.add_subparsers(dest="finetune_cmd", required=True)
+    fd = fm_sub.add_parser("download", help="download a base model into CAIRN_FINETUNE_MODEL_DIR (or --dir)")
+    fd.add_argument("model", help="a Hugging Face model id, e.g. distilgpt2")
+    fd.add_argument("--dir", help="where models are kept (CAIRN_FINETUNE_MODEL_DIR)")
+    fd.set_defaults(fn=cmd_finetune_model)
     tm = sub.add_parser("transcribe-model", help="speech to text for files pipes: put a Whisper model in place")
     tm_sub = tm.add_subparsers(dest="transcribe_cmd", required=True)
     td = tm_sub.add_parser("download", help="download a model into CAIRN_TRANSCRIBE_MODEL_DIR (or --dir)")

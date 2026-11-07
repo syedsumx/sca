@@ -1066,6 +1066,60 @@ with mlflow.start_run():
   file was tracked as its user: the run, the registered model's owner, and lineage from the table. Without a token
   it was refused before reaching MLflow. Training with `pyspark.ml` inside the Spark image isn't run in CI yet.
 
+## Fine-tuning on governed data
+
+Cairn tunes a language model on examples read from your data and serves it, all inside Cairn.
+
+**Setting up.**
+
+1. Install the workers' libraries: CPU PyTorch from its own index,
+   `pip install torch --index-url https://download.pytorch.org/whl/cpu`, then `pip install "cairn-platform[finetune]"`.
+2. Put base models in place once: `cairn finetune-model download <hugging face id>`, for example
+   `distilbert/distilgpt2`, into `CAIRN_FINETUNE_MODEL_DIR`. It takes the model's own top-level files only.
+
+Jobs never download. Fine-tuning is on when `CAIRN_FINETUNE_MODEL_DIR` is set.
+
+**A job.** `POST /v1/ml/finetunes` (`CREATE_FINETUNE`):
+
+```json
+{"name": "ticket-triage", "base_model": "distilbert/distilgpt2",
+ "source": {"connection": "lakehouse", "sql": "SELECT subject, team FROM support.tickets"},
+ "prompt_column": "subject", "completion_column": "team", "prompt_template": "Ticket: {prompt}\nTeam:",
+ "epochs": 3, "learning_rate": 0.0005, "lora": true}
+```
+
+**The data.** The SQL runs through Cairn's query path as the person who asks, so their access, masks, row
+filters and aggregation or projection policies shape the training set, as for any query of theirs. A job takes
+at most 1000 rows, the query limit, and needs at least 10 examples.
+
+Before training, emails, phone numbers, and card and account numbers left in the text are redacted. Set
+`"redact_pii": false` only for data meant to hold them.
+
+The job records the datasets the examples came from. Its owner can read the examples
+(`GET .../examples`); others need `MANAGE_FINETUNE`.
+
+**The training.** Each job trains in a process of its own:
+
+- it runs `python -I`, with no network (Hugging Face offline) and none of Cairn's environment;
+- it trains a LoRA adapter by default, or the whole model with `"lora": false`;
+- it records each epoch's loss.
+
+The status goes `queued` → `running` → `done` or `failed`, with the worker's error.
+
+**Using it.** `POST /v1/ml/finetunes/<name>/generate {"prompts": [...], "max_new_tokens"}` needs `USE_FINETUNE` on
+`urn:li:finetune:<name>`; its owner has it. Each call is audited with the number of prompts, never their text.
+`DELETE` removes the model and its examples.
+
+Tested with real training: LoRA on PyTorch CPU on `distilbert/distilgpt2`, with examples read through Cairn's
+governed query path from a real database (`tests/test_finetune.py`, in the ml job). The test checked:
+
+- PII was redacted, and the sources were recorded;
+- the epoch loss fell to under 30% of where it started;
+- the tuned model answered the taught teams;
+- the worker ran offline with no Cairn variables;
+- use was refused without `USE_FINETUNE`, and audited without the prompts;
+- bad requests were refused.
+
 ## Delta Lake tables
 
 Trino's `delta` catalog keeps Delta Lake tables in Cairn Store, with its metastore files beside them (`s3://<bucket>/<prefix>/`, default `s3://lakehouse/delta/`).
