@@ -58,6 +58,7 @@ pipes = Table(
     Column("created_ms", BigInteger, nullable=False),
     Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
     Column("tokenize", Text, nullable=True),                # JSON {column: token domain} (cairn.governance.tokens)
+    Column("ai", Text, nullable=True),                      # JSON {describe, extract} for files pipes (enrich.py)
 )
 
 pipe_files = Table(
@@ -118,7 +119,8 @@ def _pipe(r) -> dict:
     return {"id": r.id, "name": r.name, "bucket": r.bucket, "prefix": r.prefix, "format": r.format, "target": r.target,
             "create_table": bool(r.create_table), "enabled": bool(r.enabled), "created_by": r.created_by,
             "created_ms": r.created_ms, "bad_rows": getattr(r, "bad_rows", None) or "fail",
-            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {}}
+            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {},
+            "ai": json.loads(r.ai) if getattr(r, "ai", None) else {}}
 
 
 def column_name(header, i: int) -> str:
@@ -306,6 +308,7 @@ class Pipes:
         self.webhook_secret = webhook_secret
         self._locks: dict[str, threading.Lock] = {}
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
+        self.llm = None                        # Cairn's metered model, for files pipes' AI enrichment
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
@@ -345,10 +348,18 @@ class Pipes:
         if bad_rows not in BAD_ROWS or (bad_rows == "quarantine" and fmt == "files"):
             raise PipeError("bad_rows: fail, or quarantine (not for files pipes)")
         tokenize = check_tokenize(self.tokens, body.get("tokenize"), actor, fmt == "files", PipeError)
+        from cairn.pipelines.enrich import EnrichError, check as check_ai
+
+        try:
+            ai = check_ai(body.get("ai"))
+        except EnrichError as e:
+            raise PipeError(str(e))
+        if ai and fmt != "files":
+            raise PipeError("ai: for files pipes (images and documents)")
         row = {"id": uuid.uuid4().hex, "name": name[:256], "bucket": bucket, "prefix": prefix, "format": fmt, "target": target,
                "create_table": bool(body.get("create_table")), "enabled": bool(body.get("enabled", True)),
                "created_by": actor, "created_ms": _now(), "bad_rows": bad_rows,
-               "tokenize": json.dumps(tokenize) if tokenize else None}
+               "tokenize": json.dumps(tokenize) if tokenize else None, "ai": json.dumps(ai) if ai else None}
         return row
 
     def list(self) -> list[dict]:
@@ -394,8 +405,9 @@ class Pipes:
         return fs.S3FileSystem(access_key=s.get("access_key"), secret_key=s.get("secret_key"), region=s.get("region", "us-east-1"),
                                endpoint_override=endpoint.split("://", 1)[-1], scheme=scheme)
 
-    def _file_row(self, path: str):
-        """A files pipe's row for one object: what it is, and what a document says."""
+    def _file_row(self, path: str, ai: Optional[dict] = None, owner: Optional[str] = None):
+        """A files pipe's row for one object: what it is, what a document says, and (``ai``) what the model makes
+        of it, as the pipe's owner."""
         import mimetypes
 
         import pyarrow as pa
@@ -420,18 +432,29 @@ class Pipes:
         row = {"key": key, "path": f"s3://{path}", "size": int(info.size), "modified_ms": int(info.mtime_ns or 0) // 1_000_000,
                "content_type": mimetypes.guess_type(key)[0] or "application/octet-stream", "sha256": digest.hexdigest(),
                "text": text, "pages": pages, "extract_error": error}
-        schema = pa.schema([("key", pa.string()), ("path", pa.string()), ("size", pa.int64()), ("modified_ms", pa.int64()),
-                            ("content_type", pa.string()), ("sha256", pa.string()), ("text", pa.large_string()),
-                            ("pages", pa.int32()), ("extract_error", pa.string())])
+        fields = [("key", pa.string()), ("path", pa.string()), ("size", pa.int64()), ("modified_ms", pa.int64()),
+                  ("content_type", pa.string()), ("sha256", pa.string()), ("text", pa.large_string()),
+                  ("pages", pa.int32()), ("extract_error", pa.string())]
+        if ai:
+            from cairn.ai.usage import set_actor
+            from cairn.pipelines.enrich import enrich
+
+            set_actor(owner)
+            got, ai_error = (enrich(self.llm, ai, key, bytes(data), text) if info.size <= limit
+                             else ({"description": None, "labels": None, "extracted": None}, None))
+            row.update(got, ai_error=ai_error)
+            fields += [("description", pa.string()), ("labels", pa.string()), ("extracted", pa.string()),
+                       ("ai_error", pa.string())]
+        schema = pa.schema(fields)
         return pa.Table.from_pylist([row], schema=schema)
 
-    def _read(self, fmt: str, path: str):
+    def _read(self, fmt: str, path: str, ai: Optional[dict] = None, owner: Optional[str] = None):
         import pyarrow.csv as pacsv
         import pyarrow.json as pajson
         import pyarrow.parquet as pq
 
         if fmt == "files":
-            return self._file_row(path)
+            return self._file_row(path, ai, owner)
         fs = self._fs()
         if fmt == "parquet":
             return pq.read_table(path, filesystem=fs)
@@ -455,6 +478,13 @@ class Pipes:
         if pipe["format"] == "files":
             from pyiceberg.expressions import EqualTo
 
+            missing = [f for f in data.schema if f.name not in table.schema().as_arrow().names]
+            if missing:                                    # ai added to a pipe whose table exists: its columns too
+                import pyarrow as pa
+
+                with table.update_schema() as u:
+                    u.union_by_name(pa.schema(missing))
+                table = self._catalog().load_table(tuple(pipe["target"].split(".")))
             # One row per object: its new version replaces the old one, in one commit.
             table.overwrite(fit(table, data, pipe["target"]), overwrite_filter=EqualTo("key", data.column("key")[0].as_py()))
             return len(data), []
@@ -493,7 +523,8 @@ class Pipes:
                 return None
             rows, error, bad = None, None, []
             try:
-                rows, bad = self._append(pipe, self._read(pipe["format"], f"{pipe['bucket']}/{key}"))
+                rows, bad = self._append(pipe, self._read(pipe["format"], f"{pipe['bucket']}/{key}", pipe.get("ai"),
+                                                         pipe.get("created_by")))
             except Exception as e:  # noqa: BLE001 - recorded on the file; the next file still loads
                 error = str(e).splitlines()[0][:2000] if str(e) else type(e).__name__
                 logger.warning("pipe %s: %s failed: %s", pipe["name"], key, error)

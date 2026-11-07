@@ -250,8 +250,9 @@ class MeteredProvider:
             return 0.0
 
     def generate_json(self, system: str, user: str, schema: dict, *, model: Optional[str] = None,
-                      max_tokens: int = 16000) -> tuple[dict, LLMUsage]:
+                      max_tokens: int = 16000, images: Optional[list] = None) -> tuple[dict, LLMUsage]:
         self.check()
-        data, usage = self.inner.generate_json(system, user, schema, model=model, max_tokens=max_tokens)
+        kw = {"images": images} if images else {}
+        data, usage = self.inner.generate_json(system, user, schema, model=model, max_tokens=max_tokens, **kw)
         usage.extra = {**(usage.extra or {}), "cost_usd": self.record(usage)}
         return data, usage

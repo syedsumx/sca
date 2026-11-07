@@ -47,7 +47,8 @@ class LLMProvider(Protocol):
     name: str
 
     def generate_json(self, system: str, user: str, schema: dict, *, model: Optional[str] = None,
-                      max_tokens: int = 16000) -> tuple[dict, LLMUsage]: ...
+                      max_tokens: int = 16000, images: Optional[list] = None) -> tuple[dict, LLMUsage]: ...
+    # images: [(media_type, bytes)] shown to the model before the text (image/png, image/jpeg, image/gif, image/webp)
 
 
 class AnthropicProvider:
@@ -64,15 +65,22 @@ class AnthropicProvider:
         self.server_side_fallback = server_side_fallback
 
     def generate_json(self, system: str, user: str, schema: dict, *, model: Optional[str] = None,
-                      max_tokens: int = 16000) -> tuple[dict, LLMUsage]:
+                      max_tokens: int = 16000, images: Optional[list] = None) -> tuple[dict, LLMUsage]:
         anthropic = self._anthropic
+        content: Any = user
+        if images:
+            import base64
+
+            content = [{"type": "image", "source": {"type": "base64", "media_type": mt,
+                                                    "data": base64.b64encode(data).decode()}} for mt, data in images]
+            content.append({"type": "text", "text": user})
         model = model or self.model
         kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
             # The system prompt is static per task, so cache it.
             "system": [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{"role": "user", "content": content}],
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": self.effort, "format": {"type": "json_schema", "schema": schema}},
         }
@@ -114,12 +122,17 @@ class OllamaProvider:
         self.http = httpx.Client(timeout=timeout)
 
     def generate_json(self, system: str, user: str, schema: dict, *, model: Optional[str] = None,
-                      max_tokens: int = 16000) -> tuple[dict, LLMUsage]:
+                      max_tokens: int = 16000, images: Optional[list] = None) -> tuple[dict, LLMUsage]:
         model = model if model and not model.startswith("claude") else self.model
+        message: dict[str, Any] = {"role": "user", "content": user}
+        if images:
+            import base64
+
+            message["images"] = [base64.b64encode(data).decode() for _, data in images]
         resp = self.http.post(f"{self.url}/api/chat", json={
             "model": model, "stream": False, "format": schema,
             "options": {"num_predict": max_tokens},
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "messages": [{"role": "system", "content": system}, message],
         })
         if resp.status_code >= 400:
             raise LLMError(f"ollama error {resp.status_code}: {resp.text[:300]}")
@@ -142,8 +155,8 @@ class StaticProvider:
         self.calls: list[dict] = []
 
     def generate_json(self, system: str, user: str, schema: dict, *, model: Optional[str] = None,
-                      max_tokens: int = 16000) -> tuple[dict, LLMUsage]:
-        self.calls.append({"system": system, "user": user, "schema": schema, "model": model})
+                      max_tokens: int = 16000, images: Optional[list] = None) -> tuple[dict, LLMUsage]:
+        self.calls.append({"system": system, "user": user, "schema": schema, "model": model, "images": list(images or [])})
         return self.responder(system, user, schema), LLMUsage(model=model or "static")
 
 

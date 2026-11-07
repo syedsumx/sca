@@ -141,9 +141,10 @@ class _Recorder:
     def __getattr__(self, item):
         return getattr(self.inner, item)
 
-    def generate_json(self, system, user, schema, *, model=None, max_tokens=16000):
+    def generate_json(self, system, user, schema, *, model=None, max_tokens=16000, images=None):
         self.prompts.append(user)
-        return self.inner.generate_json(system, user, schema, model=model, max_tokens=max_tokens)
+        kw = {"images": images} if images else {}
+        return self.inner.generate_json(system, user, schema, model=model, max_tokens=max_tokens, **kw)
 
 
 def _scripted(case: dict) -> StaticProvider:

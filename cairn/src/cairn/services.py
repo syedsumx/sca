@@ -802,6 +802,7 @@ def _build_active_metadata(s: Services) -> None:
 
             s.pipes = Pipes(s.engine, _settings("CAIRN_PIPES_STORE"), _settings("CAIRN_PIPES_CATALOG"), s.audit,
                             webhook_secret=os.environ.get("CAIRN_PIPES_WEBHOOK_SECRET", ""))
+            s.pipes.llm = getattr(s, "llm", None)    # files pipes' AI enrichment (metered, as the pipe's owner)
         from cairn.iac.state import BundleState
 
         s.bundle_state = BundleState(s.engine, s.audit)

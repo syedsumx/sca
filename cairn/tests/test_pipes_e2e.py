@@ -313,6 +313,74 @@ def test_recordings_are_transcribed_locally(world, monkeypatch, tmp_path):
     assert row["text"] is None and "over the transcription limit" in row["extract_error"]
 
 
+def test_files_are_described_and_their_fields_extracted_by_the_model(world, tmp_path):
+    """AI enrichment of a files pipe: an image is sent to the model (scaled, as JPEG) and gets a description and
+    labels; documents and images get the asked-for fields as JSON; files with nothing to read are left alone; a model
+    that fails leaves the reason on the row and the pipe goes on. Calls are metered as the pipe's owner."""
+    import io as _io
+    import json as _json
+
+    from sqlalchemy import create_engine, select
+
+    from cairn.ai.llm import LLMError, StaticProvider
+    from cairn.ai.usage import MeteredProvider, UsageMeter, usage_table
+    from cairn.common.db import init_db
+    from cairn.pipelines.pipes import PipeError
+
+    p, s3 = world["pipes"], world["s3"]
+
+    def respond(system, user, schema):
+        if "broken" in user:
+            raise LLMError("the model is unavailable")
+        out = {}
+        if "description" in schema["properties"]:
+            out.update(description="A scanned invoice from Northwind Traders.", labels=["invoice", "document"])
+        if "extracted" in schema["properties"]:
+            found = "4471" in user or "scanned" in user
+            out["extracted"] = {"invoice_number": "4471" if found else None, "total": "1250.00" if found else None}
+        return out
+    provider = StaticProvider(respond)
+    engine = create_engine(f"sqlite:///{tmp_path}/usage.db")
+    init_db(engine)
+    meter = UsageMeter(engine)
+    p.llm = MeteredProvider(provider, meter)
+    try:
+        pipe = p.create({"name": "inbox", "bucket": "landing", "prefix": "inbox/", "format": "files", "target": "raw.inbox",
+                         "create_table": True, "ai": {"describe": True, "extract": {
+                             "invoice_number": "the invoice's number", "total": "the total amount due, as a number"}}},
+                        "urn:li:corpuser:finance-bot")
+        assert pipe["ai"]["describe"] and set(pipe["ai"]["extract"]) == {"invoice_number", "total"}
+        scan = _io.BytesIO()
+        _scan("Invoice 4471", "Total due: 1,250.00 EUR").save(scan, format="PNG")
+        s3.put_object(Bucket="landing", Key="inbox/invoice.png", Body=scan.getvalue())
+        s3.put_object(Bucket="landing", Key="inbox/letter.txt", Body=b"Please find invoice 4471 attached. Total 1,250.00 EUR.")
+        s3.put_object(Bucket="landing", Key="inbox/blob.bin", Body=b"\x00\x01binary")
+        s3.put_object(Bucket="landing", Key="inbox/broken.txt", Body=b"broken")
+        assert {f["status"] for f in p.sweep(pipe["id"])} == {"ok"}
+        rows = {r["key"]: r for r in p._catalog().load_table(("raw", "inbox")).scan().to_arrow().to_pylist()}
+        img = rows["inbox/invoice.png"]
+        assert img["description"].startswith("A scanned invoice") and _json.loads(img["labels"]) == ["invoice", "document"]
+        assert _json.loads(img["extracted"]) == {"invoice_number": "4471", "total": "1250.00"} and img["ai_error"] is None
+        letter = rows["inbox/letter.txt"]
+        assert letter["description"] is None and _json.loads(letter["extracted"])["invoice_number"] == "4471"
+        assert rows["inbox/blob.bin"]["extracted"] is None and rows["inbox/blob.bin"]["ai_error"] is None
+        assert rows["inbox/broken.txt"]["extracted"] is None and "unavailable" in rows["inbox/broken.txt"]["ai_error"]
+        # What the model was given: the image (as JPEG) for the image only, the text for documents.
+        sent = {c["user"].split("\n")[0]: c for c in provider.calls}
+        assert [mt for mt, _ in sent["File: invoice.png"]["images"]] == ["image/jpeg"]
+        assert sent["File: letter.txt"]["images"] == [] and "invoice 4471 attached" in sent["File: letter.txt"]["user"]
+        assert "File: blob.bin" not in sent
+        with engine.connect() as c:
+            used = c.execute(select(usage_table.c.actor, usage_table.c.task)).all()
+        assert used and {(a, t) for a, t in used} == {("urn:li:corpuser:finance-bot", "pipe_ai")}
+        # Not for other formats; fields are named like columns.
+        for body in ({"format": "csv", "ai": {"describe": True}}, {"format": "files", "ai": {"extract": {"Bad Name": "x"}}}):
+            with pytest.raises(PipeError, match="ai"):
+                p.create({"name": "x", "bucket": "landing", "prefix": "x/", "target": "raw.x", **body}, "urn:li:corpuser:admin")
+    finally:
+        p.llm = None
+
+
 def test_excel_workbooks_land_as_typed_tables(world):
     """Queue row 27: an Excel workbook that lands under a pipe's prefix becomes rows of its table: the first sheet,
     headers as column names, each column typed by its values, formulas as the values Excel saved."""
