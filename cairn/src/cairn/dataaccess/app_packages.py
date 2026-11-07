@@ -275,14 +275,24 @@ class AppPackages:
         from cairn.dataaccess.dataapps import AppError
 
         try:
-            self.apps.create(actor, self._app_body(prow, vrow, name))
+            self.apps.get(name)
+            raise PackageError(f"an app named {name} exists", 409)
         except AppError as e:
-            raise PackageError(str(e), e.status)
+            if e.status != 404:
+                raise PackageError(str(e), e.status)
+        # The install row first: while it exists the app runs isolated (none of Cairn's environment), so the app is
+        # never, even for a moment or after a failure, an ordinary data app running another party's code.
         now = self.clock()
         with self.engine.begin() as c:
             c.execute(insert(installs_table).values(name=name, package=package, version=version,
                                                     references=json.dumps(refs), installed_by=actor,
                                                     created_ms=now, updated_ms=now))
+        try:
+            self.apps.create(actor, self._app_body(prow, vrow, name))
+        except AppError as e:
+            with self.engine.begin() as c:
+                c.execute(installs_table.delete().where(installs_table.c.name == name))
+            raise PackageError(str(e), e.status)
         try:
             await self.apps.deploy(actor, name)
         except AppError as e:
@@ -324,13 +334,18 @@ class AppPackages:
         self._need_manage(actor, irow)
         from cairn.dataaccess.dataapps import AppError
 
-        with self.engine.begin() as c:                    # unbound first: the app's identity reads nothing from now
-            c.execute(installs_table.delete().where(installs_table.c.name == name))
+        # Unbound first: the app's identity reads nothing from now. The row itself goes last: while the app exists it
+        # must stay isolated, so a delete that fails leaves an isolated app with nothing bound, to be removed again.
+        with self.engine.begin() as c:
+            c.execute(update(installs_table).where(installs_table.c.name == name).values(
+                references=json.dumps({}), updated_ms=self.clock()))
         try:
             await self.apps.delete(actor, name)
         except AppError as e:
             if e.status != 404:
-                raise PackageError(str(e), e.status)
+                raise PackageError(f"unbound, but the app could not be removed (try again): {e}", e.status)
+        with self.engine.begin() as c:
+            c.execute(installs_table.delete().where(installs_table.c.name == name))
         self._audit("app.uninstalled", actor, self.apps.urn(name), {"package": irow.package, "version": irow.version})
 
     def get_install(self, actor: str, name: str) -> dict:

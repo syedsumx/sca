@@ -175,3 +175,42 @@ def test_manifests_and_names_are_checked(world):
 
     with pytest.raises(AuthenticationError):
         world["s"].identity.resolve({"X-Cairn-Actor": "urn:li:corpuser:cairnapp-x"}, {})
+
+
+def test_a_failed_install_or_uninstall_never_leaves_package_code_unisolated(world, monkeypatch):
+    """Review finding: uninstall dropped the install row before deleting the app, so a failed delete left another
+    party's code as an ordinary data app, started with Cairn's environment."""
+    from cairn.dataaccess.dataapps import AppError
+
+    ana, bob, s = world["ana"], world["bob"], world["s"]
+    commit(world["dev"], "v1", ["orders"])
+    git_ = {"url": world["url"], "branch": "main", "path": "churn"}
+    assert ana.post("/v1/app-packages", json={"name": "churn", "git": git_}).status_code == 201
+    assert ana.post("/v1/app-packages/churn/versions", json={"version": "1.0.0"}).status_code == 201
+    inst = {"name": "bob-churn", "package": "churn", "version": "1.0.0", "references": {"orders": ORDERS}}
+    assert bob.post("/v1/app-installs", json=inst).status_code == 201
+    apps, pk = s.data_apps, s.app_packages
+    real_delete = type(apps).delete
+
+    async def failing(self, actor, name):
+        raise AppError("the runtime is away", 502)
+    monkeypatch.setattr(type(apps), "delete", failing)
+    assert bob.delete("/v1/app-installs/bob-churn").status_code == 502
+    # The app is still there: still isolated, and bound to nothing.
+    assert apps.get("bob-churn") and apps.isolated("bob-churn") is True
+    assert pk.identity("cairnapp-bob-churn")["tables"] == set()
+    page = bob.get("/apps/bob-churn/").json()
+    assert page["leaked"] == []
+    monkeypatch.setattr(type(apps), "delete", real_delete)
+    assert bob.delete("/v1/app-installs/bob-churn").status_code == 204       # tried again: gone
+    assert apps.isolated("bob-churn") is False
+    # An install whose app cannot be made leaves no install behind; one over an existing app's name is refused.
+    real_create = type(apps).create
+    monkeypatch.setattr(type(apps), "create", lambda self, actor, body: (_ for _ in ()).throw(AppError("no", 503)))
+    assert bob.post("/v1/app-installs", json=inst).status_code == 503
+    assert not pk.is_install("bob-churn")
+    monkeypatch.setattr(type(apps), "create", real_create)
+    apps.create(ANA, {"name": "taken", "command": ["true"]})
+    assert bob.post("/v1/app-installs", json={**inst, "name": "taken"}).status_code == 409
+    assert apps.isolated("taken") is False
+
