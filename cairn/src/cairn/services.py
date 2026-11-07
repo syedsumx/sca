@@ -1266,9 +1266,12 @@ def _build_active_metadata(s: Services) -> None:
         def apps_authorize(actor: str, privilege: str, urn: Optional[str]) -> bool:
             return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
         root = _Path(os.environ.get("CAIRN_AGENT_APPS_DIR") or os.path.join(tempfile.gettempdir(), "cairn-agent-apps"))
+        from cairn.ai.agent_apps import MlflowRuns
+
         s.agent_apps = AgentApps(s.engine, s.agents, ProcessRuntime(root, os.environ.get(
             "CAIRN_AGENT_APPS_CAIRN_URL", "http://127.0.0.1:9000")), apps_authorize,
-            lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit)
+            lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
+            MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:

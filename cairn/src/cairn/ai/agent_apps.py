@@ -18,6 +18,9 @@
   per app (on the API's host, its Python environment, which must have the project's requirements: a deploy that
   needs a missing package is refused and names it), reachable on 127.0.0.1 only with a secret Cairn gives it in a
   file. ``CAIRN_AGENT_APPS_CAIRN_URL`` is the address the runtime calls Cairn back on.
+* **MLflow.** With ``CAIRN_MLFLOW_URL`` (Cairn's MLflow), each app has an experiment ``agents/<name>`` and each run is
+  an MLflow run in it: ``mlflow.user`` the person who asked, the app version and session as tags, latency and the
+  sizes of the question and answer as metrics, FINISHED or FAILED. Never the content.
 * **Audited:** ``agent_app.deployed``, ``agent_app.invoked`` (who, session, time; no content), ``agent_app.deleted``.
 """
 
@@ -191,11 +194,56 @@ class ProcessRuntime:
                 got[0].kill()
 
 
+class MlflowRuns:
+    """Each run of an agent app as an MLflow run (REST, Cairn's MLflow): best effort, never failing a run."""
+
+    def __init__(self, url: str):
+        self.url = url.rstrip("/")
+
+    def _post(self, path: str, body: dict) -> dict:
+        import httpx
+
+        r = httpx.post(f"{self.url}/api/2.0/mlflow/{path}", json=body, timeout=15)
+        r.raise_for_status()
+        return r.json()
+
+    def experiment(self, app: str) -> Optional[str]:
+        import httpx
+
+        name = f"agents/{app}"
+        try:
+            r = httpx.get(f"{self.url}/api/2.0/mlflow/experiments/get-by-name", params={"experiment_name": name},
+                          timeout=15)
+            if r.status_code == 200:
+                return r.json()["experiment"]["experiment_id"]
+            return self._post("experiments/create", {"name": name, "tags": [
+                {"key": "cairn.agent_app", "value": app}]})["experiment_id"]
+        except Exception as e:  # noqa: BLE001 - tracking is best effort
+            logger.warning("MLflow experiment for agent app %s: %s", app, e)
+            return None
+
+    def record(self, experiment: str, app: str, version: int, actor: str, session: str, ok: bool, started_ms: int,
+               metrics: dict) -> None:
+        try:
+            run = self._post("runs/create", {"experiment_id": experiment, "start_time": started_ms,
+                                             "run_name": f"{app} v{version}", "tags": [
+                                                 {"key": "mlflow.user", "value": actor},
+                                                 {"key": "cairn.agent_app", "value": app},
+                                                 {"key": "cairn.app_version", "value": str(version)},
+                                                 {"key": "cairn.session", "value": session}]})["run"]["info"]["run_id"]
+            now = _now()
+            self._post("runs/log-batch", {"run_id": run, "metrics": [
+                {"key": k, "value": float(v), "timestamp": now, "step": 0} for k, v in metrics.items()]})
+            self._post("runs/update", {"run_id": run, "status": "FINISHED" if ok else "FAILED", "end_time": now})
+        except Exception as e:  # noqa: BLE001 - tracking is best effort
+            logger.warning("MLflow run for agent app %s: %s", app, e)
+
+
 class AgentApps:
     def __init__(self, engine, agents, runtime: ProcessRuntime, authorize: Callable[[str, str, Optional[str]], bool],
-                 is_operator: Callable[[str], bool], audit=None):
+                 is_operator: Callable[[str], bool], audit=None, mlflow: Optional[MlflowRuns] = None):
         self.engine, self.agents, self.runtime, self.authorize = engine, agents, runtime, authorize
-        self.is_operator, self.audit = is_operator, audit
+        self.is_operator, self.audit, self.mlflow = is_operator, audit, mlflow
         self.history = int(os.environ.get("CAIRN_AGENT_APPS_HISTORY", "40"))
 
     def _row(self, name: str) -> dict:
@@ -213,7 +261,7 @@ class AgentApps:
         return {"name": d["name"], "agent_id": d["agent_id"], "urn": urn(d["name"]), "owner": d["owner"],
                 "description": m.get("description", ""), "template": m.get("template"), "model": m.get("model"),
                 "scopes": m.get("scopes", []), "version": d["version"], "status": d["status"], "error": d["error"],
-                "updated_ms": d["updated_ms"]}
+                "mlflow_experiment": m.get("_mlflow_experiment"), "updated_ms": d["updated_ms"]}
 
     def deploy(self, actor: str, body: dict) -> dict:
         if not self.authorize(actor, "BUILD_AGENTS", None):
@@ -253,6 +301,8 @@ class AgentApps:
                 self.agents.delete(agent_id, actor)
                 raise
             status, error = "failed", str(e)[:2000]
+        if self.mlflow is not None:
+            m = {**m, "_mlflow_experiment": self.mlflow.experiment(name)}
         values = {"agent_id": agent_id, "manifest": json.dumps(m), "bundle": raw, "version": version, "status": status,
                   "error": error, "updated_ms": now}
         with self.engine.begin() as c:
@@ -344,6 +394,7 @@ class AgentApps:
             raise AgentAppError(f"the agent could not be reached: {type(e).__name__}", 502)
         finally:
             self.agents.revoke_token(token)
+        experiment = d["manifest"].get("_mlflow_experiment")
         if r.status_code != 200:
             try:
                 why = r.json().get("detail") or r.text
@@ -351,8 +402,15 @@ class AgentApps:
                 why = r.text
             self._audit("agent_app.invoked", actor, name, {"session": session_id, "ok": False,
                                                            "ms": _now() - started})
+            if self.mlflow is not None and experiment:
+                self.mlflow.record(experiment, name, d["version"], actor, session_id, False, started,
+                                   {"latency_ms": _now() - started, "input_chars": len(text)})
             raise AgentAppError(str(why)[:1000], 502)
         out = r.json()
+        if self.mlflow is not None and experiment:
+            self.mlflow.record(experiment, name, d["version"], actor, session_id, True, started,
+                               {"latency_ms": _now() - started, "input_chars": len(text),
+                                "output_chars": len(out.get("output") or ""), "turns": len(history) // 2 + 1})
         history.append({"role": "assistant", "content": out["output"]})
         with self.engine.begin() as c:
             c.execute(delete(agent_app_sessions).where(agent_app_sessions.c.app == name,

@@ -664,6 +664,10 @@ cairn agents invoke triage "Which tickets are open?"
   messages) and sends it with each run. People read only their own (`GET …/sessions/<id>`).
 - `DELETE /v1/agent-apps/<name>` (its owner or an operator) stops the runtime and removes the app, its identity and
   its sessions. Audited: `agent_app.deployed`, `agent_app.invoked` (no content), `agent_app.deleted`.
+- **MLflow:** with `CAIRN_MLFLOW_URL` set, deploying makes an experiment `agents/<name>` in Cairn's MLflow (its id is
+  the app's `mlflow_experiment`), and every invocation is a run in it: `mlflow.user` the person who asked, the app
+  version and session as tags, `latency_ms`, `input_chars`, `output_chars` and `turns` as metrics, status FINISHED or
+  FAILED. No message content is logged. Tracking is best effort: an unreachable MLflow is logged, never fails a run.
 
 Tested through the real services, decision point, database and HTTP API, with the agent's real code in its own process
 and the model behind Cairn's AI gateway, a local stand-in for the provider (`tests/test_agent_apps.py`):
@@ -673,6 +677,8 @@ and the model behind Cairn's AI gateway, a local stand-in for the provider (`tes
 - invocations as the caller, metered to them, each run's token revoked, sessions kept apart and their history sent;
   a person without `USE_AGENT` refused;
 - a redeploy; the pause switch; delete stopping the runtime and the identity.
+- against a real MLflow server: the app's experiment, and each run under the caller's name with its metrics and no
+  content (`tests/test_agent_apps_mlflow.py`).
 
 All three templates' own tests passed with the real frameworks (anthropic, openai-agents, langgraph).
 

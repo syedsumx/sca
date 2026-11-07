@@ -315,12 +315,12 @@ jobs:
       - name: MLflow through Cairn (tracking, governed registry, catalog lineage, serving)
         run: |
           set -o pipefail
-          pip install -e ".[server,test]"
+          pip install -e ".[server,ai,test]"
           # MLflow in its own environment, as it is deployed (its own image).
           python -m venv "$RUNNER_TEMP/mlflow"
           "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" \
-            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py -k "not spark_image" | tee "$RUNNER_TEMP/ml.log"   # the Spark image test runs in the pipelines job
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ml_e2e.py tests/test_agent_apps_mlflow.py -k "not spark_image" | tee "$RUNNER_TEMP/ml.log"   # the Spark image test runs in the pipelines job
           ! grep -q "skipped" "$RUNNER_TEMP/ml.log"
       - name: Fine-tuning on governed data (real LoRA training on PyTorch CPU)
         run: |
