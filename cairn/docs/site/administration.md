@@ -343,6 +343,60 @@ Reversible tokenisation replaces sensitive values with tokens where data lands. 
 
   Also tested in `tests/test_pipes_e2e.py` and `tests/test_streams_e2e.py`, with the real store and catalog: tokenised files and a tokenised upsert key.
 
+## Aggregation and projection policies
+
+Some tables should only ever be read in aggregate, such as pay, health or survey answers. Some columns can be
+used but should never be shown, such as an email that analysts may join or filter on. Both are policy
+obligations on reading the table (`VIEW_DATASET_PROFILE`), so they follow the same subjects, conditions and
+exemptions as any other policy:
+
+```yaml
+- id: pay-in-aggregate
+  effect: obligation
+  actions: [VIEW_DATASET_PROFILE]
+  target:
+    resource_urns: ["urn:li:dataset:(urn:li:dataPlatform:iceberg,hr.pay,PROD)"]
+    subjects: ["urn:li:corpGroup:analysts"]
+  obligations:
+    - {type: aggregation, params: {min_group: 5, entity_key: person_id}}
+    - {type: projection, params: {columns: [email]}}
+```
+
+**Aggregation.** Every query block that reads the table must aggregate: a `GROUP BY`, or aggregates only. It
+may not use `*` or window functions, and every column it returns is aggregated or grouped. Cairn adds
+`HAVING count(*) >= min_group` to that block, so no group smaller than `min_group` rows is returned. This holds
+in subqueries, CTEs and each branch of a `UNION` too.
+
+With `entity_key`, the floor counts distinct entities instead (`count(DISTINCT <alias>.<key>)`), and the block
+may join other tables. Without an entity key, joining in that block is refused: a join can repeat one person's
+rows until a group passes the floor. Aggregate the table in a subquery first, or set `entity_key`.
+
+**Projection.** The listed columns may be used in `WHERE`, `JOIN`, `GROUP BY`, `HAVING` and `ORDER BY`, and
+counted (`count(email)`). They are never returned: not as a column, not inside an expression such as
+`upper(email)` or `max(email)`, and not through a subquery. A `*` over the table is refused.
+
+**Where queries run.** Cairn's query endpoint (`/v1/data/query`) checks the SQL against these policies. It
+serves the SQL editor, dashboards and ask-your-data. A query that breaks a policy is refused with the reason
+and audited (`data.query_denied`). A query that passes is rewritten with the floors and run:
+
+- On a Trino connection, it runs as a one-query identity, `checked-<id>`. That identity is registered for ten
+  minutes with the person and the tables the query was checked for, in `cairn_checked_queries`. Trino applies
+  the person's own row filters and masks.
+- On other connections, Cairn runs the rewritten SQL itself.
+
+Direct Trino access (JDBC, BI tools, notebooks) refuses any read of an aggregation-protected table. It also
+refuses any read that names a projection-protected column. Trino's access control sees which tables and
+columns a query reads, not the shape of the query, so those queries go through Cairn.
+
+Row previews of such tables are refused. A misconfigured policy refuses rather than allows, for example a
+`min_group` below 2 or an aggregation policy without columns.
+
+`checked-` (like `cleanroom-`) is a reserved user name: nobody signs in as one, and a checked identity Cairn
+did not register, or one that has expired, reads nothing.
+
+The floor bounds how small a group can be. It does not stop someone from comparing two large groups that
+differ by one person: that is what differential privacy in clean rooms is for.
+
 ## Consent
 
 Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,

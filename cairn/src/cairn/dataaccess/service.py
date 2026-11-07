@@ -162,6 +162,11 @@ class DataAccessService:
         # (actor, urn, dialect) -> row filters in that dialect (policy row filters, consent): applied here on
         # direct connections; a run_as_user Trino connection gets them from Trino's own access control.
         self.row_filters: Optional[Callable[[str, str, str], list[str]]] = None
+        # Aggregation and projection policies (cairn.governance.aggregation): (actor, urn) -> TablePolicy or None
+        # (raises PolicyViolation when misconfigured); checked_identity(actor, urns) -> the one-query identity a
+        # checked query runs as on Trino.
+        self.query_policies: Optional[Callable[[str, str], Any]] = None
+        self.checked_identity: Optional[Callable[[str, list[str]], str]] = None
 
     # ---- where datasets live ----------------------------------------------------------
     def sources(self) -> list[Source]:
@@ -338,9 +343,31 @@ class DataAccessService:
             return str(x)
         return [[v(x) for x in r] for r in rows]
 
+    def _policies(self, actor: str, urns: list[str]) -> dict:
+        """urn -> TablePolicy for the tables under an aggregation or projection policy (fail closed)."""
+        if self.query_policies is None:
+            return {}
+        from cairn.governance.aggregation import PolicyViolation
+
+        out = {}
+        for u in urns:
+            try:
+                pol = self.query_policies(actor, u)
+            except PolicyViolation as e:
+                raise DataAccessError(str(e), 403)
+            except Exception as e:  # noqa: BLE001 - a policy that cannot be read refuses
+                logger.warning("aggregation/projection policies for %s on %s could not be read: %s", actor, u, e)
+                raise DataAccessError("the table's query policies could not be checked", 503)
+            if pol is not None:
+                out[u] = pol
+        return out
+
     def preview(self, actor: str, urn: str, limit: int = PREVIEW_ROWS) -> dict:
         if not self.known(urn) or not self.can_read(actor, urn):
             raise DataAccessError("you may not see this dataset's data", 403)
+        if self._policies(actor, [urn]):
+            raise DataAccessError("this table has an aggregation or projection policy: it has no row preview; "
+                                  "query it in aggregate, naming the columns", 403)
         source, parts = self.source_for(urn)
         schema, table = parts[-2], parts[-1]
         database = parts[0] if len(parts) == 3 and not source.database else None
@@ -385,11 +412,35 @@ class DataAccessService:
                 raise DataAccessError(f"you may not query {t.db}.{t.name}", 403)
             urns.append(u)
         limit = max(1, min(limit, self.max_rows))
+        policies = self._policies(actor, sorted(set(urns)))
+        run_as = actor
+        if policies:
+            from cairn.governance.aggregation import PolicyViolation, enforce
+
+            by_key = {}
+            for t, u in zip(tables, urns):
+                if u in policies:
+                    by_key[((t.catalog or "").lower(), (t.db or "").lower(), t.name.lower())] = policies[u]
+            try:
+                tree = enforce(tree, lambda t: by_key.get(((t.catalog or "").lower(), (t.db or "").lower(),
+                                                           t.name.lower())))
+            except PolicyViolation as e:
+                self._audit(actor, "data.query_denied", source.connection,
+                            {"sql": mask_sql(sql), "reason": "aggregation_or_projection", "detail": str(e)[:300]})
+                raise DataAccessError(str(e), 403)
+            tables = [t for t in tree.find_all(exp.Table) if t.name and
+                      ((t.catalog or "").lower(), (t.db or "").lower(), t.name.lower()) in
+                      {((x.catalog or "").lower(), (x.db or "").lower(), x.name.lower()) for x in tables}]
+            if ((self.registry.definitions() or {}).get(source.connection) or {}).get("run_as_user"):
+                if self.checked_identity is None:
+                    raise DataAccessError("queries on tables with aggregation or projection policies are not set "
+                                          "up on this connection", 503)
+                run_as = self.checked_identity(actor, sorted(policies))
         tree = self._filter_tables(actor, source, tree, tables)
         wrapped = capped(tree, limit + 1, source.dialect)
         started = time.monotonic()
         try:
-            columns, rows, truncated = self._execute(source, wrapped, limit, actor)
+            columns, rows, truncated = self._execute(source, wrapped, limit, run_as)
         except DataAccessError:
             raise
         except Exception as e:  # noqa: BLE001 - warehouse errors go back to the editor
@@ -398,7 +449,8 @@ class DataAccessService:
         out = QueryResult(columns, self._jsonable(rows), masked, truncated, int((time.monotonic() - started) * 1000),
                           sorted(set(urns)))
         self._audit(actor, "data.queried", source.connection,
-                    {"sql": mask_sql(sql), "tables": out.tables, "rows": len(rows), "masked": masked})
+                    {"sql": mask_sql(sql), "tables": out.tables, "rows": len(rows), "masked": masked,
+                     **({"query_policies": sorted(policies)} if policies else {})})
         self._read(actor, out.tables)
         return out.as_dict()
 

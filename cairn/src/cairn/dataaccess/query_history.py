@@ -23,7 +23,7 @@ import logging
 import os
 import time
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, select
 from sqlalchemy.exc import IntegrityError
@@ -114,10 +114,12 @@ class QueryHistory:
         # Trino's per-query memory limit, for the "near the limit" hint (bytes; CAIRN_TRINO_QUERY_MAX_MEMORY).
         self.query_max_memory = query_max_memory or _bytes(os.environ.get("CAIRN_TRINO_QUERY_MAX_MEMORY", ""))
         self._pruned = 0.0
+        # user_of(trino user): the person a Trino user stands for (a checked query's identity: its person).
+        self.user_of: Callable[[str], str] = lambda u: u
 
     def record(self, event: dict) -> Optional[str]:
         meta, ctx, st = event.get("metadata") or {}, event.get("context") or {}, event.get("statistics") or {}
-        qid, user = str(meta.get("queryId") or ""), str(ctx.get("user") or "")
+        qid, user = str(meta.get("queryId") or ""), self.user_of(str(ctx.get("user") or ""))
         if not qid or not user:
             return None
         failure = event.get("failureInfo") or {}

@@ -48,7 +48,7 @@ class AuthenticationError(Exception):
     pass
 
 
-RESERVED_PREFIXES = ("cleanroom-",)
+RESERVED_PREFIXES = ("cleanroom-", "checked-")   # clean rooms; checked queries (aggregation policies)
 
 
 class IdentityResolver:

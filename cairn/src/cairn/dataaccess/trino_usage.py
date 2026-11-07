@@ -67,6 +67,8 @@ class UsageError(ValueError):
 class TrinoUsage:
     def __init__(self, engine, graph, urn_of: Callable[[str, str, str], str]):
         self.engine, self.graph, self.urn_of = engine, graph, urn_of
+        # user_of(trino user): the person a Trino user stands for (a checked query's identity: its person).
+        self.user_of: Callable[[str], str] = lambda u: u
 
     # ---- recording ----------------------------------------------------------------------------
     def reads(self, event: dict) -> tuple[str, str, int, dict[str, set[str]]]:
@@ -74,7 +76,7 @@ class TrinoUsage:
         if not isinstance(event, dict) or not isinstance(event.get("metadata"), dict):
             raise UsageError("not a Trino QueryCompletedEvent")
         meta, ctx = event["metadata"], event.get("context") or {}
-        qid, user = str(meta.get("queryId") or ""), str(ctx.get("user") or "")
+        qid, user = str(meta.get("queryId") or ""), self.user_of(str(ctx.get("user") or ""))
         if not qid or not user:
             raise UsageError("the event has no query id or user")
         out: dict[str, set[str]] = {}

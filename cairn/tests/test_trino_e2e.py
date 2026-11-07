@@ -674,6 +674,63 @@ def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
         s.pdp.set_bundle(bundle)
 
 
+def test_aggregation_and_projection_policies_hold_on_trino(trino, cairn):
+    """An aggregation policy (groups of at least 3) and a projection policy (email used, never returned) for Ana:
+    Trino refuses her direct reads of the table, and of the column; Cairn's query endpoint checks her SQL, adds the
+    floor and runs it on Trino as a one-query identity, with her own row filters still applied. A made-up or
+    expired checked identity reads nothing; the admin, under no such policy, reads rows as before."""
+    from cairn.dataaccess.service import DataAccessError
+    from cairn.governance.abac import Obligation, Policy, PolicyBundle
+    from cairn.quality.collectors import ConnectionRegistry
+
+    _, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": "", "dialect": "trino"}}})
+    trino("CREATE TABLE lake.sales.pay AS SELECT * FROM (VALUES (1, 'eng', 100, 'a@x.com', 'de'), "
+          "(2, 'eng', 110, 'b@x.com', 'de'), (3, 'eng', 120, 'c@x.com', 'de'), (4, 'ops', 90, 'd@x.com', 'de'), "
+          "(5, 'eng', 500, 'e@x.com', 'us')) AS t(person_id, dept, salary, email, country)")
+    urn = "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.pay,PROD)"
+    s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in
+                                                           ("person_id", "dept", "salary", "email", "country")]}
+    s.attributes.invalidate(urn)
+    ana_is = {"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:ana"}
+    bundle = s.pdp.bundle
+    bundle = bundle() if callable(bundle) else bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(
+        id="ana-pay-aggregate", effect="obligation", actions=["VIEW_DATASET_PROFILE"],
+        target={"resource_urns": [urn]}, condition=ana_is,
+        obligations=[Obligation(type="aggregation", params={"min_group": 3}),
+                     Obligation(type="projection", params={"columns": ["email"]}),
+                     Obligation(type="row_filter", params={"expression": "country = 'de'"})])]))
+    try:
+        # Direct on Trino: the table is refused to Ana in any shape.
+        for q in ("SELECT dept, count(*) AS n FROM lake.sales.pay GROUP BY dept", "SELECT salary FROM lake.sales.pay"):
+            with pytest.raises(Exception, match="Access Denied"):
+                trino(q, user="ana")
+        # Through Cairn: checked, floored, run as a checked identity, with her row filter (the US row is gone).
+        out = s.data_access.query("urn:li:corpuser:ana", "SELECT dept, avg(salary) AS a, count(*) AS n FROM sales.pay "
+                                  "GROUP BY dept ORDER BY dept", "lakehouse")
+        assert out["rows"] == [["eng", 110.0, 3]], out                # ops (one person) is held back
+        out = s.data_access.query("urn:li:corpuser:ana", "SELECT count(*) AS n FROM sales.pay WHERE email = 'a@x.com'",
+                                  "lakehouse")
+        assert out["rows"] == []                                       # one person: below the floor
+        for q, why in (("SELECT salary FROM sales.pay", "aggregate"), ("SELECT email, count(*) FROM sales.pay GROUP BY email",
+                                                                     "not returned"), ("SELECT * FROM sales.pay", "name the")):
+            with pytest.raises(DataAccessError, match=why):
+                s.data_access.query("urn:li:corpuser:ana", q, "lakehouse")
+        with pytest.raises(DataAccessError, match="no row preview"):
+            s.data_access.preview("urn:li:corpuser:ana", urn)
+        # A checked identity Cairn never registered reads nothing.
+        with pytest.raises(Exception, match="Access Denied|403|expired"):
+            trino("SELECT dept, count(*) AS n FROM lake.sales.pay GROUP BY dept", user="checked-0123456789abcdef01234567")
+        # The admin has no such policy: rows, as before, directly and through Cairn.
+        assert len(trino("SELECT salary FROM lake.sales.pay")) == 5
+        assert len(s.data_access.query("urn:li:corpuser:admin", "SELECT salary FROM sales.pay", "lakehouse")["rows"]) == 5
+    finally:
+        s.pdp.set_bundle(bundle)
+
+
 def test_trino_tables_are_synced_into_the_catalog(trino, cairn):
     """Cairn reads the connection's tables as its crawler (structure only) and writes them to the catalog
     under the URNs access control uses; dropped tables are marked removed; the SQL editor can then query

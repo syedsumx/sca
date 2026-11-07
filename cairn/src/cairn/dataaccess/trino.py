@@ -262,6 +262,9 @@ class TrinoAccess:
         # metric_view_source(table): a published metric's view (SECURITY INVOKER) is read on the terms of the
         # metric's table, its source's urn; None otherwise (cairn.sqlworkspace.metrics).
         self.metric_view_source: Optional[Callable[[dict], Optional[str]]] = None
+        # checked(user): a one-query identity ``checked-<id>`` Cairn registered after checking a query against
+        # aggregation and projection policies -> {actor, groups, tables}; None: not one (cairn.governance.aggregation).
+        self.checked: Optional[Callable[[str], Optional[dict]]] = None
 
     def _decided_on(self, t: dict, need: str) -> str:
         """The urn a read or view of ``t`` is decided on: a published metric view's source table, else ``t``."""
@@ -314,14 +317,54 @@ class TrinoAccess:
         platform, name, env = self.dataset_name(catalog, schema, table)
         return f"urn:li:dataset:(urn:li:dataPlatform:{platform},{name},{env})"
 
-    @staticmethod
-    def who(ctx: dict) -> tuple[str, list[str]]:
+    def who(self, ctx: dict) -> tuple[str, list[str]]:
+        """The person a Trino request is for: a checked query's identity stands for the person it was checked for
+        (an unknown or expired one for nobody: refused)."""
         ident_ = (ctx or {}).get("identity") or {}
         user = str(ident_.get("user") or "")
         if not user:
             raise HTTPException(400, "no Trino user")
         groups = [g if g.startswith("urn:li:corpGroup:") else f"urn:li:corpGroup:{g}" for g in ident_.get("groups") or []]
+        if user.startswith("checked-"):
+            reg = self._checked(user)
+            if reg is None:
+                raise HTTPException(403, "unknown or expired checked query")
+            return reg["actor"], sorted(set(groups) | set(reg["groups"]))
         return f"urn:li:corpuser:{user}", groups
+
+    def _checked(self, user: str) -> Optional[dict]:
+        if self.checked is None or not user.startswith("checked-"):
+            return None
+        try:
+            return self.checked(user)
+        except Exception as e:  # noqa: BLE001 - fail closed: an identity that cannot be looked up is nobody
+            logger.warning("checked query lookup failed: %s", e)
+            return None
+
+    def _policy_refuses(self, ctx: dict, actor: str, groups: list[str], t: dict, urn: str) -> bool:
+        """A direct read of a table under an aggregation policy, or one naming a projection-protected column, is
+        refused: such queries run through Cairn's query endpoint, which checks them (a checked identity may read
+        the tables it was checked for)."""
+        from cairn.governance.aggregation import PolicyViolation, from_obligations
+
+        try:
+            pol = from_obligations(self.decide(actor, groups, READ, urn).obligations)
+        except PolicyViolation as e:
+            logger.warning("aggregation/projection policy on %s is misconfigured: %s", urn, e)
+            return True
+        except Exception as e:  # noqa: BLE001 - fail closed
+            logger.warning("aggregation/projection policy check failed for %s on %s: %s", actor, urn, e)
+            return True
+        if pol is None:
+            return False
+        cols = {str(c).lower() for c in t.get("columns") or []}
+        if not pol.aggregation and not (pol.projection & cols):
+            return False
+        reg = self._checked(str(((ctx or {}).get("identity") or {}).get("user") or ""))
+        if reg is not None and urn in reg["tables"]:
+            return False
+        logger.info("direct read of %s refused for %s: it has an aggregation or projection policy", urn, actor)
+        return True
 
     def allowed(self, actor: str, groups: list[str], privilege: str, urn: Optional[str]) -> bool:
         try:
@@ -433,6 +476,9 @@ class TrinoAccess:
                     logger.info("%s on %s refused: a legal hold is on", op, self.table_urn(t))
                     return False
             ok = self.allowed(actor, groups, TABLE_OPS[op], self._decided_on(t, TABLE_OPS[op]))
+            if ok and TABLE_OPS[op] == READ and self._policy_refuses(inp.get("context"), actor, groups, t,
+                                                                    self._decided_on(t, READ)):
+                return False
             if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
                 target = (action.get("targetResource") or {}).get("table")
                 ok = bool(target) and self.allowed(actor, groups, MANAGE, self.table_urn(target))

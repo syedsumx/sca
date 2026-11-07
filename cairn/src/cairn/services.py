@@ -76,6 +76,7 @@ class Services:
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
     ai_workspace: Optional[Any] = None
+    checked_queries: Optional[Any] = None
     ai_usage: Optional[Any] = None
     forms: Optional[Any] = None
     bulk: Optional[Any] = None
@@ -1403,6 +1404,21 @@ def _build_data_access(s: Services) -> None:
 
     s.data_access = DataAccessService(s.connections, masking.plan, can_read, s.audit, known=known, on_read=on_read)
 
+    # Aggregation and projection policies (cairn.governance.aggregation): obligations on reading a table.
+    from cairn.governance.aggregation import CheckedQueries, from_obligations
+    from cairn.governance.pdp import AuthorizeRequest as _AR, ResourceRef as _RR
+
+    def person_groups(actor: str) -> list[str]:
+        return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])] if s.attributes is not None else []
+
+    def query_policies(actor: str, urn: str):
+        d = s.pdp.decide(_AR(actor=actor, privilege="VIEW_DATASET_PROFILE", actor_groups=person_groups(actor),
+                             resource=_RR(type="dataset", urn=urn), environment={"channel": "query"}))
+        return from_obligations(d.obligations)
+    s.checked_queries = CheckedQueries(s.engine)
+    s.data_access.query_policies = query_policies
+    s.data_access.checked_identity = lambda actor, urns: s.checked_queries.register(actor, person_groups(actor), urns)
+
     # Trino asks Cairn before every action (its OPA access-control plugin) when given this key.
     trino_key = _secret_env("CAIRN_TRINO_ACCESS_KEY")
     if trino_key:
@@ -1425,11 +1441,18 @@ def _build_data_access(s: Services) -> None:
         ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
         routine_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_ROUTINE_CATALOGS", "routines").split(",") if c.strip()}
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs, routine_catalogs)
+        s.trino_access.checked = s.checked_queries.lookup
         s.trino_key = trino_key
         # Query history, profiles and tuning hints, from the same events as usage statistics.
         from cairn.dataaccess.query_history import QueryHistory
 
         s.query_history = QueryHistory(s.engine, s.trino_access.urn)
+
+        def trino_user_of(user: str) -> str:
+            """Checked queries are recorded as the person they were checked for."""
+            reg = s.checked_queries.lookup(user) if user.startswith("checked-") else None
+            return reg["actor"].removeprefix("urn:li:corpuser:") if reg else user
+        s.query_history.user_of = trino_user_of
         # AI functions in SQL through Cairn: the provider's key, allowed models, budgets and usage.
         from cairn.ai.sql_gateway import SqlAiGateway
 
@@ -1489,6 +1512,7 @@ def _build_data_access(s: Services) -> None:
             from cairn.dataaccess.trino_usage import TrinoUsage
 
             s.trino_usage = TrinoUsage(s.engine, s.graph, s.trino_access.urn)
+            s.trino_usage.user_of = trino_user_of
             from cairn.dataaccess.trino_catalog import TrinoCatalogSync
 
             s.trino_catalog = TrinoCatalogSync(s.engine, s.graph, s.data_access, s.trino_access, s.audit)
