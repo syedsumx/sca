@@ -286,10 +286,12 @@ def test_recordings_are_transcribed_locally(world, monkeypatch, tmp_path):
         pytest.skip("needs faster-whisper, CAIRN_TRANSCRIBE_MODEL_DIR (a Whisper model), espeak-ng and ffmpeg")
     p, s3 = world["pipes"], world["s3"]
     wav, mp3, mp4 = tmp_path / "note.wav", tmp_path / "note.mp3", tmp_path / "clip.mp4"
-    _sp.run(["espeak-ng", "-w", str(wav), "The invoice for the Berlin office is due on Friday."], check=True)
-    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-c:a", "libmp3lame", str(mp3)], check=True)
-    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=4:size=160x120:rate=10",
-             "-i", str(wav), "-shortest", "-c:v", "libx264", "-c:a", "aac", str(mp4)], check=True)
+    # Slow, clear synthetic speech, compressed at ordinary bitrates (the tiny model mishears 32 kbit/s MP3s).
+    _sp.run(["espeak-ng", "-s", "130", "-w", str(wav), "The invoice for the Berlin office is due on Friday."], check=True)
+    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(wav), "-c:a", "libmp3lame", "-b:a", "192k", str(mp3)],
+            check=True)
+    _sp.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc=duration=5:size=160x120:rate=10",
+             "-i", str(wav), "-shortest", "-c:v", "libx264", "-c:a", "aac", "-b:a", "128k", str(mp4)], check=True)
     pipe = p.create({"name": "calls", "bucket": "landing", "prefix": "calls/", "format": "files", "target": "raw.calls",
                      "create_table": True}, "urn:li:corpuser:admin")
     for name, path in (("note.wav", wav), ("note.mp3", mp3), ("clip.mp4", mp4)):
@@ -299,8 +301,9 @@ def test_recordings_are_transcribed_locally(world, monkeypatch, tmp_path):
     rows = {r["key"]: r for r in p._catalog().load_table(("raw", "calls")).scan().to_arrow().to_pylist()}
     for key in ("calls/note.wav", "calls/note.mp3", "calls/clip.mp4"):
         text = (rows[key]["text"] or "").lower()
-        assert rows[key]["extract_error"] is None and "office" in text and "friday" in text, rows[key]
-        assert rows[key]["pages"] in (3, 4)                                          # its length in seconds
+        heard = {w for w in ("invoice", "berlin", "office", "friday") if w in text}
+        assert rows[key]["extract_error"] is None and len(heard) >= 3, rows[key]     # a small model: most words
+        assert 3 <= rows[key]["pages"] <= 6                                          # its length in seconds
     assert rows["calls/broken.mp3"]["text"] is None and "not a recording" in rows["calls/broken.mp3"]["extract_error"]
     # Over the length limit: noted, not read.
     monkeypatch.setenv("CAIRN_TRANSCRIBE_MAX_SECONDS", "2")
