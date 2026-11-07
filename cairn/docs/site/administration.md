@@ -626,6 +626,56 @@ the provider seeing only Cairn's keys, metering per person and agent, refusals (
 `USE_AI_GATEWAY`, no sign-in, the rate limit, the token allowance) before the provider, and agent keys without the
 `model` scope refused.
 
+## Code-first agents: `cairn agents init`, `dev`, `deploy`
+
+From an empty directory to a deployed agent, with the runtime, model access, sessions and governance already in place:
+
+```bash
+cairn agents init triage --template basic        # or openai-agents, langgraph
+cd triage && pytest tests                         # offline: the model is a local stand-in
+export CAIRN_URL=https://cairn.example.com CAIRN_TOKEN=…   # your Cairn token, from the environment only
+cairn agents dev                                  # http://127.0.0.1:8765/ : a chat page
+cairn agents deploy                               # Cairn runs it as an agent app
+cairn agents invoke triage "Which tickets are open?"
+```
+
+- **The project.** `agent.py` defines `respond(ctx, messages)` and returns the answer. `ctx.anthropic()` and
+  `ctx.openai()` are the providers' SDK clients already pointed at Cairn's AI gateway with the right token, and
+  `ctx.gateway` gives the base URLs and key for frameworks that take them (LangGraph, the OpenAI Agents SDK).
+  `ctx.sql(...)` runs SQL through Cairn as the person; `ctx.user` and `ctx.session_id` say who is asking.
+  `agent.toml` names the agent, its model and its scopes (`model`, `query_data`, `read`, `propose`). There are
+  three templates: `basic` (Claude with a SQL tool), `openai-agents` and `langgraph`. Each comes with a test that
+  runs offline against a stand-in model (`cairn.agentkit.testing.FakeContext`) and with a chat page.
+- **dev** runs the project in `cairn.agentkit.runtime` on your machine. Every model and data call goes through Cairn
+  as you. Sessions are kept in the project's `.cairn/`.
+- **deploy** (`POST /v1/agent-apps`, `BUILD_AGENTS`) sends the project, without `.cairn/`, caches or virtualenvs, up
+  to `CAIRN_AGENT_APPS_MAX_BUNDLE` (5 MB). Cairn registers the app in the agent hub (kind `app`, its scopes, no key)
+  and starts it. A redeploy by its owner makes a new version.
+- **Runtime:** `CAIRN_AGENT_APPS_RUNTIME=process` runs each app as a local process on the API's host, on 127.0.0.1,
+  with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
+  whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
+  is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+- **Invoking** (`POST /v1/agent-apps/<name>/invocations` with `input` and `session_id`) needs to be the app's owner or
+  `USE_AGENT` on `urn:li:cairnAgent:<name>`. Each run gets a 15-minute token for the person asking, narrowed to the
+  app's scopes and revoked when the run ends. The agent's model calls go through the AI gateway, and its SQL through
+  Cairn's query path, as that person: their policies, masks, row filters and budget apply, and usage is metered to
+  them as `gateway:<agent id>`. The pause switch and the agent's quotas apply.
+- **Sessions:** Cairn keeps each conversation per app, person and session (the last `CAIRN_AGENT_APPS_HISTORY`, 40
+  messages) and sends it with each run. People read only their own (`GET …/sessions/<id>`).
+- `DELETE /v1/agent-apps/<name>` (its owner or an operator) stops the runtime and removes the app, its identity and
+  its sessions. Audited: `agent_app.deployed`, `agent_app.invoked` (no content), `agent_app.deleted`.
+
+Tested through the real services, decision point, database and HTTP API, with the agent's real code in its own process
+and the model behind Cairn's AI gateway, a local stand-in for the provider (`tests/test_agent_apps.py`):
+
+- the scaffold's tests offline; dev mode's chat page, sessions and metering as the developer;
+- deploy refused without `BUILD_AGENTS` and for a missing package;
+- invocations as the caller, metered to them, each run's token revoked, sessions kept apart and their history sent;
+  a person without `USE_AGENT` refused;
+- a redeploy; the pause switch; delete stopping the runtime and the identity.
+
+All three templates' own tests passed with the real frameworks (anthropic, openai-agents, langgraph).
+
 ## CoWork: scheduled tasks and an approved outbox
 
 The assistant can work for one person on a schedule, and send its results to Slack or email only once they approve.

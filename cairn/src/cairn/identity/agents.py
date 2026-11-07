@@ -265,6 +265,31 @@ class AgentService:
         self._record("agent.created", actor, agent_id, {"name": name, "scopes": scopes, "kind": "built"})
         return self.get(agent_id)
 
+    def issue_run_token(self, agent_id: str, actor: str, ttl_ms: int = 900_000) -> str:
+        """A short-lived access token for one run of a Cairn-hosted agent (built or deployed app) on behalf of
+        ``actor``: their rights narrowed to the agent's scopes. No refresh token; revoke it when the run ends."""
+        with self.engine.begin() as conn:
+            client = conn.execute(select(agent_clients).where(agent_clients.c.id == agent_id)).first()
+            if client is None or client.kind not in ("built", "app") or not client.enabled:
+                raise AgentError("no such agent", 404)
+            token, now = ACCESS_PREFIX + secrets.token_urlsafe(32), _now()
+            conn.execute(agent_tokens.insert().values(
+                hash=_hash(token), kind="access", client_id=agent_id, actor=actor, scopes=list(client.scopes),
+                expires_ms=now + ttl_ms, revoked=False, created_ms=now, details={"run": True}))
+        return token
+
+    def create_app_agent(self, name: str, owner: str, scopes: list[str], description: str, actor: str) -> dict:
+        """The identity of a code-first agent app deployed to Cairn (``cairn.ai.agent_apps``): like a built agent,
+        it has no key; each run gets a short-lived token for the person who asked (:meth:`issue_run_token`)."""
+        agent_id = f"agt_{uuid.uuid4().hex[:12]}"
+        with self.engine.begin() as conn:
+            conn.execute(agent_clients.insert().values(
+                id=agent_id, name=name, kind="app", owner=owner, scopes=_check_scopes(scopes), redirect_uris=[],
+                ai_system=None, key_hash=None, enabled=True, details={"description": description},
+                created_by=actor, created_ms=_now()))
+        self._record("agent.created", actor, agent_id, {"name": name, "scopes": scopes, "kind": "app"})
+        return self.get(agent_id)
+
     def runnable(self, agent_id: str) -> Optional[str]:
         """Why the agent may not act now (paused, disabled, its AI system not approved), or None."""
         if self.paused():

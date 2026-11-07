@@ -412,6 +412,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         app.include_router(build_warehouses_router(warehouse_status, cp, authz, services.audit,
                                                    getattr(services, "costs", None), services.trino_key,
                                                    getattr(services, "query_history", None)))
+    if getattr(services, "agent_apps", None) is not None:      # code-first agents deployed to Cairn
+        from cairn.ai.agent_apps import build_agent_apps_router
+
+        app.include_router(build_agent_apps_router(services.agent_apps, cp))
     if getattr(services, "ai_gateway", None) is not None:      # model calls from agent code, as the caller
         from cairn.ai.gateway import build_gateway_router
 

@@ -458,6 +458,12 @@ def cmd_actions(a) -> None:
     sys.exit(subprocess.call(["datahub", "actions", "-c", a.config]))
 
 
+def cmd_agents(a) -> None:
+    from cairn.agentkit.project import cli
+
+    cli(a)
+
+
 def cmd_agent_run(a) -> None:
     from cairn.agent.worker import main
 
@@ -911,6 +917,22 @@ def build_parser() -> argparse.ArgumentParser:
     act.add_argument("-c", "--config", required=True)
     act.set_defaults(fn=cmd_actions)
 
+    ag = sub.add_parser("agents", help="code-first agents: init a project, run it locally, deploy it, ask it")
+    ag_sub = ag.add_subparsers(dest="agents_cmd", required=True)
+    x = ag_sub.add_parser("init", help="make an agent project (agent.py, agent.toml, tests, a chat page)")
+    x.add_argument("dir")
+    x.add_argument("--name")
+    x.add_argument("--template", default="basic", choices=("basic", "openai-agents", "langgraph"))
+    x = ag_sub.add_parser("dev", help="run the project here; its model and data calls go through Cairn as you")
+    x.add_argument("--dir", default=".")
+    x.add_argument("--port", type=int, default=8765)
+    x = ag_sub.add_parser("deploy", help="send the project to Cairn, which runs it as an agent app")
+    x.add_argument("--dir", default=".")
+    x = ag_sub.add_parser("invoke", help="ask a deployed agent app, as you")
+    x.add_argument("name")
+    x.add_argument("message")
+    x.add_argument("--session", default="cli")
+    ag.set_defaults(fn=cmd_agents)
     agent = sub.add_parser("agent", help="in-VPC remote ingestion agent")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
     run = agent_sub.add_parser("run")

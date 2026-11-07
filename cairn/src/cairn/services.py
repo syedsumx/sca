@@ -117,6 +117,7 @@ class Services:
     bundle_state: Optional[Any] = None
     sql_ai: Optional[Any] = None
     ai_gateway: Optional[Any] = None
+    agent_apps: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -1255,6 +1256,19 @@ def _build_active_metadata(s: Services) -> None:
     from cairn.ai.gateway import AiGateway
 
     s.ai_gateway = AiGateway.from_env(s.ai_usage)
+    # Agent apps (cairn.ai.agent_apps): code-first agents deployed to Cairn, run as the person asking.
+    if os.environ.get("CAIRN_AGENT_APPS_RUNTIME") == "process" and s.agents is not None:
+        import tempfile
+        from pathlib import Path as _Path
+
+        from cairn.ai.agent_apps import AgentApps, ProcessRuntime
+
+        def apps_authorize(actor: str, privilege: str, urn: Optional[str]) -> bool:
+            return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+        root = _Path(os.environ.get("CAIRN_AGENT_APPS_DIR") or os.path.join(tempfile.gettempdir(), "cairn-agent-apps"))
+        s.agent_apps = AgentApps(s.engine, s.agents, ProcessRuntime(root, os.environ.get(
+            "CAIRN_AGENT_APPS_CAIRN_URL", "http://127.0.0.1:9000")), apps_authorize,
+            lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit)
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
