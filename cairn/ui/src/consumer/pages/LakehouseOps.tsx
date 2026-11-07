@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type {
-    DerivedRun, DerivedTable, LakehouseShare, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, Stream, StreamReject,
+    DerivedRun, DerivedTable, LakehouseShare, MaintenancePolicy, MaintenanceRun, Pipe, PipeFile, PipeReject, Stream, StreamReject,
     WarehouseState,
 } from '../api/types';
 import { Muted, Surface } from '../components/tokens';
@@ -31,12 +31,13 @@ export function PipesTab() {
                     loading={q.loading}
                     dataSource={q.data ?? []}
                     pagination={false}
-                    expandable={{ expandedRowRender: (p) => <PipeFiles id={p.id} /> }}
+                    expandable={{ expandedRowRender: (p) => <><PipeFiles id={p.id} />{p.bad_rows === 'quarantine' && <PipeRejects id={p.id} />}</> }}
                     columns={[
                         { title: 'Pipe', dataIndex: 'name' },
                         { title: 'From', render: (_, p) => <code>{`s3://${p.bucket}/${p.prefix}`}</code> },
                         { title: 'Format', dataIndex: 'format' },
                         { title: 'Into', dataIndex: 'target', render: (t: string) => <code>{t}</code> },
+                        { title: 'Bad rows', dataIndex: 'bad_rows', render: (b?: string) => (b === 'quarantine' ? 'set aside' : 'refuse the file') },
                         { title: 'State', dataIndex: 'enabled', render: (e: boolean) => <Tag color={e ? 'green' : 'default'}>{e ? 'on' : 'paused'}</Tag> },
                         {
                             title: '',
@@ -69,8 +70,32 @@ function PipeFiles({ id }: { id: string }) {
                 { title: 'File', dataIndex: 'key', render: (k: string) => <code>{k}</code> },
                 { title: 'Result', dataIndex: 'status', render: ok },
                 { title: 'Rows', dataIndex: 'rows' },
+                { title: 'Set aside', dataIndex: 'rejected', render: (n?: number | null) => n ?? '' },
                 { title: 'Why', dataIndex: 'error', render: (e: string | null) => e ?? '' },
                 { title: 'Loaded', dataIndex: 'loaded_ms', render: when },
+            ]}
+        />
+    );
+}
+
+/** The rows a pipe set aside (bad_rows: quarantine): fix them and land them as a new file. */
+function PipeRejects({ id }: { id: string }) {
+    const q = useDheQuery<PipeReject[]>(`/v1/pipes/${id}/rejects`, (c, signal) => c.pipeRejects(id, { signal }));
+    return (
+        <Table<PipeReject>
+            size="small"
+            style={{ marginTop: 12 }}
+            title={() => 'Rows set aside'}
+            rowKey={(r) => `${r.key}@${r.version}#${r.row}`}
+            loading={q.loading}
+            dataSource={q.data ?? []}
+            pagination={{ pageSize: 10 }}
+            columns={[
+                { title: 'File', dataIndex: 'key', render: (k: string) => <code>{k}</code> },
+                { title: 'Row', dataIndex: 'row' },
+                { title: 'Why', dataIndex: 'reason' },
+                { title: 'Values', dataIndex: 'value', render: (v: string | null) => <code>{v ?? ''}</code> },
+                { title: 'When', dataIndex: 'rejected_ms', render: when },
             ]}
         />
     );
@@ -489,6 +514,7 @@ function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body
             mode: v.format === 'debezium' ? 'upsert' : v.mode,
             key: String(v.key ?? '').split(',').map((k: string) => k.trim()).filter(Boolean),
             create_table: !!v.create_table, evolve: !!v.evolve, start: v.start, batch_seconds: v.batch_seconds,
+            bad_rows: v.quarantine ? 'quarantine' : 'fail',
         };
         if (v.source) body.source = v.source;
         setSaving(true);
@@ -540,6 +566,9 @@ function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body
                 </Space>
                 <Form.Item name="create_table" valuePropName="checked"><Checkbox>Create the table from the first messages</Checkbox></Form.Item>
                 <Form.Item name="evolve" valuePropName="checked"><Checkbox>Add new columns instead of setting messages aside</Checkbox></Form.Item>
+                <Form.Item name="quarantine" valuePropName="checked">
+                    <Checkbox>Set aside rows the table refuses instead of stopping the stream</Checkbox>
+                </Form.Item>
             </Form>
         </Modal>
     );

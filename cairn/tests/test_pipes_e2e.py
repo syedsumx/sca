@@ -304,3 +304,47 @@ def test_excel_workbooks_land_as_typed_tables(world):
     assert [r["order_id"] for r in rows] == [1, 2, 3] and [r["amount_eur"] for r in rows] == [12.5, 20.0, 7.25]
     assert rows[0]["ordered"] == dt.datetime(2026, 10, 1, 9, 30) and rows[1]["paid"] is False
     assert [r["note"] for r in rows] == ["first", None, "42"]
+
+
+def test_bad_rows_are_set_aside_with_quarantine_and_the_rest_load(world):
+    """Bad-row quarantine: with ``bad_rows: quarantine`` a row whose value the table cannot take is set aside with the
+    reason and the rest of the file loads; with the default (``fail``) the same file is refused whole. Columns the
+    table lacks still refuse the whole file: that is the data's shape, not one bad row."""
+    import httpx
+
+    p, s3, api = world["pipes"], world["s3"], world["api"]
+    good = b"id,region,amount\n1,EU,9.5\n2,US,3.0\n"
+    bad = b"id,region,amount\n3,EU,7.0\n4,US,n/a\n5,EU,2.5\n6,US,1e999x\n"
+    strict = p.create({"name": "strict", "bucket": "landing", "prefix": "strict/", "format": "csv",
+                       "target": "raw.strict", "create_table": True}, "urn:li:corpuser:admin")
+    assert strict["bad_rows"] == "fail"
+    s3.put_object(Bucket="landing", Key="strict/a.csv", Body=good)
+    s3.put_object(Bucket="landing", Key="strict/b.csv", Body=bad)
+    done = {f["key"]: f for f in p.sweep(strict["id"])}
+    assert done["strict/a.csv"]["status"] == "ok" and done["strict/b.csv"]["status"] == "error", done
+    assert rows(p, "raw.strict") == 2 and p.rejects(strict["id"]) == []
+
+    r = httpx.post(f"{api}/v1/pipes", json={"name": "lenient", "bucket": "landing", "prefix": "lenient/", "format": "csv",
+                                            "target": "raw.lenient", "create_table": True, "bad_rows": "quarantine"},
+                   timeout=10)
+    assert r.status_code == 201 and r.json()["bad_rows"] == "quarantine", r.text
+    pid = r.json()["id"]
+    s3.put_object(Bucket="landing", Key="lenient/a.csv", Body=good)
+    assert [f["status"] for f in p.sweep(pid)] == ["ok"]
+    s3.put_object(Bucket="landing", Key="lenient/b.csv", Body=bad)
+    s3.put_object(Bucket="landing", Key="lenient/c.csv", Body=b"id,region,amount,extra\n7,EU,1.0,x\n")
+    done = {f["key"]: f for f in p.sweep(pid)}
+    assert (done["lenient/b.csv"]["status"], done["lenient/b.csv"]["rows"], done["lenient/b.csv"]["rejected"]) == ("ok", 2, 2)
+    assert done["lenient/c.csv"]["status"] == "error" and "extra" in done["lenient/c.csv"]["error"]
+    got = sorted(p._catalog().load_table(("raw", "lenient")).scan().to_arrow().to_pylist(), key=lambda x: x["id"])
+    assert [(x["id"], x["amount"]) for x in got] == [(1, 9.5), (2, 3.0), (3, 7.0), (5, 2.5)]
+    out = httpx.get(f"{api}/v1/pipes/{pid}/rejects", timeout=10).json()
+    assert sorted((x["key"], x["row"]) for x in out) == [("lenient/b.csv", 1), ("lenient/b.csv", 3)]
+    assert all(x["reason"] for x in out) and json.loads(out[0]["value"])["region"] == "US"
+    # A file pipe has no rows to quarantine; a value outside the list is refused.
+    for wrong in ({"format": "files", "bad_rows": "quarantine"}, {"format": "csv", "bad_rows": "skip"}):
+        r = httpx.post(f"{api}/v1/pipes", json={"name": "x", "bucket": "landing", "prefix": "x/", "target": "raw.x",
+                                                **wrong}, timeout=10)
+        assert r.status_code == 400, r.text
+    p.delete(pid, "urn:li:corpuser:admin")
+    assert p.rejects(pid) == []

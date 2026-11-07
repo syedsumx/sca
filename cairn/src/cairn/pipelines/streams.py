@@ -23,7 +23,8 @@ snapshots have been expired.)
 A message that cannot be a row (not JSON, unknown operation, columns the table lacks without
 ``evolve``, no key) is set aside in ``cairn_stream_rejects`` with its offset and the reason; the stream
 goes on. A batch the table refuses (say, a type that does not convert) stops the stream with the error
-on its status and is retried with back-off: nothing is skipped silently.
+on its status and is retried with back-off: nothing is skipped silently. With ``bad_rows: quarantine``
+the rows the table refuses are set aside there too, and the rest of the batch commits.
 
 Over HTTP (``format: http``): no Kafka. Producers post rows to ``POST /v1/ingest/<name>/rows`` with a
 ``channel`` (one per producer) and the channel ``offset`` of the first row; each request is one commit
@@ -52,7 +53,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, delete, select, update
 
 from cairn.common.db import metadata
-from cairn.pipelines.pipes import TARGET, PipeError, fit, open_table
+from cairn.pipelines.pipes import BAD_ROWS, TARGET, PipeError, fit, fit_rows, open_table
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +76,7 @@ streams = Table(
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
+    Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
 )
 
 stream_status = Table(
@@ -122,7 +124,8 @@ def _stream(r) -> dict:
             "evolve": bool(r.evolve),
             "encoding": getattr(r, "encoding", None) or "json", "start": r.start, "source": r.source,
             "batch_rows": r.batch_rows, "batch_seconds": r.batch_seconds,
-            "enabled": bool(r.enabled), "created_by": r.created_by, "created_ms": r.created_ms}
+            "enabled": bool(r.enabled), "created_by": r.created_by, "created_ms": r.created_ms,
+            "bad_rows": getattr(r, "bad_rows", None) or "fail"}
 
 
 class Reject(Exception):
@@ -314,6 +317,9 @@ class Streams:
             raise StreamError("source is the dataset URN the topic carries")
         if source is not None and self.graph is None:
             raise StreamError("lineage needs Cairn Core: this deployment has none", 503)
+        bad_rows = str(body.get("bad_rows") or "fail")
+        if bad_rows not in BAD_ROWS:
+            raise StreamError("bad_rows is fail (the stream stops on a row the table refuses) or quarantine")
         rows, secs = body.get("batch_rows", 5000), body.get("batch_seconds", 10)
         if not isinstance(rows, int) or not 1 <= rows <= 1_000_000 or not isinstance(secs, int) or not 1 <= secs <= 3600:
             raise StreamError("batch_rows is 1-1000000 and batch_seconds 1-3600")
@@ -321,7 +327,8 @@ class Streams:
                "key": ",".join(key), "target": target, "create_table": bool(body.get("create_table")),
                "evolve": bool(body.get("evolve")),
                "encoding": encoding, "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
-               "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now()}
+               "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now(),
+               "bad_rows": bad_rows}
         return row
 
     def _lineage(self, urn: str, source: str, actor: str) -> None:
@@ -423,13 +430,15 @@ class Streams:
         return self.table_offsets(table, stream["id"], stream["topic"])
 
     # ---- writing one batch --------------------------------------------------------------
-    def write(self, stream: dict, messages: list) -> int:
+    def write(self, stream: dict, messages: list, reject: Optional[Callable] = None) -> int:
         """Writes a batch of Kafka messages (``.partition .offset .key .value``) as one Iceberg commit whose
-        snapshot records the next offset of each partition. Returns the rows written."""
+        snapshot records the next offset of each partition. Returns the rows written. ``reject`` files a
+        message that cannot be a row (``_reject`` unless given)."""
         import pyarrow as pa
         from pyiceberg.exceptions import CommitFailedException, NoSuchTableError
 
         sid, key = stream["id"], stream["key"]
+        reject = reject or self._reject
         nxt: dict[int, int] = {}
         ops: list[tuple[str, dict, int, int]] = []
         for m in messages:
@@ -443,7 +452,7 @@ class Streams:
                     raise Reject(f"no value for the key {', '.join(key)}")
                 ops.append((op, row, m.partition, m.offset))
             except Reject as e:
-                self._reject(sid, m.partition, m.offset, str(e), m.value)
+                reject(sid, m.partition, m.offset, str(e), m.value)
         props = {f"{PROP}{sid}.{stream['topic']}.{p}": str(o) for p, o in nxt.items()}
         if not ops:
             return 0                                       # only tombstones or rejects: offsets go to Kafka
@@ -468,23 +477,42 @@ class Streams:
             for op, r, p, o in ops:
                 unknown = sorted(c for c in r if c not in names)
                 if unknown and op == "upsert":
-                    self._reject(sid, p, o, f"columns {stream['target']} does not have: {', '.join(unknown)}",
+                    reject(sid, p, o, f"columns {stream['target']} does not have: {', '.join(unknown)}",
                                  json.dumps(r, default=str).encode())
                 else:
-                    kept.append((op, r))
+                    kept.append((op, r, p, o))
             if stream["mode"] == "upsert":
-                last: dict[tuple, tuple[str, dict]] = {}
-                for op, r in kept:                         # the last change of each key wins
-                    last[tuple(r[k] for k in key)] = (op, r)
-                keys = list(last)
-                rows = [r for op, r in last.values() if op == "upsert"]
+                last: dict[tuple, tuple[str, dict, int, int]] = {}
+                for op, r, p, o in kept:                   # the last change of each key wins
+                    last[tuple(r[k] for k in key)] = (op, r, p, o)
+                changes = list(last.values())
+            else:
+                changes = kept
+            want = table.schema().as_arrow()
+            if stream.get("bad_rows") == "quarantine" and any(op == "upsert" for op, _, _, _ in changes):
+                # A row the table refuses (a value that does not convert, no value for a required column) is
+                # set aside with its offset; the rest commit. Its key is left alone: the old row stays.
+                at = [i for i, c in enumerate(changes) if c[0] == "upsert"]
+                data, bad = fit_rows(table, [changes[i][1] for i in at], want, stream["target"])
+                refused = {at[j] for j, _ in bad}
+                for j, reason in bad:
+                    _, r, p, o = changes[at[j]]
+                    reject(sid, p, o, reason, json.dumps(r, default=str).encode())
+                changes = [c for i, c in enumerate(changes) if i not in refused]
+            else:
+                data = None
+            rows = [r for op, r, _, _ in changes if op == "upsert"]
+            if data is None and rows:
+                data = fit(table, pa.Table.from_pylist(rows, schema=want), stream["target"])
+            if not rows:
+                data = None
+            if stream["mode"] == "upsert":
+                keys = [tuple(r[k] for k in key) for _, r, _, _ in changes]
                 deleted = len(keys) - len(rows)
             else:
-                keys, rows, deleted = [], [r for _, r in kept], 0
+                keys, deleted = [], 0
             if not keys and not rows:
                 return 0
-            want = table.schema().as_arrow()
-            data = fit(table, pa.Table.from_pylist(rows, schema=want), stream["target"]) if rows else None
             try:
                 with table.transaction() as tx:
                     if keys:
@@ -552,12 +580,8 @@ class Streams:
             written = 0
             if msgs:
                 http_stream = {**stream, "topic": f"http.{channel}"}
-                reject = self._reject
-                self._reject = lambda sid, p, o, reason, value: reject(sid, part, o, f"[{channel}] {reason}", value)
-                try:
-                    written = self.write(http_stream, msgs)
-                finally:
-                    self._reject = reject
+                written = self.write(http_stream, msgs, reject=lambda sid, p, o, reason, value: self._reject(
+                    sid, part, o, f"[{channel}] {reason}", value))
             nxt = self.channel_offset(stream, channel) if msgs else committed
         self._status(stream["id"], status="running", add_rows=written, last_commit_ms=_now(), error=None)
         return {"written": written, "duplicates": skip, "rejected": len(todo) - written if stream["mode"] == "append" else None,

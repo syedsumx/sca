@@ -27,7 +27,7 @@ import type {
     MaintenancePolicy,
     MaintenanceRun,
     Pipe,
-    PipeFile,
+    PipeFile, PipeReject,
     Stream,
     StreamReject,
     WarehouseState,
@@ -1329,6 +1329,10 @@ export class ConsumerClient extends CairnClient {
 
     pipeFiles(id: string, opts?: RequestOptions) {
         return this.request<PipeFile[]>('GET', `/v1/pipes/${enc(id)}/files`, undefined, opts);
+    }
+
+    pipeRejects(id: string, opts?: RequestOptions) {
+        return this.request<PipeReject[]>('GET', `/v1/pipes/${enc(id)}/rejects`, undefined, opts);
     }
 
     sweepPipe(id: string) {

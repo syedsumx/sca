@@ -1481,6 +1481,8 @@ export interface Pipe {
     enabled: boolean;
     created_by: string;
     created_ms: number;
+    /** fail: a file with a value the table cannot take is refused whole; quarantine: those rows are set aside. */
+    bad_rows?: 'fail' | 'quarantine';
 }
 
 /** One file a pipe saw (GET /v1/pipes/{id}/files). */
@@ -1492,6 +1494,18 @@ export interface PipeFile {
     rows: number | null;
     error: string | null;
     loaded_ms: number;
+    /** Rows set aside (bad_rows: quarantine). */
+    rejected?: number | null;
+}
+
+/** A row a pipe set aside (GET /v1/pipes/{id}/rejects). */
+export interface PipeReject {
+    key: string;
+    version: string;
+    row: number;
+    reason: string;
+    value: string | null;
+    rejected_ms: number;
 }
 
 /** A Kafka topic written into a lakehouse table (GET /v1/streams). */
@@ -1506,6 +1520,7 @@ export interface Stream {
     target: string;
     source: string | null;
     enabled: boolean;
+    bad_rows?: 'fail' | 'quarantine';
     status: { status: 'running' | 'error' | null; rows: number | null; lag: number | null; last_commit_ms: number | null;
         error: string | null; updated_ms: number | null };
 }

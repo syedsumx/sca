@@ -37,7 +37,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, and_, delete, select
+from sqlalchemy import BigInteger, Boolean, Column, Integer, String, Table, Text, and_, delete, select
 from starlette.requests import Request  # module level: FastAPI resolves the handler's annotations here
 
 from cairn.common.db import metadata
@@ -56,6 +56,7 @@ pipes = Table(
     Column("enabled", Boolean, nullable=False, default=True),
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
+    Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
 )
 
 pipe_files = Table(
@@ -67,7 +68,20 @@ pipe_files = Table(
     Column("rows", Integer, nullable=True),
     Column("error", String(2000), nullable=True),
     Column("loaded_ms", BigInteger, nullable=False),
+    Column("rejected", Integer, nullable=True),             # rows set aside (bad_rows: quarantine)
 )
+
+pipe_rejects = Table(
+    "cairn_pipe_rejects", metadata,
+    Column("pipe_id", String(32), primary_key=True),
+    Column("key", String(1024), primary_key=True),
+    Column("version", String(64), primary_key=True),
+    Column("row", Integer, primary_key=True),               # 0-based, in the file
+    Column("reason", String(1000), nullable=False),
+    Column("value", Text, nullable=True),                   # the row as JSON (first 4 KiB)
+    Column("rejected_ms", BigInteger, nullable=False, index=True),
+)
+BAD_ROWS = ("fail", "quarantine")
 
 FORMATS = ("csv", "json", "parquet", "xlsx", "files")
 TARGET = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
@@ -102,7 +116,7 @@ def _now() -> int:
 def _pipe(r) -> dict:
     return {"id": r.id, "name": r.name, "bucket": r.bucket, "prefix": r.prefix, "format": r.format, "target": r.target,
             "create_table": bool(r.create_table), "enabled": bool(r.enabled), "created_by": r.created_by,
-            "created_ms": r.created_ms}
+            "created_ms": r.created_ms, "bad_rows": getattr(r, "bad_rows", None) or "fail"}
 
 
 def column_name(header, i: int) -> str:
@@ -201,6 +215,66 @@ def fit(table, data, target: str):
     return pa.Table.from_arrays(cols, schema=want)
 
 
+ROW_ERRORS = ("ArrowInvalid", "ArrowTypeError", "ArrowNotImplementedError", "ValueError", "OverflowError", "TypeError")
+
+
+def _required(table) -> list[str]:
+    return [f.name for f in table.schema().as_arrow() if not f.nullable]
+
+
+def _nulls(t, required: list[str]) -> list[str]:
+    return [c for c in required if c in t.column_names and t.column(c).null_count]
+
+
+def _row_error(e: Exception) -> bool:
+    """A conversion problem of the values (set aside with quarantine), not of the data's shape (PipeError)."""
+    return not isinstance(e, PipeError) and type(e).__name__ in ROW_ERRORS
+
+
+def fit_rows(table, rows: list, schema, target: str):
+    """Rows (dicts) as an Arrow table of ``schema`` fitted to the table, and the rows that cannot be:
+    ``(good, [(index, reason)])``. The batch is tried whole first; only when that fails is it gone through
+    row by row. Columns the table lacks still refuse the whole batch (PipeError): that is the data's shape,
+    not a bad row."""
+    import pyarrow as pa
+
+    required = _required(table)
+    try:
+        good = fit(table, pa.Table.from_pylist(rows, schema=schema), target)
+        if not _nulls(good, required):
+            return good, []
+    except Exception as e:  # noqa: BLE001 - only value problems fall through to the row-by-row pass
+        if not _row_error(e):
+            raise
+    keep, bad = [], []
+    for i, row in enumerate(rows):
+        try:
+            one = fit(table, pa.Table.from_pylist([row], schema=schema), target)
+            if missing := _nulls(one, required):
+                raise ValueError(f"no value for {', '.join(missing)}")
+            keep.append(row)
+        except Exception as e:  # noqa: BLE001 - only a row's own problem is set aside
+            if not _row_error(e):
+                raise
+            msg = str(e).splitlines()[0][:300] if str(e) else ""
+            bad.append((i, f"{type(e).__name__}: {msg}"))
+    return fit(table, pa.Table.from_pylist(keep, schema=schema), target), bad
+
+
+def split_rows(table, data, target: str):
+    """An Arrow table fitted to the table, and the rows that cannot be: ``(good, [(row, reason, values)])``."""
+    try:
+        good = fit(table, data, target)
+        if not _nulls(good, _required(table)):
+            return good, []
+    except Exception as e:  # noqa: BLE001 - only value problems fall through to the row-by-row pass
+        if not _row_error(e):
+            raise
+    rows = data.to_pylist()
+    good, bad = fit_rows(table, rows, data.schema, target)
+    return good, [(i, reason, rows[i]) for i, reason in bad]
+
+
 class Pipes:
     def __init__(self, engine, store: dict, catalog: dict, audit=None, changes=None,
                  urn: Optional[Callable[[str, str], str]] = None, webhook_secret: str = ""):
@@ -245,9 +319,12 @@ class Pipes:
             raise PipeError("target is namespace.table")
         if prefix.startswith("/") or ".." in prefix:
             raise PipeError("prefix is a key prefix in the bucket")
+        bad_rows = str(body.get("bad_rows") or "fail")
+        if bad_rows not in BAD_ROWS or (bad_rows == "quarantine" and fmt == "files"):
+            raise PipeError("bad_rows: fail, or quarantine (not for files pipes)")
         row = {"id": uuid.uuid4().hex, "name": name[:256], "bucket": bucket, "prefix": prefix, "format": fmt, "target": target,
                "create_table": bool(body.get("create_table")), "enabled": bool(body.get("enabled", True)),
-               "created_by": actor, "created_ms": _now()}
+               "created_by": actor, "created_ms": _now(), "bad_rows": bad_rows}
         return row
 
     def list(self) -> list[dict]:
@@ -266,8 +343,16 @@ class Pipes:
             if not conn.execute(delete(pipes).where(pipes.c.id == pid)).rowcount:
                 raise PipeError("no such pipe", 404)
             conn.execute(delete(pipe_files).where(pipe_files.c.pipe_id == pid))
+            conn.execute(delete(pipe_rejects).where(pipe_rejects.c.pipe_id == pid))
             if self.audit is not None:
                 self.audit.record("lakehouse", "pipe.deleted", actor, None, {"pipe": pid}, conn=conn)
+
+    def rejects(self, pid: str, limit: int = 500) -> list[dict]:
+        """The rows set aside (bad_rows: quarantine), newest first, with the reason and the row as it was."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(pipe_rejects).where(pipe_rejects.c.pipe_id == pid)
+                                .order_by(pipe_rejects.c.rejected_ms.desc(), pipe_rejects.c.row).limit(limit)).all()
+        return [dict(r._mapping) for r in rows]
 
     def files(self, pid: str, limit: int = 500) -> list[dict]:
         with self.engine.connect() as conn:
@@ -336,16 +421,22 @@ class Pipes:
 
         return RestCatalog("cairn-pipes", **self.catalog_props)
 
-    def _append(self, pipe: dict, data) -> int:
+    def _append(self, pipe: dict, data) -> tuple[int, list]:
+        """Rows loaded, and (with bad_rows: quarantine) the rows set aside."""
         table = open_table(self._catalog(), pipe["target"], data.schema, pipe["create_table"])
         if pipe["format"] == "files":
             from pyiceberg.expressions import EqualTo
 
             # One row per object: its new version replaces the old one, in one commit.
             table.overwrite(fit(table, data, pipe["target"]), overwrite_filter=EqualTo("key", data.column("key")[0].as_py()))
+            return len(data), []
+        if pipe.get("bad_rows") == "quarantine":
+            good, bad = split_rows(table, data, pipe["target"])
         else:
-            table.append(fit(table, data, pipe["target"]))
-        return len(data)
+            good, bad = fit(table, data, pipe["target"]), []
+        if len(good):
+            table.append(good)
+        return len(good), bad
 
     def forget(self, pipe: dict, key: str) -> bool:
         """A files pipe: the row of an object that was deleted goes too."""
@@ -372,16 +463,23 @@ class Pipes:
                     pipe_files.c.pipe_id == pipe["id"], pipe_files.c.key == key, pipe_files.c.version == version))).first()
             if done is not None:
                 return None
-            rows, error = None, None
+            rows, error, bad = None, None, []
             try:
-                rows = self._append(pipe, self._read(pipe["format"], f"{pipe['bucket']}/{key}"))
+                rows, bad = self._append(pipe, self._read(pipe["format"], f"{pipe['bucket']}/{key}"))
             except Exception as e:  # noqa: BLE001 - recorded on the file; the next file still loads
                 error = str(e).splitlines()[0][:2000] if str(e) else type(e).__name__
                 logger.warning("pipe %s: %s failed: %s", pipe["name"], key, error)
             rec = {"pipe_id": pipe["id"], "key": key, "version": version, "status": "error" if error else "ok",
-                   "rows": rows, "error": error, "loaded_ms": _now()}
+                   "rows": rows, "error": error, "loaded_ms": _now(), "rejected": len(bad) if bad else None}
             with self.engine.begin() as conn:
                 conn.execute(pipe_files.insert().values(**rec))
+                if bad:
+                    now = _now()
+                    conn.execute(pipe_rejects.insert(), [
+                        {"pipe_id": pipe["id"], "key": key, "version": version, "row": i, "reason": reason[:1000],
+                         "value": json.dumps(values, default=str)[:4096], "rejected_ms": now} for i, reason, values in bad])
+            if bad:
+                logger.warning("pipe %s: %s: %d row(s) set aside", pipe["name"], key, len(bad))
         if not error and self.changes is not None:
             self.changes.record([self.urn(*pipe["target"].split("."))], "pipe", f"pipe:{pipe['name']}")
         return rec
@@ -512,6 +610,11 @@ def build_pipes_router(p: Pipes, current_principal, authorize) -> Any:
     def files(pid: str, pr=Depends(current_principal)):
         admin(pr)
         return p.files(pid)
+
+    @router.get("/{pid}/rejects")
+    def rejects(pid: str, pr=Depends(current_principal)):
+        admin(pr)
+        return p.rejects(pid)
 
     @router.post("/{pid}/sweep")
     async def sweep(pid: str, pr=Depends(current_principal)):

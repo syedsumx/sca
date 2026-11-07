@@ -268,6 +268,49 @@ def test_the_source_is_lineage_and_a_failed_write_creates_nothing(streams):
         s.graph = None
 
 
+def test_bad_rows_quarantine_sets_aside_what_the_table_refuses(streams):
+    """Bad-row quarantine: by default a row the table refuses (a value that does not convert) stops the write;
+    with ``bad_rows: quarantine`` it is set aside with its offset and the reason, and the rest commit. In an
+    upsert stream the refused change leaves its key alone: the row already there stays."""
+    from cairn.pipelines.streams import StreamError
+
+    s = streams
+    with pytest.raises(StreamError, match="bad_rows"):
+        s.create({"name": "q0", "format": "http", "target": "raw.q0", "bad_rows": "skip"}, "urn:li:corpuser:admin")
+    strict = s.create({"name": "q-strict", "format": "http", "target": "raw.qstrict", "create_table": True},
+                      "urn:li:corpuser:admin")
+    assert strict["bad_rows"] == "fail"
+    assert s.ingest("q-strict", "a", [{"id": 1, "amount": 9.5}])["written"] == 1
+    import pyarrow as pa
+
+    with pytest.raises((pa.ArrowInvalid, pa.ArrowTypeError)):        # the batch the table refuses stops the write
+        s.ingest("q-strict", "a", [{"id": 2, "amount": 3.0}, {"id": 3, "amount": "n/a"}])
+    assert [r["id"] for r in table_rows(s, "raw.qstrict")] == [1]          # nothing of the refused batch
+
+    s.create({"name": "q-append", "format": "http", "target": "raw.qappend", "create_table": True,
+              "bad_rows": "quarantine"}, "urn:li:corpuser:admin")
+    assert s.ingest("q-append", "a", [{"id": 1, "amount": 9.5}])["written"] == 1
+    out = s.ingest("q-append", "a", [{"id": 2, "amount": 3.0}, {"id": 3, "amount": "n/a"}, {"id": 4, "amount": 1.5},
+                                     {"id": "five", "amount": 2.0}])
+    assert (out["written"], out["rejected"], out["next_offset"]) == (2, 2, 5), out
+    assert sorted((r["id"], r["amount"]) for r in table_rows(s, "raw.qappend")) == [(1, 9.5), (2, 3.0), (4, 1.5)]
+    st = s.by_name("q-append")
+    rej = sorted(s.rejects(st["id"]), key=lambda r: r["offset"])
+    assert [r["offset"] for r in rej] == [2, 4] and all(r["reason"].startswith("[a] ") for r in rej), rej
+    assert json.loads(rej[0]["value"]) == {"id": 3, "amount": "n/a"}
+    # A retry of the same request writes nothing twice and files nothing twice.
+    again = s.ingest("q-append", "a", [{"id": 2, "amount": 3.0}, {"id": 3, "amount": "n/a"}, {"id": 4, "amount": 1.5},
+                                       {"id": "five", "amount": 2.0}], offset=1)
+    assert again["written"] == 0 and again["duplicates"] == 4 and len(s.rejects(st["id"])) == 2
+
+    s.create({"name": "q-upsert", "format": "http", "mode": "upsert", "key": "id", "target": "raw.qupsert",
+              "create_table": True, "bad_rows": "quarantine"}, "urn:li:corpuser:admin")
+    s.ingest("q-upsert", "a", [{"id": 1, "amount": 9.5}, {"id": 2, "amount": 3.0}])
+    s.ingest("q-upsert", "a", [{"id": 1, "amount": "oops"}, {"id": 2, "amount": 4.0}, {"id": 3, "amount": 5.0}])
+    assert sorted((r["id"], r["amount"]) for r in table_rows(s, "raw.qupsert")) == [(1, 9.5), (2, 4.0), (3, 5.0)]
+    assert [r["offset"] for r in s.rejects(s.by_name("q-upsert")["id"])] == [2]
+
+
 REDPANDA = "redpandadata/redpanda:v25.2.9"
 
 
