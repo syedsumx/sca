@@ -288,7 +288,12 @@ class LakehouseAccess:
     def _decide_tables(self, actor: str, groups: list[str], tables: list[dict], allowed, out: list) -> None:
         for t in tables:
             try:
-                urn = self.urn(list(t.get("namespace") or []), str(t.get("name") or ""))
+                namespace = list(t.get("namespace") or [])
+                urn = self.urn(namespace, str(t.get("name") or ""))
+                if not self.access._resident({"catalogName": self.trino_catalog, "schemaName": ".".join(namespace)}):
+                    # Pinned to a region this deployment is not allowed to process it in: seen, never read.
+                    out.append({**NOTHING, "view": allowed(VIEW, urn)})
+                    continue
                 r = {"view": allowed(VIEW, urn), "read": allowed(READ, urn), "write": allowed(WRITE, urn),
                      "manage": allowed(MANAGE, urn), "restricted": False}
                 if r["read"]:

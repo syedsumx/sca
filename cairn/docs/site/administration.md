@@ -222,6 +222,41 @@ A.5.18) ask for this evidence.
   - At the due date, the grant nobody answered for was revoked. A `keep` campaign kept it.
   - The audit chain stayed whole.
 
+## Data residency
+
+Data residency pins lakehouse namespaces to a region. Their tables are then stored only in that region's storage, are read and written only by a deployment in a region the pin allows, and are sent out only to such regions.
+
+- **The rules are deployment configuration.** They live in one JSON file, which Cairn reads as `CAIRN_RESIDENCY_FILE` and Cairn Catalog as `CAIRN_CATALOG_RESIDENCY_FILE`. In Kubernetes, set `cairn.residency.rules` in the chart: it becomes a ConfigMap mounted into every Cairn component and the catalog.
+  - A pin changes only through a reviewed deployment change. No administrator moves pinned data by changing a setting, and there is no API that does.
+  - A file that is set but invalid stops Cairn and the catalog at start. Unknown keys are refused too, so a misspelt key cannot leave namespaces unpinned.
+
+  ```json
+  {"regions": {"eu": {"location": "s3://lake-eu/warehouse"}, "us": {"location": "s3://lake-us/warehouse"}},
+   "pins": [{"namespaces": ["crm_eu", "hr_*"], "region": "eu"},
+            {"namespaces": ["sales_us"], "region": "us", "allow": ["us", "eu"]}]}
+  ```
+
+  - `regions` gives each region's storage location. Each region's bucket must exist in the store.
+  - `pins` names namespaces (or `*` patterns) and their region. `allow` lists the regions their data may be processed in and sent to. Without it, that is the pin's own region alone.
+- **The deployment's region.** `CAIRN_REGION` (chart: `cairn.residency.region`) is where this deployment runs: Trino, Spark and the catalog's engines. A pinned table is read and written only when this region is in its pin's `allow`. Elsewhere (a standby in another region, a restored copy, a test deployment), the table is listed but no rows are read or written. With no region set, pinned tables are processed nowhere.
+- **Where the data is stored.** Cairn Catalog keeps a pinned namespace's tables under `<region location>/<namespace>`, whoever asks, administrators included. It refuses:
+  - any other location: at create, at register, in a commit, or in a `write.data.path`, `write.metadata.path` or `write.object-storage.path` property;
+  - a change of the namespace's own `location`;
+  - a clone or rename between namespaces that are not pinned alike, because a clone shares its source's files and a rename keeps them.
+
+  Region locations are reserved for pinned namespaces: an unpinned table may not point into one, so pinned files are never reachable through a table that is not pinned. The store role that per-table keys come from is given the region buckets as well.
+- **What leaves.**
+  - **Shares.** A share takes the recipient's `region` (`POST /v1/shares` with `"region": "eu"`). A pinned table is shared only with a recipient whose region its pin allows, and that is checked again on every request the recipient makes. A recipient with no region gets no pinned table.
+  - **Reverse syncs.** A reverse sync takes the `region` the app keeps its data in, checked at save and at every run.
+- **Seeing the rules.** `GET /governance/residency` (`MANAGE_POLICIES`) shows the deployment's region, the regions and the pins.
+- **Fail closed.** If a namespace cannot be decided, it is refused: for example, when two pins put it in different regions, or when the check itself fails.
+- **Pinning a namespace that already has tables.** Tables stored outside the region's location refuse commits until they are moved, for example with `CREATE TABLE … AS SELECT` into the pinned namespace.
+- **What it does not follow.** A copy made with SQL into an unpinned namespace is a new table, and the pin does not follow it. Keep the deployment's default warehouse in the deployment's own region, and use lineage to find copies of pinned tables. Reads still need `allow` to include the deployment's region.
+- **Tested** in `tests/test_residency_e2e.py`, with the real store and catalog and the Cairn API:
+  - locations, refusals for an administrator, renames and `write.data.path`;
+  - reads from an allowed and a refused region, through the catalog and through Trino's access decisions;
+  - shares by region, rechecked when the rules change, and reverse syncs.
+
 ## Consent
 
 Purposes that need consent, and each person's consent, are kept by Cairn (`cairn_consent_purposes`,
@@ -2003,7 +2038,7 @@ A multi-table transaction changes every table or none.
 
 **Sharing tables outside the organisation.** A share gives a recipient, such as a partner or an auditor, read access to named tables until it expires or is revoked. The recipient reads with any Iceberg REST client (pyiceberg, Spark, Trino, Snowflake, DuckDB) from Cairn Catalog. Shares are listed under **Pipelines → Shares**.
 
-- **Making a share.** `POST /v1/shares` with `{"name": "partner-a", "recipient": "Partner A", "tables": ["analytics.products"], "expires_days": 30}`. You need MANAGE on every table you share. The answer holds the recipient's credential and connection settings, and is the only time the credential is shown. Only a hash of it is kept.
+- **Making a share.** `POST /v1/shares` with `{"name": "partner-a", "recipient": "Partner A", "tables": ["analytics.products"], "expires_days": 30}`. Add `"region"` (where the recipient keeps what it reads) to share tables pinned to a region (see "Data residency"). You need MANAGE on every table you share. The answer holds the recipient's credential and connection settings, and is the only time the credential is shown. Only a hash of it is kept.
 - **What the recipient sees.** Only the shared tables and their namespaces, read-only. Their storage keys are the catalog's scoped keys for one table at a time, read-only. A share never gets the store's own key, and the catalog refuses shares unless `CAIRN_CATALOG_VEND_CREDENTIALS=scoped`.
 - **Masks and row filters.** A table to which a column mask or row filter applies is never shared, because its files hold what they hide. This is checked when the share is made and again on every request.
 - **Revoking.** `POST /v1/shares/{id}/revoke`, or **Revoke** in the UI, stops the share at once. The catalog asks Cairn about the recipient on every request, without caching, so the next request and the next token renewal are refused. Storage keys already handed out last at most the catalog's credential lifetime (`CAIRN_CATALOG_VEND_SECONDS`). Expiry works the same way.

@@ -217,6 +217,9 @@ class TrinoAccess:
         self.ai_admit: Optional[Callable[[str], bool]] = None
         # held(urn): a legal hold is on the table (cairn.governance.records); None: holds are not in use.
         self.held: Optional[Callable[[str], bool]] = None
+        # resident(catalog, schema): may this deployment read and write the schema's tables (data residency,
+        # cairn.governance.residency)? None: no residency rules.
+        self.resident: Optional[Callable[[str, str], bool]] = None
         self.plan_for = plan_for
         self.catalogs = catalogs
         # metric_view_source(table): a published metric's view (SECURITY INVOKER) is read on the terms of the
@@ -298,6 +301,15 @@ class TrinoAccess:
     def table_urn(self, t: dict) -> str:
         return self.urn(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
 
+    def _resident(self, t: dict) -> bool:
+        if self.resident is None:
+            return True
+        try:
+            return bool(self.resident(str(t.get("catalogName") or ""), str(t.get("schemaName") or "")))
+        except Exception as e:  # noqa: BLE001 - fail closed: residency that cannot be checked refuses
+            logger.warning("residency check failed for %s: %s", self._tkey(t), e)
+            return False
+
     def _room_tables(self, user: str) -> Optional[set[str]]:
         if self.cleanroom_tables is None or not user.startswith("cleanroom-"):
             return None
@@ -362,6 +374,9 @@ class TrinoAccess:
             if (t.get("schemaName") == "information_schema" or t.get("catalogName") == "system") and TABLE_OPS[op] in (VIEW, READ):
                 return True
             name = str(t.get("tableName") or "")
+            if TABLE_OPS[op] != VIEW and not self._resident(t):
+                logger.info("%s on %s refused: its data is pinned to another region", op, self._tkey(t))
+                return False
             if "$" in name:                            # an Iceberg metadata table: decided on its table
                 base, meta = name.split("$", 1)
                 if TABLE_OPS[op] not in (VIEW, READ):

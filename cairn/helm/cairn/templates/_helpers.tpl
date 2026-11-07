@@ -144,6 +144,12 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end -}}
 
+{{- define "cairn.residencyConfigMap" -}}
+{{- if .Values.cairn.residency.rules -}}
+{{- printf "%s-residency" (include "cairn.fullname" .) -}}
+{{- end -}}
+{{- end -}}
+
 {{- define "cairn.autoMonitorsConfigMap" -}}
 {{- if .Values.cairn.quality.autoMonitors.existingConfigMap -}}
 {{- .Values.cairn.quality.autoMonitors.existingConfigMap -}}
@@ -178,6 +184,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- if .Values.cairn.licence.existingSecret }}
 - name: CAIRN_LICENCE_FILE
   value: /run/cairn-licence/licence
+{{- end }}
+{{- with .Values.cairn.residency.region }}
+- name: CAIRN_REGION
+  value: {{ . | quote }}
+{{- end }}
+{{- if include "cairn.residencyConfigMap" . }}
+- name: CAIRN_RESIDENCY_FILE
+  value: /etc/cairn-residency/residency.json
 {{- end }}
 - name: CAIRN_AUTHZ_MODE
   value: {{ .Values.cairn.auth.mode | quote }}
@@ -452,6 +466,11 @@ spec:
               mountPath: /etc/cairn/config/quality
               readOnly: true
             {{- end }}
+            {{- if include "cairn.residencyConfigMap" $root }}
+            - name: residency
+              mountPath: /etc/cairn-residency
+              readOnly: true
+            {{- end }}
             {{- if $root.Values.cairn.licence.existingSecret }}
             - name: licence
               mountPath: /run/cairn-licence
@@ -482,6 +501,11 @@ spec:
         - name: auto-monitors
           configMap:
             name: {{ include "cairn.autoMonitorsConfigMap" $root }}
+        {{- end }}
+        {{- if include "cairn.residencyConfigMap" $root }}
+        - name: residency
+          configMap:
+            name: {{ include "cairn.residencyConfigMap" $root }}
         {{- end }}
         {{- with $root.Values.cairn.licence.existingSecret }}
         - name: licence

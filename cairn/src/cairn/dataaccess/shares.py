@@ -14,7 +14,10 @@ Trino, Snowflake, DuckDB) from Cairn Catalog:
   last at most the catalog's credential lifetime (``CAIRN_CATALOG_VEND_SECONDS``);
 * a table to which a column mask or row filter applies is never shared: its files hold what the mask or
   filter hides. That is checked when the share is made and again on every request, so a mask added
-  later stops the table from being read through the share.
+  later stops the table from being read through the share;
+* a table pinned to a region (data residency, ``cairn.governance.residency``) is shared only with a recipient
+  whose ``region`` its pin allows, also checked on every request: a recipient with no region gets no pinned
+  table.
 
 Only people who may manage every table they share (``MANAGE`` on it) make shares; operators
 (``MANAGE_SYSTEM_OPERATIONS``) see and revoke all of them. Only a hash of the credential is kept. Every
@@ -59,6 +62,7 @@ lakehouse_shares = Table(
     Column("revoked_s", BigInteger, nullable=True),
     Column("revoked_by", String(256), nullable=True),
     Column("last_used_s", BigInteger, nullable=True),
+    Column("region", String(32), nullable=True),           # where the recipient keeps what it reads (residency)
 )
 
 
@@ -88,6 +92,7 @@ class Shares:
         # What the recipient connects to: the catalog and the token endpoint as they reach them.
         self.catalog_url = catalog_url or os.environ.get("CAIRN_SHARES_CATALOG_URL", "")
         self.token_url = token_url or os.environ.get("CAIRN_SHARES_TOKEN_URL", "")
+        self.residency = None                  # cairn.governance.residency.Residency, when rules are in force
 
     # ---- the share's own records -----------------------------------------------------------------
     def _row(self, conn, sid: str) -> Optional[dict]:
@@ -101,13 +106,16 @@ class Shares:
         return {"id": row["id"], "name": row["name"], "recipient": row["recipient"], "tables": json.loads(row["tables"]),
                 "created_by": row["created_by"], "created_at": row["created_s"], "expires_at": row["expires_s"],
                 "revoked_at": row["revoked_s"], "revoked_by": row["revoked_by"], "last_used_at": row["last_used_s"],
-                "state": state}
+                "region": row.get("region"), "state": state}
+
+    def _may_leave(self, table: str, region: Optional[str]) -> bool:
+        return self.residency is None or self.residency.transfer_allowed(".".join(_split(table)[0]), region)
 
     def _restricted(self, sid: str, urn: str) -> bool:
         return self.lake._restricted(f"urn:li:corpuser:{PREFIX}{sid}", [], urn)
 
     def create(self, actor: str, groups: list[str], name: str, recipient: str, tables: list[str],
-               expires_days: int) -> dict:
+               expires_days: int, region: Optional[str] = None) -> dict:
         if not NAME.match(name or ""):
             raise ShareError("name: lowercase letters, digits, '.', '_' and '-'")
         recipient = (recipient or "").strip()
@@ -121,6 +129,16 @@ class Shares:
             raise ShareError(f"tables are named namespace.table: {', '.join(bad)}")
         if not 1 <= int(expires_days or 0) <= self.max_days:
             raise ShareError(f"expires_days: between 1 and {self.max_days}")
+        from cairn.governance.residency import ResidencyError, valid_region
+
+        try:
+            region = valid_region(region)
+        except ResidencyError as e:
+            raise ShareError(str(e))
+        pinned = [t for t in tables if not self._may_leave(t, region)]
+        if pinned:
+            where = f"a recipient in {region}" if region else "a recipient with no region"
+            raise ShareError(f"{', '.join(pinned)} may not be shared with {where}: data residency", 409)
         sid = uuid.uuid4().hex
         from cairn.dataaccess.trino import MANAGE
 
@@ -135,7 +153,8 @@ class Shares:
         now = int(time.time())
         row = {"id": sid, "name": name, "recipient": recipient, "tables": json.dumps(tables),
                "secret_hash": _hash(secret), "created_by": actor, "created_s": now,
-               "expires_s": now + int(expires_days) * 86400, "revoked_s": None, "revoked_by": None, "last_used_s": None}
+               "expires_s": now + int(expires_days) * 86400, "revoked_s": None, "revoked_by": None, "last_used_s": None,
+               "region": region}
         from sqlalchemy.exc import IntegrityError
 
         try:
@@ -144,7 +163,7 @@ class Shares:
                 if self.audit is not None:
                     self.audit.record("shares", "share.created", actor, None,
                                       {"share": sid, "name": name, "recipient": recipient, "tables": tables,
-                                       "expires_at": row["expires_s"]}, conn=conn)
+                                       "region": region, "expires_at": row["expires_s"]}, conn=conn)
         except IntegrityError:
             raise ShareError(f"a share named {name} exists", 409)
         out = self._public(row)
@@ -223,7 +242,8 @@ class Shares:
             for t in tables:
                 ns, name = [str(x) for x in t.get("namespace") or []], str(t.get("name") or "")
                 full = ".".join(ns + [name])
-                if full in shared and not self._restricted(sid, self.lake.urn(ns, name)):
+                if full in shared and self._may_leave(full, row.get("region")) \
+                        and not self._restricted(sid, self.lake.urn(ns, name)):
                     out.append({"view": True, "read": True, "write": False, "manage": False, "restricted": False})
                 else:
                     out.append(dict(NOTHING))
@@ -259,10 +279,11 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
 
     @router.post("")
     def create(name: str = Body(...), recipient: str = Body(...), tables: list[str] = Body(...),
-               expires_days: int = Body(30), p=Depends(current_principal)):
-        """Shares tables with a recipient outside the organisation. The credential is shown once."""
+               expires_days: int = Body(30), region: Optional[str] = Body(None), p=Depends(current_principal)):
+        """Shares tables with a recipient outside the organisation. The credential is shown once. ``region``:
+        where the recipient keeps what it reads (needed for tables pinned to a region)."""
         person(p)
-        return call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days)
+        return call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region)
 
     @router.get("")
     def list_(p=Depends(current_principal)):

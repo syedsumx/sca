@@ -15,6 +15,8 @@
   upsert by the external id field (200 per call). Rows that disappear are not deleted in the app.
 * **Per-record failures** are counted and the first few kept on the run; only records the app accepted are
   remembered as sent, so failed ones are tried again next run. A failed run is audited and told to the owner.
+* **Data residency.** A source pinned to a region (``cairn.governance.residency``) leaves only for a ``region``
+  its pin allows: give the sync the region the app keeps its data in. Checked at save and at every run.
 * **Keys** come from a secret scope read as the owner (``cairn.pipelines.saas.connector_keys``): the same fail-
   closed rules as the SaaS connectors.
 """
@@ -66,6 +68,7 @@ reverse_syncs = Table(
     Column("last_failed", Integer, nullable=True),
     Column("last_error", Text, nullable=True),
     Column("created_ms", BigInteger, nullable=False),
+    Column("region", String(32), nullable=True),            # where the app keeps the data (residency)
 )
 reverse_sync_rows = Table(
     "cairn_reverse_sync_rows", metadata,
@@ -138,6 +141,8 @@ class ReverseSyncs:
         self.timeout = float(os.environ.get("CAIRN_SAAS_HTTP_TIMEOUT", "60"))
         self.pool = ThreadPoolExecutor(max_workers=int(os.environ.get("CAIRN_REVERSE_ETL_CONCURRENCY", "2")),
                                        thread_name_prefix="cairn-reverse-etl")
+        # may_leave(schema, region): may the source schema's data go to that region (data residency)? None: no rules.
+        self.may_leave: Optional[Callable[[str, Optional[str]], bool]] = None
 
     def _source_urn(self, source: str) -> str:
         return self.urn(*source.split("."))
@@ -168,14 +173,30 @@ class ReverseSyncs:
 
             if not isinstance(cron, str) or not croniter.is_valid(cron):
                 raise SaasError("cron: a cron expression (UTC)")
+        from cairn.governance.residency import ResidencyError, valid_region
+
+        try:
+            region = valid_region(body.get("region"))
+        except ResidencyError as e:
+            raise SaasError(str(e))
         return {"kind": kind, "source": source, "object": obj, "key_column": key["column"], "key_field": key["field"],
                 "mapping": dict(sorted(mapping.items())), "secret_scope": str(body["secret_scope"]), "cron": cron,
-                "enabled": bool(body.get("enabled", True))}
+                "enabled": bool(body.get("enabled", True)), "region": region}
 
     def _need(self, owner: str, v: dict) -> None:
         urn = self._source_urn(v["source"])
         if not self.may_export(owner, urn):
             raise SaasError(f"{owner} may not send {v['source']} out of the platform ({PRIVILEGE})", 403)
+        if self.may_leave is not None:
+            region = v.get("region")
+            try:
+                ok = self.may_leave(v["source"].split(".")[0], region)
+            except Exception as e:  # noqa: BLE001 - fail closed
+                logger.warning("residency check failed for %s: %s", v["source"], e)
+                ok = False
+            if not ok:
+                where = f"region {region}" if region else "an app with no region"
+                raise SaasError(f"{v['source']} may not leave for {where}: data residency", 409)
         plan = self.plan_for(owner, urn)
         cols = [v["key_column"], *v["mapping"]]
         masked = sorted(c for c in cols if plan.all_fields or plan.masks_field(c))

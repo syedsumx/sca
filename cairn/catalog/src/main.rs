@@ -34,6 +34,7 @@ mod api;
 mod db;
 mod identity;
 mod pg;
+mod residency;
 mod s3;
 
 use std::sync::Arc;
@@ -130,7 +131,7 @@ fn main() {
 /// How the catalog hands storage access to engines (CAIRN_CATALOG_VEND_CREDENTIALS):
 /// `scoped` (temporary per-table keys from the store's STS; the default when CAIRN_CATALOG_VEND_ROLE is
 /// set), `static` (the catalog's own key, the default otherwise) or `off`.
-async fn vend_mode(store: &s3::Client, warehouse: &str) -> api::Vend {
+async fn vend_mode(store: &s3::Client, warehouse: &str, extra_buckets: &[String]) -> api::Vend {
     let role = env("CAIRN_CATALOG_VEND_ROLE", "");
     let mode = env("CAIRN_CATALOG_VEND_CREDENTIALS", if role.is_empty() { "static" } else { "scoped" });
     match mode.as_str() {
@@ -145,7 +146,8 @@ async fn vend_mode(store: &s3::Client, warehouse: &str) -> api::Vend {
                 .ok()
                 .filter(|s| (900..=43200).contains(s))
                 .unwrap_or_else(|| fail("CAIRN_CATALOG_VEND_SECONDS", "900 to 43200"));
-            let role_arn = ensure_vend_role(store, &role, warehouse).await.unwrap_or_else(|e| fail("CAIRN_CATALOG_VEND_ROLE", e));
+            let role_arn =
+                ensure_vend_role(store, &role, warehouse, extra_buckets).await.unwrap_or_else(|e| fail("CAIRN_CATALOG_VEND_ROLE", e));
             // Prove it works now rather than on the first table load.
             let policy = api::table_policy(&format!("{}/_probe", warehouse.trim_end_matches('/')), true).unwrap_or_default();
             store
@@ -168,17 +170,21 @@ async fn vend_mode(store: &s3::Client, warehouse: &str) -> api::Vend {
 /// The store role scoped credentials come from: a role ARN as given, or a role name the catalog creates
 /// when missing (trusted only by the catalog's key; allowed the warehouse bucket, which each session's
 /// policy narrows to one table).
-async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Result<String, String> {
+async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str, extra_buckets: &[String]) -> Result<String, String> {
     if role.starts_with("arn:") {
         return Ok(role.to_string());
     }
     let (status, xml) =
         store.query_api("iam", &[("Action", "GetRole"), ("Version", "2010-05-08"), ("RoleName", role)]).await.map_err(|e| e.to_string())?;
-    if status == 200 {
-        return s3::xml_text(&xml, "Arn").map(str::to_string).ok_or_else(|| "GetRole: no Arn".into());
-    }
-    if s3::xml_text(&xml, "Code") != Some("NoSuchEntity") {
+    let existing = if status == 200 {
+        Some(s3::xml_text(&xml, "Arn").map(str::to_string).ok_or("GetRole: no Arn")?)
+    } else if s3::xml_text(&xml, "Code") != Some("NoSuchEntity") {
         return Err(format!("GetRole {role}: HTTP {status}: {}", s3::xml_text(&xml, "Message").unwrap_or(&xml)));
+    } else {
+        None
+    };
+    if existing.is_some() && extra_buckets.is_empty() {
+        return Ok(existing.unwrap_or_default());
     }
     let (_, who) =
         store.query_api("sts", &[("Action", "GetCallerIdentity"), ("Version", "2011-06-15")]).await.map_err(|e| e.to_string())?;
@@ -187,38 +193,49 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Re
     let trust = serde_json::json!({"Version": "2012-10-17", "Statement": [
         {"Effect": "Allow", "Principal": {"AWS": me}, "Action": "sts:AssumeRole"}]})
     .to_string();
+    // The warehouse bucket, and the region locations' buckets when namespaces are pinned (data residency).
+    let mut buckets = vec![bucket.to_string()];
+    buckets.extend(extra_buckets.iter().cloned());
+    buckets.sort();
+    buckets.dedup();
+    let resources: Vec<String> = buckets.iter().flat_map(|b| [format!("arn:aws:s3:::{b}"), format!("arn:aws:s3:::{b}/*")]).collect();
     let access = serde_json::json!({"Version": "2012-10-17", "Statement": [
-        {"Effect": "Allow", "Action": "s3:*", "Resource": [format!("arn:aws:s3:::{bucket}"), format!("arn:aws:s3:::{bucket}/*")]}]})
+        {"Effect": "Allow", "Action": "s3:*", "Resource": resources}]})
     .to_string();
-    let (status, xml) = store
-        .query_api(
-            "iam",
-            &[
-                ("Action", "CreateRole"),
-                ("Version", "2010-05-08"),
-                ("RoleName", role),
-                ("AssumeRolePolicyDocument", &trust),
-                ("MaxSessionDuration", "43200"),
-                ("Description", "Cairn Catalog: per-table credentials for engines"),
-            ],
-        )
-        .await
-        .map_err(|e| e.to_string())?;
-    let arn = if status == 200 {
-        s3::xml_text(&xml, "Arn").ok_or("CreateRole: no Arn")?.to_string()
-    } else if s3::xml_text(&xml, "Code") == Some("EntityAlreadyExists") {
-        // Another catalog replica, starting at the same time, created it first; its policy is set below
-        // all the same (PutRolePolicy replaces it with the same document).
+    let created = existing.is_none();
+    let arn = if let Some(arn) = existing {
+        arn
+    } else {
         let (status, xml) = store
-            .query_api("iam", &[("Action", "GetRole"), ("Version", "2010-05-08"), ("RoleName", role)])
+            .query_api(
+                "iam",
+                &[
+                    ("Action", "CreateRole"),
+                    ("Version", "2010-05-08"),
+                    ("RoleName", role),
+                    ("AssumeRolePolicyDocument", &trust),
+                    ("MaxSessionDuration", "43200"),
+                    ("Description", "Cairn Catalog: per-table credentials for engines"),
+                ],
+            )
             .await
             .map_err(|e| e.to_string())?;
-        if status != 200 {
-            return Err(format!("GetRole {role}: HTTP {status}"));
+        if status == 200 {
+            s3::xml_text(&xml, "Arn").ok_or("CreateRole: no Arn")?.to_string()
+        } else if s3::xml_text(&xml, "Code") == Some("EntityAlreadyExists") {
+            // Another catalog replica, starting at the same time, created it first; its policy is set below
+            // all the same (PutRolePolicy replaces it with the same document).
+            let (status, xml) = store
+                .query_api("iam", &[("Action", "GetRole"), ("Version", "2010-05-08"), ("RoleName", role)])
+                .await
+                .map_err(|e| e.to_string())?;
+            if status != 200 {
+                return Err(format!("GetRole {role}: HTTP {status}"));
+            }
+            s3::xml_text(&xml, "Arn").ok_or("GetRole: no Arn")?.to_string()
+        } else {
+            return Err(format!("CreateRole {role}: HTTP {status}: {}", s3::xml_text(&xml, "Message").unwrap_or(&xml)));
         }
-        s3::xml_text(&xml, "Arn").ok_or("GetRole: no Arn")?.to_string()
-    } else {
-        return Err(format!("CreateRole {role}: HTTP {status}: {}", s3::xml_text(&xml, "Message").unwrap_or(&xml)));
     };
     let (status, xml) = store
         .query_api(
@@ -236,7 +253,7 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str) -> Re
     if status != 200 {
         return Err(format!("PutRolePolicy {role}: HTTP {status}: {}", s3::xml_text(&xml, "Message").unwrap_or(&xml)));
     }
-    tracing::info!(role = %arn, "created the store role for scoped credentials");
+    tracing::info!(role = %arn, created, buckets = buckets.len(), "the store role for scoped credentials is set");
     Ok(arn)
 }
 
@@ -280,13 +297,16 @@ async fn serve(addr: String) {
     let s3cfg_endpoint = s3cfg.endpoint.clone();
     let warehouse_store = s3::Client::new(s3cfg.clone());
     s3::parse_location(&format!("{}/x", warehouse.trim_end_matches('/'))).unwrap_or_else(|e| fail("warehouse", e));
+    let residency = residency::Residency::from_env().unwrap_or_else(|e| fail("CAIRN_CATALOG_RESIDENCY_FILE", e));
+    let extra_buckets = residency.buckets();
     let cfg = api::Config {
         warehouse: warehouse.clone(),
         principals: principals(),
         s3: s3cfg,
-        vend: vend_mode(&warehouse_store, &warehouse).await,
+        vend: vend_mode(&warehouse_store, &warehouse, &extra_buckets).await,
         client_endpoint: env("CAIRN_CATALOG_CLIENT_S3_ENDPOINT", &s3cfg_endpoint),
         identity: identity_config(),
+        residency,
     };
     if cfg.identity.is_some() && !matches!(cfg.vend, api::Vend::Scoped { .. }) {
         // A person's token must never carry the catalog's own store key, nor nothing at all.

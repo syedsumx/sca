@@ -59,6 +59,8 @@ pub struct Config {
     pub client_endpoint: String,
     /// People and pipeline users (Cairn-issued tokens), decided by Cairn table by table.
     pub identity: Option<std::sync::Arc<crate::identity::Identity>>,
+    /// Namespaces pinned to a region: where their tables may live (data residency).
+    pub residency: crate::residency::Residency,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -621,6 +623,9 @@ impl Catalog {
                 }
                 scope(&req.namespace)?;
                 self.need_schemas(&principal).await?;
+                if let Some(l) = req.properties.get("location") {
+                    self.resident(&req.namespace, l, std::iter::empty())?;
+                }
                 self.db.create_namespace(&req.namespace, req.properties.clone())?;
                 Ok(json_resp(StatusCode::OK, &json!({"namespace": req.namespace, "properties": req.properties})))
             }
@@ -633,6 +638,9 @@ impl Catalog {
                         props.retain(|k, _| !k.starts_with(KEPT));
                         // Where its tables go unless they name a location (engines such as Trino build
                         // table locations from it).
+                        if matches!(self.cfg.residency.pin(&levels), Ok(Some(_))) {
+                            props.insert("location".into(), self.namespace_location(&levels));
+                        }
                         props.entry("location".into()).or_insert_with(|| self.namespace_location(&levels));
                         Ok(json_resp(StatusCode::OK, &json!({"namespace": levels, "properties": props})))
                     }
@@ -663,6 +671,9 @@ impl Catalog {
                     ));
                 }
                 self.need_schemas(&principal).await?;
+                if let Some(l) = req.updates.get("location") {
+                    self.resident(&levels, l, std::iter::empty())?;
+                }
                 let (updated, removed, missing) = self.db.update_namespace(&levels, &req.removals, &req.updates)?;
                 Ok(json_resp(StatusCode::OK, &json!({"updated": updated, "removed": removed, "missing": missing})))
             }
@@ -863,6 +874,7 @@ impl Catalog {
                 }
                 self.need(&principal, &req.source.namespace, &req.source.name, Need::Manage).await?;
                 self.need(&principal, &req.destination.namespace, &req.destination.name, Need::Manage).await?;
+                self.resident_move(&req.source.namespace, &req.destination.namespace)?;
                 self.db.rename_table((&req.source.namespace, &req.source.name), (&req.destination.namespace, &req.destination.name))?;
                 Ok(empty(StatusCode::NO_CONTENT))
             }
@@ -958,18 +970,48 @@ impl Catalog {
         Ok(t)
     }
 
-    /// A namespace's location: its own `location` property, else its place under the warehouse.
+    /// A namespace's location: its region's (when pinned), else its place under the warehouse.
     fn namespace_location(&self, levels: &[String]) -> String {
+        if let Ok(Some(pin)) = self.cfg.residency.pin(levels) {
+            return pin.base;
+        }
         format!("{}/{}", self.cfg.warehouse.trim_end_matches('/'), levels.join("/"))
     }
 
     fn default_location(&self, levels: &[String], name: &str) -> String {
         let suffix = &uuid::Uuid::new_v4().simple().to_string()[..8];
+        let pinned = matches!(self.cfg.residency.pin(levels), Ok(Some(_)));
         let base = match self.db.namespace(levels).ok().and_then(|p| p.get("location").cloned()) {
-            Some(l) => l.trim_end_matches('/').to_string(),
-            None => self.namespace_location(levels),
+            Some(l) if !pinned => l.trim_end_matches('/').to_string(),
+            _ => self.namespace_location(levels),
         };
         format!("{base}/{name}-{suffix}")
+    }
+
+    /// Data residency: may a table of the namespace live at `location`, with these properties?
+    fn resident<'a>(
+        &self,
+        levels: &[String],
+        location: &str,
+        props: impl IntoIterator<Item = (&'a String, &'a String)>,
+    ) -> Result<(), ApiError> {
+        let r = &self.cfg.residency;
+        if !r.active() {
+            return Ok(());
+        }
+        let refuse = |m: String| err(StatusCode::FORBIDDEN, "ForbiddenException", m);
+        r.check_location(levels, location).map_err(refuse)?;
+        for (k, v) in props {
+            if crate::residency::PATH_PROPERTIES.contains(&k.as_str()) {
+                r.check_location(levels, v).map_err(refuse)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Data residency: may a table move with its files between the two namespaces (a clone, a rename)?
+    fn resident_move(&self, from: &[String], to: &[String]) -> Result<(), ApiError> {
+        self.cfg.residency.check_move(from, to).map_err(|m| err(StatusCode::FORBIDDEN, "ForbiddenException", m))
     }
 
     async fn create_table(&self, levels: &[String], req: CreateTable) -> Result<Resp, ApiError> {
@@ -982,6 +1024,7 @@ impl Catalog {
         }
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
         s3::parse_location(&location)?;
+        self.resident(levels, &location, &req.properties)?;
         let mut properties = req.properties.clone();
         let format_version = match properties.remove("format-version").as_deref() {
             None | Some("2") => iceberg::spec::FormatVersion::V2,
@@ -1102,10 +1145,12 @@ impl Catalog {
         if self.db.table(target, new_name).is_ok() {
             return Err(db::Error::TableExists.into());
         }
+        self.resident_move(levels, target)?;
         let src = self.db.table(levels, name)?;
         let md: TableMetadata = serde_json::from_str(&src.metadata).map_err(|e| bad_request(e.to_string()))?;
         let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
         let location = self.default_location(target, new_name);
+        self.resident(target, &location, md.properties())?;
         let mut props = HashMap::new();
         props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
         props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
@@ -1258,6 +1303,8 @@ impl Catalog {
         self.db.namespace(levels)?;
         let bytes = self.store.get(&req.metadata_location).await?;
         let metadata: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
+        self.resident(levels, metadata.location(), metadata.properties())?;
+        self.resident(levels, &req.metadata_location, std::iter::empty())?;
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         let change = Change {
             namespace: db::ns_key(levels),
@@ -1315,6 +1362,7 @@ impl Catalog {
             builder = u.apply(builder).map_err(iceberg_err)?;
         }
         let metadata = builder.build().map_err(iceberg_err)?.metadata;
+        self.resident(levels, metadata.location(), metadata.properties())?;
         let location = match base_location.as_deref().map(MetadataLocation::from_str) {
             Some(Ok(cur)) => cur.with_next_version().with_new_metadata(&metadata),
             _ => MetadataLocation::new_with_metadata(metadata.location(), &metadata),

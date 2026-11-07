@@ -11,6 +11,18 @@ data:
     {{- $body | nindent 4 }}
   {{- end }}
 {{- end }}
+{{- if include "cairn.residencyConfigMap" . }}
+---
+# Data residency: one file for Cairn (CAIRN_RESIDENCY_FILE) and Cairn Catalog (CAIRN_CATALOG_RESIDENCY_FILE).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "cairn.residencyConfigMap" . }}
+  labels:
+    {{- include "cairn.labels" . | nindent 4 }}
+data:
+  residency.json: {{ toJson .Values.cairn.residency.rules | quote }}
+{{- end }}
 {{- if and .Values.cairn.quality.autoMonitors.files (not .Values.cairn.quality.autoMonitors.existingConfigMap) }}
 ---
 apiVersion: v1

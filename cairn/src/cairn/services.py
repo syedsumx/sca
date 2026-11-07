@@ -857,6 +857,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_saas(s)
         _build_reverse_etl(s)
         _build_records(s)
+        _wire_residency(s)
         from cairn.common.limits import ApiLimits
 
         s.limits = ApiLimits(s.engine, s.audit)
@@ -1886,6 +1887,29 @@ def _build_records(s: Services) -> None:
     s.records = Records(s.engine, s.privacy, s.data_access, signer, s.audit, proved)
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.held = s.records.held
+
+
+def _wire_residency(s: Services) -> None:
+    """Data residency (cairn.governance.residency): pinned namespaces read and written only by a deployment in a
+    region their pin allows, and sent only to such regions. An invalid CAIRN_RESIDENCY_FILE stops Cairn here."""
+    from cairn.governance.residency import Residency
+
+    s.residency = r = Residency.from_env()
+    if not r.active:
+        return
+    default_catalog = os.environ.get("CAIRN_LAKEHOUSE_TRINO_CATALOG", "lakehouse")
+
+    def lake_catalog() -> str:            # the Trino catalog that is the lakehouse (the pins name its schemas)
+        lake = getattr(s, "lakehouse", None)
+        return getattr(lake, "trino_catalog", None) or default_catalog
+    if getattr(s, "trino_access", None) is not None:
+        s.trino_access.resident = lambda catalog, schema: catalog != lake_catalog() or r.processing_allowed(schema)
+    if getattr(s, "shares", None) is not None:
+        s.shares.residency = r
+    if getattr(s, "reverse_syncs", None) is not None:
+        rs = s.reverse_syncs
+        s.reverse_syncs.may_leave = lambda schema, region: rs.catalog != lake_catalog() or r.transfer_allowed(schema, region)
+    logger.info("data residency: region %s, %d pin(s)", r.region or "(none)", len(r.pins))
 
 
 def _build_consent(s: Services) -> None:

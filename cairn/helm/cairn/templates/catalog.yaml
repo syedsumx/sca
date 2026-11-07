@@ -112,6 +112,10 @@ spec:
             - name: CAIRN_CATALOG_TOKENS_FILE
               value: /etc/cairn-catalog/tokens.json
             {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: CAIRN_CATALOG_RESIDENCY_FILE
+              value: /etc/cairn-residency/residency.json
+            {{- end }}
           ports:
             - name: http
               containerPort: {{ $u.port }}
@@ -135,7 +139,12 @@ spec:
               mountPath: /etc/cairn-catalog
               readOnly: true
             {{- end }}
-      {{- if or $u.extraTokensSecret $pg }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: residency
+              mountPath: /etc/cairn-residency
+              readOnly: true
+            {{- end }}
+      {{- if or $u.extraTokensSecret $pg (include "cairn.residencyConfigMap" $) }}
       volumes:
         {{- if $pg }}
         - name: data
@@ -145,6 +154,11 @@ spec:
         - name: tokens
           secret:
             secretName: {{ $u.extraTokensSecret }}
+        {{- end }}
+        {{- if include "cairn.residencyConfigMap" $ }}
+        - name: residency
+          configMap:
+            name: {{ include "cairn.residencyConfigMap" $ }}
         {{- end }}
       {{- end }}
       {{- include "cairn.spread" (merge (dict "replicas" $u.replicas) $ctx) | nindent 6 }}

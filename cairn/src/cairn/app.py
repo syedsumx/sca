@@ -353,6 +353,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.governance.access_reviews import build_access_reviews_router
 
         app.include_router(build_access_reviews_router(services.access_reviews, cp, authz))
+    if getattr(services, "residency", None) is not None:
+        from cairn.governance.residency import build_residency_router
+
+        app.include_router(build_residency_router(services.residency, cp, authz))
     if getattr(services, "samples", None) is not None:
         from cairn.pipelines.samples import build_samples_router
 

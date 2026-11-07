@@ -251,6 +251,14 @@ cairn:
   samples:
     onStart: ""
 
+  # Data residency: the region this deployment runs in, and lakehouse namespaces pinned to regions. Cairn and
+  # Cairn Catalog read the same rules (a ConfigMap, so a pin changes only by a reviewed deployment change):
+  #   rules: {regions: {eu: {location: s3://lake-eu/warehouse}}, pins: [{namespaces: [crm_eu], region: eu}]}
+  # Each region's bucket must exist in the store. See "Data residency" in the operator manual.
+  residency:
+    region: ""
+    rules: {}
+
   # ============================================================ Active Metadata layer
   # Public base URL users reach Cairn on (Slack/Teams links, embed snippets, OAuth-style redirects).
   publicUrl: https://cairn.example.com
