@@ -592,6 +592,40 @@ Deep research needs the Anthropic provider. Without it the endpoint answers 503.
 
 Everything above is audited: `assistant.memory.*`, `assistant.artifact.*` and `assistant.research.*`.
 
+## AI gateway: model calls from code people and agents write
+
+Agent code written outside Cairn (LangGraph, the OpenAI Agents SDK, the Claude Agent SDK, plain scripts) calls models
+through Cairn instead of holding a provider key. It uses the providers' own SDKs, pointed at Cairn, with a Cairn
+token:
+
+```python
+anthropic.Anthropic(base_url=f"{cairn}/v1/ai/gateway/anthropic", api_key=cairn_token)
+openai.OpenAI(base_url=f"{cairn}/v1/ai/gateway/openai/v1", api_key=cairn_token)
+```
+
+- **Endpoints:** `POST /v1/ai/gateway/anthropic/v1/messages` (Anthropic), `POST /v1/ai/gateway/openai/v1/chat/completions`
+  (OpenAI or any OpenAI-compatible server: vLLM, Ollama, a model Cairn serves), `GET /v1/ai/gateway/models` (the
+  models the caller may use). Streaming is passed through as it arrives.
+- **Upstreams** (the API's environment): `CAIRN_AI_GATEWAY_ANTHROPIC_KEY` (or `…_FILE`) and optionally
+  `CAIRN_AI_GATEWAY_ANTHROPIC_URL`; `CAIRN_AI_GATEWAY_OPENAI_URL` and `CAIRN_AI_GATEWAY_OPENAI_KEY` (or `…_FILE`).
+  The provider only ever sees Cairn's key; callers never hold one. With neither configured, the gateway is off.
+- **Who may call:** a person's Cairn token, or an agent key (`ca_…`) acting for its owner, which needs the agent
+  scope `model` (the agent hub's pause switch and quotas apply). Each call needs `USE_AI_GATEWAY` on the model
+  (`urn:li:aiModel:<model>`), and the model must be listed in `CAIRN_AI_GATEWAY_MODELS` (nothing listed: every model
+  is refused).
+- **Limits:** the deployment's daily AI budget (`CAIRN_AI_DAILY_BUDGET_USD`) and each person's daily token allowance
+  (`CAIRN_AI_USER_DAILY_TOKENS`), shared with Cairn's own AI features, and `CAIRN_AI_GATEWAY_RPM` calls a minute per
+  person. A refused call never reaches the provider, and the SDK sees the provider's own error type.
+- **Metering:** every call's tokens and estimated cost, streamed ones included, are recorded under the person, as
+  feature `gateway` or `gateway:<agent id>`, in the AI usage report and the audit log. Prompts and answers are not
+  stored.
+
+Tested through the real services, decision point, database and HTTP API with the official Anthropic and OpenAI SDKs
+against a local stand-in for the providers (`tests/test_ai_gateway.py`): plain and streamed calls on both protocols,
+the provider seeing only Cairn's keys, metering per person and agent, refusals (a model not served, no
+`USE_AI_GATEWAY`, no sign-in, the rate limit, the token allowance) before the provider, and agent keys without the
+`model` scope refused.
+
 ## CoWork: scheduled tasks and an approved outbox
 
 The assistant can work for one person on a schedule, and send its results to Slack or email only once they approve.

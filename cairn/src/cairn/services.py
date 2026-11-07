@@ -116,6 +116,7 @@ class Services:
     derived: Optional[Any] = None
     bundle_state: Optional[Any] = None
     sql_ai: Optional[Any] = None
+    ai_gateway: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -1250,6 +1251,10 @@ def _build_active_metadata(s: Services) -> None:
             return True
         return (s.graph.get_aspect(person, "corpUserStatus") or {}).get("status", "ACTIVE") != "SUSPENDED"
     s.cowork = CoWork(s.engine, s.ai_workspace, s.notify, cowork_authorize, s.audit, active=cowork_active)
+    # The AI gateway (cairn.ai.gateway): model calls from code people and agents write, as them, metered.
+    from cairn.ai.gateway import AiGateway
+
+    s.ai_gateway = AiGateway.from_env(s.ai_usage)
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:

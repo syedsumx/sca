@@ -412,6 +412,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         app.include_router(build_warehouses_router(warehouse_status, cp, authz, services.audit,
                                                    getattr(services, "costs", None), services.trino_key,
                                                    getattr(services, "query_history", None)))
+    if getattr(services, "ai_gateway", None) is not None:      # model calls from agent code, as the caller
+        from cairn.ai.gateway import build_gateway_router
+
+        app.include_router(build_gateway_router(services.ai_gateway, cp, authz))
     if getattr(services, "sql_ai", None) is not None and services.trino_key:
         from cairn.ai.sql_gateway import build_sql_ai_router
 
