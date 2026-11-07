@@ -15,7 +15,9 @@ import pytest
 
 from conftest import ADMIN_TOKEN, READER_TOKEN, STORE_KEY
 
-TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:484")   # the upgrade matrix tries newer ones
+_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 484
+S3_ON = "fs.s3.enabled=true" if _TV >= 484 else "fs.native-s3.enabled=true"   # renamed in Trino 484
 
 
 def docker_ok():
@@ -32,7 +34,7 @@ def catalog_props(stack, token):
         f"iceberg.rest-catalog.uri={stack.uri}",
         "iceberg.rest-catalog.security=OAUTH2",
         f"iceberg.rest-catalog.oauth2.token={token}",
-        "fs.native-s3.enabled=true",
+        S3_ON,
         f"s3.endpoint={stack.store_url}",
         "s3.region=us-east-1",
         "s3.path-style-access=true",

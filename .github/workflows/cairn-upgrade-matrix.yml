@@ -85,20 +85,20 @@ jobs:
               [ "$COMPONENT" = dbt-core ] && args="$args --build-arg DBT_VERSION=$LATEST"
               [ "$COMPONENT" = dbt-trino ] && args="$args --build-arg DBT_TRINO_VERSION=$LATEST"
               docker build -q -f docker/dbt.Dockerfile $args -t cairn/dbt:try .
-              docker pull -q trinodb/trino:476
+              docker pull -q trinodb/trino:484
               pip install -q "dbt-core" "dbt-trino" "duckdb>=1.1"
               CAIRN_DBT_IMAGE=cairn/dbt:try run tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py ;;
             airflow)
               docker build -q -f docker/airflow.Dockerfile --build-arg "AIRFLOW_VERSION=$LATEST" -t cairn/airflow:try .
-              docker pull -q trinodb/trino:476
+              docker pull -q trinodb/trino:484
               CAIRN_AIRFLOW_IMAGE=cairn/airflow:try run tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py ;;
             spark)
               docker build -q -f docker/spark.Dockerfile --build-arg "SPARK_IMAGE=apache/spark:$LATEST-scala2.13-java17-python3-ubuntu" -t cairn/spark:try .
-              docker pull -q trinodb/trino:476
+              docker pull -q trinodb/trino:484
               CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
             iceberg-spark)
               docker build -q -f docker/spark.Dockerfile --build-arg "ICEBERG_VERSION=$LATEST" -t cairn/spark:try .
-              docker pull -q trinodb/trino:476
+              docker pull -q trinodb/trino:484
               CAIRN_SPARK_IMAGE=cairn/spark:try run tests/test_spark_e2e.py ;;
             *) echo "no tests for $COMPONENT"; exit 1 ;;
           esac

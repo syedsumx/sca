@@ -162,5 +162,8 @@ def enable() -> bool:
             return tuple(out), requirements
 
         producer._commit = _commit
+        # Manifests read before now were read without their first_row_id, and pyiceberg reuses what it read by path:
+        # forget them, or a later commit would give their rows new ids.
+        manifest.clear_manifest_cache()
         _enabled = True
         return True

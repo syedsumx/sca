@@ -226,7 +226,7 @@ jobs:
         with:
           version: v3.16.4
       - name: Pull Trino (and Vector, stripe-mock and Mailpit for the SIEM and signup tests)
-        run: for i in trinodb/trino:476 timberio/vector:0.43.1-alpine stripe/stripe-mock:v0.194.0 axllent/mailpit:v1.21.8; do docker pull $i; done
+        run: for i in trinodb/trino:484 timberio/vector:0.43.1-alpine stripe/stripe-mock:v0.194.0 axllent/mailpit:v1.21.8; do docker pull $i; done
       - name: The image scheduled jobs run in
         working-directory: cairn
         run: docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
@@ -397,7 +397,7 @@ jobs:
           docker build -q -f docker/dbt.Dockerfile -t cairn/dbt:ci .
           docker build -q -f docker/airflow.Dockerfile -t cairn/airflow:ci .
           docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
-          docker pull -q trinodb/trino:476
+          docker pull -q trinodb/trino:484
       - name: Kubernetes API server, etcd and kubectl (workload identity)
         run: |
           mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"

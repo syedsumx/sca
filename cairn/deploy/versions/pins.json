@@ -1,6 +1,6 @@
 {
   "_doc": "The versions Cairn is tested with. The upgrade matrix (.github/workflows/cairn-upgrade-matrix.yml) tests each component's newest release against Cairn every week; a pin moves only in a pull request whose CI passes.",
-  "trino": {"pinned": "476", "source": {"docker": "trinodb/trino", "tags": "^(\\d+)$"},
+  "trino": {"pinned": "484", "source": {"docker": "trinodb/trino", "tags": "^(\\d+)$"},
             "files": ["tests/test_trino_e2e.py", "catalog/conformance/test_trino.py", "catalog/conformance/test_vending.py",
                       "docker-compose.cairn.yml", "docker/spark.Dockerfile", "helm/cairn/values.yaml", "../.github/workflows/cairn-ci.yml"]},
   "pyiceberg": {"pinned": "0.12.0", "source": {"pypi": "pyiceberg"}, "files": [],

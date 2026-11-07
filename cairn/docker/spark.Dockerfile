@@ -37,7 +37,7 @@ RUN --mount=type=secret,id=extra_ca,required=false \
     rm -rf "$src"
 # Trino's JDBC driver: Spark reads tables with masks or row filters through Trino, as the signed-in
 # user (cairn_spark.governed_read). Its own layer, checked against Maven's checksum.
-ARG TRINO_JDBC_VERSION=476
+ARG TRINO_JDBC_VERSION=484
 RUN --mount=type=secret,id=extra_ca,required=false \
     --mount=type=bind,target=/mnt/cairn \
     set -eu; \

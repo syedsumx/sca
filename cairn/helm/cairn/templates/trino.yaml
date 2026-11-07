@@ -145,21 +145,21 @@ data:
     connector.name=delta_lake
     hive.metastore=file
     hive.metastore.catalog.dir=s3://{{ $u.delta.bucket }}/{{ $u.delta.prefix }}
-    fs.native-s3.enabled=true
+    fs.s3.enabled=true
     s3.endpoint={{ $s3 }}
     s3.region={{ $st.region }}
     s3.path-style-access=true
     s3.aws-access-key=${ENV:CAIRN_DELTA_ACCESS_KEY}
     s3.aws-secret-key=${ENV:CAIRN_DELTA_SECRET_KEY}
     delta.register-table-procedure.enabled=true
-    s3.exclusive-create=true
+    delta.s3.transaction-log-conditional-writes.enabled=true
   {{- end }}
   {{- if $u.routines.enabled }}
   routines.properties: |
     connector.name=hive
     hive.metastore=file
     hive.metastore.catalog.dir=s3://{{ $u.routines.bucket }}/{{ $u.routines.prefix }}
-    fs.native-s3.enabled=true
+    fs.s3.enabled=true
     s3.endpoint={{ $s3 }}
     s3.region={{ $st.region }}
     s3.path-style-access=true
@@ -186,7 +186,7 @@ data:
     iceberg.rest-catalog.uri=http://{{ include "cairn.componentName" $catCtx }}:{{ $cat.port }}
     iceberg.rest-catalog.security=OAUTH2
     iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_CATALOG_TOKEN}
-    fs.native-s3.enabled=true
+    fs.s3.enabled=true
     s3.endpoint={{ $s3 }}
     s3.region={{ $st.region }}
     s3.path-style-access=true

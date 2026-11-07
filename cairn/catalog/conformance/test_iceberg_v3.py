@@ -16,7 +16,7 @@ import urllib.request
 import pytest
 
 from conftest import ADMIN_TOKEN, STORE_KEY
-from test_trino import Trino, docker_ok
+from test_trino import TRINO, Trino, docker_ok
 
 SPARK = os.environ.get("CAIRN_SPARK_BASE_IMAGE", "apache/spark:4.0.1-scala2.13-java17-python3-ubuntu")
 ICEBERG = os.environ.get("CAIRN_ICEBERG_SPARK_VERSION", "1.10.0")
@@ -126,14 +126,75 @@ def test_other_engines_read_what_spark_wrote(spark_run, stack, cat):
         # A v3 table without deletion vectors or VARIANT columns (copy-on-write, Iceberg's default delete mode):
         # Trino reads it, so it stays queryable through Cairn's governed SQL.
         assert [r["id"] for r in trino.sql("SELECT id FROM lake.v3.legacy ORDER BY id")] == [1, 2]
-        # Deletion vectors and VARIANT need a newer Trino than the pinned one. Until then a query fails with
-        # Trino's own error and returns no rows: never the deleted row. A newer Trino (the upgrade matrix)
-        # must return the right rows.
-        for q, want, err in (("SELECT id FROM lake.v3.orders ORDER BY id", [1, 3, 4, 5, 6], "PUFFIN"),
-                             ("SELECT id FROM lake.v3.events", [1], "variant")):
-            try:
-                assert [r["id"] for r in trino.sql(q)] == want
-            except RuntimeError as e:
-                assert err in str(e), e
+        tag = TRINO.rsplit(":", 1)[-1]
+        if tag.isdigit() and int(tag) >= 480:
+            # Trino reads the deletion vector (never the deleted row) and VARIANT columns,
+            assert [r["id"] for r in trino.sql("SELECT id FROM lake.v3.orders ORDER BY id")] == [1, 3, 4, 5, 6]
+            assert [r["id"] for r in trino.sql("SELECT id FROM lake.v3.events")] == [1]
+            assert [r["v"] for r in trino.sql("SELECT json_extract_scalar(CAST(payload AS JSON), '$.user.id') AS v "
+                                              "FROM lake.v3.events")] == ["7"]
+            # and writes v3: a delete as a deletion vector, and an insert.
+            trino.sql("DELETE FROM lake.v3.orders WHERE id = 3")
+            trino.sql("INSERT INTO lake.v3.orders VALUES (10, 'apac')")
+            assert [r["id"] for r in trino.sql("SELECT id FROM lake.v3.orders ORDER BY id")] == [1, 4, 5, 6, 10]
+            assert sorted(cat.load_table("v3.orders").scan().to_arrow().column("id").to_pylist()) == [1, 4, 5, 6, 10]
+        else:
+            # An older Trino fails such a query with its own error and returns no rows: never the deleted row.
+            for q, err in (("SELECT id FROM lake.v3.orders ORDER BY id", "PUFFIN"),
+                           ("SELECT id FROM lake.v3.events", "variant")):
+                with pytest.raises(RuntimeError, match=err):
+                    trino.sql(q)
     finally:
         trino.stop()
+
+
+READ = textwrap.dedent('''
+    import json, sys
+    from pyspark.sql import SparkSession
+    uri, store, token, key, secret, query = sys.argv[1:7]
+    spark = (SparkSession.builder
+        .config("spark.sql.extensions", "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions")
+        .config("spark.sql.catalog.lake", "org.apache.iceberg.spark.SparkCatalog")
+        .config("spark.sql.catalog.lake.type", "rest").config("spark.sql.catalog.lake.uri", uri)
+        .config("spark.sql.catalog.lake.token", token)
+        .config("spark.sql.catalog.lake.io-impl", "org.apache.iceberg.aws.s3.S3FileIO")
+        .config("spark.sql.catalog.lake.s3.endpoint", store).config("spark.sql.catalog.lake.s3.path-style-access", "true")
+        .config("spark.sql.catalog.lake.s3.access-key-id", key).config("spark.sql.catalog.lake.s3.secret-access-key", secret)
+        .config("spark.sql.catalog.lake.client.region", "us-east-1").getOrCreate())
+    print("RESULT " + json.dumps([r.asDict(recursive=True) for r in spark.sql(query).collect()], default=str))
+''')
+
+
+def spark_sql(stack, jars, query):
+    job = tempfile.mkdtemp(prefix="v3-read-")
+    open(os.path.join(job, "job.py"), "w").write(READ)
+    os.chmod(job, 0o755)
+    names = ",".join(f"/jars/{u.rsplit('/', 1)[1]}" for u in JARS)
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{jars}:/jars:ro", "-v", f"{job}:/job:ro",
+                        SPARK, "/opt/spark/bin/spark-submit", "--jars", names, "--conf", "spark.jars.ivy=/tmp/ivy",
+                        "/job/job.py", stack.uri, stack.store_url, ADMIN_TOKEN, STORE_KEY[0], STORE_KEY[1], query],
+                       capture_output=True, text=True, timeout=1200)
+    shutil.rmtree(job, ignore_errors=True)
+    line = next((ln for ln in r.stdout.splitlines() if ln.startswith("RESULT ")), None)
+    assert line, (r.stdout[-3000:], r.stderr[-6000:])
+    import json
+    return json.loads(line[len("RESULT "):])
+
+
+def test_cairn_writes_v3_with_row_lineage_spark_reads(spark_run, stack, cat, jars):
+    """Cairn's Python writers (pyiceberg with cairn.pipelines.iceberg_v3) append to the v3 table Spark made: the new
+    rows take the next row ids, the rows already there keep theirs, and Spark reads both."""
+    import pyarrow as pa
+
+    from cairn.pipelines.iceberg_v3 import enable
+
+    enable()
+    t = cat.load_table("v3.orders")
+    start = t.metadata.next_row_id
+    before = {r["id"]: r["_row_id"] for r in spark_sql(stack, jars, "SELECT id, _row_id FROM lake.v3.orders")}
+    t.append(pa.table({"id": pa.array([20, 21], pa.int64()), "region": pa.array(["apac", "apac"])}))
+    after = {r["id"]: r["_row_id"] for r in spark_sql(stack, jars, "SELECT id, _row_id FROM lake.v3.orders")}
+    assert {k: after[k] for k in before} == before                      # the rows already there keep their ids
+    assert sorted([after[20], after[21]]) == [start, start + 1]           # the new rows take the next ones
+    assert len(set(after.values())) == len(after)
+    assert cat.load_table("v3.orders").metadata.next_row_id == start + 2

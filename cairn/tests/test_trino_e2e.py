@@ -19,8 +19,8 @@ import pytest
 
 from cairn.governance.abac import Obligation, Policy, PolicyBundle, Target
 
-TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
-_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 476
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:484")   # the upgrade matrix tries newer ones
+_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 484
 # Settings Trino renamed (by 484; the old names stop it starting): what this image calls them.
 S3_ON = "fs.s3.enabled=true" if _TV >= 484 else "fs.native-s3.enabled=true"
 DELTA_CONDITIONAL = "delta.s3.transaction-log-conditional-writes.enabled=true" if _TV >= 484 else "s3.exclusive-create=true"
@@ -675,7 +675,9 @@ def test_locations_are_coarsened_and_spatial_sql_still_works(trino, cairn):
         assert ana[0]["km"] == 504 and ana[1]["km"] == 0             # spatial SQL on the coarse values
         admin = trino(q)
         assert admin[0]["lat"] == 48.137154 and admin[1]["place"].startswith("POLYGON")
-        assert admin[1]["c"] == "POINT (13.41 52.53)" and admin[0]["km"] == 504
+        # The centre's last digits differ between Trino releases (52.53 or 52.529999999999994): compared as numbers.
+        x, y = map(float, admin[1]["c"].removeprefix("POINT (").removesuffix(")").split())
+        assert (round(x, 6), round(y, 6)) == (13.41, 52.53) and admin[0]["km"] == 504
         # Spatial functions over the masked text see only the coarse point.
         geom = trino("SELECT ST_AsText(ST_GeometryFromText(place)) AS g FROM sales.visits WHERE id = 2", user="ana")
         assert geom[0]["g"] == "POINT (13.41 52.53)"

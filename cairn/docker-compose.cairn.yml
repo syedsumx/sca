@@ -673,7 +673,7 @@ services:
   # Cairn Store, as the `lakehouse` catalog. http://localhost:8088 (e.g. `trino --server localhost:8088`).
   # Once: a self-signed certificate for Trino's HTTPS port (kept in the trinotls volume).
   cairn-trino-tls:
-    image: trinodb/trino:476
+    image: trinodb/trino:484
     profiles: [trino]
     user: "0"
     entrypoint: ["/bin/sh", "/make-tls.sh"]
@@ -685,7 +685,7 @@ services:
     networks: [catalog]
 
   cairn-trino:
-    image: trinodb/trino:476
+    image: trinodb/trino:484
     hostname: cairn-trino
     restart: unless-stopped
     profiles: [trino]

@@ -19,7 +19,9 @@ from botocore.exceptions import ClientError
 from conftest import ADMIN_TOKEN, READER_TOKEN, STORE_KEY, Stack
 
 STS = {"CAIRN_STORE_STS_SECRET": "catalog-sts-" + "s" * 32}
-TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:476")   # the upgrade matrix tries newer ones
+TRINO = os.environ.get("CAIRN_TRINO_IMAGE", "trinodb/trino:484")   # the upgrade matrix tries newer ones
+_TV = int(TRINO.rsplit(":", 1)[-1]) if TRINO.rsplit(":", 1)[-1].isdigit() else 484
+S3_ON = "fs.s3.enabled=true" if _TV >= 484 else "fs.native-s3.enabled=true"   # renamed in Trino 484
 
 
 @pytest.fixture(scope="module")
@@ -125,7 +127,7 @@ def test_trino_needs_no_store_key(scoped):
         "connector.name=iceberg", "iceberg.catalog.type=rest", f"iceberg.rest-catalog.uri={scoped.uri}",
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={ADMIN_TOKEN}",
         "iceberg.rest-catalog.vended-credentials-enabled=true",
-        "fs.native-s3.enabled=true", f"s3.endpoint={scoped.store_url}", "s3.region=us-east-1", "s3.path-style-access=true", ""]))
+        S3_ON, f"s3.endpoint={scoped.store_url}", "s3.region=us-east-1", "s3.path-style-access=true", ""]))
     port = 18600 + os.getpid() % 300
     open(f"{d}/config.properties", "w").write(f"coordinator=true\nnode-scheduler.include-coordinator=true\n"
                                               f"http-server.http.port={port}\ndiscovery.uri=http://127.0.0.1:{port}\n")

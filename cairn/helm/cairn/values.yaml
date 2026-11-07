@@ -858,7 +858,7 @@ cairn:
     #    database: crm
     image:
       repository: trinodb/trino
-      tag: "476"
+      tag: "484"
       pullPolicy: IfNotPresent
     queryMaxMemory: 2GB
     # Worker pods besides the coordinator (0: the coordinator runs queries itself).

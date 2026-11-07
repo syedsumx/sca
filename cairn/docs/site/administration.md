@@ -3128,18 +3128,17 @@ metadata table, so it needs that answer.
 
 **Readers.** What each engine can read depends on its version:
 
-| Reader | v3 tables | Deletion vectors | `VARIANT` |
-|---|---|---|---|
-| Spark 4 / Iceberg 1.10 | ✅ | ✅ | ✅ |
-| pyiceberg 0.12 (Cairn's own reads) | ✅ reads | ✅ applied on read | — |
-| Trino 476 (the pinned Trino, governed SQL) | ✅ | ❌ query fails | ❌ query fails |
+**Engines.** Every engine Cairn ships reads and writes v3 tables:
 
-Iceberg's default delete mode is copy-on-write, which writes no deletion vectors. A v3 table written that way,
-without `VARIANT` columns, stays queryable through Trino and so through Cairn's governed SQL, masks and row
-filters.
+| Engine | Reads v3 | Deletion vectors | `VARIANT` | Writes v3 | Row lineage |
+|---|---|---|---|---|---|
+| Spark 4 / Iceberg 1.10 | ✅ | ✅ read and written | ✅ | ✅ | ✅ kept on rewrite |
+| Trino 484 (the pinned Trino, governed SQL) | ✅ | ✅ read and written | ✅ read | ✅ | ✅ |
+| Cairn's own writers (pyiceberg 0.12 with Cairn's v3 writers) | ✅ | ✅ applied on read | — | ✅ | ✅ new rows; rows a rewrite keeps take new ids |
 
-When a table does hold deletion vectors or `VARIANT` columns, a Trino query on it fails with Trino's own error.
-It never returns deleted rows. The weekly upgrade matrix tests newer Trino releases against such tables.
+So v3 tables, deletion vectors and `VARIANT` columns included, are queried through Cairn's governed SQL with its
+masks and row filters. Trino 476 and older (Iceberg 1.9) fail a query on deletion vectors or `VARIANT` with
+Trino's own error and never return deleted rows; the pin moved to 484 for v3.
 
 Cairn's own writers (files and stream pipes, mirrors, SaaS syncs, synthetic tables, samples) write through
 pyiceberg, which reads v3 but has no v3 manifest writers (0.12). Cairn adds them (`cairn.pipelines.iceberg_v3`,
@@ -3804,4 +3803,4 @@ cairn db check       # non-zero exit if the schema is not at the latest revision
 - **Tried here.** The resolver found Trino 484, Spark 4.2.1 and Iceberg 1.12.0 newer than their pins. Cairn's Trino suite (21 tests) was then run against Trino 484:
   - First, Trino did not start: 484 refuses `s3.exclusive-create` (now `delta.s3.transaction-log-conditional-writes.enabled`) and renames `fs.native-s3.enabled` to `fs.s3.enabled`.
   - With those two settings renamed, every test passed. Policies, masks, row filters, SSO, lineage, AI functions, stored functions, procedures, Delta writes from two clusters and Delta conversion all worked unchanged.
-  - The tests name each setting the way the image in use expects. The chart and Compose pin 476; bumping to 484 means renaming the two settings in `helm/cairn/templates/trino.yaml` in the same pull request.
+  - The tests name each setting the way the image in use expects. Trino is now pinned to 484 (for Iceberg v3): the chart, Compose and the conformance suite use `fs.s3.enabled` and `delta.s3.transaction-log-conditional-writes.enabled`; set `CAIRN_TRINO_IMAGE` to an older image to run the tests against it.
