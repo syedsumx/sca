@@ -346,6 +346,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.custom_agents import build_custom_agents_router
 
         app.include_router(build_custom_agents_router(services.custom_agents, cp))
+    if getattr(services, "trace_insights", None) is not None:      # agent trace intelligence
+        from cairn.ai.trace_insights import build_trace_insights_router
+
+        app.include_router(build_trace_insights_router(services.trace_insights, cp))
     if getattr(services, "ml", None) is not None:
         from cairn.ml.mlflow_gateway import build_ml_router
 

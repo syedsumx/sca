@@ -1289,6 +1289,141 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1783732000000
   }
  ],
+ "/v1/agent-traces/insights": {
+  "days": 7,
+  "since_ms": 1793490400000,
+  "until_ms": 1794095200000,
+  "baseline_days": 21,
+  "settings": {
+   "loop_threshold": 4,
+   "slow_call_ms": 10000,
+   "outlier_factor": 2.0,
+   "min_calls": 10,
+   "error_rate_warning": 0.2,
+   "error_rate_critical": 0.5
+  },
+  "truncated": false,
+  "agents": [
+   {
+    "agent": "agt_5f20c1a9e7b4",
+    "name": "Revenue analyst",
+    "kind": "built",
+    "owner": "urn:li:corpuser:alice",
+    "enabled": true,
+    "runs": 58,
+    "tool_calls": 402,
+    "errors": 9,
+    "refused": 2,
+    "error_rate": 0.0224,
+    "refusal_rate": 0.005,
+    "flagged": 0,
+    "people": 4,
+    "avg_ms": 412.5,
+    "p95_ms": 2210,
+    "slow_calls": 3,
+    "loops": 1,
+    "model": {
+     "calls": 174,
+     "input_tokens": 2436000,
+     "output_tokens": 179800,
+     "cost_usd": 21.84
+    },
+    "cost_per_run_usd": 0.376552,
+    "last_ms": 1794091600000,
+    "baseline": {
+     "days": 21,
+     "tool_calls": 930,
+     "calls_per_day": 44.29,
+     "error_rate": 0.018,
+     "p95_ms": 1980,
+     "cost_per_day_usd": 1.2,
+     "calls_per_run": 6.8
+    }
+   },
+   {
+    "agent": "agt_91c3d7e2a0f5",
+    "name": "Support triage",
+    "kind": "app",
+    "owner": "urn:li:corpuser:bob",
+    "enabled": true,
+    "runs": 40,
+    "tool_calls": 128,
+    "errors": 31,
+    "refused": 2,
+    "error_rate": 0.2422,
+    "refusal_rate": 0.0156,
+    "flagged": 0,
+    "people": 4,
+    "avg_ms": 412.5,
+    "p95_ms": 860,
+    "slow_calls": 0,
+    "loops": 0,
+    "model": {
+     "calls": 120,
+     "input_tokens": 1680000,
+     "output_tokens": 124000,
+     "cost_usd": 4.4
+    },
+    "cost_per_run_usd": 0.11,
+    "last_ms": 1794080800000,
+    "baseline": {
+     "days": 21,
+     "tool_calls": 402,
+     "calls_per_day": 19.14,
+     "error_rate": 0.21,
+     "p95_ms": 900,
+     "cost_per_day_usd": 0.61,
+     "calls_per_run": 3.2
+    }
+   }
+  ],
+  "findings": [
+   {
+    "id": "f_3c91e0a7b52d",
+    "agent": "agt_5f20c1a9e7b4",
+    "agent_name": "Revenue analyst",
+    "kind": "loop",
+    "severity": "critical",
+    "title": "get_quality_status repeated 9 times in one run",
+    "detail": "The agent called get_quality_status with the same arguments 9 times in run 7e1c0b9a2f4d4c83a5d6e0f19b2c7a48 (threshold 4): it may be stuck retrying.",
+    "value": 9,
+    "baseline": 4,
+    "run": "7e1c0b9a2f4d4c83a5d6e0f19b2c7a48",
+    "tool": "get_quality_status"
+   },
+   {
+    "id": "f_a0d47c2e19b8",
+    "agent": "agt_91c3d7e2a0f5",
+    "agent_name": "Support triage",
+    "kind": "error_rate",
+    "severity": "warning",
+    "title": "24% of tool calls failed",
+    "detail": "31 of 128 tool calls ended in an error.",
+    "value": 0.2422,
+    "baseline": 0.2
+   },
+   {
+    "id": "f_6b2e93d0c4a1",
+    "agent": "agt_5f20c1a9e7b4",
+    "agent_name": "Revenue analyst",
+    "kind": "cost_outlier",
+    "severity": "warning",
+    "title": "Model cost per day 2.6x its baseline",
+    "detail": "Model cost per day was 3.12 USD against a baseline of 1.2 USD (over the 21 days before).",
+    "value": 3.12,
+    "baseline": 1.2
+   }
+  ],
+  "totals": {
+   "agents": 2,
+   "runs": 98,
+   "tool_calls": 530,
+   "errors": 40,
+   "cost_usd": 26.24,
+   "critical": 1,
+   "warning": 2
+  }
+ },
  "/ai/outbox": [
   {
    "id": "9d2b7e41c08a4f5f93e6a1b0c7d42e18",

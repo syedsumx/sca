@@ -44,6 +44,7 @@ agent_calls = Table(
     Column("duration_ms", Integer, nullable=False),
     Column("flagged", Integer, nullable=False),
     Column("created_ms", BigInteger, nullable=False, index=True),
+    Column("run", String(40), nullable=True, index=True),     # the run (or token session) it was part of
 )
 ai_feedback = Table(
     "cairn_ai_feedback", metadata,
@@ -76,6 +77,9 @@ KEEP_READS_DAYS = 400
 
 # Set while an AI tool runs (MCP or the assistant), so data access knows its reads are AI usage.
 ai_channel: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_ai_channel", default=None)
+# The agent run a tool call belongs to (a custom agent's run, or the short-lived token of an agent app run), so
+# trace analysis (cairn.ai.trace_insights) can find loops within a run.
+current_run: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar("cairn_agent_run", default=None)
 
 def _now() -> int:
     return int(time.time() * 1000)
@@ -136,17 +140,18 @@ class TraceService:
 
     # ---- tool calls ---------------------------------------------------------------------------
     def record(self, actor: str, agent: Optional[str], channel: str, tool: str, args: dict, status: str,
-               duration_ms: int, flagged: int = 0) -> None:
+               duration_ms: int, flagged: int = 0, run: Optional[str] = None) -> None:
         metrics.AGENT_TOOL_CALLS.labels(channel, tool, status).inc()
         metrics.AGENT_TOOL_SECONDS.labels(tool).observe(duration_ms / 1000)
         if flagged:
             metrics.AI_INJECTIONS.labels(channel).inc(flagged)
         now = _now()
+        run = run or current_run.get()
         with self.engine.begin() as conn:
             conn.execute(agent_calls.insert().values(
                 id=f"call_{uuid.uuid4().hex[:14]}", agent=agent, actor=actor, channel=channel, tool=tool,
                 args=summarize(args), status=status, duration_ms=int(duration_ms), flagged=int(flagged),
-                created_ms=now))
+                created_ms=now, run=str(run)[:40] if run else None))
             if now - self._purged > 3_600_000:              # keep a month, purged at most hourly
                 self._purged = now
                 conn.execute(delete(agent_calls).where(agent_calls.c.created_ms < now - KEEP_CALLS_DAYS * 86_400_000))
@@ -160,7 +165,7 @@ class TraceService:
         with self.engine.connect() as conn:
             return [{"id": r.id, "agent": r.agent, "actor": r.actor, "channel": r.channel, "tool": r.tool,
                      "args": r.args, "status": r.status, "duration_ms": r.duration_ms, "flagged": r.flagged,
-                     "created_ms": r.created_ms} for r in conn.execute(q)]
+                     "created_ms": r.created_ms, "run": r.run} for r in conn.execute(q)]
 
     def stats(self, since_ms: Optional[int] = None) -> dict:
         """Per agent and per tool over the last day (or since ``since_ms``): calls, errors, p95-ish time."""

@@ -120,6 +120,7 @@ class AgentGrant:
     actor: str
     agent: str
     scopes: tuple[str, ...]
+    run: Optional[str] = None          # access tokens: the run (``run_…``) or OAuth session (``tok_…``) they belong to
 
 
 def _now() -> int:
@@ -555,7 +556,7 @@ class AgentService:
                 client = conn.execute(select(agent_clients).where(agent_clients.c.key_hash == _hash(token))).first()
                 if client is None or client.kind != "key":
                     return None
-                actor, scopes = client.owner, list(client.scopes)
+                actor, scopes, run = client.owner, list(client.scopes), None
             elif token.startswith(ACCESS_PREFIX):
                 row = conn.execute(select(agent_tokens).where(agent_tokens.c.hash == _hash(token),
                                                               agent_tokens.c.kind == "access")).first()
@@ -565,6 +566,7 @@ class AgentService:
                 if client is None:
                     return None
                 actor, scopes = row.actor, [s for s in row.scopes if s in client.scopes]
+                run = ("run_" if (row.details or {}).get("run") else "tok_") + row.hash[:16]
             else:
                 return None
         if not client.enabled or not actor:
@@ -572,7 +574,7 @@ class AgentService:
         if client.ai_system and self.ai_system_state is not None and self.ai_system_state(client.ai_system) != "APPROVED":
             return None
         self._touch(client.id, now)
-        return AgentGrant(actor, client.id, tuple(scopes))
+        return AgentGrant(actor, client.id, tuple(scopes), run)
 
     def _touch(self, agent_id: str, now: int) -> None:
         if now - self._touched.get(agent_id, 0) < 60_000:       # at most once a minute per agent

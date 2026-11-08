@@ -899,6 +899,14 @@
    "done": "A team writes an agent in plain Python, LangGraph or the OpenAI Agents SDK, tests it offline, runs it locally with their own Cairn token, and deploys it without wiring runtime, model keys, sessions or access by hand; the counterpart of Databricks' Agent Bricks CLI",
    "status": "shipped",
    "note": "cairn.agentkit (runtime, ctx with gateway-routed SDK clients and governed SQL, offline test kit, three templates), /v1/agent-apps (migration 0123): an agent identity per app, per-run tokens for the caller narrowed to the app's scopes and revoked after, sessions kept by Cairn, the process runtime and the Kubernetes runtime (a pod per app from the agent runtime image, reached only by Cairn, the chart's Role). Each invocation is an MLflow run in the app's experiment, under the caller's name, metrics only. Tested end to end (tests/test_agent_apps.py, tests/test_agent_apps_mlflow.py against a real MLflow, tests/test_agent_apps_k8s.py on kind)"
+  },
+  {
+   "id": "L101",
+   "title": "Agent trace intelligence",
+   "summary": "What each agent's tool calls and model use say: runs, errors, loops, slow calls, cost, and outliers against its own baseline",
+   "done": "An operator sees which agent is stuck retrying, failing, slowing down or spending far more than it used to, before people complain or the budget runs out; owners see the same for their own agents",
+   "status": "shipped",
+   "note": "cairn.ai.trace_insights, /v1/agent-traces/insights (and per agent), /v1/agent-traces/settings (admin, audited); every traced tool call records its run (migration 0124): a custom agent's run, an agent app's run token, an OAuth session; key agents' calls are split into sessions. Findings with severity: loops, error rate, refusals, slow calls, flagged text, and volume, cost, latency, calls-per-run and error outliers against the agent's previous weeks. Tested end to end through the real services and HTTP API with real recorded MCP calls from a real agent key, a custom agent's real run and real usage metering (tests/test_agent_trace_insights.py)"
   }
  ]
 }

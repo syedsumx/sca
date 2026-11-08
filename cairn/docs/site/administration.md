@@ -518,6 +518,36 @@ it. To make an agent depend on the AI system register, link it to an AI system
   down-voted questions as `cairn ai eval` cases. Fill in what a right answer must contain and add
   them to the eval suite, so mistakes people saw stay fixed.
 
+**Agent trace intelligence (what the traces say):** Agents → *Agent insights* and *Agent findings* analyse each
+agent's recorded tool calls and model use over a window.
+
+- `GET /cairn/api/v1/agent-traces/insights?days=7` (1 to 30 days) gives, per agent: runs, tool calls, errors,
+  refusals, error rate, average and p95 latency, slow calls, loops, model calls, tokens and estimated cost, and cost
+  per run, with the agent's own baseline. `GET …/insights/{agent id}?days=7` adds a per-tool breakdown, its runs
+  (loops first), each loop's (redacted) arguments and a daily series.
+- **Runs.** A custom agent's run, an agent app run's short-lived token and an OAuth access token's session each count
+  as a run; every traced tool call records the run it belongs to. Calls made with an agent key have no run of their
+  own and are grouped into sessions per person, split after 30 idle minutes.
+- **Loops** are the same tool with the same arguments repeated within one run at least `loop_threshold` times
+  (default 4). **Slow calls** take `slow_call_ms` (default 10 000) or more.
+- **Model cost** comes from AI usage metering: tasks `gateway:<agent id>` (agent keys and agent apps through the AI
+  gateway) and `agent.<name>` (custom agents).
+- **Outliers** compare the window with the agent's own history only: the period before it (up to three windows,
+  within the 30 days traces are kept). Calls per day and model cost per day are flagged when they are at least
+  `outlier_factor` (default 2) times the agent's daily mean and three standard deviations above it; p95 latency,
+  calls per run and the error rate when they are at least `outlier_factor` times the baseline. An agent with too
+  little history gets an `info` finding saying so.
+- **Findings** have a kind (`loop`, `error_rate`, `refusals`, `slow_calls`, `injection_flagged`,
+  `volume_outlier`, `cost_outlier`, `latency_outlier`, `calls_per_run_outlier`, `error_outlier`, `no_baseline`) and a
+  severity: `critical` (a loop at twice the threshold, an error rate at or over `error_rate_critical`, an outlier at
+  twice the factor), `warning` or `info`. They are listed most severe first.
+- **Who sees it.** Administrators (`MANAGE_GLOBAL_SETTINGS`) and operators (`MANAGE_SYSTEM_OPERATIONS`) see every
+  agent; anyone else sees only the agents they own, and others' agents answer 404. Agent credentials are refused (403).
+- **Thresholds.** `GET|PUT /cairn/api/v1/agent-traces/settings` with any of `loop_threshold`, `slow_call_ms`,
+  `outlier_factor`, `min_calls` (calls needed before rates and latency are judged, default 10),
+  `error_rate_warning` (0.2) and `error_rate_critical` (0.5). Changing them needs `MANAGE_GLOBAL_SETTINGS` and is
+  audited as `agent_traces.settings_changed`. Reading insights changes nothing.
+
 **Custom agents (built in Cairn):** a team builds an agent from Cairn's own tools, deploys it, and people run it.
 
 - `POST /cairn/api/v1/custom-agents` with `{"name", "description", "instructions", "tools": [...], "scopes": [...],

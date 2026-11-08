@@ -348,7 +348,8 @@ def build_mcp_server(services: Services):
                     bound = dict(kwargs)
                 status = outcome(result)
                 services.traces.record(p.urn, p.agent, "mcp", fn.__name__, bound, status,
-                                       int((_time.monotonic() - started) * 1000), len(flagged))
+                                       int((_time.monotonic() - started) * 1000), len(flagged),
+                                       run=getattr(p, "run", None))
                 if status == "ok" and tool_scope(fn.__name__) == "read" and (read := datasets_in(bound)):
                     services.traces.record_reads(p.urn, p.agent, "mcp", read, "metadata")
 

@@ -269,6 +269,9 @@ class CustomAgents:
         principal = Principal(actor, "agent", agent=a["agent_id"], scopes=tuple(a["scopes"]))
         set_actor(actor)
         status, answer, calls = "ok", None, []
+        from cairn.ai.traces import current_run
+
+        run_token = current_run.set(rid)          # its tool calls are traced as part of this run (its id)
         try:
             answer, _, calls = self.assistant.run_loop(
                 principal, RULES + a["instructions"], [self.specs[t] for t in a["tools"]],
@@ -279,6 +282,8 @@ class CustomAgents:
         except Exception as e:  # noqa: BLE001 - recorded on the run
             status, answer = "failed", f"{type(e).__name__}: {e}"[:2000]
             logger.warning("custom agent %s failed: %s", name, e)
+        finally:
+            current_run.reset(run_token)
         with self.engine.begin() as conn:
             conn.execute(update(custom_agent_runs).where(custom_agent_runs.c.id == rid).values(
                 status=status, answer=answer, calls=calls, finished_ms=_now()))

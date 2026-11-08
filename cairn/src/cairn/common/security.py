@@ -38,6 +38,7 @@ class Principal:
     groups: tuple[str, ...] = field(default_factory=tuple)
     agent: Optional[str] = None                 # via=agent: the agent acting for ``urn``
     scopes: tuple[str, ...] = ()                # via=agent: what it may do (read, query_data, …)
+    run: Optional[str] = None                   # via=agent: the run (or token session) the request is part of
 
     @property
     def is_service(self) -> bool:
@@ -106,7 +107,8 @@ class IdentityResolver:
                     raise AuthenticationError(str(e)) from e
                 if grant is None:
                     raise AuthenticationError("unknown, expired or revoked agent credential")
-                return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes))
+                return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes),
+                                 run=getattr(grant, "run", None))
             if token.count(".") == 2 and self.notebook_lookup is not None:
                 try:
                     urn = self.notebook_lookup(token)

@@ -823,6 +823,52 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "agent-insights": {
+        "key": "agent-insights",
+        "title": "Agent insights",
+        "path": "/v1/agent-traces/insights",
+        "listKey": "agents",
+        "description": "Per agent over the last week: runs, tool calls, error rate, loops, slow calls and model cost, compared with the agent's own baseline. Administrators and operators see every agent; owners see their own.",
+        "columns": [
+            "name",
+            "kind",
+            "runs",
+            "tool_calls",
+            "error_rate",
+            "loops",
+            "slow_calls",
+            "p95_ms",
+            "last_ms"
+        ],
+        "rowKey": "agent",
+        "actions": [
+            {
+                "label": "Change thresholds",
+                "method": "PUT",
+                "path": "/v1/agent-traces/settings",
+                "body": {
+                    "loop_threshold": 4,
+                    "slow_call_ms": 10000,
+                    "outlier_factor": 2.0
+                }
+            }
+        ]
+    },
+    "agent-findings": {
+        "key": "agent-findings",
+        "title": "Agent findings",
+        "path": "/v1/agent-traces/insights",
+        "listKey": "findings",
+        "description": "What the traces say needs a look, most severe first: an agent stuck repeating a call, failing or refused calls, slow calls, and spend or volume well above its own baseline.",
+        "columns": [
+            "severity",
+            "agent_name",
+            "kind",
+            "title",
+            "value",
+            "baseline"
+        ]
+    },
     "pipeline-agent": {
         "key": "pipeline-agent",
         "title": "Pipeline agent tasks",

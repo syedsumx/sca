@@ -96,6 +96,7 @@ class Services:
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
     custom_agents: Optional[Any] = None
+    trace_insights: Optional[Any] = None
     consent: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
@@ -1291,6 +1292,14 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor, privilege, urn: s.authorize(Principal(urn=actor, via="delegated"), privilege, urn,
                                                       raise_on_deny=False),
             agent_groups, s.audit)
+        # Agent trace intelligence (cairn.ai.trace_insights): loops, errors, slow calls, cost and outliers per agent.
+        from cairn.ai.trace_insights import TraceInsights
+
+        s.trace_insights = TraceInsights(
+            s.engine, s.agents,
+            lambda actor, privilege: s.authorize(Principal(urn=actor, via="delegated"), privilege, None,
+                                                 raise_on_deny=False),
+            s.audit)
 
     # ---- inline actions (Slack buttons, Teams/email signed links, in-app) -----------
     if s.marketplace is not None:
