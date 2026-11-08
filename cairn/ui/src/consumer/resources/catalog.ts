@@ -6,6 +6,35 @@ import type { ResourceSpec } from './types';
  * fields were read from the API's routers and services; keep them in step when an endpoint changes.
  */
 export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
+    "share-usage": {
+        "key": "share-usage",
+        "title": "Share usage",
+        "path": "/v1/shares/usage/overview",
+        "listKey": "shares",
+        "description": "What each share's recipient reads: requests, table loads, refusals and failures, the last access, and what needs attention: shares nobody uses, shares about to expire and recipients reading tables whose quality is failing.",
+        "columns": [
+            "name",
+            "recipient",
+            "state",
+            "last_access_ms",
+            "requests",
+            "table_loads",
+            "refusals",
+            "unused",
+            "expiring_soon"
+        ],
+        "seconds": [
+            "expires_at"
+        ],
+        "actions": [
+            {
+                "label": "Revoke",
+                "method": "POST",
+                "path": "/v1/shares/{id}/revoke",
+                "body": {}
+            }
+        ]
+    },
     "external-catalogs": {
         "key": "external-catalogs",
         "title": "External catalogs",

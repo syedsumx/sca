@@ -47,7 +47,7 @@ EVENT_TYPES = [
     "ml.drift_detected", "ml.drift_resolved", "budget.threshold_crossed", "budget.forecast_exceeded",
     "bi.shared", "privacy.erasure_proved", "input.change_requested", "input.change_decided",
     "bi.mentioned", "bi.commented", "metric.alert_triggered", "metric.alert_resolved", "job.failed", "job.finished",
-    "saas.sync_failed",
+    "saas.sync_failed", "share.expiring", "share.unused",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
 

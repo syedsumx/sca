@@ -112,6 +112,7 @@ export const HUBS: Hub[] = [
         "description": "Data shared outside the platform and the promises made about it: Delta shares and data product service levels.",
         "tabs": [
             "shares",
+            "share-usage",
             "slos"
         ]
     },

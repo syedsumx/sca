@@ -917,6 +917,14 @@
    "note": "/v1/external-catalogs (migration 0126): registration with a credential reference (secret scope or CAIRN_EXTCAT_*), Trino's dynamic catalogs (CREATE CATALOG by cairn-catalogs only) signing in through Cairn's OAuth token broker with Trino's own key, namespaces, tables and schemas catalogued, read-only enforcement, re-added after a Trino restart. Tested with a second real Cairn Catalog and Store on Trino 484: masked, filtered and refused users, writes refused (tests/test_external_catalogs_e2e.py)"
   },
   {
+   "id": "L106",
+   "title": "Share observability",
+   "summary": "Who reads what through each lakehouse share",
+   "done": "Share owners see each recipient's requests, tables read, loads, refusals and failures, find unused and expiring shares and recipients reading tables with failing quality, and are told before a share ends; the counterpart of Delta Sharing's and Snowflake's share usage views",
+   "status": "shipped",
+   "note": "Per share, day and table counts from Cairn Catalog's per-request questions and the token endpoint, with retention (migration 0126); GET /v1/shares/<name>/usage, GET /v1/shares/usage/overview joined with the quality status; share.expiring and share.unused notices once each. Tested with pyiceberg as the recipient against the real store and catalog (tests/test_share_usage_e2e.py); refusals outside a share's namespaces are decided by the catalog alone and count as requests"
+  },
+  {
    "id": "L108",
    "title": "Agent automations from the CLI: cairn tasks",
    "summary": "CoWork scheduled tasks and their outbox from a terminal or a script",

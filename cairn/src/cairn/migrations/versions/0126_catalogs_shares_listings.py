@@ -39,7 +39,29 @@ def upgrade() -> None:
         sa.Column('last_sync_ms', sa.BigInteger(), nullable=True),
         sa.Column('last_sync', sa.Text(), nullable=True),
     )
+    op.create_table(
+        'cairn_share_usage',
+        sa.Column('share_id', sa.String(length=32), nullable=False),
+        sa.Column('day', sa.Integer(), nullable=False),
+        sa.Column('table_name', sa.String(length=512), nullable=False),
+        sa.Column('requests', sa.BigInteger(), nullable=False),
+        sa.Column('loads', sa.BigInteger(), nullable=False),
+        sa.Column('refusals', sa.BigInteger(), nullable=False),
+        sa.Column('failures', sa.BigInteger(), nullable=False),
+        sa.Column('tokens', sa.BigInteger(), nullable=False),
+        sa.Column('last_ms', sa.BigInteger(), nullable=False),
+        sa.PrimaryKeyConstraint('share_id', 'day', 'table_name'),
+    )
+    op.create_table(
+        'cairn_share_notices',
+        sa.Column('share_id', sa.String(length=32), nullable=False),
+        sa.Column('kind', sa.String(length=16), nullable=False),
+        sa.Column('sent_ms', sa.BigInteger(), nullable=False),
+        sa.PrimaryKeyConstraint('share_id', 'kind'),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table('cairn_share_notices')
+    op.drop_table('cairn_share_usage')
     op.drop_table('cairn_external_catalogs')

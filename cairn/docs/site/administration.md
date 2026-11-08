@@ -2974,6 +2974,25 @@ A multi-table transaction changes every table or none.
 - **Settings.** `CAIRN_SHARES_CATALOG_URL` and `CAIRN_SHARES_TOKEN_URL` are the catalog and token endpoint as recipients reach them; both must be public. In Helm, set them under `cairn.catalog.identity.shares`. `CAIRN_SHARES_MAX_DAYS` (default 365) is the longest a share may last.
 - **Who sees shares.** People see the shares they made. Operators (MANAGE_SYSTEM_OPERATIONS) see and revoke them all.
 - **Audit.** Creating and revoking a share, and every token a recipient gets, are audited (category `shares`).
+- **Usage.** Cairn counts what each share's recipient does, per day and table, from the catalog's questions about
+  it and the token endpoint: requests, table loads (a question about one table: loading its metadata, snapshot
+  and files), refusals (a table in a shared namespace that was not shared, or a revoked or expired share), failures
+  (a wrong secret, a decision that could not be made) and tokens, with the last access. Tables outside the share's
+  namespaces are refused by the catalog without asking, so they count as requests only. Counts are written every
+  few seconds and kept `CAIRN_SHARES_USAGE_RETENTION_DAYS` (default 90).
+  - `GET /v1/shares/<name or id>/usage?days=30`: totals, the tables read, each table's loads, refusals and last
+    access, and each day's counts. For the share's maker and operators.
+  - `GET /v1/shares/usage/overview?unused_days=30&expiring_days=14`: every share the caller sees, with `unused`
+    (active, no access in `unused_days`), `expiring_soon`, and `quality_failing`: recipients reading tables
+    whose quality status (the quality module's latest evaluations, as on trust badges) is failing.
+  - **Notices.** The scheduler tells the share's maker once when a share is about to expire (`share.expiring`) and
+    once per unused spell (`share.unused`), through their notification channels. `CAIRN_SHARES_EXPIRING_DAYS`
+    (14), `CAIRN_SHARES_UNUSED_DAYS` (30), checked every `CAIRN_SHARES_NOTICE_SECONDS` (3600).
+  - **Tested** (`tests/test_share_usage_e2e.py`): pyiceberg as the recipient against the real store and catalog
+    listed, loaded and read a table, was refused one beside it and sent a wrong secret; the counts, tables read and
+    last access came back by name and by id (not for another person); a share unused for 40 days and ending in 2
+    days was found and its maker notified once of each; a table read through a share with a failing quality
+    evaluation was reported; older days were dropped.
 
 **Data clean rooms.** Two or more parties join their tables in aggregate, and none of them sees the others' rows (`/v1/clean-rooms`).
 

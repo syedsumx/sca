@@ -433,6 +433,9 @@ class Services:
                     sync_every = float(os.environ.get("CAIRN_TRINO_CATALOG_SYNC_SECONDS", "3600"))
                     if self.trino_catalog is not None and sync_every > 0:
                         self.trino_catalog.run_due(sync_every)
+                    if self.shares is not None:              # share usage written; expiry and unused notices
+                        self.shares.flush_usage()
+                        self.shares.sweep(every_s=float(os.environ.get("CAIRN_SHARES_NOTICE_SECONDS", "3600")))
                     if self.external_catalogs is not None:   # back in Trino after a restart; catalogued again
                         self.external_catalogs.run_due(
                             float(os.environ.get("CAIRN_EXTERNAL_CATALOG_SYNC_SECONDS", "3600")),
@@ -1677,6 +1680,14 @@ def _build_data_access(s: Services) -> None:
 
             s.shares = Shares(s.engine, s.trino_tokens, s.lakehouse, s.audit)
             s.lakehouse.shares = s.shares
+            # Usage overview: the quality of the tables recipients read; notices to the share's maker.
+            s.shares.quality_status = lambda urns: {u: v.get("quality_status") for u, v in s.trust(urns).items()}
+
+            class _Hub:                                  # built later: looked up when a notice is sent
+                def publish(self, event):
+                    hub = getattr(s, "notify", None)
+                    return hub.publish(event) if hub is not None else []
+            s.shares.notify = _Hub()
 
     # MLflow behind Cairn sign-in, with models in the catalog (CAIRN_MLFLOW_URL).
     from cairn.ml.mlflow_gateway import MlflowGateway

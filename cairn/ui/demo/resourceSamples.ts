@@ -1,6 +1,54 @@
 /* Sample answers for the platform areas (src/consumer/resources/catalog.ts), in the API's own shapes; fictional data. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const RESOURCE_SAMPLES: Record<string, any> = {
+ "/v1/shares/usage/overview": {
+  "shares": [
+   {
+    "id": "8c1f0a5e2b7d4c39a6e0f1b2c3d4e5f6",
+    "name": "partner-a",
+    "recipient": "Partner A (data@partner.example)",
+    "state": "active",
+    "created_by": "urn:li:corpuser:ana",
+    "expires_at": 1795392400,
+    "last_access_ms": 1794182800000,
+    "requests": 1284,
+    "table_loads": 96,
+    "refusals": 3,
+    "failures": 0,
+    "tables_read": ["analytics.products", "analytics.orders"],
+    "unused": false,
+    "expiring_soon": false,
+    "quality_failing": [
+     {"table": "analytics.orders", "urn": "urn:li:dataset:(urn:li:dataPlatform:iceberg,analytics.orders,PROD)", "status": "FAILING"}
+    ]
+   },
+   {
+    "id": "2d4e6f8a0b1c4d3e9f7a5b3c1d0e2f4a",
+    "name": "auditor-2026",
+    "recipient": "External auditor",
+    "state": "active",
+    "created_by": "urn:li:corpuser:finance-ops",
+    "expires_at": 1794355600,
+    "last_access_ms": null,
+    "requests": 0,
+    "table_loads": 0,
+    "refusals": 0,
+    "failures": 0,
+    "tables_read": [],
+    "unused": true,
+    "expiring_soon": true,
+    "quality_failing": []
+   }
+  ],
+  "unused": ["auditor-2026"],
+  "expiring_soon": ["auditor-2026"],
+  "quality_failing": [
+   {"share": "partner-a", "recipient": "Partner A (data@partner.example)", "tables": [
+    {"table": "analytics.orders", "urn": "urn:li:dataset:(urn:li:dataPlatform:iceberg,analytics.orders,PROD)", "status": "FAILING"}]}
+  ],
+  "unused_days": 30,
+  "expiring_days": 14
+ },
  "/v1/external-catalogs": {
   "catalogs": [
    {
