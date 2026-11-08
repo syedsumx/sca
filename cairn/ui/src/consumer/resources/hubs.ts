@@ -33,6 +33,7 @@ export const HUBS: Hub[] = [
         "description": "Tables kept by Cairn: derived tables and materialized views, vector indexes, volumes, storage buckets, maintenance and stored procedures.",
         "tabs": [
             "derived",
+            "external-catalogs",
             "vectors",
             "volumes",
             "storage",

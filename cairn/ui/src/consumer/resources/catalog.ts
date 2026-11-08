@@ -6,6 +6,64 @@ import type { ResourceSpec } from './types';
  * fields were read from the API's routers and services; keep them in step when an endpoint changes.
  */
 export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
+    "external-catalogs": {
+        "key": "external-catalogs",
+        "title": "External catalogs",
+        "path": "/v1/external-catalogs",
+        "listKey": "catalogs",
+        "rowKey": "name",
+        "description": "Other organisations' and cloud Iceberg REST catalogs, queried in Trino as catalogs of their own under the lakehouse's grants, masks and row filters; read-only unless registered writable. Their credentials stay in Cairn.",
+        "columns": [
+            "name",
+            "uri",
+            "auth",
+            "writable",
+            "trino_state",
+            "last_sync_ms"
+        ],
+        "actions": [
+            {
+                "label": "Sync now",
+                "method": "POST",
+                "path": "/v1/external-catalogs/{name}/sync",
+                "body": {}
+            },
+            {
+                "label": "Add to Trino again",
+                "method": "POST",
+                "path": "/v1/external-catalogs/{name}/attach",
+                "body": {}
+            },
+            {
+                "label": "Make writable",
+                "method": "PATCH",
+                "path": "/v1/external-catalogs/{name}",
+                "body": {
+                    "writable": true
+                }
+            },
+            {
+                "label": "Register",
+                "method": "POST",
+                "path": "/v1/external-catalogs",
+                "body": {
+                    "name": "partner",
+                    "uri": "https://catalog.partner.example/iceberg",
+                    "warehouse": "shared",
+                    "auth": "oauth2",
+                    "client_id": "cairn-at-partner",
+                    "credential_ref": "scope:partner-catalog/client-secret",
+                    "token_url": "https://login.partner.example/oauth/token"
+                }
+            },
+            {
+                "label": "Remove",
+                "method": "DELETE",
+                "path": "/v1/external-catalogs/{name}",
+                "body": null
+            }
+        ]
+    },
     "semantic-models": {
         "key": "semantic-models",
         "title": "Semantic model drafts",

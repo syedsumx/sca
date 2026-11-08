@@ -120,6 +120,7 @@ class Services:
     sql_ai: Optional[Any] = None
     ai_gateway: Optional[Any] = None
     agent_apps: Optional[Any] = None
+    external_catalogs: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -432,6 +433,10 @@ class Services:
                     sync_every = float(os.environ.get("CAIRN_TRINO_CATALOG_SYNC_SECONDS", "3600"))
                     if self.trino_catalog is not None and sync_every > 0:
                         self.trino_catalog.run_due(sync_every)
+                    if self.external_catalogs is not None:   # back in Trino after a restart; catalogued again
+                        self.external_catalogs.run_due(
+                            float(os.environ.get("CAIRN_EXTERNAL_CATALOG_SYNC_SECONDS", "3600")),
+                            float(os.environ.get("CAIRN_EXTERNAL_CATALOGS_RECONCILE_SECONDS", "60")))
                 except Exception:
                     logger.exception("held Trino lineage or usage could not be retried")
 
@@ -888,6 +893,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_saas(s)
         _build_reverse_etl(s)
         _build_doc_sources(s)
+        _build_external_catalogs(s)
         _build_branches(s)
         _build_records(s)
         _wire_residency(s)
@@ -2360,3 +2366,19 @@ def _build_saml(s: Services) -> None:
     signer = TrinoTokens(s.engine, passphrase, issuer, 3600, key_name="sso-oidc")
     s.saml = SamlBridge(s.engine, signer, issuer, load_clients(clients_file), idp_metadata, s.audit,
                         os.environ.get("CAIRN_SAML_SP_ENTITY_ID") or None)
+
+
+def _build_external_catalogs(s: Services) -> None:
+    """External Iceberg catalogs (cairn.dataaccess.external_catalogs): on with Trino's access control."""
+    if getattr(s, "trino_access", None) is None or s.graph is None:
+        return
+    from cairn.dataaccess.external_catalogs import ExternalCatalogs
+
+    scopes = s.secret_scopes
+    s.external_catalogs = ExternalCatalogs(
+        s.engine, s.graph, s.trino_access, s.data_access, s.audit,
+        read_secret=(scopes.read if scopes is not None and scopes.enabled else None),
+        broker_url=os.environ.get("CAIRN_EXTERNAL_CATALOGS_BROKER_URL", ""),
+        trino_connection=os.environ.get("CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION", ""),
+        trino_key=s.trino_key)
+    s.trino_access.external_catalog = s.external_catalogs.mapping

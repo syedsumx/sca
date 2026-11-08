@@ -289,6 +289,8 @@ def trino(lake, cairn):
         f"http-server.authentication.oauth2.jwks-url={cairn_url}/v1/trino/jwks.json",
         "http-server.authentication.oauth2.client-id=trino", f"http-server.authentication.oauth2.client-secret={OAUTH_SECRET}",
         "http-server.authentication.oauth2.scopes=trino",
+        # External Iceberg catalogs are added by Cairn (CREATE CATALOG), kept as files in the catalog directory.
+        "catalog.management=dynamic",
         "event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties", ""]))
     # Another database through Trino (federation): PostgreSQL, its password from the environment.
     pg, pgp = f"cairn-trino-pg-{os.getpid()}", port()
@@ -319,9 +321,12 @@ def _start_trino(d, tp, tls, pg, pgp, name, services, model):
         "connector.name=postgresql", f"connection-url=jdbc:postgresql://127.0.0.1:{pgp}/crm",
         "connection-user=postgres", "connection-password=${ENV:CAIRN_FED_CRM_PASSWORD}", ""]))
     os.chmod(d, 0o755)
+    os.chmod(f"{d}/catalog", 0o777)          # Trino (its own user) writes the catalogs Cairn adds
+    with open(f"{d}/trino.env", "w") as fh:  # Trino's key for Cairn, as Helm passes it (catalogs refer to it)
+        fh.write(f"CAIRN_TRINO_ACCESS_KEY={KEY}\n")
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "-e", "CAIRN_FED_CRM_PASSWORD=crm-secret",
-                    "-e", "CAIRN_AI_API_KEY=stub-key",
-                    "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
+                    "-e", "CAIRN_AI_API_KEY=stub-key", "--env-file", f"{d}/trino.env",
+                    "-v", f"{d}/catalog:/etc/trino/catalog", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
                     "-v", f"{d}/event-listener.properties:/etc/trino/event-listener.properties:ro",
                     "-v", f"{d}/usage-listener.properties:/etc/trino/usage-listener.properties:ro",

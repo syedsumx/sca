@@ -909,6 +909,14 @@
    "note": "cairn.ai.trace_insights, /v1/agent-traces/insights (and per agent), /v1/agent-traces/settings (admin, audited); every traced tool call records its run (migration 0124): a custom agent's run, an agent app's run token, an OAuth session; key agents' calls are split into sessions. Findings with severity: loops, error rate, refusals, slow calls, flagged text, and volume, cost, latency, calls-per-run and error outliers against the agent's previous weeks. Tested end to end through the real services and HTTP API with real recorded MCP calls from a real agent key, a custom agent's real run and real usage metering (tests/test_agent_trace_insights.py)"
   },
   {
+   "id": "L105",
+   "title": "External Iceberg catalogs, governed",
+   "summary": "Another organisation's or a cloud Iceberg REST catalog queried in Trino as a catalog of its own",
+   "done": "Partner and cloud tables are queried in place under the same grants, masks and row filters as the lakehouse, read-only by default, with their credential never leaving Cairn; the counterpart of Unity Catalog's and Snowflake's catalog federation",
+   "status": "shipped",
+   "note": "/v1/external-catalogs (migration 0126): registration with a credential reference (secret scope or CAIRN_EXTCAT_*), Trino's dynamic catalogs (CREATE CATALOG by cairn-catalogs only) signing in through Cairn's OAuth token broker with Trino's own key, namespaces, tables and schemas catalogued, read-only enforcement, re-added after a Trino restart. Tested with a second real Cairn Catalog and Store on Trino 484: masked, filtered and refused users, writes refused (tests/test_external_catalogs_e2e.py)"
+  },
+  {
    "id": "L108",
    "title": "Agent automations from the CLI: cairn tasks",
    "summary": "CoWork scheduled tasks and their outbox from a terminal or a script",

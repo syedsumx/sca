@@ -17,6 +17,11 @@
 {{- if .Values.cairn.trino.delta.enabled }}{{ $_ := set $map "delta" (dict "platform" "delta-lake" "database" "") }}{{ end }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_CATALOGS" "value" (toJson $map)) }}
 {{- end }}
+{{- if .Values.cairn.trino.externalCatalogs.enabled }}
+{{- $trinoApi := printf "http://%s:%v" (include "cairn.componentName" (dict "root" $ "component" "api" "cfg" .Values.cairn.api)) .Values.cairn.api.port }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_BROKER_URL" "value" $trinoApi) }}
+{{- $scimEnv = append $scimEnv (dict "name" "CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION" "value" .Values.cairn.trino.externalCatalogs.connection) }}
+{{- end }}
 {{- if .Values.cairn.trino.sso.enabled }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_SECRET" "valueFrom" (dict "secretKeyRef" (dict "name" .Values.cairn.trino.accessKeySecret.name "key" .Values.cairn.trino.sso.clientSecretKey))) }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_TRINO_OAUTH_REDIRECT_URIS" "value" (printf "%s/oauth2/callback" (trimSuffix "/" .Values.cairn.trino.sso.publicUrl))) }}

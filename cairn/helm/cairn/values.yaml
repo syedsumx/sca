@@ -850,6 +850,14 @@ cairn:
       callsPerMinute: 600
       userDailyQueries: 200
     federation: []
+    # External Iceberg REST catalogs (another organisation's or a cloud catalog), registered at
+    # /v1/external-catalogs and added to Trino by Cairn (dynamic catalogs), governed like the lakehouse and
+    # read-only unless registered writable. Trino signs in to them through Cairn's token broker with its own
+    # access key; the external credential stays in Cairn (a secret scope or a CAIRN_EXTCAT_* variable).
+    # connection: the trino:// connection (cairn.connections) Cairn runs CREATE CATALOG on.
+    externalCatalogs:
+      enabled: false
+      connection: lakehouse
     #  - name: crm
     #    connector: postgresql
     #    properties: { connection-url: "jdbc:postgresql://crm-db:5432/crm" }

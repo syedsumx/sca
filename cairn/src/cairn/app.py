@@ -253,6 +253,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
                                               groups_of=lambda urn: services.attributes.subject(urn).get("groups", []),
                                               history=services.query_history,
                                               functions=getattr(services, "trino_functions", None)))
+        if getattr(services, "external_catalogs", None) is not None:   # other organisations' Iceberg catalogs
+            from cairn.dataaccess.external_catalogs import build_external_catalogs_router
+
+            app.include_router(build_external_catalogs_router(services.external_catalogs, cp, authz))
         if services.query_history is not None:
             from cairn.dataaccess.query_history import build_queries_router
 

@@ -43,6 +43,10 @@ data:
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    # External Iceberg catalogs: Cairn adds them (CREATE CATALOG) and adds them again after a restart.
+    catalog.management=dynamic
+    {{- end }}
     {{- if $u.cache.enabled }}
     # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
     cache-manager.config-files=/etc/trino/cache-manager.properties
@@ -88,6 +92,9 @@ data:
     {{- end }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    catalog.management=dynamic
+    {{- end }}
     {{- if $u.cache.enabled }}
     # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
     cache-manager.config-files=/etc/trino/cache-manager.properties
@@ -481,6 +488,10 @@ data:
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     event-listener.config-files=/etc/trino/event-listener.properties,/etc/trino/usage-listener.properties
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    # External Iceberg catalogs: Cairn adds them (CREATE CATALOG) and adds them again after a restart.
+    catalog.management=dynamic
+    {{- end }}
     {{- if $u.cache.enabled }}
     # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
     cache-manager.config-files=/etc/trino/cache-manager.properties
@@ -505,6 +516,9 @@ data:
     query.max-memory={{ $wh.queryMaxMemory | default $u.queryMaxMemory }}
     internal-communication.shared-secret=${ENV:CAIRN_TRINO_ACCESS_KEY}
     shutdown.grace-period={{ $u.gracefulShutdownSeconds }}s
+    {{- if $u.externalCatalogs.enabled }}
+    catalog.management=dynamic
+    {{- end }}
     {{- if $u.cache.enabled }}
     # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
     cache-manager.config-files=/etc/trino/cache-manager.properties

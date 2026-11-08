@@ -20,6 +20,10 @@ masking plans and row filters that govern the catalog and its SQL editor:
   - A warehouse (a Trino of a team's own, ``cairn.dataaccess.warehouses``) asks as itself
     (``/v1/trino/<key>/warehouse/<name>/...``): running a query there needs ``USE_WAREHOUSE`` on
     ``urn:li:warehouse:<name>``, granted to the team like any policy.
+  - External Iceberg catalogs (``cairn.dataaccess.external_catalogs``) are named like the lakehouse
+    (``iceberg`` datasets ``<catalog>.<schema>.<table>``) and are read-only unless registered writable:
+    every write, table or schema change in one is refused. Only Cairn's catalog administrator
+    (``cairn-catalogs``) may create or drop catalogs, and it may do nothing else.
   - An action Cairn does not know is refused.
 - **Masks and filters.** Columns the caller's masking plan covers get a Trino mask with the plan's strategy
   (``partial``, ``hash``, ``redact`` or ``null``). ``row_filter`` obligations (``{"expression": "region =
@@ -236,6 +240,9 @@ def mask_expression(column: str, column_type: str, strategy: str) -> str:
 # Cairn's own catalog crawler (trino_catalog.py): it may see every table and column, and read no rows.
 # Only Cairn signs in as it; /v1/trino/token never issues a token for it.
 CRAWLER = "cairn-catalog"
+# Cairn's catalog administrator (external_catalogs.py): creates and drops external catalogs, nothing else.
+CATALOG_ADMIN = "cairn-catalogs"
+CATALOG_ADMIN_OPS = {"ExecuteQuery", "AccessCatalog", "FilterCatalogs", "CreateCatalog", "DropCatalog"}
 
 
 class TrinoAccess:
@@ -268,6 +275,9 @@ class TrinoAccess:
         # app_identity(user): an installed app's identity ``cairnapp-<install>`` -> {actor: its installer, tables:
         # the dataset urns bound to it}; None: not one (cairn.dataaccess.app_packages).
         self.app_identity: Optional[Callable[[str], Optional[dict]]] = None
+        # external_catalog(catalog): a registered external Iceberg catalog -> {platform, database, writable};
+        # None: not one (cairn.dataaccess.external_catalogs). It raises when it cannot tell (refused).
+        self.external_catalog: Optional[Callable[[str], Optional[dict]]] = None
 
     def _decided_on(self, t: dict, need: str) -> str:
         """The urn a read or view of ``t`` is decided on: a published metric view's source table, else ``t``."""
@@ -283,7 +293,12 @@ class TrinoAccess:
 
     def dataset_name(self, catalog: str, schema: str, table: str) -> tuple[str, str, str]:
         """(platform, name, env) of a Trino table's dataset."""
-        m = self.catalogs.get(catalog, CatalogMapping())
+        m = self.catalogs.get(catalog)
+        if m is None and self.external_catalog is not None and catalog:
+            ext = self.external_catalog(catalog)
+            if ext is not None:
+                m = CatalogMapping(platform=ext["platform"], database=ext["database"])
+        m = m or CatalogMapping()
         db = catalog if m.database is None else m.database
         return m.platform, ".".join(p for p in (db, schema, table) if p).lower(), m.env
 
@@ -420,12 +435,26 @@ class TrinoAccess:
     def _tkey(t: dict) -> str:
         return ".".join(str(t.get(k) or "") for k in ("catalogName", "schemaName", "tableName")).lower()
 
+    def _read_only(self, catalog: str) -> bool:
+        """An external catalog not registered writable."""
+        if self.external_catalog is None or not catalog or catalog in self.catalogs:
+            return False
+        ext = self.external_catalog(catalog)
+        return ext is not None and not ext.get("writable")
+
     def allow(self, inp: dict, warehouse: Optional[str] = None) -> bool:
         actor, groups = self.who(inp.get("context"))
         action = inp.get("action") or {}
         op = action.get("operation", "")
         res = action.get("resource") or {}
         user = actor.removeprefix("urn:li:corpuser:")
+        if user == CATALOG_ADMIN or op in ("CreateCatalog", "DropCatalog"):
+            if user != CATALOG_ADMIN:
+                return False
+            if op in CATALOG_ADMIN_OPS:
+                return True
+            t = res.get("table") or {}            # SHOW CATALOGS reads Trino's system tables
+            return op in TABLE_OPS and TABLE_OPS[op] in (VIEW, READ) and t.get("catalogName") == "system"
         room = self._room_tables(user)
         if room is not None:                          # a clean room: read its tables, and nothing else
             if op in ("ExecuteQuery", "AccessCatalog", "FilterCatalogs", "ShowSchemas", "FilterSchemas", "ShowTables"):
@@ -476,6 +505,12 @@ class TrinoAccess:
         if op in ("ViewQueryOwnedBy", "KillQueryOwnedBy"):
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
         if op in SCHEMA_OPS:
+            try:
+                if self._read_only(str((res.get("schema") or {}).get("catalogName") or "")):
+                    return False
+            except Exception as e:  # noqa: BLE001 - fail closed
+                logger.warning("external catalog lookup failed: %s", e)
+                return False
             return self.allowed(actor, groups, MANAGE, None)
         if op in SYSTEM_OPS:
             return self.allowed(actor, groups, SYSTEM, None)
@@ -488,6 +523,14 @@ class TrinoAccess:
             if (t.get("schemaName") == "information_schema" or t.get("catalogName") == "system") and TABLE_OPS[op] in (VIEW, READ):
                 return True
             name = str(t.get("tableName") or "")
+            if TABLE_OPS[op] not in (VIEW, READ):
+                try:
+                    if self._read_only(str(t.get("catalogName") or "")):
+                        logger.info("%s on %s refused: the external catalog is read-only", op, self._tkey(t))
+                        return False
+                except Exception as e:  # noqa: BLE001 - fail closed
+                    logger.warning("external catalog lookup failed for %s: %s", self._tkey(t), e)
+                    return False
             if TABLE_OPS[op] != VIEW and not self._resident(t):
                 logger.info("%s on %s refused: its data is pinned to another region", op, self._tkey(t))
                 return False
@@ -719,7 +762,8 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
                     p = current_principal(request)
                 except HTTPException:
                     p = None
-                if p is None or p.via not in ("session", "dev") or p.urn == f"urn:li:corpuser:{CRAWLER}":
+                if p is None or p.via not in ("session", "dev") or p.urn in (f"urn:li:corpuser:{CRAWLER}",
+                                                                          f"urn:li:corpuser:{CATALOG_ADMIN}"):
                     here = f"/cairn/api/v1/trino/oauth/authorize?{request.url.query}"
                     return RedirectResponse(f"/login?redirect_uri={quote(here, safe='')}", 302)
                 groups = tuple(p.groups) or (tuple(groups_of(p.urn)) if groups_of is not None else ())
@@ -759,7 +803,8 @@ def build_trino_router(access: TrinoAccess, key: str, audit=None, lineage=None, 
         @router.post("/token")
         def token(ttl_seconds: Optional[int] = Body(None, embed=True), p=Depends(current_principal)):
             """A Trino sign-in token for the caller (BI tools, the Trino CLI, notebooks)."""
-            if p.is_service or p.via in ("agent", "extension") or p.urn == f"urn:li:corpuser:{CRAWLER}":
+            if p.is_service or p.via in ("agent", "extension") or p.urn in (f"urn:li:corpuser:{CRAWLER}",
+                                                                             f"urn:li:corpuser:{CATALOG_ADMIN}"):
                 raise HTTPException(403, "Trino tokens are for people signed in to Cairn")
             try:
                 out = tokens.mint(p.urn, ttl_seconds)

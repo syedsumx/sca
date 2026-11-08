@@ -936,6 +936,56 @@ Trino queries other databases in place (PostgreSQL, MySQL, SQL Server, Oracle, H
   - an HR table was refused;
   - a join of a lakehouse table with the PostgreSQL table was governed on both sides.
 
+## External Iceberg catalogs
+
+Another organisation's Iceberg REST catalog, or a cloud provider's, queried through Trino as a catalog of its
+own and governed like the lakehouse.
+
+- **Register** (`MANAGE_SYSTEM_OPERATIONS`): `POST /v1/external-catalogs` with
+  - `name`: the Trino catalog (lowercase, not one of Cairn's own);
+  - `uri`, and `warehouse` if the catalog wants one;
+  - `auth`: `oauth2` (client credentials: `client_id`, `token_url`, default `<uri>/v1/oauth/tokens`, `scope`),
+    `token` (a bearer token) or `none`;
+  - `credential_ref`: where the client secret or token is, never the value: `scope:<scope>/<key>` (a secret
+    scope the registering operator can read; read as them, so revoking their access stops the catalog) or
+    `env:CAIRN_EXTCAT_<NAME>` (only that prefix);
+  - `store_endpoint` and `store_region`: where the data files are, if the catalog's vended settings do not say;
+  - `writable` (default `false`).
+
+  Cairn signs in once to check the reference (a refusal is `502`, with the status only), adds the catalog to
+  Trino and catalogs it. `GET /v1/external-catalogs[/<name>]` (`MANAGE_INGESTION`) shows each with its Trino
+  state and last sync; `POST …/<name>/sync` catalogs it again, `POST …/<name>/attach` adds it to Trino again,
+  `PATCH …/<name> {"writable": true|false}`, `DELETE …/<name>` drops it from Trino and marks its datasets
+  removed. Everything is audited (`external_catalogs`), with references only.
+- **In Trino, with no credential.** Cairn runs `CREATE CATALOG <name> USING iceberg` as `cairn-catalogs`, the
+  only identity Trino's access control lets create or drop catalogs (Cairn never issues it a token). Trino signs
+  in to the external catalog with OAuth2 against Cairn's broker, `POST /v1/external-catalogs/oauth/tokens`: the
+  client id is the catalog's name and the client secret is `${ENV:CAIRN_TRINO_ACCESS_KEY}`, resolved inside
+  Trino. Cairn checks the key, exchanges the credential and returns the external access token (cached until a
+  minute before it ends). Data files are read with the credentials the external catalog vends per table.
+  Settings on the API: `CAIRN_EXTERNAL_CATALOGS_BROKER_URL` (Cairn as Trino reaches it) and
+  `CAIRN_EXTERNAL_CATALOGS_TRINO_CONNECTION` (the `trino://` connection Cairn runs `CREATE CATALOG` on). Trino
+  needs `catalog.management=dynamic` and a writable catalog directory. Helm: `cairn.trino.externalCatalogs`
+  (`enabled`, `connection`).
+- **Catalogued.** Namespaces, tables and schemas are read from the REST API (metadata only) as `iceberg`
+  datasets `<name>.<namespace>.<table>`, the names access control uses, on registration, on demand and every
+  `CAIRN_EXTERNAL_CATALOG_SYNC_SECONDS` (3600). Labels and descriptions added in Cairn survive; dropped tables
+  are marked removed.
+- **Governed.** Grants, masks, row filters and refusals apply as on the lakehouse. The catalog is read-only
+  unless `writable`: writes, table and schema changes are refused for everyone.
+- **Restarts.** Every `CAIRN_EXTERNAL_CATALOGS_RECONCILE_SECONDS` (60) the scheduler adds registered catalogs
+  that Trino has lost again.
+- **Tested** (`tests/test_external_catalogs_e2e.py`): a second Cairn Catalog and Cairn Store (scoped keys) as
+  the partner's catalog, its OAuth client secret behind `env:` and an identity provider stand-in, on Trino 484:
+  - registration refused for non-operators, for credentials in the request, for references outside
+    `CAIRN_EXTCAT_*`, for Cairn's own catalog names and for a wrong secret;
+  - Trino's catalog file holds no secret, and the broker refuses anything but Trino's key;
+  - both tables catalogued with their schemas, and a label added in Cairn kept by the next sync;
+  - the admin read the rows as they are, `ana` got the labelled email masked, `bob` his row filter, and `ana`
+    was refused the HR table;
+  - inserts, deletes, `CREATE TABLE` and `CREATE SCHEMA` were refused, and so was `DROP CATALOG`;
+  - the catalog was added again after it was dropped from Trino, and removing it marked its datasets removed.
+
 ## Operational databases
 
 Applications need a database they can write to row by row, with low latency, next to the lakehouse. Cairn makes

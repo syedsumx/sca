@@ -1,6 +1,54 @@
 /* Sample answers for the platform areas (src/consumer/resources/catalog.ts), in the API's own shapes; fictional data. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const RESOURCE_SAMPLES: Record<string, any> = {
+ "/v1/external-catalogs": {
+  "catalogs": [
+   {
+    "name": "partner",
+    "uri": "https://catalog.partner.example/iceberg",
+    "warehouse": "shared",
+    "auth": "oauth2",
+    "client_id": "cairn-at-partner",
+    "credential_ref": "scope:partner-catalog/client-secret",
+    "token_url": "https://login.partner.example/oauth/token",
+    "oauth_scope": null,
+    "store_endpoint": null,
+    "store_region": "eu-west-1",
+    "writable": false,
+    "description": "Partner order feed",
+    "created_by": "urn:li:corpuser:ops",
+    "created_ms": 1794096400000,
+    "updated_ms": 1794182800000,
+    "trino_state": "attached",
+    "trino_error": null,
+    "last_sync_ms": 1794182800000,
+    "last_sync": {"catalog": "partner", "namespaces": 2, "tables": 14, "columns": 121, "removed": 0, "seconds": 1.8},
+    "platform": "iceberg"
+   },
+   {
+    "name": "glue_eu",
+    "uri": "https://glue.eu-west-1.amazonaws.com/iceberg",
+    "warehouse": "123456789012",
+    "auth": "token",
+    "client_id": null,
+    "credential_ref": "env:CAIRN_EXTCAT_GLUE_EU",
+    "token_url": null,
+    "oauth_scope": null,
+    "store_endpoint": null,
+    "store_region": "eu-west-1",
+    "writable": false,
+    "description": null,
+    "created_by": "urn:li:corpuser:ops",
+    "created_ms": 1793922400000,
+    "updated_ms": 1793922400000,
+    "trino_state": "failed",
+    "trino_error": "Trino could not be reached",
+    "last_sync_ms": 1793922400000,
+    "last_sync": {"error": "the catalog answered HTTP 403 for namespaces"},
+    "platform": "iceberg"
+   }
+  ]
+ },
  "/sql/semantic-models": [
   {
    "id": "5b2e8f0a3c7d41e69a0b4c2d8e1f7a63",
