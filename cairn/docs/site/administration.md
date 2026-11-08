@@ -3687,6 +3687,41 @@ A stream writes a Kafka topic into a lakehouse table continuously. Define it wit
 - **Bad messages.** A message that cannot be a row is set aside with its offset and the reason (`GET /v1/streams/{id}/rejects`), and the stream goes on. Examples: not JSON, an unknown operation, no key, or a column the table lacks. With `evolve`, new columns are added to the table instead.
 - **Failures.** A batch the table refuses, such as a value that does not convert, stops the stream. The error shows on its status and the batch is retried with back-off. Nothing is skipped silently.
 - **Bad rows (`bad_rows`).** With `quarantine` instead of `fail` (the default), a row the table refuses is set aside with the bad messages, with its offset and the reason, and the rest of the batch commits. In an upsert stream the refused change leaves its key alone: the row already in the table stays. For HTTP streams, `rejected` in the response counts them. Tested in `tests/test_streams_e2e.py`, with the real store and catalog: append and upsert, and a retried request that files nothing twice.
+- **Transforms (`transform`).** One SQL `SELECT` over `batch` (the batch's incoming rows; nested objects are
+  structs, so `geo.country` works) reshapes each micro-batch before it lands, in the same commit, so transformed data
+  is in the table within seconds instead of waiting for a derived table's schedule. For `json` and `http` streams.
+  ```sql
+  SELECT id, lower(email) AS email, CAST(amount AS DECIMAL(12, 2)) AS amount, CAST(ts AS TIMESTAMP) AS ts
+  FROM batch WHERE status <> 'test'
+  ```
+  - **What it may do.** Projection, renames, casts and row-level expressions and functions, and `WHERE`. Each output
+    row comes from one input row, so joins, other tables, subqueries, `WITH`, `UNION`, aggregates, `GROUP BY`,
+    `DISTINCT`, window functions, `UNNEST`, `ORDER BY` and `LIMIT` are refused. Other tables are refused because
+    their access could not be checked here; join them in a derived table. Name every computed column with `AS`. In
+    `upsert` mode the key columns must be in the output. Deletes (tombstones) are applied by key, untransformed.
+  - **Checked when defined** (`POST` and `PUT /v1/streams`): the statement is parsed (sqlglot), checked against these
+    rules, and bound in the engine against a row of NULLs, so a function or type that does not exist is refused then
+    rather than on the first batch.
+  - **Engine: DuckDB, in-process.** It runs the statement on the batch in memory, column-wise, with standard SQL
+    casts, string, date and JSON functions, and nothing to deploy. Expression-only evaluation (sqlglot) would need
+    Cairn to implement each function. Sending each batch to Trino would add a round trip and a query per batch.
+    The engine is sandboxed: an in-memory database with file system and network access off, no extension
+    loading, one thread, a memory limit (`CAIRN_STREAMS_TRANSFORM_MEMORY`, 512MB), and its configuration locked
+    before the statement runs.
+  - **Rows.** A row the `WHERE` drops is skipped. A row the statement fails on, such as a cast that does not
+    convert, is set aside with the rejects (`GET /v1/streams/{id}/rejects`), with the engine's reason and the row
+    as it arrived; the batch is split in halves until those rows are found, and the rest commit. A row the table
+    then refuses follows `bad_rows`. A table the stream creates takes the transform's output types (a
+    `DECIMAL(12, 2)` stays one).
+  - **Offsets.** When nothing is left to write, an empty commit still records the batch's offsets, so an HTTP
+    channel moves on. HTTP responses say how many rows were `rejected` and `filtered`.
+  - **Tested** in `tests/test_stream_transform_e2e.py`, through an HTTP ingest stream into a real lakehouse table
+    (real store and catalog) read back through a real Trino. Rows landed lowercased, cast and filtered, with the
+    transform's column types, and were readable through Trino as soon as the request returned. A row whose amount
+    did not convert was set aside with the reason while the rest committed. A retry wrote nothing twice. A request
+    whose rows were all filtered still moved the channel on. Upserts kept their key. Joins, aggregates, other
+    tables, file reads, unnamed columns, unknown functions and a transform dropping the key were refused at
+    definition. File access, writes and configuration changes failed inside the engine.
 - **Lineage.** Give `source` (the dataset URN the topic carries, such as the Postgres table) and Cairn adds it to the target's upstream lineage, merged with what is there. If that write fails, the stream is not created.
 - **Status.** `GET /v1/streams` shows each stream's status, rows written, lag and last commit. `POST /v1/streams/{id}/enabled` pauses or resumes a stream. Changes are audited. Written tables are recorded as changed, for data-aware schedules.
 - **Workers.** `cairn streams` runs every enabled stream. Several replicas share each stream's partitions, through one Kafka consumer group per stream.

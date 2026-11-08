@@ -362,17 +362,31 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "title": "Streams",
         "path": "/v1/streams",
         "listKey": null,
-        "description": "Writes messages from a Kafka topic (or rows posted over HTTP) into a lakehouse table continuously, including database change events.",
+        "description": "Writes messages from a Kafka topic (or rows posted over HTTP) into a lakehouse table continuously, including database change events. A transform (one SELECT over batch) reshapes, casts and filters each micro-batch before it lands; rows it fails on are set aside with the rejects.",
         "columns": [
             "name",
             "topic",
             "format",
             "mode",
             "target",
+            "transform",
             "enabled",
             "status"
         ],
         "actions": [
+            {
+                "label": "New HTTP stream with a transform",
+                "method": "POST",
+                "path": "/v1/streams",
+                "body": {
+                    "name": "orders-clean",
+                    "format": "http",
+                    "target": "sales.orders_clean",
+                    "create_table": true,
+                    "bad_rows": "quarantine",
+                    "transform": "SELECT id, lower(email) AS email, CAST(amount AS DECIMAL(12, 2)) AS amount, CAST(ts AS TIMESTAMP) AS ts FROM batch WHERE status <> 'test'"
+                }
+            },
             {
                 "label": "Enable / disable",
                 "method": "POST",

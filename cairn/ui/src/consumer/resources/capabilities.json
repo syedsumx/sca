@@ -917,6 +917,14 @@
    "note": "POST /v1/vectors/<name>/answer: passages retrieved as the caller (refused under masks and row filters), numbered and answered by the deployment's model through the metered, budgeted model path; citations actually used [{n, key, chunk, text, score}], sentences without a valid citation flagged, a refusal when no passage supports an answer, audited without content. Tested end to end on a real lakehouse table (tests/test_vectors_answer_e2e.py)"
   },
   {
+   "id": "L104",
+   "title": "Streaming transformations",
+   "summary": "A SQL SELECT applied to each micro-batch of a stream before it lands",
+   "done": "Cleaned, cast and filtered data arrives within seconds of being sent, without waiting for a derived table's schedule; the counterpart of transformations in Snowflake's Snowpipe Streaming and Databricks' streaming tables",
+   "status": "shipped",
+   "note": "transform on json and http streams: one row-for-row SELECT over batch, checked when the stream is defined (no joins or other tables, key kept, binds in the engine), run in-process in a sandboxed DuckDB (no files, network or extensions); failing rows go to the stream's rejects, filtered rows are skipped and the offsets still move on, a new table takes the transform's types (migration 0125). Tested end to end through an HTTP ingest stream into a real lakehouse table read through Trino (tests/test_stream_transform_e2e.py)"
+  },
+  {
    "id": "L105",
    "title": "External Iceberg catalogs, governed",
    "summary": "Another organisation's or a cloud Iceberg REST catalog queried in Trino as a catalog of its own",

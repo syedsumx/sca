@@ -527,6 +527,7 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1789780000000,
    "bad_rows": "quarantine",
    "tokenize": {},
+   "transform": null,
    "status": {
     "status": "running",
     "rows": 9821334,
@@ -556,6 +557,7 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1792804000000,
    "bad_rows": "fail",
    "tokenize": {},
+   "transform": "SELECT store_id, sensor, CAST(visitors AS INTEGER) AS visitors, CAST(ts AS TIMESTAMP) AS ts FROM batch WHERE sensor <> 'test'",
    "status": {
     "status": "error",
     "rows": 412900,
@@ -587,6 +589,7 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "tokenize": {
     "card_number": "pan"
    },
+   "transform": "SELECT receipt_id, store_id, card_number, CAST(total AS DECIMAL(12, 2)) AS total, upper(currency) AS currency, CAST(sold_at AS TIMESTAMP) AS sold_at FROM batch WHERE total IS NOT NULL",
    "status": {
     "status": null,
     "rows": null,

@@ -26,6 +26,11 @@ goes on. A batch the table refuses (say, a type that does not convert) stops the
 on its status and is retried with back-off: nothing is skipped silently. With ``bad_rows: quarantine``
 the rows the table refuses are set aside there too, and the rest of the batch commits.
 
+Transform (``transform``): one SQL SELECT over ``batch`` (the incoming rows) applied to each batch before it
+lands, in-process (``cairn.pipelines.stream_transform``): projection, renames, casts, filters, row-level
+expressions. It is checked when the stream is defined; a row it fails on is set aside with the rejects, a row its
+WHERE drops is skipped, and the batch's offsets are still recorded (an empty commit when nothing is left).
+
 Over HTTP (``format: http``): no Kafka. Producers post rows to ``POST /v1/ingest/<name>/rows`` with a
 ``channel`` (one per producer) and the channel ``offset`` of the first row; each request is one commit
 whose snapshot records the channel's next offset, so a retried request writes nothing twice
@@ -78,6 +83,7 @@ streams = Table(
     Column("created_ms", BigInteger, nullable=False),
     Column("bad_rows", String(16), nullable=False, server_default="fail"),   # fail | quarantine
     Column("tokenize", Text, nullable=True),                # JSON {column: token domain} (cairn.governance.tokens)
+    Column("transform", Text, nullable=True),               # a SELECT over each batch before it lands (0125)
 )
 
 stream_status = Table(
@@ -127,7 +133,8 @@ def _stream(r) -> dict:
             "batch_rows": r.batch_rows, "batch_seconds": r.batch_seconds,
             "enabled": bool(r.enabled), "created_by": r.created_by, "created_ms": r.created_ms,
             "bad_rows": getattr(r, "bad_rows", None) or "fail",
-            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {}}
+            "tokenize": json.loads(r.tokenize) if getattr(r, "tokenize", None) else {},
+            "transform": getattr(r, "transform", None) or None}
 
 
 class Reject(Exception):
@@ -326,6 +333,16 @@ class Streams:
         if bad_rows not in BAD_ROWS:
             raise StreamError("bad_rows is fail (the stream stops on a row the table refuses) or quarantine")
         tokenize = check_tokenize(self.tokens, body.get("tokenize"), actor, False, StreamError)
+        transform = body.get("transform") or None
+        if transform is not None:
+            from cairn.pipelines.stream_transform import TransformError, check
+
+            if fmt not in ("json", "http"):
+                raise StreamError("transform applies to json and http streams (debezium changes land as they are)")
+            try:
+                transform = check(transform, key if mode == "upsert" else None)
+            except TransformError as e:
+                raise StreamError(str(e))
         rows, secs = body.get("batch_rows", 5000), body.get("batch_seconds", 10)
         if not isinstance(rows, int) or not 1 <= rows <= 1_000_000 or not isinstance(secs, int) or not 1 <= secs <= 3600:
             raise StreamError("batch_rows is 1-1000000 and batch_seconds 1-3600")
@@ -334,7 +351,7 @@ class Streams:
                "evolve": bool(body.get("evolve")),
                "encoding": encoding, "start": start, "source": source, "batch_rows": rows, "batch_seconds": secs,
                "enabled": bool(body.get("enabled", True)), "created_by": actor, "created_ms": _now(),
-               "bad_rows": bad_rows, "tokenize": json.dumps(tokenize) if tokenize else None}
+               "bad_rows": bad_rows, "tokenize": json.dumps(tokenize) if tokenize else None, "transform": transform}
         return row
 
     def _lineage(self, urn: str, source: str, actor: str) -> None:
@@ -464,6 +481,15 @@ class Streams:
             except Reject as e:
                 reject(sid, m.partition, m.offset, str(e), m.value)
         props = {f"{PROP}{sid}.{stream['topic']}.{p}": str(o) for p, o in nxt.items()}
+        shaped = None                                      # the transform's output types, for a new table
+        if stream.get("transform") and ops:
+            from cairn.pipelines.stream_transform import transform_ops
+
+            ops, shaped = transform_ops(stream["transform"], ops, key if stream["mode"] == "upsert" else [],
+                                lambda p, o, reason, r: reject(sid, p, o, reason, json.dumps(r, default=str).encode()))
+            if not ops:
+                self._mark(stream, props)                  # all filtered or set aside: the offsets still move on
+                return 0
         if not ops:
             return 0                                       # only tombstones or rejects: offsets go to Kafka
         if stream.get("tokenize"):
@@ -481,7 +507,11 @@ class Streams:
             except NoSuchTableError:
                 if not upserts:
                     return 0                               # deletes of rows that were never written
-                table = open_table(cat, stream["target"], infer_schema(upserts), stream["create_table"])
+                schema = infer_schema(upserts)
+                if shaped is not None and set(shaped.names) >= set(schema.names):
+                    schema = pa.schema([pa.field(f.name, pa.string() if pa.types.is_null(f.type) else f.type)
+                                        for f in shaped])
+                table = open_table(cat, stream["target"], schema, stream["create_table"])
             names = set(table.schema().as_arrow().names)
             extra = {c for _, r, _, _ in ops for c in r} - names
             if stream["evolve"] and extra:
@@ -547,6 +577,24 @@ class Streams:
         return len(rows) + deleted
 
 
+    def _mark(self, stream: dict, props: dict) -> None:
+        """An empty commit recording a batch's offsets, when its transform left nothing to write (an http channel
+        resumes from the table's offsets, so a fully filtered request must still move them on)."""
+        import pyarrow as pa
+        from pyiceberg.exceptions import CommitFailedException, NoSuchTableError
+
+        for attempt in range(5):
+            try:
+                table = self._catalog().load_table(tuple(stream["target"].split(".")))
+            except NoSuchTableError:
+                return                                     # created by the first row that lands
+            try:
+                table.append(pa.Table.from_pylist([], schema=table.schema().as_arrow()), snapshot_properties=props)
+                return
+            except CommitFailedException:
+                time.sleep(0.2 * (attempt + 1))
+        raise StreamError(f"{stream['target']}: the commit kept conflicting")
+
     # ---- rows over HTTP ---------------------------------------------------------------------
     _channel_locks: dict = {}
     _channel_locks_guard = threading.Lock()
@@ -593,15 +641,22 @@ class Streams:
             part = zlib.crc32(channel.encode()) & 0x7FFFFFFF        # where its rejects are filed
             msgs = [types.SimpleNamespace(partition=0, offset=committed + i, key=None,
                                           value=json.dumps(r, default=str).encode()) for i, r in enumerate(todo)]
-            written = 0
+            written, rejected = 0, set()
+
+            def reject(sid, p, o, reason, value):
+                rejected.add(o)
+                self._reject(sid, part, o, f"[{channel}] {reason}", value)
             if msgs:
-                http_stream = {**stream, "topic": f"http.{channel}"}
-                written = self.write(http_stream, msgs, reject=lambda sid, p, o, reason, value: self._reject(
-                    sid, part, o, f"[{channel}] {reason}", value))
+                written = self.write({**stream, "topic": f"http.{channel}"}, msgs, reject=reject)
             nxt = self.channel_offset(stream, channel) if msgs else committed
         self._status(stream["id"], status="running", add_rows=written, last_commit_ms=_now(), error=None)
-        return {"written": written, "duplicates": skip, "rejected": len(todo) - written if stream["mode"] == "append" else None,
-                "next_offset": nxt}
+        out = {"written": written, "duplicates": skip, "rejected": len(todo) - written if stream["mode"] == "append" else None,
+               "next_offset": nxt}
+        if stream.get("transform"):                       # rows its WHERE dropped are neither written nor rejected
+            out["rejected"] = len(rejected)
+            if stream["mode"] == "append":
+                out["filtered"] = len(todo) - written - len(rejected)
+        return out
 
 
 class StreamWorker(threading.Thread):
