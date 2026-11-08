@@ -798,6 +798,88 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "serving-tables": {
+        "key": "serving-tables",
+        "title": "Serving tables",
+        "path": "/v1/serving",
+        "listKey": "serving_tables",
+        "description": "Lakehouse tables kept as row stores in PostgreSQL for lookups by key in milliseconds, synced from the table's snapshots, every answer governed like a read of the table (masks and row filters applied).",
+        "columns": [
+            "name",
+            "table",
+            "primary_key",
+            "rows",
+            "lag_ms",
+            "synced_ms",
+            "writable",
+            "error"
+        ],
+        "actions": [
+            {
+                "label": "Sync now",
+                "method": "POST",
+                "path": "/v1/serving/{name}/sync",
+                "body": {
+                    "full": false
+                }
+            },
+            {
+                "label": "Look up a key",
+                "method": "POST",
+                "path": "/v1/serving/{name}/lookup",
+                "body": {
+                    "keys": [
+                        {
+                            "id": 1
+                        }
+                    ],
+                    "columns": [
+                        "id",
+                        "region",
+                        "balance"
+                    ]
+                }
+            },
+            {
+                "label": "Write rows",
+                "method": "POST",
+                "path": "/v1/serving/{name}/rows",
+                "body": {
+                    "rows": [
+                        {
+                            "id": 9001,
+                            "region": "EU",
+                            "balance": "10.50"
+                        }
+                    ]
+                }
+            },
+            {
+                "label": "Drop",
+                "method": "DELETE",
+                "path": "/v1/serving/{name}",
+                "body": null
+            },
+            {
+                "label": "Declare",
+                "method": "POST",
+                "path": "/v1/serving",
+                "body": {
+                    "name": "accounts",
+                    "table": "sales.accounts",
+                    "primary_key": [
+                        "id"
+                    ],
+                    "indexes": [
+                        [
+                            "region"
+                        ]
+                    ],
+                    "writable": false
+                }
+            }
+        ]
+    },
     "jobs": {
         "key": "jobs",
         "title": "Jobs",

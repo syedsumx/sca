@@ -917,6 +917,14 @@
    "note": "POST /v1/vectors/<name>/answer: passages retrieved as the caller (refused under masks and row filters), numbered and answered by the deployment's model through the metered, budgeted model path; citations actually used [{n, key, chunk, text, score}], sentences without a valid citation flagged, a refusal when no passage supports an answer, audited without content. Tested end to end on a real lakehouse table (tests/test_vectors_answer_e2e.py)"
   },
   {
+   "id": "L103",
+   "title": "Serving tables (interactive analytics and hybrid tables)",
+   "summary": "A lakehouse or derived table kept as a row store in PostgreSQL, looked up in milliseconds under the table's own policies",
+   "done": "Applications and dashboards that need answers by key in milliseconds read the governed lakehouse table without a second, ungoverned copy; the counterpart of Snowflake hybrid tables and Databricks online tables",
+   "status": "shipped",
+   "note": "cairn.dataaccess.serving, /v1/serving (migration 0127): owners or operators declare a serving table (primary key, secondary indexes) over an Iceberg table; Cairn keeps it in a PostgreSQL database it manages, synced from the table's snapshots (only the added files on an append, a row-hash diff on rewrites, a full resync on a schema change), with the freshness lag reported. Reads by key, key range and simple filters (GET .../rows, POST .../lookup) go through the data preview's decisions: read access, aggregation/projection policies, row filters applied in PostgreSQL, Trino's column masks, a masked column never compared, fail closed. Writable (hybrid) tables take owners' writes, readable at once and upserted into the Iceberg table on the next sync. Tested end to end with Trino, Cairn Store and Catalog and PostgreSQL (tests/test_serving_tables_e2e.py: masked and row-filtered answers equal Trino's; p50 about 9-13 ms, p95 about 17-47 ms per key lookup through the API on a shared 4-CPU runner). Not done: a Trino catalog over the serving tables"
+  },
+  {
    "id": "L104",
    "title": "Streaming transformations",
    "summary": "A SQL SELECT applied to each micro-batch of a stream before it lands",

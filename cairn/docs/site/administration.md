@@ -1075,6 +1075,69 @@ Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
 - dropping removed everything;
 - no password reached the audit log.
 
+## Serving tables: lookups in milliseconds on governed tables
+
+A serving table keeps a lakehouse table (or a derived table) as a row store in PostgreSQL, so applications and
+dashboards get rows by key in milliseconds instead of a Trino query in seconds, under exactly the source table's
+policies. Cairn keeps it in step with the Iceberg table; nobody connects to the row store but Cairn.
+
+**Turning it on.** Serving tables need Cairn's own catalog client (`CAIRN_SERVING_CATALOG`, the same JSON
+properties as `CAIRN_PIPES_CATALOG`, which it falls back to) and a PostgreSQL database:
+
+| Setting | What it does |
+|---|---|
+| `CAIRN_SERVING_STORE_URL` (or `..._FILE`) | The serving database's connection string (a role that may create a schema in it). |
+| `CAIRN_DATABASES_ADMIN_URL` (or `..._FILE`) | Without the setting above: Cairn makes the database `cairn_serving` (`CAIRN_SERVING_DATABASE`) on the server it administers for operational databases, with no access for anyone else. It is not listed under `/v1/databases`, and no login is handed out for it. |
+| `CAIRN_SERVING_STATEMENT_TIMEOUT_MS` | The statement timeout of a read (default 5000). Reads run on read-only sessions. |
+
+The rows live in the schema `cairn_serving`, one table per serving table (`st_<name>_<generation>`) with its
+primary key and an index per declared secondary index; pending writes in `cairn_serving._cairn_pending`. Cairn's
+own database keeps the declarations (`cairn_serving_tables`, migration 0127). The scheduler syncs every serving
+table whose source has a new snapshot (`cairn scheduler`); replicas take a PostgreSQL advisory lock per table, so
+one syncs it at a time. The source table's URN is the one Trino's access control uses
+(`CAIRN_LAKEHOUSE_TRINO_CATALOG` names the lakehouse's Trino catalog), so the same policies apply.
+
+**Declaring one.** The table's owners (`MANAGE_DATASET`) or an operator (`MANAGE_SYSTEM_OPERATIONS`):
+`POST /v1/serving` `{"name": "accounts", "table": "sales.accounts", "primary_key": ["id"], "indexes": [["region"]],
+"writable": false}`. The table must be in the catalog; key and index columns are simple columns. Cairn fills it at
+once (nothing is kept if that fails). `GET /v1/serving` lists those whose table you may see; `GET /v1/serving/<name>`
+shows the columns, the row count, the snapshot served and the source's current one, `behind`, `lag_ms` (how long
+the oldest commit not yet served has waited; 0 when up to date), `pending_writes`, the last sync (`mode`, rows
+written and removed, duration) and the last error. `POST .../sync` syncs now (`{"full": true}` rebuilds);
+`DELETE /v1/serving/<name>` drops it (an operator cannot drop a table with writes not yet in the lakehouse table).
+
+**How it syncs.** Comparing the served snapshot's data and delete files with the current one's: if files were only
+added, only those files are read and their rows upserted by key (**append**); if files were removed or delete files
+added (an `UPDATE`, `DELETE`, `MERGE`, compaction or rollback, or the served snapshot was expired), the table is read
+and compared by a hash per row, and only the rows that differ are written and the keys gone deleted (**changed**);
+if the table's columns changed, a new row store is filled and swapped in, the old one dropped (**full**). Rows with a
+null key are skipped; if the source repeats a key, the last row read wins. Tables with equality deletes are not
+read (compact them). Trino's position-delete files are read (Cairn reads them plainly where pyiceberg cannot).
+
+**Reading.** `GET /v1/serving/<name>/rows` with `key` (repeatable; a one-column key), `from`/`to` (a range of the
+first key column, `from` included), `filter=<column>:<op>:<value>` (`eq ne lt le gt ge in prefix null notnull`;
+`in` takes `|`-separated values), `columns`, `limit` (up to 1000) and `order` (`asc`/`desc` by key).
+`POST /v1/serving/<name>/lookup` `{"keys": [{"id": 1}], "columns": [...]}` looks up to 1000 keys of any shape and
+answers each `found` or `missing`. Every answer is decided for the caller as the data preview decides a read of the
+source table: it must be in the catalog and the caller need read access (`VIEW_DATASET_PROFILE`); a table under an
+aggregation or projection policy has no rows to serve; the caller's row filters (policies and consent) are run in
+PostgreSQL, so a filtered-out key reads as `missing`; column masks are applied to every value as Trino masks them;
+a key, range or filter on a column masked for the caller is refused. A decision that cannot be made answers 503;
+row filters that cannot be built pass nothing; a row filter PostgreSQL cannot run refuses (read through Trino).
+Service tokens are refused. Reads are not audited one by one; declaring, syncing, writing and dropping are
+(`serving.*`). Measured in the end-to-end test through the API, with a mask and a row filter applied: p50 about
+10 ms, p95 under 50 ms per key lookup on a busy 4-CPU machine.
+
+**Writing (hybrid tables).** A table declared `"writable": true` (simple columns only) takes
+`POST /v1/serving/<name>/rows` `{"rows": [{"id": 9001, "balance": "10.50"}]}` from its owners (`MANAGE_DATASET`;
+not operators): each row names its key; the given columns are merged into the stored row, readable at once
+(governed like any other row), and kept as a pending write. The next sync first writes the pending rows into the
+Iceberg table (the rows with those keys replaced, in one commit), then syncs; a key with a pending write is never
+overwritten by a sync before it lands. If the write-back fails, the sync stops and says why, and the writes stay
+pending.
+
+**Not done.** The serving tables are not a Trino catalog: Trino reads the Iceberg table itself.
+
 ## Mirrors: PostgreSQL tables in the lakehouse
 
 A mirror keeps a PostgreSQL table in a lakehouse table, change by change, with no Kafka or Debezium in between.

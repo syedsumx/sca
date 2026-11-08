@@ -1136,6 +1136,122 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "error": "All connection attempts failed"
   }
  ],
+ "/v1/serving": {
+  "serving_tables": [
+   {
+    "name": "accounts",
+    "table": "sales.accounts",
+    "source_urn": "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.accounts,PROD)",
+    "primary_key": [
+     "id"
+    ],
+    "indexes": [
+     [
+      "region"
+     ],
+     [
+      "email"
+     ]
+    ],
+    "writable": true,
+    "enabled": true,
+    "created_by": "urn:li:corpuser:raj",
+    "created_ms": 1794096400000,
+    "rows": 48211,
+    "synced_ms": 1794183000000,
+    "synced_snapshot": 5824019233371456120,
+    "synced_snapshot_ms": 1794182990000,
+    "source_snapshot": 5824019233371456120,
+    "behind": false,
+    "lag_ms": 0,
+    "behind_snapshots": null,
+    "columns": [
+     {
+      "name": "id",
+      "type": "long"
+     },
+     {
+      "name": "email",
+      "type": "string"
+     },
+     {
+      "name": "region",
+      "type": "string"
+     },
+     {
+      "name": "balance",
+      "type": "decimal(12, 2)"
+     },
+     {
+      "name": "opened",
+      "type": "date"
+     },
+     {
+      "name": "updated_at",
+      "type": "timestamptz"
+     }
+    ],
+    "last_sync": {
+     "mode": "append",
+     "written": 312,
+     "removed": 0,
+     "duration_ms": 240
+    },
+    "error": null
+   },
+   {
+    "name": "stock_levels",
+    "table": "inventory.stock_levels",
+    "source_urn": "urn:li:dataset:(urn:li:dataPlatform:iceberg,inventory.stock_levels,PROD)",
+    "primary_key": [
+     "store_id",
+     "sku"
+    ],
+    "indexes": [
+     [
+      "sku"
+     ]
+    ],
+    "writable": false,
+    "enabled": true,
+    "created_by": "urn:li:corpuser:raj",
+    "created_ms": 1794096400000,
+    "rows": 1204400,
+    "synced_ms": 1794183000000,
+    "synced_snapshot": 7310298814460021733,
+    "synced_snapshot_ms": 1794182990000,
+    "source_snapshot": 7310298814460021734,
+    "behind": true,
+    "lag_ms": 42000,
+    "behind_snapshots": null,
+    "columns": [
+     {
+      "name": "store_id",
+      "type": "long"
+     },
+     {
+      "name": "sku",
+      "type": "string"
+     },
+     {
+      "name": "on_hand",
+      "type": "int"
+     },
+     {
+      "name": "updated_at",
+      "type": "timestamptz"
+     }
+    ],
+    "last_sync": {
+     "mode": "changed",
+     "written": 1810,
+     "removed": 22,
+     "duration_ms": 3900
+    },
+    "error": null
+   }
+  ]
+ },
  "/v1/databases": {
   "databases": [
    {

@@ -153,6 +153,7 @@ class Services:
     clean_rooms: Optional[Any] = None
     feature_tables: Optional[Any] = None
     online_features: Optional[Any] = None
+    serving_tables: Optional[Any] = None
     ml_monitoring: Optional[Any] = None
     budgets: Optional[Any] = None
     siem: Optional[Any] = None
@@ -935,6 +936,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_data_access(s)
         _build_databases(s)
         _build_consent(s)
+        _build_serving(s)
         _build_saml(s)
         _build_secret_scopes(s)
         _build_volumes(s)
@@ -2267,6 +2269,39 @@ def _build_consent(s: Services) -> None:
         s.data_access.row_filters = row_filters
     if getattr(s, "trino_access", None) is not None:
         s.trino_access.consent = lambda actor, urn, dialect, groups: s.consent.filters(actor, urn, dialect, groups)
+
+
+def _build_serving(s: Services) -> None:
+    """Serving tables (cairn.dataaccess.serving): lakehouse tables kept as row stores in a PostgreSQL database Cairn
+    manages (CAIRN_SERVING_STORE_URL, or the database cairn_serving on the server of CAIRN_DATABASES_ADMIN_URL), read
+    from Cairn's catalog (CAIRN_SERVING_CATALOG, or the pipes'), every answer decided as the data preview decides a
+    read of the source table."""
+    from cairn.pipelines.pipes import _settings as _catalog_settings
+
+    env = "CAIRN_SERVING_CATALOG" if os.environ.get("CAIRN_SERVING_CATALOG") else "CAIRN_PIPES_CATALOG"
+    props = _catalog_settings(env)
+    store, admin = _secret_env("CAIRN_SERVING_STORE_URL"), _secret_env("CAIRN_DATABASES_ADMIN_URL")
+    if not props or not (store or admin) or getattr(s, "data_access", None) is None:
+        return
+    from cairn.dataaccess.serving import ServingTables, ensure_database
+
+    def catalog_client():
+        from pyiceberg.catalog.rest import RestCatalog
+
+        return RestCatalog("cairn-serving", **props)
+
+    def store_dsn() -> str:
+        return store or ensure_database(admin, os.environ.get("CAIRN_SERVING_DATABASE", "cairn_serving"))
+
+    def urn_of(table: str) -> str:
+        ns, t = table.rsplit(".", 1)
+        lake = getattr(s, "lakehouse", None)
+        return lake.urn(ns.split("."), t) if lake is not None else f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{table},PROD)"
+
+    s.serving_tables = ServingTables(
+        s.engine, catalog_client, store_dsn, s.data_access,
+        lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), urn_of, s.audit,
+        int(os.environ.get("CAIRN_SERVING_STATEMENT_TIMEOUT_MS", "5000")))
 
 
 def _build_secret_scopes(s: Services) -> None:
