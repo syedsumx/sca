@@ -1980,3 +1980,38 @@ export interface TrinoCosts {
     total_usd: number | null;
     rows: TrinoCostRow[];
 }
+
+// ---- profiles (/v1/me/profile) and web push --------------------------------------------------------------
+export type ProfileLanguage = 'en' | 'de' | 'fr' | 'es' | 'ja';
+export type PinKind = 'asset' | 'dashboard' | 'metric' | 'query' | 'workbook';
+export type ProfileChannel = 'in_app' | 'email' | 'slack' | 'teams' | 'push';
+
+export interface ProfilePin {
+    kind: PinKind;
+    ref: string;
+    label: string;
+}
+
+export interface PushState {
+    enabled: boolean;
+    public_key: string | null;
+    subscriptions: number;
+}
+
+export interface Profile {
+    urn: string;
+    role: string | null;
+    team: string | null;
+    default_persona: string | null;
+    language: ProfileLanguage | null;
+    pinned: ProfilePin[];
+    instructions: string | null;
+    notifications: { channels: Record<ProfileChannel, boolean>; events: Record<string, boolean> };
+    personas: { id: string; name: string }[];
+    push: PushState;
+    updated_ms: number | null;
+}
+
+export type ProfileUpdate = Partial<Pick<Profile, 'role' | 'team' | 'default_persona' | 'language' | 'pinned' | 'instructions'>> & {
+    notifications?: { channels?: Partial<Record<ProfileChannel, boolean>>; events?: Record<string, boolean> };
+};

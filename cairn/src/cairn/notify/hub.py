@@ -49,7 +49,7 @@ EVENT_TYPES = [
     "bi.mentioned", "bi.commented", "metric.alert_triggered", "metric.alert_resolved", "job.failed", "job.finished",
     "saas.sync_failed", "share.expiring", "share.unused",
 ]
-CHANNELS = ("in_app", "slack", "teams", "email", "webhook")
+CHANNELS = ("in_app", "slack", "teams", "email", "webhook", "push")
 
 notifications = Table(
     "cairn_notifications", metadata,
@@ -95,7 +95,8 @@ class ChannelSettings(BaseModel):
 class NotifySettings(BaseModel):
     channels: dict[str, ChannelSettings] = Field(default_factory=lambda: {
         "in_app": ChannelSettings(enabled=True), "slack": ChannelSettings(enabled=True),
-        "teams": ChannelSettings(enabled=False), "email": ChannelSettings(enabled=False)})
+        "teams": ChannelSettings(enabled=False), "email": ChannelSettings(enabled=False),
+        "push": ChannelSettings(enabled=False)})
     events: dict[str, bool] = Field(default_factory=lambda: {t: True for t in EVENT_TYPES})
 
 

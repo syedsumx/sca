@@ -1047,6 +1047,58 @@ the notification's button; someone else could not decide it; the email arrived t
 person who may read but not export the dataset was refused; rejected and expired items were not sent; a suspended
 owner's task was paused after three failures.
 
+## Profiles, the installable app and Cairn Desktop
+
+**Profiles.** Each person has a profile (**Platform → Profile**, `GET`/`PUT /v1/me/profile`): role, team, a default
+persona (only one they belong to), language (also the UI's), notification channels, pinned assets, dashboards,
+metrics, saved queries and workbooks, and the assistant's standing instructions (up to 2,000 characters). The
+assistant's chat and CoWork's scheduled tasks (plan, each step and the report) get the profile as context, wrapped
+as data after Cairn's rules: it shapes answers (language, focus, format) but grants nothing and cannot lift a rule.
+Notification channels are the same settings as Settings → Notifications (one source). A pinned asset the person can
+no longer see drops out when the profile is read. Profiles are people's own: agent credentials never reach `/v1/me`,
+so an agent cannot plant standing instructions. Changes are audited (`profile.updated`).
+
+**The installable app.** The consumer UI also serves the workspace as a progressive web app at
+`/cairn-ui/app.html` (same origin as `/cairn/api`): a web app manifest (`manifest.webmanifest`, standalone, 192 and
+512 px icons and a maskable one), and a service worker (`sw.js`, scope `/cairn-ui/`) that caches the app shell only:
+the page, its scripts and styles, icons and the offline page. Cairn's API and anything outside `/cairn-ui/` go
+straight to the network and are never stored, so no governed data stays on a device. Opened without a network, the
+app shows an offline page. On a phone, open the address and use **Add to Home Screen** (Safari) or **Install app**
+(Chrome, Edge); the sidebar becomes a drawer under 960 px. The consumer UI's nginx serves the shell files and
+`sw.js` with `Cache-Control: no-cache`, so a deploy reaches devices at their next start.
+
+**Web push** (optional) announces inbox notifications on people's devices. Set:
+
+- `CAIRN_WEBPUSH_VAPID_KEY_FILE`: a file with an EC P-256 private key in PEM (`openssl ecparam -name prime256v1
+  -genkey -noout | openssl pkcs8 -topk8 -nocrypt -out vapid.pem`), mounted from a Kubernetes Secret; never in code or
+  a command line. Changing it invalidates every subscription.
+- `CAIRN_WEBPUSH_SUBJECT`: `mailto:` an operations address, or an https URL (push services contact it).
+- `CAIRN_WEBPUSH_ALLOWED_HOSTS` (optional): the push services Cairn sends to (exact hosts or `*.` patterns); by
+  default Google (`fcm.googleapis.com`), Mozilla (`updates.push.services.mozilla.com`), Apple (`web.push.apple.com`,
+  `*.push.apple.com`) and Microsoft (`*.notify.windows.com`). Subscriptions to other hosts are refused, so Cairn
+  never posts to an address a browser made up. The API needs egress to these hosts.
+
+People then turn push on in their profile, on each device ("Turn on for this device"). Each push is empty and signed
+with the VAPID key (RFC 8292): the browser vendor's push service learns only that there is something; the service
+worker fetches the newest unread notification from Cairn with the person's own session and shows it. Subscriptions
+the push service reports gone (404, 410) are deleted; ten devices per person are kept. Without a key, push is off
+and the channel cannot be turned on.
+
+**Cairn Desktop** (`cairn/desktop`, Electron, outside the main build): one window on `/cairn-ui/app.html` of the
+configured Cairn (`--cairn-url`, `CAIRN_URL`, or a setup page), `cairn://open/<section>/…` deep links, the OS's
+notifications (only Cairn's origin may ask), other links in the default browser, no Node.js in pages. Build the
+installers with `npm install && npm run dist` there; see its README for signing and roll-out.
+
+Tested end to end: the profile API through a real Cairn API server over HTTP, with the assistant's chat and a CoWork
+task whose research saw the profile (the model is a scripted stand-in), and web push against a stand-in push service
+that verified each VAPID signature (`tests/test_profiles.py`); the built UI in Chromium against a real Cairn
+(`tests/test_pwa_e2e.py`): the manifest and its icons, the service worker registered and controlling the page with
+only the shell cached, the offline page when Cairn is unreachable, the Profile page saved through the API and read
+back, the main pages at phone width without sideways scrolling, the drawer, and axe on the Profile page at phone
+width. Cairn Desktop's main process is tested against a stand-in for Electron, and with Electron installed, the real
+app opened a Cairn and followed a deep link from a second launch (`desktop/test`). Not tested end to end: a real
+browser vendor's push service (a browser's subscription needs it), and the installers on Windows and macOS.
+
 ## Excel and Google Sheets
 
 Cairn for Excel (an Office add-in) and Cairn for Google Sheets (an Apps Script add-on) put governed answers in

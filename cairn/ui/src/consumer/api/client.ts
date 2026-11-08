@@ -148,6 +148,7 @@ import type {
     TrendingItem,
     UiConfig,
 } from './types';
+import type { Profile, ProfileUpdate, PushState } from './types';
 
 export const DEFAULT_GRAPHQL_URL = '/api/v2/graphql';
 
@@ -1546,6 +1547,24 @@ export class ConsumerClient extends CairnClient {
 
     markRead(ids: string[]) {
         return this.request<void>('POST', '/notify/inbox/read', { ids });
+    }
+
+    // --- your profile and this device's push subscription ---------------------------------------------------
+
+    profile(opts?: RequestOptions) {
+        return this.request<Profile>('GET', '/v1/me/profile', undefined, opts);
+    }
+
+    saveProfile(update: ProfileUpdate) {
+        return this.request<Profile>('PUT', '/v1/me/profile', update);
+    }
+
+    subscribePush(subscription: { endpoint: string; keys?: Record<string, string> }) {
+        return this.request<PushState>('POST', '/v1/me/push/subscriptions', subscription);
+    }
+
+    unsubscribePush(endpoint: string) {
+        return this.request<PushState>('POST', '/v1/me/push/unsubscribe', { endpoint });
     }
 
     createEmbedToken(input: EmbedTokenRequest) {

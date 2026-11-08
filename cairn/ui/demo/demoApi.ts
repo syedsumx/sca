@@ -1901,6 +1901,27 @@ on('GET', '/v1/queries/:id', (_b, _q, [id]) => {
     return { ...r, hints };
 });
 
+// Your profile (/v1/me/profile): the API's shape; notification channels are the notify settings' channels.
+const PROFILE: Json = {
+    urn: ME, role: 'Financial analyst', team: 'FP&A', default_persona: 'finance-analyst', language: null,
+    pinned: [{ kind: 'asset', ref: REV_DAILY, label: 'revenue_daily' }, { kind: 'metric', ref: 'net_revenue', label: 'Net revenue' },
+             { kind: 'dashboard', ref: 'd_sales', label: 'Sales overview' }],
+    instructions: 'Start with the number, then the why. Use EUR. Flag anything certified data does not back up.',
+    notifications: { channels: { in_app: true, email: true, slack: true, teams: false, push: false }, events: {} },
+    personas: [{ id: 'finance-analyst', name: 'Finance analyst' }, { id: 'marketing-viewer', name: 'Marketing viewer' }],
+    push: { enabled: true, public_key: 'BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-RXtYtDhq7ZBbJbs6a4M', subscriptions: 1 },
+    updated_ms: now - 6 * DAY,
+};
+on('GET', '/v1/me/profile', () => PROFILE);
+on('PUT', '/v1/me/profile', (b) => {
+    const { notifications, ...rest } = b ?? {};
+    Object.assign(PROFILE, rest, { updated_ms: Date.now() });
+    if (notifications?.channels) PROFILE.notifications.channels = { ...PROFILE.notifications.channels, ...notifications.channels };
+    return PROFILE;
+});
+on('POST', '/v1/me/push/subscriptions', () => { PROFILE.push.subscriptions += 1; return PROFILE.push; });
+on('POST', '/v1/me/push/unsubscribe', () => { PROFILE.push.subscriptions = Math.max(0, PROFILE.push.subscriptions - 1); return PROFILE.push; });
+
 // ------------------------------------------------------------------------------- platform areas (resources/catalog.ts)
 
 for (const [path, sample] of Object.entries(RESOURCE_SAMPLES)) {

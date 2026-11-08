@@ -23,7 +23,7 @@ ANA = "urn:li:corpuser:ana"
 DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
-         "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/settings", "/extensions"]
+         "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions"]
 BLOCKING = {"serious", "critical"}
 
 

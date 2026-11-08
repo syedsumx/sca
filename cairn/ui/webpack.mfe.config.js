@@ -3,8 +3,32 @@
 // The host loads remotes with { format: 'var', from: 'webpack' } and calls mount(el, {}), sharing no
 // dependencies, so this bundle is self-contained (own React 17 + antd).
 //   npm run build:mfe  →  dist/mfe/remoteEntry.js  (+ hashed chunks)
+const fs = require('fs');
 const path = require('path');
-const { ModuleFederationPlugin } = require('webpack').container;
+const webpack = require('webpack');
+const { ModuleFederationPlugin } = webpack.container;
+
+/** The installable app (ui/pwa): its shell page, manifest, icons and service worker, next to remoteEntry.js. The
+ *  service worker's cache is named after the build, so a deploy replaces the cached shell. */
+class PwaShellPlugin {
+    apply(compiler) {
+        compiler.hooks.thisCompilation.tap('PwaShellPlugin', (compilation) => {
+            compilation.hooks.processAssets.tap({ name: 'PwaShellPlugin', stage: webpack.Compilation.PROCESS_ASSETS_STAGE_REPORT }, () => {
+                const dir = path.resolve(__dirname, 'pwa');
+                const walk = (rel) => fs.readdirSync(path.join(dir, rel), { withFileTypes: true }).flatMap((e) =>
+                    e.isDirectory() ? walk(path.join(rel, e.name)) : [path.join(rel, e.name)]);
+                for (const rel of walk('')) {
+                    let buf = fs.readFileSync(path.join(dir, rel));
+                    if (rel === 'sw.js') buf = Buffer.from(buf.toString('utf8').replace('__CAIRN_BUILD__', compilation.hash.slice(0, 12)));
+                    compilation.emitAsset(rel.split(path.sep).join('/'), new webpack.sources.RawSource(buf));
+                }
+                // The full page has no catalog host to bring antd's styles: the app shell links its own copy.
+                compilation.emitAsset('antd.min.css', new webpack.sources.RawSource(
+                    fs.readFileSync(require.resolve('antd/dist/antd.min.css'))));
+            });
+        });
+    }
+}
 
 module.exports = (env = {}, argv = {}) => {
     const production = argv.mode !== 'development';
@@ -47,6 +71,7 @@ module.exports = (env = {}, argv = {}) => {
                 exposes: { './mount': './src/consumer/mount.tsx' },
                 shared: {},
             }),
+            new PwaShellPlugin(),
         ],
         optimization: {
             splitChunks: { chunks: 'async' },

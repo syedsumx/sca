@@ -376,6 +376,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.dataaccess.databases import build_databases_router
 
         app.include_router(build_databases_router(services.databases, cp))
+    if getattr(services, "profiles", None) is not None:      # /v1/me/profile and web push subscriptions
+        from cairn.identity.profiles import build_router as profiles_router
+
+        app.include_router(profiles_router(services.profiles, cp))
     if getattr(services, "ai_workspace", None) is not None:
         from cairn.ai.workspace import build_workspace_router
 

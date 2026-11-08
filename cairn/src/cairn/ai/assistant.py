@@ -254,7 +254,7 @@ class Assistant:
         system, specs = SYSTEM, TOOL_SPECS
         person = getattr(principal, "via", "") not in ("agent", "service")
         if self.workspace is not None and person:
-            system = SYSTEM + WORKSPACE_RULES + self.workspace.memory_prompt(principal.urn)
+            system = SYSTEM + WORKSPACE_RULES + self.workspace.person_prompt(principal.urn)
             specs = TOOL_SPECS + WORKSPACE_TOOL_SPECS
         reads_token, conv_token = turn_reads.set([]), current_conversation.set(cid)
         try:

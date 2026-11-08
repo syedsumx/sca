@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'">
+    <title>Cairn</title>
+    <style>
+        body { font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d2330; margin: 0; }
+        main { max-width: 440px; margin: 16vh auto; padding: 0 16px; }
+        label { display: block; font-weight: 600; margin: 16px 0 6px; }
+        input { width: 100%; box-sizing: border-box; padding: 8px 10px; font: inherit; border: 1px solid #b9c0cc; border-radius: 6px; }
+        button { margin-top: 14px; padding: 8px 18px; font: inherit; color: #fff; background: #1f40a6; border: 0; border-radius: 6px; }
+        #error { color: #a4262c; min-height: 1.5em; }
+    </style>
+</head>
+<body>
+<main>
+    <h1>Connect to Cairn</h1>
+    <p>Your organisation’s Cairn address. You sign in there as usual.</p>
+    <form id="form">
+        <label for="url">Cairn address</label>
+        <input id="url" type="url" required placeholder="https://cairn.example.com" autocomplete="url">
+        <button type="submit">Open Cairn</button>
+        <p id="error" role="alert"></p>
+    </form>
+</main>
+<script src="setup.js"></script>
+</body>
+</html>

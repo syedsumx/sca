@@ -144,6 +144,7 @@ class Workspace:
         self.audit = audit
         self.clock = clock
         self.assistant = None             # set by the wiring (deep research runs through its loop)
+        self.profile_prompt: Optional[Callable[[str], str]] = None   # the person's profile (cairn.identity.profiles)
         self._pool = ThreadPoolExecutor(max_workers=max(1, workers), thread_name_prefix="cairn-research")
         self._lock = threading.Lock()
 
@@ -220,6 +221,16 @@ class Workspace:
             return ""
         body = "\n".join(f"- {n['text']}" for n in notes)
         return f"\n{MEMORY_NOTICE}\n{untrusted(body, 'user_memory')}"
+
+    def person_prompt(self, actor: str) -> str:
+        """The system-prompt sections about this person: their profile, then their memory notes."""
+        profile = ""
+        if self.profile_prompt is not None:
+            try:
+                profile = self.profile_prompt(actor)
+            except Exception:  # noqa: BLE001 - a profile that cannot be read leaves it out, never the answer
+                logger.warning("could not read the profile of %s", actor, exc_info=True)
+        return profile + self.memory_prompt(actor)
 
     # ---- artifacts ------------------------------------------------------------------------------
     @staticmethod
@@ -467,7 +478,8 @@ class Workspace:
         try:
             # 1. Plan.
             self._budget(a)
-            plan_reply, _, _ = a.run_loop(principal, PLAN_SYSTEM + self.memory_prompt(principal.urn), [],
+            about = self.person_prompt(principal.urn)
+            plan_reply, _, _ = a.run_loop(principal, PLAN_SYSTEM + about, [],
                                           [{"role": "user", "content": question}], 1, "assistant.research")
             plan = _parse_plan(plan_reply, max_steps) or [question]
             self._set(rid, plan=plan)
@@ -481,14 +493,14 @@ class Workspace:
                 context = "\n\n".join(f"Finding {j + 1} ({s['question']}):\n{s['finding']}" for j, s in enumerate(steps))
                 prompt = (f"Overall question: {question}\n\nSub-question {i + 1} of {len(plan)}: {sub}" +
                           (f"\n\nFindings so far:\n{context}" if context else ""))
-                reply, _, calls = a.run_loop(principal, STEP_SYSTEM, tools, [{"role": "user", "content": prompt}],
+                reply, _, calls = a.run_loop(principal, STEP_SYSTEM + about, tools, [{"role": "user", "content": prompt}],
                                              a.max_iterations, "assistant.research", allowed_tools=names)
                 steps.append({"question": sub, "finding": reply, "tool_calls": calls})
                 self._set(rid, steps=steps)
             # 3. Write the report.
             self._budget(a)
             findings = "\n\n".join(f"## {s['question']}\n{s['finding']}" for s in steps)
-            report, _, _ = a.run_loop(principal, REPORT_SYSTEM, [],
+            report, _, _ = a.run_loop(principal, REPORT_SYSTEM + about, [],
                                       [{"role": "user", "content": f"Question: {question}\n\nFindings:\n{findings}"}],
                                       1, "assistant.research")
             if not report.strip():

@@ -174,6 +174,7 @@ def load_models() -> MetaData:
     from cairn.identity import passkeys as _passkeys  # noqa: F401
     from cairn.sqlworkspace import workflows as _workflows  # noqa: F401
     from cairn.identity import workload as _workload  # noqa: F401
+    from cairn.identity import profiles as _profiles  # noqa: F401
     from cairn.pipelines import changes as _changes  # noqa: F401
     from cairn.pipelines import dbt as _dbt  # noqa: F401
     from cairn.sqlworkspace import workspace as _sqlworkspace  # noqa: F401

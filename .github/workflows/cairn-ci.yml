@@ -370,6 +370,10 @@ jobs:
         run: |
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_accessibility_e2e.py | tee "$RUNNER_TEMP/a11y.log"
+      - name: The installable app and the Profile page (manifest, service worker, offline, phone width; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pwa_e2e.py | tee "$RUNNER_TEMP/pwa.log"
           ! grep -q "skipped" "$RUNNER_TEMP/a11y.log"
 
   pipelines:
@@ -580,6 +584,9 @@ jobs:
       - name: Browser extension
         working-directory: cairn/extension
         run: npm test && node build.mjs --cairn-url https://cairn.example.com
+      - name: Cairn Desktop (main process against a stand-in, then the real Electron app under xvfb)
+        working-directory: cairn/desktop
+        run: npm test && npm install --no-audit --no-fund && npm test
       - name: Spreadsheet add-ins (unit; the live tests run in the python job, tests/test_spreadsheet_addins.py)
         working-directory: cairn/addins
         run: npm test && node build.mjs --cairn-url https://cairn.example.com --addin-url https://addins.example.com

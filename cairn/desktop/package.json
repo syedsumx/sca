@@ -1,0 +1,29 @@
+{
+  "name": "cairn-desktop",
+  "productName": "Cairn",
+  "version": "0.1.0",
+  "description": "Cairn's workspace as a desktop app: deep links (cairn://) and the OS's notifications.",
+  "private": true,
+  "main": "src/main.js",
+  "license": "Apache-2.0",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.js",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "33.2.1",
+    "electron-builder": "25.1.8"
+  },
+  "build": {
+    "appId": "com.cairn.desktop",
+    "productName": "Cairn",
+    "files": ["src/**/*", "package.json"],
+    "directories": { "output": "dist", "buildResources": "build" },
+    "protocols": [{ "name": "Cairn", "schemes": ["cairn"] }],
+    "mac": { "category": "public.app-category.business", "target": ["dmg", "zip"] },
+    "win": { "target": ["nsis"] },
+    "nsis": { "oneClick": false, "perMachine": false },
+    "linux": { "target": ["AppImage", "deb"], "category": "Office", "mimeTypes": ["x-scheme-handler/cairn"] }
+  }
+}

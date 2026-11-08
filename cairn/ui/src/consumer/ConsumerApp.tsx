@@ -44,6 +44,7 @@ const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const ProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const CapabilitiesPage = React.lazy(() =>
     import('./resources/CapabilitiesPage').then((m) => ({ default: m.CapabilitiesPage })),
 );
@@ -71,6 +72,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/dashboards', component: DashboardsPage, exact: true },
     ...HUB_ROUTES,
     { path: '/capabilities', component: CapabilitiesPage, exact: true },
+    { path: '/profile', component: ProfilePage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
     { path: '/extensions', component: ExtensionsPage, exact: true },
 ];

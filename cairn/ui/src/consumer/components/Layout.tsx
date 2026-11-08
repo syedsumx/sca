@@ -80,6 +80,7 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
         label: 'nav.group.platform',
         items: [
             { to: '/capabilities', label: 'nav.capabilities', icon: 'grid' },
+            { to: '/profile', label: 'nav.profile', icon: 'user' },
             { to: '/settings', label: 'nav.settings', icon: 'gear' },
         ],
     },

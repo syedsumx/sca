@@ -129,6 +129,7 @@ class Services:
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
+    profiles: Optional[Any] = None
     sheets: Optional[Any] = None
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
@@ -757,6 +758,26 @@ def _build_active_metadata(s: Services) -> None:
                               event_types=["quality.incident.raised", "certification.requested", "asset.deprecated",
                                            "context.drift"])])
     s.notify = hub
+    # Profiles (cairn.identity.profiles): what a person tells Cairn about themselves; web push to their devices.
+    from cairn.identity.profiles import ProfileService, WebPush
+
+    push = WebPush.from_env(s.engine, s.audit)
+    if push.enabled:
+        hub.channels["push"] = push
+
+    def personas_of(actor: str) -> list[dict]:
+        if s.personas is None:
+            return []
+        out = []
+        for pid in s.subject_of(actor).get("personas") or []:
+            p = s.personas.get_persona(pid)
+            if p is not None and p.enabled:
+                out.append({"id": p.id, "name": p.name})
+        return out
+
+    def profile_can_view(actor: str, urn: str) -> bool:
+        return bool(s.can_view(Principal(urn=actor, via="delegated"))(urn))
+    s.profiles = ProfileService(s.engine, hub, personas_of, profile_can_view, s.audit, push)
 
     def entity_name(urn: str) -> str:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn
@@ -1322,6 +1343,8 @@ def _build_active_metadata(s: Services) -> None:
     s.ai_workspace = Workspace(s.engine, may_read, person_groups, s.audit)
     s.ai_workspace.assistant = s.assistant
     s.assistant.workspace = s.ai_workspace
+    if s.profiles is not None:            # the assistant and CoWork's tasks know who they work for
+        s.ai_workspace.profile_prompt = s.profiles.prompt
     # CoWork (cairn.ai.cowork): the assistant's scheduled tasks for a person, and an outbox they approve.
     from cairn.ai.cowork import CoWork
 
