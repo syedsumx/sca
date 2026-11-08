@@ -914,7 +914,7 @@
    "summary": "Another organisation's or a cloud Iceberg REST catalog queried in Trino as a catalog of its own",
    "done": "Partner and cloud tables are queried in place under the same grants, masks and row filters as the lakehouse, read-only by default, with their credential never leaving Cairn; the counterpart of Unity Catalog's and Snowflake's catalog federation",
    "status": "shipped",
-   "note": "/v1/external-catalogs (migration 0126): registration with a credential reference (secret scope or CAIRN_EXTCAT_*), Trino's dynamic catalogs (CREATE CATALOG by cairn-catalogs only) signing in through Cairn's OAuth token broker with Trino's own key, namespaces, tables and schemas catalogued, read-only enforcement, re-added after a Trino restart. Tested with a second real Cairn Catalog and Store on Trino 484: masked, filtered and refused users, writes refused (tests/test_external_catalogs_e2e.py)"
+   "note": "/v1/external-catalogs (migration 0125): registration with a credential reference (secret scope or CAIRN_EXTCAT_*), Trino's dynamic catalogs (CREATE CATALOG by cairn-catalogs only) signing in through Cairn's OAuth token broker with Trino's own key, namespaces, tables and schemas catalogued, read-only enforcement, re-added after a Trino restart. Tested with a second real Cairn Catalog and Store on Trino 484: masked, filtered and refused users, writes refused (tests/test_external_catalogs_e2e.py)"
   },
   {
    "id": "L106",
@@ -922,7 +922,7 @@
    "summary": "Who reads what through each lakehouse share",
    "done": "Share owners see each recipient's requests, tables read, loads, refusals and failures, find unused and expiring shares and recipients reading tables with failing quality, and are told before a share ends; the counterpart of Delta Sharing's and Snowflake's share usage views",
    "status": "shipped",
-   "note": "Per share, day and table counts from Cairn Catalog's per-request questions and the token endpoint, with retention (migration 0126); GET /v1/shares/<name>/usage, GET /v1/shares/usage/overview joined with the quality status; share.expiring and share.unused notices once each. Tested with pyiceberg as the recipient against the real store and catalog (tests/test_share_usage_e2e.py); refusals outside a share's namespaces are decided by the catalog alone and count as requests"
+   "note": "Per share, day and table counts from Cairn Catalog's per-request questions and the token endpoint, with retention (migration 0125); GET /v1/shares/<name>/usage, GET /v1/shares/usage/overview joined with the quality status; share.expiring and share.unused notices once each. Tested with pyiceberg as the recipient against the real store and catalog (tests/test_share_usage_e2e.py); refusals outside a share's namespaces are decided by the catalog alone and count as requests"
   },
   {
    "id": "L107",
@@ -930,7 +930,7 @@
    "summary": "Agent apps, custom agents and extensions listed and requested beside data products",
    "done": "People find agents and reusable skills where they find data, ask for them with a purpose and duration, and get exactly the right to use them until it expires; the counterpart of Databricks' and Snowflake's marketplace listings of agents and apps",
    "status": "shipped",
-   "note": "/marketplace/listings and /marketplace/search (migration 0126): listings by the agent's or skill's owner, searched with data products, requests in the marketplace's queue, approval granting a time-boxed persona with USE_AGENT on urn:li:cairnAgent:<name> (USE_SKILL on urn:li:cairnSkill:<name>) only, revoked by the sweep at expiry and on delisting. Tested through the HTTP API with a real agent app process (tests/test_marketplace_agents.py)"
+   "note": "/marketplace/listings and /marketplace/search (migration 0125): listings by the agent's or skill's owner, searched with data products, requests in the marketplace's queue, approval granting a time-boxed persona with USE_AGENT on urn:li:cairnAgent:<name> (USE_SKILL on urn:li:cairnSkill:<name>) only, revoked by the sweep at expiry and on delisting. Tested through the HTTP API with a real agent app process (tests/test_marketplace_agents.py)"
   },
   {
    "id": "L108",
