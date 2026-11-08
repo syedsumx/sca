@@ -22,9 +22,11 @@ pytest.importorskip("pymysqlreplication")
 def start_mysql(*args):
     p = port()
     name = f"cairn-mirror-mysql-{p}-{os.getpid()}"
-    subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{p}:3306",
+    r = subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "-p", f"127.0.0.1:{p}:3306",
                     "-e", "MYSQL_ROOT_PASSWORD=mypass", "-e", "MYSQL_DATABASE=shop", "mysql:8.4",
-                    "--server-id=1", "--binlog-row-metadata=FULL", *args], check=True, capture_output=True)
+                    "--server-id=1", "--binlog-row-metadata=FULL", *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"docker run mysql:8.4: {r.stderr[-1000:]}")
     import pymysql
 
     end = time.time() + 120
