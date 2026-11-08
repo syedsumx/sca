@@ -262,6 +262,18 @@ spec:
         runAsUser: 1000
         fsGroup: 1000
       initContainers:
+        {{- if $u.functions.enabled }}
+        # Cairn's functions in SQL (ai_search): the plugin, copied from its image into Trino's plugin directory.
+        - name: cairn-functions
+          image: {{ printf "%s:%s" $u.functions.image.repository $u.functions.image.tag }}
+          imagePullPolicy: {{ $u.functions.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp /plugin/cairn-functions/*.jar /target/"]
+          volumeMounts:
+            - { name: cairn-functions, mountPath: /target }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+        {{- end }}
         # Trino reads Cairn's signing key (JWKS) when it starts: wait for the API.
         - name: wait-for-cairn
           image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
@@ -302,6 +314,10 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.functions.enabled }}
+            - name: CAIRN_API_URL                   # where Cairn's functions (ai_search) ask Cairn
+              value: {{ $api | quote }}
+            {{- end }}
             {{- if $u.delta.enabled }}
             - name: CAIRN_DELTA_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.delta.credentialsSecret.name" $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.accessKeyKey | default "access-key" }} } }
@@ -430,6 +446,9 @@ spec:
             {{- if $tls }}
             - { name: tls, mountPath: /etc/trino/tls, readOnly: true }
             {{- end }}
+            {{- if $u.functions.enabled }}
+            - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml ($wh.resources | default $u.resources) | nindent 12 }}
           securityContext:
@@ -439,6 +458,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $u.functions.enabled }}
+        - name: cairn-functions
+          emptyDir: { sizeLimit: 16Mi }
+        {{- end }}
         {{- if $wh.name }}
         - name: whconfig
           configMap:
@@ -581,6 +604,19 @@ spec:
         fsGroup: 1000
       # Room to finish running work: Trino waits the grace period twice (before and after its tasks end).
       terminationGracePeriodSeconds: {{ add (mul 2 (int $u.gracefulShutdownSeconds)) 30 }}
+      {{- if $u.functions.enabled }}
+      initContainers:
+        # Cairn's functions in SQL (ai_search): the plugin, copied from its image into Trino's plugin directory.
+        - name: cairn-functions
+          image: {{ printf "%s:%s" $u.functions.image.repository $u.functions.image.tag }}
+          imagePullPolicy: {{ $u.functions.image.pullPolicy }}
+          command: ["/bin/sh", "-c", "cp /plugin/cairn-functions/*.jar /target/"]
+          volumeMounts:
+            - { name: cairn-functions, mountPath: /target }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+      {{- end }}
       containers:
         - name: trino
           image: {{ printf "%s:%s" $u.image.repository $u.image.tag }}
@@ -600,6 +636,10 @@ spec:
             - name: CAIRN_TRINO_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $u.accessKeySecret.name }}, key: {{ $u.accessKeySecret.key }} }
+            {{- if $u.functions.enabled }}
+            - name: CAIRN_API_URL                   # where Cairn's functions (ai_search) ask Cairn
+              value: {{ $api | quote }}
+            {{- end }}
             {{- if $u.delta.enabled }}
             - name: CAIRN_DELTA_ACCESS_KEY
               valueFrom: { secretKeyRef: { name: {{ required "cairn.trino.delta.credentialsSecret.name" $u.delta.credentialsSecret.name }}, key: {{ $u.delta.credentialsSecret.accessKeyKey | default "access-key" }} } }
@@ -706,6 +746,9 @@ spec:
               subPath: cache-manager.properties
               readOnly: true
             {{- end }}
+            {{- if $u.functions.enabled }}
+            - { name: cairn-functions, mountPath: /usr/lib/trino/plugin/cairn-functions, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml $u.resources | nindent 12 }}
           securityContext:
@@ -715,6 +758,10 @@ spec:
         - name: config
           configMap:
             name: {{ include "cairn.componentName" $ctx }}
+        {{- if $u.functions.enabled }}
+        - name: cairn-functions
+          emptyDir: { sizeLimit: 16Mi }
+        {{- end }}
         {{- if $wk.name }}
         - name: whconfig
           configMap:

@@ -754,6 +754,34 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "layer": "silver"
   }
  ],
+ "/v1/documents/parsed": [
+  {
+   "id": "7c1e5a9d3b2f40e8a6c4d2b0f8e6a4c2",
+   "name": "q3-board-report.pdf",
+   "sha256": "3f9a1c7e5b2d8f4a6c0e9b1d7f3a5c8e2b4d6f0a9c1e3b5d7f9a2c4e6b8d0f1a",
+   "size": 482113,
+   "tables": 3,
+   "charts": 2,
+   "model": "multimodal-model",
+   "errors": [],
+   "created_by": "urn:li:corpuser:alice",
+   "created_ms": 1794091200000,
+   "page_count": 12
+  },
+  {
+   "id": "2e8b4d6f0a1c43e5b7d9f1a3c5e7b9d1",
+   "name": "supplier-price-list.pdf",
+   "sha256": "a1b2c3d4e5f60718293a4b5c6d7e8f9011223344556677889900aabbccddeeff",
+   "size": 96204,
+   "tables": 4,
+   "charts": 0,
+   "model": null,
+   "errors": [],
+   "created_by": "urn:li:corpuser:alice",
+   "created_ms": 1794004800000,
+   "page_count": 3
+  }
+ ],
  "/v1/medallion": [
   {
    "dataset": "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders_live,PROD)",
@@ -3072,6 +3100,33 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    path segment), in the API's own shapes; fictional data. Other actions are accepted without running. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const ACTION_SAMPLES: Record<string, any> = {
+ "POST /v1/documents/parse": {
+  "name": "q3-report.pdf",
+  "sha256": "5d2c8e1f7a3b9d4c6e0f2a8b1d3c5e7f9a0b2c4d6e8f1a3b5c7d9e0f2a4b6c8d",
+  "size": 182044,
+  "id": "9a7c5e3b1d0f42a8c6e4b2d0f8a6c4e2",
+  "pages": [
+   {
+    "page": 1,
+    "text": "Quarterly sales by region\nRegion Q1 Q2 Q3\nNorth 120 135 150\nSouth 90 80 95\nWest 60 75 110",
+    "tables": [
+     {"source": "text_layer", "header": ["Region", "Q1", "Q2", "Q3"],
+      "rows": [["North", "120", "135", "150"], ["South", "90", "80", "95"], ["West", "60", "75", "110"]]}
+    ],
+    "charts": [
+     {"source": "model", "type": "bar", "title": "Units sold per quarter", "x_label": "Quarter", "y_label": "Units",
+      "labels": ["Q1", "Q2", "Q3"], "series": [{"name": "Units", "values": [270.0, 290.0, 355.0]}]}
+    ]
+   },
+   {"page": 2, "text": "The outlook for next year is steady.", "tables": [], "charts": []}
+  ],
+  "page_count": 2,
+  "tables": 1,
+  "charts": 1,
+  "model": "multimodal-model",
+  "model_pages": 1,
+  "errors": []
+ },
  "POST /v1/vectors/:id/answer": {
   "index": "support-tickets",
   "question": "How long do refunds take?",

@@ -446,16 +446,33 @@ class Pipes:
         fields = [("key", pa.string()), ("path", pa.string()), ("size", pa.int64()), ("modified_ms", pa.int64()),
                   ("content_type", pa.string()), ("sha256", pa.string()), ("text", pa.large_string()),
                   ("pages", pa.int32()), ("extract_error", pa.string())]
+        enrichment = {k: v for k, v in (ai or {}).items() if k != "parse"}
         if ai:
             from cairn.ai.usage import set_actor
-            from cairn.pipelines.enrich import enrich
 
             set_actor(owner)
-            got, ai_error = (enrich(self.llm, ai, key, bytes(data), text) if info.size <= limit
+        if enrichment:
+            from cairn.pipelines.enrich import enrich
+
+            got, ai_error = (enrich(self.llm, enrichment, key, bytes(data), text) if info.size <= limit
                              else ({"description": None, "labels": None, "extracted": None}, None))
             row.update(got, ai_error=ai_error)
             fields += [("description", pa.string()), ("labels", pa.string()), ("extracted", pa.string()),
                        ("ai_error", pa.string())]
+        if (ai or {}).get("parse"):
+            # Tables (from the text layer) and charts (by the model) as JSON; documents of other kinds get null.
+            from cairn.pipelines.parse import IMAGES as PARSEABLE, ParseError, parse, without_text
+
+            parsed, parse_error = None, None
+            if info.size <= limit and (key.lower().endswith(".pdf") or os.path.splitext(key.lower())[1] in PARSEABLE):
+                try:
+                    parsed = json.dumps(without_text(parse(key, bytes(data), self.llm)))
+                except ParseError as e:
+                    parse_error = str(e)[:2000]
+                except Exception as e:  # noqa: BLE001 - recorded on the row; the pipe goes on
+                    parse_error = f"{type(e).__name__}: {str(e)[:300]}"
+            row.update(parsed=parsed, parse_error=parse_error)
+            fields += [("parsed", pa.large_string()), ("parse_error", pa.string())]
         schema = pa.schema(fields)
         return pa.Table.from_pylist([row], schema=schema)
 

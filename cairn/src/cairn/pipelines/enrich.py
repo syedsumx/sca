@@ -39,11 +39,13 @@ def check(spec: Any) -> dict:
     """A pipe's ``ai``: {"describe": bool, "extract": {field: what it is}}; {} for none."""
     if spec in (None, {}):
         return {}
-    if not isinstance(spec, dict) or set(spec) - {"describe", "extract"}:
-        raise EnrichError('ai: {"describe": true, "extract": {"field": "what it is"}}')
+    if not isinstance(spec, dict) or set(spec) - {"describe", "extract", "parse"}:
+        raise EnrichError('ai: {"describe": true, "extract": {"field": "what it is"}, "parse": true}')
     out: dict[str, Any] = {}
     if spec.get("describe"):
         out["describe"] = True
+    if spec.get("parse"):                  # tables and charts as JSON (cairn.pipelines.parse), column ``parsed``
+        out["parse"] = True
     fields = spec.get("extract") or {}
     if not isinstance(fields, dict) or len(fields) > MAX_FIELDS or not all(
             isinstance(k, str) and FIELD.match(k) and isinstance(v, str) and 0 < len(v) <= 500 for k, v in fields.items()):

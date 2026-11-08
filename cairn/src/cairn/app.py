@@ -282,6 +282,14 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.vectors import build_vectors_router
 
         app.include_router(build_vectors_router(services.vectors, cp, authz))
+    if getattr(services, "documents", None) is not None:      # tables and charts from PDFs and images
+        from cairn.pipelines.parse import build_documents_router
+
+        app.include_router(build_documents_router(services.documents, cp, authz))
+    if getattr(services, "sql_search", None) is not None and services.trino_key:
+        from cairn.ai.sql_search import build_sql_search_router
+
+        app.include_router(build_sql_search_router(services.sql_search, services.trino_key))
     if getattr(services, "feature_tables", None) is not None:
         from cairn.ml.features import build_features_router
 

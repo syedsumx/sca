@@ -849,6 +849,16 @@ cairn:
       allowedModels: []     # besides `model`
       callsPerMinute: 600
       userDailyQueries: 200
+    # Cairn's functions in Trino SQL: ai_search(index, query, k) searches a Cairn vector index as the person
+    # running the query (the same checks as the API's search, metered as AI usage). The plugin
+    # (plugins/java/cairn-trino-functions) is built by docker/trino-functions.Dockerfile against this Trino
+    # version; an init container copies it into Trino's plugin directory, and Trino calls Cairn with its access key.
+    functions:
+      enabled: false
+      image:
+        repository: cairn/trino-functions
+        tag: "0.1.0"
+        pullPolicy: IfNotPresent
     federation: []
     # External Iceberg REST catalogs (another organisation's or a cloud catalog), registered at
     # /v1/external-catalogs and added to Trino by Cairn (dynamic catalogs), governed like the lakehouse and

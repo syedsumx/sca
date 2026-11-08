@@ -979,6 +979,14 @@
    "done": "Dimension history (what a customer's tier was last quarter) without hand-written MERGE logic, and a gold layer that means something: owned, described and passing its contract; the counterpart of Databricks' APPLY CHANGES (SCD type 2) and medallion architecture",
    "status": "shipped",
    "note": "Derived mode scd2 (key, tracked): one Trino MERGE per refresh closes changed and removed keys (valid_to, is_current), inserts new versions, writes untracked changes in place, changes nothing when nothing changed; a full rebuild is refused once there is history. layer on pipes, streams and derived tables and /v1/medallion: kept (migration 0126), tagged in the catalog, gold refused without an owner, a description and a met contract or passing monitors, and re-checked in the listing. Tested end to end on Trino with the real store and catalog (tests/test_scd2_medallion_e2e.py)"
+  },
+  {
+   "id": "L112",
+   "title": "AI search and document parsing in SQL and pipelines",
+   "summary": "ai_search(index, query, k) in Trino SQL over a vector index; tables and charts extracted from PDFs and images as data",
+   "done": "An analyst retrieves passages and joins them to their rows in one query, under the same policies as the API's search; a report's tables and its charts' numbers land as JSON next to its text; the counterpart of Databricks' vector_search() and ai_parse_document, and Snowflake's Cortex Search and document AI",
+   "status": "shipped",
+   "note": "Cairn's Trino functions plugin (plugins/java/cairn-trino-functions, built inside the Trino image, installed by Helm cairn.trino.functions): ai_search returns array(row(key, chunk, text, score)) searched by Cairn as the query's user (read access, no mask or row filter on the source; Cairn's own identities refused), metered under the person with a daily cap. cairn.pipelines.parse: tables from PDFs' text layer without a model; pages that draw graphics rendered (pdftoppm) and read by the deployment's multimodal model for chart series and pictured tables; POST /v1/documents/parse (kept per person, migration 0129) and files pipes' \"ai\": {\"parse\": true}. Tested end to end: a real Trino calling ai_search on a real index in the store and catalog (tests/test_ai_search_e2e.py); a generated PDF with a table and a drawn chart, the model behind the provider stand-in, the deterministic path without a model, the API and a files pipe (tests/test_document_parse_e2e.py)"
   }
  ]
 }

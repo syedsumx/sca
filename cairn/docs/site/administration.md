@@ -3635,6 +3635,10 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - Formulas load as the values Excel last saved. Rows that are entirely empty are skipped.
   - A file that is not a workbook is recorded as an error, and the next one still loads.
   - Tested in `tests/test_pipes_e2e.py` with a workbook written by openpyxl: three typed rows from the first sheet, an empty row skipped, a number in a text column kept as text, and a broken file recorded.
+- **Tables and charts (`"ai": {"parse": true}`).** A files pipe adds `parsed` and `parse_error`: for each PDF and
+  image, the JSON of its tables and charts (see [Document parsing](#document-parsing-tables-and-charts), without
+  the text, which is in `text`); other files get null. Charts are read by Cairn's model as the pipe's owner; without
+  a model, the text layer's tables still come.
 - **Downstream.** Loaded tables are recorded as changed, so data-aware schedules (Airflow, dbt) see the new data.
 - **Settings.** `CAIRN_PIPES_STORE` holds `{"endpoint", "access_key", "secret_key", "region"}`; give it a key that can only read the pipes' prefixes. `CAIRN_PIPES_CATALOG` holds the pyiceberg REST catalog properties: `uri`, `token`, and the warehouse's `s3.*` settings. Each is JSON, or a path to a JSON file.
 - **Tested** with real Cairn Stores and Cairn Catalog (`tests/test_pipes_e2e.py`):
@@ -3643,6 +3647,46 @@ A pipe loads the files that land in a Cairn Store prefix into a lakehouse table,
   - **Once only.** A sweep afterwards loaded nothing again.
   - **Sweep.** Files under a prefix with no event rule were loaded by the sweep, and the markers were skipped.
   - **Signature.** A bad signature got 401.
+
+## Document parsing: tables and charts
+
+Cairn reads the tables and charts in PDFs and images as data (JSON), beside their text.
+
+- **Tables from the text layer, with no model.** On a PDF page with a text layer, Cairn reads where each piece of
+  text is drawn and finds runs of lines whose cells fall in the same columns. Each run is a table:
+  `{"source": "text_layer", "header": [...], "rows": [[...]]}`, cells as text, a missing cell `null`. The same
+  document always gives the same tables. Simple layouts work best; a two-column page of prose can look like a table.
+- **Charts by the deployment's multimodal model.** A page that draws something (an image, or vector graphics such
+  as bars and axes) is rendered to PNG by Poppler's `pdftoppm` (Cairn's image has it; without it, the images the
+  page embeds are sent) and shown to Cairn's model (`CAIRN_LLM_PROVIDER`, `CAIRN_AI_MODEL`). It returns each chart
+  as `{"type": "bar" | "line" | "pie" | "scatter" | "area" | "other", "title", "x_label", "y_label", "labels",
+  "series": [{"name", "values"}]}` (values are numbers, `null` where unreadable), and tables drawn as pictures
+  (`"source": "model"`). It is told which tables the text layer already gave, and copies of them are dropped. Image
+  files (PNG, JPEG, TIFF, GIF, WebP, BMP) go to the model a frame at a time. Text in a picture is treated as data.
+- **The result.** `{"pages": [{"page", "text", "tables", "charts"}], "page_count", "tables", "charts", "model",
+  "model_pages", "errors"}`. Pages that draw graphics but were not read (no model, `charts: false`, the page budget
+  or a model error) are listed in `errors`; the rest of the document is still parsed.
+- **API.** `POST /v1/documents/parse` with `{"name": "report.pdf", "content": "<base64>", "charts": true, "save":
+  true}`. With `charts` (the default) pages go to the model, so it needs `USE_AI_FUNCTIONS`, and calls are metered
+  under the caller (task `document_parse`) and held to `CAIRN_AI_DAILY_BUDGET_USD` and `CAIRN_AI_USER_DAILY_TOKENS`.
+  `charts: false` uses the text layer only and needs no privilege. Saved results (tables and charts, not the text)
+  are kept for the person who asked: `GET /v1/documents/parsed`, `GET /v1/documents/parsed/<id>`,
+  `DELETE /v1/documents/parsed/<id>`; operators (`MANAGE_SYSTEM_OPERATIONS`) see everyone's. Each parse is audited
+  as `document.parsed` with counts only, never what the document says (migration 0129, `cairn_parsed_documents`).
+- **In files pipes.** `"ai": {"parse": true}` (see [Pipes](#pipes-automatic-file-loading)).
+- **Settings.** `CAIRN_PARSE_MAX_MODEL_PAGES` (20) pages shown to the model per document; `CAIRN_PARSE_DPI` (110)
+  and `CAIRN_PARSE_IMAGE_PIXELS` (1,568 on the long side) for what it is shown, within OCR's
+  `CAIRN_OCR_MAX_PIXELS`; `CAIRN_PARSE_DOCUMENT_TIMEOUT` (600 s); `CAIRN_PARSE_MAX_BYTES` (50 MB) for the API;
+  `CAIRN_PARSE_RENDER_COMMAND` (`pdftoppm`).
+- **Tested** in `tests/test_document_parse_e2e.py`: a generated two-page PDF with a table in its text layer and a
+  drawn bar chart embedded as an image. With no model, the table came back exactly and the chart page was listed as
+  not read. With Anthropic's SDK talking to a scripted stand-in for the model's API, through Cairn's metered
+  provider: only the chart page was rendered by `pdftoppm` and shown (the bars in the picture), the chart's labels
+  and values came back, the model's copy of the known table was dropped and a table only in the picture was kept,
+  and the call was metered under the person. A PNG chart and a three-frame TIFF (held to a one-page budget) were
+  read. Through the API: a person without `USE_AI_FUNCTIONS` was refused charts but got the text layer's tables,
+  results were listed and read back by their owner only, and audits held no content. A files pipe on the real
+  store and catalog filled `parsed` for the PDF and the image and left it null for a text file.
 
 ## Sample datasets
 
@@ -3730,6 +3774,44 @@ says which ones it used.
   question the passages do not answer, and an answer that cited only made-up passages, were refused. People without read access or under a row filter were
   refused before the model was called. Calls were metered under the caller, refused at the token allowance, and
   audited without the question, answer or passages.
+
+### Search from SQL: `ai_search`
+
+With Cairn's Trino functions plugin installed, a query searches an index itself:
+
+```sql
+SELECT r.key, r.text, r.score
+FROM UNNEST(ai_search('help', 'how do refunds work', 5)) AS r(key, chunk, text, score)
+
+-- joined back to the source table, governed like any other read
+SELECT a.*, r.score
+FROM UNNEST(ai_search('help', 'forgot password')) AS r(key, chunk, text, score)
+JOIN lakehouse.support.articles a ON a.id = r.key
+```
+
+- **Shape.** `ai_search(index, query)` or `ai_search(index, query, k)` (1-100, default 10) returns
+  `array(row(key varchar, chunk integer, text varchar, score double))`, closest first. It is a scalar function
+  returning an array (Trino's plugin functions cannot be table functions), so read it with `UNNEST`. It is not
+  deterministic: Trino calls it each time it is evaluated, so put it in `FROM UNNEST(...)` rather than in a
+  per-row expression.
+- **As the person.** Trino calls Cairn (`POST /v1/trino/functions/ai-search`, with Trino's access key in a header)
+  naming the query's user, and Cairn searches as them with the same refusals as `GET /v1/vectors/<name>/search`:
+  read access to the source table, and no mask or row filter there. Cairn's own identities (the catalog crawler,
+  clean rooms, installed apps, share recipients, checked queries) are refused. A refusal fails the query with
+  Cairn's reason (`Cairn: searching help needs read access to …`).
+- **Metered.** Each search is held to the daily AI budget and the person's token allowance
+  (`CAIRN_AI_DAILY_BUDGET_USD`, `CAIRN_AI_USER_DAILY_TOKENS`) and recorded in AI usage under the person (task
+  `sql_ai_search`, the query's estimated tokens). `CAIRN_AI_SEARCH_USER_DAILY` caps searches a person a day.
+- **Install (Helm).** `cairn.trino.functions.enabled: true`. An init container from `cairn/trino-functions`
+  (`docker/trino-functions.Dockerfile`; `deploy/build-images.sh` builds it as `trino-functions`) copies the plugin
+  into `/usr/lib/trino/plugin/cairn-functions` on the coordinator and workers, and Trino gets `CAIRN_API_URL`.
+  The plugin is compiled inside the Trino image against its own SPI (`plugins/java/cairn-trino-functions/build.sh`),
+  so rebuild the image with each Trino version (`TRINO_IMAGE`). Without the URL or key on Trino, every call fails.
+- **Tested** in `tests/test_ai_search_e2e.py`: a real Trino 484 with the plugin built from source, the index's
+  vectors in the real store and catalog. Ana's query returned the same chunks as the API, joined back to the source
+  table, and was metered under her; someone without read access, someone with a row filter, an unknown index, a k
+  out of range and Cairn's crawler identity were refused with the reason; the daily cap stopped her seventh search;
+  the endpoint answered only with Trino's key.
 
 ## Streams (Kafka and change data capture)
 

@@ -432,6 +432,39 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "parsed-documents": {
+        "key": "parsed-documents",
+        "title": "Parsed documents",
+        "path": "/v1/documents/parsed",
+        "listKey": null,
+        "description": "Tables and charts read from PDFs and images as data: tables from the text layer without a model, charts (their labels and series) by the deployment's model, metered as you. Yours only; files pipes do the same with \"ai\": {\"parse\": true}.",
+        "columns": [
+            "name",
+            "page_count",
+            "tables",
+            "charts",
+            "model",
+            "created_ms"
+        ],
+        "actions": [
+            {
+                "label": "Parse a document",
+                "method": "POST",
+                "path": "/v1/documents/parse",
+                "body": {
+                    "name": "q3-report.pdf",
+                    "content": "<the file, base64-encoded>",
+                    "charts": true
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/documents/parsed/{id}",
+                "body": null
+            }
+        ]
+    },
     "derived": {
         "key": "derived",
         "title": "Derived tables",

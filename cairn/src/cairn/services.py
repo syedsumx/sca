@@ -146,6 +146,8 @@ class Services:
     trino_functions: Optional[Any] = None
     change_feed: Optional[Any] = None
     vectors: Optional[Any] = None
+    sql_search: Optional[Any] = None
+    documents: Optional[Any] = None
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
     procedures: Optional[Any] = None
@@ -1867,6 +1869,11 @@ def _build_data_access(s: Services) -> None:
 
     s.delta_convert = delta_from_env(s.audit)
 
+    # Document parsing: tables from PDFs' text layer, charts read by Cairn's multimodal model (metered, as the person).
+    from cairn.pipelines.parse import ParsedDocuments
+
+    s.documents = ParsedDocuments(s.engine, s.llm if s.llm is None or isinstance(s.llm, MeteredProvider)
+                                  else MeteredProvider(s.llm, s.ai_usage), s.settings.ai.model, s.audit)
     # Vector search on lakehouse tables (the pipes' catalog, or CAIRN_VECTORS_CATALOG).
     vec_catalog = os.environ.get("CAIRN_VECTORS_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
     if vec_catalog:
@@ -1887,6 +1894,11 @@ def _build_data_access(s: Services) -> None:
                                   # answers with sources: always through the metered, budgeted provider
                                   llm=s.llm if s.llm is None or isinstance(s.llm, MeteredProvider)
                                   else MeteredProvider(s.llm, s.ai_usage), model=s.settings.ai.model)
+        if getattr(s, "trino_key", None):
+            # ai_search(index, query, k) in Trino SQL (Cairn's Trino functions plugin), searched as the query's user.
+            from cairn.ai.sql_search import SqlSearch
+
+            s.sql_search = SqlSearch.from_env(s.vectors, s.ai_usage)
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

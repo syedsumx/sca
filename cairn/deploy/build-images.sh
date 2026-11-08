@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Cairn images: Cairn Core (core, web, setup, executor), control plane, consumer UI,
-# remote agent, agent runtime, Cairn Store, Cairn Catalog, authorizer plugin.
+# remote agent, agent runtime, Cairn Store, Cairn Catalog, Trino functions plugin, authorizer plugin.
 #
 #   core/web/build.sh                            # once per engine release: builds the web UI bundle
 #   deploy/build-images.sh                       # tag cairn/*:0.1.0
@@ -10,6 +10,7 @@
 #   BASE_IMAGE      Python base image (default python:3.12-slim; e.g. mirror.gcr.io/library/python:3.12-slim
 #                   when Docker Hub rate-limits you)
 #   BUSYBOX_IMAGE   runtime for the plugin image (default busybox:1.37)
+#   TRINO_IMAGE     the Trino the functions plugin (ai_search) is compiled against (default trinodb/trino:484)
 #   RUST_IMAGE      Rust build image for Cairn Store and Cairn Catalog (default rust:1-alpine)
 #   ALPINE_IMAGE    runtime for Cairn Store (default alpine:3.20)
 #   INGEST_EXTRAS   ingestion source extras baked into the agent (default "postgres")
@@ -53,6 +54,8 @@ want store && build "${PREFIX}/store:${VERSION}" docker/store.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
 want catalog && build "${PREFIX}/catalog:${VERSION}" docker/catalog.Dockerfile \
   --build-arg "RUST_IMAGE=${RUST_IMAGE:-rust:1-alpine}" --build-arg "RUN_IMAGE=${ALPINE_IMAGE:-alpine:3.20}"
+want trino-functions && build "${PREFIX}/trino-functions:${VERSION}" docker/trino-functions.Dockerfile \
+  --build-arg "TRINO_IMAGE=${TRINO_IMAGE:-trinodb/trino:484}" --build-arg "RUNTIME_IMAGE=${BUSYBOX_IMAGE}"
 # The pipeline images (dbt, Airflow, Spark) are opt-in: ONLY="dbt airflow spark", or PIPELINE_IMAGES=true with the rest.
 want_pipeline() { [[ " ${ONLY:-} " == *" $1 "* || "${PIPELINE_IMAGES:-false}" == true ]]; }
 want_pipeline dbt && build "${PREFIX}/dbt:${VERSION}" docker/dbt.Dockerfile

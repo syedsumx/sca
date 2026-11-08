@@ -15,13 +15,14 @@ export const HUBS: Hub[] = [
         "route": "/ingestion",
         "title": "Ingestion",
         "icon": "download",
-        "description": "Everything that brings data into the lakehouse: database mirrors, document sources, SaaS and reverse syncs, file pipes and streams.",
+        "description": "Everything that brings data into the lakehouse: database mirrors, document sources, SaaS and reverse syncs, file pipes, parsed documents and streams.",
         "tabs": [
             "mirrors",
             "document-sources",
             "saas-syncs",
             "reverse-syncs",
             "pipes",
+            "parsed-documents",
             "streams",
             "samples"
         ]
