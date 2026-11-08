@@ -1,6 +1,6 @@
 """Parsed documents (tables and charts from PDFs and images), and Parquet files registered as tables in place
 
-Revision ID: 0129
+Revision ID: 0128
 Revises: 0127
 Create Date: 2026-11-08 18:00:00.000000
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0129'
+revision = '0128'
 down_revision = '0127'
 branch_labels = None
 depends_on = None

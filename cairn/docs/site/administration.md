@@ -3672,7 +3672,7 @@ Cairn reads the tables and charts in PDFs and images as data (JSON), beside thei
   `charts: false` uses the text layer only and needs no privilege. Saved results (tables and charts, not the text)
   are kept for the person who asked: `GET /v1/documents/parsed`, `GET /v1/documents/parsed/<id>`,
   `DELETE /v1/documents/parsed/<id>`; operators (`MANAGE_SYSTEM_OPERATIONS`) see everyone's. Each parse is audited
-  as `document.parsed` with counts only, never what the document says (migration 0129, `cairn_parsed_documents`).
+  as `document.parsed` with counts only, never what the document says (migration 0128, `cairn_parsed_documents`).
 - **In files pipes.** `"ai": {"parse": true}` (see [Pipes](#pipes-automatic-file-loading)).
 - **Settings.** `CAIRN_PARSE_MAX_MODEL_PAGES` (20) pages shown to the model per document; `CAIRN_PARSE_DPI` (110)
   and `CAIRN_PARSE_IMAGE_PIXELS` (1,568 on the long side) for what it is shown, within OCR's
@@ -3722,7 +3722,7 @@ other lakehouse table.
   new name). A failed run keeps its reason in `error`.
 - **Manage.** `GET /v1/lakehouse/parquet-tables[/<name>]`, `PUT …/<name>` (`every_minutes`, `enabled`),
   `DELETE …/<name>` (stops adding files; the table and the files stay). Audited: `parquet_table.registered`,
-  `.refreshed`, `.updated`, `.deleted`. Kept in `cairn_parquet_tables` (migration 0129).
+  `.refreshed`, `.updated`, `.deleted`. Kept in `cairn_parquet_tables` (migration 0128).
 - **Settings.** `CAIRN_PARQUET_STORE` (default `CAIRN_PIPES_STORE`: a key that can read the registered buckets),
   `CAIRN_PARQUET_CATALOG` (default `CAIRN_PIPES_CATALOG`), `CAIRN_PARQUET_BUCKETS`, `CAIRN_PARQUET_MAX_FILES`
   (10,000 per registration). Trino reads the files with its own store key, so that key must reach those buckets.
