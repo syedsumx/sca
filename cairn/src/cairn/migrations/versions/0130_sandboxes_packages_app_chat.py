@@ -1,7 +1,7 @@
 """Code sandboxes' runs; data packages and agents on shared data; data apps' chat context
 
 Revision ID: 0130
-Revises: 0127
+Revises: 0129
 Create Date: 2026-11-08 12:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = '0130'
-down_revision = '0127'
+down_revision = '0129'
 branch_labels = None
 depends_on = None
 
