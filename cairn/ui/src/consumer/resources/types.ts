@@ -23,6 +23,8 @@ export interface ResourceSpec {
     rowKey?: string;
     /** Fields holding epoch seconds rather than milliseconds. */
     seconds?: string[];
+    /** A dedicated view instead of the table (the list endpoint is what it reads). */
+    view?: 'ontology-graph';
     notes?: string;
 }
 

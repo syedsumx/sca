@@ -6,6 +6,136 @@ import type { ResourceSpec } from './types';
  * fields were read from the API's routers and services; keep them in step when an endpoint changes.
  */
 export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
+    "ontology-terms": {
+        "key": "ontology-terms",
+        "title": "Ontology terms",
+        "path": "/v1/ontology/terms",
+        "listKey": "terms",
+        "description": "Business terms Cairn Ontology compiled from the catalog and query history, each with the columns it maps to (display names, date notations), its synonyms and where it came from. Only terms over datasets you may see.",
+        "columns": [
+            "name",
+            "table_name",
+            "synonyms",
+            "attributes",
+            "provenance"
+        ],
+        "actions": [
+            {
+                "label": "Validate SQL",
+                "method": "POST",
+                "path": "/v1/ontology/validate-sql",
+                "body": {
+                    "sql": "SELECT c.region, sum(o.amount) FROM retail.orders o JOIN retail.customers c ON o.customer_id = c.id GROUP BY 1"
+                }
+            }
+        ]
+    },
+    "ontology-relationships": {
+        "key": "ontology-relationships",
+        "title": "Relationships",
+        "path": "/v1/ontology/relationships",
+        "listKey": "relationships",
+        "description": "How tables join: declared keys, keys the compiler inferred (names, types, values and a model's judgement) and joins seen in the query log, with evidence, confidence and the default join among several roles. Ask-your-data is given these; generated SQL is checked against them.",
+        "columns": [
+            "source",
+            "source_column",
+            "target",
+            "target_column",
+            "cardinality",
+            "confidence",
+            "provenance",
+            "join_default"
+        ]
+    },
+    "ontology-graph": {
+        "key": "ontology-graph",
+        "title": "Graph",
+        "path": "/v1/ontology/graph",
+        "listKey": null,
+        "description": "The compiled terms and the relationships between their tables, as a graph (also as JSON-LD or RDF Turtle: format=jsonld or turtle).",
+        "columns": [],
+        "view": "ontology-graph"
+    },
+    "ontology-proposals": {
+        "key": "ontology-proposals",
+        "title": "Ontology proposals",
+        "path": "/v1/ontology/proposals",
+        "listKey": "proposals",
+        "description": "What a compilation proposes, waiting for review: glossary terms linked to their columns, join relationships and metrics. Accepting needs EDIT_ENTITY_GLOSSARY_TERMS on the datasets: a term is written to the glossary (node Ontology) with its column links; a join or metric becomes an approved definition that Ask-your-data uses.",
+        "columns": [
+            "title",
+            "kind",
+            "confidence",
+            "status",
+            "version"
+        ],
+        "actions": [
+            {
+                "label": "Accept",
+                "method": "POST",
+                "path": "/v1/ontology/proposals/{id}/accept",
+                "body": null
+            },
+            {
+                "label": "Reject",
+                "method": "POST",
+                "path": "/v1/ontology/proposals/{id}/reject",
+                "body": null
+            }
+        ]
+    },
+    "ontology-runs": {
+        "key": "ontology-runs",
+        "title": "Compilation runs",
+        "path": "/v1/ontology/runs",
+        "listKey": "runs",
+        "description": "Each compilation, versioned: full or incremental (tables unchanged since the published run are reused), its state and what it built. A cancelled or interrupted run resumes from the tables it had not committed. Compiling needs MANAGE_GLOSSARIES.",
+        "columns": [
+            "version",
+            "state",
+            "mode",
+            "started_ms",
+            "finished_ms",
+            "requested_by",
+            "stats"
+        ],
+        "actions": [
+            {
+                "label": "Compile now",
+                "method": "POST",
+                "path": "/v1/ontology/runs",
+                "body": {
+                    "mode": "incremental",
+                    "sync": true,
+                    "wait": false
+                }
+            },
+            {
+                "label": "Sync catalog and queries",
+                "method": "POST",
+                "path": "/v1/ontology/sync",
+                "body": null
+            },
+            {
+                "label": "Cancel",
+                "method": "POST",
+                "path": "/v1/ontology/runs/{id}/cancel",
+                "body": null
+            },
+            {
+                "label": "Resume",
+                "method": "POST",
+                "path": "/v1/ontology/runs/{id}/resume",
+                "body": null
+            },
+            {
+                "label": "Import as proposals",
+                "method": "POST",
+                "path": "/v1/ontology/runs/{id}/import",
+                "body": null
+            }
+        ]
+    },
     "agent-listings": {
         "key": "agent-listings",
         "title": "Marketplace listings",

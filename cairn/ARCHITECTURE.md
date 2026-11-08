@@ -350,6 +350,13 @@ flowchart LR
 * **LLM providers.** `anthropic` (default `claude-opus-5-5`, with adaptive thinking and server-side
   refusal fallback), or `ollama` for fully in-VPC inference. Provider and model are configurable per
   task (`CAIRN_AI_MODEL_DOCGEN`, `CAIRN_AI_MODEL_NLQ`).
+* **Cairn Ontology** (`ontology/`, `cairn-ontology`, Rust, beside Cairn Store and Cairn Catalog): an ontology
+  compiler ported from NVIDIA's open-source Auto Ontology (Apache-2.0, `ontology/NOTICE`). Cairn
+  (`cairn.context.ontology_compiler`) pushes the catalog and Trino's query history to it over HTTP with a shared
+  bearer token; it compiles business terms, relationships (declared, inferred, observed in queries), metrics and
+  bridge tables into PostgreSQL as versioned runs, its model calls going through Cairn's AI gateway as its own
+  agent identity. Results return as context-inbox proposals; reads through `/v1/ontology` are filtered by catalog
+  visibility; Ask-your-data is grounded in its relationships and its SQL checked by `/validate-sql` (fail-open).
 
 ### 1.6 Data model additions
 
@@ -386,12 +393,14 @@ Cairn Core aspects, so nothing breaks if Cairn is removed:
 | `POST /agents/enroll`, `/agents/{id}/heartbeat`, `/agents/{id}/tasks/poll`, `/agents/{id}/runs/{run}/{batches,logs,complete}` | Agent protocol (signed) |
 | `GET /agents`, `GET /agents/runs` | Fleet and run status |
 | `POST /ai/ask`, `POST /ai/search/semantic`, `POST /ai/docs/generate`, `POST /ai/index/rebuild` | AI features |
+| `GET /v1/ontology/{terms,relationships,metrics,search,graph,proposals}`, `POST /v1/ontology/{sync,runs,validate-sql}` | Cairn Ontology (compiled ontology, visibility-filtered) |
 
 ### 1.8 Deployment topology
 
 * **Local:** `docker compose -f docker-compose.cairn.yml up` brings up Cairn Core
   (core API, web, setup and executor services), Cairn Postgres+pgvector, `cairn-api`, `cairn-scheduler`, `cairn-actions`, `cairn-mcp`,
-  `cairn-agent-gateway`, a demo `cairn-remote-agent`, and optionally Ollama (profile `ai-local`).
+  `cairn-agent-gateway`, a demo `cairn-remote-agent`, and optionally Ollama (profile `ai-local`) and
+  Cairn Ontology (profile `ontology`).
 * **Kubernetes:** `helm/cairn` is an umbrella chart that deploys Cairn Core (core API, web, setup
   jobs) and the Cairn control plane, with the authorizer plugin and the workspace configuration baked
   into the Cairn Core images. `helm/cairn-remote-agent` is installed separately inside each private

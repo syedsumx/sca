@@ -29,6 +29,8 @@ config/                      policy bundle, workflow templates, monitor + connec
 deploy/  docker/             bootstrap scripts, actions pipelines, Dockerfiles, nginx edge
 docker-compose.cairn.yml   full local stack (Cairn Core + Cairn control plane + demo private VPC)
 core/                        Cairn Core images (core, web, setup, executor) and web UI build
+store/  catalog/  ontology/   Rust services: Cairn Store (S3), Cairn Catalog (Iceberg REST), Cairn Ontology
+                             (the ontology compiler, a port of NVIDIA Auto Ontology's; ontology/NOTICE)
 helm/cairn/                  umbrella chart (Cairn Core + control plane)
 helm/cairn-remote-agent/     chart installed inside each private network
 tests/                       pytest suite (runs without a live Cairn Core)

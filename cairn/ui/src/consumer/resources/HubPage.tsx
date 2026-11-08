@@ -6,8 +6,9 @@ import styled from 'styled-components';
 import { Icon } from '../components/Icons';
 import { Page, tokens } from '../components/tokens';
 import { RESOURCE_SPECS } from './catalog';
+import { OntologyGraphView } from './OntologyGraph';
 import { ResourceView } from './ResourceView';
-import type { Hub } from './types';
+import type { Hub, ResourceSpec } from './types';
 
 const Head = styled.header`
     display: flex;
@@ -37,6 +38,10 @@ export const HubIcon = styled.span`
     flex: none;
 `;
 
+function AreaView({ spec }: { spec: ResourceSpec }) {
+    return spec.view === 'ontology-graph' && spec.path ? <OntologyGraphView path={spec.path} /> : <ResourceView spec={spec} />;
+}
+
 /** A hub: one page per platform area, its backend areas as tabs (the tab is kept in the URL: `?tab=`). */
 export function HubPage({ hub }: { hub: Hub }) {
     const location = useLocation();
@@ -54,13 +59,13 @@ export function HubPage({ hub }: { hub: Hub }) {
                 </div>
             </Head>
             {tabs.length === 1 ? (
-                <ResourceView spec={RESOURCE_SPECS[tabs[0]]} />
+                <AreaView spec={RESOURCE_SPECS[tabs[0]]} />
             ) : (
                 <Tabs
                     activeKey={active}
                     onChange={(k) => history.replace({ pathname: location.pathname, search: `?tab=${k}` })}
                     items={tabs.map((k) => ({ key: k, label: RESOURCE_SPECS[k].title,
-                        children: k === active ? <ResourceView spec={RESOURCE_SPECS[k]} /> : null }))}
+                        children: k === active ? <AreaView spec={RESOURCE_SPECS[k]} /> : null }))}
                 />
             )}
         </Page>

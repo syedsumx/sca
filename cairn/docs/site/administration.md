@@ -1643,6 +1643,87 @@ Tested with MongoDB 7 (a single-node replica set) and the real store and catalog
 - a dropped collection failing the mirror; refusals of a missing collection and of a server that is not a replica
   set.
 
+## Cairn Ontology: the ontology compiler
+
+Cairn Ontology (`cairn-ontology`, image `cairn/ontology`, source `ontology/`) compiles an ontology from Cairn's
+catalog and query history: business terms with the columns they map to, relationships (how tables join, with
+evidence), metrics and named filters taken from the queries people run, and join patterns through bridge tables.
+It is a Rust port of the compiler at the heart of NVIDIA's open-source Auto Ontology (Apache-2.0; `ontology/NOTICE`
+lists what was ported and what changed). Cairn is its only client: Cairn decides who may see and do what.
+
+**What a compilation does.** For each table, in parallel (`CAIRN_ONTOLOGY_WORKERS`, 3): profile its columns from
+the sample Cairn sends (uniqueness, most common values, the full value set of categorical columns, the stored
+notation of dates kept as strings, e.g. `DD/MM/YYYY`, and a warning when one column mixes date shapes); ask the
+model which columns are foreign keys and whether the table is a junction; describe the other columns; propose its
+business term(s) with a display name for each column and the synonyms its description states. Results are
+committed in a fixed table order, so when two tables propose the same term name the first in that order keeps it
+and the other's is qualified (`Purchase Order (sales.orders)`), whichever model answer came first. Then:
+relationships (declared keys; suspected foreign keys resolved to a unique key of another table by embedding
+similarity, name and type, the model choosing or abstaining, with a value check when it abstains; dropped when the
+column shares no value with its target; joins seen in the query log added with their counts; one default join per
+role group); metrics from the query log (expressions ranked by how often their queries ran, judged by the model,
+made into complete, validated SELECTs); and bridge tables (every column a key) with a join pattern through them.
+Terms and columns are embedded for search by meaning.
+
+**Runs.** Every compilation is a versioned run (`full`, or `incremental`: a table whose snapshot did not change
+since the published run is reused, not sent to the model again). A run can be cancelled: tables in flight finish,
+the rest are skipped, and the run resumes later from the tables it had not committed (also after the process
+stopped: such runs are marked `interrupted`). The last completed run is the published ontology.
+
+**Model calls.** Through Cairn's AI gateway on the OpenAI protocol (`/v1/ai/gateway/openai/v1`, chat completions
+with structured JSON answers and `…/embeddings`), as the compiler's own agent identity (a key agent with scope
+`model`, acting for an owner who has `USE_AI_GATEWAY` on both models): every call is admitted, budgeted and
+metered under that identity (feature `gateway:<agent>`). Create it once with `POST /v1/ontology/agent`
+(`MANAGE_GLOBAL_SETTINGS`, body `{"owner": "urn:li:corpuser:…"}`); its key is shown once: put it in a Kubernetes
+Secret (`cairn.ontology.model.keySecret`). Answers are validated against their expected shape and retried
+(`CAIRN_ONTOLOGY_MODEL_RETRIES`, 2; timeout `CAIRN_ONTOLOGY_MODEL_TIMEOUT_SECONDS`, 120); at most
+`CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT` (6) calls are in flight. When the model cannot answer, each step falls back
+(a term named after its table, no inferred keys). Without an embeddings model, search by meaning and embedding
+candidates are off; name heuristics still find keys.
+
+**Syncing.** The context-miner worker syncs and compiles every `cairn.ontology.intervalSeconds` (3600; 0: on
+demand only), one replica at a time; `cairn ontology sync|compile|import|status` does it from the command line.
+A sync sends every dataset of the catalog with its columns, types, nullability, primary and foreign keys,
+descriptions (edited ones first), deprecation and profile, and a sample of up to `CAIRN_ONTOLOGY_SAMPLE_ROWS`
+(200) rows read as `cairn.ontology.sampleAs` through the governed data path (that person's masks apply; leave it
+empty to send profiles only); then the finished Trino queries since the last sync (`/v1/queries` data). Tables
+can be kept out with `tableAllowRegex` / `tableDenyRegex` (deny wins, matched against the unqualified name).
+
+**Proposals.** A finished run comes back into the context inbox (**Semantic models → Ontology proposals**, and
+the Context inbox): a term as a glossary-term proposal linked to its columns, a relationship as a join, a metric
+as a metric definition. Accepting needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it is about: a term is
+written under the glossary node **Ontology** and linked to its columns; a join or metric becomes an approved,
+versioned definition that Ask-your-data and text to SQL use. Rejecting needs `MANAGE_GLOSSARIES`; a rejected
+proposal is not brought back by later runs.
+
+**Ask-your-data.** The relationships among the tables a question uses are given to the model (the default join
+of each role first), and the SQL it writes is checked with the compiler's SQL validation; the answer carries the
+findings (`ontology`). When the compiler cannot answer, the answer carries a warning instead: the check never
+blocks the governed run.
+
+**API** (`/v1/ontology`). Reads show only elements over datasets the caller may see (`VIEW_ENTITY_PAGE` on every
+one): `GET /terms?q=`, `GET /relationships?datasets=…&between=true`, `GET /metrics`, `GET /bridges`,
+`GET /search?q=&mode=name|semantic|hybrid`, `GET /graph?format=json|jsonld|turtle` (OWL classes, properties and
+relationships), `GET /provenance/<kind>/<id>`, `POST /validate-sql` (`{"sql"}`: unknown tables and columns,
+deprecated ones, joins with no known path, joins contradicting the known keys, fan-out, metrics computed unlike
+their definition; a query over a table the caller may not see is answered with `not_visible` only),
+`GET /proposals`, `POST /proposals/<id>/accept|reject`. Compiling needs `MANAGE_GLOSSARIES`: `POST /sync`,
+`POST /runs` (`{"mode": "incremental"|"full", "sync": true, "wait": false}`), `POST /runs/<id>/cancel|resume|import`,
+and `GET /runs` (a run's statistics count every table); `GET /status` shows whether the compiler answers. MCP tools: `ontology_search_terms`, `ontology_relationships`,
+`ontology_validate_sql`.
+
+**Deployment.** Helm: `cairn.ontology.enabled`, its token in `cairn.ontology.secret` (Cairn calls with it; the
+compiler refuses every `/v1` request without it), its PostgreSQL URL in `cairn.ontology.database.existingSecret`
+(required), the models in `cairn.ontology.model.chat` / `.embeddings` (served by the gateway:
+`CAIRN_AI_GATEWAY_MODELS`). One replica (strategy Recreate); a network policy lets only this release's components
+call it. Compose: `--profile ontology` (state in a SQLite file in a volume; set `CAIRN_ONTOLOGY_URL` and
+`CAIRN_ONTOLOGY_MODEL_KEY_FILE`). The compiler's own settings are listed in `cairn-ontology --help`'s source
+(`ontology/src/main.rs`); `/-/ready`, `/-/healthy` and Prometheus `/metrics` (model calls, failures, retries,
+tokens, runs) are open for probes.
+
+**Down.** When the compiler is unavailable, the ontology pages say so, compiles fail with 503, Ask-your-data
+answers with a warning, and nothing else in Cairn changes.
+
 ## Query history, profiles and tuning hints
 
 Every finished Trino query, on the shared coordinator and on team warehouses, is kept for `CAIRN_QUERY_HISTORY_DAYS` (30). These are the same events Trino's HTTP event listener sends for usage statistics. Each query records:

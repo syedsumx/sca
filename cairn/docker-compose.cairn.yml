@@ -49,6 +49,10 @@ x-cairn-env: &cairn-env
   CAIRN_AI_PRICES: ${CAIRN_AI_PRICES:-}                          # JSON {"model-prefix": [in, out]} USD per MTok
   CAIRN_OLLAMA_URL: ${CAIRN_OLLAMA_URL:-http://ollama:11434}
   CAIRN_EMBEDDING_PROVIDER: ${CAIRN_EMBEDDING_PROVIDER:-hashing}
+  # Cairn Ontology (profile ontology): set CAIRN_ONTOLOGY_URL=http://cairn-ontology:8590 in .env to use it.
+  CAIRN_ONTOLOGY_URL: ${CAIRN_ONTOLOGY_URL:-}
+  CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:-cairn-ontology-dev-token-0001}
+  CAIRN_ONTOLOGY_SAMPLE_AS: ${CAIRN_ONTOLOGY_SAMPLE_AS:-}
   CAIRN_ROOT_USERS: urn:li:corpuser:admin
   # ---- Active Metadata layer (UX_ACTIVE_METADATA_SPEC.md Part 8)
   CAIRN_PUBLIC_URL: ${CAIRN_PUBLIC_URL:-http://localhost:9000}
@@ -669,6 +673,34 @@ services:
         condition: service_healthy
     networks: [catalog]
 
+  # Cairn Ontology (opt-in: `--profile ontology`): the ontology compiler. Cairn pushes its catalog and query
+  # history to it and reads the compiled terms, relationships and metrics back as proposals. Its model calls go
+  # through Cairn's AI gateway as its agent identity: create one (POST /v1/ontology/agent), put the key in
+  # CAIRN_ONTOLOGY_MODEL_KEY_FILE, and serve the models through the gateway (CAIRN_AI_GATEWAY_*). State: a
+  # SQLite file in the ontologydata volume here; production uses PostgreSQL (Helm: cairn.ontology.database).
+  cairn-ontology:
+    image: ${CAIRN_REGISTRY:-cairn}/ontology:${CAIRN_VERSION:-0.1.0}
+    build:
+      context: .
+      dockerfile: docker/ontology.Dockerfile
+    hostname: cairn-ontology
+    restart: unless-stopped
+    profiles: [ontology]
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    environment:
+      CAIRN_ONTOLOGY_TOKEN: ${CAIRN_ONTOLOGY_TOKEN:-cairn-ontology-dev-token-0001}
+      CAIRN_ONTOLOGY_MODEL_URL: http://cairn-api:8800/v1/ai/gateway/openai/v1
+      CAIRN_ONTOLOGY_MODEL: ${CAIRN_ONTOLOGY_MODEL:-}
+      CAIRN_ONTOLOGY_EMBED_MODEL: ${CAIRN_ONTOLOGY_EMBED_MODEL:-}
+      CAIRN_ONTOLOGY_MODEL_API_KEY_FILE: /run/cairn-ontology/model-key
+    volumes:
+      - ontologydata:/data
+      - ${CAIRN_ONTOLOGY_MODEL_KEY_FILE:-/dev/null}:/run/cairn-ontology/model-key:ro
+    networks: [catalog]
+
   # Trino on the lakehouse (opt-in: `--profile trino`): SQL on Cairn Catalog's Iceberg tables, data in
   # Cairn Store, as the `lakehouse` catalog. http://localhost:8088 (e.g. `trino --server localhost:8088`).
   # Once: a self-signed certificate for Trino's HTTPS port (kept in the trinotls volume).
@@ -973,6 +1005,7 @@ networks:
 
 volumes:
   storedata:
+  ontologydata:
   spark-events:
   catalogdata:
   trinotls:

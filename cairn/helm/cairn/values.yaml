@@ -775,6 +775,56 @@ cairn:
     tolerations: []
     affinity: {}
 
+  # Cairn Ontology: the ontology compiler (a Rust port of NVIDIA auto-ontology's compiler; see ontology/NOTICE).
+  # Cairn pushes its catalog and Trino query history to it (the context-miner worker, every intervalSeconds, and
+  # on demand), it compiles business terms, relationships, metrics and bridge tables, and the results come back
+  # as proposals in the context inbox. Its model calls go through Cairn's AI gateway as its own agent identity.
+  ontology:
+    enabled: false
+    port: 8590
+    image:
+      repository: ""   # empty = <global.cairn.registry>/ontology
+      tag: ""
+      pullPolicy: IfNotPresent
+    # The bearer token Cairn calls the compiler with (16+ characters): a Secret you create.
+    secret:
+      name: cairn-ontology
+      tokenKey: token
+    # The compiler's ontology, runs and query log: a Secret whose urlKey holds a postgresql:// URL (TLS unless
+    # ?sslmode=disable). Required.
+    database:
+      existingSecret: ""
+      urlKey: url
+    model:
+      # OpenAI-compatible base URL; empty = this release's AI gateway (…/v1/ai/gateway/openai/v1). The gateway
+      # must serve both models (cairn.extraEnv CAIRN_AI_GATEWAY_MODELS) and the agent's owner needs
+      # USE_AI_GATEWAY on them.
+      url: ""
+      chat: ""
+      embeddings: ""      # empty: no embeddings (semantic search and vector FK candidates off)
+      # The compiler agent's key (scope "model"; POST /v1/ontology/agent shows it once): a Secret you create.
+      keySecret:
+        name: ""
+        key: key
+      timeoutSeconds: 120
+      maxInflight: 6
+    workers: 3
+    probeDistinctValues: true
+    maxQueries: 20000
+    # Cairn's side: how often the context-miner worker syncs and compiles (0: on demand only); the person whose
+    # governed reads sample rows for profiling (masking applied; empty: no samples beyond catalog profiles); and
+    # relation allow/deny regexes (deny wins; matched against the unqualified table name).
+    intervalSeconds: 3600
+    sampleAs: ""
+    tableAllowRegex: ""
+    tableDenyRegex: ""
+    resources:
+      requests: { cpu: 200m, memory: 256Mi }
+      limits: { memory: 2Gi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
+
   # Trino on the lakehouse: SQL on Cairn Catalog's Iceberg tables (data in Cairn Store), as the
   # `lakehouse` catalog. Needs catalog.enabled. One coordinator that also runs queries.
   trino:

@@ -6,9 +6,14 @@ export const HUBS: Hub[] = [
         "route": "/semantic",
         "title": "Semantic models",
         "icon": "cube",
-        "description": "Governed metric layers drafted from your tables and query history, reviewed before they go live.",
+        "description": "Governed metric layers drafted from your tables and query history, reviewed before they go live, and the ontology Cairn Ontology compiles from them: business terms, relationships, metrics and proposals.",
         "tabs": [
-            "semantic-models"
+            "semantic-models",
+            "ontology-terms",
+            "ontology-relationships",
+            "ontology-graph",
+            "ontology-proposals",
+            "ontology-runs"
         ]
     },
     {

@@ -356,6 +356,28 @@ app.kubernetes.io/component: {{ .component }}
 - name: CAIRN_SAMPLES_ON_START
   value: {{ . | quote }}
 {{- end }}
+{{- if .Values.cairn.ontology.enabled }}
+{{- $o := .Values.cairn.ontology }}
+- name: CAIRN_ONTOLOGY_URL
+  value: {{ printf "http://%s:%v" (include "cairn.componentName" (dict "root" . "component" "ontology" "cfg" $o)) $o.port | quote }}
+- name: CAIRN_ONTOLOGY_TOKEN
+  valueFrom:
+    secretKeyRef: { name: {{ $o.secret.name }}, key: {{ $o.secret.tokenKey }} }
+- name: CAIRN_ONTOLOGY_INTERVAL_SECONDS
+  value: {{ $o.intervalSeconds | quote }}
+{{- with $o.sampleAs }}
+- name: CAIRN_ONTOLOGY_SAMPLE_AS
+  value: {{ . | quote }}
+{{- end }}
+{{- with $o.tableAllowRegex }}
+- name: CAIRN_ONTOLOGY_TABLE_ALLOW_REGEX
+  value: {{ . | quote }}
+{{- end }}
+{{- with $o.tableDenyRegex }}
+- name: CAIRN_ONTOLOGY_TABLE_DENY_REGEX
+  value: {{ . | quote }}
+{{- end }}
+{{- end }}
 {{- with .Values.cairn.extraEnv }}
 {{ toYaml . }}
 {{- end }}

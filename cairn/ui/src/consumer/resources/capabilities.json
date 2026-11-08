@@ -78,6 +78,13 @@
    "note": ""
   },
   {
+   "layer": "Ontology",
+   "compare": "Semantic views / Unity Catalog metric views and AI/BI Genie's knowledge",
+   "cairn": "Cairn Ontology (Rust, a port of NVIDIA Auto Ontology's compiler). Business terms, relationships (declared, inferred, seen in queries), metrics and bridge tables compiled from the catalog and query history; reviewed as proposals; grounds and checks Ask-your-data's SQL; governed model calls",
+   "status": "shipped",
+   "note": ""
+  },
+  {
    "layer": "Sharing and marketplace",
    "compare": "Listings / Delta Sharing",
    "cairn": "Internal marketplace with access requests; publishing to Snowflake listings and Delta Sharing shares",
@@ -1059,6 +1066,14 @@
    "done": "People get answers about the numbers in front of them without leaving the app, and never see more through the chat than the app itself would show them",
    "status": "shipped",
    "note": "cairn.dataaccess.app_chat: chat on a data app (description, tables, queries, a context endpoint; migration 0130); POST /v1/apps/<name>/chat (USE_APP) runs the declared queries as the asker (masks, row filters, refusals), describes only tables they may see, asks the running app's context endpoint as them (never with Cairn's or the app's credentials), and calls the model through the AI gateway as them; answers cite the tables used; audited without content. Ask about this app on the Data apps tab. Tested end to end with a real app process, a real warehouse and the gateway's model stand-in: the asker's masking held in the answer (tests/test_app_chat_e2e.py)"
+  },
+  {
+   "id": "L121",
+   "title": "Cairn Ontology",
+   "summary": "An ontology compiled from the catalog and the query log: business terms, relationships, metrics and bridge tables, reviewed as proposals and used to ground and check generated SQL (a Rust port of the compiler at the heart of NVIDIA's open-source Auto Ontology, Apache-2.0)",
+   "done": "Agents and people ask in business words and get SQL that joins the way the data is really joined; a wrong join is flagged before anyone trusts its number; nobody sees ontology elements over data they may not see",
+   "status": "shipped",
+   "note": "cairn/ontology (cairn-ontology, Rust; PostgreSQL or SQLite): catalog snapshots diffed incrementally with allow/deny table filters, the query log parsed with sqlparser (tables, columns, joins, unions, aggregations) and merged by shape with usage counts; the semantic pipeline ported (column profiling with date-notation inference, FK and junction detection, column descriptions, terms with display names and synonyms, semantic FK resolution with pruning and join defaults, metrics from the query log, bridge-table join patterns, embeddings) with tables processed in parallel and committed in canonical order, cancellation, resumable and incremental versioned runs; model calls through Cairn's AI gateway (OpenAI chat with structured outputs and embeddings, added to the gateway) as the compiler's agent identity; /validate-sql (unknown join paths, joins contradicting keys, fan-out, deprecated columns, definition mismatches), search by name and meaning, JSON, JSON-LD and Turtle exports, provenance. In Cairn (cairn.context.ontology_compiler, /v1/ontology): sync on a schedule and on demand (MANAGE_GLOSSARIES), results as context-inbox proposals (accepted terms become glossary terms linked to their columns, joins and metrics approved definitions), reads filtered by catalog visibility, Ask-your-data grounded in the relationships and its SQL checked (fail-open with a warning), MCP tools ontology_search_terms, ontology_relationships, ontology_validate_sql; Helm, Compose, image; an Ontology area in the Semantic models hub with a graph view. Tested end to end with the real compiler on PostgreSQL, a real Cairn, Cairn Store, Cairn Catalog and Trino (queries run through Trino are the query log) and the provider stand-in behind the gateway (tests/test_ontology_e2e.py); 42 Rust unit tests carrying the upstream tests' intent"
   }
  ]
 }

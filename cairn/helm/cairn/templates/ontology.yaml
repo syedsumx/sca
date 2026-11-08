@@ -1,0 +1,119 @@
+{{- if .Values.cairn.ontology.enabled }}
+{{- $o := .Values.cairn.ontology }}
+{{- $ctx := dict "root" $ "component" "ontology" "cfg" $o }}
+{{- $api := dict "root" $ "component" "api" "cfg" $.Values.cairn.api }}
+{{- if not $o.database.existingSecret }}{{ fail "cairn.ontology needs cairn.ontology.database.existingSecret (a PostgreSQL URL for the compiler's ontology and runs)" }}{{ end }}
+{{- if not $o.secret.name }}{{ fail "cairn.ontology needs cairn.ontology.secret.name (the bearer token Cairn calls the compiler with)" }}{{ end }}
+# Cairn Ontology: the ontology compiler (a Rust port of NVIDIA auto-ontology's compiler). One replica: a run is
+# held in this process (its committed tables are in PostgreSQL, so a restarted pod resumes it).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 45
+      {{- with .Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.cairn.podSecurityContext | nindent 8 }}
+      containers:
+        - name: ontology
+          image: {{ printf "%s:%s" (default (printf "%s/ontology" .Values.global.cairn.registry) $o.image.repository) (default (include "cairn.tag" .) $o.image.tag) }}
+          imagePullPolicy: {{ $o.image.pullPolicy }}
+          args: ["serve"]
+          env:
+            - name: CAIRN_ONTOLOGY_ADDR
+              value: {{ printf ":%v" $o.port | quote }}
+            - name: CAIRN_ONTOLOGY_DATABASE_URL
+              valueFrom:
+                secretKeyRef: { name: {{ $o.database.existingSecret }}, key: {{ $o.database.urlKey }} }
+            - name: CAIRN_ONTOLOGY_TOKEN
+              valueFrom:
+                secretKeyRef: { name: {{ $o.secret.name }}, key: {{ $o.secret.tokenKey }} }
+            # Model calls through Cairn's AI gateway (OpenAI protocol), as the compiler's agent identity.
+            - name: CAIRN_ONTOLOGY_MODEL_URL
+              value: {{ default (printf "http://%s:%v/v1/ai/gateway/openai/v1" (include "cairn.componentName" $api) $.Values.cairn.api.port) $o.model.url | quote }}
+            - name: CAIRN_ONTOLOGY_MODEL
+              value: {{ $o.model.chat | quote }}
+            - name: CAIRN_ONTOLOGY_EMBED_MODEL
+              value: {{ $o.model.embeddings | quote }}
+            {{- if $o.model.keySecret.name }}
+            - name: CAIRN_ONTOLOGY_MODEL_API_KEY_FILE
+              value: /run/cairn-ontology-model/key
+            {{- end }}
+            - name: CAIRN_ONTOLOGY_MODEL_TIMEOUT_SECONDS
+              value: {{ $o.model.timeoutSeconds | quote }}
+            - name: CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT
+              value: {{ $o.model.maxInflight | quote }}
+            - name: CAIRN_ONTOLOGY_WORKERS
+              value: {{ $o.workers | quote }}
+            - name: CAIRN_ONTOLOGY_PROBE_DISTINCT_VALUES
+              value: {{ $o.probeDistinctValues | quote }}
+            - name: CAIRN_ONTOLOGY_MAX_QUERIES
+              value: {{ $o.maxQueries | quote }}
+          ports:
+            - name: http
+              containerPort: {{ $o.port }}
+              protocol: TCP
+          readinessProbe:
+            httpGet: { path: /-/ready, port: http }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthy, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          resources:
+            {{- toYaml $o.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.cairn.containerSecurityContext | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            {{- if $o.model.keySecret.name }}
+            - name: model-key
+              mountPath: /run/cairn-ontology-model
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: data
+          emptyDir: {}
+        {{- if $o.model.keySecret.name }}
+        - name: model-key
+          secret:
+            secretName: {{ $o.model.keySecret.name }}
+            items:
+              - key: {{ $o.model.keySecret.key }}
+                path: key
+        {{- end }}
+      {{- with $o.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $o.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $o.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+{{ include "cairn.service" (merge (dict "port" $o.port) $ctx) }}
+{{- end }}

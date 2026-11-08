@@ -23,6 +23,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0131) | Python |
 | `store/` | Cairn Store: S3-compatible object store | Rust |
 | `catalog/` | Cairn Catalog: Iceberg REST catalog | Rust |
+| `ontology/` | Cairn Ontology: the ontology compiler (a port of NVIDIA Auto Ontology's; see `ontology/NOTICE`) | Rust |
 | `spark/` | `cairn-spark`: governed Spark submit, Kubernetes pod templates | Python |
 | `airflow-provider/` | Airflow provider for Cairn | Python |
 | `terraform-provider-cairn/` | Terraform provider | Go |
@@ -44,10 +45,11 @@ Run everything from `cairn/`.
 - **Lint:** `ruff check .`.
 - **Unit tests:** `pytest -q -p no:cacheprovider -o addopts="" tests/<file>.py`.
 - **End-to-end tests against the real store and catalog:** build them once with
-  `cargo build --release` (in `store/` and `catalog/`), then set
-  `CAIRN_STORE_BIN=.../release/cairn-store CAIRN_CATALOG_BIN=.../release/cairn-catalog`. Trino, Kafka,
+  `cargo build --release` (in `store/`, `catalog/` and `ontology/`), then set
+  `CAIRN_STORE_BIN=.../release/cairn-store CAIRN_CATALOG_BIN=.../release/cairn-catalog`
+  (and `CAIRN_ONTOLOGY_BIN=.../release/cairn-ontology` for `tests/test_ontology_e2e.py`). Trino, Kafka,
   PostgreSQL and the other services run as Docker containers that the tests start themselves.
-- **Rust:** `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` in `store/` and `catalog/`.
+- **Rust:** `cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` in `store/`, `catalog/` and `ontology/`.
 - **UI:** `npm ci && npm run typecheck && npm test && npm run build` in `ui/`; accessibility: `npm run build:mfe`, then
   `pytest -q -p no:cacheprovider -o addopts="" tests/test_accessibility_e2e.py` (axe on the main pages).
 - **Helm:** `helm lint helm/cairn` and `helm template` with each values profile; CI runs kubeconform.
@@ -57,7 +59,7 @@ Run everything from `cairn/`.
 - **Hetzner setup:** `deploy/hetzner/ci/k3s-smoke.sh` runs the whole setup on one Linux machine (sudo,
   internet); CI runs it as job `hetzner`.
 
-CI is `.github/workflows/cairn-ci.yml` (14 jobs); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
+CI is `.github/workflows/cairn-ci.yml` (15 jobs); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
 
 ## Conventions
 
