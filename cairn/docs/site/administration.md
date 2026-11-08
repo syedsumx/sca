@@ -585,7 +585,7 @@ agent's recorded tool calls and model use over a window.
 
 **Agentic abuse detection (prompt injection and exfiltration):** rule-based detectors run wherever text crosses into
 or out of a model on an agent's behalf, record findings, block the serious ones and pause an agent that keeps
-tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0128).
+tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0129).
 
 - **What is checked.**
   - *Into models:* every message of an AI gateway call (agent apps' model calls included) and every tool result a
@@ -741,7 +741,7 @@ the provider seeing only Cairn's keys, metering per person and agent, refusals (
 ### Routes: virtual models with rules and fallback
 
 A **route** is a model name callers use (`"model": "cairn-auto"`) that stands for an ordered list of real models,
-the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migration 0128).
+the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migration 0129).
 
 - **More upstreams.** Besides the Anthropic and OpenAI upstreams, `CAIRN_AI_GATEWAY_UPSTREAMS` names more:
   `backup=anthropic@https://…,local=openai@http://…`, each one's key in `CAIRN_AI_GATEWAY_UPSTREAM_<NAME>_KEY` (or
@@ -862,7 +862,7 @@ All three templates' own tests passed with the real frameworks (anthropic, opena
 
 Agents keep chat sessions per conversation; **agent memory** is what an agent keeps across them about the people it
 works for: preferences, facts about their work, decisions made (`cairn.ai.agent_memory`, table
-`cairn_agent_memories`, migration 0128).
+`cairn_agent_memories`, migration 0129).
 
 - **Scopes of a memory.** `person` (about one person: written by the agent during a run for them, or by the person),
   `team` (shared with a group's members: written only by a member, by hand) and `shared` (everyone who may use the

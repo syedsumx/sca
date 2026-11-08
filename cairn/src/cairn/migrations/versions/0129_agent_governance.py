@@ -1,7 +1,7 @@
 """Agent memory; AI gateway routes; agentic abuse findings
 
-Revision ID: 0128
-Revises: 0127
+Revision ID: 0129
+Revises: 0128
 Create Date: 2026-11-08 18:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0128'
-down_revision = '0127'
+revision = '0129'
+down_revision = '0128'
 branch_labels = None
 depends_on = None
 
