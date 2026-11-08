@@ -1037,6 +1037,14 @@
    "note": "cairn.dataaccess.share_packages: PUT /v1/shares/<share>/package publishes a versioned manifest (tables, columns, glossary, metrics over shared tables only, sample questions, attached agents) signed as a JWS with Cairn's published key; the recipient fetches it with the share's credential (/v1/shares/recipient/package). Agent apps attached to a share (/v1/shares/<share>/agents) are invoked by the recipient as identity type share-recipient: run token narrowed to model (model use decided for the provider, metered to the recipient), data only through a lakehouse token for the share (ctx.catalog()); runs recorded per recipient and audited (migration 0130). Tested end to end with the real store and catalog, a real agent process and the gateway's model stand-in: signature verified, shared table read, other tables refused, revocation stopping both (tests/test_share_packages_e2e.py)"
   },
   {
+   "id": "L118",
+   "title": "Cairn in Excel and Google Sheets",
+   "summary": "An Office add-in and a Google Sheets add-on with QUERY, METRIC and ASK functions and a pane to sign in, browse governed metrics and insert them",
+   "done": "Analysts get governed numbers in the spreadsheet they already use, as themselves: masked, filtered and permitted as in Cairn, with the metric meaning what it means everywhere else; the counterpart of Snowflake's and Databricks' Excel and Sheets connectors",
+   "status": "partial",
+   "note": "cairn/addins: the Excel add-in (manifest, shared runtime, custom functions CAIRN.QUERY/METRIC/ASK, task pane) and the Apps Script add-on (CAIRN_QUERY/METRIC/ASK, sidebar, hourly refresh trigger), built per Cairn by build.mjs. Both are OAuth public clients configured by the operator (CAIRN_EXCEL_ADDIN_ORIGINS, CAIRN_SHEETS_ADDON_SCRIPT_IDS): authorization code with PKCE, the person's tokens scoped read, query_data, model, short-lived and rotating; CORS for the Office origin only; /data/sheets/{query,metric,ask,metrics} answer 2-D grids. Tested end to end against a real Cairn API server (tests/test_spreadsheet_addins.py): the add-ins' own JavaScript in Node signs in through the real consent page, a masked column comes back masked, the row filter holds, a denied table is refused, refresh rotates once for concurrent calls, sign-out revokes. Not tested end to end: running inside Excel and Sheets themselves (host APIs are stand-ins; the task pane and sidebar UI are not exercised), and the manifest against Microsoft's XSD (checked structurally)"
+  },
+  {
    "id": "L120",
    "title": "Talk to your app",
    "summary": "A chat panel for data apps: questions about what the app shows, answered with the app's declared context and the asker's own access",

@@ -1,0 +1,37 @@
+{
+  "functions": [
+    {
+      "id": "QUERY",
+      "name": "QUERY",
+      "description": "Runs read-only SQL in Cairn as you; the rows spill, headers first.",
+      "helpUrl": "https://addins.example.com/help.html#query",
+      "result": { "type": "any", "dimensionality": "matrix" },
+      "parameters": [
+        { "name": "sql", "description": "A SELECT over catalogued tables (schema.table).", "type": "string", "dimensionality": "scalar" },
+        { "name": "connection", "description": "The connection; leave out for the default.", "type": "string", "dimensionality": "scalar", "optional": true }
+      ]
+    },
+    {
+      "id": "METRIC",
+      "name": "METRIC",
+      "description": "A governed metric from Cairn, broken down by dimensions and filtered.",
+      "helpUrl": "https://addins.example.com/help.html#metric",
+      "result": { "type": "any", "dimensionality": "matrix" },
+      "parameters": [
+        { "name": "name", "description": "The metric's name.", "type": "string", "dimensionality": "scalar" },
+        { "name": "dimensions", "description": "Dimensions, e.g. \"region, country\", or a range of names.", "type": "any", "dimensionality": "matrix", "optional": true },
+        { "name": "filters", "description": "Filters, e.g. \"region = EU; amount >= 10\", or a range.", "type": "any", "dimensionality": "matrix", "optional": true }
+      ]
+    },
+    {
+      "id": "ASK",
+      "name": "ASK",
+      "description": "Asks Cairn a question of your data; the answer's rows spill, headers first.",
+      "helpUrl": "https://addins.example.com/help.html#ask",
+      "result": { "type": "any", "dimensionality": "matrix" },
+      "parameters": [
+        { "name": "question", "description": "The question, in your words.", "type": "string", "dimensionality": "scalar" }
+      ]
+    }
+  ]
+}

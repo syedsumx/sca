@@ -68,6 +68,7 @@ READ_POSTS = {
     "/collab/enrich", "/ai/search/semantic", "/ai/ask", "/ai/chat", "/ai/explain/lineage", "/v1/agent-memory/recall",
     "/governance/v1/authorize", "/governance/simulate", "/governance/policies/validate",
     "/governance/pii/propagation/plan", "/data/query", "/data/ask", "/context/metrics/{name}/query",
+    "/data/sheets/query", "/data/sheets/metric", "/data/sheets/ask",
     "/marketplace/access-requests/preview", "/sources/test",
     "/quality/contracts/check", "/notify/inbox/read", "/governance/automations/preview",
 }

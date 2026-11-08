@@ -184,6 +184,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     app = _base_app("api", services)
     cp, authz = _principal_dependency(services), _authorize(services)
     modules = set(modules)
+    if getattr(services, "addins", None) is not None and services.addins.origins:   # the Office add-in's origins
+        from cairn.identity.addins import AddinCors
+
+        app.add_middleware(AddinCors, addins=services.addins)
     if "quality" in modules:
         app.include_router(quality_router(services.quality, cp, authz, services.external_quality))
     if "governance" in modules:
@@ -619,6 +623,11 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "quality" in modules and services.data_access is not None:
         from cairn.dataaccess.api import build_router as data_router
 
+        if getattr(services, "sheets", None) is not None:      # /data/sheets: the spreadsheet add-ins
+            from cairn.dataaccess.sheets import build_router as sheets_router
+
+            app.include_router(sheets_router(services.sheets, cp, services.can_view, getattr(services, "intents", None),
+                                             services.ai_actor))
         app.include_router(data_router(services.data_access, cp, services.ask, services.can_view, services.ai_actor,
                                        getattr(services, "intents", None)))
         if services.sql_workspace is not None:

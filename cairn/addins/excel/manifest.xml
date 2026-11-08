@@ -1,0 +1,118 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Cairn for Excel: the add-in-only manifest (Excel on Windows, Mac and the web).
+  https://addins.example.com is where the add-in's files are served; https://cairn.example.com is Cairn.
+  build.mjs writes both (and the Id) into dist/excel/manifest.xml; see cairn/addins/README.md.
+-->
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+           xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+           xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+           xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+           xsi:type="TaskPaneApp">
+  <Id>6f0d3c4e-2a51-4f7b-9c1e-8d2b5a7e3c10</Id>
+  <Version>1.0.0.0</Version>
+  <ProviderName>Cairn</ProviderName>
+  <DefaultLocale>en-US</DefaultLocale>
+  <DisplayName DefaultValue="Cairn"/>
+  <Description DefaultValue="Governed queries, metrics and answers from Cairn in your workbook, as you."/>
+  <IconUrl DefaultValue="https://addins.example.com/assets/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://addins.example.com/assets/icon-64.png"/>
+  <SupportUrl DefaultValue="https://addins.example.com/help.html"/>
+  <AppDomains>
+    <AppDomain>https://cairn.example.com</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Workbook"/>
+  </Hosts>
+  <Requirements>
+    <Sets DefaultMinVersion="1.1">
+      <Set Name="SharedRuntime" MinVersion="1.1"/>
+    </Sets>
+  </Requirements>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://addins.example.com/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Workbook">
+        <Runtimes>
+          <Runtime resid="Taskpane.Url" lifetime="long"/>
+        </Runtimes>
+        <AllFormFactors>
+          <ExtensionPoint xsi:type="CustomFunctions">
+            <Script>
+              <SourceLocation resid="Functions.Script.Url"/>
+            </Script>
+            <Page>
+              <SourceLocation resid="Taskpane.Url"/>
+            </Page>
+            <Metadata>
+              <SourceLocation resid="Functions.Metadata.Url"/>
+            </Metadata>
+            <Namespace resid="Functions.Namespace"/>
+          </ExtensionPoint>
+        </AllFormFactors>
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="Help.Url"/>
+          </GetStarted>
+          <FunctionFile resid="Taskpane.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="Cairn.Group">
+                <Label resid="Group.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16"/>
+                  <bt:Image size="32" resid="Icon.32"/>
+                  <bt:Image size="80" resid="Icon.80"/>
+                </Icon>
+                <Control xsi:type="Button" id="Cairn.TaskpaneButton">
+                  <Label resid="Button.Label"/>
+                  <Supertip>
+                    <Title resid="Button.Label"/>
+                    <Description resid="Button.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+                    <bt:Image size="16" resid="Icon.16"/>
+                    <bt:Image size="32" resid="Icon.32"/>
+                    <bt:Image size="80" resid="Icon.80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>Cairn.Taskpane</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16" DefaultValue="https://addins.example.com/assets/icon-16.png"/>
+        <bt:Image id="Icon.32" DefaultValue="https://addins.example.com/assets/icon-32.png"/>
+        <bt:Image id="Icon.80" DefaultValue="https://addins.example.com/assets/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="Functions.Script.Url" DefaultValue="https://addins.example.com/functions.js"/>
+        <bt:Url id="Functions.Metadata.Url" DefaultValue="https://addins.example.com/functions.json"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://addins.example.com/taskpane.html"/>
+        <bt:Url id="Help.Url" DefaultValue="https://addins.example.com/help.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="Functions.Namespace" DefaultValue="CAIRN"/>
+        <bt:String id="GetStarted.Title" DefaultValue="Cairn is ready"/>
+        <bt:String id="Group.Label" DefaultValue="Cairn"/>
+        <bt:String id="Button.Label" DefaultValue="Cairn"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="GetStarted.Description" DefaultValue="Open Cairn on the Home tab to sign in, then use =CAIRN.QUERY, =CAIRN.METRIC and =CAIRN.ASK."/>
+        <bt:String id="Button.Tooltip" DefaultValue="Sign in to Cairn and insert governed metrics."/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

@@ -580,6 +580,9 @@ jobs:
       - name: Browser extension
         working-directory: cairn/extension
         run: npm test && node build.mjs --cairn-url https://cairn.example.com
+      - name: Spreadsheet add-ins (unit; the live tests run in the python job, tests/test_spreadsheet_addins.py)
+        working-directory: cairn/addins
+        run: npm test && node build.mjs --cairn-url https://cairn.example.com --addin-url https://addins.example.com
 
   java:
     runs-on: ubuntu-latest

@@ -1047,6 +1047,77 @@ the notification's button; someone else could not decide it; the email arrived t
 person who may read but not export the dataset was refused; rejected and expired items were not sent; a suspended
 owner's task was paused after three failures.
 
+## Excel and Google Sheets
+
+Cairn for Excel (an Office add-in) and Cairn for Google Sheets (an Apps Script add-on) put governed answers in
+cells, as the person signed in to them. Both offer the same three functions, whose results spill from the cell,
+headers first:
+
+| Excel | Google Sheets | Answers with |
+|---|---|---|
+| `=CAIRN.QUERY(sql, [connection])` | `=CAIRN_QUERY(sql, [connection])` | a read-only query's rows |
+| `=CAIRN.METRIC(name, [dimensions], [filters])` | `=CAIRN_METRIC(name, [dimensions], [filters])` | a governed metric (the metrics layer's, else the semantic layer's approved one), per dimension |
+| `=CAIRN.ASK(question)` | `=CAIRN_ASK(question)` | the rows answering a question (ask-your-data; needs an LLM provider) |
+
+Dimensions are `"region, country"` or a range of names; filters `"region = EU; amount >= 10"`, `"region in EU, US"`
+or a range (operators `= != <> > >= < <= in` and `not in`). A task pane (Excel) and a sidebar (Sheets) sign people in
+and out, list the governed metrics they may see, and insert one as a live formula or as values.
+
+**How they sign in.** Each add-in is an OAuth 2.0 public client of Cairn (the authorization server the AI agents
+use): authorization code with PKCE (S256), the person's normal sign-in and a consent page, then an access token and
+a refresh token that rotates on each use. The tokens are the person's, narrowed to the scopes `read`, `query_data`
+and `model`. Masks, row filters, table permissions and aggregation policies apply as they do for that person in
+Cairn; administration is never reachable. Each add-in shows in **Settings → AI agents** (the hub's pause, quotas and
+audit apply), and people disconnect it there. The access token lives one hour for Excel and two hours for Sheets:
+Sheets' custom functions may read the stored tokens but not write them, so they never refresh themselves, and an
+hourly time-driven trigger (installed at sign-in) refreshes instead. A function whose token has run out asks the
+person to sign in again; it never spends the refresh token.
+
+**Configuration** (the API's environment):
+
+- `CAIRN_EXCEL_ADDIN_ORIGINS`: the https origin(s) the Excel add-in's files are served from, comma separated (e.g.
+  `https://addins.example.com`). This creates the client `agt_excel_addin` with the redirect URI
+  `<origin>/callback.html`, and allows CORS from those origins, for bearer tokens only (no cookies), on the routes the
+  add-in calls from the browser: `/oauth/token`, `/oauth/revoke`, `/me` and `/data/sheets/*`. No other origin or
+  route gets CORS headers.
+- `CAIRN_SHEETS_ADDON_SCRIPT_IDS`: the Apps Script project id(s) of the Sheets add-on. This creates the client
+  `agt_sheets_addon` with the redirect URI `https://script.google.com/macros/d/<id>/usercallback`. Apps Script calls
+  Cairn from Google's servers, so Cairn must be reachable from the internet for Sheets; no CORS is involved.
+- `CAIRN_SHEETS_DEFAULT_CONNECTION`: the connection `QUERY` uses when none is named (when only one connection
+  serves catalog datasets, it is the default).
+
+A value that is not an https origin or a script id stops the API at start. Removing one turns its client off and
+revokes its tokens; setting it again turns it back on (unless an administrator turned it off in the hub).
+
+**Building and deploying** (no dependencies, Node 18 or later): `node build.mjs --cairn-url https://cairn.example.com
+--addin-url https://addins.example.com` in `cairn/addins` writes `dist/excel` and `dist/sheets` for that Cairn
+(`--api-base` when the API is not at `<cairn-url>/cairn/api`; `--id` for your own manifest GUID).
+
+- *Excel.* Serve `dist/excel` over https at the add-in URL (any static host; `callback.html` must be at its root).
+  For a pilot, sideload `dist/excel/manifest.xml`: in Excel on the web, **Home → Add-ins → More add-ins → Upload
+  My Add-in**; on Windows, a network share added as a trusted add-in catalog. For everyone, upload the manifest in
+  the Microsoft 365 admin center (**Settings → Integrated apps → Upload custom apps**) and assign it to users or
+  groups. The add-in needs Excel with the SharedRuntime 1.1 requirement set (Microsoft 365 on Windows, Mac and the
+  web).
+- *Google Sheets.* Create an Apps Script project (or `clasp create --type standalone`), push `dist/sheets`
+  (`clasp push`), and set the script property `CAIRN_API_URL` to the API URL (`https://cairn.example.com/cairn/api`;
+  optionally `CAIRN_CLIENT_ID`). Put the project id in `CAIRN_SHEETS_ADDON_SCRIPT_IDS`. To test, use **Deploy → Test
+  deployments** on a spreadsheet. For your domain, link a Google Cloud project, configure the OAuth consent screen
+  (internal), and publish the add-on privately on the Google Workspace Marketplace (the Marketplace SDK's app
+  configuration names the script's deployment), then install it for the domain from the Google Admin console.
+  `appsscript.json` limits outbound calls to Cairn's origin (`urlFetchWhitelist`).
+
+Tested end to end against a real Cairn API server with a SQLite warehouse and the metrics layer
+(`tests/test_spreadsheet_addins.py`): the built add-ins' own JavaScript runs in Node (the Excel client and custom
+functions with a stand-in for Office's `CustomFunctions` and `OfficeRuntime.storage`; `Code.gs` with stand-ins for
+the Apps Script services, custom functions run with read-only properties as in Sheets). Each signs in through the
+real authorization page with PKCE; a PII column comes back masked, the person's row filter holds in metrics and
+queries, a denied table and a write are refused, the token cannot reach administration, a replayed code and a spent
+refresh token end the grant, concurrent Excel functions refresh once, and sign-out revokes the tokens. The model
+behind `ASK` is a scripted stand-in. The manifest is checked structurally (the schema's elements and order, every
+resource id defined, every URL on the add-in's origin), not against Microsoft's XSD, which is not available offline;
+running in Excel and Sheets themselves is not part of CI.
+
 ## Sources
 
 **Settings → Sources** manages where the catalog's metadata comes from. It needs `MANAGE_INGESTION`.

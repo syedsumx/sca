@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Cairn for Excel: help</title>
+    <link rel="stylesheet" href="taskpane.css">
+</head>
+<body>
+<main>
+    <h1>Cairn for Excel</h1>
+    <p>Sign in from <strong>Home ▸ Cairn</strong>. Every answer comes back as you: Cairn's masks, row filters and table
+        permissions apply as they do in Cairn. Results spill from the cell, headers first.</p>
+    <h2 id="query">=CAIRN.QUERY(sql, [connection])</h2>
+    <p>Runs a read-only query, e.g. <code>=CAIRN.QUERY("SELECT region, sum(amount) FROM sales.orders GROUP BY 1")</code>.</p>
+    <h2 id="metric">=CAIRN.METRIC(name, [dimensions], [filters])</h2>
+    <p>A governed metric, e.g. <code>=CAIRN.METRIC("revenue", "region", "region = EU; amount &gt;= 10")</code>.
+        Dimensions and filters may also be ranges of cells. Operators: <code>= != &gt; &gt;= &lt; &lt;= in</code>
+        (<code>region in EU, US</code>).</p>
+    <h2 id="ask">=CAIRN.ASK(question)</h2>
+    <p>Asks a question of your data, e.g. <code>=CAIRN.ASK("orders per region last month")</code>.</p>
+</main>
+</body>
+</html>

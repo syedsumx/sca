@@ -57,6 +57,7 @@ SCOPE_TEXT = {
 }
 KEY_PREFIX, ACCESS_PREFIX, REFRESH_PREFIX = "ca_", "cat_", "car_"
 ACCESS_TTL_MS, REFRESH_TTL_MS, CODE_TTL_MS = 3600_000, 30 * 86400_000, 600_000
+MAX_ACCESS_TTL_MS = 4 * 3600_000
 
 agent_clients = Table(
     "cairn_agent_clients", metadata,
@@ -504,6 +505,46 @@ class AgentService:
             seen.setdefault(r.id, {**self._public(r), "granted_scopes": list(r.scopes), "since_ms": r.created_ms})
         return list(seen.values())
 
+    def ensure_client(self, client_id: str, name: str, redirect_uris: list[str], scopes: list[str],
+                      details: Optional[dict] = None) -> dict:
+        """An OAuth client the operator configures (not dynamically registered): created, or brought in line with
+        the configuration (its name, redirect URIs and scopes), with a fixed id. With no redirect URI it is
+        disabled, so a client whose configuration was removed stops working. An administrator's own disable is
+        kept."""
+        bad = [u for u in redirect_uris if not valid_redirect(u)]
+        if bad:
+            raise AgentError(f"redirect_uris must be https, loopback http or a private-use scheme: {bad}")
+        scopes = _check_scopes(scopes)
+        event: Optional[tuple[str, dict]] = None
+        with self.engine.begin() as conn:
+            row = conn.execute(select(agent_clients).where(agent_clients.c.id == client_id)).first()
+            if row is None:
+                if not redirect_uris:
+                    return {}
+                conn.execute(agent_clients.insert().values(
+                    id=client_id, name=name, kind="oauth", owner=None, scopes=scopes, redirect_uris=redirect_uris,
+                    ai_system=None, key_hash=None, enabled=True, details={**(details or {}), "configured": True},
+                    created_by="configuration", created_ms=_now()))
+                event = ("agent.registered", {"name": name, "redirect_uris": redirect_uris, "enabled": True})
+            elif row.kind != "oauth" or row.created_by != "configuration":
+                raise AgentError(f"agent id {client_id} is taken by another agent", 409)
+            else:
+                merged = {**(row.details or {}), **(details or {}), "configured": True}
+                changes: dict[str, Any] = {"name": name, "redirect_uris": redirect_uris, "scopes": scopes,
+                                           "details": merged}
+                if not redirect_uris:
+                    changes.update(enabled=False, details={**merged, "disabled_by_configuration": True})
+                elif merged.pop("disabled_by_configuration", False):   # configured again: back on (an
+                    changes["enabled"] = True                          # administrator's own disable is kept)
+                if any(getattr(row, k) != v for k, v in changes.items()):
+                    conn.execute(update(agent_clients).where(agent_clients.c.id == client_id).values(**changes))
+                    event = ("agent.updated", {"redirect_uris": redirect_uris, "scopes": scopes})
+        if event is not None:
+            self._record(event[0], "configuration", client_id, event[1])
+        if not redirect_uris:
+            self._revoke(client_id)
+        return self.get(client_id)
+
     def disconnect(self, agent_id: str, actor: str) -> int:
         n = self._revoke(agent_id, actor)
         self._record("agent.disconnected", actor, agent_id, {"tokens": n})
@@ -542,11 +583,13 @@ class AgentService:
 
     def _tokens(self, conn, client_id: str, actor: str, scopes: list, resource: Optional[str]) -> dict:
         access, refresh, now = ACCESS_PREFIX + secrets.token_urlsafe(32), REFRESH_PREFIX + secrets.token_urlsafe(32), _now()
-        for tok, kind, ttl in ((access, "access", ACCESS_TTL_MS), (refresh, "refresh", REFRESH_TTL_MS)):
+        details = conn.execute(select(agent_clients.c.details).where(agent_clients.c.id == client_id)).scalar() or {}
+        access_ttl = min(int(details.get("access_ttl_ms") or ACCESS_TTL_MS), MAX_ACCESS_TTL_MS)   # configured clients
+        for tok, kind, ttl in ((access, "access", access_ttl), (refresh, "refresh", REFRESH_TTL_MS)):
             conn.execute(agent_tokens.insert().values(
                 hash=_hash(tok), kind=kind, client_id=client_id, actor=actor, scopes=list(scopes),
                 expires_ms=now + ttl, revoked=False, created_ms=now, details={"resource": resource}))
-        return {"access_token": access, "token_type": "Bearer", "expires_in": ACCESS_TTL_MS // 1000,
+        return {"access_token": access, "token_type": "Bearer", "expires_in": access_ttl // 1000,
                 "refresh_token": refresh, "scope": " ".join(scopes)}
 
     def exchange_code(self, code: str, client_id: str, redirect_uri: str, verifier: str) -> dict:
@@ -652,7 +695,8 @@ class AgentService:
 
 # ---- what a scope allows over HTTP ---------------------------------------------------------------
 QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metrics/{name}/query",
-                    "/v1/sandboxes/runs")                       # code in a sandbox may read data as the person
+                    "/v1/sandboxes/runs",                       # code in a sandbox may read data as the person
+                    "/data/sheets/query", "/data/sheets/metric", "/data/sheets/ask")
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}

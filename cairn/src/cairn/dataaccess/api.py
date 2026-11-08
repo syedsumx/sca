@@ -25,6 +25,23 @@ class AskIn(BaseModel):
     limit: int = Field(default=200, ge=1, le=1000)
 
 
+def check_agent_sql(svc: DataAccessService, intents, p: Principal, sql: str, connection: Optional[str],
+                    urn: Optional[str]) -> None:
+    """An agent's SQL is checked against its declared intent: by statement kind, and the tables it reads (403)."""
+    if intents is None or p.via != "agent":
+        return
+    from cairn.identity.intents import IntentDenied
+
+    try:
+        read = svc.urns_of(sql, connection or svc.source_for(urn)[0].connection)
+    except Exception:  # noqa: BLE001 - unreadable SQL is refused below by its kind, or by the query itself
+        read = []
+    try:
+        intents.check_sql(p, sql, [*read, *([urn] if urn else [])])
+    except IntentDenied as e:
+        raise HTTPException(403, f"this agent may not do this ({e})")
+
+
 def build_router(svc: DataAccessService, current_principal, ask=None, can_view=None, ai_actor=None,
                  intents=None) -> APIRouter:
     router = APIRouter(prefix="/data", tags=["data"])
@@ -48,17 +65,7 @@ def build_router(svc: DataAccessService, current_principal, ask=None, can_view=N
     def query(body: QueryIn, p: Principal = Depends(current_principal)):
         if not body.connection and not body.urn:
             raise HTTPException(422, "give a connection or a dataset urn")
-        if intents is not None and p.via == "agent":     # an agent's SQL: by statement kind, and the tables it reads
-            from cairn.identity.intents import IntentDenied
-
-            try:
-                read = svc.urns_of(body.sql, body.connection or svc.source_for(body.urn)[0].connection)
-            except Exception:  # noqa: BLE001 - unreadable SQL is refused below by its kind, or by the query itself
-                read = []
-            try:
-                intents.check_sql(p, body.sql, [*read, *([body.urn] if body.urn else [])])
-            except IntentDenied as e:
-                raise HTTPException(403, f"this agent may not do this ({e})")
+        check_agent_sql(svc, intents, p, body.sql, body.connection, body.urn)
         return _wrap(lambda: svc.query(p.urn, body.sql, body.connection, body.urn, body.limit))
 
     @router.post("/ask")

@@ -128,6 +128,8 @@ class Services:
     listings: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
+    addins: Optional[Any] = None
+    sheets: Optional[Any] = None
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
     context_layer: Optional[Any] = None
@@ -598,6 +600,11 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     services.agents = AgentService(engine, audit, ai_system_state,
                                    registration if registration in ("open", "admin", "off") else "open")
     identity.agent_lookup = services.agents.resolve
+    # The spreadsheet add-ins (Excel, Google Sheets): OAuth clients from the operator's configuration.
+    from cairn.identity.addins import SpreadsheetAddins
+
+    services.addins = SpreadsheetAddins.from_env(services.agents)
+    services.addins.sync()
     from cairn.identity.intents import IntentGuard
 
     def dataset_domains(urn: str) -> list[str]:
@@ -2040,6 +2047,11 @@ def _build_data_access(s: Services) -> None:
             return [u for u, _, _ in Planner(s.graph).datasets()] if s.graph is not None else []
 
         s.semantic_layer = SemanticService(s.context, s.data_access, catalog_datasets, s.audit)
+    # Cairn in Excel and Google Sheets: grids for the add-ins' functions, over the same governed reads.
+    from cairn.dataaccess.sheets import SheetsService
+
+    s.sheets = SheetsService(s.data_access, lambda: getattr(s, "metrics", None), lambda: s.semantic_layer,
+                             lambda: s.ask)
 
 
 def _build_costs(s: Services, hub, Event) -> None:
