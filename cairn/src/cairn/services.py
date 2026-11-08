@@ -120,6 +120,7 @@ class Services:
     sql_ai: Optional[Any] = None
     ai_gateway: Optional[Any] = None
     agent_apps: Optional[Any] = None
+    agent_memory: Optional[Any] = None
     external_catalogs: Optional[Any] = None
     listings: Optional[Any] = None
     ask: Optional[Any] = None
@@ -1369,6 +1370,30 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor, privilege: s.authorize(Principal(urn=actor, via="delegated"), privilege, None,
                                                  raise_on_deny=False),
             s.audit)
+        # Agent memory (cairn.ai.agent_memory): what an agent remembers about the people it works for, governed.
+        from cairn.ai.agent_memory import AgentMemory
+        from cairn.ai.embeddings import HashingEmbedder as _Hashing
+
+        memory_embedder = s.semantic.embedder if s.semantic is not None else _Hashing()
+
+        def memory_may_use(actor: str, agent: dict) -> bool:
+            if agent.get("owner") == actor:
+                return True
+            if agent.get("kind") == "built":
+                built = next((r for r in s.custom_agents.list(actor) if r.get("agent_id") == agent["id"]), None)
+                return built is not None
+            if agent.get("kind") == "app":
+                return s.authorize(Principal(urn=actor, via="delegated"), "USE_AGENT",
+                                   f"urn:li:cairnAgent:{agent['name']}", raise_on_deny=False)
+            return False
+        s.agent_memory = AgentMemory(
+            s.engine, s.agents, lambda text: memory_embedder.embed([text])[0], memory_may_use,
+            lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                      raise_on_deny=False),
+            agent_groups, s.audit)
+        s.custom_agents.memory = s.agent_memory
+        if s.agent_apps is not None:
+            s.agent_apps.memory = s.agent_memory
 
     # ---- inline actions (Slack buttons, Teams/email signed links, in-app) -----------
     if s.marketplace is not None:

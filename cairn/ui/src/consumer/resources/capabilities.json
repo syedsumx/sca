@@ -981,6 +981,14 @@
    "note": "Derived mode scd2 (key, tracked): one Trino MERGE per refresh closes changed and removed keys (valid_to, is_current), inserts new versions, writes untracked changes in place, changes nothing when nothing changed; a full rebuild is refused once there is history. layer on pipes, streams and derived tables and /v1/medallion: kept (migration 0126), tagged in the catalog, gold refused without an owner, a description and a met contract or passing monitors, and re-checked in the listing. Tested end to end on Trino with the real store and catalog (tests/test_scd2_medallion_e2e.py)"
   },
   {
+   "id": "L111",
+   "title": "Agent memory",
+   "summary": "Governed long-term memory for agents, about the people they work for",
+   "done": "An agent remembers a person's preferences and context across sessions without ever recalling one person's memories for another, holding values masking protects or credentials, or keeping anything the person cannot see and delete",
+   "status": "shipped",
+   "note": "cairn.ai.agent_memory (migration 0128): memories per agent and person (written by the agent through its run token, scope memory, ctx.memory.remember/recall/forget, or by the person), team and shared memories written only by people; recall by meaning (the search-by-meaning embedder) plus recency; the source run recorded; PII (the classifier's value detectors), credentials and instructions refused; size cap with eviction, retention and purge; GET/DELETE /v1/me/agent-memories under the person's own identity; audited without content. Tested end to end with a real agent app process remembering in one session and recalling in another, as one person and not as another (tests/test_agent_memory.py)"
+  },
+  {
    "id": "L112",
    "title": "AI search and document parsing in SQL and pipelines",
    "summary": "ai_search(index, query, k) in Trino SQL over a vector index; tables and charts extracted from PDFs and images as data",

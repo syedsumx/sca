@@ -74,7 +74,7 @@ agent_app_sessions = Table(
 
 NAME = re.compile(r"^[a-z][a-z0-9-]{1,40}$")
 SESSION = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
-APP_SCOPES = ("read", "query_data", "propose", "model")
+APP_SCOPES = ("read", "query_data", "propose", "model", "memory")
 MAX_BUNDLE = int(os.environ.get("CAIRN_AGENT_APPS_MAX_BUNDLE", str(5 * 1024 * 1024)))
 
 
@@ -324,6 +324,8 @@ class AgentApps:
             raise AgentAppError("only its owner or an operator deletes an agent app", 403)
         self.runtime.stop(name)
         self.agents.delete(d["agent_id"], actor)
+        if getattr(self, "memory", None) is not None:          # its memories go with it (cairn.ai.agent_memory)
+            self.memory.drop_agent(d["agent_id"])
         with self.engine.begin() as c:
             c.execute(delete(agent_app_sessions).where(agent_app_sessions.c.app == name))
             c.execute(delete(agent_apps).where(agent_apps.c.name == name))

@@ -138,6 +138,7 @@ def load_models() -> MetaData:
     from cairn.ai import cowork as _cowork  # noqa: F401
     from cairn.pipelines import doc_sources as _doc_sources  # noqa: F401
     from cairn.ai import agent_apps as _agent_apps  # noqa: F401
+    from cairn.ai import agent_memory as _agent_memory  # noqa: F401
     from cairn.sqlworkspace import actions as _actions  # noqa: F401
     from cairn.sqlworkspace import cache as _cache  # noqa: F401
     from cairn.identity import saml as _saml  # noqa: F401

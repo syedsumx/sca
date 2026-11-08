@@ -71,6 +71,11 @@ class Context:
 
         return openai.OpenAI(base_url=self.gateway["openai_base_url"], api_key=self._token, max_retries=2)
 
+    @property
+    def memory(self) -> "Memory":
+        """Long-term memory about the person this run is for (the app needs the scope ``memory``)."""
+        return Memory(self.cairn_url, self._token)
+
     def sql(self, sql: str, connection: Optional[str] = None, limit: int = 200) -> dict:
         """Runs SQL through Cairn as the person (their policies, masks and row filters apply)."""
         import httpx
@@ -80,6 +85,35 @@ class Context:
         if r.status_code != 200:
             raise RuntimeError(f"Cairn refused the query ({r.status_code}): {r.text[:300]}")
         return r.json()
+
+
+class Memory:
+    """``ctx.memory``: what the agent keeps across sessions about the person it works for, kept by Cairn
+    (:mod:`cairn.ai.agent_memory`): recalled by meaning and recency, only ever in runs for that person, refused when
+    it holds values masking protects or credentials, and visible to and deletable by the person."""
+
+    def __init__(self, cairn_url: str, token: str):
+        self._url, self._token = cairn_url.rstrip("/"), token
+
+    def _call(self, method: str, path: str, body: Optional[dict] = None):
+        import httpx
+
+        r = httpx.request(method, f"{self._url}/v1/agent-memory{path}", json=body,
+                          headers={"Authorization": f"Bearer {self._token}"}, timeout=60)
+        if r.status_code >= 400:
+            raise RuntimeError(f"Cairn refused the memory request ({r.status_code}): {r.text[:300]}")
+        return r.json() if r.content else None
+
+    def remember(self, content: str) -> dict:
+        """Keeps ``content`` (a fact, preference or decision) about the person; returns the memory."""
+        return self._call("POST", "", {"content": content})
+
+    def recall(self, query: str = "", k: int = 5) -> list[dict]:
+        """The ``k`` memories most relevant to ``query`` (by meaning and recency; the most recent without one)."""
+        return self._call("POST", "/recall", {"query": query, "k": k})["memories"]
+
+    def forget(self, memory_id: str) -> None:
+        self._call("DELETE", f"/{memory_id}")
 
 
 def load_agent(project: Path) -> Callable[..., Any]:

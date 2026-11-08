@@ -1298,6 +1298,39 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "agent-memories": {
+        "key": "agent-memories",
+        "title": "Agent memories",
+        "path": "/v1/me/agent-memories",
+        "listKey": "memories",
+        "description": "What agents remember about you across sessions (and your teams' and shared memories), each with the run that wrote it. Memories with values masking protects, credentials or instructions are refused; delete any that are about you.",
+        "columns": [
+            "content",
+            "agent",
+            "scope",
+            "source",
+            "source_run",
+            "last_used_ms"
+        ],
+        "actions": [
+            {
+                "label": "Tell an agent",
+                "method": "POST",
+                "path": "/v1/me/agent-memories",
+                "body": {
+                    "agent": "triage",
+                    "content": "I prefer answers as a short table",
+                    "scope": "person"
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/me/agent-memories/{id}",
+                "body": null
+            }
+        ]
+    },
     "pipeline-agent": {
         "key": "pipeline-agent",
         "title": "Pipeline agent tasks",

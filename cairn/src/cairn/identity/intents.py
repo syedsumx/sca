@@ -99,7 +99,7 @@ def _under(path: str, prefixes: Iterable[str]) -> bool:
 
 def classify_request(method: str, route: str, read_posts: Iterable[str] = ()) -> str:
     """The action category of ``method route`` (the route template, e.g. ``/x/{id}``)."""
-    from cairn.identity.agents import MODEL_PATHS, PROPOSE_ROUTES, QUERY_DATA_PATHS
+    from cairn.identity.agents import MEMORY_PATHS, MODEL_PATHS, PROPOSE_ROUTES, QUERY_DATA_PATHS
 
     reading = method in ("GET", "HEAD", "OPTIONS")
     if _under(route, _ADMIN_PREFIXES) or (not reading and _under(route, _ADMIN_WRITES)):
@@ -108,6 +108,8 @@ def classify_request(method: str, route: str, read_posts: Iterable[str] = ()) ->
         return "export"
     if _under(route, MODEL_PATHS):
         return "model"
+    if _under(route, MEMORY_PATHS):          # agent memory: recalling reads, remembering and forgetting write
+        return "read" if reading or route.endswith("/recall") else "write"
     if route in QUERY_DATA_PATHS:
         return "query"
     if not reading and (_under(route, _SHARE_PREFIXES) or _SHARE_SEGMENTS.search(route)):

@@ -65,7 +65,7 @@ FEATURE_ROUTES = (("/ai/", "ai"), ("/governance/automations", "automations"), ("
                   ("/notify/ticketing", "ticketing"), ("/data/", "data_access"), ("/reports/costs", "costs"))
 # Requests that change nothing although they are POSTs; allowed when Cairn is read-only.
 READ_POSTS = {
-    "/collab/enrich", "/ai/search/semantic", "/ai/ask", "/ai/chat", "/ai/explain/lineage",
+    "/collab/enrich", "/ai/search/semantic", "/ai/ask", "/ai/chat", "/ai/explain/lineage", "/v1/agent-memory/recall",
     "/governance/v1/authorize", "/governance/simulate", "/governance/policies/validate",
     "/governance/pii/propagation/plan", "/data/query", "/data/ask", "/context/metrics/{name}/query",
     "/marketplace/access-requests/preview", "/sources/test",

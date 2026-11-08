@@ -29,7 +29,8 @@ description = "{description}"
 template = "{template}"
 model = "{model}"
 # What the agent may do for the person it works for (their own rights, narrowed to these): "model" calls models
-# through Cairn's AI gateway, "query_data" runs SQL as them, "read" reads the catalog.
+# through Cairn's AI gateway, "query_data" runs SQL as them, "read" reads the catalog, "memory" keeps long-term
+# memory about them (ctx.memory.remember / recall / forget), which they can see and delete.
 scopes = ["model", "query_data"]
 '''
 

@@ -100,3 +100,56 @@ def screen(value: Any, flagged: Optional[list[str]] = None, _depth: int = 0) -> 
     if isinstance(value, (list, tuple)):
         return [screen(v, flagged, _depth + 1) for v in value]
     return value
+
+
+# ---- values a person's data must not leak through: PII (validated as the classifier does) and secrets ----------
+_PII_CANDIDATES = [
+    ("SSN", re.compile(r"\b(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}\b")),
+    ("CreditCard", re.compile(r"\b\d(?:[ \-]?\d){12,18}\b")),
+    ("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b")),
+    ("Email", re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")),
+    ("IPAddress", re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")),
+    ("Phone", re.compile(r"(?<![\w.])\+?\d[\d\s().\-]{7,}\d(?![\w.])")),
+]
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def pii_values(text: str) -> dict[str, int]:
+    """How many values of each PII kind ``text`` holds, found with the validated value detectors the column
+    classifier uses (:mod:`cairn.governance.pii`: Luhn for cards, mod-97 for IBANs), the kinds masking policies
+    protect. A span counted as one kind is not counted again as another (a card number is not also a phone)."""
+    from cairn.governance.pii import _VALUE_DETECTORS
+
+    found: dict[str, int] = {}
+    taken: list[tuple[int, int]] = []
+    for kind, rx in _PII_CANDIDATES:
+        for m in rx.finditer(text):
+            if any(a < m.end() and m.start() < b for a, b in taken):
+                continue
+            v = m.group(0).strip()
+            if kind == "Phone" and (_ISO_DATE.match(v) or (not v.startswith("+") and (
+                    v.isdigit() or sum(c.isdigit() for c in v) < 9))):    # an id or a date, not a number to call
+                continue
+            if _VALUE_DETECTORS[kind](v):
+                found[kind] = found.get(kind, 0) + 1
+                taken.append((m.start(), m.end()))
+    return found
+
+
+_SECRETS = [
+    ("aws_access_key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
+    ("private_key", re.compile(r"-----BEGIN (?:[A-Z]+ )?PRIVATE KEY-----")),
+    ("api_key", re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}")),
+    ("github_token", re.compile(r"\bgh[pousr]_[A-Za-z0-9]{30,}")),
+    ("slack_token", re.compile(r"\bxox[abprs]-[A-Za-z0-9\-]{10,}")),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{8,}\.eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}")),
+    ("cairn_credential", re.compile(r"\b(?:ca_agt_[0-9a-f]{12}\.|cat_|car_|cx_)[A-Za-z0-9_\-]{20,}")),
+    ("password_assignment", re.compile(r"(?i)\b(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token)"
+                                       r"\s*[:=]\s*[\"']?[^\s\"']{8,}")),
+]
+
+
+def secret_kinds(text: str) -> list[str]:
+    """The kinds of credential ``text`` appears to carry (keys, tokens, private keys, passwords)."""
+    return [kind for kind, rx in _SECRETS if rx.search(text)]

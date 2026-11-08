@@ -214,6 +214,8 @@ class CustomAgents:
             conn.execute(delete(custom_agent_runs).where(custom_agent_runs.c.agent == a["id"]))
             conn.execute(delete(custom_agents).where(custom_agents.c.id == a["id"]))
         self.hub.delete(a["agent_id"], actor)
+        if getattr(self, "memory", None) is not None:          # its memories go with it (cairn.ai.agent_memory)
+            self.memory.drop_agent(a["agent_id"])
         self._audit(actor, "agent.deleted", name, {})
 
     def get(self, actor: str, name: str) -> dict:

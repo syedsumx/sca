@@ -771,6 +771,49 @@ and the model behind Cairn's AI gateway, a local stand-in for the provider (`tes
 
 All three templates' own tests passed with the real frameworks (anthropic, openai-agents, langgraph).
 
+## Agent memory
+
+Agents keep chat sessions per conversation; **agent memory** is what an agent keeps across them about the people it
+works for: preferences, facts about their work, decisions made (`cairn.ai.agent_memory`, table
+`cairn_agent_memories`, migration 0128).
+
+- **Scopes of a memory.** `person` (about one person: written by the agent during a run for them, or by the person),
+  `team` (shared with a group's members: written only by a member, by hand) and `shared` (everyone who may use the
+  agent: written only by the agent's owner or an operator). An agent's run acts for one person, so an agent writes
+  only `person` memories; a run recalls that person's memories, their teams' and the shared ones, and never another
+  person's.
+- **From agent code:** the agent scope `memory` (add it to `agent.toml`'s `scopes`, or to a key agent's) and
+  `ctx.memory.remember(text)`, `ctx.memory.recall(query, k=5)`, `ctx.memory.forget(id)` in `cairn.agentkit`. Over
+  HTTP with the run token or key: `POST /v1/agent-memory` `{"content"}`, `POST /v1/agent-memory/recall`
+  `{"query", "k"}`, `DELETE /v1/agent-memory/{id}`. Under a declared intent (L109), recalling counts as `read`,
+  remembering and forgetting as `write`.
+- **Recall** is by meaning and recency: the query and the memories are embedded with the embedder Cairn uses for
+  search by meaning (`CAIRN_EMBEDDING_PROVIDER`; the built-in hashing embedder by default), and the score is
+  `0.8 × similarity + 0.2 × recency` (recency halves every 30 days since the memory was written or last recalled).
+  Memories with no similarity to the query are not returned. Each memory records the run that wrote it
+  (`source_run`).
+- **Refused content (422, audited `agent_memory.refused` without the content):** values of the kinds masking
+  policies protect (emails, SSNs, card numbers, IBANs, phone numbers, IP addresses, found with the column
+  classifier's validated value detectors), credentials (cloud keys, API keys, tokens, private keys, passwords) and
+  text that reads like instructions to an AI. Keep the fact ("prefers email contact"), not the value.
+- **Limits:** `CAIRN_AGENT_MEMORY_MAX_CHARS` (2,000 characters a memory), `CAIRN_AGENT_MEMORY_MAX_PER_SUBJECT`
+  (200 per agent and person, team or shared pool: when an agent writes one more, its oldest, least recently recalled
+  memory there is evicted, audited `agent_memory.evicted`; a person's own write is refused instead) and
+  `CAIRN_AGENT_MEMORY_RETENTION_DAYS` (180: a memory not recalled for that long is no longer recalled and is purged).
+- **People decide:** `GET /v1/me/agent-memories[?agent=<id or name>]` lists what agents keep about the caller (and
+  the team and shared memories they can see, with `deletable`); `DELETE /v1/me/agent-memories/{id}` and
+  `DELETE /v1/me/agent-memories?agent=<id or name>` delete them; `POST /v1/me/agent-memories`
+  `{"agent", "content", "scope", "team"}` adds one by hand. Only people reach these routes, under their own
+  identity; agent credentials are refused. Deleting an agent app or custom agent deletes its memories.
+- **Audited** (category `agents`): `agent_memory.saved`, `.recalled`, `.deleted`, `.refused`, `.evicted`, `.purged`
+  with who, agent, scope and run, never the content.
+
+Tested through the real services, decision point, database and HTTP API with a real agent app process remembering
+and recalling through its run token (`tests/test_agent_memory.py`): remembered in one session and recalled by meaning
+in another for the same person, never for another person; PII, credentials and instructions refused; the person
+listing and deleting their memories and nobody else; team and shared memories written only by members and the owner;
+the `memory` scope required; eviction at the cap, retention, and deletion with the agent.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

@@ -1833,6 +1833,49 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "warning": 2
   }
  },
+ "/v1/me/agent-memories": {
+  "memories": [
+   {
+    "id": "mem_3b9f0c2d7e1a4f58",
+    "agent": "agt_5e2c9a1f7b30",
+    "scope": "person",
+    "subject": "urn:li:corpuser:ana",
+    "content": "Prefers the weekly churn summary as a table, sent on Mondays",
+    "source": "agent",
+    "source_run": "run_9c41d7e02a6b5f13",
+    "created_by": "urn:li:corpuser:ana",
+    "created_ms": 1794268800000,
+    "last_used_ms": 1794528000000,
+    "deletable": true
+   },
+   {
+    "id": "mem_8e1d2c3b4a5f6071",
+    "agent": "agt_5e2c9a1f7b30",
+    "scope": "team",
+    "subject": "urn:li:corpGroup:finance",
+    "content": "Finance closes the books on the third working day",
+    "source": "person",
+    "source_run": null,
+    "created_by": "urn:li:corpuser:bob",
+    "created_ms": 1793923200000,
+    "last_used_ms": 1794441600000,
+    "deletable": true
+   },
+   {
+    "id": "mem_0f9e8d7c6b5a4932",
+    "agent": "agt_5e2c9a1f7b30",
+    "scope": "shared",
+    "subject": null,
+    "content": "The fiscal year starts in February",
+    "source": "person",
+    "source_run": null,
+    "created_by": "urn:li:corpuser:cal",
+    "created_ms": 1793318400000,
+    "last_used_ms": 1794441600000,
+    "deletable": false
+   }
+  ]
+ },
  "/v1/agent-intents/denials": [
   {
    "id": "7c0e4b2a-91d3-4f6e-a8b5-2d1f0c9e3a74",

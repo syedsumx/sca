@@ -45,7 +45,7 @@ from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, String, Tabl
 
 from cairn.common.db import JSONText, metadata
 
-SCOPES = ("read", "query_data", "propose", "write", "model")
+SCOPES = ("read", "query_data", "propose", "write", "model", "memory")
 DEFAULT_OAUTH_SCOPES = ("read", "query_data", "propose")
 SCOPE_TEXT = {
     "read": "Read the catalog: assets, lineage, quality, definitions",
@@ -53,6 +53,7 @@ SCOPE_TEXT = {
     "propose": "Propose changes for review (documentation, requests, discussions)",
     "write": "Change metadata directly (tags, owners, descriptions)",
     "model": "Call language models through Cairn's AI gateway, metered to you",
+    "memory": "Remember and recall what it learns about you, which you can see and delete",
 }
 KEY_PREFIX, ACCESS_PREFIX, REFRESH_PREFIX = "ca_", "cat_", "car_"
 ACCESS_TTL_MS, REFRESH_TTL_MS, CODE_TTL_MS = 3600_000, 30 * 86400_000, 600_000
@@ -621,8 +622,9 @@ QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metri
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
-NEVER_PATHS = ("/admin", "/oauth", "/me/agents")              # not even to read
+NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me/agent-memories")    # not even to read
 MODEL_PATHS = ("/v1/ai/gateway",)                              # the AI gateway: scope "model", reads included
+MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
 READ_ONLY_PATHS = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes")
 
 
@@ -638,6 +640,8 @@ def required_scope(method: str, path: str, read_posts: set[str]) -> Optional[str
         return None
     if _under(path, MODEL_PATHS):
         return "model"
+    if _under(path, MEMORY_PATHS):
+        return "memory"
     if path in QUERY_DATA_PATHS:
         return "query_data"
     if reading or path in read_posts:
