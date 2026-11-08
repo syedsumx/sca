@@ -3688,6 +3688,53 @@ Cairn reads the tables and charts in PDFs and images as data (JSON), beside thei
   results were listed and read back by their owner only, and audits held no content. A files pipe on the real
   store and catalog filled `parsed` for the PDF and the image and left it null for a text file.
 
+## Zero-copy Parquet: files registered as tables in place
+
+Parquet files already in Cairn Store (written by another system, an export, a Spark job) become an Iceberg table in
+Cairn Catalog without being copied. The table then reads the original objects and is governed and queried like any
+other lakehouse table.
+
+- **Register** with `POST /v1/lakehouse/parquet-tables` (`MANAGE_INGESTION`): `{"name": "events", "bucket":
+  "landing", "prefix": "exports/events/", "target": "files.events", "every_minutes": 60}`. Every `.parquet`
+  object under the prefix is taken; names starting with `_` or `.` (`_SUCCESS`, `.crc`) are skipped.
+- **Where files may come from.** Only buckets in `CAIRN_PARQUET_BUCKETS` (comma-separated; unset, nothing is
+  registered). The person must be able to read the files:
+  - a governed volume's bucket (`cairn-vol-<name>`): a read or write grant on the volume;
+  - any other bucket: `READ_FILES` on `urn:li:storagePath:<bucket>/<prefix>`, granted by policy like any
+    privilege (for example a policy on `urn:li:storagePath:landing/exports/*`). No policy, no read.
+- **Schema.** Read from each file's footer (no data is read). All files must have the same columns and types, or
+  the registration is refused naming the file that differs. Files written with Iceberg field ids (another table's
+  files) are refused.
+- **Partitions** come from Hive-style directories, `…/region=EU/day=2026-11-01/part-0.parquet`: each `key=value`
+  level is an identity-partitioned column, a whole number when every value is one and text otherwise
+  (`__HIVE_DEFAULT_PARTITION__` is null). Every file needs the same keys in the same order, and a key may not also
+  be a column in the files. Readers get the value from the table's metadata, so queries filter on it and skip files.
+- **No copy.** The table is created with that schema and partitioning, a name mapping (the files have no field ids)
+  and `gc.enabled=false`, and the files are added by reference with statistics from their footers, in one commit.
+  Only metadata is written under the table's location. Because the table does not own the files, snapshot expiry
+  and orphan removal never delete them; delete or replace files only through the registration (below).
+- **Lineage.** The store prefix (`urn:li:dataset:(urn:li:dataPlatform:s3,<bucket>/<prefix>,PROD)`) is recorded as
+  the table's upstream in the catalog, and the table is recorded as changed, so data-aware schedules see it.
+- **New files.** `POST /v1/lakehouse/parquet-tables/<name>/refresh`, and the scheduler every `every_minutes`, add
+  the files that appeared since, as the person who registered them (their read access is checked again each
+  time). New files must match the registered columns and partition keys. A file that disappeared, or changed size
+  in place, is reported in `problems` and left in the table (Iceberg files are immutable: write new data under a
+  new name). A failed run keeps its reason in `error`.
+- **Manage.** `GET /v1/lakehouse/parquet-tables[/<name>]`, `PUT …/<name>` (`every_minutes`, `enabled`),
+  `DELETE …/<name>` (stops adding files; the table and the files stay). Audited: `parquet_table.registered`,
+  `.refreshed`, `.updated`, `.deleted`. Kept in `cairn_parquet_tables` (migration 0129).
+- **Settings.** `CAIRN_PARQUET_STORE` (default `CAIRN_PIPES_STORE`: a key that can read the registered buckets),
+  `CAIRN_PARQUET_CATALOG` (default `CAIRN_PIPES_CATALOG`), `CAIRN_PARQUET_BUCKETS`, `CAIRN_PARQUET_MAX_FILES`
+  (10,000 per registration). Trino reads the files with its own store key, so that key must reach those buckets.
+  Engines that take narrowed credentials from Cairn Catalog for a table's location (Spark) cannot read files outside
+  it: query these tables through Trino.
+- **Tested** in `tests/test_parquet_tables_e2e.py` on the real store, catalog and Trino 484: two files under
+  `region=EU/` and `region=US/` were registered (a `_SUCCESS` marker skipped); the table's manifests referenced the
+  same object keys and only metadata was written; Trino grouped by the region taken from the paths, and the email
+  column came back masked for ana and raw for the admin. Refused: someone without `READ_FILES`, a bucket not
+  allowed, and files that disagreed on their schema. Two new files (one a new partition) were added on refresh, a
+  third by the schedule, a file with another schema was refused, and a deleted file was reported.
+
 ## Sample datasets
 
 A new tenant can start with a small documented lakehouse to try search, SQL, dashboards and Ask-your-data on before its own data arrives.

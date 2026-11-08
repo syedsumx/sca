@@ -31,11 +31,12 @@ export const HUBS: Hub[] = [
         "route": "/lakehouse",
         "title": "Lakehouse",
         "icon": "database",
-        "description": "Tables kept by Cairn: derived tables and materialized views, vector indexes, volumes, storage buckets, maintenance and stored procedures.",
+        "description": "Tables kept by Cairn: derived tables and materialized views, Parquet registered in place, vector indexes, volumes, storage buckets, maintenance and stored procedures.",
         "tabs": [
             "derived",
             "external-catalogs",
             "medallion",
+            "parquet-tables",
             "vectors",
             "volumes",
             "storage",

@@ -822,6 +822,44 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    ]
   }
  ],
+ "/v1/lakehouse/parquet-tables": [
+  {
+   "id": "4d6f8a0c2e4b46d8a0c2e4f6b8d0a2c4",
+   "name": "events",
+   "target": "files.events",
+   "bucket": "landing",
+   "prefix": "exports/events/",
+   "partition_columns": [["region", "string"], ["day", "string"]],
+   "file_schema": [["id", "int64"], ["email", "string"], ["amount", "double"]],
+   "every_minutes": 60,
+   "enabled": true,
+   "created_by": "urn:li:corpuser:carol",
+   "created_ms": 1793952000000,
+   "registered_ms": 1794097800000,
+   "files": 412,
+   "rows": 18204331,
+   "problems": [],
+   "error": null
+  },
+  {
+   "id": "8b0d2f4a6c8e40b2d4f6a8c0e2b4d6f8",
+   "name": "partner-orders",
+   "target": "partners.orders",
+   "bucket": "cairn-vol-partner-drop",
+   "prefix": "orders/",
+   "partition_columns": [["year", "long"]],
+   "file_schema": [["order_id", "string"], ["sku", "string"], ["qty", "int32"], ["placed_at", "timestamp[us]"]],
+   "every_minutes": null,
+   "enabled": true,
+   "created_by": "urn:li:corpuser:alice",
+   "created_ms": 1793606400000,
+   "registered_ms": 1793606460000,
+   "files": 36,
+   "rows": 902117,
+   "problems": ["orders/year=2025/part-7.parquet is gone from the store but still in the table"],
+   "error": null
+  }
+ ],
  "/v1/vectors": [
   {
    "id": "1f3b5d7e9a0c42e4b6d8f0a2c4e6b8d0",

@@ -164,6 +164,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.sql_workflows.run_due)    # SQL workflows on their cron
     if getattr(s, "vectors", None) is not None:
         sch.extra.append(s.vectors.run_due)      # vector indexes kept in step with their tables
+    if getattr(s, "parquet_tables", None) is not None:
+        sch.extra.append(s.parquet_tables.run_due)    # Parquet files registered in place: new files added
     if getattr(s, "online_features", None) is not None:
         sch.extra.append(s.online_features.run_due)   # online features: synced when their table changes
     if getattr(s, "serving_tables", None) is not None:

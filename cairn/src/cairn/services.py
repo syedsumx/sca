@@ -148,6 +148,7 @@ class Services:
     vectors: Optional[Any] = None
     sql_search: Optional[Any] = None
     documents: Optional[Any] = None
+    parquet_tables: Optional[Any] = None
     delta_convert: Optional[Any] = None
     git_folders: Optional[Any] = None
     procedures: Optional[Any] = None
@@ -1899,6 +1900,36 @@ def _build_data_access(s: Services) -> None:
             from cairn.ai.sql_search import SqlSearch
 
             s.sql_search = SqlSearch.from_env(s.vectors, s.ai_usage)
+
+    # Zero-copy Parquet: files already in the store registered as Iceberg tables in place (cairn.pipelines.parquet_tables).
+    pq_store = os.environ.get("CAIRN_PARQUET_STORE") or os.environ.get("CAIRN_PIPES_STORE")
+    pq_catalog = os.environ.get("CAIRN_PARQUET_CATALOG") or os.environ.get("CAIRN_PIPES_CATALOG")
+    if pq_store and pq_catalog:
+        from cairn.pipelines.parquet_tables import READ_FILES, ParquetTables, path_urn
+        from cairn.pipelines.pipes import _settings
+
+        def may_read_files(actor: str, bucket: str, prefix: str) -> bool:
+            """A volume's grant for its bucket; READ_FILES on the path (Cairn's policies) for any other."""
+            vols = getattr(s, "volumes", None)
+            if bucket.startswith("cairn-vol-"):
+                if vols is None:
+                    return False
+                try:
+                    return vols.access(actor, vols._vol(bucket.removeprefix("cairn-vol-"))) in ("read", "write")
+                except Exception:  # noqa: BLE001 - no such volume, or it cannot be looked up: no read
+                    return False
+            return s.authorize(Principal(urn=actor, via="delegated"), READ_FILES, path_urn(bucket, prefix),
+                               raise_on_deny=False)
+
+        def table_urn(ns: str, t: str) -> str:
+            lk = getattr(s, "lakehouse", None)
+            return lk.urn([ns], t) if lk is not None else f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"
+        s.parquet_tables = ParquetTables(
+            s.engine, _settings("CAIRN_PARQUET_STORE" if os.environ.get("CAIRN_PARQUET_STORE") else "CAIRN_PIPES_STORE"),
+            _settings("CAIRN_PARQUET_CATALOG" if os.environ.get("CAIRN_PARQUET_CATALOG") else "CAIRN_PIPES_CATALOG"),
+            s.audit, getattr(s, "graph", None), table_urn,
+            [b.strip() for b in os.environ.get("CAIRN_PARQUET_BUCKETS", "").split(",") if b.strip()],
+            may_read_files, getattr(s, "dataset_changes", None))
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

@@ -282,6 +282,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.pipelines.vectors import build_vectors_router
 
         app.include_router(build_vectors_router(services.vectors, cp, authz))
+    if getattr(services, "parquet_tables", None) is not None:  # Parquet files registered as tables in place
+        from cairn.pipelines.parquet_tables import build_parquet_tables_router
+
+        app.include_router(build_parquet_tables_router(services.parquet_tables, cp, authz))
     if getattr(services, "documents", None) is not None:      # tables and charts from PDFs and images
         from cairn.pipelines.parse import build_documents_router
 

@@ -550,6 +550,59 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "parquet-tables": {
+        "key": "parquet-tables",
+        "title": "Registered Parquet",
+        "path": "/v1/lakehouse/parquet-tables",
+        "listKey": null,
+        "description": "Parquet files already in the store registered as Iceberg tables in place, without copying them: schema from the files, partitions from Hive-style paths, new files added as they land. Needs read access to the files.",
+        "columns": [
+            "name",
+            "target",
+            "bucket",
+            "prefix",
+            "files",
+            "rows",
+            "every_minutes",
+            "registered_ms",
+            "error"
+        ],
+        "actions": [
+            {
+                "label": "Register files",
+                "method": "POST",
+                "path": "/v1/lakehouse/parquet-tables",
+                "body": {
+                    "name": "events",
+                    "bucket": "landing",
+                    "prefix": "exports/events/",
+                    "target": "files.events",
+                    "every_minutes": 60
+                }
+            },
+            {
+                "label": "Add new files",
+                "method": "POST",
+                "path": "/v1/lakehouse/parquet-tables/{name}/refresh",
+                "body": {}
+            },
+            {
+                "label": "Schedule",
+                "method": "PUT",
+                "path": "/v1/lakehouse/parquet-tables/{name}",
+                "body": {
+                    "every_minutes": 60,
+                    "enabled": true
+                }
+            },
+            {
+                "label": "Stop registering",
+                "method": "DELETE",
+                "path": "/v1/lakehouse/parquet-tables/{name}",
+                "body": null
+            }
+        ]
+    },
     "vectors": {
         "key": "vectors",
         "title": "Vector indexes",

@@ -96,11 +96,10 @@ def cairn(lake, tmp_path_factory):  # noqa: F811
     t.join(30)
 
 
-@pytest.fixture(scope="module")
-def trino(lake, cairn):  # noqa: F811
-    cairn_url, _ = cairn
-    d = tempfile.mkdtemp(prefix="trino-search-")
-    plugin = build_plugin(f"{d}/plugin")
+def run_trino(lake, cairn_url: str, key: str, plugin=None, tag: str = "search"):  # noqa: F811
+    """A Trino on the lake catalog that asks Cairn before every action (OPA), with Cairn's functions plugin when
+    ``plugin`` is a directory holding it. Yields ``sql(statement, user)``; removes the container afterwards."""
+    d = tempfile.mkdtemp(prefix=f"trino-{tag}-")
     os.makedirs(f"{d}/catalog")
     tp = port()
     open(f"{d}/catalog/lake.properties", "w").write("\n".join([
@@ -108,7 +107,7 @@ def trino(lake, cairn):  # noqa: F811
         "iceberg.rest-catalog.security=OAUTH2", f"iceberg.rest-catalog.oauth2.token={CATALOG_TOKEN}",
         S3_ON, f"s3.endpoint={lake['store']}", "s3.region=us-east-1", "s3.path-style-access=true",
         f"s3.aws-access-key={STORE_KEY[0]}", f"s3.aws-secret-key={STORE_KEY[1]}", ""]))
-    base = f"{cairn_url}/v1/trino/{KEY}"
+    base = f"{cairn_url}/v1/trino/{key}"
     open(f"{d}/access-control.properties", "w").write("\n".join([
         "access-control.name=opa", f"opa.policy.uri={base}/allow", f"opa.policy.batched-uri={base}/batch",
         f"opa.policy.row-filters-uri={base}/row-filters", f"opa.policy.column-masking-uri={base}/column-mask", ""]))
@@ -116,15 +115,15 @@ def trino(lake, cairn):  # noqa: F811
         "coordinator=true", "node-scheduler.include-coordinator=true", f"http-server.http.port={tp}",
         f"discovery.uri=http://127.0.0.1:{tp}", ""]))
     with open(f"{d}/trino.env", "w") as fh:          # as Helm passes them: never on a command line
-        fh.write(f"CAIRN_TRINO_ACCESS_KEY={KEY}\nCAIRN_API_URL={cairn_url}\n")
+        fh.write(f"CAIRN_TRINO_ACCESS_KEY={key}\nCAIRN_API_URL={cairn_url}\n")
     os.chmod(d, 0o755)
-    name = f"cairn-ai-search-{os.getpid()}"
+    name = f"cairn-{tag}-{os.getpid()}"
     subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
     try:
         subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host", "--env-file", f"{d}/trino.env",
                         "-v", f"{d}/catalog:/etc/trino/catalog:ro", "-v", f"{d}/config.properties:/etc/trino/config.properties:ro",
                         "-v", f"{d}/access-control.properties:/etc/trino/access-control.properties:ro",
-                        "-v", f"{plugin}:/usr/lib/trino/plugin/cairn-functions:ro", TRINO],
+                        *(["-v", f"{plugin}:/usr/lib/trino/plugin/cairn-functions:ro"] if plugin else []), TRINO],
                        check=True, capture_output=True, timeout=600)
         end = time.time() + 240
         while "SERVER STARTED" not in subprocess.run(["docker", "logs", name], capture_output=True, text=True).stderr:
@@ -142,6 +141,12 @@ def trino(lake, cairn):  # noqa: F811
     finally:
         subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
         shutil.rmtree(d, ignore_errors=True)
+
+
+@pytest.fixture(scope="module")
+def trino(lake, cairn, tmp_path_factory):  # noqa: F811
+    plugin = build_plugin(str(tmp_path_factory.mktemp("plugin")))
+    yield from run_trino(lake, cairn[0], KEY, plugin)
 
 
 SEARCH = "SELECT r.key, r.chunk, r.text, r.score FROM UNNEST(ai_search('help', '{q}', {k})) AS r(key, chunk, text, score)"
