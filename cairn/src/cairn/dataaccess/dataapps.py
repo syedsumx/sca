@@ -26,6 +26,9 @@ configured for Cairn's git integration (its token is used) or a URL the operator
 and again on ``POST /v1/apps/<name>/deploy``; the app records the commit it runs. ``command`` runs in
 ``path`` of that commit.
 
+**Chat.** ``chat`` declares what the app's chat panel may tell people (``cairn.dataaccess.app_chat``): a
+description, the tables and queries the app uses, and an endpoint of the app that says what it is showing.
+
 **Runtimes.** ``runtime: local`` (the default) runs ``command`` beside Cairn. ``runtime: kubernetes`` runs
 it in ``image`` on Kubernetes, a Deployment per app that is started on the first visit and stopped when
 idle (``cairn.dataaccess.apps_k8s``).
@@ -78,6 +81,7 @@ data_apps = Table(
     Column("port", Integer, nullable=True),
     Column("commit", String(64), nullable=True),       # what is deployed
     Column("deployed_ms", BigInteger, nullable=True),
+    Column("chat", Text, nullable=True),               # JSON: the declared chat context (cairn.dataaccess.app_chat)
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
@@ -184,10 +188,17 @@ class DataApps:
         idle = body.get("idle_minutes", 30)
         if isinstance(idle, bool) or not isinstance(idle, int) or not 1 <= idle <= 1440:
             raise AppError("idle_minutes is 1-1440")
+        from cairn.dataaccess.app_chat import check_chat
+
+        try:
+            chat = check_chat(body.get("chat"))
+        except ValueError as e:
+            raise AppError(str(e))
         return {"title": str(body.get("title") or body.get("name") or "")[:256], "url": str(url).rstrip("/") if url else None,
                 "command": json.dumps(command) if command else None, "workdir": body.get("workdir") or None,
                 "idle_minutes": idle, "runtime": runtime, "git": git,
-                "image": str(image) if runtime == "kubernetes" else None, "port": port if runtime == "kubernetes" else None}
+                "image": str(image) if runtime == "kubernetes" else None, "port": port if runtime == "kubernetes" else None,
+                "chat": chat}
 
     def create(self, actor: str, body: dict) -> dict:
         from sqlalchemy.exc import IntegrityError
@@ -241,6 +252,7 @@ class DataApps:
         d = dict(r._mapping)
         d["command"] = json.loads(d["command"]) if d["command"] else None
         d["git"] = json.loads(d["git"]) if d["git"] else None
+        d["chat"] = json.loads(d["chat"]) if d.get("chat") else None
         d["running"] = (name in self._running and self._running[name].proc.poll() is None) if d["runtime"] == "local" else None
         return d
 
@@ -461,8 +473,10 @@ def build_apps_router(apps: DataApps, services) -> Any:
 
     @router.get("/v1/apps")
     def list_apps(p=Depends(principal)):
-        hidden = ("command", "git", "image", "workdir")                  # how it runs is the operators' business
-        return [{k: v for k, v in a.items() if k not in hidden} for a in apps.list() if may_use(p, a["name"])]
+        hidden = ("command", "git", "image", "workdir", "chat")          # how it runs is the operators' business
+        return [{**{k: v for k, v in a.items() if k not in hidden}, "chat": bool(a.get("chat")),
+                 "description": (a.get("chat") or {}).get("description") or ""}
+                for a in apps.list() if may_use(p, a["name"])]
 
     async def awrap(coro):
         try:

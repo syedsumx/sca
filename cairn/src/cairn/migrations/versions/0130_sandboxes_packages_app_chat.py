@@ -1,4 +1,4 @@
-"""Code sandboxes' runs; data packages and agents on shared data
+"""Code sandboxes' runs; data packages and agents on shared data; data apps' chat context
 
 Revision ID: 0130
 Revises: 0127
@@ -73,9 +73,13 @@ def upgrade() -> None:
     )
     op.create_index('ix_cairn_share_agent_runs_share_id', 'cairn_share_agent_runs', ['share_id'])
     op.create_index('ix_cairn_share_agent_runs_started_ms', 'cairn_share_agent_runs', ['started_ms'])
+    with op.batch_alter_table('cairn_data_apps') as batch:
+        batch.add_column(sa.Column('chat', sa.Text(), nullable=True))
 
 
 def downgrade() -> None:
+    with op.batch_alter_table('cairn_data_apps') as batch:
+        batch.drop_column('chat')
     op.drop_index('ix_cairn_share_agent_runs_started_ms', table_name='cairn_share_agent_runs')
     op.drop_index('ix_cairn_share_agent_runs_share_id', table_name='cairn_share_agent_runs')
     op.drop_table('cairn_share_agent_runs')

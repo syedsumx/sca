@@ -1035,6 +1035,14 @@
    "done": "A partner's agents understand what they were given (descriptions, columns, glossary, governed metrics, sample questions) and can trust it came from the provider; the provider can offer its own agent on the data without opening anything else",
    "status": "shipped",
    "note": "cairn.dataaccess.share_packages: PUT /v1/shares/<share>/package publishes a versioned manifest (tables, columns, glossary, metrics over shared tables only, sample questions, attached agents) signed as a JWS with Cairn's published key; the recipient fetches it with the share's credential (/v1/shares/recipient/package). Agent apps attached to a share (/v1/shares/<share>/agents) are invoked by the recipient as identity type share-recipient: run token narrowed to model (model use decided for the provider, metered to the recipient), data only through a lakehouse token for the share (ctx.catalog()); runs recorded per recipient and audited (migration 0130). Tested end to end with the real store and catalog, a real agent process and the gateway's model stand-in: signature verified, shared table read, other tables refused, revocation stopping both (tests/test_share_packages_e2e.py)"
+  },
+  {
+   "id": "L120",
+   "title": "Talk to your app",
+   "summary": "A chat panel for data apps: questions about what the app shows, answered with the app's declared context and the asker's own access",
+   "done": "People get answers about the numbers in front of them without leaving the app, and never see more through the chat than the app itself would show them",
+   "status": "shipped",
+   "note": "cairn.dataaccess.app_chat: chat on a data app (description, tables, queries, a context endpoint; migration 0130); POST /v1/apps/<name>/chat (USE_APP) runs the declared queries as the asker (masks, row filters, refusals), describes only tables they may see, asks the running app's context endpoint as them (never with Cairn's or the app's credentials), and calls the model through the AI gateway as them; answers cite the tables used; audited without content. Ask about this app on the Data apps tab. Tested end to end with a real app process, a real warehouse and the gateway's model stand-in: the asker's masking held in the answer (tests/test_app_chat_e2e.py)"
   }
  ]
 }

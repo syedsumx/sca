@@ -1424,7 +1424,9 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_by": "urn:li:corpuser:alice",
    "created_ms": 1790212000000,
    "updated_ms": 1793927200000,
-   "running": null
+   "running": null,
+   "chat": true,
+   "description": "Weekly sales and stock by store, against target."
   },
   {
    "id": "4e6a8c0e2a4c46e8a0c2e4a6c8e0a2c4",
@@ -1439,7 +1441,9 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_by": "urn:li:corpuser:mei",
    "created_ms": 1793322400000,
    "updated_ms": 1793322400000,
-   "running": true
+   "running": true,
+   "chat": false,
+   "description": ""
   },
   {
    "id": "8c0e2a4c6e8a40c2e4a6c8e0a2c4e6a8",
@@ -1454,7 +1458,9 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_by": "urn:li:corpuser:raj",
    "created_ms": 1787188000000,
    "updated_ms": 1791508000000,
-   "running": null
+   "running": null,
+   "chat": true,
+   "description": "Each supplier's on-time rate and defects, by quarter."
   }
  ],
  "/v1/spark/history/api/v1/applications": [

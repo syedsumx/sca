@@ -1000,16 +1000,28 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "title": "Data apps",
         "path": "/v1/apps",
         "listKey": null,
-        "description": "Streamlit or other web apps served by Cairn at /apps/<name>/, each viewer signed in and governed as themselves. Lists the apps you may open.",
+        "description": "Streamlit or other web apps served by Cairn at /apps/<name>/, each viewer signed in and governed as themselves. Lists the apps you may open; ask an app with a chat about what it shows, answered with your own access.",
         "columns": [
             "name",
             "title",
+            "chat",
             "runtime",
             "commit",
             "deployed_ms",
             "running"
         ],
         "actions": [
+            {
+                "label": "Ask about this app",
+                "method": "POST",
+                "path": "/v1/apps/{name}/chat",
+                "body": {
+                    "question": "Which region grew the most this month, and which tables does that come from?",
+                    "view": {
+                        "region": "EU"
+                    }
+                }
+            },
             {
                 "label": "Deploy",
                 "method": "POST",

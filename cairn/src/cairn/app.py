@@ -313,6 +313,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     if getattr(services, "data_apps", None) is not None:
         from cairn.dataaccess.dataapps import build_apps_router
 
+        if getattr(services, "app_chat", None) is not None:      # questions about what an app shows
+            from cairn.dataaccess.app_chat import build_app_chat_router
+
+            app.include_router(build_app_chat_router(services.app_chat, services))
         app.include_router(build_apps_router(services.data_apps, services))
     if getattr(services, "procedures", None) is not None:
         from cairn.sqlworkspace.procedures import build_procedures_router

@@ -158,6 +158,7 @@ class Services:
     git_folders: Optional[Any] = None
     procedures: Optional[Any] = None
     data_apps: Optional[Any] = None
+    app_chat: Optional[Any] = None
     clean_rooms: Optional[Any] = None
     feature_tables: Optional[Any] = None
     online_features: Optional[Any] = None
@@ -1927,6 +1928,12 @@ def _build_data_access(s: Services) -> None:
                                      s.audit, app_identity_token)
         if getattr(s, "trino_access", None) is not None:
             s.trino_access.app_identity = s.app_packages.identity
+        # Talking to an app (cairn.dataaccess.app_chat): its declared context, the asker's own data access, the model
+        # through the AI gateway as them.
+        from cairn.dataaccess.app_chat import AppChat
+
+        s.app_chat = AppChat(s.data_apps, lambda: getattr(s, "data_access", None),
+                             lambda: getattr(s, "ai_gateway", None), s.authorize, s.can_view, s.graph, s.audit)
 
     # Fine-tuning (cairn.ml.finetune): models tuned on data read through the governed query path, as the asker.
     if os.environ.get("CAIRN_FINETUNE_MODEL_DIR"):

@@ -2238,6 +2238,38 @@ Data apps are Streamlit apps (or any web app) that Cairn serves to people, each 
   - The headers her browser forged (`X-Cairn-User: root`) never reached the app, and Cairn's secrets were not in its environment.
   - The idle app was stopped, and the next visit started it again.
 
+**Talk to your app.** People using an app can ask questions about what it shows (`POST /v1/apps/<name>/chat`, and
+**Ask about this app** on the Data apps tab), answered by the model from the app's declared context and the asker's
+own data access.
+
+- **Declaring the context.** With the app (`POST` or `PUT /v1/apps`), an operator sets `chat`:
+  `{"description": "Customers by region", "tables": ["urn:li:dataset:(…)"], "queries": [{"name": "customers",
+  "sql": "SELECT region, count(*) AS n FROM main.users GROUP BY region", "connection": "wh"}],
+  "context_endpoint": "/cairn-context"}` (up to 50 tables and 10 queries). The listing shows whether an app has a
+  chat and its description, never the queries.
+- **Asking.** `{"question": "...", "view": {...}, "history": [...]}` from someone with `USE_APP` on the app (others:
+  403, before anything runs). Agents and services cannot ask.
+  - The declared queries run through Cairn's query path **as the asker**: their policies, masks and row filters
+    apply, and a query they may not run is left out and named in `left_out`. The app's own credentials are never
+    used. The declared tables are described (name, description, columns) only when the asker may see them.
+  - With `context_endpoint`, Cairn asks the running app `GET /apps/<name><endpoint>?view=<the view, JSON>` the way
+    its pages are reached: with the asker's identity headers (`X-Cairn-User`, the app key, the viewer's Trino token
+    where Trino is set up), without anything of Cairn's. Its JSON answer (up to 20 KB) says what the app is showing;
+    an app that does not answer is left out.
+  - The model is called through the AI gateway as the asker: `USE_AI_GATEWAY` on the model, their budget and rate
+    limit, metered as `app-chat:<name>`. The model is the request's `model`, else `CAIRN_APPS_CHAT_MODEL`, else the
+    first served model the asker may use. Everything from the app and the queries is passed as data, never as
+    instructions, and values masked for the asker stay masked.
+- **The answer** has `answer`, `citations` (every table whose data or description the model was given),
+  `masked_columns`, `left_out` and `app_view` (whether the app's view was included). Audited as `app.chat`: the app,
+  the model and the tables, never the question or the answer.
+- **Tested** in `tests/test_app_chat_e2e.py`, with a real app process started by Cairn, a real SQLite warehouse and the
+  model behind the gateway (a stand-in repeating what it was given). Ana's answer held her masked emails and none of
+  the real ones reached the model; the administrator's held them unmasked. The app's context endpoint was asked as
+  Ana with the page's view, got her identity and the app key and none of Cairn's secrets, and its page title reached
+  the answer. The answer cited the table read; a query on a table Ana may not read was left out and named. Bob
+  (no `USE_APP`) was refused before the model was called; the call was metered to Ana and audited without content.
+
 ## App packages: apps others install on their own data
 
 An app package is a data app one team publishes and other teams install on their own datasets. Each install
