@@ -1424,6 +1424,34 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "warning": 2
   }
  },
+ "/v1/agent-intents/denials": [
+  {
+   "id": "7c0e4b2a-91d3-4f6e-a8b5-2d1f0c9e3a74",
+   "ts": "2026-11-07T14:21:08.412000+00:00",
+   "agent": "agt_91c3d7e2a0f5",
+   "actor": "urn:li:corpuser:bob",
+   "category": "export",
+   "reason": "export is outside this run's declared intent (triage open tickets: read, query, model)",
+   "route": "/context/definitions/export",
+   "tool": null,
+   "dataset": null,
+   "run": "run_3f9a1c07d2e84b56",
+   "purpose": "triage open tickets"
+  },
+  {
+   "id": "b5d21f80-3e6c-4a97-9c0b-71e4a2f8d613",
+   "ts": "2026-11-07T09:02:51.077000+00:00",
+   "agent": "agt_5f20c1a9e7b4",
+   "actor": "urn:li:corpuser:alice",
+   "category": "query",
+   "reason": "hr.public.salaries is outside this run's declared intent (weekly revenue summary)",
+   "route": "sql",
+   "tool": null,
+   "dataset": "urn:li:dataset:(urn:li:dataPlatform:postgres,hr.public.salaries,PROD)",
+   "run": "8e2d40b7c1f94a3e9b6d05c7a1f2e8d4",
+   "purpose": "weekly revenue summary"
+  }
+ ],
  "/ai/outbox": [
   {
    "id": "9d2b7e41c08a4f5f93e6a1b0c7d42e18",

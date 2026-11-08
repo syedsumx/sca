@@ -142,6 +142,20 @@ def test_init_dev_deploy_invoke_delete(stack):
     (proj / "agent.py").write_text((proj / "agent.py").read_text().replace("Answer briefly", "Answer in one line"))
     assert deploy(str(proj), url, {"X-Cairn-Actor": ANA})["version"] == 2
     assert ask(BOB, "Again?").status_code == 200
+
+    # Intents (L109): the invocation declares what the run is for; the app's own requests outside it are refused.
+    def ask_for(intent):
+        return httpx.post(f"{url}/v1/agent-apps/triage/invocations", json={"input": "Open?", "intent": intent},
+                          headers={"X-Cairn-Actor": BOB}, timeout=120)
+    assert ask_for({"purpose": "x", "actions": ["read"]}).status_code == 400            # not a valid intent
+    no_model = ask_for({"purpose": "list open tickets", "actions": ["read"]})
+    assert no_model.status_code == 502 and "model is outside" in no_model.text           # its model call was refused
+    denied = [e for e in s.audit.export(category="agents") if e["action"] == "agent.intent_denied"][-1]
+    assert denied["actor"] == BOB and denied["subject"] == app["agent_id"] and denied["details"]["category"] == "model"
+    assert ask_for({"purpose": "list open tickets", "actions": ["read", "model"]}).status_code == 200
+    s.intents.set_required(ADMIN, True)
+    assert ask(BOB, "No intent?").status_code == 403                                     # required: refused up front
+    s.intents.set_required(ADMIN, False)
     bad = init(str(tmp / "needy"), template="basic")
     (bad / "requirements.txt").write_text("anthropic\nno-such-package-cairn-test\n")
     with pytest.raises(ProjectError, match="no-such-package-cairn-test"):

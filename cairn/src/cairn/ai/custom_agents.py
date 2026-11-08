@@ -63,6 +63,7 @@ custom_agents = Table(
     Column("deployed_version", Integer, nullable=True),
     Column("created_ms", BigInteger, nullable=False),
     Column("updated_ms", BigInteger, nullable=False),
+    Column("intent", JSONText, nullable=True),              # the intent each run declares (cairn.identity.intents)
 )
 custom_agent_runs = Table(
     "cairn_custom_agent_runs", metadata,
@@ -127,9 +128,16 @@ class CustomAgents:
         team = body.get("team") or None
         if team is not None and not str(team).startswith("urn:li:corpGroup:"):
             raise AgentBuildError("team: a group urn (urn:li:corpGroup:…)")
+        from cairn.identity.intents import IntentError, parse_intent
+
+        try:
+            intent = parse_intent(body.get("intent") or None)
+        except IntentError as e:
+            raise AgentBuildError(str(e))
         return {"description": str(body.get("description") or "")[:2000], "instructions": instructions,
                 "tools": sorted(set(tools)), "scopes": [s for s in BUILT_SCOPES if s in scopes], "team": team,
-                "ai_system": body.get("ai_system") or None, "max_steps": steps}
+                "ai_system": body.get("ai_system") or None, "max_steps": steps,
+                "intent": intent.as_dict() if intent is not None else None}
 
     def _get(self, name: str) -> dict:
         with self.engine.connect() as conn:
@@ -178,7 +186,7 @@ class CustomAgents:
     def update(self, actor: str, name: str, body: dict) -> dict:
         a = self._owner(actor, name)
         v = self._check(body)
-        changed = any(a[k] != v[k] for k in ("instructions", "tools", "scopes", "max_steps", "ai_system"))
+        changed = any(a[k] != v[k] for k in ("instructions", "tools", "scopes", "max_steps", "ai_system", "intent"))
         with self.engine.begin() as conn:
             conn.execute(update(custom_agents).where(custom_agents.c.id == a["id"]).values(
                 updated_ms=_now(), version=a["version"] + (1 if changed else 0),
@@ -213,7 +221,8 @@ class CustomAgents:
         if not self.may_run(actor, a):
             raise AgentBuildError(f"no agent {name}", 404)
         out = {k: a[k] for k in ("name", "owner", "team", "description", "tools", "scopes", "ai_system", "max_steps",
-                                 "deployed", "version", "deployed_version", "agent_id", "created_ms", "updated_ms")}
+                                 "deployed", "version", "deployed_version", "agent_id", "created_ms", "updated_ms",
+                                 "intent")}
         if actor == a["owner"]:
             out["instructions"] = a["instructions"]
         return out
@@ -266,7 +275,16 @@ class CustomAgents:
         with self.engine.begin() as conn:
             conn.execute(insert(custom_agent_runs).values(id=rid, agent=a["id"], actor=actor, version=a["version"],
                                                           status="running", input=clean, calls=[], started_ms=started))
-        principal = Principal(actor, "agent", agent=a["agent_id"], scopes=tuple(a["scopes"]))
+        from cairn.identity.intents import parse_intent
+
+        intent = parse_intent(a.get("intent") or None)
+        guard = getattr(self, "intents", None)
+        if intent is None and guard is not None and guard.required():   # fail closed: the run would do nothing
+            with self.engine.begin() as conn:
+                conn.execute(update(custom_agent_runs).where(custom_agent_runs.c.id == rid).values(
+                    status="refused", answer="an operator requires a declared intent", finished_ms=_now()))
+            raise AgentBuildError(f"{name} declares no intent, and an operator requires one for agents", 403)
+        principal = Principal(actor, "agent", agent=a["agent_id"], scopes=tuple(a["scopes"]), run=rid, intent=intent)
         set_actor(actor)
         status, answer, calls = "ok", None, []
         from cairn.ai.traces import current_run

@@ -502,6 +502,41 @@ it. To make an agent depend on the AI system register, link it to an AI system
     Auto-applied suggestions show as *auto accepted* in the AI steward history and can be undone
     there.
 
+**Intents (intent-based security):** scopes say what an agent may ever do; an intent narrows one run or one
+credential to what the task in hand needs. An intent is
+`{"purpose": "...", "actions": [...], "tables": [...], "domains": [...]}`:
+
+| Category | Covers |
+|---|---|
+| `read` | catalog reads (every GET, and requests that change nothing) |
+| `query` | previews, SQL, ask-your-data, metric queries; SQL whose statements are `SELECT`, `WITH`, `SHOW`, `DESCRIBE`, `EXPLAIN` |
+| `propose` | things that wait for a person's review (documentation drafts, workflows, access requests, discussions) |
+| `write` | direct changes; SQL `INSERT`, `UPDATE`, `DELETE`, `MERGE`, `CREATE`, `DROP`, `ALTER`, `COPY` … |
+| `share` | shares, clean rooms, grants, publishing, the outbox, embedding, artifact sharing, reverse syncs |
+| `export` | exports, downloads, detokenizing; SQL `UNLOAD`, `INTO OUTFILE`, writes to a storage location |
+| `model` | the AI gateway |
+| `admin` | administration; SQL `GRANT`, `REVOKE`, and any statement Cairn does not recognise |
+
+- `tables` are dataset urns or name patterns (`finance.public.*`, matched against the dataset's name); `domains` are
+  domain urns. With either set, a request naming a dataset in neither (a path or query parameter, the tables a SQL
+  statement reads, a tool's arguments) is refused.
+- **Every agent request is classified**: HTTP by method and route, SQL (`POST /data/query`) by its statement kinds
+  (the most powerful wins), MCP and assistant tools by the tool. A request outside the intent gets **403** with the
+  reason and is audited as `agent.intent_denied` (category, reason, route or tool, dataset, run, the intent). The
+  scope check comes first and is unchanged.
+- **Where intents come from:** an agent app invocation may pass `intent` (`POST /v1/agent-apps/<name>/invocations`
+  with `{"input", "intent"}`); it rides on the run's short-lived token, so the app's own model calls, SQL and API
+  requests are held to it (an app that calls a model needs `model`). A custom agent declares `intent` in its
+  definition (changing it takes a deployed agent back to draft). An administrator may give a key agent one with
+  `PATCH /admin/agents/{id}` `{"intent": {...}}` (`{"intent": {}}` removes it). OAuth tokens carry none.
+- **Credentials without an intent** work as before, unless you require intents:
+  `PUT /cairn/api/v1/agent-intents/settings {"required": true}` (`MANAGE_GLOBAL_SETTINGS`, audited as
+  `agents.intents_required` / `agents.intents_optional`). Then every agent request without one is refused, agent app
+  invocations without one are refused up front, and custom agents without one do not run (fail closed).
+- **Denials:** Agents → *Intent denials*, or `GET /cairn/api/v1/agent-intents/denials?days=7`: administrators and
+  operators see all; people see those made for them or by the agents they own. `POST /v1/agent-intents/classify`
+  with `{"sql": ...}` or `{"method", "path"}` shows how a request would be classified.
+
 **Seeing what agents do:**
 
 - Each agent's **Activity** lists its recent tool calls: tool, arguments (personal data redacted),

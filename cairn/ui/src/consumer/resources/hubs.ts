@@ -58,7 +58,7 @@ export const HUBS: Hub[] = [
         "route": "/agents",
         "title": "Agents",
         "icon": "bot",
-        "description": "Agents that work for people in Cairn, each with its own identity and scopes: code-first agent apps, custom agents, scheduled tasks and their outbox, what their traces say, the pipeline agent and the AI steward.",
+        "description": "Agents that work for people in Cairn, each with its own identity and scopes: code-first agent apps, custom agents, scheduled tasks and their outbox, what their traces say, intent denials, the pipeline agent and the AI steward.",
         "tabs": [
             "agent-apps",
             "custom-agents",
@@ -66,6 +66,7 @@ export const HUBS: Hub[] = [
             "outbox",
             "agent-insights",
             "agent-findings",
+            "agent-intent-denials",
             "pipeline-agent",
             "ai-steward",
             "agents",

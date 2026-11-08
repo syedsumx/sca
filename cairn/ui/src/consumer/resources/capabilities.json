@@ -915,6 +915,14 @@
    "done": "Someone who lives in the terminal (or a CI job acting for a person) sets up recurring research, runs it now, reads the report and approves or rejects what goes out, without the web UI",
    "status": "shipped",
    "note": "cairn.agentkit.tasks: list, create (name, prompt, cron, max steps, Slack or email), show (last runs), output (a run's report), run, pause/resume, delete, outbox, approve/reject, --json; CAIRN_URL and CAIRN_TOKEN/CAIRN_TOKEN_FILE from the environment only; agent credentials refused. Tested by running the real CLI in a subprocess against a real Cairn API server, with the report sent to a Slack stand-in only after approval (tests/test_tasks_cli.py)"
+  },
+  {
+   "id": "L109",
+   "title": "Intent-based security for agents",
+   "summary": "Each agent run declares its purpose and the kinds of action it allows; anything else is refused",
+   "done": "An agent asked to summarise revenue cannot, even through a prompt injection or a bug, write, share, export or read tables the task does not concern, though its scopes would allow it; operators can require every agent run to say what it is for",
+   "status": "shipped",
+   "note": "cairn.identity.intents: intents (purpose, actions read, query, propose, write, share, export, model, admin, tables, domains) on run tokens (agent app invocations), custom agent definitions (migration 0124) and key agents; every agent request classified (HTTP by route, SQL by statement kind, tools by tool) and refused outside its intent (403, audited agent.intent_denied); /v1/agent-intents/settings (require intents, fail closed), /denials, /classify. Tested end to end through the HTTP API with real agent keys, run tokens, a real SQLite warehouse, a custom agent run and a real agent app process whose model call is refused (tests/test_agent_intents.py, tests/test_agent_apps.py)"
   }
  ]
 }

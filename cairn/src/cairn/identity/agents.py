@@ -121,6 +121,7 @@ class AgentGrant:
     agent: str
     scopes: tuple[str, ...]
     run: Optional[str] = None          # access tokens: the run (``run_…``) or OAuth session (``tok_…``) they belong to
+    intent: Any = None                 # the declared intent (cairn.identity.intents.Intent), if any
 
 
 def _now() -> int:
@@ -176,11 +177,19 @@ class AgentPatch(BaseModel):
     auto_accept_at: Optional[float] = Field(default=None, ge=0.5, le=1.0)
     per_minute: Optional[int] = Field(default=None, ge=1, le=10_000)
     daily_requests: Optional[int] = Field(default=None, ge=1, le=10_000_000)
+    intent: Optional[dict] = None          # a key agent's declared intent (cairn.identity.intents); {} clears it
 
     @field_validator("scopes")
     @classmethod
     def _scopes(cls, v: Optional[list[str]]) -> Optional[list[str]]:
         return None if v is None else _check_scopes(v)
+
+    @field_validator("intent")
+    @classmethod
+    def _intent(cls, v: Optional[dict]) -> Optional[dict]:
+        from cairn.identity.intents import parse_intent
+
+        return None if v is None else ({} if v == {} else parse_intent(v).as_dict())
 
 
 class ClientRegistration(BaseModel):
@@ -222,6 +231,7 @@ class AgentService:
                 **cls._policy(r.details),
                 "redirect_uris": list(r.redirect_uris), "ai_system": r.ai_system, "enabled": r.enabled,
                 "created_by": r.created_by, "created_ms": r.created_ms, "last_used_ms": r.last_used_ms,
+                "intent": (r.details or {}).get("intent"),
                 **{k: v for k, v in (r.details or {}).items() if k in ("client_uri", "software_id", "description")}}
 
     def get(self, agent_id: str) -> dict:
@@ -266,9 +276,10 @@ class AgentService:
         self._record("agent.created", actor, agent_id, {"name": name, "scopes": scopes, "kind": "built"})
         return self.get(agent_id)
 
-    def issue_run_token(self, agent_id: str, actor: str, ttl_ms: int = 900_000) -> str:
+    def issue_run_token(self, agent_id: str, actor: str, ttl_ms: int = 900_000, intent: Any = None) -> str:
         """A short-lived access token for one run of a Cairn-hosted agent (built or deployed app) on behalf of
-        ``actor``: their rights narrowed to the agent's scopes. No refresh token; revoke it when the run ends."""
+        ``actor``: their rights narrowed to the agent's scopes, and to ``intent`` (an
+        :class:`~cairn.identity.intents.Intent`) when one is declared. No refresh token; revoke it when the run ends."""
         with self.engine.begin() as conn:
             client = conn.execute(select(agent_clients).where(agent_clients.c.id == agent_id)).first()
             if client is None or client.kind not in ("built", "app") or not client.enabled:
@@ -276,7 +287,8 @@ class AgentService:
             token, now = ACCESS_PREFIX + secrets.token_urlsafe(32), _now()
             conn.execute(agent_tokens.insert().values(
                 hash=_hash(token), kind="access", client_id=agent_id, actor=actor, scopes=list(client.scopes),
-                expires_ms=now + ttl_ms, revoked=False, created_ms=now, details={"run": True}))
+                expires_ms=now + ttl_ms, revoked=False, created_ms=now,
+                details={"run": True, **({"intent": intent.as_dict()} if intent is not None else {})}))
         return token
 
     def create_app_agent(self, name: str, owner: str, scopes: list[str], description: str, actor: str) -> dict:
@@ -342,17 +354,29 @@ class AgentService:
         self.get(agent_id)
         values = {k: v for k, v in patch.model_dump().items() if v is not None}
         policy = {k: values.pop(k) for k in list(values) if k in DEFAULT_POLICY}
-        if policy:
+        intent = values.pop("intent", None)
+        if intent is not None and self.get(agent_id)["kind"] != "key":
+            raise AgentError("only key agents carry an intent of their own; runs of built agents and agent apps "
+                             "declare theirs")
+        if policy or intent is not None:
             with self.engine.connect() as conn:
                 details = conn.execute(select(agent_clients.c.details).where(agent_clients.c.id == agent_id)).scalar()
-            values["details"] = {**(details or {}), "policy": {**((details or {}).get("policy") or {}), **policy}}
+            details = {**(details or {})}
+            if policy:
+                details["policy"] = {**(details.get("policy") or {}), **policy}
+            if intent is not None:
+                details.pop("intent", None)
+                if intent:
+                    details["intent"] = intent
+            values["details"] = details
         if values:
             with self.engine.begin() as conn:
                 conn.execute(update(agent_clients).where(agent_clients.c.id == agent_id).values(**values))
             if values.get("enabled") is False:
                 self._revoke(agent_id)
         self._record("agent.updated", actor, agent_id, {**{k: v for k, v in values.items() if k != "details"},
-                                                        **policy})
+                                                        **policy, **({"intent": intent or None}
+                                                                     if intent is not None else {})})
         return self.get(agent_id)
 
     def rotate_key(self, agent_id: str, actor: str) -> dict:
@@ -557,6 +581,7 @@ class AgentService:
                 if client is None or client.kind != "key":
                     return None
                 actor, scopes, run = client.owner, list(client.scopes), None
+                declared = (client.details or {}).get("intent")
             elif token.startswith(ACCESS_PREFIX):
                 row = conn.execute(select(agent_tokens).where(agent_tokens.c.hash == _hash(token),
                                                               agent_tokens.c.kind == "access")).first()
@@ -567,14 +592,21 @@ class AgentService:
                     return None
                 actor, scopes = row.actor, [s for s in row.scopes if s in client.scopes]
                 run = ("run_" if (row.details or {}).get("run") else "tok_") + row.hash[:16]
+                declared = (row.details or {}).get("intent")
             else:
                 return None
         if not client.enabled or not actor:
             return None
         if client.ai_system and self.ai_system_state is not None and self.ai_system_state(client.ai_system) != "APPROVED":
             return None
+        from cairn.identity.intents import IntentError, parse_intent
+
+        try:
+            intent = parse_intent(declared)
+        except IntentError:
+            return None                          # an intent that cannot be read: the credential does not work
         self._touch(client.id, now)
-        return AgentGrant(actor, client.id, tuple(scopes), run)
+        return AgentGrant(actor, client.id, tuple(scopes), run, intent)
 
     def _touch(self, agent_id: str, now: int) -> None:
         if now - self._touched.get(agent_id, 0) < 60_000:       # at most once a minute per agent

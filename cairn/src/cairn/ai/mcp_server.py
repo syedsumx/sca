@@ -362,6 +362,13 @@ def build_mcp_server(services: Services):
             if p is not None and p.via == "agent" and tool_scope(fn.__name__) not in p.scopes:
                 return {"error": "forbidden",
                         "message": f"this agent's scopes do not include {tool_scope(fn.__name__)}"}
+            if p is not None and p.via == "agent" and getattr(services, "intents", None) is not None:
+                from cairn.identity.intents import IntentDenied
+
+                try:
+                    services.intents.check_tool(p, fn.__name__, kwargs)
+                except IntentDenied as e:
+                    return {"error": "forbidden", "message": str(e)}
             return _traced(fn, args, kwargs, p)
         return wrapper
 

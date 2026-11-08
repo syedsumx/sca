@@ -97,6 +97,7 @@ class Services:
     ml_serving: Optional[Any] = None
     custom_agents: Optional[Any] = None
     trace_insights: Optional[Any] = None
+    intents: Optional[Any] = None
     consent: Optional[Any] = None
     bi_sharing: Optional[Any] = None
     records: Optional[Any] = None
@@ -578,6 +579,13 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     services.agents = AgentService(engine, audit, ai_system_state,
                                    registration if registration in ("open", "admin", "off") else "open")
     identity.agent_lookup = services.agents.resolve
+    from cairn.identity.intents import IntentGuard
+
+    def dataset_domains(urn: str) -> list[str]:
+        return [str(d) for d in ((services.graph.get_aspect(urn, "domains") or {}).get("domains") or [])] \
+            if services.graph is not None else []
+    services.intents = IntentGuard(services.agents, audit, dataset_domains, lambda actor, privilege: services.authorize(
+        Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False))
     from cairn.ai.traces import TraceService
 
     services.traces = TraceService(engine, audit)
@@ -1279,6 +1287,7 @@ def _build_active_metadata(s: Services) -> None:
         s.agent_apps = AgentApps(s.engine, s.agents, agent_runtime, apps_authorize,
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
+        s.agent_apps.intents = s.intents
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
@@ -1292,6 +1301,7 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor, privilege, urn: s.authorize(Principal(urn=actor, via="delegated"), privilege, urn,
                                                       raise_on_deny=False),
             agent_groups, s.audit)
+        s.custom_agents.intents = s.intents
         # Agent trace intelligence (cairn.ai.trace_insights): loops, errors, slow calls, cost and outliers per agent.
         from cairn.ai.trace_insights import TraceInsights
 

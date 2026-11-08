@@ -47,6 +47,16 @@ def _principal_dependency(services: Services):
             if need is None or need not in principal.scopes:
                 why = "not allowed for agents" if need is None else f"needs scope {need}"
                 raise HTTPException(403, f"this agent may not do this ({why})")
+            if getattr(services, "intents", None) is not None:
+                from cairn.identity.intents import IntentDenied, classify_request
+
+                params = [*request.path_params.values(), *request.query_params.values()]
+                try:
+                    services.intents.check(principal, classify_request(request.method, route, READ_POSTS),
+                                           [v for v in params if isinstance(v, str)], route=route,
+                                           method=request.method)
+                except IntentDenied as e:
+                    raise HTTPException(403, f"this agent may not do this ({e})")
             from cairn.identity.agents import AgentError
 
             try:
@@ -346,6 +356,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.custom_agents import build_custom_agents_router
 
         app.include_router(build_custom_agents_router(services.custom_agents, cp))
+    if getattr(services, "intents", None) is not None:      # intent-based security for agents
+        from cairn.identity.intents import build_intents_router
+
+        app.include_router(build_intents_router(services.intents, cp))
     if getattr(services, "trace_insights", None) is not None:      # agent trace intelligence
         from cairn.ai.trace_insights import build_trace_insights_router
 
@@ -561,7 +575,8 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "quality" in modules and services.data_access is not None:
         from cairn.dataaccess.api import build_router as data_router
 
-        app.include_router(data_router(services.data_access, cp, services.ask, services.can_view, services.ai_actor))
+        app.include_router(data_router(services.data_access, cp, services.ask, services.can_view, services.ai_actor,
+                                       getattr(services, "intents", None)))
         if services.sql_workspace is not None:
             from cairn.sqlworkspace import build_router as sql_router
 

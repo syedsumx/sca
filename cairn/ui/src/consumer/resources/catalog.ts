@@ -877,6 +877,39 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             "baseline"
         ]
     },
+    "agent-intent-denials": {
+        "key": "agent-intent-denials",
+        "title": "Intent denials",
+        "path": "/v1/agent-intents/denials",
+        "listKey": null,
+        "description": "Agent requests refused because they fell outside the intent their run declared: a write during a read-only task, an export, a table the task does not concern. Administrators and operators see all; people see those made for them or by agents they own.",
+        "columns": [
+            "ts",
+            "agent",
+            "actor",
+            "category",
+            "reason",
+            "purpose"
+        ],
+        "actions": [
+            {
+                "label": "Require intents",
+                "method": "PUT",
+                "path": "/v1/agent-intents/settings",
+                "body": {
+                    "required": true
+                }
+            },
+            {
+                "label": "Make intents optional",
+                "method": "PUT",
+                "path": "/v1/agent-intents/settings",
+                "body": {
+                    "required": false
+                }
+            }
+        ]
+    },
     "pipeline-agent": {
         "key": "pipeline-agent",
         "title": "Pipeline agent tasks",

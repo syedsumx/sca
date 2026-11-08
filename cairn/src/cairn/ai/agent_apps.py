@@ -352,6 +352,15 @@ class AgentApps:
         why = self.agents.runnable(d["agent_id"])
         if why:
             raise AgentAppError(why, 403)
+        from cairn.identity.intents import IntentError, parse_intent
+
+        try:
+            intent = parse_intent(body.get("intent") or None)
+        except IntentError as e:
+            raise AgentAppError(str(e))
+        guard = getattr(self, "intents", None)
+        if intent is None and guard is not None and guard.required():   # fail closed before anything runs
+            raise AgentAppError("an operator requires agent runs to declare an intent (intent: purpose, actions)", 403)
         from cairn.identity.agents import AgentError
 
         try:
@@ -365,7 +374,7 @@ class AgentApps:
             self.runtime.start(name, d["version"], base64.b64decode(d["bundle"]))
             ep = self.runtime.endpoint(name, d["version"])
         history = self.session(actor, name, session_id) + [{"role": "user", "content": text}]
-        token = self.agents.issue_run_token(d["agent_id"], actor)
+        token = self.agents.issue_run_token(d["agent_id"], actor, intent=intent)
         started = _now()
         try:
             r = httpx.post(f"{ep[0]}/invocations", json={"messages": history[-self.history:], "session_id": session_id,
@@ -401,7 +410,8 @@ class AgentApps:
                                                         messages=json.dumps(history[-self.history:]),
                                                         updated_ms=_now()))
         self._audit("agent_app.invoked", actor, name, {"session": session_id, "ok": True, "ms": _now() - started,
-                                                       "version": d["version"]})
+                                                       "version": d["version"],
+                                                       **({"intent": intent.as_dict()} if intent else {})})
         return {"output": out["output"], "session_id": session_id, "version": d["version"]}
 
     def _audit(self, action: str, actor: str, name: str, details: dict) -> None:

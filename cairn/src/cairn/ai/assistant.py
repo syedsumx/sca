@@ -175,6 +175,14 @@ class Assistant:
 
         reads = turn_reads.get()
         tools = self.tools_factory(principal)
+        guard = getattr(getattr(tools, "s", None), "intents", None)
+        if getattr(principal, "via", "") == "agent" and guard is not None:
+            from cairn.identity.intents import IntentDenied
+
+            try:
+                guard.check_tool(principal, name, args)
+            except IntentDenied as e:
+                raise PermissionError(str(e))
         if name == "explain_lineage":
             if self.explainer_factory is None:
                 raise RuntimeError("lineage explanation unavailable")
