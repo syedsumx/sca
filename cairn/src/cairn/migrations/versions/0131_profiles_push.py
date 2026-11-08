@@ -1,7 +1,7 @@
 """Profiles (role, team, persona, language, pins, the assistant's standing instructions) and web push subscriptions
 
 Revision ID: 0131
-Revises: 0127
+Revises: 0130
 Create Date: 2026-11-08 18:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = '0131'
-down_revision = '0127'
+down_revision = '0130'
 branch_labels = None
 depends_on = None
 

@@ -228,7 +228,7 @@ class ProfileService:
             if ch == "in_app" and not on:
                 raise ProfileError("the in-app inbox cannot be turned off")
             if ch == "push" and on and (self.push is None or not self.push.enabled):
-                raise ProfileError("push notifications are not set up on this Cairn", 409)
+                raise ProfileError("push notifications are not configured on this Cairn", 409)
             cur = s.channels.get(ch) or ChannelSettings()
             s.channels[ch] = cur.model_copy(update={"enabled": on})
         for ev, on in events.items():
@@ -331,7 +331,7 @@ class WebPush:
 
     def subscribe(self, actor: str, body: dict, user_agent: Optional[str] = None) -> dict:
         if not self.enabled:
-            raise ProfileError("push notifications are not set up on this Cairn (no VAPID key)", 503)
+            raise ProfileError("push notifications are not configured on this Cairn (no VAPID key)", 503)
         endpoint = self._check_endpoint((body or {}).get("endpoint"))
         digest = hashlib.sha256(endpoint.encode()).hexdigest()
         with self.engine.begin() as conn:
@@ -452,7 +452,7 @@ def build_router(svc: ProfileService, current_principal):
 
     def _push():
         if svc.push is None:
-            raise HTTPException(503, "push notifications are not set up on this Cairn")
+            raise HTTPException(503, "push notifications are not configured on this Cairn")
         return svc.push
 
     @router.get("/push")
