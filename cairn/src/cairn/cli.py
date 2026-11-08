@@ -293,7 +293,35 @@ def cmd_context_miner(a) -> None:
     from cairn.common.metrics import serve_worker_metrics
 
     serve_worker_metrics()
+    onto = getattr(s, "ontology", None)
+    if onto is not None and onto.interval > 0:      # Cairn Ontology's sync and compile, on its own schedule
+        import threading
+
+        threading.Thread(target=onto.run_forever, daemon=True, name="cairn-ontology-sync").start()
     miner.run_forever()
+
+
+def cmd_ontology(a) -> None:
+    """Cairn Ontology from the command line: sync the catalog and query log, compile, import the results."""
+    s = _services(with_gateway=False, with_ai=False)
+    if getattr(s, "ontology", None) is None:
+        sys.exit("CAIRN_ONTOLOGY_URL is not set")
+    actor = "urn:li:corpuser:cairn-ontology-cli"
+    if a.action == "status":
+        out = s.ontology.status()
+    elif a.action == "sync":
+        out = s.ontology.sync(actor)
+    elif a.action == "compile":
+        out = s.ontology.compile(actor, a.mode, sync=True, wait=a.wait)
+    elif a.action == "import":
+        out = s.ontology.import_run(a.run, actor)
+    else:                                            # worker: the schedule
+        from cairn.common.metrics import serve_worker_metrics
+
+        serve_worker_metrics()
+        s.ontology.run_forever()
+        return
+    print(json.dumps(out, indent=2, default=str))
 
 
 def notifier_tick(s) -> dict:
@@ -905,6 +933,13 @@ def build_parser() -> argparse.ArgumentParser:
     cm.add_argument("--interval", type=int, default=300)
     cm.add_argument("--once", action="store_true")
     cm.set_defaults(fn=cmd_context_miner)
+
+    on = sub.add_parser("ontology", help="Cairn Ontology: sync, compile, import, status, or run the schedule (worker)")
+    on.add_argument("action", choices=["status", "sync", "compile", "import", "worker"])
+    on.add_argument("--mode", choices=["full", "incremental"], default="incremental")
+    on.add_argument("--wait", action="store_true", help="compile: wait for the run and import its proposals")
+    on.add_argument("--run", default=None, help="import: the run (default: the published one)")
+    on.set_defaults(fn=cmd_ontology)
 
     nt = sub.add_parser("notifier", help="notification delivery + access/grant expiry sweeps")
     nt.add_argument("--interval", type=float, default=10.0)

@@ -760,6 +760,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "context" in modules and services.context is not None:
         app.include_router(context_router(services.context, cp, authz, services.can_view, services.semantic_layer,
                                       services.knowledge))
+    if "context" in modules and getattr(services, "ontology", None) is not None:   # Cairn Ontology
+        from cairn.context.ontology_api import build_router as ontology_router
+
+        app.include_router(ontology_router(services.ontology, cp, authz, services.can_view, services.context))
     if "notify" in modules and services.notify is not None:
         app.include_router(notify_router(services.notify, services.slack, cp, authz,
                                          services.slack_events, services.teams_bot))

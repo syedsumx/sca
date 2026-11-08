@@ -127,6 +127,7 @@ class Services:
     external_catalogs: Optional[Any] = None
     listings: Optional[Any] = None
     ask: Optional[Any] = None
+    ontology: Optional[Any] = None          # Cairn Ontology, the ontology compiler (cairn.context.ontology_compiler)
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
     profiles: Optional[Any] = None
@@ -2061,6 +2062,14 @@ def _build_data_access(s: Services) -> None:
     s.ask = AskService(s.data_access, s.graph, s.llm, s.context_layer, search,
                        s.settings.ai.model_nlq or s.settings.ai.model, s.audit,
                        lambda refs: s.metrics.for_tables(refs) if getattr(s, "metrics", None) is not None else [])
+    # Cairn Ontology (CAIRN_ONTOLOGY_URL): the compiler, fed from the catalog and the query history; its
+    # relationships ground Ask-your-data and its /validate-sql checks the SQL it writes.
+    from cairn.context.ontology_compiler import OntologyCompiler
+
+    s.ontology = OntologyCompiler.from_env(s.engine, s.graph, context=s.context,
+                                           query_history=getattr(s, "query_history", None), data_access=s.data_access,
+                                           audit=s.audit, agents=s.agents)
+    s.ask.ontology = s.ontology
     if s.context is not None:
         from cairn.context.semantic import SemanticService
 

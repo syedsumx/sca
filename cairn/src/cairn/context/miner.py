@@ -484,15 +484,23 @@ class ContextStore:
         if kind == "create_term":
             v = change["value"]
             slug = re.sub(r"[^A-Za-z0-9]+", "", v["name"].title()) or "Term"
-            term_urn = f"urn:li:glossaryTerm:Mined.{slug}"
+            # A proposal may name its term and parent node (Cairn Ontology's do: urn:li:glossaryTerm:Ontology.*).
+            term_urn = v.get("urn") or f"urn:li:glossaryTerm:Mined.{slug}"
+            parent = v.get("parent") or MINED_NODE
+            props = {"cairn_expression": v.get("expression", ""), "cairn_finding": finding["id"],
+                     "cairn_approved_by": actor}
+            if v.get("synonyms"):
+                props["cairn_synonyms"] = ", ".join(v["synonyms"])
+            node_info = {"name": "Mined", "definition":
+                         "Business terms discovered by Cairn Context Agents from queries, dbt and BI."}
+            if parent != MINED_NODE:
+                node_info = {"name": v.get("parent_name") or parent.rsplit(":", 1)[-1],
+                             "definition": "Business terms compiled by Cairn Ontology from the catalog and query log."}
             return [
-                make_mcp(MINED_NODE, "glossaryNodeInfo", {"name": "Mined", "definition":
-                         "Business terms discovered by Cairn Context Agents from queries, dbt and BI."}),
+                make_mcp(parent, "glossaryNodeInfo", node_info),
                 make_mcp(term_urn, "glossaryTermInfo", {
                     "name": v["name"], "definition": v["definition"], "termSource": "INTERNAL",
-                    "parentNode": MINED_NODE,
-                    "customProperties": {"cairn_expression": v.get("expression", ""), "cairn_finding": finding["id"],
-                                         "cairn_approved_by": actor}}),
+                    "parentNode": parent, "customProperties": props}),
             ]
         if kind == "create_relationship":
             v = change["value"]

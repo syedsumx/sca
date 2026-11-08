@@ -3,12 +3,16 @@
 1. **Tables**: the datasets the caller named, or the best matches for the question among the
    datasets they may see that a warehouse connection serves (all on one connection).
 2. **Context**: their columns, the approved metric and join definitions over them, the metrics layer's
-   metrics on those tables (:mod:`cairn.sqlworkspace.metrics`), and the SQL that answered similar questions
-   before (:mod:`cairn.context.layer`).
+   metrics on those tables (:mod:`cairn.sqlworkspace.metrics`), the relationships Cairn Ontology compiled
+   between them (:mod:`cairn.context.ontology_compiler`), and the SQL that answered similar questions before
+   (:mod:`cairn.context.layer`).
 3. **SQL**: one read-only SELECT from the model (:mod:`cairn.ai.text2sql`).
 4. **Run**: through :class:`DataAccessService`, so the caller's table permissions, purposes, column
    masking, row limit and audit apply exactly as for SQL they wrote themselves. When the warehouse
    rejects the statement, the model gets the error and one more try; a permission refusal is final.
+5. **Check**: with Cairn Ontology, the SQL is checked against its relationships and definitions (unknown join
+   paths, joins contradicting known keys, fan-out, deprecated columns) and the findings are returned. The check
+   never blocks the governed run; when the compiler cannot answer, the answer carries a warning instead.
 """
 
 from __future__ import annotations
@@ -49,6 +53,7 @@ class AskService:
         self.audit = audit
         self.metrics = metrics
         self.sql = TextToSQL(llm, model)
+        self.ontology = None          # OntologyCompiler (cairn.context.ontology_compiler), set by the services
 
     @property
     def configured(self) -> bool:
@@ -106,6 +111,13 @@ class AskService:
                 defs += self.metrics(refs)
             except Exception:  # noqa: BLE001 - the metrics layer never stops a question being answered
                 pass
+        if self.ontology is not None:
+            approved = {(d["doc"].get("source"), d["doc"].get("source_field"), d["doc"].get("destination"),
+                         d["doc"].get("destination_field")) for d in defs if d["kind"] == "join"}
+            # Compiled relationships among the chosen tables, unless an approved join already says the same.
+            defs += [d for d in self.ontology.join_definitions(urns)
+                     if (d["doc"]["source"], d["doc"]["source_field"], d["doc"]["destination"],
+                         d["doc"]["destination_field"]) not in approved]
         return defs, examples
 
     # ---- asking ---------------------------------------------------------------------------
@@ -134,6 +146,11 @@ class AskService:
                 out.update(sql=None, explanation=None, error=f"the model's SQL was refused: {e}")
                 break
             out.update(sql=gen["sql"], explanation=gen["explanation"])
+            if self.ontology is not None:            # never blocks: findings, or a warning when unavailable
+                out["ontology"] = self.ontology.check(
+                    gen["sql"], source.dialect, can_view,
+                    [{"name": d["name"], "expression": d["doc"]["expression"]} for d in defs
+                     if d["kind"] == "metric" and d["doc"].get("expression")])
             if not run:
                 break
             try:

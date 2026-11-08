@@ -70,7 +70,7 @@ READ_POSTS = {
     "/governance/pii/propagation/plan", "/data/query", "/data/ask", "/context/metrics/{name}/query",
     "/data/sheets/query", "/data/sheets/metric", "/data/sheets/ask",
     "/marketplace/access-requests/preview", "/sources/test",
-    "/quality/contracts/check", "/notify/inbox/read", "/governance/automations/preview",
+    "/quality/contracts/check", "/notify/inbox/read", "/governance/automations/preview", "/v1/ontology/validate-sql",
 }
 ALWAYS = ("/admin/licence", "/me", "/scim/")
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

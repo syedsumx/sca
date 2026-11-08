@@ -5,7 +5,7 @@ provider key:
 
 * Anthropic-compatible: ``POST /v1/ai/gateway/anthropic/v1/messages``
   (``anthropic.Anthropic(base_url=f"{cairn}/v1/ai/gateway/anthropic", auth_token=cairn_token)``);
-* OpenAI-compatible: ``POST /v1/ai/gateway/openai/v1/chat/completions``
+* OpenAI-compatible: ``POST /v1/ai/gateway/openai/v1/chat/completions`` and ``…/openai/v1/embeddings``
   (``openai.OpenAI(base_url=f"{cairn}/v1/ai/gateway/openai/v1", api_key=cairn_token)``), for OpenAI or any
   OpenAI-compatible server (vLLM, Ollama, a model Cairn serves);
 * ``GET /v1/ai/gateway/models``: the models the caller may use.
@@ -478,6 +478,12 @@ def build_gateway_router(gw: AiGateway, current_principal, authorize) -> Any:
     @router.post("/openai/v1/chat/completions")
     async def openai_chat(request: Request, p=Depends(current_principal)):
         return await handle("openai", "/v1/chat/completions", request, p)
+
+    @router.post("/openai/v1/embeddings")
+    async def openai_embeddings(request: Request, p=Depends(current_principal)):
+        """Embeddings on the OpenAI protocol (``openai.OpenAI(...).embeddings.create``), admitted and metered like
+        any other call (input tokens)."""
+        return await handle("openai", "/v1/embeddings", request, p)
 
     @router.get("/models")
     def models(p=Depends(current_principal)):
