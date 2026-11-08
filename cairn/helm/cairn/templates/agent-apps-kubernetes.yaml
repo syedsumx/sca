@@ -1,0 +1,44 @@
+{{- with .Values.cairn.agentApps }}
+{{- if eq .runtime "kubernetes" }}
+{{- /* Agent apps on Kubernetes: Cairn's API account may manage each app's Secret, Deployment, Service and
+       NetworkPolicy in their namespace, read their pods (why one did not start), and nothing else there
+       (cairn.ai.agent_apps_k8s). */}}
+{{- $ctx := dict "root" $ "component" "agent-apps" "cfg" $.Values.cairn.api }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .kubernetes.namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "secrets"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .kubernetes.namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

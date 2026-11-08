@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build the Cairn images: Cairn Core (core, web, setup, executor), control plane, consumer UI,
-# remote agent, Cairn Store, Cairn Catalog, authorizer plugin.
+# remote agent, agent runtime, Cairn Store, Cairn Catalog, authorizer plugin.
 #
 #   core/web/build.sh                            # once per engine release: builds the web UI bundle
 #   deploy/build-images.sh                       # tag cairn/*:0.1.0
@@ -60,6 +60,9 @@ want_pipeline airflow && build "${PREFIX}/airflow:${VERSION}" docker/airflow.Doc
 want_pipeline spark && build "${PREFIX}/spark:${VERSION}" docker/spark.Dockerfile
 want remote-agent && build "${PREFIX}/remote-agent:${VERSION}" docker/agent.Dockerfile \
   --build-arg "INGEST_EXTRAS=${INGEST_EXTRAS:-postgres}"
+# What agent apps run in on Kubernetes (cairn.ai.agent_apps_k8s); AGENT_EXTRA_REQUIREMENTS adds packages.
+want agent-runtime && build "${PREFIX}/agent-runtime:${VERSION}" docker/agent-runtime.Dockerfile \
+  --build-arg "EXTRA_REQUIREMENTS=${AGENT_EXTRA_REQUIREMENTS:-}"
 
 if want authorizer || want core; then
   if [[ "${PLUGIN_JAR:-host}" == "host" ]]; then

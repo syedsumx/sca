@@ -479,6 +479,7 @@ jobs:
           (cd store && cargo build --release --locked)
           docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
           docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
+          docker build -q -f docker/agent-runtime.Dockerfile -t cairn/agent-runtime:ci .
       - name: Kind cluster
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
@@ -499,7 +500,7 @@ jobs:
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
           # Model serving (test_ml_serving_k8s.py): MLflow's model server.
           echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
-          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -511,7 +512,7 @@ jobs:
           CAIRN_SPARK_IMAGE: cairn/spark:ci
         run: |
           set -o pipefail
-          pip install -e ".[server,test,trino,streams]" pyyaml
+          pip install -e ".[server,ai,test,trino,streams]" pyyaml
           export CAIRN_KIND_KUBECONFIG="$HOME/.kube/config"
           # Pods reach this host at the kind network's gateway.
           export CAIRN_KIND_HOST_IP="$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)"
@@ -522,6 +523,10 @@ jobs:
           CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci CAIRN_APPS_K8S_GIT_IMAGE=cairn-test/git:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_data_apps_k8s.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
+          # Agent apps as pods: deployed by Cairn with the chart's Role, called back as the asker, reached only by Cairn.
+          CAIRN_AGENT_RUNTIME_TEST_IMAGE=cairn/agent-runtime:ci CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_agent_apps_k8s.py | tee "$RUNNER_TEMP/agents.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/agents.log"
           # The chart's Gateway API routes through a real Gateway implementation (Envoy Gateway).
           CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_api_kind.py | tee "$RUNNER_TEMP/gateway.log"
@@ -543,6 +548,8 @@ jobs:
           kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
           kubectl -n cairn-jobs-test get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
+          kubectl -n cairn-agents get events --sort-by=.lastTimestamp || true
+          for p in $(kubectl -n cairn-agents get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-agents logs "$p" --tail=100 || true; done
           kubectl -n cairn-models get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-models get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-models logs "$p" --tail=100 || true; done
 
@@ -768,7 +775,7 @@ jobs:
           exit 1
       - name: Scan Cairn-owned images (fail on fixable critical CVEs)
         run: |
-          for img in platform remote-agent store catalog; do
+          for img in platform remote-agent agent-runtime store catalog; do
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$RUNNER_TEMP/trivy:/root/.cache/trivy" \
               aquasec/trivy:0.57.1 image --skip-db-update --quiet --scanners vuln --severity CRITICAL --ignore-unfixed \
               --exit-code 1 "cairn/${img}:${CAIRN_VERSION}"
@@ -784,7 +791,7 @@ jobs:
       - name: SBOMs
         run: |
           mkdir -p "$RUNNER_TEMP/sbom"
-          for img in platform consumer-ui remote-agent store catalog authorizer core web setup executor; do
+          for img in platform consumer-ui remote-agent agent-runtime store catalog authorizer core web setup executor; do
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock anchore/syft:v1.18.1 \
               "cairn/${img}:${CAIRN_VERSION}" -o spdx-json > "$RUNNER_TEMP/sbom/${img}.spdx.json"
           done
@@ -857,7 +864,7 @@ jobs:
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
           chmod +x /usr/local/bin/cosign
-          for img in platform consumer-ui remote-agent store catalog authorizer core web setup executor; do
+          for img in platform consumer-ui remote-agent agent-runtime store catalog authorizer core web setup executor; do
             ref="${REGISTRY,,}/${img}:${CAIRN_VERSION}"
             docker tag "cairn/${img}:${CAIRN_VERSION}" "$ref"
             docker push "$ref"

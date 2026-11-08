@@ -4,9 +4,10 @@ Two modes:
 
 * **dev** (``cairn agents dev``): on your machine, with your own Cairn token (``CAIRN_TOKEN``) for every call, sessions
   kept in ``.cairn/sessions.db`` in the project, and a chat page at ``/``.
-* **app** (run by Cairn for a deployed agent app): reachable only by Cairn (a shared secret on every request); Cairn
-  sends the conversation (it keeps the sessions) and a short-lived token for the person who asked, narrowed to the
-  app's scopes, which the agent's model and data calls use. The runtime keeps nothing.
+* **app** (run by Cairn for a deployed agent app, as a local process or a pod): reachable only by Cairn (a shared
+  secret on every request); Cairn sends the conversation (it keeps the sessions) and a short-lived token for the
+  person who asked, narrowed to the app's scopes, which the agent's model and data calls use. The runtime keeps
+  nothing. On Kubernetes, ``--bundle`` unpacks the project first and exits (3) naming any requirement it lacks.
 
 ``POST /invocations`` (app): ``{"messages", "session_id", "user"}`` with ``X-Cairn-Runtime-Secret`` and
 ``X-Cairn-Run-Token``; ``POST /chat`` (dev): ``{"message", "session_id"}``; ``GET /healthz``; ``GET /`` (dev: the
@@ -202,8 +203,23 @@ def main(argv: Optional[list[str]] = None) -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8765)
     ap.add_argument("--secret-file", default="")       # app mode: the shared secret, from a file (never argv)
+    # On Kubernetes: the project arrives as its bundle (a mounted Secret) and is unpacked into --dir first.
+    ap.add_argument("--bundle", default="")
     a = ap.parse_args(argv)
     project = Path(a.dir).resolve()
+    if a.bundle:
+        from cairn.agentkit.bundle import BundleError, missing_requirements, unpack
+
+        try:
+            unpack(Path(a.bundle).read_bytes(), project)
+        except (BundleError, OSError) as e:
+            print(f"cairn agent runtime: {e}", file=sys.stderr)
+            sys.exit(2)
+        missing = missing_requirements(project)
+        if missing:                                    # Cairn reads this from the pod's termination message
+            print(f"the runtime lacks the project's requirements: {', '.join(missing)} (add them to the agent "
+                  "runtime image, or remove them from requirements.txt)", file=sys.stderr)
+            sys.exit(3)
     secret = Path(a.secret_file).read_text().strip() if a.secret_file else ""
     app = build_app(project, a.mode, os.environ.get("CAIRN_URL", "http://127.0.0.1:9000"),
                     os.environ.get("CAIRN_TOKEN", ""), secret, os.environ.get("CAIRN_USER", ""),

@@ -47,6 +47,15 @@ spec:
         {{- with .Values.cairn.networkPolicy.apiIngressFrom }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
+        {{- if eq .Values.cairn.agentApps.runtime "kubernetes" }}
+        # Agent apps call Cairn back for their models and data, with the asking person's token.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.cairn.agentApps.kubernetes.namespace }}
+          podSelector:
+            matchExpressions:
+              - { key: cairn.io/agent-app, operator: Exists }
+        {{- end }}
       ports:
         - port: http
 ---

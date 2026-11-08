@@ -1257,7 +1257,7 @@ def _build_active_metadata(s: Services) -> None:
 
     s.ai_gateway = AiGateway.from_env(s.ai_usage)
     # Agent apps (cairn.ai.agent_apps): code-first agents deployed to Cairn, run as the person asking.
-    if os.environ.get("CAIRN_AGENT_APPS_RUNTIME") == "process" and s.agents is not None:
+    if os.environ.get("CAIRN_AGENT_APPS_RUNTIME") in ("process", "kubernetes") and s.agents is not None:
         import tempfile
         from pathlib import Path as _Path
 
@@ -1268,8 +1268,14 @@ def _build_active_metadata(s: Services) -> None:
         root = _Path(os.environ.get("CAIRN_AGENT_APPS_DIR") or os.path.join(tempfile.gettempdir(), "cairn-agent-apps"))
         from cairn.ai.agent_apps import MlflowRuns
 
-        s.agent_apps = AgentApps(s.engine, s.agents, ProcessRuntime(root, os.environ.get(
-            "CAIRN_AGENT_APPS_CAIRN_URL", "http://127.0.0.1:9000")), apps_authorize,
+        cairn_url = os.environ.get("CAIRN_AGENT_APPS_CAIRN_URL", "http://127.0.0.1:9000")
+        if os.environ["CAIRN_AGENT_APPS_RUNTIME"] == "kubernetes":
+            from cairn.ai.agent_apps_k8s import KubeRuntime
+
+            agent_runtime: Any = KubeRuntime.from_env(cairn_url)    # misconfigured: Cairn refuses to start
+        else:
+            agent_runtime = ProcessRuntime(root, cairn_url)
+        s.agent_apps = AgentApps(s.engine, s.agents, agent_runtime, apps_authorize,
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
 

@@ -655,6 +655,26 @@ cairn agents invoke triage "Which tickets are open?"
   with a secret Cairn gives it in a file, so only Cairn reaches it. It runs in Cairn's Python environment: a deploy
   whose `requirements.txt` names a package that is not installed is refused, naming it. `CAIRN_AGENT_APPS_CAIRN_URL`
   is the address the runtime calls Cairn back on, and `CAIRN_AGENT_APPS_DIR` is where projects are unpacked.
+- **On Kubernetes** (`CAIRN_AGENT_APPS_RUNTIME=kubernetes`; chart: `cairn.agentApps.runtime: kubernetes`), each app is
+  a Deployment of one pod in `cairn.agentApps.kubernetes.namespace` (`cairn-agents`), with a Secret, a Service and a
+  NetworkPolicy, labelled `cairn.io/agent-app: <name>`. The chart gives Cairn's API a Role there for those objects
+  (and to list pods) and nothing else.
+  - The pod runs `cairn.agentApps.kubernetes.image`, built from `docker/agent-runtime.Dockerfile`: Cairn's agent
+    runtime with the Anthropic and OpenAI SDKs. For agents that need more (LangGraph, the OpenAI Agents SDK, your own
+    libraries), build FROM it, or pass `--build-arg EXTRA_REQUIREMENTS=...`. A deploy whose `requirements.txt` names
+    a package the image lacks is refused, naming it, and leaves nothing behind.
+  - The project travels in the app's Secret (so a bundle is at most 700,000 bytes on Kubernetes), with the secret
+    Cairn sends on every request; neither is in the Deployment. The pod runs as user 10001 without privileges, on a
+    read-only root file system, without a Kubernetes token, and holds no credential of its own: each run brings the
+    asking person's 15-minute token.
+  - Only Cairn reaches the pods: by default Cairn's API pods in this release's namespace
+    (`cairn.agentApps.kubernetes.ingressFrom` to change). The pods call Cairn back at `cairn.agentApps.cairnUrl`
+    (default: the API Service); with `cairn.networkPolicy.enabled`, the API's policy admits them.
+  - `access: node-port` (with `nodeAddress`) is for a Cairn outside the cluster. A redeploy replaces the pod
+    (`Recreate`): two versions never answer side by side. A deploy that does not become ready within
+    `CAIRN_AGENT_APPS_K8S_START_TIMEOUT` seconds (180) is refused with the reason (the pod's termination message,
+    an image pull error, or why it cannot be scheduled), and the app stays down until a deploy works.
+  - Any Cairn replica serves any app: the address and secret are read from the cluster.
 - **Invoking** (`POST /v1/agent-apps/<name>/invocations` with `input` and `session_id`) needs to be the app's owner or
   `USE_AGENT` on `urn:li:cairnAgent:<name>`. Each run gets a 15-minute token for the person asking, narrowed to the
   app's scopes and revoked when the run ends. The agent's model calls go through the AI gateway, and its SQL through
@@ -677,6 +697,10 @@ and the model behind Cairn's AI gateway, a local stand-in for the provider (`tes
 - invocations as the caller, metered to them, each run's token revoked, sessions kept apart and their history sent;
   a person without `USE_AGENT` refused;
 - a redeploy; the pause switch; delete stopping the runtime and the identity.
+- on a real cluster (`tests/test_agent_apps_k8s.py`, kind in CI): the app deployed with only the chart's Role, the
+  pod calling Cairn's gateway back as the asker, a pod elsewhere in the cluster refused by the network policy and a
+  request without the secret refused, another Cairn replica finding the app, a redeploy replacing the pod, a missing
+  package refused by name, Cairn's account refused outside its namespace, and delete removing every object.
 - against a real MLflow server: the app's experiment, and each run under the caller's name with its metrics and no
   content (`tests/test_agent_apps_mlflow.py`).
 

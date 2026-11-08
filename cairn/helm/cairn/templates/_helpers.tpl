@@ -235,6 +235,36 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail "cairn.jobs.runtime: \"\" or kubernetes" }}
 {{- end }}
 {{- end }}
+{{- with .Values.cairn.agentApps }}
+{{- if eq .runtime "kubernetes" }}
+{{- $api := include "cairn.componentName" (dict "root" $ "component" "api") }}
+- name: CAIRN_AGENT_APPS_RUNTIME
+  value: kubernetes
+- name: CAIRN_AGENT_APPS_CAIRN_URL
+  value: {{ default (printf "http://%s.%s.svc:%v" $api $.Release.Namespace $.Values.cairn.api.port) .cairnUrl | quote }}
+- name: CAIRN_AGENT_APPS_K8S_NAMESPACE
+  value: {{ .kubernetes.namespace | quote }}
+- name: CAIRN_AGENT_APPS_K8S_IMAGE
+  value: {{ .kubernetes.image | quote }}
+- name: CAIRN_AGENT_APPS_K8S_ACCESS
+  value: {{ .kubernetes.access | quote }}
+{{- if eq .kubernetes.access "node-port" }}
+{{- if not .kubernetes.nodeAddress }}{{ fail "cairn.agentApps.kubernetes.nodeAddress: where Cairn reaches node ports" }}{{ end }}
+- name: CAIRN_AGENT_APPS_K8S_NODE_ADDRESS
+  value: {{ .kubernetes.nodeAddress | quote }}
+{{- end }}
+- name: CAIRN_AGENT_APPS_K8S_CAIRN_NAMESPACE
+  value: {{ $.Release.Namespace | quote }}
+{{- with .kubernetes.ingressFrom }}
+- name: CAIRN_AGENT_APPS_K8S_INGRESS_FROM
+  value: {{ toJson . | quote }}
+{{- end }}
+- name: CAIRN_AGENT_APPS_K8S_RESOURCES
+  value: {{ toJson .kubernetes.resources | quote }}
+{{- else if .runtime }}
+{{- fail "cairn.agentApps.runtime: \"\" or kubernetes" }}
+{{- end }}
+{{- end }}
 - name: CAIRN_LLM_PROVIDER
   value: {{ .Values.cairn.ai.llmProvider | quote }}
 - name: CAIRN_AI_MODEL

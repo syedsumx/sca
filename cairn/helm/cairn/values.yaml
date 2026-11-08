@@ -1064,6 +1064,24 @@ cairn:
       gitImage: alpine/git:v2.49.1
       resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
 
+  # Agent apps (/v1/agent-apps, `cairn agents deploy`): code-first agents run as the person asking. runtime: ""
+  # (off) or kubernetes: a Deployment per app in kubernetes.namespace running `image` (docker/agent-runtime.Dockerfile;
+  # build FROM it to add the packages your agents need). The chart gives Cairn's API a Role there for the apps'
+  # objects only. Deploying needs BUILD_AGENTS; asking an app needs USE_AGENT on urn:li:cairnAgent:<name>.
+  agentApps:
+    runtime: ""
+    # Where the agents call Cairn back for models and data (default: this release's API Service).
+    cairnUrl: ""
+    kubernetes:
+      namespace: cairn-agents
+      image: cairn/agent-runtime:0.1.0
+      # cluster-ip: Cairn reaches the agents at their Service (Cairn in this cluster); node-port: at nodeAddress.
+      access: cluster-ip
+      nodeAddress: ""
+      # Network policy peers that may reach the agents (default: Cairn's API pods in this release's namespace).
+      ingressFrom: []
+      resources: { requests: { cpu: 100m, memory: 256Mi }, limits: { memory: 1Gi } }
+
   # Scheduled notebook and Python jobs (/v1/jobs): each run as a Kubernetes Job in `namespace`, as its owner
   # (a Trino token minted for them, in a Secret deleted after the run). The chart gives Cairn's account a Role
   # there for the jobs' objects only. Defining or running a job needs RUN_JOBS.

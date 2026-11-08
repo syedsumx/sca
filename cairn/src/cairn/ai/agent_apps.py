@@ -17,7 +17,9 @@
 * **Runtime.** ``CAIRN_AGENT_APPS_RUNTIME=process``: the project runs in ``cairn.agentkit.runtime`` as a local process
   per app (on the API's host, its Python environment, which must have the project's requirements: a deploy that
   needs a missing package is refused and names it), reachable on 127.0.0.1 only with a secret Cairn gives it in a
-  file. ``CAIRN_AGENT_APPS_CAIRN_URL`` is the address the runtime calls Cairn back on.
+  file. ``CAIRN_AGENT_APPS_RUNTIME=kubernetes``: each app is a pod of its own (``cairn.ai.agent_apps_k8s``), from the
+  agent runtime image, reached only by Cairn. ``CAIRN_AGENT_APPS_CAIRN_URL`` is the address the runtime calls Cairn
+  back on.
 * **MLflow.** With ``CAIRN_MLFLOW_URL`` (Cairn's MLflow), each app has an experiment ``agents/<name>`` and each run is
   an MLflow run in it: ``mlflow.user`` the person who asked, the app version and session as tags, latency and the
   sizes of the question and answer as metrics, FINISHED or FAILED. Never the content.
@@ -27,7 +29,6 @@
 from __future__ import annotations
 
 import base64
-import io
 import json
 import logging
 import os
@@ -37,7 +38,6 @@ import shutil
 import socket
 import subprocess
 import sys
-import tarfile
 import threading
 import time
 import uuid
@@ -94,37 +94,18 @@ def urn(name: str) -> str:
 
 def unpack(data: bytes, into: Path) -> None:
     """A project bundle, unpacked safely: regular files and folders inside ``into`` only."""
-    into.mkdir(parents=True, exist_ok=True)
+    from cairn.agentkit.bundle import BundleError, unpack as _unpack
+
     try:
-        tar = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz")
-    except (tarfile.TarError, OSError) as e:
-        raise AgentAppError(f"the bundle is not a gzipped tar: {e}")
-    with tar:
-        for m in tar.getmembers():
-            target = (into / m.name).resolve()
-            if not str(target).startswith(str(into.resolve()) + os.sep) or not (m.isfile() or m.isdir()):
-                raise AgentAppError(f"the bundle has an entry outside the project or not a file: {m.name}")
-        tar.extractall(into, filter="data")
-    if not (into / "agent.py").is_file():
-        raise AgentAppError("the bundle has no agent.py")
+        _unpack(data, into)
+    except BundleError as e:
+        raise AgentAppError(str(e))
 
 
 def missing_requirements(project: Path) -> list[str]:
-    """Requirements (``requirements.txt``) not installed in this Python environment."""
-    from importlib.metadata import PackageNotFoundError, distribution
+    from cairn.agentkit.bundle import missing_requirements as _missing
 
-    req = project / "requirements.txt"
-    out = []
-    for line in (req.read_text().splitlines() if req.is_file() else []):
-        line = line.split("#", 1)[0].strip()
-        if not line or line.startswith("-"):
-            continue
-        name = re.split(r"[<>=!~;\[ ]", line, maxsplit=1)[0].strip()
-        try:
-            distribution(name)
-        except PackageNotFoundError:
-            out.append(name)
-    return out
+    return _missing(project)
 
 
 class ProcessRuntime:
