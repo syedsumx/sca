@@ -204,6 +204,14 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 
 ```
 
+## Cairn Ontology
+
+Cairn Ontology (`cairn/ontology`, the `cairn/ontology` image) is a Rust port of the ontology compiler of
+**NVIDIA Auto Ontology**, <https://github.com/NVIDIA/auto-ontology>, Copyright (c) 2026, NVIDIA CORPORATION &
+AFFILIATES, licensed under the Apache License, Version 2.0 (full text at the end of this file). Its semantic
+compilation algorithms, catalog ingestion, SQL handling and model prompts were ported with modifications;
+`ontology/NOTICE` lists the files and the changes, and each ported source file names its origin.
+
 ## Other components
 
 | Component | Used as | Licence |
@@ -214,7 +222,7 @@ THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND 
 | PostgreSQL, pgvector | control-plane database (container) | PostgreSQL License |
 | nginx | edge proxy and static hosting (container) | BSD-2-Clause |
 | Ollama (optional profile) | local LLM runtime (container) | MIT |
-| Rust crates (see `store/Cargo.lock`, `catalog/Cargo.lock`: iceberg-rust, redb, tokio, hyper, reqwest, rustls, serde, RustCrypto hashes and AES-GCM, rustls with ring, rskafka, russh and russh-sftp with ring, fuser, rust-postgres with tokio-postgres-rustls, ...) | compiled into Cairn Store and Cairn Catalog | per crate (Apache-2.0, MIT, ISC, BSD) |
+| Rust crates (see `store/Cargo.lock`, `catalog/Cargo.lock`, `ontology/Cargo.lock`: iceberg-rust, sqlparser, axum, rusqlite (SQLite), redb, tokio, hyper, reqwest, rustls, serde, RustCrypto hashes and AES-GCM, rustls with ring, rskafka, russh and russh-sftp with ring, fuser, rust-postgres with tokio-postgres-rustls, ...) | compiled into Cairn Store, Cairn Catalog and Cairn Ontology | per crate (Apache-2.0, MIT, ISC, BSD) |
 | webpki-roots (Mozilla root certificates) | compiled into Cairn Store for outbound HTTPS | CDLA-Permissive-2.0 |
 | Alpine Linux | Cairn Store runtime image | per package (MIT, GPL-2.0 for BusyBox) |
 | Python packages (see `pyproject.toml`) | control plane, remote agent | per package (Apache-2.0, BSD, MIT, MPL-2.0) |

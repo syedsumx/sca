@@ -1,0 +1,30 @@
+Cairn Ontology (cairn-ontology)
+
+This product includes software derived from NVIDIA Auto Ontology
+(https://github.com/NVIDIA/auto-ontology), Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES.
+All rights reserved. Licensed under the Apache License, Version 2.0 (see LICENSE in this directory).
+
+The following were ported from it to Rust, with modifications (each ported file carries an attribution
+header naming its origin):
+
+- the semantic compilation pipeline: auto_ontology/semantic/pipeline.py, compile.py, visit_enter.py,
+  cancellation.py (the ordered commit queue, per-table processing, column profiling, cancellation);
+- deterministic column mapping, foreign-key suggestion and term extraction: auto_ontology/semantic/
+  deterministic.py, fk_suggester.py, term_extractor.py, models.py, domain.py;
+- semantic foreign-key resolution: auto_ontology/semantic/semantic_fk.py;
+- bridge (junction) tables and SqlAttribute suggestion: auto_ontology/semantic/bridge_tables.py,
+  sql_attribute_suggester.py;
+- date-format inference and the embedding texts: auto_ontology/semantic/date_format.py, embed.py;
+- catalog ingestion: auto_ontology/catalog/extract.py, normalize.py, table_filter.py, diff.py, sql_parse.py,
+  query_stats.py, parsers/sqlglot_extractor.py, parsers/query_comparator.py, model/query.py;
+- the model prompts (reproduced verbatim in src/prompts.rs);
+- the intent of the upstream unit tests (semantic/tests, catalog/tests), rewritten as Rust tests.
+
+NVIDIA Auto Ontology's own notice reads: "This distribution includes open source which is archived at the
+following URL: https://opensource.nvidia.com/oss/teams/nvidia".
+
+Changes made in this port: rewritten in Rust; SQL parsing on the `sqlparser` crate instead of sqlglot; the
+catalog snapshot and query log arrive over an HTTP API from Cairn instead of being read by connectors; values
+are sampled by Cairn under its governance instead of by the compiler; relationships also come from joins
+observed in the query log; usage ranking uses the documented fix of the upstream scorer; the ontology is stored
+in PostgreSQL (or SQLite) with versioned compilation runs; SQL validation and graph exports were added.
