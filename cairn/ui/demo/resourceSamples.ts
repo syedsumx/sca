@@ -466,7 +466,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "tokenize": {
     "card_number": "pan"
    },
-   "ai": {}
+   "ai": {},
+   "layer": "bronze"
   },
   {
    "id": "b3a90d4e17c24f6e8a0c5b2d91e7f384",
@@ -486,7 +487,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
     "extract": {
      "invoice_total": "the invoice total in USD"
     }
-   }
+   },
+   "layer": null
   },
   {
    "id": "0e7b5c3a9d2f41e6b8c4a7f0e1d2c3b4",
@@ -501,7 +503,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1776820000000,
    "bad_rows": "fail",
    "tokenize": {},
-   "ai": {}
+   "ai": {},
+   "layer": null
   }
  ],
  "/v1/streams": [
@@ -535,7 +538,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
     "last_commit_ms": 1794099992000,
     "error": null,
     "updated_ms": 1794099995000
-   }
+   },
+   "layer": "bronze"
   },
   {
    "id": "7c4e2a9b1f0d4e3c8a6b5d2e9f1c0a37",
@@ -565,7 +569,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
     "last_commit_ms": 1794096400000,
     "error": "column visitors: expected integer, got \"n/a\"",
     "updated_ms": 1794099940000
-   }
+   },
+   "layer": "bronze"
   },
   {
    "id": "d91a3f7e5c2b4b08a4e6c1f9b7d3e520",
@@ -597,7 +602,8 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
     "last_commit_ms": null,
     "error": null,
     "updated_ms": null
-   }
+   },
+   "layer": "bronze"
   }
  ],
  "/v1/samples": [
@@ -662,7 +668,9 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1791940000000,
    "kind": "table",
    "fresh": true,
-   "changed": []
+   "changed": [],
+   "tracked": [],
+   "layer": "gold"
   },
   {
    "id": "9e1b7c3d5a0f42e6b8d4c2a7e9f01b36",
@@ -687,7 +695,9 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "fresh": false,
    "changed": [
     "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders,PROD)"
-   ]
+   ],
+   "tracked": [],
+   "layer": "silver"
   },
   {
    "id": "c0d8e2a4f6b14c79a1e3d5b7c9f02a68",
@@ -709,7 +719,79 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "created_ms": 1794013600000,
    "kind": "table",
    "fresh": null,
-   "changed": []
+   "changed": [],
+   "tracked": [],
+   "layer": null
+  },
+  {
+   "id": "6e1d9c3b7a5f4e2d8c0b1a3f5e7d9c2b",
+   "name": "customers_history",
+   "sql": "SELECT customer_id, name, segment, tier, country, email FROM lakehouse.crm.customers",
+   "target": "crm.customers_history",
+   "mode": "scd2",
+   "watermark": null,
+   "key": [
+    "customer_id"
+   ],
+   "every_minutes": 60,
+   "on_change": true,
+   "upstreams": [
+    "urn:li:dataset:(urn:li:dataPlatform:iceberg,crm.customers,PROD)"
+   ],
+   "owner": "urn:li:corpuser:alice",
+   "enabled": true,
+   "last_run_ms": 1794098200000,
+   "created_by": "urn:li:corpuser:alice",
+   "created_ms": 1791940000000,
+   "kind": "table",
+   "fresh": true,
+   "changed": [],
+   "tracked": [
+    "segment",
+    "tier",
+    "country"
+   ],
+   "layer": "silver"
+  }
+ ],
+ "/v1/medallion": [
+  {
+   "dataset": "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.orders_live,PROD)",
+   "table": "sales.orders_live",
+   "layer": "bronze",
+   "resource": "stream:orders-cdc",
+   "tag": "urn:li:tag:medallion.bronze",
+   "set_by": "urn:li:corpuser:raj",
+   "set_ms": 1789780000000,
+   "gold_ready": false,
+   "problems": [
+    "it has no description",
+    "it has neither a data contract nor a quality monitor (gold needs a met contract or passing monitors)"
+   ]
+  },
+  {
+   "dataset": "urn:li:dataset:(urn:li:dataPlatform:iceberg,crm.customers_history,PROD)",
+   "table": "crm.customers_history",
+   "layer": "silver",
+   "resource": "derived:customers_history",
+   "tag": "urn:li:tag:medallion.silver",
+   "set_by": "urn:li:corpuser:alice",
+   "set_ms": 1793900000000,
+   "gold_ready": true,
+   "problems": []
+  },
+  {
+   "dataset": "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.daily_store_revenue,PROD)",
+   "table": "sales.daily_store_revenue",
+   "layer": "gold",
+   "resource": "derived:daily-store-revenue",
+   "tag": "urn:li:tag:medallion.gold",
+   "set_by": "urn:li:corpuser:alice",
+   "set_ms": 1794000000000,
+   "gold_ready": false,
+   "problems": [
+    "its data contract is BROKEN (gold needs a met contract or passing monitors)"
+   ]
   }
  ],
  "/v1/vectors": [

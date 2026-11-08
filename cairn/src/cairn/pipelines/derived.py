@@ -7,6 +7,14 @@ and how it refreshes:
 * ``append``: only rows whose ``watermark`` column is above the table's current maximum are added;
 * ``merge``: rows (those at or above the table's maximum ``watermark``, or all without one) replace the
   rows with the same ``key`` columns, others are inserted (``MERGE``).
+* ``scd2``: a slowly changing dimension, type 2. The table keeps every version of each ``key``, with
+  ``valid_from``, ``valid_to`` and ``is_current``. Each refresh is one ``MERGE``: a key whose ``tracked`` columns
+  changed (all non-key columns unless given) has its current row closed (``valid_to``, ``is_current = false``) and
+  a new current version inserted; a new key is inserted; a key gone from the query is closed; changes to columns
+  that are not tracked are written onto the current row in place. A refresh with nothing changed changes nothing,
+  so running one twice is the same as once. The history is the table, so a full rebuild is refused once it has one.
+
+A ``layer`` (bronze, silver, gold) can be set with the definition: see ``cairn.pipelines.medallion``.
 
 The first run, and any run asked to be full, creates the table from the whole query. It refreshes every
 ``every_minutes``, and/or ``on_change``: when a table the query reads is recorded as changed (pipes,
@@ -49,6 +57,7 @@ derived_tables = Table(
     Column("lease_until", BigInteger, nullable=False, default=0),
     Column("full_next", Boolean, nullable=False, default=False),     # the query changed: rebuild next time
     Column("kind", String(32), nullable=False, default="table", server_default="table"),   # table | materialized_view
+    Column("tracked", Text, nullable=True),                          # scd2: comma-separated tracked columns (0125)
     Column("created_by", String(256), nullable=False),
     Column("created_ms", BigInteger, nullable=False),
 )
@@ -65,7 +74,9 @@ derived_runs = Table(
     Column("error", String(2000), nullable=True),
 )
 
-MODES = ("full", "append", "merge")
+MODES = ("full", "append", "merge", "scd2")
+SCD = ("valid_from", "valid_to", "is_current")
+NOW = "CAST(current_timestamp AS timestamp(6) with time zone)"
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 LEASE_MS = 3_600_000
 
@@ -84,7 +95,8 @@ def _row(r) -> dict:
     return {"id": r.id, "name": r.name, "sql": r.sql, "target": r.target, "mode": r.mode, "watermark": r.watermark,
             "key": [k for k in r.key.split(",") if k], "every_minutes": r.every_minutes, "on_change": bool(r.on_change),
             "upstreams": json.loads(r.upstreams or "[]"), "owner": r.owner, "enabled": bool(r.enabled),
-            "last_run_ms": r.last_run_ms, "created_by": r.created_by, "created_ms": r.created_ms, "kind": r.kind}
+            "last_run_ms": r.last_run_ms, "created_by": r.created_by, "created_ms": r.created_ms, "kind": r.kind,
+            "tracked": [c for c in (getattr(r, "tracked", None) or "").split(",") if c]}
 
 
 def _q(name: str) -> str:
@@ -119,11 +131,26 @@ class DerivedTables:
         """``run(owner, sql)``: runs one statement on Trino as that Cairn user and returns its rows."""
         self.engine, self.run, self.catalog, self.audit, self.changes = engine, run, catalog, audit, changes
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
+        self.medallion = None                    # cairn.pipelines.medallion.Medallion: layers on the targets
+
+    def _layer(self, body: dict, target: str) -> Optional[str]:
+        """The layer the definition asks for, checked (gold's rules) before anything is written."""
+        from cairn.pipelines.medallion import MedallionError, requested
+
+        try:
+            if self.medallion is None:
+                if requested(body):
+                    raise DerivedError("medallion layers are not available on this deployment", 503)
+                return None
+            return self.medallion.before(body, self.urn(*target.split(".")))
+        except MedallionError as e:
+            raise DerivedError(str(e), e.status)
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, owner: str, actor: str) -> dict:
         row = self._values(body, owner, actor)
         target, parts = row["target"], row["target"].split(".")
+        layer = self._layer(body, target)
         with self.engine.begin() as conn:
             if conn.execute(select(derived_tables.c.id).where(or_(derived_tables.c.name == row["name"],
                                                                   derived_tables.c.target == target))).first():
@@ -132,6 +159,8 @@ class DerivedTables:
             if self.audit is not None:
                 self.audit.record("lakehouse", "derived.created", actor, self.urn(*parts),
                                   {k: v for k, v in row.items() if k != "lease_until"}, conn=conn)
+        if layer:
+            self.medallion.after(layer, self.urn(*parts), target, actor, f"derived:{row['name']}")
         return self.get(row["id"])
 
     def update(self, did: str, body: dict, actor: str) -> dict:
@@ -139,11 +168,12 @@ class DerivedTables:
         rebuilds the table from the whole query on the next refresh; a new target is created there."""
         cur = self.get(did)
         row = self._values(body, cur["owner"], actor)
+        layer = self._layer(body, row["target"])
         changed = any(row[k] != (",".join(cur[k]) if k == "key" else cur[k]) for k in ("sql", "mode", "watermark", "key", "target"))
         keep = ("id", "seen_change", "last_run_ms", "lease_until", "created_by", "created_ms", "owner", "kind")
         values = {k: v for k, v in row.items() if k not in keep}
-        if changed:
-            values["full_next"] = True
+        if changed and not (row["mode"] == "scd2" and cur["mode"] == "scd2" and row["target"] == cur["target"]):
+            values["full_next"] = True                    # an scd2 table keeps its history: it is never rebuilt
         with self.engine.begin() as conn:
             if conn.execute(select(derived_tables.c.id).where(or_(derived_tables.c.name == row["name"],
                                                                   derived_tables.c.target == row["target"]),
@@ -153,6 +183,8 @@ class DerivedTables:
             if self.audit is not None:
                 self.audit.record("lakehouse", "derived.updated", actor, self.urn(*row["target"].split(".")),
                                   {**values, "id": did}, conn=conn)
+        if layer:
+            self.medallion.after(layer, self.urn(*row["target"].split(".")), row["target"], actor, f"derived:{row['name']}")
         return self.get(did)
 
     def _values(self, body: dict, owner: str, actor: str) -> dict:
@@ -168,10 +200,23 @@ class DerivedTables:
             raise DerivedError(f"mode is one of {', '.join(MODES)}")
         if mode == "append" and not wm:
             raise DerivedError("append needs a watermark column (rows above the table's maximum are added)")
-        if mode == "merge" and not key:
-            raise DerivedError("merge needs the key columns")
+        if mode in ("merge", "scd2") and not key:
+            raise DerivedError(f"{mode} needs the key columns")
         if (wm and not NAME.match(wm)) or not all(NAME.match(k) for k in key):
             raise DerivedError("watermark and key are column names")
+        tracked = body.get("tracked") or []
+        tracked = [c.strip() for c in tracked.split(",") if c.strip()] if isinstance(tracked, str) else [str(c) for c in tracked]
+        if tracked and mode != "scd2":
+            raise DerivedError("tracked columns are for scd2")
+        if not all(NAME.match(c) for c in tracked) or set(c.lower() for c in tracked) & {k.lower() for k in key}:
+            raise DerivedError("tracked are column names, not key columns")
+        if mode == "scd2":
+            if wm:
+                raise DerivedError("scd2 compares every row of the query with the current versions: no watermark")
+            if set(c.lower() for c in key + tracked) & set(SCD):
+                raise DerivedError(f"{', '.join(SCD)} are the history's own columns")
+            if str(body.get("kind") or "table") != "table":
+                raise DerivedError("scd2 is for tables")
         every = body.get("every_minutes")
         if every is not None and (not isinstance(every, int) or not 1 <= every <= 7 * 24 * 60):
             raise DerivedError("every_minutes is between 1 and 10080")
@@ -188,14 +233,20 @@ class DerivedTables:
                "key": ",".join(key), "every_minutes": every, "on_change": on_change,
                "upstreams": json.dumps([self.urn(s, t) for s, t in read]), "owner": owner,
                "enabled": bool(body.get("enabled", True)), "seen_change": 0, "last_run_ms": None, "lease_until": 0,
-               "created_by": actor, "created_ms": _now(), "full_next": False, "kind": kind}
+               "created_by": actor, "created_ms": _now(), "full_next": False, "kind": kind,
+               "tracked": ",".join(tracked) or None}
         if self.changes is not None:
             row["seen_change"] = self.changes.head()
         return row
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
-            return [_row(r) for r in conn.execute(select(derived_tables).order_by(derived_tables.c.name))]
+            out = [_row(r) for r in conn.execute(select(derived_tables).order_by(derived_tables.c.name))]
+        if self.medallion is not None:
+            layers = self.medallion.layers([self.urn(*d["target"].split(".")) for d in out])
+            for d in out:
+                d["layer"] = layers.get(self.urn(*d["target"].split(".")))
+        return out
 
     def get(self, did: str) -> dict:
         with self.engine.connect() as conn:
@@ -237,8 +288,66 @@ class DerivedTables:
                                     f"WHERE table_schema = '{schema.lower()}' AND table_name = '{table.lower()}'")
         return bool(rows and rows[0][0])
 
+    def _columns(self, d: dict) -> list[str]:
+        schema, table = d["target"].split(".")
+        return [r[0] for r in self.run(d["owner"], f"SELECT column_name FROM {_q(self.catalog)}.information_schema.columns "
+                                                   f"WHERE table_schema = '{schema.lower()}' AND table_name = '{table.lower()}' "
+                                                   "ORDER BY ordinal_position")]
+
+    def scd2(self, d: dict, full: bool = False) -> tuple[str, list[str]]:
+        """An scd2 run: the table created with its history columns, or one MERGE that closes changed and removed
+        keys' current rows and inserts new versions (nothing when nothing changed)."""
+        t, sql, keys = self._target(d), d["sql"], d["key"]
+        exists = self._exists(d)
+        cols = self._columns(d) if exists else []
+        if not exists or not set(SCD) <= set(cols):
+            schema = d["target"].split(".")[0]
+            return ("full" if exists else "create"), [
+                f"CREATE SCHEMA IF NOT EXISTS {_q(self.catalog)}.{_q(schema)}",
+                f"CREATE OR REPLACE TABLE {t} AS SELECT src.*, {NOW} AS valid_from, "
+                f"CAST(NULL AS timestamp(6) with time zone) AS valid_to, true AS is_current FROM ({sql}) AS src"]
+        if full:
+            raise DerivedError("an scd2 table keeps its history: a full rebuild would lose it (drop the table to start "
+                               "again)", 409)
+        data = [c for c in cols if c not in SCD]
+        missing = [k for k in keys + d.get("tracked", []) if k not in data]
+        if missing:
+            raise DerivedError(f"the table has no column {', '.join(missing)}")
+        tracked = d.get("tracked") or [c for c in data if c not in keys]
+        untracked = [c for c in data if c not in keys and c not in tracked]
+
+        def differ(a: str, b: str, columns: list[str]) -> str:
+            return " OR ".join(f"{a}.{_q(c)} IS DISTINCT FROM {b}.{_q(c)}" for c in columns) or "false"
+        on_keys = " AND ".join(f"cur.{_q(k)} = src.{_q(k)}" for k in keys)
+        src_cols = ", ".join(f"src.{_q(c)}" for c in data)
+        mk = [f"__cairn_k{i}" for i in range(len(keys))]
+        source = (
+            # every row of the query, by key: matches its current version (or none: a new key)
+            f"SELECT {', '.join(f'src.{_q(k)} AS {m}' for k, m in zip(keys, mk))}, {src_cols}, 'u' AS __cairn_op "
+            f"FROM ({sql}) AS src "
+            # the new version of each changed key: no key to match on, so it is inserted
+            f"UNION ALL SELECT {', '.join(f'NULL AS {m}' for m in mk)}, {src_cols}, 'n' AS __cairn_op "
+            f"FROM ({sql}) AS src JOIN {t} AS cur ON cur.is_current AND {on_keys} WHERE {differ('cur', 'src', tracked)} "
+            # current versions of keys the query no longer has: closed
+            f"UNION ALL SELECT {', '.join(f'cur.{_q(k)} AS {m}' for k, m in zip(keys, mk))}, "
+            f"{', '.join(f'NULL AS {_q(c)}' for c in data)}, 'd' AS __cairn_op "
+            f"FROM {t} AS cur LEFT JOIN ({sql}) AS src ON {on_keys} WHERE cur.is_current AND src.{_q(keys[0])} IS NULL")
+        on = " AND ".join(f"t.{_q(k)} = s.{m}" for k, m in zip(keys, mk))
+        close = f"UPDATE SET valid_to = {NOW}, is_current = false"
+        merge = (f"MERGE INTO {t} AS t USING ({source}) AS s ON t.is_current AND {on} "
+                 f"WHEN MATCHED AND s.__cairn_op = 'd' THEN {close} "
+                 f"WHEN MATCHED AND s.__cairn_op = 'u' AND ({differ('t', 's', tracked)}) THEN {close} ")
+        if untracked:
+            merge += (f"WHEN MATCHED AND s.__cairn_op = 'u' AND ({differ('t', 's', untracked)}) THEN UPDATE SET "
+                      + ", ".join(f"{_q(c)} = s.{_q(c)}" for c in untracked) + " ")
+        merge += (f"WHEN NOT MATCHED AND s.__cairn_op <> 'd' THEN INSERT ({', '.join(_q(c) for c in data + list(SCD))}) "
+                  f"VALUES ({', '.join('s.' + _q(c) for c in data)}, {NOW}, CAST(NULL AS timestamp(6) with time zone), true)")
+        return "scd2", [merge]
+
     def statements(self, d: dict, full: bool = False) -> tuple[str, list[str]]:
         """What a run executes: ``(kind, statements)``."""
+        if d["mode"] == "scd2":
+            return self.scd2(d, full)
         t, sql, wm = self._target(d), d["sql"], d["watermark"]
         if full or d["mode"] == "full" or not self._exists(d):
             schema = d["target"].split(".")[0]

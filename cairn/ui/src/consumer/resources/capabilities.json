@@ -963,6 +963,14 @@
    "done": "An agent asked to summarise revenue cannot, even through a prompt injection or a bug, write, share, export or read tables the task does not concern, though its scopes would allow it; operators can require every agent run to say what it is for",
    "status": "shipped",
    "note": "cairn.identity.intents: intents (purpose, actions read, query, propose, write, share, export, model, admin, tables, domains) on run tokens (agent app invocations), custom agent definitions (migration 0124) and key agents; every agent request classified (HTTP by route, SQL by statement kind, tools by tool) and refused outside its intent (403, audited agent.intent_denied); /v1/agent-intents/settings (require intents, fail closed), /denials, /classify. Tested end to end through the HTTP API with real agent keys, run tokens, a real SQLite warehouse, a custom agent run and a real agent app process whose model call is refused (tests/test_agent_intents.py, tests/test_agent_apps.py)"
+  },
+  {
+   "id": "L110",
+   "title": "SCD type 2 and medallion layers",
+   "summary": "Derived tables that keep every version of a row, and bronze, silver and gold on the tables Cairn writes",
+   "done": "Dimension history (what a customer's tier was last quarter) without hand-written MERGE logic, and a gold layer that means something: owned, described and passing its contract; the counterpart of Databricks' APPLY CHANGES (SCD type 2) and medallion architecture",
+   "status": "shipped",
+   "note": "Derived mode scd2 (key, tracked): one Trino MERGE per refresh closes changed and removed keys (valid_to, is_current), inserts new versions, writes untracked changes in place, changes nothing when nothing changed; a full rebuild is refused once there is history. layer on pipes, streams and derived tables and /v1/medallion: kept (migration 0125), tagged in the catalog, gold refused without an owner, a description and a met contract or passing monitors, and re-checked in the listing. Tested end to end on Trino with the real store and catalog (tests/test_scd2_medallion_e2e.py)"
   }
  ]
 }

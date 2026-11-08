@@ -118,6 +118,7 @@ def load_models() -> MetaData:
     from cairn.ml import mlflow_gateway as _ml  # noqa: F401
     from cairn.dataaccess import query_history as _query_history  # noqa: F401
     from cairn.pipelines import vectors as _vectors  # noqa: F401
+    from cairn.pipelines import medallion as _medallion  # noqa: F401
     from cairn.ml import online as _online  # noqa: F401
     from cairn.ml import monitoring as _monitoring  # noqa: F401
     from cairn.reports import budgets as _budgets  # noqa: F401

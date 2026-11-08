@@ -34,6 +34,7 @@ export const HUBS: Hub[] = [
         "tabs": [
             "derived",
             "external-catalogs",
+            "medallion",
             "vectors",
             "volumes",
             "storage",

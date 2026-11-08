@@ -603,7 +603,25 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     watch_licence(services.licence)
     _build_active_metadata(services)
     _build_pipeline_health(services)
+    _build_medallion(services)
     return services
+
+
+def _build_medallion(s: Services) -> None:
+    """Medallion layers on the tables pipes, streams and derived tables write; gold is checked against the catalog's
+    owner and description and the table's contract or quality monitors (built after all of those)."""
+    from cairn.pipelines.medallion import Medallion
+
+    contracts = getattr(s, "contracts", None)
+    s.medallion = Medallion(s.engine, s.graph, s.audit,
+                            (lambda urn: (contracts.get(urn) or {}).get("status")) if contracts is not None else None,
+                            s.quality)
+    lk = getattr(s, "lakehouse", None)
+    s.medallion_urn = (lambda ns, t: lk.urn([ns], t)) if lk is not None else \
+        (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
+    for name in ("pipes", "streams", "derived"):
+        if getattr(s, name, None) is not None:
+            getattr(s, name).medallion = s.medallion
 
 
 def _build_pipeline_health(s: Services) -> None:

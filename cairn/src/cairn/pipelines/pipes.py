@@ -309,28 +309,37 @@ class Pipes:
         self._locks: dict[str, threading.Lock] = {}
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
         self.llm = None                        # Cairn's metered model, for files pipes' AI enrichment
+        self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
+        from cairn.pipelines.medallion import layer_after, layer_before
+
         row = self._values(body, actor)
+        layer = layer_before(self, body, row["target"])
         with self.engine.begin() as conn:
             if conn.execute(select(pipes.c.id).where(pipes.c.name == row["name"])).first():
                 raise PipeError("a pipe with that name exists", 409)
             conn.execute(pipes.insert().values(**row))
             if self.audit is not None:
                 self.audit.record("lakehouse", "pipe.created", actor, self.urn(*row["target"].split(".")), row, conn=conn)
+        layer_after(self, layer, row["target"], actor, f"pipe:{row['name']}")
         return _pipe(type("R", (), row))
 
     def update(self, pid: str, body: dict, actor: str) -> dict:
         """Changes a pipe in place: files already loaded stay loaded."""
+        from cairn.pipelines.medallion import layer_after, layer_before
+
         cur = self.get(pid)
         row = {**self._values(body, actor), "id": pid, "created_by": cur["created_by"], "created_ms": cur["created_ms"]}
+        layer = layer_before(self, body, row["target"])
         with self.engine.begin() as conn:
             if conn.execute(select(pipes.c.id).where(pipes.c.name == row["name"], pipes.c.id != pid)).first():
                 raise PipeError("a pipe with that name exists", 409)
             conn.execute(pipes.update().where(pipes.c.id == pid).values(**row))
             if self.audit is not None:
                 self.audit.record("lakehouse", "pipe.updated", actor, self.urn(*row["target"].split(".")), row, conn=conn)
+        layer_after(self, layer, row["target"], actor, f"pipe:{row['name']}")
         return _pipe(type("R", (), row))
 
     def _values(self, body: dict, actor: str) -> dict:
@@ -363,8 +372,10 @@ class Pipes:
         return row
 
     def list(self) -> list[dict]:
+        from cairn.pipelines.medallion import with_layers
+
         with self.engine.connect() as conn:
-            return [_pipe(r) for r in conn.execute(select(pipes).order_by(pipes.c.name))]
+            return with_layers(self, [_pipe(r) for r in conn.execute(select(pipes).order_by(pipes.c.name))])
 
     def get(self, pid: str) -> dict:
         with self.engine.connect() as conn:

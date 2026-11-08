@@ -262,13 +262,17 @@ class Streams:
         self.graph = graph
         self.registry = registry or {}
         self.tokens = None                     # cairn.governance.tokens.Tokens, when tokenisation is configured
+        self.medallion = None                  # cairn.pipelines.medallion.Medallion: layers on the targets
         self._registry = Registry(self.registry) if self.registry.get("url") else None
         self.urn = urn or (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)")
 
     # ---- definitions --------------------------------------------------------------------
     def create(self, body: dict, actor: str) -> dict:
+        from cairn.pipelines.medallion import layer_after, layer_before
+
         row = self._values(body, actor)
         target, source = row["target"], row["source"]
+        layer = layer_before(self, body, target)
         with self.engine.begin() as conn:
             if conn.execute(select(streams.c.id).where(streams.c.name == row["name"])).first():
                 raise StreamError("a stream with that name exists", 409)
@@ -277,13 +281,17 @@ class Streams:
                 self.audit.record("lakehouse", "stream.created", actor, self.urn(*target.split(".")), row, conn=conn)
             if source:
                 self._lineage(self.urn(*target.split(".")), source, actor)   # fails: nothing is created
+        layer_after(self, layer, target, actor, f"stream:{row['name']}")
         return _stream(type("R", (), row))
 
     def update(self, sid: str, body: dict, actor: str) -> dict:
         """Changes a stream in place, keeping its id: its offsets (in the table's snapshots) carry on. A new
         target table starts from ``start``. Running workers pick the change up within their interval."""
+        from cairn.pipelines.medallion import layer_after, layer_before
+
         cur = self.get(sid)
         row = {**self._values(body, actor), "id": sid, "created_by": cur["created_by"], "created_ms": cur["created_ms"]}
+        layer = layer_before(self, body, row["target"])
         with self.engine.begin() as conn:
             if conn.execute(select(streams.c.id).where(streams.c.name == row["name"], streams.c.id != sid)).first():
                 raise StreamError("a stream with that name exists", 409)
@@ -292,6 +300,7 @@ class Streams:
                 self.audit.record("lakehouse", "stream.updated", actor, self.urn(*row["target"].split(".")), row, conn=conn)
             if row["source"] and (row["source"] != cur["source"] or row["target"] != cur["target"]):
                 self._lineage(self.urn(*row["target"].split(".")), row["source"], actor)
+        layer_after(self, layer, row["target"], actor, f"stream:{row['name']}")
         return self.get(sid)
 
     def _values(self, body: dict, actor: str) -> dict:
@@ -372,7 +381,9 @@ class Streams:
         for d in defs:
             s = st.get(d["id"], {})
             d["status"] = {k: s.get(k) for k in ("status", "rows", "lag", "last_commit_ms", "error", "updated_ms")}
-        return defs
+        from cairn.pipelines.medallion import with_layers
+
+        return with_layers(self, defs)
 
     def get(self, sid: str) -> dict:
         with self.engine.connect() as conn:
@@ -763,7 +774,7 @@ class StreamRunner:
                 del self.workers[sid]
         for sid, d in want.items():
             if sid not in self.workers:
-                d = {k: v for k, v in d.items() if k != "status"}
+                d = {k: v for k, v in d.items() if k not in ("status", "layer")}   # not what a worker runs
                 self.workers[sid] = StreamWorker(self.s, d)
                 self.workers[sid].start()
 

@@ -3814,6 +3814,59 @@ A derived table is a SELECT kept as a lakehouse table and refreshed on Trino. De
   - **Owner.** A table owned by a user without access to its source failed its run, recorded, and nothing was created.
   - **Checks.** Statements that are not one SELECT, a query reading its own target, and bad columns were refused. Owners saw and ran only their own. A running refresh blocked a second one.
 
+### Slowly changing dimensions (SCD type 2)
+
+`mode: "scd2"` keeps every version of each row. Give `key` (the columns that identify a row) and, optionally,
+`tracked` (the columns whose changes make a new version; default: every non-key column).
+
+```json
+{"name": "customers_history", "target": "crm.customers_history", "mode": "scd2", "key": ["customer_id"],
+ "tracked": ["segment", "tier"], "every_minutes": 60,
+ "sql": "SELECT customer_id, name, segment, tier, email FROM lakehouse.crm.customers"}
+```
+
+- **The table** has the query's columns plus `valid_from`, `valid_to` (`timestamp(6) with time zone`; NULL while
+  current) and `is_current`. The first run creates it with every row current.
+- **Each refresh is one `MERGE`** on Trino, as the owner, so it commits or fails as a whole:
+  - a key whose tracked columns changed has its current row closed (`valid_to` set, `is_current = false`) and a new
+    current version inserted; the two meet exactly (the old `valid_to` is the new `valid_from`);
+  - a new key is inserted; a key gone from the query has its current row closed; a key that comes back starts a
+    new version;
+  - changes to columns that are not tracked are written onto the current row in place (type 1 for those columns).
+- **Idempotent.** A refresh with nothing changed in the query changes nothing, so a retried or repeated refresh is
+  the same as one.
+- **The history is the table.** A full refresh is refused once the table has its history columns (the run records
+  why); drop the table to start again. Changing the query, `key` or `tracked` keeps the history: the next refresh
+  compares against it. A column added to the query is not written until it is added to the table
+  (`ALTER TABLE … ADD COLUMN`). The key must be unique in the query: duplicates fail the run.
+- `scd2` takes no `watermark` (every row of the query is compared) and is for tables, not materialized views.
+
+### Medallion layers
+
+Tables that pipes, streams and derived tables write can be marked **bronze**, **silver** or **gold**.
+
+- **Setting.** Add `"layer"` to a definition (`POST`/`PUT` on `/v1/pipes`, `/v1/streams`, `/v1/derived`), or use
+  `PUT /v1/medallion/<namespace.table>` `{"layer": "gold"}` (`MANAGE_INGESTION`); `DELETE` removes it.
+  `GET /v1/medallion` (optionally `?layer=gold`) lists layered tables; the definitions' own listings show `layer`.
+- **In the catalog.** The table's dataset gets the tag `urn:li:tag:medallion.<layer>` (one medallion tag at a time;
+  its other tags stay).
+- **Gold is earned.** Marking a table gold is refused (409, with what is missing) unless it has an owner in the
+  catalog, a description, and a data contract that is met or quality monitors whose latest evaluations all pass
+  (at least one). A definition that asks for gold is checked before anything is written.
+- **Staying gold.** `GET /v1/medallion` runs the checks again for every table (`gold_ready`, `problems`), so a gold
+  table whose contract broke shows it. The layer itself is not removed automatically.
+- Every change is audited (`medallion.set`, `medallion.removed`) with the previous layer. Without Cairn Core,
+  bronze and silver work and gold is refused.
+- **Tested** in `tests/test_scd2_medallion_e2e.py` on a real Trino with Cairn Store, Cairn Catalog and the Cairn API.
+  An scd2 table built from a customer table took a tracked change (closed and a new version that met it exactly),
+  an untracked change (in place), a removed key (closed), a new key and a returning key. Two more refreshes changed
+  nothing, a full refresh was refused with the history intact, and changing the tracked columns kept it. The
+  table's silver layer, set with its definition, showed as a catalog tag. Gold was refused while it lacked an
+  owner, a description and a contract (also through the definition, and for a user without `MANAGE_INGESTION`), and
+  granted once they existed and the contract was met. When the contract broke, the listing showed the table no
+  longer qualified. A stream's bronze layer was set with its definition; an unknown layer, and gold without its
+  conditions, were refused before the stream was created.
+
 ## Pipeline agent
 
 The pipeline agent writes, fixes and ships derived tables from a goal in plain words, as the person asking. It needs

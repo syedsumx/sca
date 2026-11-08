@@ -274,6 +274,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.sqlworkspace.workflows import build_workflows_router
 
         app.include_router(build_workflows_router(services.sql_workflows, cp))
+    if getattr(services, "medallion", None) is not None:
+        from cairn.pipelines.medallion import build_medallion_router
+
+        app.include_router(build_medallion_router(services.medallion, cp, authz, services.medallion_urn))
     if getattr(services, "vectors", None) is not None:
         from cairn.pipelines.vectors import build_vectors_router
 

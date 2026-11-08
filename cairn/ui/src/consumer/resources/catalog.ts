@@ -437,17 +437,38 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "title": "Derived tables",
         "path": "/v1/derived",
         "listKey": null,
-        "description": "A SELECT kept as a lakehouse table and refreshed on a schedule or when the tables it reads change, run as its owner.",
+        "description": "A SELECT kept as a lakehouse table and refreshed on a schedule or when the tables it reads change, run as its owner. Mode scd2 keeps every version of each key (valid_from, valid_to, is_current), closing changed rows and inserting new versions with one MERGE per refresh.",
         "columns": [
             "name",
             "target",
             "mode",
+            "layer",
             "kind",
             "every_minutes",
             "fresh",
             "last_run_ms"
         ],
         "actions": [
+            {
+                "label": "New SCD type 2 table",
+                "method": "POST",
+                "path": "/v1/derived",
+                "body": {
+                    "name": "customers_history",
+                    "target": "crm.customers_history",
+                    "mode": "scd2",
+                    "key": [
+                        "customer_id"
+                    ],
+                    "tracked": [
+                        "segment",
+                        "tier"
+                    ],
+                    "every_minutes": 60,
+                    "layer": "silver",
+                    "sql": "SELECT customer_id, name, segment, tier, email FROM lakehouse.crm.customers"
+                }
+            },
             {
                 "label": "Refresh",
                 "method": "POST",
@@ -460,6 +481,38 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 "label": "Delete",
                 "method": "DELETE",
                 "path": "/v1/derived/{id}",
+                "body": null
+            }
+        ]
+    },
+    "medallion": {
+        "key": "medallion",
+        "title": "Medallion layers",
+        "path": "/v1/medallion",
+        "listKey": null,
+        "rowKey": "table",
+        "description": "Bronze, silver and gold on the tables pipes, streams and derived tables write, tagged in the catalog. Gold needs an owner, a description and a met data contract or passing quality monitors; a gold table that stops qualifying shows why.",
+        "columns": [
+            "table",
+            "layer",
+            "resource",
+            "gold_ready",
+            "set_by",
+            "set_ms"
+        ],
+        "actions": [
+            {
+                "label": "Set layer",
+                "method": "PUT",
+                "path": "/v1/medallion/{table}",
+                "body": {
+                    "layer": "gold"
+                }
+            },
+            {
+                "label": "Remove layer",
+                "method": "DELETE",
+                "path": "/v1/medallion/{table}",
                 "body": null
             }
         ]
