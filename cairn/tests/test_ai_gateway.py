@@ -34,11 +34,13 @@ class Provider(http.server.BaseHTTPRequestHandler):
         Provider.seen.append({"path": self.path, "x-api-key": self.headers.get("x-api-key"),
                               "authorization": self.headers.get("authorization"), "body": body})
         anthropic = self.path == "/v1/messages"
-        if anthropic and self.headers.get("x-api-key") != "sk-ant-upstream":
+        # The key as an API key header, or (newer Anthropic SDKs, used directly by Cairn's own model calls) a bearer.
+        if anthropic and "sk-ant-upstream" not in (self.headers.get("x-api-key"),
+                                                   (self.headers.get("authorization") or "").removeprefix("Bearer ")):
             return self._json(401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}})
         if not anthropic and self.headers.get("authorization") != "Bearer sk-oai-upstream":
             return self._json(401, {"error": {"message": "bad key"}})
-        text = "Hello from the model"
+        text = self.reply(body)
         if not body.get("stream"):
             if anthropic:
                 return self._json(200, {"id": "msg_1", "type": "message", "role": "assistant", "model": body["model"],
@@ -79,6 +81,10 @@ class Provider(http.server.BaseHTTPRequestHandler):
                                                                "total_tokens": 17}}) + "\n\n").encode())
             self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
+
+    def reply(self, body) -> str:
+        """The model's text (other tests script it in a subclass)."""
+        return "Hello from the model"
 
     def _json(self, code, body):
         data = json.dumps(body).encode()

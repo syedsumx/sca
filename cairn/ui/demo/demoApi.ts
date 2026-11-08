@@ -4,7 +4,7 @@
  * findings behave like the real backend until the page is reloaded. All data is fictional.
  */
 
-import { RESOURCE_SAMPLES } from './resourceSamples';
+import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
@@ -1905,6 +1905,10 @@ on('GET', '/v1/queries/:id', (_b, _q, [id]) => {
 
 for (const [path, sample] of Object.entries(RESOURCE_SAMPLES)) {
     on('GET', path, () => sample);
+}
+for (const [route, sample] of Object.entries(ACTION_SAMPLES)) {   // before the catch-all below: the first match answers
+    const [method, path] = route.split(' ');
+    on(method, path, () => sample);
 }
 /** Actions on the platform areas: accepted in the demo (nothing runs), answered with what the API would act on. */
 for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {

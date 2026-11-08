@@ -909,6 +909,14 @@
    "note": "cairn.ai.trace_insights, /v1/agent-traces/insights (and per agent), /v1/agent-traces/settings (admin, audited); every traced tool call records its run (migration 0124): a custom agent's run, an agent app's run token, an OAuth session; key agents' calls are split into sessions. Findings with severity: loops, error rate, refusals, slow calls, flagged text, and volume, cost, latency, calls-per-run and error outliers against the agent's previous weeks. Tested end to end through the real services and HTTP API with real recorded MCP calls from a real agent key, a custom agent's real run and real usage metering (tests/test_agent_trace_insights.py)"
   },
   {
+   "id": "L102",
+   "title": "Grounded answers with sources",
+   "summary": "A question answered only from a vector index's passages, citing them",
+   "done": "People ask the support articles or contracts a question and get an answer they can check: every sentence points to the rows it rests on, and Cairn says when the data does not answer it; the counterpart of retrieval-augmented answers in Databricks' and Snowflake's AI layers, under Cairn's policies",
+   "status": "shipped",
+   "note": "POST /v1/vectors/<name>/answer: passages retrieved as the caller (refused under masks and row filters), numbered and answered by the deployment's model through the metered, budgeted model path; citations actually used [{n, key, chunk, text, score}], sentences without a valid citation flagged, a refusal when no passage supports an answer, audited without content. Tested end to end on a real lakehouse table (tests/test_vectors_answer_e2e.py)"
+  },
+  {
    "id": "L105",
    "title": "External Iceberg catalogs, governed",
    "summary": "Another organisation's or a cloud Iceberg REST catalog queried in Trino as a catalog of its own",

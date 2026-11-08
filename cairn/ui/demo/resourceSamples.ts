@@ -2866,3 +2866,29 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
   ]
  }
 };
+
+/* Sample answers to the areas' actions that return something to read, keyed "<METHOD> <path pattern>" (":id" is one
+   path segment), in the API's own shapes; fictional data. Other actions are accepted without running. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export const ACTION_SAMPLES: Record<string, any> = {
+ "POST /v1/vectors/:id/answer": {
+  "index": "support-tickets",
+  "question": "How long do refunds take?",
+  "method": "exact",
+  "retrieved": 8,
+  "answered": true,
+  "answer": "Refunds are issued within 30 days of purchase when the item is returned unused. [1] Card refunds reach the account in three to five business days. [3] Most customers get their money back within a week.",
+  "sentences": [
+   {"text": "Refunds are issued within 30 days of purchase when the item is returned unused.", "sources": [1], "supported": true},
+   {"text": "Card refunds reach the account in three to five business days.", "sources": [3], "supported": true},
+   {"text": "Most customers get their money back within a week.", "sources": [], "supported": false}
+  ],
+  "unsupported": [2],
+  "citations": [
+   {"n": 1, "key": "T-10482", "chunk": 0, "text": "Refunds are issued within 30 days of purchase when the item is returned unused. Store credit is offered after that.", "score": 0.8312},
+   {"n": 3, "key": "T-11907", "chunk": 1, "text": "Once approved, card refunds reach the customer's account in three to five business days, depending on the bank.", "score": 0.7744}
+  ],
+  "refusal": null,
+  "model": "support-answers-model"
+ }
+};

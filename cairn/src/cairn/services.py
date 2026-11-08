@@ -1863,7 +1863,10 @@ def _build_data_access(s: Services) -> None:
             return bool(d.get("read")), bool(d.get("restricted"))
         s.vectors = VectorIndexes(s.engine, _settings("CAIRN_VECTORS_CATALOG" if os.environ.get("CAIRN_VECTORS_CATALOG")
                                                       else "CAIRN_PIPES_CATALOG"),
-                                  s.semantic.embedder if s.semantic is not None else HashingEmbedder(), s.audit, may_read)
+                                  s.semantic.embedder if s.semantic is not None else HashingEmbedder(), s.audit, may_read,
+                                  # answers with sources: always through the metered, budgeted provider
+                                  llm=s.llm if s.llm is None or isinstance(s.llm, MeteredProvider)
+                                  else MeteredProvider(s.llm, s.ai_usage), model=s.settings.ai.model)
 
     if s.external_quality is not None and s.graph is not None:
         # dbt runs: docs, lineage and tests on the datasets they built, named as Trino names them.

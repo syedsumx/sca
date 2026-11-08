@@ -455,7 +455,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "title": "Vector indexes",
         "path": "/v1/vectors",
         "listKey": null,
-        "description": "Indexes a lakehouse table's text column so it can be searched by meaning, kept up to date as rows change.",
+        "description": "Indexes a lakehouse table's text column so it can be searched by meaning, kept up to date as rows change. Ask with sources answers a question only from the index's passages, as you, citing the passages it used (or says it cannot answer).",
         "columns": [
             "name",
             "source",
@@ -466,6 +466,15 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             "enabled"
         ],
         "actions": [
+            {
+                "label": "Ask with sources",
+                "method": "POST",
+                "path": "/v1/vectors/{name}/answer",
+                "body": {
+                    "question": "How long do refunds take?",
+                    "k": 8
+                }
+            },
             {
                 "label": "Refresh",
                 "method": "POST",

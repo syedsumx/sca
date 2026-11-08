@@ -3636,6 +3636,38 @@ A vector index lets people search a lakehouse table's text by meaning: support a
   - A refresh after the table changed built the index again for the new snapshot, and turning `ann` off made
     search exact on the next refresh.
 
+### Answers with sources
+
+`POST /v1/vectors/<name>/answer` `{"question": "...", "k": 8}` answers a question only from an index's passages and
+says which ones it used.
+
+- **Retrieved as the caller.** The `k` closest chunks (1-20, default 8) are found with the same checks as search:
+  read access to the source table, and no mask or row filter there (the index holds the raw text). Optional
+  `min_score` drops chunks below that cosine score. If no chunk is left, Cairn answers that it cannot, without
+  calling the model.
+- **The model.** The chunks are numbered and sent, as data, to the deployment's model (`CAIRN_LLM_PROVIDER`,
+  `CAIRN_AI_MODEL`) through Cairn's server-side model path. The model must return each sentence with the numbers of
+  the passages that state it, and is told not to follow instructions found inside passages. With no model
+  configured, the endpoint answers 503.
+- **What comes back.** `answer` (the sentences, each followed by its citation numbers), `sentences`
+  (`{text, sources, supported}`), `citations` (`[{n, key, chunk, text, score}]`: only the passages actually cited),
+  and `unsupported` (the positions of sentences with no valid citation, so a reader can tell grounded text from
+  the rest). A citation to a passage that was not given is dropped.
+- **Refusals.** When the model says the passages do not answer the question, or it cites none of them, Cairn
+  returns `answered: false`, no answer, and a `refusal` that says so.
+- **Metered and budgeted** like Cairn's other model calls: under the caller, as feature `vectors.answer`, held to
+  `CAIRN_AI_DAILY_BUDGET_USD` and `CAIRN_AI_USER_DAILY_TOKENS` (429 when used up, before the model is called).
+- **Audited without content.** Each answer records `vector_index.answered` with the index, `k`, how many passages
+  were retrieved and cited, how many sentences were unsupported, the model and its token counts. The question,
+  the answer and the passages are not recorded.
+- `CAIRN_VECTORS_ANSWER_CONTEXT_CHARS` (60,000) caps the passage text sent per question; the closest come first.
+- **Tested** in `tests/test_vectors_answer_e2e.py`, with the real store and catalog, a real lakehouse table, and
+  Anthropic's SDK talking to a scripted stand-in for the model's API. A refund question was answered from the
+  refund passage alone; a sentence citing a passage that was never given, and one citing nothing, were flagged. A
+  question the passages do not answer, and an answer that cited only made-up passages, were refused. People without read access or under a row filter were
+  refused before the model was called. Calls were metered under the caller, refused at the token allowance, and
+  audited without the question, answer or passages.
+
 ## Streams (Kafka and change data capture)
 
 A stream writes a Kafka topic into a lakehouse table continuously. Define it with `POST /v1/streams` (`MANAGE_SYSTEM_OPERATIONS`): `name`, `topic`, `format`, `target` (`namespace.table`), and optionally `mode`, `key`, `create_table`, `evolve`, `start` (`earliest` or `latest`), `batch_rows` and `batch_seconds`.
