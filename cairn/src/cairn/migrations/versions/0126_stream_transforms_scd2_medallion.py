@@ -1,7 +1,7 @@
 """Streaming transformations on streams; SCD type 2 derived tables; medallion layers
 
-Revision ID: 0125
-Revises: 0123
+Revision ID: 0126
+Revises: 0125
 Create Date: 2026-11-08 18:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0125'
-down_revision = '0123'
+revision = '0126'
+down_revision = '0125'
 branch_labels = None
 depends_on = None
 

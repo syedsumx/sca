@@ -1,7 +1,7 @@
 """Serving tables: lakehouse tables kept as row stores in PostgreSQL for lookups by key
 
 Revision ID: 0127
-Revises: 0123
+Revises: 0126
 Create Date: 2026-11-08 12:00:00.000000
 """
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = '0127'
-down_revision = '0123'
+down_revision = '0126'
 branch_labels = None
 depends_on = None
 

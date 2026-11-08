@@ -930,7 +930,7 @@
    "summary": "A SQL SELECT applied to each micro-batch of a stream before it lands",
    "done": "Cleaned, cast and filtered data arrives within seconds of being sent, without waiting for a derived table's schedule; the counterpart of transformations in Snowflake's Snowpipe Streaming and Databricks' streaming tables",
    "status": "shipped",
-   "note": "transform on json and http streams: one row-for-row SELECT over batch, checked when the stream is defined (no joins or other tables, key kept, binds in the engine), run in-process in a sandboxed DuckDB (no files, network or extensions); failing rows go to the stream's rejects, filtered rows are skipped and the offsets still move on, a new table takes the transform's types (migration 0125). Tested end to end through an HTTP ingest stream into a real lakehouse table read through Trino (tests/test_stream_transform_e2e.py)"
+   "note": "transform on json and http streams: one row-for-row SELECT over batch, checked when the stream is defined (no joins or other tables, key kept, binds in the engine), run in-process in a sandboxed DuckDB (no files, network or extensions); failing rows go to the stream's rejects, filtered rows are skipped and the offsets still move on, a new table takes the transform's types (migration 0126). Tested end to end through an HTTP ingest stream into a real lakehouse table read through Trino (tests/test_stream_transform_e2e.py)"
   },
   {
    "id": "L105",
@@ -978,7 +978,7 @@
    "summary": "Derived tables that keep every version of a row, and bronze, silver and gold on the tables Cairn writes",
    "done": "Dimension history (what a customer's tier was last quarter) without hand-written MERGE logic, and a gold layer that means something: owned, described and passing its contract; the counterpart of Databricks' APPLY CHANGES (SCD type 2) and medallion architecture",
    "status": "shipped",
-   "note": "Derived mode scd2 (key, tracked): one Trino MERGE per refresh closes changed and removed keys (valid_to, is_current), inserts new versions, writes untracked changes in place, changes nothing when nothing changed; a full rebuild is refused once there is history. layer on pipes, streams and derived tables and /v1/medallion: kept (migration 0125), tagged in the catalog, gold refused without an owner, a description and a met contract or passing monitors, and re-checked in the listing. Tested end to end on Trino with the real store and catalog (tests/test_scd2_medallion_e2e.py)"
+   "note": "Derived mode scd2 (key, tracked): one Trino MERGE per refresh closes changed and removed keys (valid_to, is_current), inserts new versions, writes untracked changes in place, changes nothing when nothing changed; a full rebuild is refused once there is history. layer on pipes, streams and derived tables and /v1/medallion: kept (migration 0126), tagged in the catalog, gold refused without an owner, a description and a met contract or passing monitors, and re-checked in the listing. Tested end to end on Trino with the real store and catalog (tests/test_scd2_medallion_e2e.py)"
   }
  ]
 }
