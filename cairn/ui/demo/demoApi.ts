@@ -4,6 +4,8 @@
  * findings behave like the real backend until the page is reloaded. All data is fictional.
  */
 
+import { RESOURCE_SAMPLES } from './resourceSamples';
+
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
 
 const ME = 'urn:li:corpuser:alice';
@@ -1809,3 +1811,182 @@ on('GET', '/marketplace/slos', (_b, q) => (q.product ? SLOS.filter((s) => s.prod
 on('PUT', '/marketplace/slos/:id', (b: Json) => ({ ...SLOS[2], ...b, state: 'no_data', sli: null, budget_remaining: null,
     burn_rate: null, good: 0, total: 0 }));
 on('DELETE', '/marketplace/slos/:id', () => undefined);
+
+// ------------------------------------------------------------------------------- SQL workflows, git folders, query insight
+const WORKFLOWS: Json[] = [
+    { id: 'wf_daily_rev', owner: ME, name: 'Daily revenue refresh', cron: '0 6 * * *', recipients: ['finance-data@northwind.example'],
+      notify: 'failure', enabled: true, next_run_ms: now + 9 * HOUR, last_status: 'ok', updated_ms: now - 2 * DAY,
+      steps: [{ name: 'orders_clean', type: 'derived', after: [], retries: 1, table: 'lakehouse.sales.orders_clean', full: false },
+              { name: 'by_region', type: 'derived', after: ['orders_clean'], retries: 1, table: 'lakehouse.sales.by_region', full: true },
+              { name: 'no_negative_totals', type: 'check', after: ['by_region'], retries: 0, sql: 'SELECT count(*) FROM lakehouse.sales.by_region WHERE revenue < 0', op: '==', value: 0 }] },
+    { id: 'wf_supply', owner: 'urn:li:corpuser:raj', name: 'Late shipments report', cron: '0 7 * * 1', recipients: ['ops@northwind.example'],
+      notify: 'always', enabled: true, next_run_ms: now + 2 * DAY, last_status: 'error', updated_ms: now - 6 * DAY,
+      steps: [{ name: 'late', type: 'query', after: [], retries: 2, sql: "SELECT carrier, count(*) FROM lakehouse.supply.shipments WHERE delivered_at > promised_at GROUP BY carrier" }] },
+];
+const WORKFLOW_RUNS: Record<string, Json[]> = {
+    wf_daily_rev: [{ id: 'run_31', trigger: 'schedule', status: 'ok', started_ms: now - 15 * HOUR, finished_ms: now - 15 * HOUR + 48_000,
+        steps: [{ name: 'orders_clean', type: 'derived', status: 'ok', attempts: 1, ms: 21_300, rows: 18_412 },
+                { name: 'by_region', type: 'derived', status: 'ok', attempts: 1, ms: 19_800, rows: 6 },
+                { name: 'no_negative_totals', type: 'check', status: 'ok', attempts: 1, ms: 1_900, detail: '0 == 0' }] }],
+    wf_supply: [{ id: 'run_12', trigger: 'schedule', status: 'error', started_ms: now - 5 * DAY, finished_ms: now - 5 * DAY + 4_000,
+        steps: [{ name: 'late', type: 'query', status: 'error', attempts: 3, ms: 3_900, error: 'Access denied: lakehouse.supply.shipments (column promised_at is masked for you)' }] }],
+};
+on('GET', '/v1/sql-workflows', () => WORKFLOWS);
+on('POST', '/v1/sql-workflows', (b) => { const w = { id: `wf_${Date.now()}`, owner: ME, recipients: [], notify: 'failure', enabled: true, next_run_ms: null, last_status: null, cron: null, steps: [], ...b, updated_ms: Date.now() }; WORKFLOWS.push(w); return w; });
+on('PUT', '/v1/sql-workflows/:id', (b, _q, [id]) => { const w = WORKFLOWS.find((x) => x.id === id); if (!w) throw new HttpError(404, 'no such workflow'); Object.assign(w, b, { updated_ms: Date.now() }); return w; });
+on('DELETE', '/v1/sql-workflows/:id', (_b, _q, [id]) => { const i = WORKFLOWS.findIndex((x) => x.id === id); if (i >= 0) WORKFLOWS.splice(i, 1); return undefined; });
+on('GET', '/v1/sql-workflows/:id/runs', (_b, _q, [id]) => WORKFLOW_RUNS[id] ?? []);
+on('POST', '/v1/sql-workflows/:id/run', (_b, _q, [id]) => {
+    const w = WORKFLOWS.find((x) => x.id === id);
+    if (!w) throw new HttpError(404, 'no such workflow');
+    const run = { id: `run_${Date.now()}`, trigger: 'manual', status: 'ok', started_ms: Date.now() - 4_000, finished_ms: Date.now(),
+        steps: (w.steps as Json[]).map((s) => ({ name: s.name, type: s.type, status: 'ok', attempts: 1, ms: 1_200, rows: s.type === 'check' ? null : 42 })) };
+    (WORKFLOW_RUNS[id] ||= []).unshift(run);
+    w.last_status = 'ok';
+    return run;
+});
+
+const GIT_FOLDERS: Json[] = [
+    { id: 'gf_analytics', owner: ME, name: 'analytics', repo: 'northwind/analytics', url: 'https://git.northwind.example/northwind/analytics.git',
+      branch: 'main', path: 'sql', every_minutes: 15, head: '4f9c2ab', synced_ms: now - 12 * 60_000, error: null, created_ms: now - 40 * DAY },
+    { id: 'gf_finance', owner: 'urn:li:corpuser:mei', name: 'finance-models', repo: null, url: 'https://git.northwind.example/finance/models.git',
+      branch: 'develop', path: '', every_minutes: null, head: 'a17e003', synced_ms: now - 3 * DAY, error: null, created_ms: now - 21 * DAY },
+];
+on('GET', '/v1/git-folders', () => GIT_FOLDERS);
+on('POST', '/v1/git-folders', (b) => { const g = { id: `gf_${Date.now()}`, owner: ME, repo: null, branch: 'main', path: '', every_minutes: null, head: null, synced_ms: null, error: null, ...b, created_ms: Date.now() }; GIT_FOLDERS.push(g); return g; });
+on('DELETE', '/v1/git-folders/:id', (_b, _q, [id]) => { const i = GIT_FOLDERS.findIndex((x) => x.id === id); if (i >= 0) GIT_FOLDERS.splice(i, 1); return undefined; });
+on('POST', '/v1/git-folders/:id/pull', (_b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    g.head = Math.random().toString(16).slice(2, 9); g.synced_ms = Date.now();
+    return { head: g.head, created: ['sql/churn_by_cohort.sql'], updated: ['sql/revenue_by_region.sql'], deleted: [], notebooks: ['notebooks/forecast.ipynb'], conflicts: [], errors: [] };
+});
+on('POST', '/v1/git-folders/:id/push', (b, _q, [id]) => {
+    const g = GIT_FOLDERS.find((x) => x.id === id);
+    if (!g) throw new HttpError(404, 'no such git folder');
+    return { changed: 2, branch: `cairn/${String(b.message || 'changes').toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30)}`, commit: '9d1b77e',
+        pull_request: g.repo ? `https://git.northwind.example/${g.repo}/pulls/128` : null };
+});
+
+const QUERIES: Json[] = [
+    { query_id: '20261108_061204_00041_k3f9q', user: ME, source: 'cairn-sql', state: 'FINISHED', error_code: null, error: null,
+      create_ms: now - 25 * 60_000, end_ms: now - 25 * 60_000 + 1_840, wall_ms: 1_840, cpu_ms: 3_120, queued_ms: 12,
+      input_bytes: 48_211_000, input_rows: 1_204_118, output_rows: 6, peak_memory_bytes: 92_000_000, splits: 48,
+      sql: 'SELECT region, sum(amount) AS revenue FROM lakehouse.sales.orders GROUP BY region', tables: ['lakehouse.sales.orders'] },
+    { query_id: '20261108_055901_00038_k3f9q', user: 'urn:li:corpuser:raj', source: 'cairn-dashboards', state: 'FINISHED', error_code: null, error: null,
+      create_ms: now - 2 * HOUR, end_ms: now - 2 * HOUR + 38_400, wall_ms: 38_400, cpu_ms: 211_000, queued_ms: 1_900,
+      input_bytes: 6_400_000_000, input_rows: 88_400_000, output_rows: 52, peak_memory_bytes: 2_100_000_000, splits: 912,
+      sql: 'SELECT c.segment, date_trunc(\'week\', o.created_at) w, count(*) FROM lakehouse.sales.orders o JOIN lakehouse.crm.customers c ON o.customer_id = c.id GROUP BY 1, 2',
+      tables: ['lakehouse.sales.orders', 'lakehouse.crm.customers'] },
+    { query_id: '20261108_044410_00031_k3f9q', user: ME, source: 'cairn-sql', state: 'FAILED', error_code: 'PERMISSION_DENIED', error: 'Access denied: Cannot select from columns [email] in table lakehouse.crm.customers',
+      create_ms: now - 3 * HOUR, end_ms: now - 3 * HOUR + 220, wall_ms: 220, cpu_ms: 15, queued_ms: 3,
+      input_bytes: 0, input_rows: 0, output_rows: 0, peak_memory_bytes: 0, splits: 0,
+      sql: 'SELECT email FROM lakehouse.crm.customers LIMIT 10', tables: ['lakehouse.crm.customers'] },
+];
+on('GET', '/v1/queries', (_b, q) => {
+    let out = QUERIES.slice();
+    const state = q.get('state'); const text = q.get('text');
+    if (state) out = out.filter((x) => x.state === state);
+    if (text) out = out.filter((x) => x.sql.toLowerCase().includes(text.toLowerCase()));
+    if (q.get('slowest')) out.sort((a, b) => b.wall_ms - a.wall_ms);
+    return { queries: out };
+});
+on('GET', '/v1/queries/:id', (_b, _q, [id]) => {
+    const r = QUERIES.find((x) => x.query_id === id);
+    if (!r) throw new HttpError(404, 'no such query');
+    const hints = r.wall_ms > 10_000
+        ? [{ kind: 'scan', text: 'Read 6.4 GB for 52 rows: filter on created_at (the table is partitioned by day) to read less.' },
+           { kind: 'join', text: 'customers is the smaller side; it was broadcast, which is right for this size.' }]
+        : r.state === 'FAILED' ? [{ kind: 'access', text: 'email is masked for your persona; request access on the customers page, or select a non-PII column.' }] : [];
+    return { ...r, hints };
+});
+
+// ------------------------------------------------------------------------------- platform areas (resources/catalog.ts)
+
+for (const [path, sample] of Object.entries(RESOURCE_SAMPLES)) {
+    on('GET', path, () => sample);
+}
+/** Actions on the platform areas: accepted in the demo (nothing runs), answered with what the API would act on. */
+for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+    for (const prefix of ['/v1', '/ai', '/admin', '/agents', '/governance', '/quality', '/marketplace', '/maintenance', '/sql/semantic-models', '/storage', '/workspaces']) {
+        on(method, `${prefix}/:rest`, (b, _q, [rest]) => ({ ok: true, demo: true, method, path: `${prefix}/${rest}`, received: b ?? null,
+            note: 'The demo accepts this action without running it; on a Cairn deployment it runs as you, under your policies.' }));
+    }
+}
+
+// ------------------------------------------------------------------------------- workbooks, metrics, input tables, BI folders and usage
+on('GET', '/me', () => ({ urn: ME, via: 'session' }));
+const WORKBOOKS: Json[] = [
+    { id: 'wb_rev', owner: ME, role: 'owner', name: 'Revenue by region and month', description: 'Net revenue pivoted by month, EU and US only.',
+      connection: 'warehouse', shared: true, created_ms: now - 20 * DAY, updated_ms: now - 2 * DAY,
+      spec: { elements: [{ source: { table: 'lakehouse.sales.orders' }, filters: [{ column: 'region', op: 'in', value: ['EU', 'US'] }],
+          group_by: ['region'], aggregates: [{ name: 'revenue', formula: 'SUM([amount])' }, { name: 'orders', formula: 'COUNT()' }],
+          sort: [{ column: 'revenue', desc: true }], limit: 100 }] } },
+    { id: 'wb_cohort', owner: 'urn:li:corpuser:mei', role: 'viewer', name: 'Customer cohorts', description: 'Active customers per signup cohort.',
+      connection: 'warehouse', shared: true, created_ms: now - 45 * DAY, updated_ms: now - 9 * DAY,
+      spec: { elements: [{ source: { table: 'lakehouse.crm.customers' }, group_by: ['segment'], aggregates: [{ name: 'customers', formula: 'COUNT()' }] }] } },
+];
+on('GET', '/sql/workbooks', () => WORKBOOKS);
+on('POST', '/sql/workbooks', (b) => { const w = { id: `wb_${Date.now()}`, owner: ME, role: 'owner', shared: false, created_ms: Date.now(), ...b, updated_ms: Date.now() }; WORKBOOKS.push(w); return w; });
+const METRICS: Json[] = [
+    { id: 'm_net_revenue', name: 'net_revenue', label: 'Net revenue', description: 'Order amount after refunds and discounts.', connection: 'warehouse',
+      table: 'lakehouse.sales.orders', measure: 'SUM(amount)', filters: [{ column: 'status', op: '=', value: 'complete' }], time_column: 'created_at',
+      dimensions: ['region', 'channel'], owner: ME, certified: true, version: 4, updated_ms: now - 3 * DAY },
+    { id: 'm_active_customers', name: 'active_customers', label: 'Active customers', description: 'Customers with an order in the last 90 days.',
+      connection: 'warehouse', table: 'lakehouse.crm.customers', measure: 'COUNT(DISTINCT id)', filters: [], time_column: 'last_order_at',
+      dimensions: ['segment', 'country'], owner: 'urn:li:corpuser:mei', certified: true, version: 2, updated_ms: now - 12 * DAY },
+    { id: 'm_late_shipments', name: 'late_shipments', label: 'Late shipments', description: 'Shipments delivered after their promised date.',
+      connection: 'warehouse', table: 'lakehouse.supply.shipments', measure: 'COUNT_IF(delivered_at > promised_at)', filters: [], time_column: 'delivered_at',
+      dimensions: ['carrier'], owner: 'urn:li:corpuser:raj', certified: false, version: 1, updated_ms: now - 30 * DAY },
+];
+on('GET', '/sql/metrics', () => METRICS);
+on('POST', '/sql/metrics', (b) => { const m = { id: `m_${Date.now()}`, owner: ME, certified: false, version: 1, filters: [], dimensions: [], ...b, updated_ms: Date.now() }; METRICS.push(m); return m; });
+const INPUT_TABLES: Json[] = [
+    { id: 'it_targets', connection: 'warehouse', table_name: 'lakehouse.planning.sales_targets', description: 'Monthly sales targets per region, typed in by finance.',
+      columns: [{ name: 'month', type: 'date' }, { name: 'region', type: 'text' }, { name: 'target', type: 'number' }], created_by: ME, created_ms: now - 15 * DAY },
+    { id: 'it_overrides', connection: 'warehouse', table_name: 'lakehouse.planning.fx_overrides', description: 'Manual FX rate overrides for month-end close.',
+      columns: [{ name: 'currency', type: 'text' }, { name: 'rate', type: 'number' }, { name: 'valid_from', type: 'date' }], created_by: 'urn:li:corpuser:tom', created_ms: now - 60 * DAY },
+];
+on('GET', '/sql/input-tables', () => INPUT_TABLES);
+const FOLDERS: Json[] = [
+    { id: 'f_finance', name: 'Finance', parent_id: null, owner: ME, shared: true, created_ms: now - 50 * DAY },
+    { id: 'f_board', name: 'Board pack', parent_id: 'f_finance', owner: ME, shared: false, created_ms: now - 10 * DAY },
+    { id: 'f_ops', name: 'Operations', parent_id: null, owner: 'urn:li:corpuser:raj', shared: true, created_ms: now - 33 * DAY },
+];
+on('GET', '/sql/folders', () => FOLDERS);
+on('POST', '/sql/folders', (b) => { const f = { id: `f_${Date.now()}`, parent_id: null, owner: ME, shared: false, created_ms: Date.now(), ...b }; FOLDERS.push(f); return f; });
+on('GET', '/sql/usage/popular', () => [
+    { kind: 'dashboard', id: 'd_sales', views: 182, viewers: 37 }, { kind: 'workbook', id: 'wb_rev', views: 96, viewers: 14 },
+    { kind: 'query', id: 'q_region', views: 41, viewers: 9 }]);
+on('GET', '/sql/usage/stale', () => [{ kind: 'workbook', id: 'wb_cohort', name: 'Customer cohorts', updated_ms: now - 96 * DAY }]);
+on('GET', '/reports/costs/trino', (_b, q) => {
+    const by = (q.get('by') as string) || 'user';
+    const rows = by === 'table'
+        ? [{ key: 'lakehouse.sales.orders', queries: 1_204, cpu_hours: 18.4, scanned_bytes: 412e9, usd: 92.1 },
+           { key: 'lakehouse.crm.customers', queries: 388, cpu_hours: 6.2, scanned_bytes: 88e9, usd: 31.0 }]
+        : by === 'team'
+            ? [{ key: 'finance', name: 'Finance', queries: 1_480, cpu_hours: 21.9, scanned_bytes: 455e9, usd: 109.5 },
+               { key: 'growth', name: 'Growth marketing', queries: 612, cpu_hours: 9.1, scanned_bytes: 140e9, usd: 45.5 }]
+            : [{ key: ME, name: 'Alice Moreno', queries: 512, cpu_hours: 7.7, scanned_bytes: 160e9, usd: 38.5 },
+               { key: 'urn:li:corpuser:raj', name: 'Raj Patel', queries: 1_020, cpu_hours: 15.3, scanned_bytes: 290e9, usd: 76.5 }];
+    return { by, days: Number(q.get('days') || 30), priced: true, scope: 'all', total_usd: rows.reduce((s, r) => s + (r.usd ?? 0), 0), rows };
+});
+const INPUT_ROWS: Record<string, Json[][]> = {
+    it_targets: [['r1', '2026-11-01', 'EU', 1_250_000, ME, iso(2 * DAY)], ['r2', '2026-11-01', 'US', 1_900_000, ME, iso(2 * DAY)],
+                 ['r3', '2026-12-01', 'EU', 1_400_000, 'urn:li:corpuser:tom', iso(DAY)]],
+    it_overrides: [['r1', 'GBP', 1.17, '2026-10-31', 'urn:li:corpuser:tom', iso(8 * DAY)]],
+};
+on('GET', '/sql/input-tables/:id/rows', (_b, _q, [id]) => {
+    const table = INPUT_TABLES.find((t) => t.id === id);
+    if (!table) throw new HttpError(404, 'no such input table');
+    return { table, columns: ['_row_id', ...table.columns.map((c: Json) => c.name), '_updated_by', '_updated_at'],
+        rows: INPUT_ROWS[id] ?? [], masked_columns: [], truncated: false, elapsed_ms: 140, tables: [table.table_name] };
+});
+on('POST', '/sql/input-tables/:id/rows', (b, _q, [id]) => {
+    const table = INPUT_TABLES.find((t) => t.id === id);
+    const added = (b.rows as Json[]).map((r) => { const rid = `r${Date.now()}${Math.random().toString(16).slice(2, 5)}`;
+        (INPUT_ROWS[id] ||= []).push([rid, ...table.columns.map((c: Json) => r[c.name] ?? null), ME, new Date().toISOString()]); return rid; });
+    return { added };
+});
+on('PATCH', '/sql/input-tables/:id/rows/:id', (_b, _q, [, rowId]) => ({ changed: rowId }));
+on('DELETE', '/sql/input-tables/:id/rows', (b) => ({ deleted: (b?.rows ?? []).length }));

@@ -16,6 +16,19 @@ Every component handles its own loading, empty and error states (`401`/`403` are
 explicitly). Authorization is always enforced server-side by the Cairn PDP. The `privilege` hints on
 routes only control which nav entries are shown.
 
+## The workspace shell and platform hubs
+
+The consumer workspace (`src/consumer`) has a grouped left sidebar (Find, Analyze, Build, AI & ML, Govern, Platform;
+collapsible, a drawer on phones) and a top bar with search and the assistant. Inside Cairn Core's shell (hosted
+mode) the sidebar gives way to the shell's own navigation and compact section tabs.
+
+Areas without a page of their own appear as **hubs** (`src/consumer/resources`): `/agents`, `/ingestion`,
+`/lakehouse`, `/compute`, `/ml`, `/trust`, `/sharing`, `/usage` and `/semantic`. Each tab is one backend area
+(`catalog.ts`: its list endpoint, list key, columns and actions), shown by `ResourceView` against the real API: the
+list, each row's details, and the area's actions (with an editable request body), all as the signed-in person.
+`/capabilities` lists every roadmap item and platform layer from `ROADMAP.md`: after editing the roadmap, run
+`node scripts/capabilities.mjs` (a test fails while the two disagree).
+
 ## Develop standalone
 
 ```bash

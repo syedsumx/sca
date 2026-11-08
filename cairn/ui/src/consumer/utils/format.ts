@@ -91,10 +91,10 @@ export function qualityLabel(status: string | null | undefined): string {
 }
 
 export const TONE_COLORS: Record<TrustTone, string> = {
-    good: '#2e7d32',
-    warn: '#b26a00',
-    bad: '#c62828',
-    neutral: '#6b7280',
+    good: '#166534',
+    warn: '#92400e',
+    bad: '#b91c1c',
+    neutral: '#4b5563',
 };
 
 export function plural(n: number, word: string): string {

@@ -337,13 +337,13 @@ function ProgressDrawer({ form, onClose }: { form: FormSummary | null; onClose: 
         { title, dataIndex: 'key', render: (k: string) => label(k) },
         { title: 'Assets', dataIndex: 'assets' },
         { title: 'Open', dataIndex: 'PENDING' },
-        { title: 'Done', dataIndex: 'done_pct', render: (p: number) => <Progress percent={p} format={pct} size="small" /> },
+        { title: 'Done', dataIndex: 'done_pct', render: (p: number) => <Progress aria-label={`Done: ${p}%`} percent={p} format={pct} size="small" /> },
     ];
     return (
         <Drawer open={!!form} onClose={onClose} width={640} title={form ? `Progress: ${form.name}` : ''} destroyOnClose>
             {progress.data && (
                 <>
-                    <Progress percent={progress.data.total.done_pct} format={pct} />
+                    <Progress aria-label={`Done overall: ${progress.data.total.done_pct}%`} percent={progress.data.total.done_pct} format={pct} />
                     <Table size="small" pagination={false} dataSource={rows(progress.data.by_domain)} columns={cols('Domain')} />
                     <div style={{ height: 16 }} />
                     <Table size="small" pagination={false} dataSource={rows(progress.data.by_assignee)} columns={cols('Assignee')} />
@@ -393,7 +393,7 @@ export function FormsAdmin() {
                     { title: 'Kind', render: (_: unknown, f) => (f.spec.kind === 'verification' ? 'Sign-off' : 'Completion') },
                     { title: 'Questions', render: (_: unknown, f) => f.spec.questions.length },
                     { title: 'Assets', render: (_: unknown, f) => f.progress.assets },
-                    { title: 'Done', width: 160, render: (_: unknown, f) => <Progress percent={f.progress.done_pct} format={pct} size="small" /> },
+                    { title: 'Done', width: 160, render: (_: unknown, f) => <Progress aria-label={`Done: ${f.progress.done_pct}%`} percent={f.progress.done_pct} format={pct} size="small" /> },
                     {
                         title: '',
                         render: (_: unknown, f) => (

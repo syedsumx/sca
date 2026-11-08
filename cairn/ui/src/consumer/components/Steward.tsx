@@ -138,6 +138,7 @@ export function StewardReview() {
                             width: 120,
                             render: (_, p) => (
                                 <Progress
+                                    aria-label={`Confidence: ${Math.round(p.confidence * 100)}%`}
                                     percent={Math.round(p.confidence * 100)}
                                     size="small"
                                     format={(v) => `${v}%`}

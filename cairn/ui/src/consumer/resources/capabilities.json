@@ -1,0 +1,904 @@
+{
+ "layers": [
+  {
+   "layer": "Object storage",
+   "compare": "Managed storage / cloud object stores",
+   "cairn": "Cairn Store (Rust, S3 API). Clusters with replicas, erasure coding and racks/zones; versioning and object lock; SSE, with customer-managed keys in Vault Transit; STS temporary credentials; lifecycle and tiering; backups, continuous backup and two-way sync; WebDAV, SFTP, FUSE, CSI and Hadoop S3A; node TLS",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Tables and catalog",
+   "compare": "Snowflake Iceberg tables / Unity Catalog",
+   "cairn": "Cairn Catalog (Rust, Iceberg REST). Tables and views; Delta Lake tables through Trino, registered by location, several writers at once, converted to Iceberg in place; commits via iceberg-rust; per-table credential vending; HA on PostgreSQL; Cairn identities governed per table",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "SQL warehouse",
+   "compare": "Virtual warehouses / Databricks SQL",
+   "cairn": "Trino 484 on the lakehouse. Per-team warehouses that stop when idle and start on the first query (USE_WAREHOUSE); Cairn sign-in (JWT, OAuth2 SSO for the web UI and BI); access control through Cairn's policies (OPA protocol); query lineage and usage into Cairn; resource groups; fault-tolerant execution, spill and cache; workers with autoscaling",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "SQL in the product",
+   "compare": "Snowsight / SQL editor",
+   "cairn": "Data preview and SQL editor on Trino, with autocomplete from the tables the person may query; AI functions (USE_AI_FUNCTIONS) and inline Python functions in SQL; Ask-your-data (text-to-SQL) with the caller's permissions",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Transformation",
+   "compare": "dbt Cloud on Snowflake / Databricks",
+   "cairn": "dbt-core 1.12 with dbt-trino (cairn dbt, cairn/dbt). Runs as a pipeline user; docs, tags, owners, lineage and tests recorded in Cairn; Helm CronJobs. Derived tables: a SELECT kept as a table, refreshed fully, by watermark or by merge, on a schedule or when what it reads changes, as its owner",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Orchestration",
+   "compare": "Tasks / Databricks Workflows",
+   "cairn": "Apache Airflow 3.3 (cairn/airflow, cairn-airflow-provider). Cairn operators for Trino and dbt; OpenLineage to Cairn; UI sign-in through Cairn with group → role mapping; official chart values",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Python and Spark",
+   "compare": "Snowpark / Databricks Spark",
+   "cairn": "Spark 4.0 with Iceberg 1.10 (cairn/spark, cairn-spark). Signed in as a Cairn identity; each table decided by Cairn; per-table credentials, read-only unless writable; column lineage to Cairn",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Governance",
+   "compare": "Horizon / Unity Catalog",
+   "cairn": "Policy decision point (RBAC with ABAC, deny-overrides, obligations), masking on every read path, row filters, personas and purposes, PII classification and propagation, certification workflows, compliance forms, hash-chained audit log",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Discovery and metadata",
+   "compare": "Horizon catalog / Unity Catalog explorer",
+   "cairn": "Cairn Core: search, search by meaning, lineage (column level), glossary, domains, data products, change history, bulk editing, workspaces, i18n",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Data quality",
+   "compare": "Data metric functions / Lakehouse Monitoring",
+   "cairn": "Monitors (volume, freshness, schema, drift, learned thresholds), data contracts, profiling, incidents, results from dbt and other tools",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "AI",
+   "compare": "Cortex / Mosaic AI",
+   "cairn": "Assistant, documentation drafts, context agents, governed metrics (semantic layer), MCP server, AI-system governance, usage and budgets; Claude or local models",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Sharing and marketplace",
+   "compare": "Listings / Delta Sharing",
+   "cairn": "Internal marketplace with access requests; publishing to Snowflake listings and Delta Sharing shares",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Ingestion",
+   "compare": "Connectors / Lakeflow Connect",
+   "cairn": "Source connectors and in-VPC remote agents (signed, sealed); the store's message queues and events; pipes (files landing in the store, loaded once each); streams (Kafka and Debezium CDC into Iceberg, exactly once)",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "layer": "Operations",
+   "compare": "Managed service",
+   "cairn": "Compose and Helm (HA, network policies, PDBs); infrastructure as code (cairn bundle from git, a Terraform provider); SSO and SCIM; Alembic migrations; signed images with SBOMs; monitoring dashboards; hosting tenants, with a ready Hetzner setup (deploy/hetzner: k3s on dedicated servers, shared PostgreSQL with backups, per-tenant search and Kafka, tenant isolation, tested in CI)",
+   "status": "shipped",
+   "note": ""
+  }
+ ],
+ "items": [
+  {
+   "id": "L1",
+   "title": "Table maintenance service",
+   "summary": "Snapshot expiry, orphan-file removal, data-file compaction and manifest rewrites per table, on a schedule and on demand, with retention as a table property",
+   "done": "A table with 1,000 small files and 100 snapshots is compacted and expired on schedule. Time travel within retention still works, orphaned files are gone, and every action is audited",
+   "status": "shipped",
+   "note": "policies per table, schema or default; compaction, snapshot expiry, orphan removal on a schedule; automatic clustering: sort columns chosen from what the table's queries filter on (Trino's query history), the sort order set and the files rewritten when they overlap (tests/test_trino_e2e.py)"
+  },
+  {
+   "id": "L2",
+   "title": "Governed Spark on restricted tables",
+   "summary": "A policy-enforcing scan path for masks and row filters (Spark Connect on trusted compute, or a Cairn-planned scan through Trino), so Spark users are no longer refused",
+   "done": "ana reads a masked table in Spark and sees masked values. bob's row filter returns only his rows. Neither can reach the raw files",
+   "status": "shipped",
+   "note": "a Cairn-planned scan through Trino: cairn_spark.governed_read reads as the user, with their masks and row filters, partitioned; the catalog still refuses the files (tests/test_spark_e2e.py)"
+  },
+  {
+   "id": "L3",
+   "title": "Spark on Kubernetes",
+   "summary": "Cluster-mode submission and Spark Operator SparkApplications with no secret in the cluster (the driver signs in by workload identity), CairnSparkApplicationOperator for Airflow, driver RBAC and a history server in the chart; then per-team namespaces with quotas",
+   "done": "An Airflow DAG submits a Spark job to the cluster as a pipeline user. Its lineage and run appear in Cairn, and the job is refused a table outside its grants",
+   "status": "shipped",
+   "note": "submission, operator, Airflow task and history server (tests/test_spark_k8s_e2e.py); on a full cluster in CI (kind): a cluster-mode job's driver pod signs in with its projected service-account token, starts an executor pod, reads a governed table and is refused another (tests/test_spark_kind_e2e.py); per-team quotas (tests/test_spark_teams_k8s.py)"
+  },
+  {
+   "id": "L4",
+   "title": "Notebooks",
+   "summary": "JupyterHub with Cairn sign-in; kernels with cairn-spark and Trino as the signed-in person; notebooks as catalog assets",
+   "done": "A person signs in through Cairn, queries Trino and Spark from a notebook under their own policies, and the notebook appears in Cairn with lineage",
+   "status": "shipped",
+   "note": "JupyterHub signs people in through Cairn (OAuth client jupyterhub); each person's server gets a Cairn token of their own, suspended with them; %%sql on Trino and %cairn spark as the person; saved notebooks become catalog assets owned by them with lineage from their %%sql tables (cairn_lakehouse.jupyter, helm/jupyterhub/values-cairn.yaml, tests/test_jupyterhub_e2e.py with a real JupyterHub)"
+  },
+  {
+   "id": "L5",
+   "title": "Streaming and CDC ingestion",
+   "summary": "Kafka → Iceberg (Kafka Connect Iceberg sink) and Debezium CDC as governed pipelines, with exactly-once commits and schema evolution",
+   "done": "A PostgreSQL table's changes arrive in an Iceberg table within a minute, with lineage from the source and quality monitors on freshness",
+   "status": "shipped",
+   "note": "Kafka JSON and Debezium CDC into Iceberg (cairn streams): upserts and deletes, offsets in the table snapshots for exactly once, rejects, schema evolution, source lineage (tests/test_streams_e2e.py)"
+  },
+  {
+   "id": "L6",
+   "title": "Workload management and chargeback",
+   "summary": "Trino resource groups and Spark quotas per team, with costs from Trino and Spark query statistics fed into the cost report automatically",
+   "done": "Two teams' queries are isolated under load, and each team's compute and storage costs appear per day without manual posting",
+   "status": "partial",
+   "note": "resource groups and cost report exist; Spark compute is priced per application from its runs (CAIRN_COST_SPARK_USD_PER_CORE_HOUR); team warehouses scale to zero and their workers follow the load, with node-hours priced in the cost report (tests/test_warehouses_scaling_e2e.py); cost budgets per domain, owner, platform, tables, warehouse or AI, with threshold and forecast alerts once a period (tests/test_budgets.py); per-query Trino costs attributed to people, teams and tables (L60)"
+  },
+  {
+   "id": "L7",
+   "title": "Machine learning",
+   "summary": "MLflow tracking and model registry behind Cairn sign-in; models and features as catalog assets, with lineage from training tables",
+   "done": "A model trained in Spark is registered as a pipeline user. Cairn shows its lineage to the training tables, and access to the model follows Cairn's policy",
+   "status": "partial",
+   "note": "MLflow behind Cairn sign-in (/v1/ml): runs attributed to the caller, an owned and governed registry, versions in the catalog with lineage from training tables, serving through Cairn with USE_ML_MODEL (tests/test_ml_e2e.py, trained with scikit-learn); feature tables as catalog assets with their lineage, declared by the table's owners (tests/test_feature_tables.py); an online feature store: feature tables served by entity key, kept in step with the table's snapshots, each lookup governed as a read (masks as Trino applies them, row-filtered callers refused) (tests/test_online_features_e2e.py); model monitoring: every served call logged, drift (PSI) against the training table or a reference period, accuracy from labels, alerts on drift, payloads for the model's managers only (tests/test_ml_e2e.py, tests/test_model_monitoring_e2e.py); Spark training and serving deployments in the chart to do"
+  },
+  {
+   "id": "L8",
+   "title": "Open data sharing",
+   "summary": "Iceberg REST sharing to external recipients, with recipient identities, expiry and revocation in Cairn",
+   "done": "A recipient in another organisation reads a shared table with pyiceberg. Revoking the share stops access at once",
+   "status": "partial",
+   "note": "shares through Iceberg REST: recipient credential, only the shared tables, read-only scoped keys, expiry, revocation at once, never a masked or filtered table (/v1/shares, Pipelines → Shares, tests/test_shares_e2e.py); publishing to Snowflake and Delta Sharing; clean rooms: approved aggregate templates only, k-anonymous results, the room's own Trino identity reading only its tables (/v1/clean-rooms, tests/test_trino_e2e.py); differentially private rooms: Laplace noise on counts and clipped sums, an epsilon budget spent atomically and refused once used (tested on Trino); outside parties (partner:<name>) signing in with a secret shown once, uploading their data as a table only the room reads, proposing and running templates (tested on Trino with the real store and catalog)"
+  },
+  {
+   "id": "L9",
+   "title": "Disaster recovery across regions",
+   "summary": "Store replication, catalog and Cairn database replicas, and a tested failover runbook with measured recovery point and recovery time objectives",
+   "done": "A region is lost in a test. The standby serves the lakehouse with the recorded RPO and RTO",
+   "status": "shipped",
+   "note": "standby store by bucket replication, standby PostgreSQL by streaming, a failover runbook and cairn dr reconcile (tables whose newest files never arrived move back to their newest whole commit); drill in CI with the primary region killed: RPO 4 of 10 commits (4.3 s), RTO about 2 s (tests/test_dr_drill.py); automatic failover (cairn dr watch): the standby databases promoted and DNS repointed by TSIG-signed RFC 2136 updates once the whole primary is lost and only onto a healthy standby, never failing back by itself; drilled with a real BIND server and Cairn's own database (audit chain whole, writes taken), DNS switched 1.4 s after the loss"
+  },
+  {
+   "id": "L10",
+   "title": "Scale and assurance",
+   "summary": "Load tests: PDP p99 under 5 ms cached at 2k rps, catalog decisions on 1k-table jobs, store throughput. Chaos tests. An external penetration test. KMS or HSM for gateway keys",
+   "done": "Published results in CI, and pentest findings closed",
+   "status": "partial",
+   "note": "in CI: cached decisions p99 0.02 ms at about 107k/s on one thread and a 1,000-table catalog decision in 0.6 s cold, 0.1 s warm (tests/test_scale_decisions.py, after indexing policies by privilege, compiling target patterns once and a cheaper cache key); chaos with a replica killed mid-commit, the database restarted and the store crashed, nothing acknowledged lost or doubled (catalog/conformance/test_chaos.py); every route refused to strangers but a reviewed public list, security headers (tests/test_route_security.py); KMS, Key Vault, Cloud KMS and KMIP HSMs for store keys (L22). An external penetration test, store throughput at scale and a KMS or HSM for gateway keys to do"
+  },
+  {
+   "id": "L11",
+   "title": "Upgrade matrix",
+   "summary": "Pin-and-test against new Trino, Iceberg, Spark, dbt and Airflow releases",
+   "done": "A version bump is merged only after CI passes with the new engine version",
+   "status": "shipped",
+   "note": "deploy/versions/pins.json (checked against every file that pins), a weekly workflow that finds each engine's newest release and runs the matching end-to-end suites on it (cairn-upgrade-matrix.yml); tried here: Trino 484 needed two renamed settings, then passed all 21 Trino tests"
+  },
+  {
+   "id": "L12",
+   "title": "Zero-copy clones, undrop, branches and tags",
+   "summary": "Clone a table without copying its data; bring back a dropped table; write-audit-publish on Iceberg branches",
+   "done": "A clone reads the source's files and writes its own; neither can expire what they share; a dropped table comes back within the retention, a purged one does not",
+   "status": "shipped",
+   "note": "POST …/tables/{t}/clone, …/undrop, GET …/dropped in Cairn Catalog; branches and tags kept by the catalog, tested with pyiceberg (catalog/conformance/test_clones.py)"
+  },
+  {
+   "id": "L13",
+   "title": "HTTP streaming ingestion",
+   "summary": "Producers post rows into lakehouse tables without Kafka, exactly once",
+   "done": "A producer that retries a request writes nothing twice and resumes where the table says",
+   "status": "shipped",
+   "note": "http streams: POST /v1/ingest/<name>/rows with per-channel offsets in the table's snapshots, INGEST_STREAM (tests/test_ingest_http_e2e.py)"
+  },
+  {
+   "id": "L14",
+   "title": "Query insight",
+   "summary": "Query history, profiles and tuning hints",
+   "done": "A person sees their own slow queries with why they were slow; operators see all",
+   "status": "shipped",
+   "note": "/v1/queries from Trino's events: per-query statistics and SQL for its author and operators, hints for queueing, wide or unfiltered reads, cross joins, unbounded sorts, memory and failures (tests/test_trino_e2e.py); a Query insight page with filters and profiles (tests/test_sql_ops_ui_e2e.py, in Chromium)"
+  },
+  {
+   "id": "L15",
+   "title": "Files as data",
+   "summary": "Directory tables and document text extraction",
+   "done": "A folder of documents is a table with each file's text, kept current as files change",
+   "status": "shipped",
+   "note": "files pipes: one row per object with its metadata and the text of text, HTML, PDF, Word and PowerPoint files, updated on change and removed on delete; scanned PDF pages and images read by OCR (Tesseract, in Cairn's image), with per-page and per-document limits reported on the row (tests/test_pipes_e2e.py)"
+  },
+  {
+   "id": "L16",
+   "title": "Vector search on lakehouse data",
+   "summary": "Search a table's text by meaning, governed",
+   "done": "A question finds the right rows; an index follows its table; only readers search it",
+   "status": "shipped",
+   "note": "vector indexes: chunks embedded with the deployment's model into <table>__<index>_vectors, one per index, refreshed incrementally, searched with READ on the source and never past a mask or row filter (tests/test_vectors_e2e.py); approximate (ANN) indexes for very large tables to do; approximate search (IVF: k-means lists trained at refresh, stored beside the vectors, the nearest lists searched; exact when the stored index is not for the current snapshot), recall@10 1.0 at a tenth of the work in tests"
+  },
+  {
+   "id": "L17",
+   "title": "Scheduled SQL and in-product workflows",
+   "summary": "Steps that depend on each other, on a schedule, as their owner",
+   "done": "A nightly refresh, a check and a report run in order; a failed check stops what follows and tells the owner",
+   "status": "shipped",
+   "note": "SQL workflows (/v1/sql-workflows): derived refreshes, checks and reports in a DAG on cron, with retries, run history and notifications (tests/test_sql_workspace.py, tests/test_trino_e2e.py); a SQL workflows page with a step editor, Run now and run history (tests/test_sql_ops_ui_e2e.py, in Chromium)"
+  },
+  {
+   "id": "L18",
+   "title": "Infrastructure as code for SQL and search",
+   "summary": "Saved queries, dashboards, alerts, SQL workflows and vector indexes in bundles and Terraform; Terraform data sources",
+   "done": "A team keeps its reports in git: a plan shows only real changes, and references between them stay right",
+   "status": "shipped",
+   "note": "bundle kinds and Terraform resources for all five, references by name (bundles) or id (Terraform), subset drift checks, one data source per type (tests/test_bundles.py, tests/test_terraform_provider.py with Terraform 1.13); policies (one at a time, serialized, audited) and connections as bundle kinds and Terraform resources, with data sources (tests/test_bundles.py, tests/test_policy_items.py, tests/test_terraform_provider.py); warehouses stay deployment config, their access a policy; a registry-ready release (GoReleaser, signed checksums, manifest) checked in CI. Publishing to the public registry needs the provider's own repository and a GPG key"
+  },
+  {
+   "id": "L19",
+   "title": "Delta Lake beyond one writer, and into Iceberg",
+   "summary": "Concurrent Delta writers on Cairn Store; Delta tables converted to Iceberg without copying",
+   "done": "Two clusters write one Delta table at once and lose nothing; a Delta table becomes an Iceberg table in place",
+   "status": "shipped",
+   "note": "conditional-write commits (s3.exclusive-create, checked atomically by Cairn Store), proven with two Trino clusters; in-place conversion from the Delta log (checkpoints and commits), refusing partitioned tables, deletion vectors and column mapping (tests/test_trino_e2e.py); converting partitioned tables and deletion vectors in place to do; partitioned tables (partition values from the log, identity partitions) and deletion vectors (decoded, only those files rewritten) convert too, tested on tables Trino wrote"
+  },
+  {
+   "id": "L20",
+   "title": "Git-backed SQL and notebooks",
+   "summary": "Saved queries and notebooks kept in a git repository, pulled and pushed by their owner",
+   "done": "A team reviews its queries in pull requests; a merged change reaches Cairn, and an edit made in Cairn is proposed back",
+   "status": "shipped",
+   "note": "Git folders over the git command (any host): pull to saved queries and catalog notebooks, conflicts reported rather than overwritten, push to a new branch with a pull request for configured hosts (tests/test_git_folders.py); a Git folders page to link, pull (conflicts shown) and push (tests/test_sql_ops_ui_e2e.py, in Chromium); notebooks round-trip through JupyterHub: a folder's notebooks are synced into each owner's server, saves there are pushed (outputs cleared), conflicts reported and local work never overwritten (tests/test_jupyterhub_e2e.py, real JupyterHub and git)"
+  },
+  {
+   "id": "L21",
+   "title": "Stored functions and procedures",
+   "summary": "SQL and Python functions kept in a catalog; parameterized procedures",
+   "done": "A team shares a function everyone may call under policy; an operator gives a few people a procedure for a controlled change",
+   "status": "shipped",
+   "note": "stored functions in a routines catalog, USE_FUNCTION per function with masks applied first; procedures with typed, bound parameters run as the caller, EXECUTE_PROCEDURE per procedure (tests/test_trino_e2e.py); owner's-rights procedures deliberately not offered; functions as catalog assets: published from Trino's events (creator as owner, signatures, body, comment, overloads and drops), a sync for what was missed, the policy's function urn on the asset (tests/test_trino_e2e.py, tests/test_trino_functions.py)"
+  },
+  {
+   "id": "L22",
+   "title": "Customer keys beyond Vault",
+   "summary": "Customer-managed keys in AWS KMS, Azure Key Vault, Google Cloud KMS and KMIP HSMs for Cairn Store",
+   "done": "A customer disables their key and their objects can no longer be read",
+   "status": "shipped",
+   "note": "aws-kms external keys: SigV4, the object's name as the encryption context, rotated credentials picked up (store/conformance/test_kms_aws.py against a real KMS-compatible server). ✅ azure-keyvault (RSA-OAEP-256 wrap, the wrapping version kept, client secret, workload identity, managed identity), gcp-kms (the object's name as AAD, signed service-account sign-in or the metadata server) and kmip (KMIP 1.4 over mutual TLS, AES-GCM in the HSM), tested against Lowkey Vault, floci-gcp and PyKMIP's server, with a disabled version, a key the object was not written with, a refused certificate and a revoked key (store/conformance/test_kms_cloud.py)"
+  },
+  {
+   "id": "L23",
+   "title": "Data apps",
+   "summary": "Streamlit and other web apps served by Cairn, each viewer signed in and governed as themselves",
+   "done": "A team ships an app; people open it with their Cairn sign-in and see only their own data",
+   "status": "shipped",
+   "note": "/apps/<name>/ proxy (HTTP and WebSocket), USE_APP per app, the viewer's identity and a Trino token for them passed to the app, forged headers stripped, apps started on demand and stopped when idle (tests/test_data_apps_e2e.py, Streamlit in Chromium); apps from git at a deployed commit (tests/test_data_apps_git.py); a Kubernetes runtime: a Deployment per app at the deployed commit, started on a visit and stopped when idle, locked-down pods reached only by Cairn, the chart's namespace Role (tests/test_data_apps_k8s.py on kind)"
+  },
+  {
+   "id": "L24",
+   "title": "Materialized views",
+   "summary": "A query's result kept as a table and refreshed when what it reads changes, written in SQL",
+   "done": "An analyst writes CREATE MATERIALIZED VIEW; any write to its source, from any engine, refreshes it, and it says when it is stale",
+   "status": "shipped",
+   "note": "CREATE, REFRESH and DROP MATERIALIZED VIEW in the SQL editor, refreshed on change as their owner, fresh/stale with what changed; Cairn Catalog reports every commit, so pyiceberg, Spark and Trino writes all count (tests/test_trino_e2e.py, tests/test_lakehouse_client_e2e.py)"
+  },
+  {
+   "id": "L25",
+   "title": "Change data feed",
+   "summary": "A table's row changes since a snapshot, for consumers that sync or react",
+   "done": "A downstream system reads only what changed since it last looked, seeing what its reader may see",
+   "status": "shipped",
+   "note": "GET /v1/lakehouse/tables/<schema>/<table>/changes (inserts, deletes, updates by key, the next cursor) and .../snapshots, read as the caller so masks and row filters apply; Iceberg metadata tables decided on their table (value-bearing ones for its managers), and connector table functions that bypass masks (table_changes, JDBC query) for operators only (tests/test_trino_e2e.py, tests/test_trino_access.py)"
+  },
+  {
+   "id": "L26",
+   "title": "SIEM export",
+   "summary": "The audit log pushed to Splunk HEC, syslog (RFC 5424 and CEF, over TLS) and HTTPS sinks as it is written",
+   "done": "A security team's SIEM holds every audit entry in order and can verify the chain; a sink that is down loses nothing",
+   "status": "shipped",
+   "note": "at-least-once, ordered delivery with a cursor per sink, backoff, lease and rewind; tokens from files; tested against Vector as the receiver (tests/test_siem_e2e.py)"
+  },
+  {
+   "id": "L27",
+   "title": "Signup and billing",
+   "summary": "Self-service signup, Stripe Checkout and a tenant whose licence follows its subscription",
+   "done": "A team signs up, pays and gets its workspace; renewals extend its licence, a cancelled one turns read-only after its grace with its data kept",
+   "status": "shipped",
+   "note": "email confirmation, Checkout, signed and idempotent webhooks, provisioning through tenant.sh with retries, renewals and plan changes reissuing the licence, the billing portal by emailed link (tests/test_signup_e2e.py, against stripe-mock and Mailpit)"
+  },
+  {
+   "id": "L28",
+   "title": "Usage metering",
+   "summary": "Tenants report their daily usage; the control plane bills it through Stripe's meters",
+   "done": "A tenant's Trino CPU, warehouse time and AI spend appear on its invoice, each day billed once",
+   "status": "shipped",
+   "note": "signed daily reports with per-tenant keys derived on the control plane, delivered by tenant.sh --metering-key and the chart; settled days sent as Stripe meter events with idempotent identifiers (tests/test_metering_e2e.py, against stripe-mock)"
+  },
+  {
+   "id": "L29",
+   "title": "Status page",
+   "summary": "Components probed, 90-day uptime, incidents and maintenance, public",
+   "done": "Customers see when a part of the platform is down or degraded, and what operators say about it",
+   "status": "shipped",
+   "note": "probes with operational/degraded/outage, daily uptime, incidents with updates and scheduled maintenance, a script-free page, JSON and an Atom feed (tests/test_status_page_e2e.py, against a real Cairn Store stopped and restarted)"
+  },
+  {
+   "id": "L30",
+   "title": "Gateway API",
+   "summary": "HTTPRoutes (and optionally the Gateway) instead of an Ingress, for tenants too",
+   "done": "A cluster without ingress-nginx serves Cairn through its Gateway with the same paths",
+   "status": "shipped",
+   "note": "core.gateway in the chart, the same routing as the Ingress (prefix rewrites, X-Forwarded-Prefix, timeouts, consoles blocked), validated against the Gateway API schemas; tenant.sh on a shared Gateway (CAIRN_GATEWAY); the end-to-end check through Envoy Gateway on kind (tests/test_gateway_api_kind.py) runs in CI's kind job"
+  },
+  {
+   "id": "L31",
+   "title": "BI: spreadsheet workbooks",
+   "summary": "Explore a table like a spreadsheet: formulas, filters, grouping, pivots, compiled to SQL and run as the viewer",
+   "done": "An analyst builds revenue by region and quarter without SQL; a colleague with masked columns sees them masked",
+   "status": "shipped",
+   "note": "the formula language compiled safely to Trino SQL, workbook elements with calculated columns, row and group filters, aggregates and pivots, saved and shared workbooks, the Workbooks page (tests/test_workbooks.py, tests/test_trino_e2e.py, tests/test_sql_ops_ui_e2e.py)"
+  },
+  {
+   "id": "L32",
+   "title": "BI: input tables (writeback)",
+   "summary": "Tables people type into, written on Trino as the person and read back governed",
+   "done": "Finance types quarterly targets next to actuals; a workbook compares them at once; a stale edit never overwrites a colleague's",
+   "status": "shipped",
+   "note": "create, add, edit and delete rows as the person (Trino asks Cairn for each statement), typed literals, optimistic concurrency on _updated_at, catalog registration, audit, the Input tables page (tests/test_trino_e2e.py, tests/test_input_tables.py, inputTables.test.tsx)"
+  },
+  {
+   "id": "L33",
+   "title": "BI: interactive dashboards",
+   "summary": "Shared filter controls, cross-filtering, drill-down, workbook tiles and more chart types",
+   "done": "A sales lead picks EU and a date range, clicks a region to filter the orders, drills from region to country; each viewer still sees only their rows",
+   "status": "shipped",
+   "note": "values, range, date range and text controls (choices from the data as the viewer sees it), cross-filter on click, drill paths on workbook tiles, stacked bar, area, scatter, pie and number charts, all run as the viewer (tests/test_sql_workspace.py, tests/test_trino_e2e.py, dashboards.test.tsx, tests/test_sql_ops_ui_e2e.py)"
+  },
+  {
+   "id": "L34",
+   "title": "BI: metrics layer",
+   "summary": "Named metrics (measure, dimensions, filters, time grain) defined once and used in workbooks, dashboards and Ask-your-data",
+   "done": "\"Revenue\" means the same in every tile and answer; changing its definition changes them all",
+   "status": "shipped",
+   "note": "metrics with their own filters, time column and allowed dimensions, compiled to one workbook element and run as the viewer; metric tiles on dashboards; owner-only changes, operator certification withdrawn on change, versions, audit; the Metrics page (tests/test_workbooks.py, tests/test_trino_e2e.py, metrics.test.tsx). Ask-your-data using metrics comes with the AI builder (L35)"
+  },
+  {
+   "id": "L35",
+   "title": "BI: AI builder",
+   "summary": "The assistant builds workbooks and dashboards from a question, using metrics and governed columns",
+   "done": "\"Revenue by region this quarter, with a filter on country\" becomes a saved dashboard the person may see",
+   "status": "shipped",
+   "note": "a question becomes a dashboard of metric and workbook tiles and controls proposed as structured output (no model-written SQL), each tile compiled as the person, refusals fed back once, a governed preview, saved as the person's own; Ask-your-data given the metrics layer's definitions (tests/test_trino_e2e.py, dashboards.test.tsx); 🟡 not yet evaluated with a live model"
+  },
+  {
+   "id": "L36",
+   "title": "BI: app actions",
+   "summary": "Forms and buttons on dashboards that write to input tables, call an API or run a workflow, as the person",
+   "done": "An approver clicks Approve on a row; the input table changes and a workflow runs, audited",
+   "status": "shipped",
+   "note": "forms and buttons that add or change input-table rows as the person clicking (Trino decides), run workflows only for those the owner allows, and post to operator-allowed APIs signed; every run kept and audited; buttons, forms and row picking on dashboards (tests/test_trino_e2e.py, dashboards.test.tsx)"
+  },
+  {
+   "id": "L37",
+   "title": "BI: scheduled exports and a result cache",
+   "summary": "Dashboards and workbooks sent as PDF/CSV on a schedule; results cached per viewer's policy and invalidated when tables change",
+   "done": "A Monday email with each recipient's own view; a second viewer with the same policy gets the cached result",
+   "status": "shipped",
+   "note": "a result cache shared only between people whose decisions on every table read are the same, dropped on a table change or after a time, audited; CSV and PDF exports on a schedule rendered as each recipient, kept for them alone, emailed as attachments; Schedule export on dashboards (tests/test_trino_e2e.py, tests/test_reports.py, dashboards.test.tsx)"
+  },
+  {
+   "id": "L38",
+   "title": "BI assets in the catalog",
+   "summary": "Saved queries, workbooks and dashboards as catalog entities (input tables already are datasets) with lineage from the tables they read",
+   "done": "Dropping a column shows which dashboards break, before it is dropped",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L39",
+   "title": "BI version history",
+   "summary": "Every save of a saved query, workbook or dashboard kept; compare and restore",
+   "done": "A broken edit is rolled back to yesterday's version",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L40",
+   "title": "Embedded dashboards",
+   "summary": "Dashboards embedded with signed, origin-bound tokens, running as the embedding user",
+   "done": "A portal shows a dashboard with that user's row filters",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L41",
+   "title": "BI as code",
+   "summary": "Workbooks, dashboards (every tile kind), metrics and input tables in cairn bundle and the Terraform provider (Terraform's input tables not yet run by Terraform in a test)",
+   "done": "A dashboard deployed from git to staging and production",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L42",
+   "title": "Input-table approvals",
+   "summary": "Optional review before changes to an input table land",
+   "done": "A change to targets waits for a reviewer; approved, it is written as its author",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L43",
+   "title": "Partition-aware volume monitors",
+   "summary": "Volume and freshness per partition",
+   "done": "A missing day in a partitioned table alerts even when the table total looks normal",
+   "status": "shipped",
+   "note": "partition_column on SQL volume monitors (missing and thin days or hours); tested on an Iceberg table partitioned by day on Trino"
+  },
+  {
+   "id": "L44",
+   "title": "Remote agent hardening",
+   "summary": "Key rotation by signed re-enrolment and an mTLS option between agent and gateway",
+   "done": "An agent rotates its key without downtime; a gateway with mTLS refuses an agent without a client certificate",
+   "status": "shipped",
+   "note": "Signed rotation with proof of the new key, a grace period and crash recovery; mutual TLS on the gateway; tested with a real TLS gateway"
+  },
+  {
+   "id": "L45",
+   "title": "Python functions",
+   "summary": "Sandboxed Python UDFs callable from SQL, governed like SQL functions",
+   "done": "A Python function runs on Trino rows without network or filesystem access",
+   "status": "shipped",
+   "note": "already built: inline and stored LANGUAGE PYTHON functions on Trino under USE_FUNCTION (tests/test_trino_e2e.py::test_ai_and_python_functions_run_in_sql_under_cairns_policies); found by the capability audit"
+  },
+  {
+   "id": "L46",
+   "title": "Chaos tests",
+   "summary": "Cairn Core, the PDP, the gateway and the catalog stopped under load in CI",
+   "done": "Each outage fails closed and recovers without lost writes",
+   "status": "shipped",
+   "note": "PDP and catalog stopped under Trino load, gateway restarted and Core refusing writes mid-run; Core itself at its edge (buffers and outboxes)"
+  },
+  {
+   "id": "L47",
+   "title": "SAML single sign-on",
+   "summary": "SAML 2.0 alongside OIDC: SP metadata, signed assertions checked, groups from attributes",
+   "done": "An Okta/ADFS/Entra tenant set up for SAML signs people in to Cairn with their groups; a forged or replayed assertion is refused",
+   "status": "shipped",
+   "note": "Cairn as SAML service provider (signed response or assertion, signature-wrapping and replay refused, audience, recipient, validity, InResponseTo) and OpenID provider for Cairn Core (code + PKCE, own signing key, groups claim); audited (tests/test_saml_e2e.py against Keycloak)"
+  },
+  {
+   "id": "L48",
+   "title": "Secrets for people's notebooks and jobs",
+   "summary": "Secret scopes owned by people or groups, read by notebooks, workflows and Spark as the person",
+   "done": "A notebook reads an API key from a scope its user may read; nobody else can; the value is never logged or shown again",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L49",
+   "title": "Sharing BI assets with people and groups",
+   "summary": "Viewer and editor roles on dashboards, workbooks and saved queries (metrics stay platform-wide definitions)",
+   "done": "A dashboard shared with Finance as viewers opens for Finance only; an editor changes it; others get 404",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L50",
+   "title": "Retention enforced, legal hold and automated erasure",
+   "summary": "Retention policies delete expired rows; legal hold blocks deletes and expiry on a table; right-to-be-forgotten deletes rows and proves it",
+   "done": "Rows older than the policy are gone after the run; a table on hold keeps them; an erasure request ends with a signed report of rows removed",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L51",
+   "title": "Per-tenant and per-user API quotas, and tenant IP allowlists",
+   "summary": "",
+   "done": "A user over their quota gets 429 with Retry-After; a request from outside the tenant's allowlist is refused",
+   "status": "shipped",
+   "note": ""
+  },
+  {
+   "id": "L52",
+   "title": "BI folders, comments and usage analytics",
+   "summary": "",
+   "done": "Dashboards organised in folders, discussed in threads, and a report shows who uses which and which are stale",
+   "status": "shipped",
+   "note": "API and screens (folders, threads, usage and stale assets), tested in Chromium"
+  },
+  {
+   "id": "L53",
+   "title": "Metric alerts",
+   "summary": "Thresholds and anomaly detection on metrics",
+   "done": "Revenue dropping 20% week over week, or out of its usual range, notifies the owner once",
+   "status": "shipped",
+   "note": "Change, range and threshold rules per period, run as the owner, told once per change of state; tested on Trino"
+  },
+  {
+   "id": "L54",
+   "title": "Map and heatmap charts; dashboards that work on a phone",
+   "summary": "",
+   "done": "A region map and a heatmap render from metric tiles; a dashboard is usable at phone width",
+   "status": "shipped",
+   "note": "Heatmap and point-map charts (operator's tiles optional); one-column dashboards on a phone, tested in Chromium as an iPhone"
+  },
+  {
+   "id": "L55",
+   "title": "Export files delivered to Slack and Teams",
+   "summary": "",
+   "done": "A scheduled export arrives in a Slack channel as a file, each recipient's own view",
+   "status": "shipped",
+   "note": "Each recipient's own copy uploaded to their Slack DM; Teams gets a link to it (webhooks carry no files); shared channels are told but never given a copy"
+  },
+  {
+   "id": "L56",
+   "title": "Metrics over SQL for outside BI tools",
+   "summary": "",
+   "done": "Tableau or Power BI queries a metric through Trino as the signed-in person and gets the same number as the dashboard",
+   "status": "shipped",
+   "note": "Metrics published as SECURITY INVOKER views read on their table's terms; same numbers as Cairn's metric query per person, tested on Trino (summable measures only)"
+  },
+  {
+   "id": "L57",
+   "title": "Scheduled notebook and Python jobs in Cairn",
+   "summary": "",
+   "done": "A notebook runs nightly as its owner, its output kept, failures notified",
+   "status": "shipped",
+   "note": "Notebooks and scripts on a cron, each run in a locked-down container (Docker) or a Kubernetes Job, with a Trino token for its owner; output and log kept, failures told; tested with the real image on Docker, Trino (row filters) and kind"
+  },
+  {
+   "id": "L58",
+   "title": "Governed volumes",
+   "summary": "Folders of files under Cairn's policies, not only S3 policies",
+   "done": "A volume shared with a group is readable by them alone, through the API and Spark",
+   "status": "shipped",
+   "note": "Volumes (a bucket each) under Cairn's grants to people and groups; files through the API, and narrowed, short-lived store credentials for Spark; tested on a real store and in Spark (CI)"
+  },
+  {
+   "id": "L59",
+   "title": "Snapshot browser and restore",
+   "summary": "",
+   "done": "A person sees a table's snapshots and restores yesterday's, audited",
+   "status": "shipped",
+   "note": "Snapshots tab with row counts, the table as it was (as the person sees it), and restore with a reason, as the person on Trino (MANAGE_DATASET), audited and undoable; tested on Trino and in the UI"
+  },
+  {
+   "id": "L60",
+   "title": "Cost per query, user and table on Trino",
+   "summary": "",
+   "done": "The cost report attributes Trino CPU and scanned bytes to people, teams and tables",
+   "status": "shipped",
+   "note": "Each query priced from its CPU and scanned bytes; attributed to people, teams (even split) and tables (even split), in the table cost report, on query profiles and a Reports tab; people see their own; tested on Trino and in the UI"
+  },
+  {
+   "id": "L61",
+   "title": "SaaS data connectors",
+   "summary": "Loading from Salesforce, HubSpot and similar into Iceberg",
+   "done": "Salesforce accounts land in a governed table on a schedule, incrementally",
+   "status": "partial",
+   "note": "Salesforce and HubSpot into Iceberg on a cron, incremental by modification time, upserted by id, keys from secret scopes as the owner, WRITE_DATASET checked each run; Google Sheets loaded whole each run (service account JWT or API key); Excel workbooks through file pipes (format: xlsx, typed columns), tested with real files, store and catalog; Salesforce, HubSpot and Sheets tested end to end against an emulated API (not yet against a real org or Google account)"
+  },
+  {
+   "id": "L62",
+   "title": "Reverse ETL",
+   "summary": "Syncing governed tables out to SaaS apps",
+   "done": "A segment table syncs to a CRM as its owner; masked columns are never sent",
+   "status": "partial",
+   "note": "HubSpot and Salesforce upserts read on Trino as the owner (row filters apply), refused when a sent column is masked for them, EXPORT_DATASET checked each run, only changed rows sent, rejects retried; tested on Trino against an emulated API (not yet a real account)"
+  },
+  {
+   "id": "L63",
+   "title": "Managed model serving",
+   "summary": "Deployments with autoscaling from the registry",
+   "done": "A registered model is deployed from Cairn, scales with load and is invoked as the caller",
+   "status": "shipped",
+   "note": "Deployments of registered versions, invoked as the caller (USE_ML_MODEL), scaled by in-flight concurrency with scale-to-zero, on MLflow's model server as local processes or, in the chart, as a Deployment per model on Kubernetes (Cairn's Role, network policy, no credentials in the pods); tested with real MLflow, and on a kind cluster in CI (run 287)"
+  },
+  {
+   "id": "L64",
+   "title": "Build and deploy custom agents",
+   "summary": "",
+   "done": "A team defines an agent with tools and scopes, deploys it, and its actions are governed and traced",
+   "status": "partial",
+   "note": "Agents built from the assistant's tools with scopes (read, query_data, propose), deployed with draft-on-change, run as the caller narrowed to their tools and scopes, under the pause switch, quotas, AI budget and AI system approval, traced and audited; tested on real services with a scripted model, not yet against a live model"
+  },
+  {
+   "id": "L65",
+   "title": "SDKs beyond Python, and an API deprecation policy",
+   "summary": "",
+   "done": "JS and Java clients for the main APIs; deprecated routes send Deprecation and Sunset headers",
+   "status": "shipped",
+   "note": "Dependency-free JavaScript/TypeScript and Java 17 clients for the main APIs (identity, health, search and questions, governed SQL, saved queries, products and access requests, custom agents), tested over HTTP against a real Cairn API (governed answers, bearer tokens, agent keys, retries, deprecation warnings); deprecated routes send Deprecation, Sunset and successor Link headers, are marked in the OpenAPI document and answer 410 after their sunset (180 days minimum notice)"
+  },
+  {
+   "id": "L66",
+   "title": "Consent management",
+   "summary": "",
+   "done": "A subject's withdrawn consent excludes their rows from purposes that need it",
+   "status": "shipped",
+   "note": "Purposes that need consent (opt-out or opt-in, members by user, group or persona, an identifier kind); records kept only as hashes; members' queries exclude withdrawn subjects on Trino (row filters) and on direct connections (query rewrite), failing closed; tested on real Trino, PostgreSQL and SQLite. Policy row filters now apply on direct connections too"
+  },
+  {
+   "id": "L67",
+   "title": "Accessibility tested",
+   "summary": "Automated axe checks of the main pages in CI",
+   "done": "The main pages pass axe with no serious violations",
+   "status": "shipped",
+   "note": "Twenty main pages checked with axe-core (WCAG 2.1 A/AA) in Chromium against a running Cairn, in CI; fixed what it found: antd Select's closed-combobox ARIA (corrected at build), the SQL editor's textbox ARIA, unnamed progress bars and an unlabelled input; dialogs and other opened states are not covered yet"
+  },
+  {
+   "id": "L68",
+   "title": "Failover for tenant OpenSearch and Kafka",
+   "summary": "Replicated tenant services: three-node OpenSearch and three Kafka brokers (KRaft quorum), spread over nodes with disruption budgets",
+   "done": "A tenant keeps searching and its events keep flowing when it loses a node; writes that could be lost are refused",
+   "status": "shipped",
+   "note": "CAIRN_TENANT_SERVICES_HA=1. Tested on the rendered manifest in Docker: Kafka with a broker lost (no write lost or stopped) and two lost (writes refused); OpenSearch with a node lost (every document readable, writes go on, green again when it rejoins). Tested on k3s (deploy/hetzner/ci/k3s-smoke.sh, CI run 286): the release reaches each broker by name through the policy, an OpenSearch pod and a broker deleted lose nothing"
+  },
+  {
+   "id": "L69",
+   "title": "Spark training and model serving in the chart",
+   "summary": "Model deployments as Kubernetes Deployments scaled by Cairn; Spark training tracked in MLflow through Cairn as the job",
+   "done": "A team trains on Spark as its pipeline user, registers the model, deploys it from Cairn and it scales on the cluster",
+   "status": "shipped",
+   "note": "Model serving on Kubernetes tested on kind in CI (run 287: a Deployment per model deployment with only the chart's Role, scaled from zero by traffic and back, refused to people without the model's rights, no credentials in pods). Spark training: cairn_spark.mlflow tested with real MLflow through Cairn (the job tracked as its user, with lineage); pyspark.ml training in the cairn/spark image (spark-submit), registered through Cairn as the job's user with the table as lineage, green in CI run 288"
+  },
+  {
+   "id": "L70",
+   "title": "Sample datasets for new tenants",
+   "summary": "A documented retail lakehouse (customers, products, orders) with starter queries",
+   "done": "A new tenant explores search, SQL and dashboards on real tables before its own data arrives",
+   "status": "shipped",
+   "note": "/v1/samples, cairn samples, loaded once on a new tenant's first start (CAIRN_TENANT_SAMPLES, chart cairn.samples.onStart), never back after a removal; tested with the real store, catalog and Trino (tests/test_trino_e2e.py)"
+  },
+  {
+   "id": "L71",
+   "title": "Access reviews",
+   "summary": "Recertification campaigns over the access people hold",
+   "done": "Owners confirm or revoke each grant by a due date; what nobody vouches for is taken away; auditors get the record",
+   "status": "shipped",
+   "note": "/governance/access-reviews: product owners review request-based grants, no self-review, revoke at once, undecided revoked at the due date (or kept), reminders, audited; tested on SQLite and PostgreSQL with the real PDP (tests/test_access_reviews.py)"
+  },
+  {
+   "id": "L72",
+   "title": "Bad-row quarantine in pipes and streams",
+   "summary": "Rows a table refuses are set aside instead of failing the load",
+   "done": "One bad value no longer stops a file or a stream; the bad rows are kept, with the reason, to fix and reload",
+   "status": "shipped",
+   "note": "bad_rows: quarantine on pipes and streams; set-aside rows with file and row (or offset), reason and value (/v1/pipes/{id}/rejects, /v1/streams/{id}/rejects); upserts leave the refused key alone; tested with the real store and catalog (tests/test_pipes_e2e.py, tests/test_streams_e2e.py)"
+  },
+  {
+   "id": "L73",
+   "title": "Data residency",
+   "summary": "Lakehouse namespaces pinned to a region",
+   "done": "Regulated data stays in its region: stored there, processed only by deployments the pin allows, sent only to allowed regions; even an administrator cannot move it by a setting",
+   "status": "partial",
+   "note": "Rules file shared by Cairn and Cairn Catalog (cairn.residency in the chart). The catalog keeps pinned tables in their region's location (create, register, commit, write.*.path, clone, rename, namespace location), refusing an administrator too. Trino and lakehouse engines read pinned tables only in an allowed CAIRN_REGION; shares and reverse syncs need an allowed destination region. Tested with the real store, catalog and Cairn (tests/test_residency_e2e.py). Not yet: copies made by SQL into unpinned namespaces are not followed (lineage shows them); store bucket replication targets are not checked"
+  },
+  {
+   "id": "L74",
+   "title": "Reversible tokenisation",
+   "summary": "Sensitive values replaced by tokens where data lands, given back only to people allowed to",
+   "done": "The lakehouse, shares, exports and copies hold tokens, never the values; joins still work; erasure by forgetting",
+   "status": "shipped",
+   "note": "Token domains with their own keys (wrapped by CAIRN_TOKENS_KEY, rotatable without changing tokens); deterministic keyed tokens; an encrypted vault; TOKENIZE/DETOKENIZE by policy, a required purpose, audited without values; forgetting values or tokens; pipes and streams tokenise columns (upsert keys too). Tested on SQLite and PostgreSQL with the real PDP (tests/test_tokens.py) and with the real store and catalog (tests/test_pipes_e2e.py, tests/test_streams_e2e.py)"
+  },
+  {
+   "id": "L75",
+   "title": "Table branches, tags and data diff",
+   "summary": "Iceberg refs under Cairn's policies, write-audit-publish, and a diff of any two versions",
+   "done": "Pipelines write to a branch, checks gate the publish, and reviewers see exactly what changed, under their own masks",
+   "status": "shipped",
+   "note": "/v1/tables/{t}/refs (branches, tags, MANAGE_DATASET), publish with SQL checks on the branch as the caller and a fast-forward of main (refused when main moved on), /v1/tables/{t}/diff (schema; rows added, removed and changed by key, or EXCEPT ALL) on Trino as the caller; audited. Tested on real Trino and Cairn Catalog (tests/test_trino_e2e.py)"
+  },
+  {
+   "id": "L76",
+   "title": "Synthetic test data",
+   "summary": "A table shaped like a real one, with none of its people",
+   "done": "Development, tests and demos get realistic data without a copy of production",
+   "status": "shipped",
+   "note": "/v1/synthetic: statistics on Trino as the caller (their masks apply); sensitive and masked columns made from type and shape alone, without their extremes; categories only when common (k ≥ 10); nulls, distributions, ranges, lengths and uniqueness kept; seeded, marked and audited. Tested on real Trino and Cairn Catalog (tests/test_trino_e2e.py)"
+  },
+  {
+   "id": "L77",
+   "title": "Speech to text for audio and video files",
+   "summary": "Recordings in a files pipe become searchable text",
+   "done": "Calls, meetings and voice notes join documents in SQL, search and AI, without leaving the deployment",
+   "status": "shipped",
+   "note": "Local Whisper (faster-whisper, the media extra): text and length in seconds on the files table; models put in place beforehand (cairn transcribe-model download, never downloaded while loading), one process per file with a time limit and a length limit read from the header, no network. Tested with the real store and catalog (tests/test_pipes_e2e.py)"
+  },
+  {
+   "id": "L78",
+   "title": "AI enrichment of files: image description and field extraction",
+   "summary": "The model describes images and pulls named fields out of documents as they land",
+   "done": "Invoices, forms, photos and scans become columns you can query, like Snowflake's AI_EXTRACT and image AI functions",
+   "status": "shipped",
+   "note": "Files pipes' ai: description, labels and extracted (JSON) columns, ai_error on failure; images scaled and sent as JPEG under the OCR pixel limit; Cairn's metered model (Anthropic or local Ollama), charged to the pipe's owner. Tested with the real store and catalog (tests/test_pipes_e2e.py) and per provider (tests/test_llm_images.py)"
+  },
+  {
+   "id": "L79",
+   "title": "Governed geospatial",
+   "summary": "Location data under policy, spatial SQL on it",
+   "done": "Analysts map and measure where things happen without seeing exact addresses; the equivalent of Snowflake's GEOGRAPHY governance",
+   "status": "shipped",
+   "note": "geo mask strategy: coordinates rounded (CAIRN_GEO_MASK_DECIMALS), WKT/Geometry/SphericalGeography reduced to a rounded centre, partial for other values; ranks above partial; location columns classified (PII.Location) by name and value; Trino's spatial functions on the coarse values; Policy Studio option. Tested on Trino (tests/test_trino_e2e.py) and in tests/test_geo_mask.py"
+  },
+  {
+   "id": "L80",
+   "title": "Chargeback statements",
+   "summary": "The month's bill per cost centre, from every cost Cairn knows",
+   "done": "Finance charges teams for what they used: SQL, AI, storage, compute and runs, reconciled to the total",
+   "status": "shipped",
+   "note": "Cost centres (code, name, teams); SQL by who ran it, AI by who asked, tables by their owners, unattached runs by their owner; an unallocated line with reasons so the total reconciles; preview, frozen versioned statements, audited, CSV; members see their own lines. Tested on SQLite and PostgreSQL (tests/test_chargeback.py)"
+  },
+  {
+   "id": "L81",
+   "title": "Point-lookup acceleration",
+   "summary": "Bloom filters on the columns queries look rows up by",
+   "done": "Lookups by order number, UUID or e-mail skip the files that cannot hold the value; Cairn's counterpart to Snowflake's search optimization",
+   "status": "shipped",
+   "note": "Maintenance policies' lookup: auto from Trino's query history (literal =/IN lookups, ≥10% of queries) or a list; parquet_bloom_filter_columns set and the files rewritten once; exact-value types only. Tested on real Trino (tests/test_trino_e2e.py): a miss inside min/max scans 0 rows against all rows unfiltered"
+  },
+  {
+   "id": "L82",
+   "title": "Security posture scan",
+   "summary": "Cairn checks its own configuration for the mistakes that expose data",
+   "done": "Operators see, daily, what to fix first; the counterpart of Snowflake's Trust Center",
+   "status": "shipped",
+   "note": "Ten checks (trusted header, open policies, audit chain, unmasked PII, residency region, authz mode, long and idle shares, access reviews, secrets key, AI budget) with severity, evidence and fix; a score; daily scans kept with history; new high findings sent to CAIRN_SECURITY_CONTACTS; a failing check reported, never passed. Tested with real components (tests/test_posture.py)"
+  },
+  {
+   "id": "L83",
+   "title": "Passkeys and step-up",
+   "summary": "A fresh passkey check before the most sensitive actions",
+   "done": "Detokenising, forgetting tokens and sharing outside need the person's own device, whatever the sign-in was; phishing-resistant",
+   "status": "shipped",
+   "note": "WebAuthn registration and assertions (webauthn), step-up tokens (5 minutes, the person only, hashed), X-Cairn-Step-Up on the listed actions (CAIRN_STEP_UP_ACTIONS), new passkeys only with an existing one, one-use challenges, origin and counter checks; audited. Tested over HTTP with a software authenticator (tests/test_passkeys.py). Sign-in MFA itself stays with the identity provider"
+  },
+  {
+   "id": "L84",
+   "title": "The assistant's memory, artifacts and deep research",
+   "summary": "Notes kept per person, outputs saved and shared, questions researched in steps",
+   "done": "People pick up where they left off, keep and share what the assistant made, and get a cited report for a broad question; the counterpart of Snowflake Intelligence's memory, artifacts and deep research",
+   "status": "shipped",
+   "note": "Memory notes (saved only when asked; listed, deletable, switchable off; PII redacted; instruction-like notes refused; given to the model as data). Versioned artifacts that remember their source datasets: shared readers need access to every source at read time (fail closed). Deep research: plan, read-only steps as the asker, report artifact; cancel, budget stop, recovery after restart; audited. Tested with the real services, PDP, database and API and a scripted model (tests/test_ai_workspace.py)"
+  },
+  {
+   "id": "L85",
+   "title": "Aggregation and projection policies",
+   "summary": "Tables read only in aggregate, with a minimum group size; columns used but never returned",
+   "done": "Pay, health or survey data can be analysed without anyone seeing a row; join and filter keys stay usable but hidden; the counterpart of Snowflake's aggregation and projection policies",
+   "status": "shipped",
+   "note": "Policy obligations (aggregation: min_group, entity_key; projection: columns). Cairn checks each query block that reads the table (no *, windows or ungrouped columns; protected columns never returned) and adds the HAVING floor, counting distinct entities when keyed; on Trino it runs as a one-query checked- identity with the person's row filters and masks, and direct Trino reads of such tables or columns are refused. Tested on SQLite results (tests/test_aggregation_policy.py) and on real Trino (test_aggregation_and_projection_policies_hold_on_trino)"
+  },
+  {
+   "id": "L86",
+   "title": "Iceberg v3 tables",
+   "summary": "Deletion vectors, row lineage, VARIANT and nanosecond timestamps, read and written by every engine Cairn ships",
+   "done": "Spark 4, Trino and Cairn's own writers read and write the current Iceberg format through Cairn's catalog, and v2 tables upgrade in place; the counterpart of Snowflake's Iceberg v3 support (GA)",
+   "status": "shipped",
+   "note": "Catalog on iceberg-rust 0.11 (v3 types and metadata); Spark 4 / Iceberg 1.10 writes v3 with deletion vectors, row lineage and VARIANT and upgrades v2 tables; Trino pinned to 484 (Iceberg 1.12) reads deletion vectors and VARIANT and writes v3 (deletes as deletion vectors); Cairn's pyiceberg writers write v3 with row lineage (cairn.pipelines.iceberg_v3). Tested with real Spark, Trino 484 and pyiceberg on the store and catalog (catalog/conformance/test_iceberg_v3.py, tests/test_iceberg_v3_writes.py); the full Trino suite passes on 484. Rows kept by a pyiceberg rewrite take new row ids"
+  },
+  {
+   "id": "L87",
+   "title": "Adaptive warehouses",
+   "summary": "One endpoint that picks the warehouse size for each query",
+   "done": "Nobody sizes a warehouse: heavy reports get the large one, everything else the small one, and a busy small one overflows; the counterpart of Snowflake's adaptive compute",
+   "status": "shipped",
+   "note": "Query fingerprints in query history (migration 0113) and POST /v1/warehouses/hint (median CPU, bytes, memory of earlier runs, behind the Trino key); the proxy routes each new query by that history or by load, keeps its follow-ups on the same tier, and shows where queries went; Helm warehouses.adaptive. Tested with two real Trino warehouses (tests/test_warehouses_adaptive_e2e.py)"
+  },
+  {
+   "id": "L88",
+   "title": "Operational databases",
+   "summary": "PostgreSQL databases for applications, made through Cairn and reached only with short-lived logins",
+   "done": "Teams get a transactional database next to the lakehouse without a DBA ticket, and nobody holds a standing password; the counterpart of Snowflake Postgres and Databricks Lakebase (part 1: databases, logins, branches)",
+   "status": "shipped",
+   "note": "/v1/databases: create, branch (a copy with its own roles), drop; per-person logins (write/read, up to a day, dropped on expiry or revoke with their sessions), governed by CREATE_DATABASE, USE_DATABASE, VIEW_DATABASE, MANAGE_DATABASE; passwords never stored or audited; Helm cairn.databases. Tested on real PostgreSQL 16 (tests/test_databases.py). Mirroring into the lakehouse is part 2"
+  },
+  {
+   "id": "L89",
+   "title": "Mirrors",
+   "summary": "PostgreSQL tables kept in lakehouse tables through logical replication",
+   "done": "Operational data reaches the lakehouse in seconds without running Kafka and Debezium; the counterpart of Snowflake's and Databricks' Postgres mirroring (part 2 of Postgres)",
+   "status": "shipped",
+   "note": "/v1/mirrors: a publication and a pgoutput slot per mirror, an initial copy, whole transactions per Iceberg commit through the streams writer, the slot advanced only after the commit (exactly once across crashes), upserts/deletes/key changes/truncate/new columns/TOAST, WAL retention shown, pause/resume/delete (slot and publication dropped). Tested with PostgreSQL 16 and the real store and catalog (tests/test_mirror_e2e.py)"
+  },
+  {
+   "id": "L90",
+   "title": "App packages",
+   "summary": "Data apps one team publishes and others install on their own data, with consent",
+   "done": "A team ships an app once; others run it on their tables without handing over more than they bind; the counterpart of Snowflake Native Apps",
+   "status": "shipped",
+   "note": "Packages from git with immutable versions (commit + cairn-app.json manifest declaring read references); installs bind references to the installer's datasets (only ones they can read), run pinned to the commit with a minimal environment, and query Trino as cairnapp-<install>: the bound tables only, as the installer (masks, filters), read-only; upgrade/rollback rebinding; audited. Tested with real git and app processes (tests/test_app_packages.py) and on real Trino"
+  },
+  {
+   "id": "L91",
+   "title": "Fine-tuning on governed data",
+   "summary": "A language model tuned on examples read as the asker, trained and served in Cairn",
+   "done": "Teams adapt a model to their tickets, products or wording without exporting data or holding a provider key; the counterpart of Cortex Fine-tuning",
+   "status": "shipped",
+   "note": "/v1/ml/finetunes: training sets from Cairn's governed query path (masks, filters, query policies), PII redacted, sources recorded; LoRA or full fine-tuning in an offline, isolated worker on PyTorch; per-epoch loss; generation behind USE_FINETUNE, audited without prompts; cairn finetune-model download. Tested with real LoRA training on PyTorch CPU (tests/test_finetune.py, ml job). GPU nodes and provider fine-tuning APIs are not covered"
+  },
+  {
+   "id": "L92",
+   "title": "Connectors: MySQL change data capture",
+   "summary": "MySQL tables mirrored into the lakehouse from the binary log",
+   "done": "The second operational database family arrives change by change without Kafka or Debezium; the counterpart of Openflow's and Lakeflow's MySQL connectors",
+   "status": "shipped",
+   "note": "Mirrors accept mysql:// connections: settings checked (row-based log, full row image and metadata), a copy from a recorded log position, whole transactions (rolled-back ones leave nothing), key changes, deletes, TRUNCATE, log positions as offsets so a replay writes nothing twice, a purged position reported. Tested with MySQL 8.4 and the real store and catalog (tests/test_mirror_mysql_e2e.py). SQL Server and MongoDB follow (L96, L97); Oracle is not covered"
+  },
+  {
+   "id": "L93",
+   "title": "Semantic model autopilot",
+   "summary": "A draft semantic model built from tables and how they are queried, reviewed and published as metrics",
+   "done": "Nobody writes a semantic model by hand: measures, filters, dimensions, a time column, relationships and synonyms come from the data and its use, checked as the person; the counterpart of Snowflake's Semantic View Autopilot",
+   "status": "shipped",
+   "note": "/sql/semantic-models (migration 0118): profiles as the person (masks and row filters apply), query history's shapes (aggregates with their filters, group-bys, joins) with no SQL text kept, filter values only when the person can read them, the model naming candidates by id only, every proposal run as the person, accepted ones saved as their metrics with synonyms (Ask-your-data and the AI builder use them). Tested on real Trino with history from its event listener and a scripted model (tests/test_trino_e2e.py)"
+  },
+  {
+   "id": "L94",
+   "title": "Pipeline agent",
+   "summary": "An agent that writes, tries, fixes and ships pipelines from a goal, as the person",
+   "done": "\"Revenue per region from paid orders\" becomes a checked, scheduled derived table; a broken one is fixed from its failed runs; nothing ships without the person's approval; the counterpart of Snowflake's CoCo",
+   "status": "shipped",
+   "note": "/v1/pipeline-agent/tasks (migration 0119): the model proposes a derived table and checks (never sees rows); each try is planned, previewed and checked on Trino as the person, writing nothing, failures fed back (3 tries); approval creates or updates the derived table as theirs, refreshes it and checks the result; the pipeline returned as a bundle resource. Tested on real Trino with a scripted model (tests/test_trino_e2e.py); 🟡 not yet against a live model"
+  },
+  {
+   "id": "L95",
+   "title": "CoWork: scheduled tasks and an approved outbox",
+   "summary": "The assistant works for a person on a schedule and sends to Slack or email only once they approve",
+   "done": "\"Every Monday, summarise last week's orders\" runs as its owner and lands in their artifacts; sending it to #sales waits for their click, and data they may not export never leaves; the counterpart of Snowflake's CoWork",
+   "status": "shipped",
+   "note": "/ai/scheduled-tasks and /ai/outbox (migration 0120): cron at most hourly, research runs as the owner (read-only tools, their budget), notifications with Send/Don't send buttons, targets only from operator allow-lists, approval re-checks EXPORT_DATASET on every source and redacts PII, expiry, suspended owners paused. Tested with Mailpit, a Slack Web API stand-in and a scripted model (tests/test_cowork.py); 🟡 not yet against a live model or Slack workspace"
+  },
+  {
+   "id": "L96",
+   "title": "Connectors: SQL Server change data capture",
+   "summary": "SQL Server tables mirrored into the lakehouse through CDC",
+   "done": "The Microsoft operational databases arrive change by change without Debezium; the counterpart of Openflow's SQL Server connector",
+   "status": "shipped",
+   "note": "Mirrors accept mssql:// connections: CDC and a primary key checked (refused with the commands to run), a copy from the highest captured LSN (or the capture instance's start), whole transactions in commit order with old values for key changes, LSNs as offsets, purged changes reported. Tested with SQL Server 2022 and the real store and catalog (tests/test_mirror_mssql_e2e.py)"
+  },
+  {
+   "id": "L97",
+   "title": "Connectors: MongoDB change streams",
+   "summary": "MongoDB collections mirrored into the lakehouse",
+   "done": "Document data arrives change by change, one row per document, new fields as new columns; the counterpart of Openflow's MongoDB connector",
+   "status": "shipped",
+   "note": "Mirrors accept mongodb:// connections (migration 0121 widens positions for resume tokens): replica set and collection checked, a copy from the cluster's operation time, inserts, updates (current document), replacements and deletes keyed by _id, transactions whole, resume tokens as positions, a dropped collection or lost oplog reported. Tested with MongoDB 7 and the real store and catalog (tests/test_mirror_mongo_e2e.py)"
+  },
+  {
+   "id": "L98",
+   "title": "Document sources: SharePoint and Google Drive",
+   "summary": "Folders kept in a store prefix and indexed by a files pipe",
+   "done": "Contracts in SharePoint and notes in Drive become searchable text, AI fields and SQL rows under Cairn's policies; the counterpart of Openflow's SharePoint and Google Drive connectors",
+   "status": "partial",
+   "note": "/v1/document-sources (migration 0122): Microsoft Graph (client credentials) and Drive (service account) listings with subfolders and pages, changed, moved and deleted files followed, Google Docs exported, size limit, keys from secret scopes as the owner. Tested with the real store, catalog and files pipe against a local stand-in for Graph and Drive (tests/test_doc_sources_e2e.py); not yet against a live tenant"
+  },
+  {
+   "id": "L99",
+   "title": "AI gateway for agent code",
+   "summary": "Anthropic- and OpenAI-compatible model endpoints in Cairn, called with Cairn tokens",
+   "done": "Agents written in any framework call models through Cairn: no provider key in agent code, every call as a person or their agent, allowed models, budgets and rate limits, metered and audited; the counterpart of Databricks' Unity Gateway (part 1 of the Agent Bricks counterpart)",
+   "status": "shipped",
+   "note": "/v1/ai/gateway/anthropic/v1/messages, /v1/ai/gateway/openai/v1/chat/completions, /v1/ai/gateway/models: USE_AI_GATEWAY per model, the agent scope model, shared budgets and allowances, per-person rate limit, streaming passed through and metered. Tested with the official SDKs against a stand-in provider (tests/test_ai_gateway.py)"
+  },
+  {
+   "id": "L100",
+   "title": "Code-first agents: cairn agents init, dev, deploy",
+   "summary": "From an empty directory to a deployed agent app run as the person asking",
+   "done": "A team writes an agent in plain Python, LangGraph or the OpenAI Agents SDK, tests it offline, runs it locally with their own Cairn token, and deploys it without wiring runtime, model keys, sessions or access by hand; the counterpart of Databricks' Agent Bricks CLI",
+   "status": "shipped",
+   "note": "cairn.agentkit (runtime, ctx with gateway-routed SDK clients and governed SQL, offline test kit, three templates), /v1/agent-apps (migration 0123): an agent identity per app, per-run tokens for the caller narrowed to the app's scopes and revoked after, sessions kept by Cairn, the process runtime and the Kubernetes runtime (a pod per app from the agent runtime image, reached only by Cairn, the chart's Role). Each invocation is an MLflow run in the app's experiment, under the caller's name, metrics only. Tested end to end (tests/test_agent_apps.py, tests/test_agent_apps_mlflow.py against a real MLflow, tests/test_agent_apps_k8s.py on kind)"
+  }
+ ]
+}

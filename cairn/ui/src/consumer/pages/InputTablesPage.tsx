@@ -153,7 +153,8 @@ export function InputTablesPage() {
                         {rows.error && <Alert type="error" showIcon message={rows.error.message} style={{ marginBottom: 12 }} />}
                         <Table<Row> rowKey="_row_id" size="small" pagination={{ pageSize: 50 }} dataSource={data} columns={columns}
                             loading={rows.loading} scroll={{ x: true }}
-                            rowSelection={{ selectedRowKeys: checked, onChange: (keys) => setChecked(keys as string[]) }} />
+                            rowSelection={{ selectedRowKeys: checked, onChange: (keys) => setChecked(keys as string[]),
+                                getCheckboxProps: (r: Row) => ({ 'aria-label': `Select row ${r._row_id}` } as never) }} />
                         {drafts.length > 0 && (
                             <div data-testid="new-rows" style={{ marginTop: 12 }}>
                                 <strong>New rows</strong>

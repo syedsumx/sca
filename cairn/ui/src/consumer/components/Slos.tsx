@@ -40,6 +40,7 @@ function columns(withProduct: boolean, onDelete?: (id: string) => void) {
                     '—'
                 ) : (
                     <Progress
+                        aria-label={`Error budget remaining: ${r.budget_remaining}%`}
                         percent={r.budget_remaining}
                         size="small"
                         status={r.state === 'breached' ? 'exception' : r.state === 'at_risk' ? 'active' : 'normal'}

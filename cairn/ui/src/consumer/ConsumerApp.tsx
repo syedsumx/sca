@@ -9,6 +9,17 @@ import { CatalogUrlContext } from './context/NativeLinks';
 import { tokens } from './components/tokens';
 import { CairnProvider } from './context/CairnProvider';
 import { I18nProvider, useT } from './i18n';
+import { HUBS } from './resources/hubs';
+
+// Platform hubs (/agents, /ingestion, …) load one chunk between them; each is a page of ResourceView tabs.
+const HubPage = React.lazy(() => import('./resources/HubPage').then((m) => ({ default: m.HubPage })));
+const HUB_ROUTES = HUBS.map((hub) => ({
+    path: hub.route,
+    exact: true,
+    component: function HubRoute() {
+        return <HubPage hub={hub} />;
+    },
+}));
 
 // Route-level code splitting keeps the initial MFE payload small (spec Part 9: ≤ 250 kB gz).
 const DiscoverPage = React.lazy(() => import('./pages/DiscoverPage').then((m) => ({ default: m.DiscoverPage })));
@@ -33,6 +44,9 @@ const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const CapabilitiesPage = React.lazy(() =>
+    import('./resources/CapabilitiesPage').then((m) => ({ default: m.CapabilitiesPage })),
+);
 const ExtensionsPage = React.lazy(() => import('./components/Extensions').then((m) => ({ default: m.ExtensionsPage })));
 
 export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; exact?: boolean }[] = [
@@ -55,6 +69,8 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/sql/git', component: GitFoldersPage, exact: true },
     { path: '/queries', component: QueryInsightPage, exact: true },
     { path: '/dashboards', component: DashboardsPage, exact: true },
+    ...HUB_ROUTES,
+    { path: '/capabilities', component: CapabilitiesPage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
     { path: '/extensions', component: ExtensionsPage, exact: true },
 ];
