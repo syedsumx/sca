@@ -51,9 +51,21 @@ document.getElementById('f').onsubmit = async (e) => { e.preventDefault(); const
 class Context:
     """What ``respond`` gets: model clients and data access as the person the agent works for."""
 
-    def __init__(self, cairn_url: str, token: str, session_id: str, user: str, mcp_url: Optional[str] = None):
+    def __init__(self, cairn_url: str, token: str, session_id: str, user: str, mcp_url: Optional[str] = None,
+                 identity: str = "person", lakehouse: Optional[dict] = None):
         self.cairn_url, self._token, self.session_id, self.user = cairn_url.rstrip("/"), token, session_id, user
         self.mcp_url = mcp_url
+        # "share-recipient" when a share's recipient asks: then ``lakehouse`` holds the share's catalog access
+        # ({"uri", "token", "tables"}) and the run token only reaches the AI gateway.
+        self.identity, self.lakehouse = identity, lakehouse or None
+
+    def catalog(self, name: str = "cairn"):
+        """An Iceberg REST catalog (pyiceberg) over the tables this run may read: on a share, only the shared ones."""
+        if not self.lakehouse:
+            raise RuntimeError("this run has no lakehouse access (it is not on a share)")
+        from pyiceberg.catalog.rest import RestCatalog
+
+        return RestCatalog(name, uri=self.lakehouse["uri"], token=self.lakehouse["token"])
 
     @property
     def gateway(self) -> dict:
@@ -201,11 +213,12 @@ def build_app(project: Path, mode: str, cairn_url: str, token: str = "", secret:
     def healthz():
         return {"ok": True}
 
-    def run(messages: list, session_id: str, who: str, run_token: str) -> dict:
+    def run(messages: list, session_id: str, who: str, run_token: str, identity: str = "person",
+            lakehouse: Optional[dict] = None) -> dict:
         if not isinstance(messages, list) or not messages:
             raise HTTPException(400, "messages: the conversation, newest last")
         started = time.monotonic()
-        ctx = Context(cairn_url, run_token, session_id, who, mcp_url)
+        ctx = Context(cairn_url, run_token, session_id, who, mcp_url, identity, lakehouse)
         try:
             out = _text(respond(ctx, messages))
         except HTTPException:
@@ -222,8 +235,9 @@ def build_app(project: Path, mode: str, cairn_url: str, token: str = "", secret:
                 raise HTTPException(404)                  # only Cairn reaches an app's runtime
             if not x_cairn_run_token:
                 raise HTTPException(400, "no run token")
+            lakehouse = body.get("lakehouse") if isinstance(body.get("lakehouse"), dict) else None
             return run(body.get("messages"), str(body.get("session_id") or ""), str(body.get("user") or ""),
-                       x_cairn_run_token)
+                       x_cairn_run_token, str(body.get("identity") or "person"), lakehouse)
         return app
 
     sessions = Sessions(project / ".cairn" / "sessions.db")

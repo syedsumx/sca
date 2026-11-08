@@ -3322,6 +3322,58 @@ cat.load_table("analytics.products").scan().to_arrow()
 
 Tested in `tests/test_shares_e2e.py`, with the real store and catalog and pyiceberg as the recipient.
 
+**AI data packages: a share with its meaning.** A recipient's agents need more than tables: what the tables and
+columns mean, the governed metrics over them and the questions they answer. A share's data package carries that,
+signed by Cairn.
+
+- **Publishing.** `PUT /v1/shares/<share>/package` with `{"metrics": ["avg_price"], "sample_questions": ["What is our
+  average list price?"], "notes": "Prices are refreshed nightly."}` (the share's maker or an operator) publishes a new
+  version. Cairn writes the manifest from the catalog: each shared table's description and columns (type,
+  description, glossary terms), the glossary terms' names and definitions, the metrics named (their measure,
+  filters, dimensions, SQL expression and certification), the sample questions, the notes, the agents attached and
+  the catalog's address. Only what is shared is described: a metric over a table the share does not include is
+  refused (409). The manifest is signed as a compact JWS (RS256, `typ` `cairn-data-package+jws`) with the key Cairn
+  publishes at `/v1/trino/jwks.json`. Every version is kept (`GET /v1/shares/<share>/package` lists them);
+  `GET /v1/share-packages` lists the caller's shares with their latest version and agents (**Sharing → Data
+  packages**). Audited: `share.package_published`.
+- **Fetching.** The recipient calls `GET /v1/shares/recipient/package` (`?version=` for an older one) with the
+  share's OAuth token (`Authorization: Bearer`, from `/v1/shares/oauth/tokens`) or the credential itself (HTTP Basic,
+  the id and secret around the `:`). The answer holds the `manifest`, its `signature` and `digest`, and `jwks_uri`.
+  The recipient checks the signature against the JWKS (any JOSE library, or RS256 by hand) before trusting it.
+  Nothing else signs in there: a person's token, or a lakehouse token that is not the share's, is refused (401).
+  Audited: `share.package_fetched`.
+
+**Agents on shared data.** The provider can let the recipient ask one of its deployed agent apps
+(`/v1/agent-apps`) about the shared tables, without handing over the tables' meaning to someone else's model or the
+data to anything but the share.
+
+- **Attaching.** `POST /v1/shares/<share>/agents` with `{"app": "partner-helper"}`, by the share's maker or an
+  operator, who must be allowed to use the app; it needs the `model` scope. `DELETE /v1/shares/<share>/agents/<app>`
+  detaches it. Audited: `share.agent_attached`, `share.agent_detached`.
+- **Asking.** The recipient lists the agents at `GET /v1/shares/recipient/agents` and asks one with
+  `POST /v1/shares/recipient/agents/<app>/invocations` (`{"input", "session_id"}`), with the share's credential.
+  - The run's actor is the recipient, `urn:li:corpuser:share:<share id>`, with the identity type `share-recipient`.
+    Its Cairn run token is narrowed to the `model` scope: it reaches the AI gateway and nothing else in Cairn.
+  - Its model calls are allowed (or refused) as for the provider who attached the agent, who pays for them, and are
+    metered to the recipient (`gateway:<agent id>`); the provider's budgets and the gateway's limits apply.
+  - Its data comes only through a 15-minute lakehouse token for the share's own identity, passed to the agent's
+    runtime with the run. In the agent, `ctx.catalog()` is a pyiceberg catalog with it: Cairn Catalog asks Cairn about
+    each request, so the agent reads the shared tables, read-only, and is refused every other table.
+  - Each invocation is recorded per recipient (`GET /v1/shares/<share>/agents?days=30` gives each agent's runs,
+    failures, sessions, time and last use) and audited as `share.agent_invoked` (no content). Sessions are kept per
+    recipient as for people.
+- **Revoking** the share, or its expiry, stops both at once: the package and the agents are refused (403), and the
+  lakehouse token an agent holds is refused by the catalog on its next request.
+
+Tested end to end with the real store and catalog, the agent's real code in its own process and the model behind
+the AI gateway (`tests/test_share_packages_e2e.py`): the recipient fetched the package with the share's token and
+with its credential and verified Cairn's signature against the JWKS (a tampered manifest failed); the manifest held
+the table, its columns, the glossary term, the metric and the agent, and a metric over an unshared table was
+refused; the agent read the shared table (three rows, summed up by the model) and was refused `sales.orders` and
+`hr.salaries`; the model calls were metered to the recipient, every run token was the recipient's, `model` only, and
+revoked; such a token was refused `/data/query`; revoking the share refused the package, the agent and the
+lakehouse token.
+
 **Zero-copy clones.** `POST /v1/namespaces/{ns}/tables/{table}/clone` with `{"name": "dev_orders"}` (and optionally `"namespace": ["dev"]`) makes a new table on the same data files. Nothing is copied. The clone has its own id and location, so its new writes go to its own location, and the two tables change independently. The caller needs read access to the source and manage access to the target namespace.
 
 - Neither table may expire a snapshot they share, because expiring it would delete data files the other still reads. Such a commit is refused with 409 ("shared with a clone"). Once the clone is dropped, the source may expire those snapshots again.

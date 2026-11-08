@@ -2226,6 +2226,47 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "share-packages": {
+        "key": "share-packages",
+        "title": "Data packages",
+        "path": "/v1/share-packages",
+        "listKey": "packages",
+        "description": "Each share's data package: the shared tables' descriptions, columns, glossary terms and governed metrics, with sample questions, signed by Cairn for the recipient's agents; and the agent apps attached to the share, which the recipient can ask about the shared tables only.",
+        "columns": [
+            "share",
+            "recipient",
+            "state",
+            "version",
+            "metrics",
+            "agents",
+            "published_ms"
+        ],
+        "actions": [
+            {
+                "label": "Publish package",
+                "method": "PUT",
+                "path": "/v1/shares/{share}/package",
+                "body": {
+                    "metrics": [
+                        "avg_price"
+                    ],
+                    "sample_questions": [
+                        "What is our average list price?"
+                    ],
+                    "notes": "Prices are refreshed nightly."
+                }
+            },
+            {
+                "label": "Attach agent",
+                "method": "POST",
+                "path": "/v1/shares/{share}/agents",
+                "body": {
+                    "app": "partner-helper"
+                }
+            }
+        ],
+        "rowKey": "share_id"
+    },
     "shares": {
         "key": "shares",
         "title": "Shares",

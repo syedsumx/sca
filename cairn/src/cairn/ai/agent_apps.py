@@ -333,6 +333,9 @@ class AgentApps:
 
     def session(self, actor: str, name: str, session_id: str) -> list[dict]:
         self.get(actor, name)
+        return self._history(actor, name, session_id)
+
+    def _history(self, actor: str, name: str, session_id: str) -> list[dict]:
         with self.engine.connect() as c:
             r = c.execute(select(agent_app_sessions.c.messages).where(
                 agent_app_sessions.c.app == name, agent_app_sessions.c.actor == actor,
@@ -340,10 +343,17 @@ class AgentApps:
         return json.loads(r.messages) if r else []
 
     def invoke(self, actor: str, name: str, body: dict) -> dict:
+        return self.invoke_as(actor, name, body)
+
+    def invoke_as(self, actor: str, name: str, body: dict, identity: str = "person", sponsor: Optional[str] = None,
+                  scopes: Optional[list[str]] = None, lakehouse: Optional[dict] = None) -> dict:
+        """An invocation for ``actor``: a person (who must be allowed to use the app) or, from a share it is attached
+        to, the share's recipient (``identity="share-recipient"``, allowed by the attachment; its run token narrowed
+        to ``scopes`` and ``lakehouse`` the share-scoped catalog access the agent reads with)."""
         import httpx
 
         d = self._row(name)
-        if not self._may_use(actor, d):
+        if identity == "person" and not self._may_use(actor, d):
             raise AgentAppError("no such agent app", 404)
         text = body.get("input")
         session_id = str(body.get("session_id") or uuid.uuid4().hex)
@@ -375,12 +385,14 @@ class AgentApps:
         if ep is None:                                   # Cairn restarted, or the process died: start it again
             self.runtime.start(name, d["version"], base64.b64decode(d["bundle"]))
             ep = self.runtime.endpoint(name, d["version"])
-        history = self.session(actor, name, session_id) + [{"role": "user", "content": text}]
-        token = self.agents.issue_run_token(d["agent_id"], actor, intent=intent)
+        history = self._history(actor, name, session_id) + [{"role": "user", "content": text}]
+        token = self.agents.issue_run_token(d["agent_id"], actor, intent=intent, scopes=scopes, identity=identity,
+                                            sponsor=sponsor)
         started = _now()
         try:
             r = httpx.post(f"{ep[0]}/invocations", json={"messages": history[-self.history:], "session_id": session_id,
-                                                          "user": actor},
+                                                          "user": actor, "identity": identity,
+                                                          **({"lakehouse": lakehouse} if lakehouse else {})},
                            headers={"X-Cairn-Runtime-Secret": ep[1], "X-Cairn-Run-Token": token}, timeout=600)
         except httpx.HTTPError as e:
             raise AgentAppError(f"the agent could not be reached: {type(e).__name__}", 502)
@@ -413,6 +425,8 @@ class AgentApps:
                                                         updated_ms=_now()))
         self._audit("agent_app.invoked", actor, name, {"session": session_id, "ok": True, "ms": _now() - started,
                                                        "version": d["version"],
+                                                       **({"identity": identity, "sponsor": sponsor}
+                                                          if identity != "person" else {}),
                                                        **({"intent": intent.as_dict()} if intent else {})})
         return {"output": out["output"], "session_id": session_id, "version": d["version"]}
 

@@ -393,6 +393,16 @@ def build_gateway_router(gw: AiGateway, current_principal, authorize) -> Any:
     router = APIRouter(prefix=PREFIX, tags=["ai"])
 
     def may_use(p):
+        if getattr(p, "identity", "person") == "share-recipient":
+            # The recipient is outside the organisation: the provider who attached the agent decides (and pays);
+            # the call is still metered to the recipient.
+            from cairn.common.security import Principal
+
+            sponsor = getattr(p, "sponsor", None)
+            if not sponsor:
+                return lambda model: False
+            sp = Principal(sponsor, "delegated")
+            return lambda model: authorize(sp, PRIVILEGE, model_urn(model), raise_on_deny=False)
         return lambda model: authorize(p, PRIVILEGE, model_urn(model), raise_on_deny=False)
 
     def who(p) -> tuple[str, str]:

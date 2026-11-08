@@ -144,6 +144,7 @@ class Services:
     lakehouse: Optional[Any] = None
     lakehouse_sessions: Optional[Any] = None
     shares: Optional[Any] = None
+    share_packages: Optional[Any] = None
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
@@ -1356,6 +1357,8 @@ def _build_active_metadata(s: Services) -> None:
             lambda actor: apps_authorize(actor, "MANAGE_SYSTEM_OPERATIONS", None), s.audit,
             MlflowRuns(os.environ["CAIRN_MLFLOW_URL"]) if os.environ.get("CAIRN_MLFLOW_URL") else None)
         s.agent_apps.intents = s.intents
+        if getattr(s, "share_packages", None) is not None:      # built first: agents on shared data use these
+            s.share_packages.agent_apps = s.agent_apps
 
     # Custom agents (cairn.ai.custom_agents): built and deployed in Cairn, run as the person who starts them.
     if getattr(s, "agents", None) is not None:
@@ -1802,6 +1805,11 @@ def _build_data_access(s: Services) -> None:
                     hub = getattr(s, "notify", None)
                     return hub.publish(event) if hub is not None else []
             s.shares.notify = _Hub()
+            # Data packages (the share's semantic context, signed) and the provider's agents on shared data.
+            from cairn.dataaccess.share_packages import SharePackages
+
+            s.share_packages = SharePackages(s.engine, s.shares, s.graph, lambda: getattr(s, "metrics", None),
+                                             getattr(s, "agent_apps", None), s.audit)
 
     # MLflow behind Cairn sign-in, with models in the catalog (CAIRN_MLFLOW_URL).
     from cairn.ml.mlflow_gateway import MlflowGateway

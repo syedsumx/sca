@@ -397,6 +397,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_shares_router(services.shares, cp, authz,
                                                lambda urn: services.attributes.subject(urn).get("groups", [])))
+        if getattr(services, "share_packages", None) is not None:   # data packages, agents on shared data
+            from cairn.dataaccess.share_packages import build_share_packages_router
+
+            app.include_router(build_share_packages_router(services.share_packages, cp, authz))
     if services.dataset_changes is not None:
         from cairn.pipelines.changes import build_changes_router
 

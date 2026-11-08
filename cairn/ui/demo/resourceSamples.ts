@@ -2984,6 +2984,34 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "role": "global_admin"
   }
  ],
+ "/v1/share-packages": {
+  "packages": [
+   {
+    "share": "partner-a",
+    "share_id": "7d3f0a9c2b6e4f1a8c5d0e3b9a7f2c61",
+    "recipient": "Partner A (data@partner.example)",
+    "state": "active",
+    "version": 3,
+    "digest": "4b9e1f0c7a2d83e65f1c0b9a8d7e6f5a4c3b2a1908f7e6d5c4b3a29180f7e6d5",
+    "published_ms": 1794092800000,
+    "tables": 2,
+    "metrics": ["avg_price", "units_sold"],
+    "agents": ["partner-helper"]
+   },
+   {
+    "share": "auditor-2026",
+    "share_id": "c1e8b4a7f2d94e0b6a3c5d8f1e2a7b90",
+    "recipient": "External auditor",
+    "state": "active",
+    "version": null,
+    "digest": null,
+    "published_ms": null,
+    "tables": 1,
+    "metrics": [],
+    "agents": []
+   }
+  ]
+ },
  "/v1/shares": {
   "shares": [
    {
