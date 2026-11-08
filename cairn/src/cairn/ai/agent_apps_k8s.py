@@ -33,6 +33,8 @@ import threading
 import time
 from typing import Any, Optional
 
+import httpx
+
 from cairn.ai.agent_apps import AgentAppError
 
 SA = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -264,7 +266,7 @@ class KubeRuntime:
         path = self._paths(name)["Deployment"]
         end = time.monotonic() + self.start_timeout
         while True:
-            if self._ready(self._call("GET", path, ok404=True), version):
+            if self._ready(self._call("GET", path, ok404=True), version) and self._reachable(name, version):
                 return
             failed = self._failure(name, version)
             if failed is not None:
@@ -274,6 +276,20 @@ class KubeRuntime:
                 raise AgentAppError(f"the agent did not start within {int(self.start_timeout)} seconds"
                                     + (f": {why}" if why else ""), 504)
             time.sleep(1)
+
+    def _reachable(self, name: str, version: int) -> bool:
+        """The app answers at the address Cairn calls it on, not only at its pod.
+
+        A pod turns Ready when the kubelet reaches it directly; the Service's route to it (kube-proxy's rules, a
+        node port with the Local traffic policy) follows a moment later, and a call in between is refused.
+        """
+        ep = self.endpoint(name, version)
+        if ep is None:
+            return False
+        try:
+            return httpx.get(f"{ep[0]}/healthz", timeout=2).status_code == 200
+        except httpx.HTTPError:
+            return False
 
     def endpoint(self, name: str, version: int) -> Optional[tuple[str, str]]:
         paths = self._paths(name)
