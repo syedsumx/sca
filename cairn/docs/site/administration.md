@@ -758,6 +758,25 @@ The assistant can work for one person on a schedule, and send its results to Sla
   closes an item; unanswered items expire after `CAIRN_COWORK_OUTBOX_HOURS` (72).
 - Audited (category `ai`): `cowork.task.saved`, `cowork.task.deleted`, `cowork.task.ran`, `cowork.outbound.sent`,
   `cowork.outbound.rejected`, `cowork.outbound.refused`, with targets and ids, never the text.
+- **From the command line** (`cairn tasks`): the same API for the person whose token is used. `CAIRN_URL` and
+  `CAIRN_TOKEN` (or `CAIRN_TOKEN_FILE`, a file holding it) are read from the environment only; there is no token
+  argument, so it stays out of shell history and process lists. Agent credentials are refused (403): tasks are a
+  person's own.
+
+  | Command | Does |
+  |---|---|
+  | `cairn tasks list` | your tasks: cron, enabled, last status, last and next run, where reports go |
+  | `cairn tasks create --name … --prompt … --cron "0 7 * * 1" [--max-steps 4] [--slack "#ch" \| --email a@x,b@x]` | a new task |
+  | `cairn tasks show <id>` | a task and its last 20 runs (status, report, outbox item, error) |
+  | `cairn tasks output <id> [--run <run id>]` | the report of the latest finished run (or of that run) |
+  | `cairn tasks run <id>` | runs it now and waits for the run |
+  | `cairn tasks pause <id>`, `resume <id>`, `delete <id>` | stop or restart its schedule; delete it |
+  | `cairn tasks outbox [--status pending]` | items waiting for approval and the ones decided |
+  | `cairn tasks approve <id>`, `reject <id>` | send an item, or close it unsent |
+
+  `--json` (before or after the subcommand) prints the API's answer. Exit status 0 is done, 1 the API refused (its
+  reason on stderr), 2 a usage or configuration error. Tested by running the real CLI against a real Cairn server
+  (`tests/test_tasks_cli.py`).
 
 Tested through the real services, policy decision point, database and HTTP API, with Mailpit as the SMTP server, a
 local stand-in for Slack's Web API and a scripted model (`tests/test_cowork.py`): schedules more often than hourly

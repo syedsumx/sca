@@ -907,6 +907,14 @@
    "done": "An operator sees which agent is stuck retrying, failing, slowing down or spending far more than it used to, before people complain or the budget runs out; owners see the same for their own agents",
    "status": "shipped",
    "note": "cairn.ai.trace_insights, /v1/agent-traces/insights (and per agent), /v1/agent-traces/settings (admin, audited); every traced tool call records its run (migration 0124): a custom agent's run, an agent app's run token, an OAuth session; key agents' calls are split into sessions. Findings with severity: loops, error rate, refusals, slow calls, flagged text, and volume, cost, latency, calls-per-run and error outliers against the agent's previous weeks. Tested end to end through the real services and HTTP API with real recorded MCP calls from a real agent key, a custom agent's real run and real usage metering (tests/test_agent_trace_insights.py)"
+  },
+  {
+   "id": "L108",
+   "title": "Agent automations from the CLI: cairn tasks",
+   "summary": "CoWork scheduled tasks and their outbox from a terminal or a script",
+   "done": "Someone who lives in the terminal (or a CI job acting for a person) sets up recurring research, runs it now, reads the report and approves or rejects what goes out, without the web UI",
+   "status": "shipped",
+   "note": "cairn.agentkit.tasks: list, create (name, prompt, cron, max steps, Slack or email), show (last runs), output (a run's report), run, pause/resume, delete, outbox, approve/reject, --json; CAIRN_URL and CAIRN_TOKEN/CAIRN_TOKEN_FILE from the environment only; agent credentials refused. Tested by running the real CLI in a subprocess against a real Cairn API server, with the report sent to a Slack stand-in only after approval (tests/test_tasks_cli.py)"
   }
  ]
 }

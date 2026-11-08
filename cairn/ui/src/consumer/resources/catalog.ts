@@ -773,6 +773,14 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 }
             },
             {
+                "label": "Resume",
+                "method": "PUT",
+                "path": "/ai/scheduled-tasks/{id}",
+                "body": {
+                    "enabled": true
+                }
+            },
+            {
                 "label": "Create",
                 "method": "POST",
                 "path": "/ai/scheduled-tasks",

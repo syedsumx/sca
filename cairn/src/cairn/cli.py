@@ -933,6 +933,9 @@ def build_parser() -> argparse.ArgumentParser:
     x.add_argument("message")
     x.add_argument("--session", default="cli")
     ag.set_defaults(fn=cmd_agents)
+    from cairn.agentkit.tasks import add_parser as tasks_parser
+
+    tasks_parser(sub)                                 # cairn tasks: CoWork scheduled tasks and the outbox
     agent = sub.add_parser("agent", help="in-VPC remote ingestion agent")
     agent_sub = agent.add_subparsers(dest="agent_command", required=True)
     run = agent_sub.add_parser("run")
