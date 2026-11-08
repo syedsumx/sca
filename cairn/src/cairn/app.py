@@ -454,6 +454,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         app.include_router(build_warehouses_router(warehouse_status, cp, authz, services.audit,
                                                    getattr(services, "costs", None), services.trino_key,
                                                    getattr(services, "query_history", None)))
+    if getattr(services, "sandboxes", None) is not None:       # code from agents and people, a container per run
+        from cairn.ai.sandboxes import build_sandboxes_router
+
+        app.include_router(build_sandboxes_router(services.sandboxes, cp))
     if getattr(services, "agent_apps", None) is not None:      # code-first agents deployed to Cairn
         from cairn.ai.agent_apps import build_agent_apps_router
 

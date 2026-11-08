@@ -1086,6 +1086,45 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "sandbox-runs": {
+        "key": "sandbox-runs",
+        "title": "Code sandboxes",
+        "path": "/v1/sandboxes/runs",
+        "listKey": "runs",
+        "description": "Python (or SQL over DuckDB) that agents and people ran, each run in a container of its own: no network unless asked for (then only Cairn, as the person, and hosts an operator allows), with CPU, memory and time limits. Runs need RUN_CODE; operators see everyone's.",
+        "columns": [
+            "actor",
+            "agent",
+            "language",
+            "status",
+            "duration_ms",
+            "memory_mb",
+            "cpus",
+            "egress_bytes",
+            "started_ms"
+        ],
+        "actions": [
+            {
+                "label": "Run code",
+                "method": "POST",
+                "path": "/v1/sandboxes/runs",
+                "body": {
+                    "language": "python",
+                    "code": "import json, os, urllib.request\nreq = urllib.request.Request(os.environ['CAIRN_URL'] + '/data/query', method='POST', data=json.dumps({'sql': 'SELECT region, count(*) AS n FROM main.users GROUP BY region', 'connection': 'wh'}).encode(), headers={'Authorization': 'Bearer ' + os.environ['CAIRN_TOKEN'], 'Content-Type': 'application/json'})\nresult = json.load(urllib.request.urlopen(req))['rows']",
+                    "files": [],
+                    "network": {
+                        "cairn": true,
+                        "allow": []
+                    },
+                    "limits": {
+                        "timeout_s": 60,
+                        "memory_mb": 512,
+                        "cpus": 1
+                    }
+                }
+            }
+        ]
+    },
     "custom-agents": {
         "key": "custom-agents",
         "title": "Custom agents",

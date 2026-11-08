@@ -96,6 +96,8 @@ class Services:
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
     custom_agents: Optional[Any] = None
+    sandboxes: Optional[Any] = None
+    sandbox_proxy: Optional[Any] = None
     trace_insights: Optional[Any] = None
     intents: Optional[Any] = None
     consent: Optional[Any] = None
@@ -1412,6 +1414,25 @@ def _build_active_metadata(s: Services) -> None:
             s.ai_gateway.abuse = s.abuse
         if s.agent_apps is not None:
             s.agent_apps.memory = s.agent_memory
+
+    # Code sandboxes (cairn.ai.sandboxes): code from agents and people, a container per run, data as the person.
+    from cairn.ai.sandboxes import Sandboxes, runtime_from_env
+
+    s.sandboxes = Sandboxes(
+        s.engine, runtime_from_env(),
+        lambda actor, privilege, urn: s.authorize(Principal(urn=actor, via="delegated"), privilege, urn,
+                                                  raise_on_deny=False),
+        lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None,
+                                  raise_on_deny=False),
+        getattr(s, "agents", None), os.environ.get("CAIRN_SANDBOX_CAIRN_URL", ""), s.audit)
+    if os.environ.get("CAIRN_SANDBOX_RUNTIME") == "kubernetes" and os.environ.get("CAIRN_SANDBOX_K8S_PROXY_LISTEN"):
+        from cairn.ai.sandboxes import ProxyCredentials, TcpProxy
+
+        # Kubernetes sandboxes' only way out: this egress proxy, on every API replica.
+        s.sandbox_proxy = TcpProxy(os.environ["CAIRN_SANDBOX_K8S_PROXY_LISTEN"],
+                                   ProxyCredentials((os.environ.get("CAIRN_SANDBOX_PROXY_KEY") or "").encode()),
+                                   s.sandboxes.cairn_url, s.sandboxes.allow_private, s.sandboxes.max_egress,
+                                   s.sandboxes.cairn_ca)
 
     # ---- inline actions (Slack buttons, Teams/email signed links, in-app) -----------
     if s.marketplace is not None:

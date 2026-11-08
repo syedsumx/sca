@@ -286,6 +286,27 @@ class CairnTools:
         except SemanticError as e:
             raise ValueError(str(e))
 
+    def run_python(self, code: str, files: Optional[dict[str, str]] = None, cairn_data: bool = False,
+                   timeout_s: int = 60) -> dict:
+        """Runs Python in a new sandbox (no network; with ``cairn_data``, Cairn's data as the caller)."""
+        from cairn.ai.sandboxes import SandboxError, summarize_for_model
+
+        sb = getattr(self.s, "sandboxes", None)
+        if sb is None or sb.runtime is None:
+            raise RuntimeError("code sandboxes are not configured (CAIRN_SANDBOX_RUNTIME)")
+        import base64
+
+        body = {"language": "python", "code": code,
+                "files": [{"name": k, "content": base64.b64encode(str(v).encode()).decode()}
+                          for k, v in (files or {}).items()],
+                "network": {"cairn": bool(cairn_data)}, "limits": {"timeout_s": max(1, min(int(timeout_s), 600))}}
+        try:
+            return summarize_for_model(sb.run(self.principal(), body))
+        except SandboxError as e:
+            if e.status == 403:
+                raise ValueError(str(e))
+            raise RuntimeError(str(e))
+
     def list_pending_reviews(self) -> dict:
         p = self.principal()
         items = [w for w in self.s.workflows.list() if w.state in ("SUBMITTED", "IN_REVIEW")
@@ -535,6 +556,18 @@ def build_mcp_server(services: Services):
         [{"dimension", "op": "=|!=|>|>=|<|<=|in", "value"}] on its dimensions only; time_grain day…year.
         The SQL is compiled from the definition and runs with the caller's access and masking."""
         return tools.query_metric(metric, dimensions, filters, time_grain, limit)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=False, idempotentHint=False),
+                 structured_output=True, title="Run Python in a sandbox")
+    @_safe
+    def run_python(code: str, files: Optional[dict[str, str]] = None, cairn_data: bool = False,
+                   timeout_s: int = 60) -> dict[str, Any]:
+        """Run Python in an isolated sandbox: a container of its own with no network, CPU, memory and time limits
+        and an ephemeral working directory. ``files`` (name -> text) are copied into the working directory; leave
+        the answer in a variable named ``result`` and write files to ``out/`` to get them back. With ``cairn_data``,
+        ``CAIRN_URL`` and ``CAIRN_TOKEN`` let the code query Cairn (POST {CAIRN_URL}/data/query) as the caller,
+        under their policies and masks."""
+        return tools.run_python(code, files, cairn_data, timeout_s)
 
     @server.tool(annotations=read_only, structured_output=True, title="List pending reviews")
     @_safe

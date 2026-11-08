@@ -111,6 +111,14 @@ TOOL_SPECS: list[dict] = [
                       "required": ["product_urn", "purpose", "justification"]}},
     {"name": "list_data_products", "description": "Marketplace data products matching a query, with access status.",
      "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
+    {"name": "run_python", "description": "Run Python in an isolated sandbox (no network, limited CPU, memory and "
+                                         "time). Put the answer in a variable named result; files written to out/ "
+                                         "come back. files (name -> text) are copied into the working directory. "
+                                         "With cairn_data, CAIRN_URL and CAIRN_TOKEN let the code query Cairn "
+                                         "(POST {CAIRN_URL}/data/query) as the user, masked for them.",
+     "input_schema": {"type": "object", "properties": {"code": {"type": "string"},
+                      "files": {"type": "object", "additionalProperties": {"type": "string"}},
+                      "cairn_data": {"type": "boolean"}, "timeout_s": {"type": "integer"}}, "required": ["code"]}},
 ]
 
 _URN = re.compile(r"urn:li:[A-Za-z]+:(?:\([^\s\]]+\)|[^\s\]\)\,]+)")

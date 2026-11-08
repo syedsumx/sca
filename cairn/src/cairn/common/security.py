@@ -40,6 +40,8 @@ class Principal:
     scopes: tuple[str, ...] = ()                # via=agent: what it may do (read, query_data, …)
     run: Optional[str] = None                   # via=agent: the run (or token session) the request is part of
     intent: Optional[object] = None             # via=agent: the declared intent (cairn.identity.intents.Intent)
+    identity: str = "person"                    # via=agent: person, or share-recipient (a share's recipient)
+    sponsor: Optional[str] = None               # share-recipient: the provider who attached the agent
 
     @property
     def is_service(self) -> bool:
@@ -109,7 +111,9 @@ class IdentityResolver:
                 if grant is None:
                     raise AuthenticationError("unknown, expired or revoked agent credential")
                 return Principal(grant.actor, "agent", agent=grant.agent, scopes=tuple(grant.scopes),
-                                 run=getattr(grant, "run", None), intent=getattr(grant, "intent", None))
+                                 run=getattr(grant, "run", None), intent=getattr(grant, "intent", None),
+                                 identity=getattr(grant, "identity", "person"),
+                                 sponsor=getattr(grant, "sponsor", None))
             if token.count(".") == 2 and self.notebook_lookup is not None:
                 try:
                     urn = self.notebook_lookup(token)

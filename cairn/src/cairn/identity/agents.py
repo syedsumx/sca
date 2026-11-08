@@ -123,6 +123,8 @@ class AgentGrant:
     scopes: tuple[str, ...]
     run: Optional[str] = None          # access tokens: the run (``run_…``) or OAuth session (``tok_…``) they belong to
     intent: Any = None                 # the declared intent (cairn.identity.intents.Intent), if any
+    identity: str = "person"           # who ``actor`` is: a person, or a share's recipient (``share-recipient``)
+    sponsor: Optional[str] = None      # share-recipient runs: the provider who attached the agent (decides models)
 
 
 def _now() -> int:
@@ -277,20 +279,48 @@ class AgentService:
         self._record("agent.created", actor, agent_id, {"name": name, "scopes": scopes, "kind": "built"})
         return self.get(agent_id)
 
-    def issue_run_token(self, agent_id: str, actor: str, ttl_ms: int = 900_000, intent: Any = None) -> str:
+    def issue_run_token(self, agent_id: str, actor: str, ttl_ms: int = 900_000, intent: Any = None,
+                        scopes: Optional[list[str]] = None, identity: str = "person",
+                        sponsor: Optional[str] = None) -> str:
         """A short-lived access token for one run of a Cairn-hosted agent (built or deployed app) on behalf of
-        ``actor``: their rights narrowed to the agent's scopes, and to ``intent`` (an
-        :class:`~cairn.identity.intents.Intent`) when one is declared. No refresh token; revoke it when the run ends."""
+        ``actor``: their rights narrowed to the agent's scopes (and to ``scopes`` when given, never wider), and to
+        ``intent`` (an :class:`~cairn.identity.intents.Intent`) when one is declared. ``identity`` says who ``actor``
+        is: ``person``, or ``share-recipient`` with the providing ``sponsor``. No refresh token; revoke it when the
+        run ends."""
+        if identity not in ("person", "share-recipient") or (identity == "share-recipient" and not sponsor):
+            raise AgentError("identity: person, or share-recipient with its sponsor")
         with self.engine.begin() as conn:
             client = conn.execute(select(agent_clients).where(agent_clients.c.id == agent_id)).first()
             if client is None or client.kind not in ("built", "app") or not client.enabled:
                 raise AgentError("no such agent", 404)
+            granted = [s for s in client.scopes if scopes is None or s in scopes]
             token, now = ACCESS_PREFIX + secrets.token_urlsafe(32), _now()
+            details: dict = {"run": True, **({"intent": intent.as_dict()} if intent is not None else {})}
+            if identity != "person":
+                details.update(identity=identity, sponsor=sponsor)
             conn.execute(agent_tokens.insert().values(
-                hash=_hash(token), kind="access", client_id=agent_id, actor=actor, scopes=list(client.scopes),
-                expires_ms=now + ttl_ms, revoked=False, created_ms=now,
-                details={"run": True, **({"intent": intent.as_dict()} if intent is not None else {})}))
+                hash=_hash(token), kind="access", client_id=agent_id, actor=actor, scopes=granted,
+                expires_ms=now + ttl_ms, revoked=False, created_ms=now, details=details))
         return token
+
+    def system_agent(self, agent_id: str, name: str, scopes: list[str], description: str) -> str:
+        """The identity of one of Cairn's own runtimes (code sandboxes): a built agent with a fixed id, made once.
+        Like any agent it holds no key, obeys the pause switch, and acts only for the person it runs for."""
+        with self.engine.connect() as conn:
+            if conn.execute(select(agent_clients.c.id).where(agent_clients.c.id == agent_id)).first():
+                return agent_id
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            with self.engine.begin() as conn:
+                conn.execute(agent_clients.insert().values(
+                    id=agent_id, name=name, kind="built", owner="urn:li:corpuser:__cairn__",
+                    scopes=_check_scopes(scopes), redirect_uris=[], ai_system=None, key_hash=None, enabled=True,
+                    details={"description": description, "system": True}, created_by="urn:li:corpuser:__cairn__",
+                    created_ms=_now()))
+        except IntegrityError:                     # another replica made it first
+            pass
+        return agent_id
 
     def create_app_agent(self, name: str, owner: str, scopes: list[str], description: str, actor: str) -> dict:
         """The identity of a code-first agent app deployed to Cairn (``cairn.ai.agent_apps``): like a built agent,
@@ -583,6 +613,7 @@ class AgentService:
                     return None
                 actor, scopes, run = client.owner, list(client.scopes), None
                 declared = (client.details or {}).get("intent")
+                identity, sponsor = "person", None
             elif token.startswith(ACCESS_PREFIX):
                 row = conn.execute(select(agent_tokens).where(agent_tokens.c.hash == _hash(token),
                                                               agent_tokens.c.kind == "access")).first()
@@ -594,6 +625,8 @@ class AgentService:
                 actor, scopes = row.actor, [s for s in row.scopes if s in client.scopes]
                 run = ("run_" if (row.details or {}).get("run") else "tok_") + row.hash[:16]
                 declared = (row.details or {}).get("intent")
+                identity = (row.details or {}).get("identity") or "person"
+                sponsor = (row.details or {}).get("sponsor")
             else:
                 return None
         if not client.enabled or not actor:
@@ -607,7 +640,7 @@ class AgentService:
         except IntentError:
             return None                          # an intent that cannot be read: the credential does not work
         self._touch(client.id, now)
-        return AgentGrant(actor, client.id, tuple(scopes), run, intent)
+        return AgentGrant(actor, client.id, tuple(scopes), run, intent, identity, sponsor)
 
     def _touch(self, agent_id: str, now: int) -> None:
         if now - self._touched.get(agent_id, 0) < 60_000:       # at most once a minute per agent
@@ -618,7 +651,8 @@ class AgentService:
 
 
 # ---- what a scope allows over HTTP ---------------------------------------------------------------
-QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metrics/{name}/query")
+QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metrics/{name}/query",
+                    "/v1/sandboxes/runs")                       # code in a sandbox may read data as the person
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
@@ -655,7 +689,7 @@ def tool_scope(tool: str) -> str:
     """The scope an agent needs for an MCP tool."""
     if tool.startswith("suggest_") or tool in ("generate_documentation", "request_access", "start_discussion"):
         return "propose"
-    return {"ask_data": "query_data", "query_metric": "query_data"}.get(tool, "read")
+    return {"ask_data": "query_data", "query_metric": "query_data", "run_python": "query_data"}.get(tool, "read")
 
 
 def describe(scopes: list[str]) -> list[dict[str, Any]]:

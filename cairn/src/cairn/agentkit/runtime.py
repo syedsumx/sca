@@ -115,6 +115,34 @@ class Memory:
     def forget(self, memory_id: str) -> None:
         self._call("DELETE", f"/{memory_id}")
 
+def _run_python(ctx: "Context", code: str, files: Optional[dict] = None, cairn: bool = False,
+                allow: Optional[list[str]] = None, timeout_s: int = 60, memory_mb: Optional[int] = None,
+                language: str = "python") -> dict:
+    import base64
+
+    import httpx
+
+    def raw(v: Any) -> bytes:
+        return v if isinstance(v, bytes) else str(v).encode()
+    body = {"language": language, "code": code,
+            "files": [{"name": k, "content": base64.b64encode(raw(v)).decode()} for k, v in (files or {}).items()],
+            "network": {"cairn": cairn, "allow": list(allow or [])},
+            "limits": {"timeout_s": timeout_s, **({"memory_mb": memory_mb} if memory_mb else {})}}
+    r = httpx.post(f"{ctx.cairn_url}/v1/sandboxes/runs", json=body, headers={"Authorization": f"Bearer {ctx._token}"},
+                   timeout=timeout_s + 180)
+    if r.status_code != 200:
+        raise RuntimeError(f"Cairn refused the sandbox run ({r.status_code}): {r.text[:300]}")
+    out = r.json()
+    out["files"] = {f["name"]: base64.b64decode(f["content"]) for f in out.get("files") or []}
+    return out
+
+
+Context.run_python = _run_python          # type: ignore[attr-defined]
+Context.run_python.__doc__ = """Runs code in a Cairn sandbox (a container of its own, no network unless asked), as the
+person: ``files`` (name -> bytes or text) are copied into its working directory; the answer is ``result`` and the
+files the code wrote to ``out/`` (name -> bytes). ``cairn=True`` lets the code query Cairn as the person
+(``CAIRN_URL``, ``CAIRN_TOKEN``); ``allow`` names hosts an operator lets sandboxes reach."""
+
 
 def load_agent(project: Path) -> Callable[..., Any]:
     """The project's ``respond`` function (``agent.py``)."""

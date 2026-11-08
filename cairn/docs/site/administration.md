@@ -901,6 +901,72 @@ in another for the same person, never for another person; PII, credentials and i
 listing and deleting their memories and nobody else; team and shared memories written only by members and the owner;
 the `memory` scope required; eviction at the cap, retention, and deletion with the agent.
 
+## Code sandboxes for agents
+
+Agents (custom agents, agent apps, MCP clients) and people run Python, or SQL over DuckDB, in a sandbox: a container
+of its own per run, never Cairn's process.
+
+```bash
+curl -X POST "$CAIRN/v1/sandboxes/runs" -H "Authorization: Bearer $TOKEN" -d '{
+  "language": "python", "code": "import csv; rows = list(csv.DictReader(open(\"sales.csv\"))); result = len(rows)",
+  "files": [{"name": "sales.csv", "content": "<base64>"}],
+  "network": {"cairn": true}, "limits": {"timeout_s": 60, "memory_mb": 512, "cpus": 1}}'
+```
+
+- **What comes back** when the run ends: `status` (`succeeded`, `failed`, `timeout`, `memory`), `result` (the value
+  the code left in a variable named `result`; for SQL the columns and rows), `stdout`, `stderr` (256 KB each), and
+  `files`: what the code wrote under `out/`, base64, up to `CAIRN_SANDBOX_MAX_OUTPUT_MB` (5) together. Input `files`
+  (up to `CAIRN_SANDBOX_MAX_INPUT_MB`, 20) are copied into the working directory first.
+- **For agents:** the `run_python` tool (custom agents can be given it; the assistant and the MCP server offer it; it
+  needs the `query_data` scope) and `ctx.run_python(code, files=…, cairn=True)` in agent apps.
+- **Runtime.** `CAIRN_SANDBOX_RUNTIME=docker` starts a container per run from `CAIRN_SANDBOX_IMAGE` (build
+  `docker/sandbox.Dockerfile`: Python with DuckDB, pandas, pyarrow and numpy; any Python image works for Python runs).
+  The container runs as uid 1000 with no capabilities and no new privileges, a read-only root file system, a process
+  limit, the run's CPU and memory (no swap) limits, and no network interface (`--network none`). The runner, the code
+  and the inputs are mounted read-only; `/work` (the working directory) and `/tmp` are in memory and vanish with the
+  run (`CAIRN_SANDBOX_WORK_MB`, 256). `CAIRN_SANDBOX_DOCKER_RUNTIME=runsc` runs it under gVisor where installed.
+  `CAIRN_SANDBOX_RUNTIME=kubernetes` makes a pod per run in `CAIRN_SANDBOX_K8S_NAMESPACE` (`cairn-sandboxes`), with
+  `CAIRN_SANDBOX_K8S_RUNTIME_CLASS` if set: the program and inputs in a Secret (700 KB of inputs at most), the token in
+  another, no service account token, the same security context, and a NetworkPolicy, made before the pod, that denies
+  all traffic. Cairn's account needs to create and delete pods, secrets and network policies there and read pods and
+  their logs. Without a runtime, runs are refused (503).
+- **Network: none by default.** A run that asks for network (`network.cairn` or `network.allow`) gets one way out: an
+  egress proxy Cairn runs for that run (`HTTP_PROXY`/`HTTPS_PROXY` in the sandbox). With docker it is a Unix socket
+  mounted into the container, the container still having no network interface; on Kubernetes it is
+  `CAIRN_SANDBOX_K8S_PROXY_LISTEN` on every API replica (reached at `CAIRN_SANDBOX_K8S_PROXY_URL`, the sandboxes'
+  NetworkPolicy allowing only `CAIRN_SANDBOX_K8S_PROXY_PEERS`), each run with credentials signed with
+  `CAIRN_SANDBOX_PROXY_KEY`. The proxy lets through only the hosts in `network.allow`, each of which must be in
+  `CAIRN_SANDBOX_ALLOWED_HOSTS` (an operator's list; a request naming another host is refused before anything
+  runs), and with `network.cairn`, Cairn itself as `http://cairn` (`CAIRN_SANDBOX_CAIRN_URL` says where Cairn really
+  is; `CAIRN_SANDBOX_CAIRN_CA_FILE` for a private certificate). Names are resolved by the proxy, and a host resolving
+  to a private, loopback or link-local address is refused unless `CAIRN_SANDBOX_ALLOW_PRIVATE_EGRESS=true`. A run's
+  traffic is capped at `CAIRN_SANDBOX_MAX_EGRESS_MB` (100).
+- **Data as the person, governed.** With `network.cairn`, the run gets `CAIRN_URL` (`http://cairn`) and
+  `CAIRN_TOKEN`: a token for the person who asked, through the sandbox's own agent identity (`agt_cairn_sandbox`,
+  made on first use), narrowed to `read` and `query_data` and, when an agent asked, to that agent's scopes and
+  declared intent. It lasts the run and is revoked when it ends. The code queries Cairn (`POST $CAIRN_URL/data/query`)
+  and gets exactly what the person would: masked columns masked, row filters applied. The pause switch for agents
+  stops it. The token reaches the container through an env file (docker) or a Secret (Kubernetes), never a command
+  line.
+- **Who and how much.** Running code needs `RUN_CODE`. Each person may have `CAIRN_SANDBOX_MAX_PER_PERSON` (2) runs
+  at once and Cairn `CAIRN_SANDBOX_MAX_RUNNING` (8); more are refused with 429. A run's limits are capped by
+  `CAIRN_SANDBOX_MAX_TIMEOUT_S` (600), `CAIRN_SANDBOX_MAX_MEMORY_MB` (2048) and `CAIRN_SANDBOX_MAX_CPUS` (2); the
+  defaults are 60 s, 512 MB and one CPU. A run over its time is stopped (`timeout`), one over its memory killed
+  (`memory`). `GET /v1/sandboxes/limits` shows the settings.
+- **Recorded, metered, audited.** `GET /v1/sandboxes/runs` and `/runs/<id>` (your own; operators see all) give each
+  run's person, agent, language, limits, network, status, duration and sizes, never the code or its output, kept
+  `CAIRN_SANDBOX_KEEP_DAYS` (30). `GET /v1/sandboxes/usage?days=30` sums runs, CPU seconds, memory (MB × seconds),
+  egress and outcomes per person and day. Each run is audited as `sandbox.run_<status>`.
+
+Tested end to end with real containers started by the real API (`tests/test_sandboxes_e2e.py`, in CI's trino job with
+the `cairn/sandbox` image): a computation over an input file returning its result and a generated file, as uid 1000
+on a read-only root; no network (no interface for a direct connection; the proxy refusing any host but Cairn, and a
+host an operator has not allowed refused before the run); a time limit and a memory limit enforced; a query from
+inside the sandbox through Cairn seeing a masked column masked for the person and unmasked for an administrator, with
+each run's token revoked; `RUN_CODE`, the per-person cap, records, usage and audit; the `run_python` tool within an
+agent's scopes; SQL over DuckDB. The Kubernetes pod and the proxy's credentials are checked without a cluster
+(`tests/test_sandboxes.py`).
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

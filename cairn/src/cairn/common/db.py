@@ -160,6 +160,7 @@ def load_models() -> MetaData:
     from cairn.pipelines import reverse_etl as _reverse_etl  # noqa: F401
     from cairn.ml import serving as _ml_serving  # noqa: F401
     from cairn.ai import custom_agents as _custom_agents  # noqa: F401
+    from cairn.ai import sandboxes as _sandboxes  # noqa: F401
     from cairn.governance import consent as _consent  # noqa: F401
     from cairn.sqlworkspace import reports as _bi_reports  # noqa: F401
     from cairn.sqlworkspace import gitfolders as _gitfolders  # noqa: F401

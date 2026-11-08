@@ -1513,6 +1513,50 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    ]
   }
  ],
+ "/v1/sandboxes/runs": {
+  "runs": [
+   {
+    "id": "5b0e2f8c1d4a4e7b9c3f6a2d8e1b7c40",
+    "actor": "urn:li:corpuser:ana",
+    "agent": "agt_3f9a1c7e2b40",
+    "language": "python",
+    "status": "succeeded",
+    "network": {"cairn": true, "allow": []},
+    "timeout_s": 60,
+    "memory_mb": 512,
+    "cpus": 1.0,
+    "started_ms": 1794092800000,
+    "finished_ms": 1794092803410,
+    "duration_ms": 3410,
+    "exit_code": 0,
+    "input_bytes": 18234,
+    "output_bytes": 5120,
+    "egress_bytes": 2611,
+    "files": [{"name": "weekly_sales.png", "bytes": 4896}],
+    "error": null
+   },
+   {
+    "id": "9c41d7a2e85b4f10a6e3c2b17d90f5e8",
+    "actor": "urn:li:corpuser:raj",
+    "agent": null,
+    "language": "python",
+    "status": "timeout",
+    "network": {"cairn": false, "allow": []},
+    "timeout_s": 30,
+    "memory_mb": 256,
+    "cpus": 0.5,
+    "started_ms": 1794089200000,
+    "finished_ms": 1794089231200,
+    "duration_ms": 31200,
+    "exit_code": null,
+    "input_bytes": 0,
+    "output_bytes": 0,
+    "egress_bytes": 0,
+    "files": [],
+    "error": "the run went over its time limit (30 s) and was stopped"
+   }
+  ]
+ },
  "/v1/agent-apps": [
   {
    "name": "store-ops-helper",
