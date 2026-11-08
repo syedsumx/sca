@@ -194,6 +194,25 @@ class KubeRuntime:
             self.stop(name)                            # the app stays down until a deploy works
             raise
 
+    def _pods_ready(self, name: str, version: int) -> bool:
+        """A pod of this version is Ready and not going away, and no pod of another version is left to answer.
+
+        The Deployment's status lags a rollout: right after a redeploy it can still count the old, terminating pod
+        as ready, so readiness is read from the pods themselves.
+        """
+        pods = self._call("GET", f"/api/v1/namespaces/{self.namespace}/pods?labelSelector={LABEL}%3D{name}") or {}
+        ready = False
+        for p in pods.get("items", []):
+            meta = p.get("metadata") or {}
+            if (meta.get("annotations") or {}).get(VERSION) != str(version):
+                return False                               # an old version's pod still exists (Recreate removes it first)
+            if meta.get("deletionTimestamp"):
+                continue
+            conditions = (p.get("status") or {}).get("conditions") or []
+            if any(c.get("type") == "Ready" and c.get("status") == "True" for c in conditions):
+                ready = True
+        return ready
+
     def _ready(self, d: Optional[dict], version: int) -> bool:
         if not d:
             return False
@@ -202,7 +221,8 @@ class KubeRuntime:
         return ((tpl.get("annotations") or {}).get(VERSION) == str(version)
                 and int(st.get("observedGeneration") or 0) >= int(d["metadata"].get("generation") or 0)
                 and int(st.get("readyReplicas") or 0) >= 1 and int(st.get("updatedReplicas") or 0) >= 1
-                and int(st.get("replicas") or 0) == int(st.get("updatedReplicas") or 0))
+                and int(st.get("replicas") or 0) == int(st.get("updatedReplicas") or 0)
+                and self._pods_ready(d["metadata"]["labels"][LABEL], version))
 
     def _failure(self, name: str, version: int) -> Optional[AgentAppError]:
         """Why the app's pod of this version cannot start, if it has said so."""
