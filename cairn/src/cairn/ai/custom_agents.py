@@ -292,13 +292,28 @@ class CustomAgents:
         from cairn.ai.traces import current_run
 
         run_token = current_run.set(rid)          # its tool calls are traced as part of this run (its id)
+        guard = getattr(self, "abuse", None)
+        from cairn.ai.abuse import AbuseBlocked
+
+        def check(kind: str, text: str, tool_calls: Optional[list] = None) -> None:
+            """Abuse detection (cairn.ai.abuse): planted instructions in tool results; secrets, PII dumps and far
+            destinations in what the model says and asks tools to do. Tools outside the agent's list are already
+            refused by Cairn and told to the model, so they are not a finding here."""
+            if kind == "input":
+                guard.inspect(actor, a["agent_id"], rid, "custom_agent", [("tool_result", text)])
+            else:
+                guard.inspect(actor, a["agent_id"], rid, "custom_agent", output=text, tool_calls=tool_calls or [])
         try:
             answer, _, calls = self.assistant.run_loop(
                 principal, RULES + a["instructions"], [self.specs[t] for t in a["tools"]],
-                [{"role": "user", "content": clean}], a["max_steps"], f"agent.{name}", set(a["tools"]))
+                [{"role": "user", "content": clean}], a["max_steps"], f"agent.{name}", set(a["tools"]),
+                abuse_check=check if guard is not None else None)
             if any(c["summary"].startswith("failed:") for c in calls):
                 status = "refused" if any("not one of this agent's tools" in c["summary"] or "scopes do not include"
                                           in c["summary"] for c in calls) else "ok"
+        except AbuseBlocked as e:
+            status, answer, calls = "blocked", str(e)[:2000], getattr(e, "calls", [])
+            logger.warning("custom agent %s: run %s blocked by abuse detection", name, rid)
         except Exception as e:  # noqa: BLE001 - recorded on the run
             status, answer = "failed", f"{type(e).__name__}: {e}"[:2000]
             logger.warning("custom agent %s failed: %s", name, e)

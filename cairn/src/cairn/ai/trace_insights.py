@@ -242,6 +242,21 @@ class TraceInsights:
             "p95_ms": baseline["p95_ms"], "cost_per_day_usd": round(baseline["cost_per_day"][0], 6),
             "calls_per_run": round(baseline["calls_per_run"], 2)}
         findings = self._findings(agent, summary, loops, slow, baseline, days, cfg, n)
+        abuse = getattr(self, "abuse", None)                # abuse detection's counters (cairn.ai.abuse)
+        if abuse is not None:
+            c = abuse.counts([agent["id"]], start, end).get(agent["id"]) or {"critical": 0, "warning": 0, "info": 0,
+                                                                            "blocked": 0}
+            summary["abuse"] = c
+            if c["critical"] or c["warning"]:
+                findings.append({
+                    "id": _fid(agent["id"], "abuse"), "agent": agent["id"], "agent_name": agent["name"],
+                    "kind": "abuse", "severity": "critical" if c["critical"] else "warning",
+                    "title": f"{c['critical']} critical and {c['warning']} warning abuse findings",
+                    "detail": f"Abuse detection found prompt injection or exfiltration through this agent "
+                              f"{c['critical'] + c['warning']} times ({c['blocked']} blocked); see "
+                              f"/v1/agent-abuse/findings?agent={agent['id']}.",
+                    "value": c["critical"], "baseline": None})
+                findings.sort(key=lambda f: (SEVERITY_ORDER[f["severity"]], f["kind"]))
         out = {**summary, "findings": findings}
         if detail:
             tools: dict[str, dict] = {}

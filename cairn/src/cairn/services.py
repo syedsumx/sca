@@ -121,6 +121,7 @@ class Services:
     ai_gateway: Optional[Any] = None
     agent_apps: Optional[Any] = None
     agent_memory: Optional[Any] = None
+    abuse: Optional[Any] = None
     external_catalogs: Optional[Any] = None
     listings: Optional[Any] = None
     ask: Optional[Any] = None
@@ -1397,6 +1398,18 @@ def _build_active_metadata(s: Services) -> None:
                                       raise_on_deny=False),
             agent_groups, s.audit)
         s.custom_agents.memory = s.agent_memory
+        # Agentic abuse detection (cairn.ai.abuse): injection in, exfiltration out; findings, auto-pause.
+        from cairn.ai.abuse import AbuseGuard
+
+        s.abuse = AbuseGuard(
+            s.engine, s.agents,
+            lambda actor, privilege: s.authorize(Principal(urn=actor, via="delegated"), privilege, None,
+                                                 raise_on_deny=False),
+            s.audit, AbuseGuard.judge_from_env())
+        s.trace_insights.abuse = s.abuse
+        s.custom_agents.abuse = s.abuse
+        if s.ai_gateway is not None:
+            s.ai_gateway.abuse = s.abuse
         if s.agent_apps is not None:
             s.agent_apps.memory = s.agent_memory
 

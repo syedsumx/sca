@@ -1005,6 +1005,14 @@
    "note": "cairn.ai.gateway_routes (migration 0128): candidates with capabilities (tools, vision), input size and timeouts; the route's cost ceiling, strategy (ordered, cheapest) and latency budget; fallback on 5xx, timeouts, unreachable providers and 429 (streams before the first byte); candidates the caller may not use skipped, none left refused; named upstreams (CAIRN_AI_GATEWAY_UPSTREAMS, …_MODEL_UPSTREAMS); X-Cairn-Model/X-Cairn-Route; operator API /v1/ai/gateway/routes (MANAGE_SYSTEM_OPERATIONS), audited (gateway.route_saved, gateway.routed). Tested through the HTTP gateway with the Anthropic SDK and two provider stand-ins, the first failing or rate-limiting and the second answering, plus cost, capability, size and latency routes (tests/test_ai_gateway_routes.py)"
   },
   {
+   "id": "L114",
+   "title": "Agentic abuse detection",
+   "summary": "Prompt injection and data exfiltration through agents detected, blocked and counted",
+   "done": "Instructions planted in a ticket, a description or a monitor name cannot steer an agent into leaking data, and an agent that keeps trying is paused before it does damage",
+   "status": "shipped",
+   "note": "cairn.ai.abuse (migration 0128): rule-based detectors with severities on inputs reaching models (gateway messages, custom agents' tool results, MCP results) for injection, and on outputs and tool arguments (gateway answers, streams included; custom agents' answers and tool calls; MCP arguments) for secrets, PII dumps (the classifier's value detectors), destinations outside an allowlist and tools out of scope; an optional model judge; blocking at a severity; per-agent counters in the agent insights and auto-pause after N critical findings; /v1/agent-abuse/findings, /settings, /scan; audited. Tested end to end through the gateway (an agent key, a provider stand-in) and a custom agent, with planted injection in tool results and attempted exfiltration: blocked, recorded, the agents paused (tests/test_agent_abuse.py)"
+  },
+  {
    "id": "L115",
    "title": "Zero-copy Parquet",
    "summary": "Parquet files already in the store registered as an Iceberg table in place, with new files added as they land",

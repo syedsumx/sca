@@ -583,6 +583,53 @@ agent's recorded tool calls and model use over a window.
   `error_rate_warning` (0.2) and `error_rate_critical` (0.5). Changing them needs `MANAGE_GLOBAL_SETTINGS` and is
   audited as `agent_traces.settings_changed`. Reading insights changes nothing.
 
+**Agentic abuse detection (prompt injection and exfiltration):** rule-based detectors run wherever text crosses into
+or out of a model on an agent's behalf, record findings, block the serious ones and pause an agent that keeps
+tripping them (`cairn.ai.abuse`, table `cairn_agent_abuse_findings`, migration 0128).
+
+- **What is checked.**
+  - *Into models:* every message of an AI gateway call (agent apps' model calls included) and every tool result a
+    custom agent's tools return, for **injection**: text telling an AI to ignore its instructions or policies, to
+    send data somewhere, to call tools, or hidden in invisible characters. In a tool result (data someone may have
+    planted) it is `critical`; in a person's own message `warning`.
+  - *Out of models and into tools:* gateway answers (plain and streamed) and custom agents' answers and tool calls,
+    for **secrets** (cloud keys, API keys, tokens, private keys, passwords: `critical`), **PII dumps**
+    (`pii_dump_threshold` values or more of the kinds masking protects, found with the column classifier's validated
+    value detectors: `critical`; a third of that: `warning`), **destinations** (an http(s) URL anywhere in a tool's
+    arguments, or an email address given as a recipient, outside `allowed_domains`: `critical`) and, at the gateway,
+    **tools out of scope** (the model asking for a tool the request did not offer: `critical`).
+  - *MCP:* tool arguments are checked for destinations (a blocked call answers `{"error": "blocked"}`). Instructions
+    in what an MCP tool returns are already flagged in place before they leave Cairn, so they are recorded as a
+    `warning` finding for the agent rather than blocked.
+- **Blocking.** A finding at or above `block_at` (`critical` by default; `warning` blocks more) stops it: the gateway
+  answers 403 in the provider's error format without calling the provider (inputs) or without returning its answer
+  (outputs; an agent's streamed answer is held until it has been checked, a person's is passed through), a custom
+  agent's run stops with status `blocked` before the model sees the tool result or before the tool runs.
+- **Auto-pause.** When an agent reaches `auto_pause_after` (3; 0 never) open critical findings within
+  `window_hours` (24), it is disabled in the agent hub: its key and tokens stop working at once and its runs are
+  refused, until an administrator enables it again. Audited `agent_abuse.auto_paused`.
+- **Model judge (optional).** `CAIRN_ABUSE_JUDGE_URL`: Cairn posts `{"direction", "text"}` and reads
+  `{"severity", "reason"}`; the judge can add a finding the rules missed, never remove one, and when it cannot be
+  reached the rules' verdict stands.
+- **Findings:** `GET /cairn/api/v1/agent-abuse/findings?agent=&severity=&status=&limit=` (agent, person, run,
+  source, detector, severity, blocked, a redacted summary: never a secret or the data), `POST …/findings/{id}/dismiss`
+  (dismissed findings no longer count towards auto-pause). Administrators and operators see every agent's findings,
+  owners their agents'; agent credentials are refused. The agent insights carry each agent's counters (`abuse`:
+  critical, warning, blocked) and an `abuse` finding.
+- **Settings:** `GET|PUT /cairn/api/v1/agent-abuse/settings` with `enabled`, `block_at`, `auto_pause_after`,
+  `window_hours`, `pii_dump_threshold` (10) and `allowed_domains` (`["corp.example.com"]`; subdomains included).
+  Changing them needs `MANAGE_GLOBAL_SETTINGS`. `POST …/scan` with `{"text", "direction": "input" | "output"}` is a
+  dry run for administrators and operators.
+- **Audited** (category `agents`): `agent_abuse.finding` (detector, severity, blocked, run; no content),
+  `.auto_paused`, `.dismissed`, `.settings_changed`.
+
+Tested end to end (`tests/test_agent_abuse.py`): through the AI gateway with a provider stand-in and an agent key,
+planted instructions in a tool result blocked before the provider, a tool call to a domain outside the allowlist
+blocked (an allowlisted one passing), a streamed PII dump blocked and the third critical finding pausing the agent
+(its key then refused), a person's answer carrying a secret blocked; through a custom agent, a quality monitor named
+to instruct agents stopping the run before the model saw it, a suggestion linking out stopped before it ran, and the
+agent paused; the findings API, dismissal, settings, the insights' counters and the audit.
+
 **Custom agents (built in Cairn):** a team builds an agent from Cairn's own tools, deploys it, and people run it.
 
 - `POST /cairn/api/v1/custom-agents` with `{"name", "description", "instructions", "tools": [...], "scopes": [...],

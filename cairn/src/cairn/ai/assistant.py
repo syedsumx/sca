@@ -261,10 +261,14 @@ class Assistant:
         return out
 
     def run_loop(self, principal, system: str, tool_specs: list[dict], messages: list[dict], max_iterations: int,
-                 purpose: str, allowed_tools: Optional[set[str]] = None, model: Optional[str] = None
-                 ) -> tuple[str, list[dict], list[dict]]:
+                 purpose: str, allowed_tools: Optional[set[str]] = None, model: Optional[str] = None,
+                 abuse_check: Optional[Callable[..., Any]] = None) -> tuple[str, list[dict], list[dict]]:
         """The model's tool-use loop: (reply, messages, tool calls). Tools run as ``principal``; with
-        ``allowed_tools``, only those (custom agents)."""
+        ``allowed_tools``, only those (custom agents). ``abuse_check`` (abuse detection, :mod:`cairn.ai.abuse`) sees
+        each answer and its tool calls before they run (``abuse_check("output", text, calls)``) and each tool result
+        before the model does (``abuse_check("input", text)``); it stops the loop by raising
+        :class:`~cairn.ai.abuse.AbuseBlocked`."""
+        from cairn.ai.abuse import AbuseBlocked
         from cairn.ai.workspace import WORKSPACE_TOOLS, current_conversation
 
         client = self.llm.client
@@ -291,6 +295,13 @@ class Assistant:
                                          cache_write_tokens=getattr(usage, "cache_creation_input_tokens", 0) or 0),
                                 purpose)
             content = [_block_to_dict(b) for b in resp.content]
+            if abuse_check is not None:              # what the model says and the tools it asks for, before they run
+                try:
+                    abuse_check("output", "\n".join(b.get("text", "") for b in content if b.get("type") == "text"),
+                                [(b.get("name"), b.get("input")) for b in content if b.get("type") == "tool_use"])
+                except AbuseBlocked as e:
+                    e.calls = tool_calls             # what ran before it was stopped
+                    raise
             messages.append({"role": "assistant", "content": content})
             if resp.stop_reason == "refusal":
                 reply = "I can't help with that request."
@@ -312,8 +323,14 @@ class Assistant:
                         out, summary = self._run_tool(principal, block["name"], block.get("input") or {},
                                                       allowed_tools)
                     text = json.dumps(out, default=str)[:_MAX_TOOL_RESULT]
+                    if abuse_check is not None:      # a tool result is data, maybe planted: checked before the model
+                        abuse_check("input", text)
                     results.append({"type": "tool_result", "tool_use_id": block["id"], "content": redact(text)})
                     tool_calls.append({"name": block["name"], "summary": summary, **({"saved": saved} if saved else {})})
+                except AbuseBlocked as e:
+                    tool_calls.append({"name": block["name"], "summary": "blocked: abuse detection"})
+                    e.calls = tool_calls
+                    raise
                 except Exception as e:  # report to the model, do not crash the turn
                     results.append({"type": "tool_result", "tool_use_id": block["id"], "is_error": True,
                                     "content": f"{type(e).__name__}: {e}"})

@@ -1298,6 +1298,45 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "agent-abuse-findings": {
+        "key": "agent-abuse-findings",
+        "title": "Abuse findings",
+        "path": "/v1/agent-abuse/findings",
+        "listKey": "findings",
+        "description": "Prompt injection and data exfiltration caught on agents' model calls and tools: instructions planted in tool results, secrets, PII dumps and destinations outside the allowlist. Critical findings are blocked, and an agent that collects too many is paused. Administrators and operators see all; owners see their agents'.",
+        "columns": [
+            "created_ms",
+            "severity",
+            "detector",
+            "agent",
+            "source",
+            "blocked",
+            "summary",
+            "status"
+        ],
+        "actions": [
+            {
+                "label": "Dismiss",
+                "method": "POST",
+                "path": "/v1/agent-abuse/findings/{id}/dismiss",
+                "body": null
+            },
+            {
+                "label": "Change detection settings",
+                "method": "PUT",
+                "path": "/v1/agent-abuse/settings",
+                "body": {
+                    "block_at": "critical",
+                    "auto_pause_after": 3,
+                    "window_hours": 24,
+                    "pii_dump_threshold": 10,
+                    "allowed_domains": [
+                        "corp.example.com"
+                    ]
+                }
+            }
+        ]
+    },
     "agent-memories": {
         "key": "agent-memories",
         "title": "Agent memories",

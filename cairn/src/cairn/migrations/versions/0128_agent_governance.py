@@ -1,4 +1,4 @@
-"""Agent memory; AI gateway routes
+"""Agent memory; AI gateway routes; agentic abuse findings
 
 Revision ID: 0128
 Revises: 0127
@@ -42,8 +42,26 @@ def upgrade() -> None:
         sa.Column('updated_by', sa.String(length=512), nullable=False),
         sa.Column('updated_ms', sa.BigInteger(), nullable=False),
     )
+    op.create_table(
+        'cairn_agent_abuse_findings',
+        sa.Column('id', sa.String(length=40), primary_key=True),
+        sa.Column('agent', sa.String(length=40), nullable=True),
+        sa.Column('actor', sa.String(length=512), nullable=False),
+        sa.Column('run', sa.String(length=64), nullable=True),
+        sa.Column('source', sa.String(length=16), nullable=False),
+        sa.Column('direction', sa.String(length=8), nullable=False),
+        sa.Column('detector', sa.String(length=16), nullable=False),
+        sa.Column('severity', sa.String(length=8), nullable=False),
+        sa.Column('blocked', sa.Boolean(), nullable=False),
+        sa.Column('summary', sa.Text(), nullable=False),
+        sa.Column('status', sa.String(length=10), nullable=False),
+        sa.Column('created_ms', sa.BigInteger(), nullable=False),
+    )
+    op.create_index('ix_cairn_agent_abuse_findings_agent', 'cairn_agent_abuse_findings', ['agent', 'created_ms'])
+    op.create_index('ix_cairn_agent_abuse_findings_created_ms', 'cairn_agent_abuse_findings', ['created_ms'])
 
 
 def downgrade() -> None:
+    op.drop_table('cairn_agent_abuse_findings')
     op.drop_table('cairn_ai_gateway_routes')
     op.drop_table('cairn_agent_memories')

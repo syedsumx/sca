@@ -89,6 +89,7 @@ class AiGateway:
         self.rpm, self.http = rpm, http
         self.routes = None           # GatewayRoutes (cairn.ai.gateway_routes), set by the services
         self.audit = None
+        self.abuse = None            # AbuseGuard (cairn.ai.abuse), set by the services
         self._calls: dict[str, deque] = defaultdict(deque)
         self._lock = threading.Lock()
 
@@ -387,6 +388,7 @@ def _error(provider: str, message: str) -> dict:
 def build_gateway_router(gw: AiGateway, current_principal, authorize) -> Any:
     from fastapi import APIRouter, Body, Depends, HTTPException
     from fastapi.responses import JSONResponse, StreamingResponse
+    from starlette.concurrency import run_in_threadpool
 
     router = APIRouter(prefix=PREFIX, tags=["ai"])
 
@@ -412,17 +414,48 @@ def build_gateway_router(gw: AiGateway, current_principal, authorize) -> Any:
         incoming = {k.lower(): v for k, v in request.headers.items()}
         route = gw.route(model)                  # a virtual model name: routed (cairn.ai.gateway_routes)
         headers: dict = {}
+        refused = gw.admit_limits(actor) if route is not None else gw.admit(actor, model, may_use(p))
+        if refused:
+            logger.info("AI gateway refused %s: %s", actor, refused[1])
+            return JSONResponse(_error(provider, refused[1]), status_code=refused[0])
+        guard = getattr(gw, "abuse", None)       # agentic abuse detection (cairn.ai.abuse)
+        agent, run = getattr(p, "agent", None), getattr(p, "run", None)
+        if guard is not None:
+            from cairn.ai.abuse import AbuseBlocked, request_inputs
+
+            try:                                 # what reaches the model: injection, above all in tool results
+                await run_in_threadpool(guard.inspect, actor, agent, run, "gateway", request_inputs(provider, body))
+            except AbuseBlocked as e:
+                return JSONResponse(_error(provider, str(e)), status_code=403)
         if route is not None:
-            refused = gw.admit_limits(actor)
-            if refused:
-                return JSONResponse(_error(provider, refused[1]), status_code=refused[0])
             status, out, headers = await gw.route_call(route, provider, path, body, incoming, actor, task, may_use(p))
         else:
-            refused = gw.admit(actor, model, may_use(p))
-            if refused:
-                logger.info("AI gateway refused %s: %s", actor, refused[1])
-                return JSONResponse(_error(provider, refused[1]), status_code=refused[0])
             status, out = await gw.call(provider, path, body, incoming, actor, task)
+        if guard is not None and status == 200:
+            from cairn.ai.abuse import AbuseBlocked, offered, response_outputs, stream_outputs
+
+            chunks: Optional[list] = None
+            if isinstance(out, dict):
+                text, calls = response_outputs(provider, out)
+            elif agent is not None and guard.settings()["enabled"]:
+                chunks = [c async for c in out]  # an agent's stream is held until it is checked
+                text, calls = stream_outputs(provider, chunks)
+            else:
+                text, calls = "", []
+            if text or calls:
+                try:                             # what leaves the model: secrets, PII dumps, far destinations
+                    await run_in_threadpool(lambda: guard.inspect(actor, agent, run, "gateway", output=text,
+                                                                  tool_calls=calls,
+                                                                  offered_tools=offered(provider, body)))
+                except AbuseBlocked as e:
+                    return JSONResponse(_error(provider, str(e)), status_code=403, headers=headers)
+            if chunks is not None:
+                held = chunks
+
+                async def replay():
+                    for c in held:
+                        yield c
+                out = replay()
         if isinstance(out, dict):
             return JSONResponse(out, status_code=status, headers=headers)
         return StreamingResponse(out, status_code=status, media_type="text/event-stream",

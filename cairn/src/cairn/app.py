@@ -462,6 +462,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.ai.agent_memory import build_agent_memory_router
 
         app.include_router(build_agent_memory_router(services.agent_memory, cp))
+    if getattr(services, "abuse", None) is not None:           # agentic abuse detection: findings and settings
+        from cairn.ai.abuse import build_abuse_router
+
+        app.include_router(build_abuse_router(services.abuse, cp))
     if getattr(services, "ai_gateway", None) is not None:      # model calls from agent code, as the caller
         from cairn.ai.gateway import build_gateway_router
 

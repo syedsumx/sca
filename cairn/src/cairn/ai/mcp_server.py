@@ -317,6 +317,7 @@ def build_mcp_server(services: Services):
     def _traced(fn, args: tuple, kwargs: dict, p) -> Any:
         """Run the tool and record the call (who, what, outcome, time) for agent observability."""
         import inspect
+        import json as _json
         import time as _time
 
         from cairn.ai.traces import ai_channel, outcome
@@ -324,8 +325,24 @@ def build_mcp_server(services: Services):
         started, flagged = _time.monotonic(), []
         result: Any = {"error": "error"}
         channel = ai_channel.set("mcp")                 # data read inside counts as AI usage
+        guard = getattr(services, "abuse", None) if p is not None and p.via == "agent" else None
         try:
-            result = _screened(fn(*args, **kwargs), fn.__name__, p, flagged)
+            if guard is not None:                       # abuse detection: far destinations in the tool's arguments
+                from cairn.ai.abuse import AbuseBlocked
+
+                try:
+                    guard.inspect(p.urn, p.agent, getattr(p, "run", None), "mcp",
+                                  tool_calls=[(fn.__name__, {**kwargs, **({"args": list(args)} if args else {})})])
+                except AbuseBlocked as e:
+                    result = {"error": "blocked", "message": str(e)}
+                    return result
+            raw = fn(*args, **kwargs)
+            if guard is not None:
+                # Instructions planted in what the tool returns: flagged in place below (screen) and recorded as a
+                # finding for the agent; not blocked, since Cairn neutralises them before they leave.
+                guard.inspect(p.urn, p.agent, getattr(p, "run", None), "mcp",
+                              [("tool_result", _json.dumps(raw, default=str)[:200_000])], block=False, cap="warning")
+            result = _screened(raw, fn.__name__, p, flagged)
             return result
         except ValueError as e:
             result = {"error": "refused", "message": str(e)}
