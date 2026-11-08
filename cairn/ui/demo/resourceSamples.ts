@@ -3099,6 +3099,34 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    "spent_usd": null
   }
  ],
+ "/v1/ai/gateway/routes": {
+  "routes": [
+   {
+    "name": "cairn-auto",
+    "candidates": [
+     {"model": "claude-sonnet-5-5", "capabilities": ["tools", "vision"]},
+     {"model": "claude-haiku-5-5", "capabilities": ["tools", "vision"]}
+    ],
+    "strategy": "ordered",
+    "description": "Every model the gateway serves, in the operator's order, falling back to the next on errors, timeouts and rate limits",
+    "builtin": true
+   },
+   {
+    "name": "resilient",
+    "candidates": [
+     {"model": "claude-sonnet-5-5", "capabilities": ["tools"], "timeout_s": 30.0},
+     {"model": "claude-haiku-5-5", "capabilities": ["tools", "vision"]}
+    ],
+    "strategy": "ordered",
+    "max_cost_usd": 0.5,
+    "latency_budget_ms": 60000,
+    "description": "Large model, then the small one on the backup provider",
+    "builtin": false,
+    "updated_by": "urn:li:corpuser:admin",
+    "updated_ms": 1794528000000
+   }
+  ]
+ },
  "/v1/ai/gateway/models": {
   "data": [
    {

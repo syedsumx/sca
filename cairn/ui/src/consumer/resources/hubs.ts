@@ -126,11 +126,12 @@ export const HUBS: Hub[] = [
         "route": "/usage",
         "title": "Cost & usage",
         "icon": "coin",
-        "description": "What the platform costs and who uses it: AI usage and budgets, the models the AI gateway serves, and monthly chargeback.",
+        "description": "What the platform costs and who uses it: AI usage and budgets, the models the AI gateway serves and its routes, and monthly chargeback.",
         "tabs": [
             "ai-usage",
             "budgets",
             "ai-gateway-models",
+            "gateway-routes",
             "chargeback",
             "chargeback-cost-centres"
         ]

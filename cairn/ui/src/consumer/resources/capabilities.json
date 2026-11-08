@@ -997,6 +997,14 @@
    "note": "Cairn's Trino functions plugin (plugins/java/cairn-trino-functions, built inside the Trino image, installed by Helm cairn.trino.functions): ai_search returns array(row(key, chunk, text, score)) searched by Cairn as the query's user (read access, no mask or row filter on the source; Cairn's own identities refused), metered under the person with a daily cap. cairn.pipelines.parse: tables from PDFs' text layer without a model; pages that draw graphics rendered (pdftoppm) and read by the deployment's multimodal model for chart series and pictured tables; POST /v1/documents/parse (kept per person, migration 0128) and files pipes' \"ai\": {\"parse\": true}. Tested end to end: a real Trino calling ai_search on a real index in the store and catalog (tests/test_ai_search_e2e.py); a generated PDF with a table and a drawn chart, the model behind the provider stand-in, the deterministic path without a model, the API and a files pipe (tests/test_document_parse_e2e.py)"
   },
   {
+   "id": "L113",
+   "title": "Dynamic model routing in the AI gateway",
+   "summary": "Virtual model names (cairn-auto, operators' routes) that map to ordered models with rules and fallback",
+   "done": "Agent code asks for cairn-auto and gets an answer when a provider is down, slow or rate-limited, from the cheapest model that fits the request and that the caller may use, metered on the model that answered",
+   "status": "shipped",
+   "note": "cairn.ai.gateway_routes (migration 0128): candidates with capabilities (tools, vision), input size and timeouts; the route's cost ceiling, strategy (ordered, cheapest) and latency budget; fallback on 5xx, timeouts, unreachable providers and 429 (streams before the first byte); candidates the caller may not use skipped, none left refused; named upstreams (CAIRN_AI_GATEWAY_UPSTREAMS, …_MODEL_UPSTREAMS); X-Cairn-Model/X-Cairn-Route; operator API /v1/ai/gateway/routes (MANAGE_SYSTEM_OPERATIONS), audited (gateway.route_saved, gateway.routed). Tested through the HTTP gateway with the Anthropic SDK and two provider stand-ins, the first failing or rate-limiting and the second answering, plus cost, capability, size and latency routes (tests/test_ai_gateway_routes.py)"
+  },
+  {
    "id": "L115",
    "title": "Zero-copy Parquet",
    "summary": "Parquet files already in the store registered as an Iceberg table in place, with new files added as they land",

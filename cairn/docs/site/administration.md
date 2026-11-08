@@ -691,6 +691,46 @@ the provider seeing only Cairn's keys, metering per person and agent, refusals (
 `USE_AI_GATEWAY`, no sign-in, the rate limit, the token allowance) before the provider, and agent keys without the
 `model` scope refused.
 
+### Routes: virtual models with rules and fallback
+
+A **route** is a model name callers use (`"model": "cairn-auto"`) that stands for an ordered list of real models,
+the candidates (`cairn.ai.gateway_routes`, table `cairn_ai_gateway_routes`, migration 0128).
+
+- **More upstreams.** Besides the Anthropic and OpenAI upstreams, `CAIRN_AI_GATEWAY_UPSTREAMS` names more:
+  `backup=anthropic@https://…,local=openai@http://…`, each one's key in `CAIRN_AI_GATEWAY_UPSTREAM_<NAME>_KEY` (or
+  `…_FILE`; for `backup`, `CAIRN_AI_GATEWAY_UPSTREAM_BACKUP_KEY`). `CAIRN_AI_GATEWAY_MODEL_UPSTREAMS`
+  (`model=backup,…`) says which upstream serves a model; other models go to the upstream of the protocol they are
+  called on. A model served by an upstream of the other protocol is not reachable on this one.
+- **Defining routes** (`MANAGE_SYSTEM_OPERATIONS`; agent credentials refused; audited `gateway.route_saved`,
+  `gateway.route_deleted`): `PUT /v1/ai/gateway/routes/{name}` with
+  `{"description", "candidates": [{"model", "capabilities": ["tools", "vision"], "max_input_tokens", "timeout_s"} | "model", …],
+  "strategy": "ordered" | "cheapest", "max_cost_usd", "latency_budget_ms"}`; `GET /v1/ai/gateway/routes` (anyone
+  who may call the gateway); `DELETE /v1/ai/gateway/routes/{name}`. Candidates must be served models (up to 10); a
+  route cannot take a served model's name.
+- **Rules, per call.** A candidate is skipped when the caller may not use it (`USE_AI_GATEWAY` on its
+  `urn:li:aiModel:<model>`), when the request uses tools or images it does not support, when the request's input
+  (estimated at four characters a token) is over its `max_input_tokens`, or when the request's estimated cost (input
+  plus `max_tokens` of output, at `CAIRN_AI_PRICES`) is over the route's `max_cost_usd`. `cheapest` orders the rest
+  by that estimate. With none left the call is refused before any provider: 403 when the caller may use none of
+  them, otherwise 422 naming why each was skipped.
+- **Fallback.** The candidates are tried in turn: a provider error (5xx), a timeout (the candidate's `timeout_s`, and
+  what is left of the route's `latency_budget_ms`, which covers every attempt), an unreachable provider or a rate
+  limit (429) moves on to the next; any other answer (a 400, say) is returned. Streams fall back before their first
+  byte. When every candidate fails, the error lists each attempt; a spent latency budget answers 504.
+- **Metering and the answer.** The call is metered on the model that answered (the AI usage report, the budget and
+  the person's allowance as for any call), and the response names it: `X-Cairn-Model` and `X-Cairn-Route` headers
+  and the provider's own `model` field. Each routed call is audited `gateway.routed` with the route, the model and
+  every attempt (model, status, outcome, milliseconds, or why it was skipped), never the content.
+- **`cairn-auto`** is built in: every served model in `CAIRN_AI_GATEWAY_MODELS` order, falling back on errors,
+  timeouts and rate limits. Defining a route called `cairn-auto` replaces it. `GET /v1/ai/gateway/models` lists the
+  routes a person may use (`cairn_route: true`, with the candidates open to them).
+
+Tested through the HTTP gateway with the Anthropic SDK and two provider stand-ins, the primary failing as told
+(`tests/test_ai_gateway_routes.py`): fallback on 429, 500, a timeout and before a stream, not on a 400; metering
+and the response naming the model that answered; candidates the caller may not use skipped without reaching the
+provider and none left refused; the cost ceiling, cheapest first, tools, input size and the latency budget; the
+built-in `cairn-auto`; the operator API.
+
 ## Code-first agents: `cairn agents init`, `dev`, `deploy`
 
 From an empty directory to a deployed agent, with the runtime, model access, sessions and governance already in place:

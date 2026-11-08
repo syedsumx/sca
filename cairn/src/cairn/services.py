@@ -1325,6 +1325,11 @@ def _build_active_metadata(s: Services) -> None:
     from cairn.ai.gateway import AiGateway
 
     s.ai_gateway = AiGateway.from_env(s.ai_usage)
+    if s.ai_gateway is not None:                 # operators' routes: virtual models with fallback (L113)
+        from cairn.ai.gateway_routes import GatewayRoutes
+
+        s.ai_gateway.routes = GatewayRoutes(s.engine, s.audit)
+        s.ai_gateway.audit = s.audit
     # Agent apps (cairn.ai.agent_apps): code-first agents deployed to Cairn, run as the person asking.
     if os.environ.get("CAIRN_AGENT_APPS_RUNTIME") in ("process", "kubernetes") and s.agents is not None:
         import tempfile

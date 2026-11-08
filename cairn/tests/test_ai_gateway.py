@@ -162,7 +162,7 @@ def test_a_persons_calls_go_through_cairn_on_both_protocols(stack):
     assert rows == [("anthropic", 12, 5), ("anthropic", 20, 7), ("openai", 9, 4), ("openai", 11, 6)], rows
     assert sorted({r["task"] for r in usage(s, ANA)}) == sorted([f"gateway:{dev['id']}", f"gateway:{bot['id']}"])
     models = httpx.get(f"{url}/v1/ai/gateway/models", headers=as_ana).json()["data"]
-    assert [m["id"] for m in models] == [SONNET, LOCAL]
+    assert [m["id"] for m in models] == [SONNET, LOCAL, "cairn-auto"]      # and the built-in route
 
 
 def test_refusals_happen_before_the_provider(stack):

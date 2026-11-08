@@ -1,4 +1,4 @@
-"""Agent memory
+"""Agent memory; AI gateway routes
 
 Revision ID: 0128
 Revises: 0127
@@ -33,7 +33,17 @@ def upgrade() -> None:
     )
     op.create_index('ix_cairn_agent_memories_agent_subject', 'cairn_agent_memories', ['agent', 'scope', 'subject'])
     op.create_index('ix_cairn_agent_memories_subject', 'cairn_agent_memories', ['subject'])
+    op.create_table(
+        'cairn_ai_gateway_routes',
+        sa.Column('name', sa.String(length=64), primary_key=True),
+        sa.Column('description', sa.Text(), nullable=False),
+        sa.Column('spec', sa.Text(), nullable=False),
+        sa.Column('created_by', sa.String(length=512), nullable=False),
+        sa.Column('updated_by', sa.String(length=512), nullable=False),
+        sa.Column('updated_ms', sa.BigInteger(), nullable=False),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table('cairn_ai_gateway_routes')
     op.drop_table('cairn_agent_memories')

@@ -2292,6 +2292,52 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         ],
         "actions": []
     },
+    "gateway-routes": {
+        "key": "gateway-routes",
+        "title": "Gateway routes",
+        "path": "/v1/ai/gateway/routes",
+        "listKey": "routes",
+        "description": "Virtual model names (cairn-auto and the operators' routes) that send each call to the first fitting model you may use, by cost ceiling, capabilities, input size and latency budget, falling back on provider errors, timeouts and rate limits. Calls are metered on the model that answered.",
+        "columns": [
+            "name",
+            "strategy",
+            "candidates",
+            "max_cost_usd",
+            "latency_budget_ms",
+            "builtin",
+            "updated_ms"
+        ],
+        "rowKey": "name",
+        "actions": [
+            {
+                "label": "Define a route",
+                "method": "PUT",
+                "path": "/v1/ai/gateway/routes/resilient",
+                "body": {
+                    "description": "Large model, then the small one on the backup provider",
+                    "candidates": [
+                        {
+                            "model": "claude-sonnet-5-5",
+                            "capabilities": [
+                                "tools"
+                            ],
+                            "timeout_s": 30
+                        },
+                        "claude-haiku-5-5"
+                    ],
+                    "strategy": "ordered",
+                    "max_cost_usd": 0.5,
+                    "latency_budget_ms": 60000
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/ai/gateway/routes/{name}",
+                "body": null
+            }
+        ]
+    },
     "chargeback": {
         "key": "chargeback",
         "title": "Chargeback statements",
