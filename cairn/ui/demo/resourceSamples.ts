@@ -1,6 +1,52 @@
 /* Sample answers for the platform areas (src/consumer/resources/catalog.ts), in the API's own shapes; fictional data. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const RESOURCE_SAMPLES: Record<string, any> = {
+ "/marketplace/listings": {
+  "listings": [
+   {
+    "urn": "urn:li:cairnListing:lst_4f2a9c1e7b3d5a60",
+    "id": "lst_4f2a9c1e7b3d5a60",
+    "kind": "agent",
+    "name": "Ticket triage",
+    "target": "triage",
+    "target_urn": "urn:li:cairnAgent:triage",
+    "source": "agent_app",
+    "description": "Sorts the support queue by urgency and drafts first replies.",
+    "tags": ["support"],
+    "owners": ["urn:li:corpuser:ana"],
+    "published": true,
+    "consumers": 12,
+    "access": {"status": "GRANTED", "request_id": "ar_8d1e0f2a3b4c5d6e", "expires_at": "2026-12-08T09:00:00+00:00"},
+    "request_policy": {"auto_approve": false, "max_duration_days": 90,
+                       "purposes": ["Analytics", "Reporting", "Data science", "Operations"],
+                       "approvers": ["urn:li:corpuser:ana"], "requires_justification": true,
+                       "grants": ["USE_AGENT on urn:li:cairnAgent:triage"]},
+    "created_ms": 1794096400000,
+    "updated_ms": 1794096400000
+   },
+   {
+    "urn": "urn:li:cairnListing:lst_0b9e8d7c6a5f4e31",
+    "id": "lst_0b9e8d7c6a5f4e31",
+    "kind": "skill",
+    "name": "PII scanner",
+    "target": "pii-scanner",
+    "target_urn": "urn:li:cairnSkill:pii-scanner",
+    "source": "extension",
+    "description": "Finds personal data in free-text columns.",
+    "tags": ["privacy"],
+    "owners": ["urn:li:corpuser:privacy-office"],
+    "published": true,
+    "consumers": 4,
+    "access": {"status": "NONE", "request_id": null, "expires_at": null},
+    "request_policy": {"auto_approve": false, "max_duration_days": 30,
+                       "purposes": ["Analytics", "Operations"],
+                       "approvers": ["urn:li:corpGroup:privacy"], "requires_justification": true,
+                       "grants": ["USE_SKILL on urn:li:cairnSkill:pii-scanner"]},
+    "created_ms": 1793922400000,
+    "updated_ms": 1793922400000
+   }
+  ]
+ },
  "/v1/shares/usage/overview": {
   "shares": [
    {

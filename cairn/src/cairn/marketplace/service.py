@@ -464,8 +464,11 @@ class MarketplaceService:
             self._publish("access.rejected", out, f"Access to {r['product_name']} was declined",
                           comment or "No reason given.", [r["requester"]], actor)
             return out
-        policy = self.get_policy(r["product_urn"])
-        persona_id = self._product_persona(r["product_urn"], r["product_name"], policy)
+        if r.get("listing_persona"):              # an agent or skill (cairn.marketplace.listings)
+            policy, persona_id = RequestPolicy(), r["listing_persona"]
+        else:
+            policy = self.get_policy(r["product_urn"])
+            persona_id = self._product_persona(r["product_urn"], r["product_name"], policy)
         expires = _now() + r["duration_days"] * DAY_MS
         grant_id = self.personas.grant(persona_id, r["requester"], f"access_request:{rid}", expires, actor)
         out = self._transition(rid, "PENDING", "APPROVED", actor, comment, decided_by=actor, decided_at=_iso(_now()),
@@ -568,6 +571,8 @@ class MarketplaceService:
             if row.expires_at_ms <= now:
                 ended = self._transition(r["id"], "APPROVED", "EXPIRED", "urn:li:corpuser:cairn-marketplace",
                                          "access period ended")
+                if r.get("grant_id"):                 # already past its expiry for the decision point; now ended
+                    self.personas.revoke_grant(r["grant_id"], "urn:li:corpuser:cairn-marketplace")
                 self._provision(ended, r.get("provision_steps") or [], grant=False)
                 self._publish("access.revoked", r, f"Access to {r['product_name']} expired",
                               "Request again from the marketplace if you still need it.", [r["requester"]],

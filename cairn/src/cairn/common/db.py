@@ -103,6 +103,7 @@ def load_models() -> MetaData:
     from cairn.identity import agents as _agents  # noqa: F401
     from cairn.identity import scim as _scim  # noqa: F401
     from cairn.marketplace import service as _marketplace  # noqa: F401
+    from cairn.marketplace import listings as _listings  # noqa: F401
     from cairn.notify import hub as _notify  # noqa: F401
     from cairn.quality import store as _quality_store  # noqa: F401
     from cairn.dataaccess import trino_auth as _trino_auth  # noqa: F401

@@ -59,9 +59,30 @@ def upgrade() -> None:
         sa.Column('sent_ms', sa.BigInteger(), nullable=False),
         sa.PrimaryKeyConstraint('share_id', 'kind'),
     )
+    op.create_table(
+        'cairn_marketplace_listings',
+        sa.Column('id', sa.String(length=40), primary_key=True),
+        sa.Column('kind', sa.String(length=16), nullable=False),
+        sa.Column('target', sa.String(length=128), nullable=False),
+        sa.Column('source', sa.String(length=16), nullable=False),
+        sa.Column('title', sa.String(length=200), nullable=False),
+        sa.Column('description', sa.Text(), nullable=False),
+        sa.Column('tags', sa.Text(), nullable=False),
+        sa.Column('owner', sa.String(length=512), nullable=False),
+        sa.Column('approvers', sa.Text(), nullable=False),
+        sa.Column('purposes', sa.Text(), nullable=False),
+        sa.Column('max_duration_days', sa.Integer(), nullable=False),
+        sa.Column('requires_justification', sa.Boolean(), nullable=False),
+        sa.Column('persona_id', sa.String(length=64), nullable=False),
+        sa.Column('published', sa.Boolean(), nullable=False),
+        sa.Column('created_ms', sa.BigInteger(), nullable=False),
+        sa.Column('updated_ms', sa.BigInteger(), nullable=False),
+        sa.UniqueConstraint('kind', 'target', name='uq_cairn_marketplace_listing_target'),
+    )
 
 
 def downgrade() -> None:
+    op.drop_table('cairn_marketplace_listings')
     op.drop_table('cairn_share_notices')
     op.drop_table('cairn_share_usage')
     op.drop_table('cairn_external_catalogs')

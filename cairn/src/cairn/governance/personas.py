@@ -44,6 +44,9 @@ PERMISSION_BUNDLES: dict[str, list[str]] = {
     "certify": ["CAIRN_APPROVE_CERTIFICATION", "CAIRN_APPROVE_DOCUMENTATION"],
     "approve_access": ["CAIRN_APPROVE_ACCESS"],
     "data_access": ["CAIRN_DATA_ACCESS"],
+    # Marketplace listings of agents and skills (cairn.marketplace.listings): using them, nothing else.
+    "use_agent": ["USE_AGENT"],
+    "use_skill": ["USE_SKILL"],
 }
 
 # Privileges whose responses can carry data values; masking obligations attach to these.

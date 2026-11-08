@@ -63,6 +63,7 @@ export const HUBS: Hub[] = [
         "tabs": [
             "agent-apps",
             "custom-agents",
+            "agent-listings",
             "scheduled-tasks",
             "outbox",
             "agent-insights",

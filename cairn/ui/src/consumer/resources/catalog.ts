@@ -6,6 +6,63 @@ import type { ResourceSpec } from './types';
  * fields were read from the API's routers and services; keep them in step when an endpoint changes.
  */
 export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
+    "agent-listings": {
+        "key": "agent-listings",
+        "title": "Marketplace listings",
+        "path": "/marketplace/listings",
+        "listKey": "listings",
+        "description": "Agents (agent apps and custom agents) and skills (installed extensions) offered in the marketplace beside data products. Approval of a request grants USE_AGENT (or USE_SKILL) on that one agent or skill, until it expires.",
+        "columns": [
+            "name",
+            "kind",
+            "target",
+            "source",
+            "owners",
+            "consumers",
+            "access"
+        ],
+        "actions": [
+            {
+                "label": "Request access",
+                "method": "POST",
+                "path": "/marketplace/listings/{id}/access-requests",
+                "body": {
+                    "purpose": "Operations",
+                    "justification": "Triage the support queue each morning",
+                    "duration_days": 30
+                }
+            },
+            {
+                "label": "Hide",
+                "method": "PATCH",
+                "path": "/marketplace/listings/{id}",
+                "body": {
+                    "published": false
+                }
+            },
+            {
+                "label": "List an agent or skill",
+                "method": "POST",
+                "path": "/marketplace/listings",
+                "body": {
+                    "kind": "agent",
+                    "target": "triage",
+                    "title": "Ticket triage",
+                    "description": "Sorts the support queue by urgency.",
+                    "tags": [
+                        "support"
+                    ],
+                    "max_duration_days": 90
+                }
+            },
+            {
+                "label": "Remove",
+                "method": "DELETE",
+                "path": "/marketplace/listings/{id}",
+                "body": null
+            }
+        ]
+    },
     "share-usage": {
         "key": "share-usage",
         "title": "Share usage",

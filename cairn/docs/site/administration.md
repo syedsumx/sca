@@ -771,6 +771,37 @@ and the model behind Cairn's AI gateway, a local stand-in for the provider (`tes
 
 All three templates' own tests passed with the real frameworks (anthropic, openai-agents, langgraph).
 
+## Agents and skills in the marketplace
+
+Agents and skills are listed in the marketplace beside data products, and requested the same way.
+
+- **Listing** (`POST /marketplace/listings`): `{"kind": "agent" | "skill", "target": "<name>", "title",
+  "description", "tags", "approvers", "purposes", "max_duration_days", "requires_justification"}`.
+  - An agent is a deployed agent app or a custom agent (`urn:li:cairnAgent:<name>`); a skill is an installed
+    extension (`urn:li:cairnSkill:<name>`).
+  - Only the agent's owner (the extension's installer) or an operator lists it, once per target. Approvers default
+    to the owner.
+  - `PATCH /marketplace/listings/<id> {"published": false}` hides it; `DELETE` removes it and revokes every grant
+    made through it.
+- **Finding** (`GET /marketplace/search?q=&kind=all|data_product|agent|skill`): data products, agents and skills in
+  one list, each with `kind`; `GET /marketplace/listings?q=&kind=` lists agents and skills alone. Each card shows
+  the caller's access (`NONE`, `PENDING`, `GRANTED`, `EXPIRED`, `REJECTED`) and what approval grants.
+- **Requesting** (`POST /marketplace/listings/<id>/access-requests {"purpose", "justification", "duration_days"}`).
+  The request joins the marketplace's queue: the approvers' inbox and notifications, approve, reject, cancel,
+  revoke (`/marketplace/access-requests/...`), with separation of duties.
+- **What approval grants.** A time-boxed membership in the listing's persona, which allows `USE_AGENT` on the
+  agent's URN (or `USE_SKILL` on the skill's) and nothing else. Agent apps and custom agents already check
+  `USE_AGENT` before a run. At the expiry the decision point stops allowing it; the marketplace's sweep then marks
+  the request `EXPIRED` and revokes the membership.
+- **Audit:** `marketplace.listing_published`, `marketplace.listing_changed`, `marketplace.listing_removed`, and the
+  requests' usual entries.
+- **Tested** (`tests/test_marketplace_agents.py`, through the HTTP API with a real agent app process and the model
+  behind the AI gateway): another person could not list Ana's agent; Cal found it by its description beside data
+  products, could not use it, asked (the listing's duration and justification rules held, a second request and
+  approving his own were refused), Ana approved from her inbox and Cal's invocation answered; nothing else was
+  granted; at the expiry Cal was refused at once and the sweep expired the request and revoked the grant. A skill
+  was listed, granted as `USE_SKILL` on its URN only, and delisting took the grant away.
+
 ## CoWork: scheduled tasks and an approved outbox
 
 The assistant can work for one person on a schedule, and send its results to Slack or email only once they approve.

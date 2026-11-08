@@ -925,6 +925,14 @@
    "note": "Per share, day and table counts from Cairn Catalog's per-request questions and the token endpoint, with retention (migration 0126); GET /v1/shares/<name>/usage, GET /v1/shares/usage/overview joined with the quality status; share.expiring and share.unused notices once each. Tested with pyiceberg as the recipient against the real store and catalog (tests/test_share_usage_e2e.py); refusals outside a share's namespaces are decided by the catalog alone and count as requests"
   },
   {
+   "id": "L107",
+   "title": "Agents and skills in the marketplace",
+   "summary": "Agent apps, custom agents and extensions listed and requested beside data products",
+   "done": "People find agents and reusable skills where they find data, ask for them with a purpose and duration, and get exactly the right to use them until it expires; the counterpart of Databricks' and Snowflake's marketplace listings of agents and apps",
+   "status": "shipped",
+   "note": "/marketplace/listings and /marketplace/search (migration 0126): listings by the agent's or skill's owner, searched with data products, requests in the marketplace's queue, approval granting a time-boxed persona with USE_AGENT on urn:li:cairnAgent:<name> (USE_SKILL on urn:li:cairnSkill:<name>) only, revoked by the sweep at expiry and on delisting. Tested through the HTTP API with a real agent app process (tests/test_marketplace_agents.py)"
+  },
+  {
    "id": "L108",
    "title": "Agent automations from the CLI: cairn tasks",
    "summary": "CoWork scheduled tasks and their outbox from a terminal or a script",

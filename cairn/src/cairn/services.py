@@ -121,6 +121,7 @@ class Services:
     ai_gateway: Optional[Any] = None
     agent_apps: Optional[Any] = None
     external_catalogs: Optional[Any] = None
+    listings: Optional[Any] = None
     ask: Optional[Any] = None
     semantic_layer: Optional[Any] = None
     ticketing: Optional[Any] = None
@@ -734,6 +735,32 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
+        # Agents and skills listed beside data products (cairn.marketplace.listings); the agent and extension
+        # services are built later, so they are looked up when a listing is published.
+        from cairn.marketplace.listings import Listings
+
+        def listing_owner(kind: str, name: str) -> Optional[tuple[str, str]]:
+            if kind == "agent":
+                apps, built = getattr(s, "agent_apps", None), getattr(s, "custom_agents", None)
+                for source, svc in (("agent_app", apps), ("custom_agent", built)):
+                    if svc is None:
+                        continue
+                    try:
+                        row = svc._row(name) if source == "agent_app" else svc._get(name)
+                    except Exception:  # noqa: BLE001 - not one of these
+                        continue
+                    return source, row["owner"]
+                return None
+            ext = getattr(s, "extensions", None)
+            if ext is None:
+                return None
+            try:
+                return "extension", ext.describe(name)["installed_by"]
+            except Exception:  # noqa: BLE001
+                return None
+        s.listings = Listings(s.engine, s.marketplace, listing_owner,
+                              lambda actor: s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS",
+                                                        None, raise_on_deny=False), s.audit)
         from cairn.marketplace.provisioning import Provisioner, load_targets
 
         try:
