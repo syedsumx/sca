@@ -665,6 +665,8 @@ def _build_split_compute(s: Services) -> None:
             jobs.runner = ComputeRouter(jobs.runner, s.dataplanes, s.egress)
     if getattr(s, "sandboxes", None) is not None:
         s.sandboxes.egress = s.egress
+    if getattr(s, "flows", None) is not None:              # flows' platform steps: through the egress proxy when enforced
+        s.flows.b.egress = s.egress
     apps = getattr(s, "agent_apps", None)
     if apps is not None:
         apps.egress = s.egress
@@ -791,7 +793,8 @@ def _build_flows(s: Services) -> None:
     backends = Backends(workspace=getattr(s, "sql_workspace", None), derived=getattr(s, "derived", None),
                         jobs=getattr(s, "jobs", None), agent_apps=getattr(s, "agent_apps", None),
                         pipes=getattr(s, "pipes", None), streams=getattr(s, "streams", None), notify=tell,
-                        is_operator=operator, lakehouse_sessions=getattr(s, "lakehouse_sessions", None), public_url=public)
+                        is_operator=operator, lakehouse_sessions=getattr(s, "lakehouse_sessions", None), public_url=public,
+                        secrets=getattr(s, "secret_scopes", None), egress=getattr(s, "egress", None))
     s.flows = Flows(s.engine, backends, s.audit, tell, s.is_admin, groups_of, getattr(s, "dataset_changes", None),
                     table_urn, (lambda event: ol.handle(event)) if ol is not None else None, may_run)
     # Airflow both ways (cairn.flows.airflow_interop): the DAG folder runner-airflow flows deploy to (a bad setting

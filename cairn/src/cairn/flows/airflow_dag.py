@@ -17,6 +17,13 @@ no secret. What maps, and how:
   application (``CairnSparkApplicationOperator``) and an Airflow DAG (``TriggerDagRunOperator``). They run as the
   ``cairn`` connection's Cairn user, under that user's grants. A step stays native only when its templates are plain
   ``{{ params.x }}`` (which Airflow's Jinja renders the same way) and no other step reads its output.
+* **Other platforms, with Airflow's own providers** (also native): an ``http`` step is ``HttpOperator`` (and, when it
+  polls a status, ``HttpSensor`` after it, both in a task group named after the step), ``databricks``
+  ``DatabricksRunNowOperator`` (``job_id``) or ``DatabricksSubmitRunOperator`` (``run``), ``snowflake``
+  ``SnowflakeSqlApiOperator`` and ``bigquery`` ``BigQueryInsertJobOperator``. Their credentials are Airflow
+  connections, named by the step's ``airflow_conn_id`` (default ``http_<step>``, ``databricks_default``,
+  ``snowflake_default``, ``google_cloud_default``): the file says which connection to make and what it holds (the same
+  secret the flow reads from its scope); the DAG file holds none.
 * **Delegated steps** run in Cairn, as the flow's owner, through ``CairnFlowStepOperator``: everything else
   (approvals, for-each, waits, derived tables, pipes, streams, notebooks, Python, agents, notifications, saved
   queries), with a comment saying so. A branch is ``CairnFlowBranchOperator`` (a ``BaseBranchOperator`` whose condition
@@ -29,14 +36,33 @@ no secret. What maps, and how:
 
 from __future__ import annotations
 
+import json
 import re
 import textwrap
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from cairn.flows import expr
 
 PROVIDER = "cairn-airflow-provider"
-NATIVE_TYPES = ("sql", "check", "dbt", "spark", "airflow")
+PLATFORMS = ("http", "databricks", "snowflake", "bigquery")
+NATIVE_TYPES = ("sql", "check", "dbt", "spark", "airflow", *PLATFORMS)
+# Airflow's own providers for the platform steps (import line, the pip package that has it).
+IMPORTS = {
+    "TriggerDagRunOperator": "from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator",
+    "CairnSparkApplicationOperator": "from cairn_airflow.spark import CairnSparkApplicationOperator",
+    "CairnCheckOperator": "from cairn_airflow.quality import CairnCheckOperator",
+    "HttpOperator": "from airflow.providers.http.operators.http import HttpOperator",
+    "HttpSensor": "from airflow.providers.http.sensors.http import HttpSensor",
+    "DatabricksRunNowOperator": "from airflow.providers.databricks.operators.databricks import DatabricksRunNowOperator",
+    "DatabricksSubmitRunOperator": "from airflow.providers.databricks.operators.databricks import "
+                                   "DatabricksSubmitRunOperator",
+    "SnowflakeSqlApiOperator": "from airflow.providers.snowflake.operators.snowflake import SnowflakeSqlApiOperator",
+    "BigQueryInsertJobOperator": "from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator",
+}
+PACKAGES = {"http": "apache-airflow-providers-http", "databricks": "apache-airflow-providers-databricks",
+            "snowflake": "apache-airflow-providers-snowflake", "bigquery": "apache-airflow-providers-google"}
+DEFAULT_CONN = {"databricks": "databricks_default", "snowflake": "snowflake_default", "bigquery": "google_cloud_default"}
 TRIGGER_RULES = {"all_ok": "all_success", "none_failed": "none_failed", "all_done": "all_done",
                  "any_failed": "one_failed"}
 PARAM_TYPES = {"string": "string", "int": "integer", "float": "number", "bool": "boolean", "date": "string",
@@ -119,6 +145,13 @@ def native_reason(s: dict, read: set[str]) -> Optional[str]:
         return "its templates read steps or the run, which Cairn fills in"
     if kind in ("sql", "check") and not (s.get("sql") and s.get("connection")):
         return "a saved query, run in Cairn's SQL workspace"
+    if kind == "http":
+        u = urlsplit(str(s.get("url") or ""))
+        if "{{" in f"{u.scheme}://{u.netloc}" or not u.netloc:
+            return "its host is a template: an Airflow connection names one host"
+        poll = str(s.get("poll_url") or "")
+        if poll.startswith(("http://", "https://")) and urlsplit(poll).netloc != u.netloc:
+            return "its status URL is on another host than the call"
     if kind == "spark" and s.get("class_name"):
         return "a JVM application (class_name): the Spark Operator task runs Python applications"
     return None
@@ -169,6 +202,184 @@ def _native(s: dict) -> tuple[str, list[str]]:
                                          f"wait_for_completion={bool(s.get('wait', True))!r}",
                                          f"poke_interval={int(s.get('poll_s', 30))}"]
     raise ValueError(kind)
+
+
+def conn_for(s: dict) -> str:
+    """The Airflow connection a platform step's task uses."""
+    if s.get("airflow_conn_id"):
+        return str(s["airflow_conn_id"])
+    if s["type"] == "http":
+        return "http_" + re.sub(r"[^A-Za-z0-9_]", "_", s["name"]).lower()
+    return DEFAULT_CONN[s["type"]]
+
+
+def _conn_note(s: dict) -> str:
+    """What the Airflow connection for a platform step holds (the secret the flow reads from its scope, never here)."""
+    conn, kind = conn_for(s), s["type"]
+    where = f"secret scope {s.get('secret_scope')!r}" if s.get("secret_scope") else ""
+    if kind == "http":
+        u = urlsplit(str(s["url"]))
+        auth = s.get("auth") or "none"
+        held = {"none": "no credential",
+                "bearer": f"extra {{\"Authorization\": \"Bearer <{s.get('secret_key')} from {where}>\"}}",
+                "basic": f"login {s.get('username')!r} and password <{s.get('secret_key')} from {where}>",
+                "header": f"extra {{\"{s.get('auth_header')}\": \"<{s.get('secret_key')} from {where}>\"}}"}[auth]
+        tls = f"; its CA: <{s['ca_key']} from {where}> (extra \"verify\": a CA file path)" if s.get("ca_key") else ""
+        return f"{conn} (type http): host {u.scheme}://{u.netloc}, {held}{tls}."
+    if kind == "databricks":
+        cred = (f"password: the token <{s.get('token_key') or 'token'} from {where}>" if s.get("auth", "pat") == "pat" else
+                f"login and password: the service principal's client id and secret <{s.get('client_id_key')}, "
+                f"{s.get('client_secret_key')} from {where}> with extra {{\"service_principal_oauth\": true}}")
+        return f"{conn} (type databricks): host {s['host']}, {cred}."
+    if kind == "snowflake":
+        return (f"{conn} (type snowflake): account {s['account']}, login {s['user']}, extra private_key_content: "
+                f"<{s.get('private_key_key') or 'private_key'} from {where}>"
+                + (f" and private_key_passphrase <{s['passphrase_key']}>" if s.get("passphrase_key") else "") + ".")
+    return (f"{conn} (type google_cloud_platform): extra keyfile_dict: <{s.get('key_key') or 'service_account_json'} "
+            f"from {where}>" + (f", or Airflow's own Google credentials; the API at {s['api_url']}"
+                                if (s.get("api_url") or "").rstrip("/") not in ("", "https://bigquery.googleapis.com")
+                                else "") + ".")
+
+
+def _classes(s: dict) -> list[str]:
+    kind = s["type"]
+    if kind == "http":
+        return ["HttpOperator", "HttpSensor", "TaskGroup"] if s.get("status_path") else ["HttpOperator"]
+    if kind == "databricks":
+        return ["DatabricksRunNowOperator" if s.get("job_id") else "DatabricksSubmitRunOperator"]
+    if kind == "snowflake":
+        return ["SnowflakeSqlApiOperator"]
+    if kind == "bigquery":
+        return ["BigQueryInsertJobOperator"]
+    return [_native(s)[0]]
+
+
+HTTP_HELPERS = [
+    "",
+    "",
+    "def _cairn_json(response):",
+    '    """The answer\'s JSON (its text when it is not JSON): what the task keeps."""',
+    "    try:",
+    "        return response.json()",
+    "    except ValueError:",
+    "        return response.text",
+    "",
+    "",
+    "def _cairn_at(doc, path):",
+    '    """The value at a JSONPath ($.a.b[0], $[\'a b\']) in doc, or None."""',
+    "    import re",
+    "",
+    "    for name, index, quoted in re.findall(r\"\\.([A-Za-z_$][A-Za-z0-9_$-]*)|\\[(-?\\d+)\\]|\\['([^']*)'\\]\", path[1:]):",
+    "        if index:",
+    "            doc = doc[int(index)] if isinstance(doc, list) and -len(doc) <= int(index) < len(doc) else None",
+    "        else:",
+    "            doc = doc.get(name or quoted) if isinstance(doc, dict) else None",
+    "    return doc",
+    "",
+    "",
+    "def _cairn_status_in(codes):",
+    "    return lambda response: response.status_code in codes",
+    "",
+    "",
+    "def _cairn_then(endpoint, poll):",
+    '    """The call\'s answer and the endpoint of its status ({$.path} filled in from the answer, else its Location)."""',
+    "    import re",
+    "    from urllib.parse import quote, urlsplit",
+    "",
+    "    def keep(response):",
+    "        doc = _cairn_json(response)",
+    "        where = poll or response.headers.get('location') or endpoint",
+    "        where = re.sub(r'\\{(\\$[^{}]*)\\}', lambda m: quote(str(_cairn_at(doc, m.group(1))), safe=''), where)",
+    "        if where.startswith(('http://', 'https://')):",
+    "            u = urlsplit(where)",
+    "            where = u.path + ('?' + u.query if u.query else '')",
+    "        return {'body': doc, 'poll': where}",
+    "    return keep",
+    "",
+    "",
+    "def _cairn_poll(path, done, failed):",
+    '    """A sensor\'s check: True when the status is one of done; the task fails when it is one of failed."""',
+    "    def check(response):",
+    "        value = str(_cairn_at(_cairn_json(response), path))",
+    "        if value in failed:",
+    "            raise RuntimeError(f'{path} is {value}: the remote work failed')",
+    "        return value in done",
+    "    return check",
+]
+
+
+def _platform_task(s: dict, args: list[str], lhs: str) -> list[str]:
+    """The task(s) of a platform step with Airflow's own provider operators."""
+    kind, conn = s["type"], conn_for(s)
+    out = _comment(f"{s['name']} ({kind}): Airflow's {PACKAGES[kind]}, with the connection {conn!r}.", "    ")
+    if kind == "http":
+        u = urlsplit(str(s["url"]))
+        endpoint = u.path + (f"?{u.query}" if u.query else "")
+        more = [f"http_conn_id={conn!r}", f"endpoint={_py(endpoint or '/')}", f"method={s.get('method') or 'GET'!r}"]
+        headers = dict(s.get("headers") or {})
+        if s.get("body") is not None:
+            headers.setdefault("Content-Type", "application/json")
+            more.append(f"data={_py(json.dumps(s['body']))}")
+        if headers:
+            more.append(f"headers={_py(headers)}")
+        if s.get("ok_status"):
+            more += [f"response_check=_cairn_status_in({_py([int(c) for c in s['ok_status']])})",
+                     "extra_options={'check_response': False}"]
+        if not s.get("status_path"):
+            return out + _call(lhs, "HttpOperator", args + more + ["response_filter=_cairn_json"])
+        poll = str(s.get("poll_url") or "")
+        if poll.startswith(("http://", "https://")):
+            p = urlsplit(poll)
+            poll = p.path + (f"?{p.query}" if p.query else "")
+        common = [a for a in args if not a.startswith("task_id=")]
+        group = s["name"]
+        out += [f"    with TaskGroup(group_id={group!r}) as group:"]
+        out += _call("call = ", "HttpOperator", ["task_id='call'", *common, *more,
+                                                  f"response_filter=_cairn_then({_py(endpoint or '/')}, {_py(poll)})"],
+                     "        ")
+        out += _call("done = ", "HttpSensor", [
+            "task_id='done'", *[a for a in common if not a.startswith(("retries=", "retry_"))],
+            f"http_conn_id={conn!r}", f"endpoint=\"{{{{ ti.xcom_pull(task_ids='{group}.call')['poll'] }}}}\"",
+            f"headers={_py(dict(s.get('headers') or {}))}" if s.get("headers") else "headers={}",
+            f"response_check=_cairn_poll({_py(s['status_path'])}, {_py([str(x) for x in s.get('success_values') or []])}, "
+            f"{_py([str(x) for x in s.get('failure_values') or []])})",
+            f"poke_interval={int(s.get('poll_s') or 15)}", f"timeout={int(s['timeout_s'])}", "mode='reschedule'"], "        ")
+        return out + ["        call >> done", f"    {lhs}group"]
+    if kind == "databricks":
+        if s.get("job_id"):
+            jid = str(s["job_id"]).strip()
+            more = [f"databricks_conn_id={conn!r}", f"job_id={jid if jid.isdigit() else _py(jid)}"]
+            if s.get("job_parameters"):
+                jp = {str(k): v if isinstance(v, str) else json.dumps(v) for k, v in s["job_parameters"].items()}
+                more.append(f"job_parameters={_py(jp)}")
+            cls = "DatabricksRunNowOperator"
+        else:
+            run = {"run_name": f"cairn {s['name']}", **(s.get("run") or {})}
+            more = [f"databricks_conn_id={conn!r}", f"json={_py(run)}"]
+            cls = "DatabricksSubmitRunOperator"
+        return out + _call(lhs, cls, args + more + [f"polling_period_seconds={int(s.get('poll_s') or 30)}"])
+    if kind == "snowflake":
+        sql = f"EXECUTE TASK {str(s['task']).strip()}" if s.get("task") else str(s["statement"])
+        more = [f"snowflake_conn_id={conn!r}", f"sql={_py(sql)}", f"statement_count={0 if s.get('multi_statement') else 1}",
+                f"poll_interval={int(s.get('poll_s') or 10)}"]
+        for f in ("warehouse", "database", "schema", "role"):
+            if s.get(f):
+                more.append(f"{f}={_py(str(s[f]))}")
+        return out + _call(lhs, "SnowflakeSqlApiOperator", args + more)
+    query: dict[str, Any] = {"query": s["query"], "useLegacySql": False}
+    m = re.match(r"^(.+)\.([^.]+)\.([^.]+)$", str(s.get("destination_table") or ""))
+    if m:
+        query["destinationTable"] = {"projectId": m.group(1), "datasetId": m.group(2), "tableId": m.group(3)}
+        query["writeDisposition"] = s.get("write_disposition") or "WRITE_EMPTY"
+    if s.get("max_bytes_billed"):
+        query["maximumBytesBilled"] = str(int(s["max_bytes_billed"]))
+    config: dict[str, Any] = {"query": query}
+    if s.get("labels"):
+        config["labels"] = {str(k): str(v) for k, v in s["labels"].items()}
+    more = [f"gcp_conn_id={conn!r}", f"project_id={_py(str(s['project']))}", f"configuration={_py(config)}"]
+    if s.get("location"):
+        more.append(f"location={_py(str(s['location']))}")
+    return out + _call(lhs, "BigQueryInsertJobOperator", args + more)
 
 
 WIDTH = 116
@@ -305,15 +516,13 @@ def to_dag(defn: dict, *, owner: str, version: Optional[int] = None, operators: 
         elif why is not None:
             provider.add("CairnFlowStepOperator")
         else:
-            cls = _native(s)[0]
-            if cls == "TriggerDagRunOperator":
-                other.add("from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator")
-            elif cls == "CairnSparkApplicationOperator":
-                other.add("from cairn_airflow.spark import CairnSparkApplicationOperator")
-            elif cls == "CairnCheckOperator":
-                other.add("from cairn_airflow.quality import CairnCheckOperator")
-            else:
-                provider.add(cls)
+            for cls in _classes(s):
+                if cls in IMPORTS:
+                    other.add(IMPORTS[cls])
+                elif cls == "TaskGroup":
+                    other.add("from airflow.sdk import TaskGroup")
+                else:
+                    provider.add(cls)
     params = _params(defn)
     if params:
         imports.add("from airflow.sdk import Param")
@@ -353,6 +562,18 @@ def to_dag(defn: dict, *, owner: str, version: Optional[int] = None, operators: 
     for mod in sorted(m for m in airflow_imports if m.startswith("cairn_airflow")):
         body.append(f"from {mod} import {', '.join(sorted(airflow_imports[mod]))}")
     body += ["", f"FLOW = {name!r}", f"CONN = {conn_id!r}"]
+    natives = [s for s, why in plan if why is None and s["type"] in PLATFORMS]
+    if natives:
+        body += ["", "# Airflow connections these tasks use (make them in Airflow, or in its secrets backend; the",
+                 f"# providers: {', '.join(sorted({PACKAGES[s['type']] for s in natives}))}):"]
+        seen: set[str] = set()
+        for s in natives:
+            note = _conn_note(s)
+            if note not in seen:
+                seen.add(note)
+                body += _comment(note)
+    if any(s["type"] == "http" for s in natives):
+        body += HTTP_HELPERS
     if any(why is None and s["type"] == "spark" for s, why in plan):
         body.insert(0, "import os")
         body += ["# The Spark Operator's settings on this Airflow (no secrets: the driver signs in with its service",
@@ -409,6 +630,8 @@ def to_dag(defn: dict, *, owner: str, version: Optional[int] = None, operators: 
             body += _comment(f"{s['name']} ({s['type']}): delegated to Cairn: {why}.", "    ")
             body += _call(lhs, "CairnFlowStepOperator", args + ["flow=FLOW", f"step={s['name']!r}",
                                                                 "cairn_conn_id=CONN"])
+        elif s["type"] in PLATFORMS:
+            body += _platform_task(s, args, lhs)
         else:
             cls, more = _native(s)
             if s["type"] in ("sql", "check"):

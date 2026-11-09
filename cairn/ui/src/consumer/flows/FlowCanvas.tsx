@@ -49,6 +49,9 @@ function subtitle(s: FlowStep): string {
     if (s.type === 'wait' && s.seconds) return `${s.seconds} s`;
     if (s.type === 'approval') return [...((s.approvers as string[]) ?? []).map((a) => a.split(':').pop()), ...((s.groups as string[]) ?? [])].join(', ');
     if (s.type === 'for_each') return `each of ${typeof s.items === 'string' ? s.items : JSON.stringify(s.items)}`;
+    if (s.type === 'http' && typeof s.url === 'string') return `${String(s.method ?? 'GET')} ${s.url.replace(/^https?:\/\//, '')}`;
+    if (s.type === 'databricks') return s.job_id ? `job ${String(s.job_id)}` : 'one-time run';
+    if (s.type === 'snowflake') return String(s.task ? `task ${String(s.task)}` : s.statement ?? '').replace(/\s+/g, ' ');
     return typeof v === 'string' ? v.replace(/\s+/g, ' ') : TYPE_BY[s.type]?.label ?? s.type;
 }
 

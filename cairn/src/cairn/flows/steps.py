@@ -93,6 +93,9 @@ class Backends:
         self.trino_catalog: str = kw.get("trino_catalog", os.environ.get("CAIRN_FLOWS_TRINO_CATALOG", "lakehouse"))
         self.spark_uid: int = int(kw.get("spark_uid", os.environ.get("CAIRN_FLOWS_SPARK_UID", "185")))
         self.public_url: str = kw.get("public_url", "")
+        # Platform steps (cairn.flows.platforms): credentials from secret scopes, read as the owner; egress rules.
+        self.secrets = kw.get("secrets")                    # SecretScopes
+        self.egress = kw.get("egress")                      # cairn.network.egress.Egress (set once it is built)
 
 
 def need(service: Any, what: str) -> Any:
@@ -598,4 +601,8 @@ EXECUTORS: dict[str, Callable[[Backends, Ctx], Any]] = {
     "wait": _wait, "branch": _branch, "notify": _notify,
 }
 # Steps that look again later rather than hold a worker while they wait.
-WAITING = ("approval", "wait", "airflow", "stream")
+WAITING: tuple = ("approval", "wait", "airflow", "stream")
+
+# Steps that drive other platforms (any REST API, Databricks, Snowflake, BigQuery): cairn.flows.platforms adds its
+# executors to EXECUTORS and its types to WAITING when it loads.
+from cairn.flows import platforms as _platforms  # noqa: E402,F401  (it builds on the classes above)

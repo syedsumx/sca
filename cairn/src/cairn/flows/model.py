@@ -50,7 +50,7 @@ POLICIES = ("skip", "queue", "allow")
 TRIGGERS = ("schedule", "dataset", "flow", "manual", "api")
 FLOW_EVENTS = ("succeeded", "failed", "finished")
 NOTIFY_ON = ("failure", "success", "sla")
-GROUPS = ("Data", "Compute", "AI", "Control", "Notify")
+GROUPS = ("Data", "Compute", "Platforms", "AI", "Control", "Notify")
 MAX_DEF_BYTES = 512 * 1024
 
 
@@ -59,9 +59,13 @@ def max_steps() -> int:
 
 
 # What each step type takes. A field is (kind, default, required); kinds: text (a string that may hold
-# {{ }} templates), str, int (lo, hi), num, bool, list, dict, enum (values), names (step names), people
-# (user or group urns), expr, items (an expression or a list), child (a for-each's step).
+# {{ }} templates), str, int (lo, hi), num, bool, list, dict, json (any JSON value; templates in its strings), enum
+# (values), names (step names), people (user or group urns), expr, items (an expression or a list), child (a for-each's
+# step).
 F = tuple
+HTTP_METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
+HTTP_AUTH = ("none", "bearer", "basic", "header")
+PLATFORM_TYPES = ("http", "databricks", "snowflake", "bigquery")
 STEP_TYPES: dict[str, dict[str, Any]] = {
     "sql": {"group": "Data", "label": "SQL query", "timeout": 3600, "fields": {
         "sql": F(("text", None, False)), "query": F(("str", None, False)), "connection": F(("str", None, False)),
@@ -88,6 +92,40 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
     "airflow": {"group": "Compute", "label": "Airflow DAG", "timeout": 6 * 3600, "fields": {
         "dag_id": F(("str", None, True)), "conf": F(("dict", {}, False)), "wait": F(("bool", True, False)),
         "poll_s": F(("int", 30, False, 5, 600))}},
+    # Other platforms (cairn.flows.platforms): credentials only from a secret scope, read as the owner when the step
+    # runs; TLS always verified; egress rules apply. airflow_conn_id names the Airflow connection an exported DAG uses.
+    "http": {"group": "Platforms", "label": "HTTP request", "timeout": 3600, "fields": {
+        "method": F(("enum", "GET", False, HTTP_METHODS)), "url": F(("text", None, True)),
+        "headers": F(("dict", {}, False)), "body": F(("json", None, False)),
+        "auth": F(("enum", "none", False, HTTP_AUTH)), "secret_scope": F(("str", None, False)),
+        "secret_key": F(("str", None, False)), "username": F(("text", None, False)),
+        "auth_header": F(("str", None, False)), "ca_key": F(("str", None, False)),
+        "ok_status": F(("list", [], False)), "output_path": F(("str", None, False)),
+        "poll_url": F(("text", None, False)), "status_path": F(("str", None, False)),
+        "success_values": F(("list", [], False)), "failure_values": F(("list", [], False)),
+        "poll_s": F(("int", 15, False, 1, 3600)), "airflow_conn_id": F(("str", None, False))}},
+    "databricks": {"group": "Platforms", "label": "Databricks job", "timeout": 6 * 3600, "fields": {
+        "host": F(("text", None, True)), "secret_scope": F(("str", None, True)),
+        "auth": F(("enum", "pat", False, ("pat", "oauth"))), "token_key": F(("str", "token", False)),
+        "client_id_key": F(("str", "client_id", False)), "client_secret_key": F(("str", "client_secret", False)),
+        "job_id": F(("text", None, False)), "job_parameters": F(("dict", {}, False)), "run": F(("dict", None, False)),
+        "poll_s": F(("int", 30, False, 1, 3600)), "airflow_conn_id": F(("str", None, False))}},
+    "snowflake": {"group": "Platforms", "label": "Snowflake SQL", "timeout": 3600, "fields": {
+        "account": F(("text", None, True)), "user": F(("text", None, True)), "secret_scope": F(("str", None, True)),
+        "private_key_key": F(("str", "private_key", False)), "passphrase_key": F(("str", None, False)),
+        "statement": F(("text", None, False)), "task": F(("text", None, False)),
+        "multi_statement": F(("bool", False, False)), "warehouse": F(("text", "", False)),
+        "database": F(("text", "", False)), "schema": F(("text", "", False)), "role": F(("text", "", False)),
+        "host": F(("text", None, False)), "poll_s": F(("int", 10, False, 1, 3600)),
+        "airflow_conn_id": F(("str", None, False))}},
+    "bigquery": {"group": "Platforms", "label": "BigQuery query", "timeout": 3600, "fields": {
+        "project": F(("text", None, True)), "query": F(("text", None, True)), "location": F(("text", "", False)),
+        "secret_scope": F(("str", None, True)), "key_key": F(("str", "service_account_json", False)),
+        "destination_table": F(("text", "", False)),
+        "write_disposition": F(("enum", "WRITE_EMPTY", False, ("WRITE_EMPTY", "WRITE_TRUNCATE", "WRITE_APPEND"))),
+        "max_bytes_billed": F(("int", None, False, 1, 10 ** 15)), "labels": F(("dict", {}, False)),
+        "api_url": F(("text", "https://bigquery.googleapis.com", False)), "poll_s": F(("int", 10, False, 1, 3600)),
+        "airflow_conn_id": F(("str", None, False))}},
     "agent": {"group": "AI", "label": "Agent", "timeout": 900, "fields": {
         "app": F(("str", None, True)), "input": F(("text", None, True))}},
     "approval": {"group": "Control", "label": "Approval", "timeout": 3 * 86400, "fields": {
@@ -102,7 +140,8 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
         "to": F(("people", [], False)), "title": F(("text", "", False)), "message": F(("text", None, True))}},
 }
 # Steps a for-each may repeat (not ones that wait for people or shape the graph).
-CHILD_TYPES = ("sql", "derived", "check", "pipe", "notebook", "python", "spark", "dbt", "airflow", "agent", "notify")
+CHILD_TYPES = ("sql", "derived", "check", "pipe", "notebook", "python", "spark", "dbt", "airflow", *PLATFORM_TYPES, "agent",
+               "notify")
 COMMON = {"name", "type", "after", "when", "retries", "retry_delay_s", "retry_backoff", "timeout_s", "description",
           "reads", "writes"}
 TOP = ("kind", "name", "description", "runner", "params", "triggers", "concurrency", "sla_minutes", "notify", "steps",
@@ -186,6 +225,15 @@ def _field(errs: _Errors, path: str, step: Optional[str], name: str, spec: tuple
             errs.add(p, "is a mapping", step)
             return default
         return v
+    if kind == "json":
+        try:
+            json.dumps(v)
+        except (TypeError, ValueError):
+            errs.add(p, "is a JSON value", step)
+            return default
+        for problem in _templates_in(v):
+            errs.add(p, problem, step)
+        return v
     if kind == "names":
         v = [v] if isinstance(v, str) else v
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
@@ -221,6 +269,96 @@ def _field(errs: _Errors, path: str, step: Optional[str], name: str, spec: tuple
     return v  # child: checked by the caller
 
 
+def _templates_in(v: Any) -> list[str]:
+    if isinstance(v, str):
+        return expr.check_template(v)
+    if isinstance(v, list):
+        return [p for x in v for p in _templates_in(x)]
+    if isinstance(v, dict):
+        return [p for x in v.values() for p in _templates_in(x)]
+    return []
+
+
+ID = re.compile(r"^[A-Za-z0-9_.-]{1,250}$")
+SECRET_NAMES = ("secret_scope", "secret_key", "token_key", "client_id_key", "client_secret_key", "private_key_key",
+                "passphrase_key", "key_key", "ca_key", "airflow_conn_id")
+
+
+def _platform(errs: _Errors, path: str, step_name: Optional[str], kind: str, out: dict) -> None:
+    """What a platform step's fields need together; no credentials in the definition."""
+    from cairn.flows import platforms
+
+    def bad(field: str, message: str) -> None:
+        errs.add(f"{path}.{field}" if field else path, message, step_name)
+    for f in SECRET_NAMES:
+        v = out.get(f)
+        if v and not ID.match(str(v)):
+            bad(f, "is a name: letters, digits, '.', '_' and '-'")
+    if kind == "http":
+        url = str(out.get("url") or "")
+        templated = bool(expr.TEMPLATE.match(url))
+        if not templated and not url.lower().startswith(("https://", "http://")):
+            bad("url", "is an https:// URL")
+        netloc = url.split("/", 3)[2] if url.count("/") >= 2 else ""
+        if "@" in netloc:
+            bad("url", "has credentials in it: use auth with a secret scope")
+        for h in out.get("headers") or {}:
+            if str(h).lower() in platforms.CREDENTIAL_HEADERS:
+                bad("headers", f"{h} carries a credential: use auth (bearer, basic or header) with a secret scope")
+        auth = out.get("auth") or "none"
+        if auth != "none" and not (out.get("secret_scope") and out.get("secret_key")):
+            bad("", f"auth {auth} needs secret_scope and secret_key (the key in the scope that holds the credential)")
+        if auth == "basic" and not out.get("username"):
+            bad("username", "is required for basic auth")
+        if auth == "header" and not out.get("auth_header"):
+            bad("auth_header", "is required for header auth (the header's name, such as X-Api-Key)")
+        elif auth == "header" and not re.match(r"^[A-Za-z0-9-]{1,100}$", str(out["auth_header"])):
+            bad("auth_header", "is a header name (letters, digits and -)")
+        if out.get("ca_key") and not out.get("secret_scope"):
+            bad("ca_key", "is a key in secret_scope (set secret_scope)")
+        if out.get("method") == "GET" and out.get("body") is not None:
+            bad("body", "a GET has no body: use POST, PUT or PATCH")
+        for code in out.get("ok_status") or []:
+            if isinstance(code, bool) or not isinstance(code, int) or not 100 <= code <= 599:
+                bad("ok_status", "is a list of HTTP status codes (100-599)")
+                break
+        for f in ("output_path", "status_path"):
+            if out.get(f):
+                why = platforms.check_jsonpath(str(out[f]))
+                if why:
+                    bad(f, why)
+        for ph in platforms.placeholders(str(out.get("poll_url") or "")):
+            why = platforms.check_jsonpath(ph)
+            if why:
+                bad("poll_url", why)
+        if out.get("status_path"):
+            if not (out.get("success_values") or out.get("failure_values")):
+                bad("success_values", "names the values of status_path that mean done (failure_values: those that "
+                                      "mean it failed)")
+        elif out.get("poll_url") or out.get("success_values") or out.get("failure_values"):
+            bad("status_path", "is required to poll: the JSONPath of the status in the status URL's answer")
+    if kind == "databricks":
+        if bool(out.get("job_id")) == bool(out.get("run")):
+            bad("", "needs either job_id (run an existing job) or run (a one-time run: the runs/submit body)")
+        if out.get("run") is not None and not isinstance(out["run"].get("tasks"), list):
+            bad("run", "is a runs/submit body with tasks (a list)")
+        if out.get("job_parameters") and not out.get("job_id"):
+            bad("job_parameters", "go with job_id")
+    if kind == "snowflake":
+        if bool(out.get("statement")) == bool(out.get("task")):
+            bad("", "needs either statement (SQL) or task (a task to EXECUTE)")
+        acct = str(out.get("account") or "")
+        if acct and not expr.TEMPLATE.search(acct) and not platforms.ACCOUNT.match(acct):
+            bad("account", "is a Snowflake account identifier (orgname-accountname, or a locator)")
+        task = str(out.get("task") or "")
+        if task and not expr.TEMPLATE.search(task) and not platforms.IDENT.match(task.strip()):
+            bad("task", "is a task name (task, schema.task or database.schema.task)")
+    if kind == "bigquery":
+        dest = str(out.get("destination_table") or "")
+        if dest and not expr.TEMPLATE.search(dest) and not platforms.BQ_TABLE.match(dest):
+            bad("destination_table", "is project.dataset.table")
+
+
 def _step_body(errs: _Errors, path: str, step_name: Optional[str], kind: str, raw: dict, child: bool = False) -> dict:
     spec = STEP_TYPES[kind]
     out: dict[str, Any] = {}
@@ -245,6 +383,8 @@ def _step_body(errs: _Errors, path: str, step_name: Optional[str], kind: str, ra
         errs.add(path, "needs either seconds or until (HH:MM, or a date and time)", step_name)
     if kind == "approval" and not out["approvers"] and not out["groups"]:
         errs.add(path, "needs approvers (people) or groups who may approve", step_name)
+    if kind in PLATFORM_TYPES:
+        _platform(errs, path, step_name, kind, out)
     if kind == "for_each":
         c = raw.get("step")
         if not isinstance(c, dict) or c.get("type") not in CHILD_TYPES:

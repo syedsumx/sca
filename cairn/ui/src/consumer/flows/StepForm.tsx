@@ -18,13 +18,16 @@ function errorFor(problems: Problem[], field: string): string | undefined {
     return problems.find((p) => p.path.endsWith(`.${field}`))?.message;
 }
 
-/** A JSON value edited as text: kept as text while it does not parse, set when it does. */
-function JsonField({ label, value, onChange, fid, readOnly }: { label: string; value: unknown; onChange: (v: unknown) => void; fid: string; readOnly?: boolean }) {
-    const [text, setText] = useState(() => JSON.stringify(value ?? {}, null, 2));
+/** A JSON value edited as text: kept as text while it does not parse, set when it does. `any`: any JSON value (empty
+ * text is no value); otherwise a mapping (empty text is {}). */
+function JsonField({ label, value, onChange, fid, readOnly, any, help }: { label: string; value: unknown; onChange: (v: unknown) => void; fid: string; readOnly?: boolean; any?: boolean; help?: string }) {
+    const shown = (v: unknown) => (any && (v === undefined || v === null) ? '' : JSON.stringify(v ?? {}, null, 2));
+    const [text, setText] = useState(() => shown(value));
     const [bad, setBad] = useState<string | null>(null);
     useEffect(() => {
         try {
-            if (JSON.stringify(JSON.parse(text)) !== JSON.stringify(value ?? {})) setText(JSON.stringify(value ?? {}, null, 2));
+            const now = text.trim() === '' ? (any ? undefined : {}) : JSON.parse(text);
+            if (JSON.stringify(now ?? null) !== JSON.stringify(value ?? (any ? null : {}))) setText(shown(value));
         } catch {
             /* keep the text being typed */
         }
@@ -38,17 +41,19 @@ function JsonField({ label, value, onChange, fid, readOnly }: { label: string; v
                 rows={4}
                 value={text}
                 readOnly={readOnly}
+                spellCheck={false}
                 aria-invalid={!!bad}
                 onChange={(e) => {
                     setText(e.target.value);
                     try {
-                        onChange(JSON.parse(e.target.value || '{}'));
+                        onChange(e.target.value.trim() === '' ? (any ? undefined : {}) : JSON.parse(e.target.value));
                         setBad(null);
                     } catch (err) {
                         setBad((err as Error).message); // presenter-exempt: the JSON the person typed
                     }
                 }}
             />
+            {help && <div className="fl-muted">{help}</div>}
             {bad && <div className="fl-err">Not JSON yet: {bad}</div>}
         </label>
     );
@@ -102,7 +107,8 @@ function Field({ spec, step, set, problems, others, readOnly, prefix = '' }: {
             </label>
         );
     }
-    if (spec.kind === 'dict') return <JsonField label={label} value={v ?? spec.default} fid={fid} readOnly={readOnly} onChange={(x) => set(spec.name, x)} />;
+    if (spec.kind === 'dict') return <JsonField label={label} value={v ?? spec.default} fid={fid} readOnly={readOnly} help={spec.help} onChange={(x) => set(spec.name, x)} />;
+    if (spec.kind === 'json') return <JsonField any label={label} value={v} fid={fid} readOnly={readOnly} help={spec.help} onChange={(x) => set(spec.name, x)} />;
     if (spec.kind === 'names') {
         const list = (v as string[] | undefined) ?? [];
         return (
@@ -127,8 +133,11 @@ function Field({ spec, step, set, problems, others, readOnly, prefix = '' }: {
             <label className="fl-field" htmlFor={fid}>
                 <span>{label}</span>
                 <input {...common} value={list.join(', ')}
-                    placeholder={spec.kind === 'people' ? 'urn:li:corpuser:ana, urn:li:corpGroup:finance' : 'comma-separated'}
-                    onChange={(e) => set(spec.name, e.target.value.split(',').map((x) => x.trim()).filter(Boolean))} />
+                    placeholder={spec.kind === 'people' ? 'urn:li:corpuser:ana, urn:li:corpGroup:finance' : spec.help ?? 'comma-separated'}
+                    onChange={(e) => {
+                        const items = e.target.value.split(',').map((x) => x.trim()).filter(Boolean);
+                        set(spec.name, spec.numbers ? items.map((x) => (/^\d+$/.test(x) ? Number(x) : x)) : items);
+                    }} />
                 {errEl}
             </label>
         );
@@ -146,7 +155,7 @@ function Field({ spec, step, set, problems, others, readOnly, prefix = '' }: {
                         {CHILD_TYPES.map((t) => <option key={t} value={t}>{TYPE_BY[t].label}</option>)}
                     </select>
                 </label>
-                {ct?.fields.filter((f) => f.kind !== 'child').map((f) => (
+                {ct?.fields.filter((f) => f.kind !== 'child' && (!f.showIf || f.showIf(child))).map((f) => (
                     <Field key={f.name} spec={f} step={{ ...child, name: `${String(step.name)}-item` }} others={[]} readOnly={readOnly} problems={problems}
                         prefix="step." set={(k, x) => set(spec.name, { ...child, [k]: x })} />
                 ))}
@@ -245,9 +254,22 @@ export function StepForm({ step, others, problems, readOnly, onChange, onDelete 
                     {WHEN.map((w) => <option key={w} value={w}>{WHEN_LABEL[w]}</option>)}
                 </select>
             </label>
-            {t?.fields.map((f) => (
+            {t?.fields.filter((f) => !f.advanced && (!f.showIf || f.showIf(step))).map((f) => (
                 <Field key={f.name} spec={f} step={step} set={set} problems={problems} others={others} readOnly={readOnly} />
             ))}
+            {t?.group === 'Platforms' && (
+                <div className="fl-muted" style={{ margin: '4px 0 8px' }}>
+                    Credentials are read from the secret scope as the flow’s owner when the step runs; they are never part of the flow.
+                </div>
+            )}
+            {t?.fields.some((f) => f.advanced) && (
+                <details open={t.fields.some((f) => f.advanced && step[f.name] !== undefined && step[f.name] !== null && step[f.name] !== '')}>
+                    <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600, margin: '8px 0' }}>More settings</summary>
+                    {t.fields.filter((f) => f.advanced && (!f.showIf || f.showIf(step))).map((f) => (
+                        <Field key={f.name} spec={f} step={step} set={set} problems={problems} others={others} readOnly={readOnly} />
+                    ))}
+                </details>
+            )}
             <details>
                 <summary style={{ cursor: 'pointer', fontSize: 13, fontWeight: 600, margin: '8px 0' }}>Retries, time limit, lineage</summary>
                 <Field spec={{ name: 'retries', label: 'Retries', kind: 'int', default: 0, min: 0, max: 10 }} step={step} set={set} problems={problems} others={others} readOnly={readOnly} />

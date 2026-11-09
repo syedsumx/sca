@@ -1,0 +1,63 @@
+# A flow across platforms: Snowflake stages the day's orders, a Databricks job scores them, Cairn checks the
+# scores landed in the lakehouse, a partner's REST API is told (and polled until it has taken them), and the team is
+# notified. Every credential is in a secret scope the flow's owner may read; the flow names only the scope and keys.
+#
+#   cairn flows deploy examples/flows/cross-platform.yaml
+#   cairn flows export-airflow orders-scoring --out dags/orders_scoring.py   # the same flow as an Airflow DAG
+kind: flow
+name: orders-scoring
+description: Snowflake -> Databricks -> Cairn check -> partner API -> notify
+params:
+  - {name: day, type: date, default: "{{ run.logical_date }}"}
+triggers:
+  - {type: schedule, cron: "30 3 * * *", timezone: Europe/Berlin}
+steps:
+  - name: stage
+    type: snowflake
+    account: myorg-analytics
+    user: CAIRN_FLOWS
+    secret_scope: snowflake-prod          # private_key (PEM) and, if it is encrypted, private_key_passphrase
+    passphrase_key: private_key_passphrase
+    warehouse: TRANSFORM_WH
+    database: SALES
+    schema: STAGING
+    role: TRANSFORMER
+    statement: |
+      INSERT INTO ORDERS_DAILY SELECT * FROM RAW.ORDERS WHERE ORDER_DATE = '{{ params.day }}'
+  - name: score
+    type: databricks
+    after: [stage]
+    host: https://adb-1234567890123456.7.azuredatabricks.net
+    secret_scope: databricks-prod         # client_id and client_secret of a service principal (OAuth M2M)
+    auth: oauth
+    job_id: 811234567890
+    job_parameters: {day: "{{ params.day }}", source: snowflake}
+    retries: 1
+  - name: landed
+    type: check
+    after: [score]
+    sql: SELECT count(*) AS n FROM lakehouse.scoring.order_scores WHERE day = DATE '{{ params.day }}'
+    connection: lakehouse
+    measure: n
+    op: ">"
+    value: 0
+  - name: tell-partner
+    type: http
+    after: [landed]
+    method: POST
+    url: https://api.partner.example.com/v1/imports
+    auth: bearer
+    secret_scope: partner-api
+    secret_key: token
+    body: {dataset: order_scores, day: "{{ params.day }}"}
+    poll_url: https://api.partner.example.com/v1/imports/{$.id}
+    status_path: $.state
+    success_values: [done]
+    failure_values: [failed, rejected]
+    poll_s: 30
+    output_path: $.id
+  - name: tell-team
+    type: notify
+    after: [tell-partner]
+    to: [urn:li:corpGroup:analytics]
+    message: "Orders of {{ params.day }} scored ({{ steps.score.run_page_url }}); partner import {{ steps.tell-partner.result }}."

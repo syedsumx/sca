@@ -41,7 +41,7 @@ from typing import Any, Callable, Optional
 from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, String, Table, Text, and_, delete, func, insert, or_, select, update
 
 from cairn.common.db import JSONText, metadata
-from cairn.flows import expr, model, steps as stepmod
+from cairn.flows import expr, model, platforms, steps as stepmod
 from cairn.flows.model import FlowError
 
 logger = logging.getLogger(__name__)
@@ -381,6 +381,13 @@ class Flows:
                         raise stepmod.StepFailed(f"no pipe {body['pipe']!r}")
                 if k == "stream":
                     stepmod.need(b.streams, "streams").by_name(body["stream"])
+                scope = body.get("secret_scope") if k in model.PLATFORM_TYPES else None
+                if scope and not expr.TEMPLATE.search(str(scope)):
+                    # The credentials are read as the owner when the step runs: the owner must be able to read them.
+                    secrets = stepmod.need(b.secrets, "secret scopes (CAIRN_SECRETS_KEY)")
+                    if secrets.level(owner, scope) < 1:
+                        raise stepmod.StepFailed(f"the owner cannot read the secret scope {scope!r} (it needs READ on "
+                                                 "it, or it does not exist)")
             except stepmod.StepFailed as e:
                 errs.add(p, str(e), s["name"])
             except Exception as e:  # noqa: BLE001 - a lookup that refuses (404, 403) is a problem with the step
@@ -893,6 +900,7 @@ class Flows:
             rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
             if run["cancel_requested"]:
                 cancel.set()
+                self._cancel_remote(run, defn, rows)
                 for key, r in rows.items():
                     if r["status"] not in STEP_DONE:
                         self._set_step(rid, key, status="cancelled", finished_ms=now, error="the run was cancelled")
@@ -911,7 +919,9 @@ class Flows:
             for key, r in rows.items():
                 if r["status"] == "waiting" and by[key]["type"] not in ("approval", "wait") and r["started_ms"] \
                         and now > r["started_ms"] + by[key]["timeout_s"] * 1000:
-                    self._failed(rid, by[key], r, f"timed out after {by[key]['timeout_s']} s", [])
+                    remote = self._cancel_remote(run, defn, {key: r})
+                    self._failed(rid, by[key], r, f"timed out after {by[key]['timeout_s']} s"
+                                 + ("; the remote work was cancelled" if remote else ""), [])
                 elif r["status"] == "running" and key not in futures:
                     if by[key]["type"] in stepmod.WAITING:    # looking again is safe: it resumes from its state
                         self._set_step(rid, key, status="waiting", next_ms=now)
@@ -955,6 +965,18 @@ class Flows:
                 ev.clear()
             else:
                 time.sleep(0.3)
+
+    def _cancel_remote(self, run: dict, defn: dict, rows: dict[str, dict]) -> int:
+        """Cancels what steps that drive other platforms started (a Databricks run, a Snowflake statement, a BigQuery
+        job), as the owner, from each step's kept state; how many were asked. Never raises."""
+        by = {s["name"]: s for s in defn["steps"]}
+        n = 0
+        for key, r in rows.items():
+            s = by.get(key)
+            if s is None or r["status"] in STEP_DONE or s["type"] not in platforms.CANCELLERS:
+                continue
+            n += platforms.cancel(self.b, s["type"], run["run_as"], r["state"], run["id"], defn["name"], key)
+        return n
 
     def _skip_reason(self, s: dict, deps: list[dict], by: dict, rows: dict) -> Optional[str]:
         for d in deps:                                    # a branch that chose the other side
@@ -1050,6 +1072,7 @@ class Flows:
                     res = stepmod.EXECUTORS[child["type"]](self.b, c)
                     while isinstance(res, stepmod.Wait):          # an Airflow DAG run inside a for-each: look again
                         if ctx.is_cancelled() or _now() > c.deadline_ms:
+                            platforms.cancel(self.b, child["type"], ctx.owner, res.state, rid, ctx.flow, key)
                             raise stepmod.StepFailed("timed out" if not ctx.is_cancelled() else "cancelled")
                         c.state = res.state
                         time.sleep(max(0.2, min((res.next_ms - _now()) / 1000, 30)))
@@ -1248,6 +1271,7 @@ class Flows:
                                               f"{quote(info['dag_run_id'], safe='')}", {"state": "failed"})
                 except stepmod.StepFailed as e:
                     logger.warning("flow run %s: Airflow did not stop its DAG run: %s", rid, e)
+            self._cancel_remote(run, defn, rows)
             for key, r in rows.items():
                 if r["status"] not in STEP_DONE:
                     self._set_step(rid, key, status="cancelled", finished_ms=now, error="the run was cancelled")

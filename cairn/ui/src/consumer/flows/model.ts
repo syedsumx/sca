@@ -54,7 +54,7 @@ export interface FlowDef {
     layout?: Record<string, { x: number; y: number }>;
 }
 
-export type FieldKind = 'text' | 'code' | 'str' | 'int' | 'num' | 'bool' | 'enum' | 'list' | 'dict' | 'names' | 'people' | 'expr' | 'items' | 'child';
+export type FieldKind = 'text' | 'code' | 'str' | 'int' | 'num' | 'bool' | 'enum' | 'list' | 'dict' | 'json' | 'names' | 'people' | 'expr' | 'items' | 'child';
 
 export interface FieldSpec {
     name: string;
@@ -66,6 +66,12 @@ export interface FieldSpec {
     min?: number;
     max?: number;
     help?: string;
+    /** Shown only when this holds for the step (e.g. a username only for basic auth). */
+    showIf?: (step: Record<string, unknown>) => boolean;
+    /** Under "More settings" rather than with the main fields. */
+    advanced?: boolean;
+    /** A list of whole numbers (typed comma-separated). */
+    numbers?: boolean;
 }
 
 export interface StepType {
@@ -78,11 +84,12 @@ export interface StepType {
     fields: FieldSpec[];
 }
 
-export type Group = 'Data' | 'Compute' | 'AI' | 'Control' | 'Notify';
+export type Group = 'Data' | 'Compute' | 'Platforms' | 'AI' | 'Control' | 'Notify';
 
 export const GROUPS: { name: Group; color: string; soft: string; darkSoft: string }[] = [
     { name: 'Data', color: '#2563eb', soft: '#e8f0fe', darkSoft: '#172554' },
     { name: 'Compute', color: '#7c3aed', soft: '#f1ebfe', darkSoft: '#2e1065' },
+    { name: 'Platforms', color: '#0e7490', soft: '#e0f4f8', darkSoft: '#083344' },
     { name: 'AI', color: '#db2777', soft: '#fde8f2', darkSoft: '#500724' },
     { name: 'Control', color: '#b45309', soft: '#fdf1e2', darkSoft: '#451a03' },
     { name: 'Notify', color: '#047857', soft: '#e3f6ef', darkSoft: '#022c22' },
@@ -98,6 +105,10 @@ export const WHEN_LABEL: Record<string, string> = {
 };
 
 const f = (name: string, label: string, kind: FieldKind, extra: Partial<FieldSpec> = {}): FieldSpec => ({ name, label, kind, ...extra });
+const HTTP_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
+export const PLATFORM_TYPES = ['http', 'databricks', 'snowflake', 'bigquery'];
+/** Headers that carry credentials: those come from a secret scope (auth), never from the flow. */
+const CREDENTIAL_HEADERS = ['authorization', 'proxy-authorization', 'cookie', 'x-api-key', 'api-key', 'x-auth-token'];
 
 export const STEP_TYPES: StepType[] = [
     { type: 'sql', group: 'Data', label: 'SQL query', icon: 'code', timeout: 3600, blurb: 'Run a query as the owner (a saved query, or SQL on a connection).',
@@ -122,6 +133,74 @@ export const STEP_TYPES: StepType[] = [
         fields: [f('command', 'Command', 'enum', { default: 'build', values: ['run', 'build', 'test', 'seed', 'snapshot'] }), f('select', 'Select', 'str', { default: '' }), f('project_dir', 'Project directory', 'str', { default: '/dbt' })] },
     { type: 'airflow', group: 'Compute', label: 'Airflow DAG', icon: 'flow', timeout: 21600, blurb: 'Trigger a DAG run in Airflow and wait for it.',
         fields: [f('dag_id', 'DAG id', 'str', { required: true }), f('conf', 'Conf (JSON)', 'dict', { default: {} }), f('wait', 'Wait for it', 'bool', { default: true }), f('poll_s', 'Look every (s)', 'int', { default: 30, min: 5, max: 600 })] },
+    { type: 'http', group: 'Platforms', label: 'HTTP request', icon: 'share', timeout: 3600, blurb: 'Call any REST API; optionally poll its status until done.',
+        fields: [
+            f('method', 'Method', 'enum', { default: 'GET', values: HTTP_METHODS }),
+            f('url', 'URL', 'str', { required: true, help: 'https://api.example.com/v1/imports' }),
+            f('body', 'JSON body', 'json', { showIf: (s) => s.method !== undefined && s.method !== 'GET', help: 'Templates work in its text: {{ params.day }}' }),
+            f('auth', 'Sign in with', 'enum', { default: 'none', values: ['none', 'bearer', 'basic', 'header'] }),
+            f('secret_scope', 'Secret scope', 'str', { help: 'Credentials are read from it as the flow’s owner' }),
+            f('secret_key', 'Key in the scope', 'str', { showIf: (s) => !!s.auth && s.auth !== 'none', help: 'The token, password or key value' }),
+            f('username', 'User name', 'str', { showIf: (s) => s.auth === 'basic' }),
+            f('auth_header', 'Header name', 'str', { showIf: (s) => s.auth === 'header', help: 'X-Api-Key' }),
+            f('output_path', 'Keep (JSONPath)', 'str', { help: '$.id: becomes steps.<name>.result' }),
+            f('status_path', 'Poll: status (JSONPath)', 'str', { help: '$.state: leave empty to not poll' }),
+            f('poll_url', 'Poll: status URL', 'str', { showIf: (s) => !!s.status_path, help: '/v1/imports/{$.id} (default: the answer’s Location)' }),
+            f('success_values', 'Poll: done when', 'list', { default: [], showIf: (s) => !!s.status_path, help: 'done, succeeded' }),
+            f('failure_values', 'Poll: failed when', 'list', { default: [], showIf: (s) => !!s.status_path, help: 'failed, error' }),
+            f('poll_s', 'Poll: every (s)', 'int', { default: 15, min: 1, max: 3600, showIf: (s) => !!s.status_path }),
+            f('headers', 'Headers (JSON)', 'dict', { default: {}, advanced: true }),
+            f('ok_status', 'Accepted status codes', 'list', { default: [], advanced: true, numbers: true, help: 'default: any 2xx' }),
+            f('ca_key', 'Private CA (key in the scope)', 'str', { advanced: true }),
+            f('airflow_conn_id', 'Airflow connection (export)', 'str', { advanced: true }),
+        ] },
+    { type: 'databricks', group: 'Platforms', label: 'Databricks job', icon: 'spark', timeout: 21600, blurb: 'Run a Databricks job (or a one-time run), wait, link to its run page.',
+        fields: [
+            f('host', 'Workspace URL', 'str', { required: true, help: 'https://adb-123.4.azuredatabricks.net' }),
+            f('job_id', 'Job id', 'str', { help: 'Or a one-time run below' }),
+            f('job_parameters', 'Job parameters (JSON)', 'dict', { default: {}, showIf: (s) => !!s.job_id }),
+            f('run', 'One-time run (runs/submit JSON)', 'dict', { showIf: (s) => !s.job_id }),
+            f('secret_scope', 'Secret scope', 'str', { required: true }),
+            f('auth', 'Sign in with', 'enum', { default: 'pat', values: ['pat', 'oauth'], help: 'pat: a token; oauth: a service principal (M2M)' }),
+            f('token_key', 'Token key', 'str', { default: 'token', showIf: (s) => s.auth !== 'oauth' }),
+            f('client_id_key', 'Client id key', 'str', { default: 'client_id', showIf: (s) => s.auth === 'oauth' }),
+            f('client_secret_key', 'Client secret key', 'str', { default: 'client_secret', showIf: (s) => s.auth === 'oauth' }),
+            f('poll_s', 'Look every (s)', 'int', { default: 30, min: 1, max: 3600 }),
+            f('airflow_conn_id', 'Airflow connection (export)', 'str', { advanced: true }),
+        ] },
+    { type: 'snowflake', group: 'Platforms', label: 'Snowflake SQL', icon: 'database', timeout: 3600, blurb: 'Run SQL (or a task) in Snowflake with a key pair, and wait.',
+        fields: [
+            f('account', 'Account', 'str', { required: true, help: 'myorg-myaccount' }),
+            f('user', 'User', 'str', { required: true }),
+            f('statement', 'SQL', 'code', { help: 'Or a task below' }),
+            f('task', 'Or a task to execute', 'str', { help: 'DB.SCHEMA.TASK' }),
+            f('warehouse', 'Warehouse', 'str', { default: '' }),
+            f('database', 'Database', 'str', { default: '' }),
+            f('schema', 'Schema', 'str', { default: '' }),
+            f('role', 'Role', 'str', { default: '' }),
+            f('secret_scope', 'Secret scope', 'str', { required: true }),
+            f('private_key_key', 'Private key (key in the scope)', 'str', { default: 'private_key' }),
+            f('passphrase_key', 'Its passphrase (key in the scope)', 'str', { advanced: true }),
+            f('multi_statement', 'Several statements', 'bool', { default: false, advanced: true }),
+            f('host', 'Host (when not <account>.snowflakecomputing.com)', 'str', { advanced: true }),
+            f('poll_s', 'Look every (s)', 'int', { default: 10, min: 1, max: 3600, advanced: true }),
+            f('airflow_conn_id', 'Airflow connection (export)', 'str', { advanced: true }),
+        ] },
+    { type: 'bigquery', group: 'Platforms', label: 'BigQuery query', icon: 'chart', timeout: 3600, blurb: 'Run a BigQuery query job with a service account, and wait.',
+        fields: [
+            f('project', 'Project', 'str', { required: true }),
+            f('query', 'SQL', 'code', { required: true }),
+            f('location', 'Location', 'str', { default: '', help: 'EU, US, europe-west3' }),
+            f('destination_table', 'Write to (project.dataset.table)', 'str', { default: '' }),
+            f('write_disposition', 'If it has rows', 'enum', { default: 'WRITE_EMPTY', values: ['WRITE_EMPTY', 'WRITE_TRUNCATE', 'WRITE_APPEND'], showIf: (s) => !!s.destination_table }),
+            f('secret_scope', 'Secret scope', 'str', { required: true }),
+            f('key_key', 'Service account key (key in the scope)', 'str', { default: 'service_account_json' }),
+            f('max_bytes_billed', 'At most bytes billed', 'int', { min: 1, max: 1e15, advanced: true }),
+            f('labels', 'Labels (JSON)', 'dict', { default: {}, advanced: true }),
+            f('api_url', 'API URL', 'str', { default: 'https://bigquery.googleapis.com', advanced: true }),
+            f('poll_s', 'Look every (s)', 'int', { default: 10, min: 1, max: 3600, advanced: true }),
+            f('airflow_conn_id', 'Airflow connection (export)', 'str', { advanced: true }),
+        ] },
     { type: 'agent', group: 'AI', label: 'Agent', icon: 'bot', timeout: 900, blurb: 'Ask an agent app; its answer is there for later steps.',
         fields: [f('app', 'Agent app', 'str', { required: true }), f('input', 'Input', 'text', { required: true })] },
     { type: 'approval', group: 'Control', label: 'Approval', icon: 'user', timeout: 259200, blurb: 'Wait for a person or a group to approve in Cairn.',
@@ -136,7 +215,7 @@ export const STEP_TYPES: StepType[] = [
         fields: [f('to', 'To (default: the owner)', 'people', { default: [] }), f('title', 'Title', 'str', { default: '' }), f('message', 'Message', 'text', { required: true })] },
 ];
 
-export const CHILD_TYPES = ['sql', 'derived', 'check', 'pipe', 'notebook', 'python', 'spark', 'dbt', 'airflow', 'agent', 'notify'];
+export const CHILD_TYPES = ['sql', 'derived', 'check', 'pipe', 'notebook', 'python', 'spark', 'dbt', 'airflow', ...PLATFORM_TYPES, 'agent', 'notify'];
 export const TYPE_BY: Record<string, StepType> = Object.fromEntries(STEP_TYPES.map((t) => [t.type, t]));
 export const GROUP_BY: Record<string, (typeof GROUPS)[number]> = Object.fromEntries(GROUPS.map((g) => [g.name, g]));
 const COMMON = ['name', 'type', 'after', 'when', 'retries', 'retry_delay_s', 'retry_backoff', 'timeout_s', 'description', 'reads', 'writes'];
@@ -226,6 +305,39 @@ function ancestors(steps: FlowStep[]): Map<string, Set<string>> {
     return new Map(steps.map((s) => [s.name, anc(s.name, new Set())]));
 }
 
+const JSONPATH = /^\$(?:\.[A-Za-z_$][A-Za-z0-9_$-]*|\[\s*-?\d+\s*\]|\[\s*'[^']*'\s*\]|\[\s*"[^"]*"\s*\]|\[\s*\*\s*\]|\.\*)*$/;
+
+/** The rules a platform step's fields follow together (the same as Cairn's): no credentials in the flow. */
+function checkPlatform(type: string, s: Record<string, unknown>, path: string, name: string, out: Problem[]) {
+    const bad = (field: string, message: string) => out.push({ path: field ? `${path}.${field}` : path, message, step: name });
+    const has = (k: string) => s[k] !== undefined && s[k] !== null && s[k] !== '';
+    if (type === 'http') {
+        const url = String(s.url ?? '');
+        if (url && !/^\{\{/.test(url) && !/^https?:\/\//i.test(url)) bad('url', 'is an https:// URL');
+        if (/^https?:\/\/[^/]*@/i.test(url)) bad('url', 'has credentials in it: use auth with a secret scope');
+        for (const h of Object.keys((s.headers as Record<string, unknown>) ?? {}))
+            if (CREDENTIAL_HEADERS.includes(h.toLowerCase())) bad('headers', `${h} carries a credential: use auth (bearer, basic or header) with a secret scope`);
+        const auth = String(s.auth ?? 'none');
+        if (auth !== 'none' && !(has('secret_scope') && has('secret_key')))
+            bad('', `auth ${auth} needs secret_scope and secret_key (the key in the scope that holds the credential)`);
+        if (auth === 'basic' && !has('username')) bad('username', 'is required for basic auth');
+        if (auth === 'header' && !has('auth_header')) bad('auth_header', "is required for header auth (the header's name, such as X-Api-Key)");
+        if ((s.method ?? 'GET') === 'GET' && has('body')) bad('body', 'a GET has no body: use POST, PUT or PATCH');
+        for (const k of ['output_path', 'status_path'])
+            if (has(k) && !JSONPATH.test(String(s[k]).trim())) bad(k, `'${String(s[k])}' is not a JSONPath: it starts with $ ($.status, $.items[0].id)`);
+        if (has('status_path') && !((s.success_values as unknown[]) ?? []).length && !((s.failure_values as unknown[]) ?? []).length)
+            bad('success_values', 'names the values of status_path that mean done (failure_values: those that mean it failed)');
+        if (!has('status_path') && (has('poll_url') || ((s.success_values as unknown[]) ?? []).length || ((s.failure_values as unknown[]) ?? []).length))
+            bad('status_path', "is required to poll: the JSONPath of the status in the status URL's answer");
+        if (((s.ok_status as unknown[]) ?? []).some((c) => typeof c !== 'number' || c < 100 || c > 599)) bad('ok_status', 'is a list of HTTP status codes (100-599)');
+    }
+    if (type === 'databricks' && has('job_id') === has('run'))
+        bad('', 'needs either job_id (run an existing job) or run (a one-time run: the runs/submit body)');
+    if (type === 'snowflake' && has('statement') === has('task')) bad('', 'needs either statement (SQL) or task (a task to EXECUTE)');
+    if (type === 'bigquery' && has('destination_table') && !/\{\{/.test(String(s.destination_table)) && !/^[^.]+\.[^.]+\.[^.]+$/.test(String(s.destination_table)))
+        bad('destination_table', 'is project.dataset.table');
+}
+
 function checkFields(t: StepType, s: Record<string, unknown>, path: string, name: string, out: Problem[], child = false) {
     const allowed = new Set([...t.fields.map((x) => x.name), ...COMMON]);
     if (child) ['name', 'after', 'when'].forEach((k) => allowed.delete(k));
@@ -255,6 +367,7 @@ function checkFields(t: StepType, s: Record<string, unknown>, path: string, name
         out.push({ path, message: 'needs either seconds or until (HH:MM, or a date and time)', step: name });
     if (t.type === 'approval' && !((s.approvers as unknown[]) ?? []).length && !((s.groups as unknown[]) ?? []).length)
         out.push({ path, message: 'needs approvers (people) or groups who may approve', step: name });
+    if (PLATFORM_TYPES.includes(t.type)) checkPlatform(t.type, s, path, name, out);
     if (t.type === 'for_each') {
         const c = s.step as Record<string, unknown> | undefined;
         if (!c || typeof c !== 'object' || !CHILD_TYPES.includes(String(c.type))) {
@@ -364,6 +477,10 @@ export function newStep(type: string, taken: Iterable<string>): FlowStep {
     if (type === 'branch') Object.assign(step, { condition: 'true', then: [], else: [] });
     if (type === 'for_each') Object.assign(step, { items: '[1, 2, 3]', step: { type: 'notify', message: '{{ item }}' } });
     if (type === 'agent') step.input = 'Summarise the run';
+    if (type === 'http') Object.assign(step, { method: 'GET', url: 'https://api.example.com/v1/status' });
+    if (type === 'databricks') Object.assign(step, { host: 'https://adb-1234567890123456.7.azuredatabricks.net', secret_scope: 'databricks', job_id: '123' });
+    if (type === 'snowflake') Object.assign(step, { account: 'myorg-myaccount', user: 'CAIRN', secret_scope: 'snowflake', statement: 'SELECT CURRENT_VERSION()' });
+    if (type === 'bigquery') Object.assign(step, { project: 'my-project', secret_scope: 'gcp', query: 'SELECT 1' });
     return step;
 }
 

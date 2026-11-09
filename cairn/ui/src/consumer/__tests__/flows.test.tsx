@@ -220,6 +220,42 @@ describe('the flow editor', () => {
         expect(node('first').style.left).not.toBe(before);
     });
 
+    it('builds platform steps with friendly forms: fields shown as they apply, credentials only by scope', () => {
+        mountEditor(SMALL);
+        fireEvent.pointerDown(node('b'), { button: 0 });
+        fireEvent.pointerUp(node('b'));
+        fireEvent.click(screen.getByRole('button', { name: 'Add HTTP request step' }));
+        const panel = screen.getByRole('complementary', { name: 'Step http-1' });
+        expect(within(panel).getByText(/never part of the flow/)).toBeTruthy();
+        // Basic auth asks for a user name and the key in the scope; a header carrying a credential is refused.
+        expect(within(panel).queryByLabelText(/^User name/)).toBeNull();
+        fireEvent.change(within(panel).getByLabelText(/^Sign in with/), { target: { value: 'basic' } });
+        expect(within(panel).getByText(/auth basic needs secret_scope and secret_key/)).toBeTruthy();
+        fireEvent.change(within(panel).getByLabelText(/^User name/), { target: { value: 'cairn' } });
+        fireEvent.change(within(panel).getByLabelText(/^Secret scope/), { target: { value: 'partner' } });
+        fireEvent.change(within(panel).getByLabelText(/^Key in the scope/), { target: { value: 'password' } });
+        expect(within(panel).queryByText(/needs secret_scope/)).toBeNull();
+        // Polling fields appear once there is a status to poll; the body once the method has one.
+        expect(within(panel).queryByLabelText(/^Poll: done when/)).toBeNull();
+        fireEvent.change(within(panel).getByLabelText(/^Poll: status \(JSONPath\)/), { target: { value: 'state' } });
+        expect(within(panel).getByText(/is not a JSONPath/)).toBeTruthy();
+        fireEvent.change(within(panel).getByLabelText(/^Poll: status \(JSONPath\)/), { target: { value: '$.state' } });
+        expect(within(panel).getByText(/names the values of status_path/)).toBeTruthy();
+        fireEvent.change(within(panel).getByLabelText(/^Poll: done when/), { target: { value: 'done, finished' } });
+        fireEvent.change(within(panel).getByLabelText(/^Method/), { target: { value: 'POST' } });
+        fireEvent.change(within(panel).getByLabelText(/^JSON body/), { target: { value: '{"day": "{{ params.day }}"}' } });
+        expect(within(panel).queryAllByRole('alert')).toHaveLength(0);
+        // The other platforms: the type's own fields, checked like Cairn checks them.
+        fireEvent.change(within(panel).getByLabelText(/^Type/), { target: { value: 'snowflake' } });
+        const sf = screen.getByRole('complementary', { name: 'Step http-1' });
+        expect(within(sf).getByText(/needs either statement \(SQL\) or task/)).toBeTruthy();
+        fireEvent.change(within(sf).getByLabelText(/^SQL/), { target: { value: 'SELECT 1' } });
+        expect(within(sf).queryByText(/needs either statement/)).toBeNull();
+        const d = validate({ kind: 'flow', name: 'x', steps: [newStep('databricks', []), newStep('bigquery', []), newStep('snowflake', []), newStep('http', [])] });
+        expect(d).toEqual([]);
+        expect(validate({ kind: 'flow', name: 'x', steps: [{ name: 'h', type: 'http', url: 'https://a.example.com', headers: { Authorization: 'Bearer x' } }] })[0].message).toMatch(/carries a credential/);
+    });
+
     it('keeps the canvas and the YAML in step, both ways', async () => {
         mountEditor(SMALL);
         fireEvent.click(screen.getByRole('tab', { name: 'Code' }));
