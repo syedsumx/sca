@@ -1679,7 +1679,10 @@ Secret (`cairn.ontology.model.keySecret`). Answers are validated against their e
 (`CAIRN_ONTOLOGY_MODEL_RETRIES`, 2; timeout `CAIRN_ONTOLOGY_MODEL_TIMEOUT_SECONDS`, 120); at most
 `CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT` (6) calls are in flight. When the model cannot answer, each step falls back
 (a term named after its table, no inferred keys). Without an embeddings model, search by meaning and embedding
-candidates are off; name heuristics still find keys.
+candidates are off; name heuristics still find keys. The agent's per-minute quota (120 requests by default) also
+counts these calls: a full compile makes up to four model calls a table plus those for relationships and metrics, so
+raise the compiler agent's `per_minute` (`PATCH /admin/agents/<id>` with `{"per_minute": …}`) to what a compile of your
+catalog needs; over the quota the gateway answers 429 and the steps fall back as above.
 
 **Syncing.** The context-miner worker syncs and compiles every `cairn.ontology.intervalSeconds` (3600; 0: on
 demand only), one replica at a time; `cairn ontology sync|compile|import|status` does it from the command line.
@@ -1691,10 +1694,49 @@ can be kept out with `tableAllowRegex` / `tableDenyRegex` (deny wins, matched ag
 
 **Proposals.** A finished run comes back into the context inbox (**Semantic models → Ontology proposals**, and
 the Context inbox): a term as a glossary-term proposal linked to its columns, a relationship as a join, a metric
-as a metric definition. Accepting needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it is about: a term is
-written under the glossary node **Ontology** and linked to its columns; a join or metric becomes an approved,
-versioned definition that Ask-your-data and text to SQL use. Rejecting needs `MANAGE_GLOSSARIES`; a rejected
-proposal is not brought back by later runs.
+as a metric definition. Deciding is a person's act (agents are refused) and needs `MANAGE_GLOSSARIES`; accepting
+also needs `EDIT_ENTITY_GLOSSARY_TERMS` on each dataset it is about: a term is written under the glossary node
+**Ontology** and linked to its columns (its name, definition and synonyms can be edited as it is accepted); a join
+or metric becomes an approved, versioned definition that Ask-your-data and text to SQL use. A rejected proposal is
+not brought back by later runs. Every decision is audited (`ontology.proposal_accepted` / `_rejected`) with the
+reviewer's comment, which is also kept with the proposal.
+
+**The Ontology explorer** (**Ontology** in the navigation, `/ontology`; linked from Semantic models). Everything on
+it is the signed-in person's view: elements over datasets they may not see are not there, and every action is
+theirs, under their privileges.
+
+- *Graph*: business terms as nodes coloured by domain (the dataset's domain, or its schema when it has none),
+  accepted terms filled and proposed ones with a dashed ring, bridge tables as diamonds, tables without a term as
+  squares; relationships as arrows labelled with their columns and cardinality (`customer_id → id · N:1`), solid
+  for declared keys, dashed when only seen in queries, dotted when inferred. Pan by dragging or with the arrow keys,
+  zoom with the wheel or `+`/`-`, `0` or **Fit** to see everything, and a minimap to move around. Filter by
+  domain, schema, status (accepted, proposed, compiled, rejected) and confidence; **Find a term** zooms to it and
+  lights up its neighbours. Over 150 terms the graph starts with one node per domain (sized by its terms, edges
+  summed); open a domain, filter or search to see its terms, or **Show every term**.
+- *List*: the same terms, relationships and bridge tables as tables: the screen-reader alternative to the graph.
+- *Term* (the side panel, or `/ontology/terms/<id>`): definition, synonyms, domain, owners (the dataset's), the
+  mapped columns (each linking to the asset), date formats detected, relationships with their join and evidence
+  (declared key, joins in the query log with query and run counts, the model's confidence), the metrics that use
+  it, bridge tables through it, provenance (the run, its mode, when and who asked, and its inputs: tables, columns,
+  queries), and the proposals still open on it, with accept, reject, and edit-and-accept. Sampled values are never
+  shown (they were read as the sampling identity, not as the viewer).
+- *Review*: the open proposals, filtered by kind and confidence; select some (or work on the highlighted one) and
+  accept or reject them with one comment. Keyboard: `j`/`k` move, `x` selects, `a` accepts, `r` rejects, `o`
+  opens the term. **Accept all above** a confidence lists what it will accept before it does. Each proposal is
+  decided as if alone: those you may not decide are listed with the reason and the others go through.
+- *Compile* (`MANAGE_GLOSSARIES`): choose every table, some schemas or some tables (pickers over the compiler's
+  catalog, limited to tables you may see), incremental or full, and see what it will cost before it starts: tables
+  to compile, tables reused, and an upper bound of model and embedding calls. A run limited to some tables compiles
+  only those; every other table keeps what the published run made of it, so the ontology stays whole. The run's
+  progress shows live (tables done, then relationships, metrics, bridge tables, publishing) with **Cancel** and
+  **Resume**; when it completes its proposals are imported into the review queue and the diff against the run
+  before is shown (terms, relationships and metrics added, removed and changed).
+- *Download* the graph as JSON-LD, RDF Turtle or CSV (one row per term, column attribute, relationship and metric).
+
+Elsewhere: an asset page's summary has **Business terms** (the table's terms and each column's, linked to the term
+pages, and its joins); search shows matching terms above the assets with a **Term** badge (a synonym finds its
+term); Ask-your-data answers show **Grounded in** chips for the terms of the tables used and the compiled
+relationships given to the model (`grounded` in the answer).
 
 **Ask-your-data.** The relationships among the tables a question uses are given to the model (the default join
 of each role first), and the SQL it writes is checked with the compiler's SQL validation; the answer carries the
@@ -1707,9 +1749,18 @@ one): `GET /terms?q=`, `GET /relationships?datasets=…&between=true`, `GET /met
 relationships), `GET /provenance/<kind>/<id>`, `POST /validate-sql` (`{"sql"}`: unknown tables and columns,
 deprecated ones, joins with no known path, joins contradicting the known keys, fan-out, metrics computed unlike
 their definition; a query over a table the caller may not see is answered with `not_visible` only),
-`GET /proposals`, `POST /proposals/<id>/accept|reject`. Compiling needs `MANAGE_GLOSSARIES`: `POST /sync`,
-`POST /runs` (`{"mode": "incremental"|"full", "sync": true, "wait": false}`), `POST /runs/<id>/cancel|resume|import`,
-and `GET /runs` (a run's statistics count every table); `GET /status` shows whether the compiler answers. MCP tools: `ontology_search_terms`, `ontology_relationships`,
+`GET /explorer` (terms with domain, schema, status and confidence; relationships; bridge tables; tables),
+`GET /terms/<id>` (a term with its evidence and provenance), `GET /asset?urn=` (a dataset's terms per column; 404
+for a dataset the caller may not see), `GET /search-terms?q=` (by name or synonym), `GET /catalog` (the tables
+the caller may see, for scoping a run), `GET /graph?format=csv`, `GET /proposals?kind=`,
+`POST /proposals/<id>/accept|reject` (`{"comment", "edits": {"name", "definition", "synonyms"}}`, edits for terms
+only) and `POST /proposals/batch` (`{"ids": [...], "action": "accept"|"reject", "comment"}`, at most 500; the
+outcome of each). Compiling needs `MANAGE_GLOSSARIES`: `POST /sync`, `POST /estimate` (`{"mode", "tables",
+"schemas"}`), `POST /runs` (`{"mode": "incremental"|"full", "sync": true, "wait": false, "tables": [...],
+"schemas": [...]}`: a scope names tables the caller may see, else 422), `GET /runs/<id>` (with `progress` while
+it runs), `POST /runs/<id>/cancel|resume|import`, `GET /runs/<id>/diff?against=` (a completed run against the
+completed run before it, over what the caller may see) and `GET /runs` (a run's statistics count every table);
+`GET /status` shows whether the compiler answers. MCP tools: `ontology_search_terms`, `ontology_relationships`,
 `ontology_validate_sql`.
 
 **Deployment.** Helm: `cairn.ontology.enabled`, its token in `cairn.ontology.secret` (Cairn calls with it; the
