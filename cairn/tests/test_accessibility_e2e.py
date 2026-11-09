@@ -23,7 +23,8 @@ ANA = "urn:li:corpuser:ana"
 DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
-         "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions"]
+         "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions", "/flows",
+         "/flows?flow=a11y-flow"]
 BLOCKING = {"serious", "critical"}
 
 
@@ -79,6 +80,10 @@ def cairn(settings, graph, tmp_path, monkeypatch):
     s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
     s.sql_workspace.save(ANA, {"name": "Revenue by region", "connection": "wh",
                                "sql": "SELECT region, sum(amount) AS total FROM main.orders GROUP BY region"})
+    s.flows.create(ANA, {"name": "a11y-flow", "steps": [          # the canvas editor, with a branch and an approval
+        {"name": "count", "type": "sql", "sql": "SELECT count(*) AS n FROM main.orders", "connection": "wh"},
+        {"name": "big", "type": "branch", "after": ["count"], "condition": "steps.count.rows > 0", "then": ["ask"]},
+        {"name": "ask", "type": "approval", "after": ["big"], "approvers": [ANA]}]}, publish=True)
     app = create_api_app(s)
     app.mount("/ui", StaticFiles(directory=BUNDLE), name="ui")
     app.add_api_route("/host", lambda: HTMLResponse(HOST), methods=["GET"])

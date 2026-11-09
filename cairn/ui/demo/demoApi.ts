@@ -4,6 +4,7 @@
  * findings behave like the real backend until the page is reloaded. All data is fictional.
  */
 
+import { installFlowsDemo } from './flowSamples';
 import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -1845,6 +1846,10 @@ on('POST', '/v1/sql-workflows/:id/run', (_b, _q, [id]) => {
     w.last_status = 'ok';
     return run;
 });
+
+installFlowsDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
 
 const GIT_FOLDERS: Json[] = [
     { id: 'gf_analytics', owner: ME, name: 'analytics', repo: 'northwind/analytics', url: 'https://git.northwind.example/northwind/analytics.git',
