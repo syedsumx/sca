@@ -66,6 +66,23 @@ def build_router(hub: NotificationHub, slack: Optional[SlackInteractions], curre
         except ValueError as e:
             raise HTTPException(400, str(e))
 
+    @router.put("/notify/routes/{route_id}", response_model=Route)
+    def put_route(route_id: str, route: Route, p: Principal = Depends(current_principal)):
+        """One route, added or replaced; the others stay (``cairn_notification_route``, bundles)."""
+        authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        if route.id != route_id:
+            raise HTTPException(422, "the route's id must match the path")
+        try:
+            return hub.put_route(route)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+    @router.delete("/notify/routes/{route_id}", status_code=204)
+    def delete_route(route_id: str, p: Principal = Depends(current_principal)):
+        authorize(p, "MANAGE_GLOBAL_SETTINGS", None)
+        if not hub.delete_route(route_id):
+            raise HTTPException(404, "no such route")
+
     @router.post("/notify/test")
     def test(req: TestRequest, p: Principal = Depends(current_principal)):
         ids = hub.publish(Event(type="subscription.update", title="Test notification",

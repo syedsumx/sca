@@ -57,6 +57,7 @@ class Field:
     tf: str = ""                    # Terraform's name for it, when Terraform reserves Cairn's (connection)
     read: str = ""                  # the field's name in Cairn's records, when it differs from the request's
     only_set: bool = False          # a JSON document Cairn always returns: compared only when declared
+    once: bool = False              # only the create call returns it (a key): kept as created, never compared
 
     @property
     def tf_name(self) -> str:
@@ -75,6 +76,8 @@ class Field:
             out["default"] = self.default
         if self.read:
             out["read_as"] = self.read
+        if self.once:
+            out["once"] = True
         return out
 
 
@@ -88,6 +91,7 @@ class Op:
     only: tuple[str, ...] = ()      # only these fields go in the body (empty: all of them)
     body: Optional[dict] = None     # fixed values added to the body (e.g. {"permission": None} to remove)
     no_body: bool = False
+    query: tuple[str, ...] = ()     # fields sent as query parameters (not in the body)
 
     def schema(self) -> dict:
         out: dict[str, Any] = {"method": self.method, "path": self.path}
@@ -98,6 +102,8 @@ class Op:
             out["body"] = self.body
         if self.no_body:
             out["no_body"] = True
+        if self.query:
+            out["query"] = list(self.query)
         return out
 
 
@@ -126,6 +132,7 @@ class Kind:
     mine: bool = False              # the token user's own (others' shared ones are not managed)
     owner_field: str = "owner"
     match: tuple[tuple[str, Any], ...] = ()   # only records with these values are this kind (others are skipped)
+    skip: tuple[tuple[str, str], ...] = ()    # records whose field starts with this are Cairn's own (not managed)
     order: int = 100                # created in this order, deleted in the reverse
     service: str = ""               # the Services attribute that serves it (None there: the kind is off)
     docs: str = ""                  # the operator manual's section on it
@@ -185,6 +192,8 @@ class Kind:
                "fields": [f.schema() for f in self.fields], "docs": self.docs or "infrastructure-as-code"}
         if self.match:
             out["match"] = dict(self.match)
+        if self.skip:
+            out["skip"] = [list(x) for x in self.skip]
         if self.example is not None:
             out["example"] = self.example
         return out
@@ -202,7 +211,7 @@ def crud(path: str, *, id: str = "{id}", update: str = "PUT", **kw) -> dict:
     """The usual API: POST path, update path/{id}, DELETE path/{id}."""
     item = f"{path}/{id}"
     return {"read": path, "create": op(f"POST {path}"), "update": op(f"{update} {item}") if update else None,
-            "delete": op(f"DELETE {item}"), **kw}
+            "delete": op(f"DELETE {item}", no_body=True), **kw}
 
 
 # ---- the kinds ---------------------------------------------------------------------------------------------------
@@ -278,7 +287,7 @@ CORE: list[Kind] = [
          **crud("/v1/derived"), order=60, service="derived", bundle_fields=("owner",),
          example={"name": "revenue", "target": "marts.revenue", "on_change": True,
                   "sql": "SELECT region, sum(amount) AS total FROM raw.orders GROUP BY region"},
-         example_update={"on_change": False}),
+         example_update={"every_minutes": 60}),
     Kind("vectors", "vector_index", "ai",
          "Vector search over a lakehouse table's text, kept in step with the table and searched under Cairn's policies.",
          (R("name", force_new=True), R("source", force_new=True, description="namespace.table"),
@@ -312,11 +321,17 @@ CORE: list[Kind] = [
           R("measure", description="a workbook aggregate, e.g. Sum([amount])"), F("description", default=""),
           F("filters", "json", default=[], only_set=True, description='[{"column": "status", "op": "=", "value": "paid"}]'),
           F("time_column", default=None), F("dimensions", "list", default=[])),
-         **crud("/sql/metrics", id="{name}"), id="name", mine=True, order=100, service="metrics"),
+         **crud("/sql/metrics", id="{name}"), id="name", mine=True, order=100, service="metrics",
+         example={"name": "revenue", "label": "Revenue", "connection": "wh", "table": "main.orders",
+                  "measure": "Sum([amount])", "time_column": "day", "dimensions": ["region"]},
+         example_update={"label": "Revenue (USD)"}),
     Kind("workbooks", "workbook", "bi", "A spreadsheet workbook: elements compiled to SQL and run as the person looking.",
          (R("name"), R("connection", tf="connection_name"), R("spec", "json"), F("description", default=""),
           F("shared", "bool", default=False)),
-         **crud("/sql/workbooks"), mine=True, order=110, service="workbooks"),
+         **crud("/sql/workbooks"), mine=True, order=110, service="workbooks",
+         example={"name": "orders", "connection": "wh", "spec": {"elements": [
+             {"source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}]}},
+         example_update={"description": "Orders by region"}),
     Kind("dashboards", "dashboard", "bi", "Saved queries shown together, each run as its viewer.",
          (R("name"), F("description", default=""), F("shared", "bool", default=False),
           R("tiles", "json", description='[{"query": "<saved query id>", "title": "...", "width": 1}]'),
@@ -381,6 +396,8 @@ def check(kinds: list[Kind]) -> None:
         for o in (k.create, k.update, k.delete):
             if o is None:
                 continue
+            for q in o.query:
+                assert q in names, (k.name, o.path, q)
             for p in PLACEHOLDER.findall(o.path):
                 assert p == "id" or p in names, (k.name, o.path, p)
         if k.update is None:

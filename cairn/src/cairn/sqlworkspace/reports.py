@@ -191,7 +191,8 @@ class Reports:
     @staticmethod
     def _public(r) -> dict:
         d = dict(r._mapping)
-        return {**d, "recipients": json.loads(d["recipients"]), "enabled": bool(d["enabled"])}
+        return {**d, "recipients": json.loads(d["recipients"]), "enabled": bool(d["enabled"]),
+                "target": {d["target_kind"]: d["target_id"]}}
 
     def get(self, actor: str, sid: str) -> dict:
         with self.engine.connect() as conn:

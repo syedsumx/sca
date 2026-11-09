@@ -60,7 +60,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from cairn.iac import registry
-from cairn.iac.engine import Engine, EngineError, declared
+from cairn.iac.engine import Engine, EngineError, declared, key_values
 
 # The sections a bundle may hold: every kind in the registry (cairn.iac.registry), created in the registry's
 # order (policies first, so what follows is reachable as declared; derived tables may read the others' tables;
@@ -314,7 +314,7 @@ def key_of(k: registry.Kind, spec: dict) -> str:
 
 
 def _rec_key(k: registry.Kind, r: dict) -> str:
-    return "/".join(str(r.get(k.field(f).read_name)) for f in k.key) or k.name
+    return "/".join(key_values(k, r)) or k.name
 
 
 class ApiError(BundleError):
@@ -398,7 +398,7 @@ def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change
                     missing = [q for q in _refs(k2, spec) if q not in known]
                     if missing:
                         raise BundleError(f"{k2}/{key}: no saved query of yours named {missing[0]!r}")
-        skip = {"owner", *k.write_only, *(f"{w}_version" for w in k.write_only)}
+        skip = {"owner", *k.write_only, *(f"{w}_version" for w in k.write_only), *(f.name for f in k.fields if f.once)}
         for key, want in bundle[kind].items():
             have = current.get(key)
             if have is None:

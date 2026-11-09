@@ -56,7 +56,7 @@ def go_field(k: Kind, f: Field) -> str:
         parts.append(f"read: {go_str(f.read)}")
     for flag, on in (("required", f.required), ("computed", computed and not f.required),
                      ("forceNew", f.force_new or k.immutable), ("sensitive", f.sensitive or f.write_only),
-                     ("writeOnly", f.write_only), ("onlySet", f.only_set)):
+                     ("writeOnly", f.write_only), ("onlySet", f.only_set), ("once", f.once)):
         if on:
             parts.append(f"{flag}: true")
     d = go_default(f)
@@ -75,6 +75,8 @@ def go_op(o: Op | None) -> str:
         parts.append(f"omit: {go_strs(o.omit)}")
     if o.only:
         parts.append(f"only: {go_strs(o.only)}")
+    if o.query:
+        parts.append(f"query: {go_strs(o.query)}")
     if o.body is not None:
         parts.append(f"body: {go_str(json.dumps(o.body, sort_keys=True))}")
     if o.no_body:
@@ -92,6 +94,8 @@ def go_kind(k: Kind) -> str:
         extra.append(f"mine: true, ownerField: {go_str(k.owner_field)}")
     if k.match:
         extra.append(f"match: {go_str(json.dumps(dict(k.match), sort_keys=True))}")
+    if k.skip:
+        extra.append("skip: [][2]string{" + ", ".join("{" + go_str(a) + ", " + go_str(b) + "}" for a, b in k.skip) + "}")
     lines.append("\t\t" + ", ".join(extra) + ",")
     lines.append(f"\t\tcreate: {go_op(k.create)}, update: {go_op(k.update)}, del: {go_op(k.delete)},")
     lines.append("\t\tfields: []field{")

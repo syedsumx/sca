@@ -352,19 +352,24 @@ class Jobs:
             raise JobError(f"no job {name}", 404)
         return dict(r._mapping)
 
-    def get(self, actor: str, name: str) -> dict:
+    def get(self, actor: str, name: str, source: bool = False) -> dict:
+        """A job; with ``source``, its notebook or script as it was saved (``code`` or ``notebook``), so it can
+        be kept in git (``cairn export``, Terraform)."""
         j = self._get(name)
         if j["owner"] != actor and not self.is_operator(actor):
             raise JobError(f"no job {name}", 404)
-        return {k: v for k, v in j.items() if k != "source"} | {"source_bytes": len(j["source"])}
+        out = {k: v for k, v in j.items() if k != "source"} | {"source_bytes": len(j["source"])}
+        if source:
+            out |= {"code": j["source"]} if j["kind"] == "python" else {"notebook": json.loads(j["source"])}
+        return out
 
-    def list(self, actor: str) -> list[dict]:
+    def list(self, actor: str, source: bool = False) -> list[dict]:
         with self.engine.connect() as conn:
             q = select(jobs.c.name)
             if not self.is_operator(actor):
                 q = q.where(jobs.c.owner == actor)
             names = [r[0] for r in conn.execute(q.order_by(jobs.c.name))]
-        return [self.get(actor, n) for n in names]
+        return [self.get(actor, n, source) for n in names]
 
     def delete(self, actor: str, name: str) -> None:
         j = self._get(name)
@@ -511,16 +516,17 @@ def build_jobs_router(j: Jobs, current_principal) -> Any:
             raise HTTPException(e.status, str(e))
 
     @router.get("")
-    async def list_(p=Depends(current_principal)):
-        return await call(lambda: j.list(p.urn))
+    async def list_(source: bool = False, p=Depends(current_principal)):
+        """The jobs (an operator: everyone's); ``?source=true`` adds each one's notebook or script."""
+        return await call(lambda: j.list(p.urn, source))
 
     @router.post("", status_code=201)
     async def create(body: dict = Body(...), p=Depends(current_principal)):
         return await call(lambda: j.save(p.urn, body))
 
     @router.get("/{name}")
-    async def get(name: str, p=Depends(current_principal)):
-        return await call(lambda: j.get(p.urn, name))
+    async def get(name: str, source: bool = False, p=Depends(current_principal)):
+        return await call(lambda: j.get(p.urn, name, source))
 
     @router.put("/{name}")
     async def change(name: str, body: dict = Body(...), p=Depends(current_principal)):

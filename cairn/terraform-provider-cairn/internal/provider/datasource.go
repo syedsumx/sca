@@ -36,7 +36,7 @@ func (d *kindData) Schema(_ context.Context, _ datasource.SchemaRequest, resp *d
 	look := d.lookupField()
 	by := []string{}
 	for _, f := range d.k.fields {
-		if f.writeOnly {
+		if f.writeOnly || f.once {
 			continue
 		}
 		in := (look != nil && f.name == look.name) || contains(d.k.parents, f.key())
@@ -92,7 +92,11 @@ func (d *kindData) Read(ctx context.Context, req datasource.ReadRequest, resp *d
 	}
 	var found []map[string]any
 	for _, m := range rs {
-		if look == nil || fmt.Sprint(m[look.readKey()]) == want.ValueString() {
+		if look == nil {
+			found = append(found, m)
+			continue
+		}
+		if got, _ := dig(m, look.readKey()); fmt.Sprint(got) == want.ValueString() {
 			found = append(found, m)
 		}
 	}
@@ -121,5 +125,5 @@ func (d *kindData) Read(ctx context.Context, req datasource.ReadRequest, resp *d
 		return
 	}
 	r := &kindResource{k: d.k}
-	resp.Diagnostics.Append(r.store(ctx, found[0], resp.State.SetAttribute, nil)...)
+	resp.Diagnostics.Append(r.store(ctx, found[0], resp.State.SetAttribute, nil, true)...)
 }

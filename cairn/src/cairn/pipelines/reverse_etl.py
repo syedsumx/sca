@@ -231,12 +231,17 @@ class ReverseSyncs:
             r = conn.execute(select(reverse_syncs).where(reverse_syncs.c.name == name)).first()
         if r is None or r.owner != actor:
             raise SaasError(f"no sync {name}", 404)
-        return dict(r._mapping)
+        return self._public(r)
+
+    @staticmethod
+    def _public(r) -> dict:
+        d = dict(r._mapping)
+        return {**d, "key": {"column": d["key_column"], "field": d["key_field"]}}   # as it is given
 
     def list(self, actor: str) -> list[dict]:
         with self.engine.connect() as conn:
-            return [dict(r._mapping) for r in conn.execute(select(reverse_syncs).where(reverse_syncs.c.owner == actor)
-                                                           .order_by(reverse_syncs.c.name))]
+            return [self._public(r) for r in conn.execute(select(reverse_syncs).where(reverse_syncs.c.owner == actor)
+                                                          .order_by(reverse_syncs.c.name))]
 
     def delete(self, actor: str, name: str) -> None:
         s = self.get(actor, name)

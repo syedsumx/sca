@@ -44,6 +44,7 @@ type field struct {
 	sensitive bool
 	writeOnly bool // sent to Cairn, never stored in Terraform's state (secrets); <name>_version sets it again
 	onlySet   bool // a JSON document Cairn always returns: kept in state only when the configuration sets it
+	once      bool // only the create call returns it (a key): kept in state as created
 	def       any  // a static default; nil: null when not given
 	desc      string
 }
@@ -56,7 +57,7 @@ func (f field) key() string {
 	return f.name
 }
 
-// readKey is the field's name in Cairn's records.
+// readKey is the field's name in Cairn's records (dotted: inside a document, e.g. spec.select).
 func (f field) readKey() string {
 	if f.read != "" {
 		return f.read
@@ -64,11 +65,27 @@ func (f field) readKey() string {
 	return f.key()
 }
 
+// dig is a record's field by its dotted name.
+func dig(m map[string]any, name string) (any, bool) {
+	var cur any = m
+	for _, part := range strings.Split(name, ".") {
+		mm, ok := cur.(map[string]any)
+		if !ok {
+			return nil, false
+		}
+		if cur, ok = mm[part]; !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
 // op is one API call: its method, its path template ({id}: Cairn's id, {field}: a field's value) and its body.
 type op struct {
 	method, path string
 	omit, only   []string
-	body         string // fixed values added to the body, as JSON
+	query        []string // fields sent as query parameters
+	body         string   // fixed values added to the body, as JSON
 	noBody       bool
 }
 
@@ -80,7 +97,8 @@ type kind struct {
 	lookup               string // the data source's lookup attribute
 	mine                 bool
 	ownerField           string
-	match                string // only records with these values (JSON) are this kind
+	match                string      // only records with these values (JSON) are this kind
+	skip                 [][2]string // records whose field starts with this are Cairn's own
 	create               *op
 	update, del          *op
 	fields               []field
@@ -209,6 +227,11 @@ func (k kind) records(ctx context.Context, c *client, parents map[string]any) ([
 				keep = false
 			}
 		}
+		for _, s := range k.skip {
+			if strings.HasPrefix(fmt.Sprint(m[s[0]]), s[1]) {
+				keep = false
+			}
+		}
 		if !keep {
 			continue
 		}
@@ -245,7 +268,8 @@ func (k kind) body(o *op, vals map[string]any) map[string]any {
 	out := map[string]any{}
 	for _, f := range k.fields {
 		v, ok := vals[f.key()]
-		if !ok || contains(o.omit, f.key()) || (len(o.only) > 0 && !contains(o.only, f.key())) {
+		if !ok || f.once || contains(o.omit, f.key()) || contains(o.query, f.key()) ||
+			(len(o.only) > 0 && !contains(o.only, f.key())) {
 			continue
 		}
 		out[f.key()] = v
@@ -273,6 +297,15 @@ func (k kind) send(ctx context.Context, c *client, o *op, vals map[string]any, i
 	p, err := expand(o.path, vals, id)
 	if err != nil {
 		return nil, err
+	}
+	q := url.Values{}
+	for _, name := range o.query {
+		if v, ok := vals[name]; ok && v != nil {
+			q.Set(name, fmt.Sprint(v))
+		}
+	}
+	if len(q) > 0 {
+		p += "?" + q.Encode()
 	}
 	b := k.body(o, vals)
 	if b == nil {
@@ -465,7 +498,7 @@ type setter func(context.Context, path.Path, any) diag.Diagnostics
 
 // store writes what Cairn returned into the state. “prior“ is the plan (or the state being refreshed):
 // a JSON document Cairn holds everything of is kept as written, so Cairn's own additions are not drift.
-func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter, prior getter) diag.Diagnostics {
+func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter, prior getter, imported bool) diag.Diagnostics {
 	var diags diag.Diagnostics
 	diags.Append(set(ctx, path.Root("id"), types.StringValue(r.k.tfID(obj)))...)
 	for _, f := range r.k.fields {
@@ -478,7 +511,16 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			}
 			continue
 		}
-		v, present := obj[f.readKey()]
+		v, present := dig(obj, f.readKey())
+		if f.once && prior == nil {
+			continue // a data source does not show it
+		}
+		if f.once && !present {
+			var was types.String
+			prior(ctx, p, &was)
+			diags.Append(set(ctx, p, was)...)
+			continue
+		}
 		switch f.typ {
 		case "string":
 			if s, ok := v.(string); ok && present {
@@ -511,7 +553,8 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			if prior != nil {
 				var was types.String
 				prior(ctx, p, &was)
-				if f.onlySet && (was.IsNull() || was.IsUnknown()) {
+				if f.onlySet && (was.IsNull() || was.IsUnknown()) && !imported {
+					// not declared: Cairn's own value is not drift (an import takes what is there)
 					diags.Append(set(ctx, p, types.StringNull())...)
 					continue
 				}
@@ -524,6 +567,10 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			b, _ := json.Marshal(v)
 			diags.Append(set(ctx, p, types.StringValue(string(b)))...)
 		case "list":
+			if v == nil && f.def == nil && !f.computed {
+				diags.Append(set(ctx, p, types.ListNull(types.StringType))...)
+				continue
+			}
 			vals := []attr.Value{}
 			if xs, ok := v.([]any); ok {
 				for _, x := range xs {
@@ -603,10 +650,20 @@ func (r *kindResource) created(ctx context.Context, res any, vals map[string]any
 	if m, ok := res.(map[string]any); ok && m[r.k.idKey] != nil && fmt.Sprint(m[r.k.idKey]) != "" {
 		id = fmt.Sprint(m[r.k.idKey])
 	}
+	once := func(obj map[string]any) map[string]any {
+		if m, ok := res.(map[string]any); ok && obj != nil {
+			for _, f := range r.k.fields {
+				if v, given := m[f.key()]; f.once && given {
+					obj[f.key()] = v // only the create answer has it
+				}
+			}
+		}
+		return obj
+	}
 	if r.k.singleton() || id != "" {
 		obj, err := r.k.find(ctx, r.c, parents, id)
 		if err != nil || obj != nil {
-			return obj, err
+			return once(obj), err
 		}
 	}
 	rs, err := r.k.records(ctx, r.c, parents)
@@ -617,12 +674,13 @@ func (r *kindResource) created(ctx context.Context, res any, vals map[string]any
 		same := true
 		for _, key := range r.k.key {
 			f := r.k.fieldByAPI(key)
-			if f == nil || fmt.Sprint(m[f.readKey()]) != fmt.Sprint(vals[key]) {
+			got, _ := dig(m, f.readKey())
+			if fmt.Sprint(got) != fmt.Sprint(vals[key]) {
 				same = false
 			}
 		}
 		if same {
-			return m, nil
+			return once(m), nil
 		}
 	}
 	return nil, errors.New("created, but Cairn does not list it")
@@ -643,7 +701,7 @@ func (r *kindResource) Create(ctx context.Context, req resource.CreateRequest, r
 		var obj map[string]any
 		obj, err = r.created(ctx, res, vals)
 		if err == nil {
-			resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute)...)
+			resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute, false)...)
 			return
 		}
 	}
@@ -665,7 +723,7 @@ func (r *kindResource) Read(ctx context.Context, req resource.ReadRequest, resp 
 				resp.State.RemoveResource(ctx) // deleted outside Terraform: it will be created again
 				return
 			}
-			resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.State.GetAttribute)...)
+			resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.State.GetAttribute, r.imported(ctx, req.State.GetAttribute))...)
 			return
 		}
 	}
@@ -695,7 +753,7 @@ func (r *kindResource) Update(ctx context.Context, req resource.UpdateRequest, r
 				if obj == nil {
 					err = errors.New("changed, but Cairn no longer lists it")
 				} else {
-					resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute)...)
+					resp.Diagnostics.Append(r.store(ctx, obj, resp.State.SetAttribute, req.Plan.GetAttribute, false)...)
 					return
 				}
 			}
@@ -726,6 +784,41 @@ func (r *kindResource) Delete(ctx context.Context, req resource.DeleteRequest, r
 	if err != nil && !(errors.As(err, &ae) && ae.status == 404) {
 		resp.Diagnostics.AddError("cairn: delete "+r.k.typeName, err.Error())
 	}
+}
+
+// imported: the state holds only an id (just imported), so what Cairn holds is taken as declared. A required
+// attribute is never null in a state Terraform wrote.
+func (r *kindResource) imported(ctx context.Context, state getter) bool {
+	for _, f := range r.k.fields {
+		if !f.required || f.writeOnly {
+			continue
+		}
+		var v attr.Value
+		switch f.typ {
+		case "string", "json":
+			var x types.String
+			state(ctx, path.Root(f.name), &x)
+			v = x
+		case "bool":
+			var x types.Bool
+			state(ctx, path.Root(f.name), &x)
+			v = x
+		case "int":
+			var x types.Int64
+			state(ctx, path.Root(f.name), &x)
+			v = x
+		case "float":
+			var x types.Float64
+			state(ctx, path.Root(f.name), &x)
+			v = x
+		case "list":
+			var x types.List
+			state(ctx, path.Root(f.name), &x)
+			v = x
+		}
+		return v == nil || v.IsNull()
+	}
+	return false
 }
 
 func (r *kindResource) ImportState(ctx context.Context, req resource.ImportStateRequest, resp *resource.ImportStateResponse) {

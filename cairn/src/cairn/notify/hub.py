@@ -18,6 +18,7 @@ import hmac
 import json
 import logging
 import re
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -155,6 +156,7 @@ class NotificationHub:
         self.owners = owners or (lambda urn: [])
         self.domains_of = domains_of or (lambda urn: [])
         self.action_handlers: dict[str, ActionHandler] = {}
+        self._routes_lock = threading.Lock()
         self.channels: dict[str, Any] = {}   # channel name → sender (see channels.py)
         # Routes owned by something else (installed extensions); not editable through the routes API.
         self.route_providers: list[Callable[[], list[Route]]] = []
@@ -204,6 +206,22 @@ class NotificationHub:
     def list_routes(self) -> list[Route]:
         with self.engine.connect() as conn:
             return [Route.model_validate(r.doc) for r in conn.execute(select(notify_routes))]
+
+    def put_route(self, route: Route) -> Route:
+        """Adds or replaces one route, the others as they are (one route at a time, as Terraform manages them)."""
+        with self._routes_lock:
+            others = [r for r in self.list_routes() if r.id != route.id]
+            self.put_routes([*others, route])
+        return route
+
+    def delete_route(self, route_id: str) -> bool:
+        with self._routes_lock:
+            routes = self.list_routes()
+            keep = [r for r in routes if r.id != route_id]
+            if len(keep) == len(routes):
+                return False
+            self.put_routes(keep)
+        return True
 
     def put_routes(self, routes: list[Route]) -> list[Route]:
         from cairn.notify.channels import teams_webhook_allowed

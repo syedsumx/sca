@@ -498,6 +498,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.iac.state import build_bundles_router
 
         app.include_router(build_bundles_router(services.bundle_state, cp, authz))
+    from cairn.iac.api import build_iac_router   # the resource registry, inventory and export (as the caller)
+
+    app.include_router(build_iac_router(cp))
     if services.derived is not None:
         from cairn.pipelines.derived import build_derived_router
 

@@ -5,7 +5,7 @@ templates, ids and bodies for bundles, ``cairn export`` and ``GET /v1/iac/export
 from __future__ import annotations
 
 from typing import Any, Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from cairn.iac.registry import PLACEHOLDER, Kind, Op
 
@@ -33,11 +33,30 @@ def expand(tmpl: str, values: dict, ident: Optional[str] = None) -> str:
     return PLACEHOLDER.sub(one, tmpl)
 
 
+def dig(rec: dict, name: str) -> tuple[bool, Any]:
+    """A record's field by its (dotted) name: (present, value)."""
+    cur: Any = rec
+    for part in name.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return False, None
+        cur = cur[part]
+    return True, cur
+
+
+def path_of(k: Kind, o: Op, values: dict, ident: Optional[str]) -> str:
+    """The op's path, with its query parameters."""
+    p = expand(o.path, values, ident)
+    q = {n: ("true" if values[n] is True else "false" if values[n] is False else str(values[n]))
+         for n in o.query if values.get(n) is not None}
+    return p + ("?" + urlencode(q) if q else "")
+
+
 def body(k: Kind, o: Op, values: dict) -> Optional[dict]:
     if o.no_body:
         return None
-    names = [f.name for f in k.fields] + list(k.bundle_fields)
-    out ={n: values[n] for n in names if n in values and n not in o.omit and (not o.only or n in o.only)}
+    names = [f.name for f in k.fields if not f.once] + list(k.bundle_fields)
+    out = {n: values[n] for n in names
+           if n in values and n not in o.omit and n not in o.query and (not o.only or n in o.only)}
     if o.body:
         out.update(o.body)
     return out
@@ -71,11 +90,16 @@ def declared(k: Kind, rec: dict) -> dict:
     """A record as its fields (Cairn's names for them), without what Cairn adds."""
     out = {}
     for f in k.fields:
-        if f.write_only:
+        if f.write_only or f.once:
             continue
-        if f.read_name in rec:
-            out[f.name] = rec[f.read_name]
+        present, v = dig(rec, f.read_name)
+        if present:
+            out[f.name] = v
     return out
+
+
+def key_values(k: Kind, rec: dict) -> list[str]:
+    return [str(dig(rec, k.field(f).read_name)[1]) for f in k.key]
 
 
 class Engine:
@@ -95,7 +119,7 @@ class Engine:
             items = [x for x in (res or []) if isinstance(x, dict)]
         out = []
         for r in items:
-            if all(r.get(a) == b for a, b in k.match):
+            if all(r.get(a) == b for a, b in k.match) and not any(str(r.get(a, "")).startswith(b) for a, b in k.skip):
                 out.append({**r, **{p: parents[p] for p in k.parents}})
         return out
 
@@ -132,7 +156,7 @@ class Engine:
     # ---- writing ------------------------------------------------------------------------------------------------
     def create(self, k: Kind, values: dict) -> dict:
         ident = values.get(k.id) if k.id in values else None
-        res = self.call(k.create.method, expand(k.create.path, values, None if ident is None else str(ident)),
+        res = self.call(k.create.method, path_of(k, k.create, values, None if ident is None else str(ident)),
                         body(k, k.create, values))
         parents = {p: values[p] for p in k.parents}
         if isinstance(res, dict) and res.get(k.id) not in (None, ""):
@@ -144,7 +168,7 @@ class Engine:
             if found is not None:
                 return found
         for r in self.records(k, parents):                 # known by its key instead
-            if all(str(r.get(k.field(f).read_name)) == str(values.get(f)) for f in k.key):
+            if key_values(k, r) == [str(values.get(f)) for f in k.key]:
                 return r
         raise EngineError(f"{k.name}: created, but Cairn does not list it")
 
@@ -153,11 +177,11 @@ class Engine:
             raise EngineError(f"{k.name}: created once; a change replaces it")
         ident = record_id(k, rec)
         values = {**{p: rec.get(p) for p in k.parents}, **values}
-        self.call(k.update.method, expand(k.update.path, values, ident), body(k, k.update, values))
+        self.call(k.update.method, path_of(k, k.update, values, ident), body(k, k.update, values))
         return self.find(k, {p: values[p] for p in k.parents}, ident) or {}
 
     def delete(self, k: Kind, rec: dict) -> None:
         if k.delete is None:
             return
         values = {**rec, **{p: rec.get(p) for p in k.parents}}
-        self.call(k.delete.method, expand(k.delete.path, values, record_id(k, rec)), body(k, k.delete, values))
+        self.call(k.delete.method, path_of(k, k.delete, values, record_id(k, rec)), body(k, k.delete, values))

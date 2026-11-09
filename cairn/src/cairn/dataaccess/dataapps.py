@@ -472,8 +472,13 @@ def build_apps_router(apps: DataApps, services) -> Any:
             raise HTTPException(e.status, str(e))
 
     @router.get("/v1/apps")
-    def list_apps(p=Depends(principal)):
-        hidden = ("command", "git", "image", "workdir", "chat")          # how it runs is the operators' business
+    def list_apps(config: bool = False, p=Depends(principal)):
+        """The apps the caller may use; ``?config=true`` (operators): how each runs too, as it is declared (for
+        ``cairn export`` and Terraform)."""
+        if config:
+            services.authorize(p, "MANAGE_SYSTEM_OPERATIONS", None)
+            return apps.list()
+        hidden =("command", "git", "image", "workdir", "chat")          # how it runs is the operators' business
         return [{**{k: v for k, v in a.items() if k not in hidden}, "chat": bool(a.get("chat")),
                  "description": (a.get("chat") or {}).get("description") or ""}
                 for a in apps.list() if may_use(p, a["name"])]

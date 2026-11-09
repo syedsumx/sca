@@ -257,6 +257,13 @@ def cmd_bundle(a) -> None:
     raise SystemExit(main(a))
 
 
+def cmd_export(a) -> None:
+    """A live Cairn as code: Terraform (resources and import blocks) or a bundle, secrets as variables."""
+    from cairn.iac.export import main
+
+    raise SystemExit(main(a))
+
+
 def cmd_streams(a) -> None:
     """Kafka topics into lakehouse tables: one worker per enabled stream; replicas share the partitions."""
     from cairn.common.metrics import serve_worker_metrics
@@ -878,6 +885,15 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
     bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")
     bd.set_defaults(fn=cmd_bundle)
+
+    ex = sub.add_parser("export", help="write a live Cairn as code: Terraform with import blocks, or a bundle")
+    ex.add_argument("--format", choices=["terraform", "yaml"], default="terraform")
+    ex.add_argument("--kind", action="append", help="only this resource type (a bundle section or Terraform type); "
+                    "repeat for more")
+    ex.add_argument("--bundle", default="exported", help="the bundle's name (--format yaml)")
+    ex.add_argument("--out", help="the file to write (default: standard output)")
+    ex.add_argument("--url", help="Cairn's API (default CAIRN_URL)")
+    ex.set_defaults(fn=cmd_export, token=None)
 
     dr = sub.add_parser("dr", help="disaster recovery: after failing over, make every lakehouse table readable")
     dr_sub = dr.add_subparsers(dest="dr_cmd", required=True)
