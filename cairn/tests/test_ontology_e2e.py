@@ -147,6 +147,9 @@ def sub(who):
 
 @pytest.fixture(scope="module")
 def provider():
+    # Provider.seen is shared with every test of this process that uses the gateway's stand-in provider (the
+    # trino job runs them all in one pytest), so this module looks only at the requests made while it runs.
+    Provider.seen.clear()
     up = http.server.ThreadingHTTPServer(("127.0.0.1", 0), OntologyProvider)
     threading.Thread(target=up.serve_forever, daemon=True).start()
     d = tempfile.mkdtemp(prefix="onto-")
