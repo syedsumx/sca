@@ -1,29 +1,61 @@
 {
   "name": "cairn-desktop",
   "productName": "Cairn",
-  "version": "0.1.0",
-  "description": "Cairn's workspace as a desktop app: deep links (cairn://) and the OS's notifications.",
+  "version": "1.0.0",
+  "description": "Cairn Desktop: your Cairn workspaces in one app, with the command line, notifications, deep links and offline reading.",
   "private": true,
   "main": "src/main.js",
   "license": "Apache-2.0",
+  "author": "Cairn",
+  "homepage": "https://github.com/syedsumx/sca",
   "scripts": {
     "start": "electron .",
     "test": "node --test test/*.test.js",
     "dist": "electron-builder"
   },
+  "dependencies": {
+    "electron-updater": "6.8.11"
+  },
   "devDependencies": {
-    "electron": "33.2.1",
-    "electron-builder": "25.1.8"
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0",
+    "playwright-core": "1.64.1"
   },
   "build": {
     "appId": "com.cairn.desktop",
     "productName": "Cairn",
-    "files": ["src/**/*", "package.json"],
+    "copyright": "Cairn contributors",
+    "files": ["src/**/*", "package.json", "!test{,/**/*}"],
     "directories": { "output": "dist", "buildResources": "build" },
+    "extraResources": [{ "from": "resources/cli", "to": "cli", "filter": ["cairn", "cairn.exe"] }],
+    "asar": true,
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true
+    },
     "protocols": [{ "name": "Cairn", "schemes": ["cairn"] }],
-    "mac": { "category": "public.app-category.business", "target": ["dmg", "zip"] },
-    "win": { "target": ["nsis"] },
-    "nsis": { "oneClick": false, "perMachine": false },
-    "linux": { "target": ["AppImage", "deb"], "category": "Office", "mimeTypes": ["x-scheme-handler/cairn"] }
+    "publish": [{ "provider": "generic", "url": "https://github.com/syedsumx/sca/releases/download/desktop-latest" }],
+    "artifactName": "Cairn-${version}-${os}-${arch}.${ext}",
+    "mac": {
+      "category": "public.app-category.business",
+      "target": [{ "target": "dmg", "arch": ["arm64", "x64"] }, { "target": "zip", "arch": ["arm64", "x64"] }],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "notarize": false
+    },
+    "win": { "target": [{ "target": "nsis", "arch": ["x64"] }] },
+    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true },
+    "linux": {
+      "target": [{ "target": "AppImage", "arch": ["x64"] }, { "target": "deb", "arch": ["x64"] }],
+      "category": "Office",
+      "mimeTypes": ["x-scheme-handler/cairn"],
+      "maintainer": "Cairn <desktop@cairn.invalid>"
+    }
   }
 }

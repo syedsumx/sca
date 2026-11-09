@@ -517,6 +517,18 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pwa_e2e.py | tee "$RUNNER_TEMP/pwa.log"
           ! grep -q "skipped" "$RUNNER_TEMP/a11y.log"
+      - name: Cairn Desktop end to end (the real Electron app under xvfb with GNOME Keyring, two Cairns, the CLI binary)
+        run: |
+          set -o pipefail
+          sudo apt-get update -q && sudo apt-get install -y -q xvfb dbus gnome-keyring >/dev/null
+          (cd desktop && npm ci --no-audit --no-fund)
+          python -m venv "$RUNNER_TEMP/desktop-cli"
+          "$RUNNER_TEMP/desktop-cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
+          "$RUNNER_TEMP/desktop-cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/desktop-cli-dist" \
+            --workpath "$RUNNER_TEMP/desktop-cli-build" cli/cairn.spec
+          CAIRN_CLI_BIN="$RUNNER_TEMP/desktop-cli-dist/cairn" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_desktop_policy.py tests/test_desktop_e2e.py | tee "$RUNNER_TEMP/desktop.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/desktop.log"
 
   pipelines:
     runs-on: ubuntu-latest
@@ -728,7 +740,7 @@ jobs:
         run: npm test && node build.mjs --cairn-url https://cairn.example.com
       - name: Cairn Desktop (main process against a stand-in, then the real Electron app under xvfb)
         working-directory: cairn/desktop
-        run: npm test && npm install --no-audit --no-fund && npm test
+        run: npm test && npm ci --no-audit --no-fund && xvfb-run -a npm test
       - name: Spreadsheet add-ins (unit; the live tests run in the python job, tests/test_spreadsheet_addins.py)
         working-directory: cairn/addins
         run: npm test && node build.mjs --cairn-url https://cairn.example.com --addin-url https://addins.example.com

@@ -1,0 +1,222 @@
+# Cairn Desktop's installers: macOS (dmg and zip, Apple silicon and Intel), Windows (NSIS) and Linux (AppImage and
+# deb), each with the platform's `cairn` command line inside (built first with PyInstaller from cli/cairn.spec, as the
+# CLI's own release does). Every build is smoke-tested: the packaged app opens a stand-in Cairn and follows a deep
+# link (under xvfb on Linux), and the CLI inside runs --version. Artifacts are uploaded on every run; a `desktop-v*`
+# tag publishes a GitHub release (desktop-v1.2.0 releases 1.2.0) with SHA256SUMS and electron-updater's latest*.yml,
+# and refreshes the rolling `desktop-latest` release the app updates from.
+#
+# Signing is off until its secrets exist; adding them turns it on (docs/site/desktop.md, "Signing"):
+#   macOS:   APPLE_CERTIFICATE_P12 (base64 of a "Developer ID Application" .p12) and APPLE_CERTIFICATE_PASSWORD sign the
+#            app (hardened runtime, build/entitlements.mac*.plist) and the CLI inside; APPLE_NOTARY_KEY (an App Store
+#            Connect API key, .p8 text), APPLE_NOTARY_KEY_ID and APPLE_NOTARY_ISSUER notarize it.
+#   Windows: WINDOWS_CERT (base64 of a code-signing .pfx) and WINDOWS_CERT_PASSWORD sign the installer, the app and
+#            cairn.exe.
+# A signed macOS build installs its updates itself; unsigned, it only says one is out and links to the download.
+name: cairn-desktop-release
+
+on:
+  push:
+    tags: ["desktop-v*"]
+    branches: ["**"]
+    paths:
+      - "cairn/desktop/**"
+      - "cairn/src/cairn_cli/**"
+      - "cairn/cli/**"
+      - ".github/workflows/cairn-desktop-release.yml"
+  pull_request:
+    paths:
+      - "cairn/desktop/**"
+      - ".github/workflows/cairn-desktop-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14, platform: macos-arm64, builder: "--mac --arm64", unpacked: "dist/mac-arm64/Cairn.app/Contents/MacOS/Cairn", cli: "dist/mac-arm64/Cairn.app/Contents/Resources/cli/cairn" }
+          - { os: macos-15-intel, platform: macos-x64, builder: "--mac --x64", unpacked: "dist/mac/Cairn.app/Contents/MacOS/Cairn", cli: "dist/mac/Cairn.app/Contents/Resources/cli/cairn" }
+          - { os: windows-latest, platform: windows-x64, builder: "--win --x64", unpacked: "dist/win-unpacked/Cairn.exe", cli: "dist/win-unpacked/resources/cli/cairn.exe" }
+          - { os: ubuntu-latest, platform: linux-x64, builder: "--linux --x64", unpacked: "dist/linux-unpacked/cairn-desktop", cli: "dist/linux-unpacked/resources/cli/cairn" }
+    runs-on: ${{ matrix.os }}
+    env:
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      WINDOWS_CERT: ${{ secrets.WINDOWS_CERT }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: cairn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: cairn/desktop/package-lock.json
+      - name: The release's version (a desktop-v* tag)
+        if: startsWith(github.ref, 'refs/tags/desktop-v')
+        working-directory: cairn/desktop
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#desktop-v}"
+
+      # ---- the command line inside the app ------------------------------------------------------------------
+      - name: Build the cairn command line (PyInstaller, client dependencies only)
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q ./cli "pyinstaller==6.22.3"
+          pyinstaller --clean --noconfirm cli/cairn.spec
+          mkdir -p desktop/resources/cli
+          if [ "$RUNNER_OS" = "Windows" ]; then cp dist/cairn.exe desktop/resources/cli/; else cp dist/cairn desktop/resources/cli/; fi
+          ls -la desktop/resources/cli
+
+      # ---- signing material, only when its secrets are set --------------------------------------------------
+      - name: Signing (macOS, when its secrets are set)
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        env:
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          umask 077
+          # electron-builder reads these (CSC_LINK takes the base64 .p12); the values stay in the environment file.
+          {
+            echo "CSC_LINK=$APPLE_CERTIFICATE_P12"
+            echo "CSC_KEY_PASSWORD=$APPLE_CERTIFICATE_PASSWORD"
+            echo "CAIRN_SIGNED=true"
+          } >> "$GITHUB_ENV"
+          if [ -n "$APPLE_NOTARY_KEY_ID" ]; then
+            key="$RUNNER_TEMP/notary.p8"
+            printf '%s' "$APPLE_NOTARY_KEY" > "$key"
+            { echo "APPLE_API_KEY=$key"; echo "APPLE_API_KEY_ID=$APPLE_NOTARY_KEY_ID"; echo "APPLE_API_ISSUER=$APPLE_NOTARY_ISSUER"
+              echo "CAIRN_NOTARIZE=true"; } >> "$GITHUB_ENV"
+          fi
+      - name: Signing (Windows, when its secrets are set)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT != ''
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          { echo "WIN_CSC_LINK=$WINDOWS_CERT"; echo "WIN_CSC_KEY_PASSWORD=$WINDOWS_CERT_PASSWORD"; echo "CAIRN_SIGNED=true"; } >> "$GITHUB_ENV"
+
+      # ---- the installers -----------------------------------------------------------------------------------
+      - name: Install
+        working-directory: cairn/desktop
+        run: npm ci --no-audit --no-fund
+      - name: Unit tests
+        working-directory: cairn/desktop
+        run: npm test
+      - name: Build the installers
+        working-directory: cairn/desktop
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          extra=(-c.publish.url="https://github.com/$GITHUB_REPOSITORY/releases/download/desktop-latest")
+          if [ "${CAIRN_SIGNED:-}" = "true" ]; then
+            extra+=(-c.extraMetadata.cairnSigned=true)
+          else
+            export CSC_IDENTITY_AUTO_DISCOVERY=false        # unsigned: no identity is looked for
+            [ "$RUNNER_OS" = "macOS" ] && extra+=(-c.mac.identity=null)
+          fi
+          [ "${CAIRN_NOTARIZE:-}" = "true" ] && extra+=(-c.mac.notarize=true)
+          npx electron-builder ${{ matrix.builder }} --publish never "${extra[@]}"
+          ls -la dist
+      - name: Remove the notary key
+        if: always() && runner.os == 'macOS'
+        run: rm -f "$RUNNER_TEMP/notary.p8"
+
+      # ---- smoke tests of what was built --------------------------------------------------------------------
+      - name: The command line inside runs
+        working-directory: cairn/desktop
+        run: |
+          "${{ matrix.cli }}" --version
+          "${{ matrix.cli }}" login --help | grep -q -- --token-stdin
+      - name: Virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
+      - name: The packaged app opens a Cairn and follows a deep link
+        working-directory: cairn/desktop
+        env:
+          CAIRN_DESKTOP_APP: ${{ github.workspace }}/cairn/desktop/${{ matrix.unpacked }}
+        run: node --test test/electron.smoke.test.js
+      - name: The AppImage itself starts (Linux)
+        if: runner.os == 'Linux'
+        working-directory: cairn/desktop
+        run: |
+          app=$(ls dist/*.AppImage)
+          chmod +x "$app"
+          APPIMAGE_EXTRACT_AND_RUN=1 CAIRN_DESKTOP_APP="$PWD/$app" node --test test/electron.smoke.test.js
+          dpkg-deb --info dist/*.deb | grep -q "Package: cairn-desktop"
+      - name: Verify the signature (when signed)
+        if: env.CAIRN_SIGNED == 'true'
+        working-directory: cairn/desktop
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            codesign --verify --deep --strict --verbose=2 "$(dirname "$(dirname "$(dirname "${{ matrix.unpacked }}")")")"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh -Command "if ((Get-AuthenticodeSignature (Get-ChildItem dist/*.exe)[0]).Status -ne 'Valid') { exit 1 }"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cairn-desktop-${{ matrix.platform }}
+          path: |
+            cairn/desktop/dist/*.dmg
+            cairn/desktop/dist/*.zip
+            cairn/desktop/dist/*.exe
+            cairn/desktop/dist/*.AppImage
+            cairn/desktop/dist/*.deb
+            cairn/desktop/dist/*.blockmap
+            cairn/desktop/dist/latest*.yml
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    needs: [build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: per-platform
+      - name: Merge the macOS update files, then checksums
+        run: |
+          python3 -m pip install -q pyyaml
+          mkdir -p out
+          # Each build wrote its own latest*.yml; macOS's two (arm64, x64) become one listing both.
+          for d in per-platform/*/; do
+            for f in "$d"*; do case "$f" in *latest-mac.yml) cp "$f" "out/$(basename "$d").latest-mac.yml" ;; *) cp "$f" out/ ;; esac; done
+          done
+          python3 - <<'EOF'
+          import glob, os, yaml
+          docs = [yaml.safe_load(open(f)) for f in sorted(glob.glob("out/*.latest-mac.yml"))]
+          if docs:
+              merged = dict(docs[0])
+              merged["files"] = [f for d in docs for f in d["files"]]
+              with open("out/latest-mac.yml", "w") as fh:
+                  yaml.safe_dump(merged, fh, sort_keys=False)
+          for f in glob.glob("out/*.latest-mac.yml"):
+              os.remove(f)
+          EOF
+          cd out
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+      - name: Publish the release, and the rolling desktop-latest the app updates from
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#desktop-v}"
+          cd out
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "Cairn Desktop $version" \
+            --notes "Cairn Desktop $version. Install: docs/site/desktop.md. Verify a download with SHA256SUMS." -- *
+          gh release delete desktop-latest --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create desktop-latest --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+            --title "Cairn Desktop (latest: $version)" \
+            --notes "The update feed of Cairn Desktop (electron-updater reads latest*.yml here). This is $version." -- *

@@ -1084,10 +1084,40 @@ worker fetches the newest unread notification from Cairn with the person's own s
 the push service reports gone (404, 410) are deleted; ten devices per person are kept. Without a key, push is off
 and the channel cannot be turned on.
 
-**Cairn Desktop** (`cairn/desktop`, Electron, outside the main build): one window on `/cairn-ui/app.html` of the
-configured Cairn (`--cairn-url`, `CAIRN_URL`, or a setup page), `cairn://open/<section>/…` deep links, the OS's
-notifications (only Cairn's origin may ask), other links in the default browser, no Node.js in pages. Build the
-installers with `npm install && npm run dist` there; see its README for signing and roll-out.
+**Cairn Desktop** (`cairn/desktop`, Electron; the [Cairn Desktop](desktop.html) page is for the people who use it):
+Cairn's web workspace in an app, with several workspaces (the command line's profiles, the same `config.toml`), each
+in its own browser session; sign-in is Cairn's usual one in the app's window; "Sign in the command line too" runs the
+bundled `cairn login` and approves its device code with the person's session (the device flow below; the CLI keeps
+its tokens in the OS keychain, the app never holds them); OS notifications from the person's inbox and the pages;
+`cairn://<workspace>/<page>` links; a tray icon with the unread count; and the dashboards and reports a person opened,
+kept encrypted with the OS keychain for reading while Cairn cannot be reached. Installers (dmg and zip, NSIS,
+AppImage and deb, with the CLI inside) come from the `cairn-desktop-release` workflow on a `desktop-v*` tag; updates
+come from the rolling `desktop-latest` release (electron-updater, checked against the SHA-512 in `latest*.yml`).
+
+**Workspace settings for Cairn Desktop** (`GET /v1/desktop/policy` for any signed-in person, which the app reads with
+their session; `GET` and `PUT /admin/desktop/policy` with `MANAGE_GLOBAL_SETTINGS`; each change audited as
+`desktop.policy_changed`; stored in `cairn_agent_settings` under the key `desktop`, no migration). A `PUT` states the
+whole policy (what it leaves out goes back to its default); unknown or invalid settings are refused (422):
+
+| Setting | Default | What it does |
+|---|---|---|
+| `offline_cache` | `true` | `false`: the app keeps nothing of this Cairn for offline reading, and deletes what it kept when it next connects |
+| `offline_cache_pages` | `20` | at most this many pages kept per person (1-100) |
+| `offline_cache_max_age_days` | `14` | kept pages are deleted after this many days (1-90) |
+| `updates` | `"auto"` | `"notify"`: the app only says an update is out; `"off"`: it never checks (app-wide: the strictest workspace wins) |
+| `pinned_version` | none | the app does not update past this version (`"1.4.2"`; the lowest pin among workspaces wins) |
+| `update_feed_url` | none | an https folder with a release's files (electron-updater's generic feed), instead of GitHub Releases |
+| `sign_in_origins` | `[]` | https origins of the identity provider the app's window may show during sign-in, besides the redirects it follows |
+
+```
+curl -X PUT https://cairn.example.com/cairn/api/admin/desktop/policy -H "Authorization: Bearer $(cat token)" \
+     -H 'Content-Type: application/json' -d '{"offline_cache": false, "updates": "notify"}'
+```
+
+The app fails closed: until it has read a workspace's settings it keeps nothing offline. A computer's policy file
+(`/etc/cairn/desktop-policy.json`, `/Library/Application Support/Cairn/desktop-policy.json`,
+`%ProgramData%\Cairn\desktop-policy.json`) sets the same things for IT, plus workspaces to add and the Cairns
+allowed; the strictest of the file, the workspaces and the person wins.
 
 Tested end to end: the profile API through a real Cairn API server over HTTP, with the assistant's chat and a CoWork
 task whose research saw the profile (the model is a scripted stand-in), and web push against a stand-in push service
@@ -1095,9 +1125,15 @@ that verified each VAPID signature (`tests/test_profiles.py`); the built UI in C
 (`tests/test_pwa_e2e.py`): the manifest and its icons, the service worker registered and controlling the page with
 only the shell cached, the offline page when Cairn is unreachable, the Profile page saved through the API and read
 back, the main pages at phone width without sideways scrolling, the drawer, and axe on the Profile page at phone
-width. Cairn Desktop's main process is tested against a stand-in for Electron, and with Electron installed, the real
-app opened a Cairn and followed a deep link from a second launch (`desktop/test`). Not tested end to end: a real
-browser vendor's push service (a browser's subscription needs it), and the installers on Windows and macOS.
+width. Cairn Desktop: the real app under a virtual display, with GNOME Keyring as the OS keychain, against two real
+Cairns and the CLI's PyInstaller binary (`tests/test_desktop_e2e.py`): adding a workspace (seen by `cairn profiles
+list`), signing in with a session, two workspaces with separate cookie jars, deep links, a page's and an inbox
+notification, links elsewhere opening in the browser, "Sign in the command line too" ending with `cairn whoami` as the
+person from the keychain, a dashboard kept encrypted and read offline after Cairn stopped, cleared on sign-out, and an
+administrator's `offline_cache: false` honoured; the settings API itself in `tests/test_desktop_policy.py`; unit tests
+in `desktop/test`; a Linux build (unpacked and AppImage) smoke-tested, and an AppImage updating itself from a local
+feed (and not past a pinned version). Not tested end to end: a real browser vendor's push service (a browser's
+subscription needs it), and the macOS and Windows installers (built only on GitHub's runners).
 
 ## The command line: `cairn login` and people's commands
 

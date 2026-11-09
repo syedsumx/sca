@@ -1,0 +1,59 @@
+:root {
+    --fg: #1d2330; --muted: #5b6475; --line: #d9dee7; --bg: #ffffff; --bar: #f5f7fa; --accent: #1f40a6;
+    --accent-fg: #ffffff; --warn: #8a5300; --error: #a4262c; --ok: #1d6b3a; --chip: #e8ecf4;
+    color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+    :root { --fg: #e6e9ef; --muted: #a3abba; --line: #343a46; --bg: #16191f; --bar: #1d2129; --accent: #7d9bff;
+            --accent-fg: #0d1020; --warn: #f0b35a; --error: #ff8a8f; --ok: #6ccf91; --chip: #2a303b; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body { font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color: var(--fg); background: var(--bg); }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, input:focus-visible, a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.primary { background: var(--accent); color: var(--accent-fg); border: 0; border-radius: 6px; padding: 7px 16px; }
+.secondary { background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 6px 14px; }
+.muted { color: var(--muted); }
+.error { color: var(--error); min-height: 1.45em; }
+
+/* the top bar */
+body.bar { background: var(--bar); border-bottom: 1px solid var(--line); overflow: hidden; user-select: none; }
+.bar header { display: flex; align-items: center; gap: 10px; height: 43px; padding: 0 10px; white-space: nowrap; }
+#switcher { display: flex; align-items: center; gap: 8px; background: transparent; border: 1px solid transparent;
+            border-radius: 6px; padding: 4px 8px; font-weight: 600; max-width: 40vw; overflow: hidden; text-overflow: ellipsis; }
+#switcher:hover { border-color: var(--line); }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.online { background: var(--ok); }
+.dot.offline { background: var(--error); }
+.chip { background: var(--chip); border-radius: 10px; padding: 1px 9px; font-size: 12px; }
+.chip.offline { color: var(--error); }
+.chip.signin { color: var(--warn); }
+.spacer { flex: 1; }
+#toast { overflow: hidden; text-overflow: ellipsis; max-width: 50vw; font-size: 13px; }
+#toast.error { color: var(--error); } #toast.warning { color: var(--warn); } #toast.success { color: var(--ok); }
+#unread:empty { display: none; }
+#unread { background: var(--accent); color: var(--accent-fg); border-radius: 10px; padding: 0 7px; font-size: 12px; font-weight: 600; }
+#ask { background: transparent; border: 1px solid var(--line); border-radius: 6px; padding: 4px 10px; }
+
+/* the panel */
+.panel main { max-width: 640px; margin: 8vh auto; padding: 0 20px 40px; }
+.panel h1 { font-size: 22px; margin: 0 0 6px; }
+.panel label { display: block; font-weight: 600; margin: 14px 0 4px; }
+.panel input[type=url], .panel input[type=text] { width: 100%; padding: 8px 10px; font: inherit; color: var(--fg);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+.panel .row { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; align-items: center; }
+.panel .check { display: flex; gap: 8px; align-items: flex-start; font-weight: normal; }
+.panel .check input { margin-top: 3px; }
+.panel section[hidden] { display: none; }
+.panel ul.pages { list-style: none; padding: 0; margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; }
+.panel ul.pages li + li { border-top: 1px solid var(--line); }
+.panel ul.pages button { width: 100%; text-align: left; background: transparent; border: 0; padding: 10px 12px; display: flex; justify-content: space-between; gap: 12px; }
+.panel ul.pages button:hover { background: var(--chip); }
+.panel .viewer { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); }
+.panel .viewer[hidden] { display: none; }
+.panel .viewer header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; background: var(--chip); border-bottom: 1px solid var(--line); }
+.panel .viewer iframe { flex: 1; border: 0; width: 100%; background: #fff; }
+.panel fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px 14px; margin: 16px 0; }
+.panel legend { font-weight: 600; padding: 0 6px; }
+.panel .note { font-size: 13px; color: var(--muted); margin: 4px 0 0 24px; }

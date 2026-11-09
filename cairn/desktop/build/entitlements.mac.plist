@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Cairn Desktop under the hardened runtime (used once a Developer ID signs it): what Electron's JIT needs, the
+     network, and the camera and microphone a workspace may ask for (each still asked of the person). -->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.network.client</key><true/>
+    <key>com.apple.security.device.camera</key><true/>
+    <key>com.apple.security.device.audio-input</key><true/>
+</dict>
+</plist>

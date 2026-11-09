@@ -1,43 +1,48 @@
 # Cairn Desktop
 
-A minimal desktop app for Cairn's workspace (Electron): one window on your Cairn's `/cairn-ui/app.html`, `cairn://`
-deep links, and the operating system's notifications. It is kept out of the main build: nothing here is installed
-by `cairn/ui` or the Python package.
+Cairn's web workspace as an app for macOS, Windows and Linux (Electron 45): several workspaces, each in its own
+browser session; the `cairn` command line inside, signed in with one click; OS notifications; `cairn://` links; a
+tray icon with the unread count; and the dashboards and reports a person opened, readable offline. It loads Cairn's
+own web UI (`/cairn-ui/app.html`) and adds nothing to it. People's guide: `docs/site/desktop.md`; operators':
+`docs/site/administration.md` ("Profiles, the installable app and Cairn Desktop").
 
-## What it does
+## Layout
 
-- **Opens your Cairn.** The address comes from `--cairn-url=https://cairn.example.com`, else `CAIRN_URL`, else the
-  setup page on first start (saved in the app's user data as `config.json`). https only (http only to this computer).
-  People sign in on Cairn's own sign-in page, as in a browser.
-- **Stays on Cairn.** Windows only show Cairn's origin; other links open in the default browser (web and mail links
-  only). The page gets no Node.js (context isolation, sandbox); the setup page's only bridge saves the address.
-- **Deep links.** `cairn://open/<section>[/<rest>][?query]` opens that page of the workspace, e.g.
-  `cairn://open/asset/<urn>`, `cairn://open/search?q=revenue`, `cairn://open/profile`. Sections are the workspace's
-  (discover, search, asset, sql, dashboards, profile, …); anything else opens nothing. A link given to a second launch
-  is handed to the running window (one instance).
-- **Notifications.** Only Cairn's origin may ask for the notification permission (every other permission is
-  refused); the workspace's notifications and push messages show as the OS's notifications.
+| File | What it is |
+|---|---|
+| `src/app.js` | The main process: window, top bar and panel views, workspaces, sign-in, notifications, offline, CLI, menus, tray |
+| `src/logic.js` | Rules without Electron: addresses, `cairn://` links, the navigation allowlist, permissions, notification targets |
+| `src/profiles.js` | Workspaces are the CLI's profiles: reads and writes its `config.toml` (byte for byte as the CLI does) |
+| `src/offline-cache.js` | Encrypted (safeStorage) per-workspace cache of viewed pages, with limits and expiry |
+| `src/snapshot.js` | The read-only copy of a page (no scripts, links or handlers), made in an isolated world |
+| `src/policy.js` | The computer's policy file, workspace settings and preferences merged strictly; update decisions |
+| `src/updater.js` | electron-updater: GitHub's `desktop-latest` release or a generic feed |
+| `src/cli.js` | The bundled CLI: "Sign in the command line too", "Install command line tool" |
+| `src/menu.js`, `src/tray-model.js`, `src/window-state.js` | Menus, the tray's state, the remembered window |
+| `src/preload-workspace.js`, `src/preload-local.js` | The two preloads: workspace pages (notifications only) and the app's own pages |
+| `src/ui/` | The top bar and the panel (add a workspace, offline, settings) |
+| `build/` | Icon and macOS entitlements (hardened runtime, used once signed) |
+| `resources/cli/` | Where the release workflow puts the `cairn` binary before packaging |
 
-## Build
+## Develop
 
-Node 18+, then in this folder:
+Node 22, then in this folder:
 
 ```
-npm install            # downloads Electron and electron-builder (needs access to the npm registry and GitHub)
-npm start -- --cairn-url=https://cairn.example.com
-npm run dist           # installers in dist/: NSIS (Windows), dmg and zip (macOS), AppImage and deb (Linux)
+npm ci
+npm start                          # workspaces come from ~/.config/cairn/config.toml, or Add workspace
+CAIRN_DESKTOP_CLI=/path/to/cairn npm start      # a development run's CLI (a packaged app uses its own)
+npm test                           # unit tests, and the real app under xvfb when Electron is installed
+npx electron-builder --linux dir   # an unpacked build in dist/ (put the cairn binary in resources/cli/ first)
 ```
 
-Signing: set electron-builder's usual variables in CI (`CSC_LINK`/`CSC_KEY_PASSWORD` for Windows and macOS,
-`APPLE_ID`/`APPLE_APP_SPECIFIC_PASSWORD`/`APPLE_TEAM_ID` for notarisation), from your secret store, never on a
-command line. Each installer registers the `cairn:` scheme.
+The end-to-end test (`test/e2e/desktop.e2e.js`) is started by `tests/test_desktop_e2e.py`, which runs two real
+Cairns, GNOME Keyring in a D-Bus session and a virtual display.
 
-To roll it out with the address set, deploy the installer and set `CAIRN_URL` for users (or a `config.json` with
-`{"cairnUrl": "https://cairn.example.com"}` in the app's user-data folder: `%APPDATA%\Cairn`,
-`~/Library/Application Support/Cairn`, `~/.config/Cairn`).
+Versions: Electron 45.2.3, electron-builder 26.18.0, electron-updater 6.8.11, pinned exactly.
 
-## Test
+## Release
 
-`npm test` runs the main process against a stand-in for Electron (no download), and, once `npm install` has fetched
-Electron, a smoke test of the real app (on Linux under `xvfb-run` when there is no display): it opens a Cairn and a
-deep link given to a second launch opens in the first window.
+`.github/workflows/cairn-desktop-release.yml` builds on macOS (arm64, x64), Windows and Linux, CLI first, smoke-tests
+each build, and on a `desktop-v*` tag publishes the release and refreshes `desktop-latest` (the update feed).
+Signing turns on when its secrets exist (`docs/site/desktop.md`, "Signing").

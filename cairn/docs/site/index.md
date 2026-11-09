@@ -19,4 +19,5 @@ access governance, a data marketplace, context agents and an AI assistant on top
 | Connect Slack, Teams, email, webhooks, BI tools | [Integrations](integrations.html) |
 | Install, configure and operate Cairn | [Administration](administration.html) |
 | Query, search and ask from a terminal (`cairn`) | [Command line](command-line.html) |
+| Use Cairn as an app on macOS, Windows and Linux | [Cairn Desktop](desktop.html) |
 | Automate with the APIs | [APIs](api.html) |

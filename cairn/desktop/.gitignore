@@ -1,2 +1,4 @@
 node_modules/
 dist/
+resources/cli/cairn
+resources/cli/cairn.exe

@@ -1,3 +1,3 @@
 'use strict';
-// Cairn Desktop: electron . [--cairn-url=https://cairn.example.com]   (or CAIRN_URL, or the setup page)
+// Cairn Desktop: `electron .` (workspaces are the command line's profiles; Add workspace makes one).
 require('./app').start(require('electron'));
