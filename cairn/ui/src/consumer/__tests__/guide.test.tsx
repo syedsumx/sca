@@ -19,7 +19,7 @@ import { crumbsFor } from '../guide/PageHeader';
 import { I18nProvider } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { HUBS } from '../resources/hubs';
-import { MockCall, UI_CONFIG, makeClient } from './mockApi';
+import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
 beforeAll(installMatchMedia);
@@ -353,6 +353,37 @@ describe('the guided workspace', () => {
         fireEvent.change(box3, { target: { value: 'revenue by region last week' } });
         fireEvent.click(await screen.findByRole('option', { name: /Ask: revenue by region last week/ }));
         await waitFor(() => expect(nav.where()).toBe('/assistant?q=revenue%20by%20region%20last%20week'));
+    });
+
+    it('Enter chooses the entry the person moved to, even when results arrive after and re-rank the list', async () => {
+        const pending: ((v: unknown) => void)[] = [];      // every search waits until the test answers
+        const nav = workspace({ 'GET /v1/me/profile': profile({ onboarding: { role: 'analyst', done: [], dismissed: false, asked: true },
+            sidebar: { pinned: [], hidden: [], show_all: false } }), 'GET /v1/me/capabilities': ADMIN_CAPS,
+            'GQL cairnConsumerSearch': () => new Promise((r) => {
+                pending.push(r);
+            }) });
+        await screen.findByRole('navigation', { name: 'Workspace sections' });
+        act(() => {
+            fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+        });
+        const box = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
+        fireEvent.change(box, { target: { value: 'orders qx' } });
+        const ask = await screen.findByRole('option', { name: /Ask: orders qx/ });
+        fireEvent.keyDown(box, { key: 'End' });
+        expect(ask.getAttribute('aria-selected')).toBe('true');
+        // The catalog answers now: a dataset joins the list above the person's choice.
+        await waitFor(() => expect(pending.length).toBeGreaterThan(0));
+        await act(async () => {
+            for (const r of pending.splice(0)) {
+                r({ data: { searchAcrossEntities: { total: 1, facets: [],
+                    searchResults: [{ entity: { urn: DS, type: 'DATASET', name: 'orders', platform: { name: 'snowflake' } } }] } } });
+            }
+        });
+        const list = screen.getByRole('listbox', { name: 'Command palette' });
+        await waitFor(() => expect(within(list).getAllByRole('option').map((o) => o.textContent).join('|')).toContain('snowflake'));
+        expect(screen.getByRole('option', { name: /Ask: orders qx/ }).getAttribute('aria-selected')).toBe('true');
+        fireEvent.keyDown(box, { key: 'Enter' });
+        await waitFor(() => expect(nav.where()).toBe('/assistant?q=orders%20qx'));
     });
 
     it('"?" opens the keyboard shortcuts, and the help button opens this page’s docs', async () => {

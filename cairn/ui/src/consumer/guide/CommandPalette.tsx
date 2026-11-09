@@ -128,7 +128,9 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
     const session = useDheSession();
     const { client } = useConsumerApi();
     const [q, setQ] = useState('');
-    const [active, setActive] = useState(0);
+    // The highlighted entry, by its id: results re-rank as the person's capabilities and the catalog's answers
+    // arrive, and Enter must still choose the entry they moved to, not whatever now sits at its position.
+    const [activeId, setActiveId] = useState<string | null>(null);
     const [catalog, setCatalog] = useState<PaletteItem[]>([]);
     const [searching, setSearching] = useState(false);
     const [flows, setFlows] = useState<PaletteItem[] | null>(null);
@@ -144,7 +146,7 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
     useEffect(() => {
         if (!g.palette) {
             setQ('');
-            setActive(0);
+            setActiveId(null);
             setCatalog([]);
             setFlows(null);
         } else setTimeout(() => input.current?.focus(), 0);
@@ -181,7 +183,9 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
         return out;
     }, [base, catalog, q, flows, t, session]);
 
-    useEffect(() => setActive(0), [q, flows]);
+    useEffect(() => setActiveId(null), [q, flows]);
+    const active = Math.max(0, activeId === null ? 0 : results.findIndex((r) => r.id === activeId));
+    const setActive = (i: number) => setActiveId(results[i]?.id ?? null);
     const optionId = (i: number) => `cairn-palette-option-${i}`;
 
     const choose = async (item: PaletteItem | undefined) => {
