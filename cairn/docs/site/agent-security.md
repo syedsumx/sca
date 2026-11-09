@@ -107,7 +107,7 @@ compromised: rotating the gateway key requires agents to re-enrol.
 
 Its keys need not sit on that host in the clear: with `CAIRN_GATEWAY_KEY_KMS` they are kept wrapped by Vault's
 transit engine or AWS KMS and exist only in the gateway's memory; revoking its access to the key stops it within
-`cache_seconds` (see [the operator manual](administration.html#the-gateways-keys-in-a-key-manager)).
+`cache_seconds` (see [the operator manual](administration.html#the-gateway-s-keys-in-a-key-manager)).
 
 ## Operating checklist
 
