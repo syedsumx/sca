@@ -396,6 +396,9 @@ def test_yaml_round_trips_with_the_layout(env):
     assert model.normalize(model.to_yaml(d, full=True)) == d
     assert model.normalize(json.dumps(model.compact(d))) == d
     assert expr.render("{{ params.n * 2 }}", {"params": {"n": 21}}) == 42
+    steps = {"steps": {"full-report": {"rows": 2}, "a": {"rows": 5}}}
+    assert expr.evaluate("steps.full-report.rows + 1", steps) == 3 and expr.evaluate("steps.a.rows - 1", steps) == 4
+    assert expr.references("steps.full-report.rows > 'steps.x-y'") == {"full-report"}
     with pytest.raises(expr.ExprError):
         expr.evaluate("params.__class__", {"params": {}})
 

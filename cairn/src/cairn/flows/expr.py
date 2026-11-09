@@ -43,6 +43,37 @@ class ExprError(ValueError):
     pass
 
 
+STEP_REF = re.compile(r"\bsteps\.([A-Za-z][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)+)")
+
+
+def _prep(text: str) -> str:
+    """Step names may hold '-' (``steps.full-report.rows``): such a reference is read as ``steps["full-report"]``.
+    Subtraction after a step's field is written with spaces (``steps.a.rows - 1``)."""
+    out, quote, i = [], None, 0
+    while i < len(text):
+        c = text[i]
+        if quote:
+            out.append(c)
+            if c == "\\":
+                out.append(text[i + 1:i + 2])
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "\"'":
+            quote = c
+            out.append(c)
+        else:
+            word_start = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+            m = STEP_REF.match(text, i) if word_start and text.startswith("steps.", i) else None
+            if m:
+                out.append(f'steps["{m.group(1)}"]')
+                i = m.end()
+                continue
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def parse(text: str) -> ast.AST:
     """The expression's tree, or ExprError naming what is not allowed."""
     if not isinstance(text, str) or not text.strip():
@@ -50,7 +81,7 @@ def parse(text: str) -> ast.AST:
     if len(text) > MAX_EXPR:
         raise ExprError(f"an expression is at most {MAX_EXPR} characters")
     try:
-        tree = ast.parse(text.strip(), mode="eval")
+        tree = ast.parse(_prep(text.strip()), mode="eval")
     except SyntaxError as e:
         raise ExprError(f"{text.strip()!r} is not an expression: {e.msg} (column {e.offset})")
     for node in ast.walk(tree):
