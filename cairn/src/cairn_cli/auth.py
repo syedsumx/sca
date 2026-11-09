@@ -94,7 +94,8 @@ def cmd_login(a) -> int:
     store.set(name, cred)
     if previous and previous.get("kind") == "device" and previous.get("refresh_token") != cred.get("refresh_token"):
         _revoke(previous, existing.get("ca_file") or True)      # the profile's earlier sign-in: signed out in Cairn
-    out = {"profile": name, "url": base, "user": me.get("urn"), "credential_store": store.kind}
+    out = {"profile": name, "url": base, "user": me.get("urn"), "credential_store": store.kind,
+           "credential_backend": store.backend}
     if getattr(a, "output", None) == "json":
         emit_json(out)
     else:
@@ -200,6 +201,7 @@ def cmd_whoami(a) -> int:
     out = {"user": me.get("urn"), "groups": me.get("groups") or [], "via": me.get("via"),
            "profile": s.target.profile if s.target.source == "profile" else None, "source": s.target.source,
            "url": s.url, "device": me.get("device"), "credential_store": s.store.kind if s.store else "environment",
+           "credential_backend": s.store.backend if s.store else None,
            "access_token_expires": cred.get("access_expires"), "sign_in_expires": cred.get("refresh_expires")}
     if a.output == "json":
         emit_json(out)

@@ -1,6 +1,8 @@
 # The `cairn` command line as single-file binaries (PyInstaller), for Linux (x86_64, arm64), macOS (arm64, x86_64)
 # and Windows (x86_64): built and smoke-tested on every change to the CLI, and published as a GitHub release with
-# SHA256SUMS and a filled-in Homebrew formula on a `cli-v*` tag (cli-v0.2.0 releases version 0.2.0).
+# SHA256SUMS and a filled-in Homebrew formula on a `cli-v*` tag (cli-v0.2.0 releases version 0.2.0). Every build also
+# signs in through the platform's real keychain (cli/ci/keychain-smoke.sh), and the macOS builds install the formula
+# from a local tap (cli/ci/homebrew-smoke.sh). Only a tag publishes; a branch push builds and tests.
 #
 # Signing is off until its secrets exist; adding them turns it on (see docs/site/command-line.md, "Signed binaries"):
 #   macOS:   APPLE_CERTIFICATE_P12 (base64 of a "Developer ID Application" .p12), APPLE_CERTIFICATE_PASSWORD,
@@ -119,11 +121,39 @@ jobs:
           "$exe" query --help >/dev/null
           set +e; "$exe" whoami; rc=$?; set -e
           [ "$rc" = 3 ] || { echo "whoami without a sign-in should exit 3, got $rc"; exit 1; }
+      # The binary keeps a sign-in in the OS's own keychain (macOS Keychain, Windows Credential Manager, the Secret
+      # Service): `cairn login --token-stdin` against a stand-in Cairn, `cairn whoami --output json` naming the
+      # keyring backend, the item found with the OS's own tool, then `cairn logout` removing it (cli/ci/).
+      - name: The OS keychain (Linux, the Secret Service of an unlocked GNOME Keyring in a D-Bus session)
+        if: runner.os == 'Linux'
+        env:
+          PYTHON: python
+        run: |
+          sudo apt-get update -q >/dev/null
+          sudo apt-get install -y -q gnome-keyring libsecret-tools dbus >/dev/null
+          # The keyring's password is random, read from standard input (never on a command line).
+          dbus-run-session -- bash -c 'head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" \
+            | gnome-keyring-daemon --unlock --components=secrets >/dev/null && cli/ci/keychain-smoke.sh dist/cairn'
+      - name: The OS keychain (macOS Keychain, Windows Credential Manager)
+        if: runner.os != 'Linux'
+        env:
+          PYTHON: python
+        run: |
+          exe=dist/cairn; [ "$RUNNER_OS" = "Windows" ] && exe=dist/cairn.exe
+          cli/ci/keychain-smoke.sh "$exe"
       - name: Name the binary for its platform
         run: |
           mkdir -p out
           if [ "$RUNNER_OS" = "Windows" ]; then cp dist/cairn.exe "out/cairn-${{ matrix.platform }}.exe"
           else cp dist/cairn "out/cairn-${{ matrix.platform }}"; fi
+      - name: Homebrew from a real tap (macOS)
+        if: runner.os == 'macOS'
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_ANALYTICS: "1"
+          HOMEBREW_NO_ENV_HINTS: "1"
+        run: cli/ci/homebrew-smoke.sh "out/cairn-${{ matrix.platform }}"
       - uses: actions/upload-artifact@v4
         with:
           name: cairn-${{ matrix.platform }}
@@ -135,7 +165,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: shellcheck
-        run: shellcheck -S warning cairn/deploy/cli/install.sh
+        run: shellcheck -S warning cairn/deploy/cli/install.sh cairn/cli/ci/*.sh
 
   release:
     if: startsWith(github.ref, 'refs/tags/cli-v')

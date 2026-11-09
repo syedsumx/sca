@@ -95,7 +95,9 @@ pointing elsewhere, is refused. The configuration directory is `CAIRN_CONFIG_DIR
 else `%APPDATA%\cairn` on Windows, else `~/.config/cairn`.
 
 `cairn whoami` shows who you are (user and groups), the profile, the Cairn, and when the access token and the
-sign-in expire.
+sign-in expire. With `--output json` it also says where the tokens are kept: `credential_store` (`keyring` or `file`)
+and `credential_backend` (the keychain itself, e.g. `keyring.backends.macOS.Keyring`,
+`keyring.backends.Windows.WinVaultKeyring` or `keyring.backends.SecretService.Keyring`).
 
 ## Commands
 
@@ -207,8 +209,9 @@ Commands, options and choices complete, and so do profile names (`--profile`, `p
 
 The workflow `.github/workflows/cairn-cli-release.yml` builds the binaries with PyInstaller on GitHub's runners
 (Ubuntu x86_64 and arm64, macOS arm64 and Intel, Windows), checks each one (`cairn --version`, `completion bash`,
-`login --help`, `whoami` exiting 3), and on a tag `cli-vX.Y.Z` publishes a release with the binaries, `SHA256SUMS`
-and the filled-in Homebrew formula. Build one yourself from `cairn/`:
+`login --help`, `whoami` exiting 3, a sign-in kept in the OS's keychain and removed by `logout`:
+`cli/ci/keychain-smoke.sh`), installs the Homebrew formula from a local tap on macOS (`cli/ci/homebrew-smoke.sh`), and
+on a tag `cli-vX.Y.Z` publishes a release with the binaries, `SHA256SUMS` and the filled-in Homebrew formula. Build one yourself from `cairn/`:
 
 ```bash
 python -m venv /tmp/cli && /tmp/cli/bin/pip install ./cli pyinstaller

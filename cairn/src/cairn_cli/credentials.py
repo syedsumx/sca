@@ -30,6 +30,7 @@ def _warn(message: str) -> None:
 
 class FileStore:
     kind = "file"
+    backend = "file"
 
     def __init__(self, directory: Path):
         self.directory = directory
@@ -87,7 +88,10 @@ class KeyringStore:
 
     @property
     def name(self) -> str:
-        return type(self.backend).__module__ + "." + type(self.backend).__name__
+        """The keyring backend in use (e.g. keyring.backends.macOS.Keyring); a chain names the backends it chains."""
+        b = self.backend
+        inner = getattr(b, "backends", None) if type(b).__name__ == "ChainerBackend" else None
+        return ",".join(type(x).__module__ + "." + type(x).__name__ for x in (inner or [b]))
 
     def get(self, profile: str) -> Optional[dict]:
         raw = self.backend.get_password(SERVICE, profile)
@@ -158,6 +162,11 @@ class _Guarded:
     @property
     def kind(self) -> str:
         return self._fallback.kind if self._fallback else self.store.kind
+
+    @property
+    def backend(self) -> str:
+        """Which keychain: the keyring backend's name, or "file" after falling back to credentials.json."""
+        return self._fallback.backend if self._fallback else self.store.name
 
     def _call(self, name: str, *a):
         if self._fallback is not None:
