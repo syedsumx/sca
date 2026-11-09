@@ -193,7 +193,7 @@ def _when(ts: Optional[float]) -> str:
 def cmd_whoami(a) -> int:
     s = Session.open(a.profile)
     try:
-        me = s.call("GET", "/me")
+        me = s.call("GET", "/me", params={"detail": "true"})
         cred = s.credentials() or {}
     finally:
         s.close()

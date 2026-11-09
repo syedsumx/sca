@@ -668,7 +668,9 @@ def test_the_cli_validates_here_and_needs_cairn_for_the_rest(tmp_path, monkeypat
     assert "flow nightly, 7 steps, valid" in capsys.readouterr().out
     assert cli.main(argparse.Namespace(flows_cmd="validate", files=[str(bad)])) == 1
     assert "steps[0].after: no step 'zz' to come after" in capsys.readouterr().out
-    for v in ("CAIRN_URL", "CAIRN_TOKEN", "CAIRN_TOKEN_FILE"):
+    for v in ("CAIRN_URL", "CAIRN_TOKEN", "CAIRN_TOKEN_FILE", "CAIRN_PROFILE"):
         monkeypatch.delenv(v, raising=False)
+    monkeypatch.setenv("CAIRN_CONFIG_DIR", str(tmp_path / "no-profiles"))     # nobody signed in with `cairn login`
     assert cli.main(argparse.Namespace(flows_cmd="list")) == 1
-    assert "set CAIRN_URL" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "set CAIRN_URL" in err and "cairn login" in err

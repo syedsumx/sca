@@ -38,7 +38,7 @@ def _client():
         try:
             url, token, verify = api_credentials()
         except SignInError as e:
-            raise CliError(str(e))
+            raise CliError(f"{e} (or set CAIRN_URL and CAIRN_TOKEN)")
     else:
         url, token = os.environ.get("CAIRN_URL", "").rstrip("/"), os.environ.get("CAIRN_TOKEN", "")
         if not token and os.environ.get("CAIRN_TOKEN_FILE"):

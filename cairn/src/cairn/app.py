@@ -167,15 +167,17 @@ def _base_app(name: str, services: Services) -> FastAPI:
         return PlainTextResponse(generate_latest().decode(), media_type=CONTENT_TYPE_LATEST)
 
     @app.get("/me")
-    def me(p: Principal = Depends(_principal_dependency(services))):
+    def me(detail: bool = False, p: Principal = Depends(_principal_dependency(services))):
+        """Who the caller is; ``?detail=true`` adds their groups (and, for `cairn login`, the signed-in device)."""
+        if not detail:
+            return {"urn": p.urn, "via": p.via}
         groups: list[str] = []
         if not p.is_service and getattr(services, "attributes", None) is not None:
             try:
                 groups = sorted(str(g) for g in (services.attributes.subject(p.urn).get("groups") or []))
             except Exception:  # noqa: BLE001 - who you are does not depend on the groups being readable now
                 groups = []
-        return {"urn": p.urn, "via": p.via, "groups": groups,
-                **({"device": p.run} if p.via == "cli" else {})}
+        return {"urn": p.urn, "via": p.via, "groups": groups, **({"device": p.run} if p.via == "cli" else {})}
 
     return app
 

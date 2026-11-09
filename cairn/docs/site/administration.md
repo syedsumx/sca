@@ -1153,7 +1153,7 @@ and runs on that warehouse's port of the warehouse proxy (`CAIRN_WAREHOUSES_URL`
 statement is audited (`data.queried` with `streamed: true` and Trino's query id; `data.query_cancelled`).
 
 `cairn search` and `cairn show` use `GET /v1/assets/search` and `GET /v1/assets/describe` (only what the caller may
-see; `VIEW_ENTITY_PAGE`); `cairn ask` uses `/data/ask`; `cairn whoami` uses `/me`, which now also gives the
+see; `VIEW_ENTITY_PAGE`); `cairn ask` uses `/data/ask`; `cairn whoami` uses `/me?detail=true`, which adds the
 person's groups.
 
 Tested end to end (`tests/test_cli_e2e.py`): the CLI as separate processes (the Python package, and the PyInstaller
