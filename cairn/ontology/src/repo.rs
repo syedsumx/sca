@@ -194,6 +194,11 @@ pub async fn put_table_result(s: &Store, run_id: &str, position: i64, r: &TableR
     .map(|_| ())
 }
 
+/// Forgets a run's per-table results, so resuming it compiles every table again.
+pub async fn clear_table_results(s: &Store, run_id: &str) -> Result<()> {
+    s.transaction(vec![("DELETE FROM onto_table_results WHERE run_id = $1".to_string(), vec![P::from(run_id)])]).await
+}
+
 pub async fn table_results(s: &Store, run_id: &str) -> Result<BTreeMap<String, TableResult>> {
     let rows = s.query("SELECT table_id, doc FROM onto_table_results WHERE run_id = $1 ORDER BY position", vec![run_id.into()]).await?;
     rows.iter().map(|r| Ok((r[0].text(), from_json(&r[1].text())?))).collect()

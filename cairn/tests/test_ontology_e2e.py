@@ -72,9 +72,13 @@ class OntologyProvider(Provider):
     """The provider's API as the compiler reaches it through Cairn: each step's structured answer, and embeddings."""
     tasks: list = []
     delay = 0.0
+    failing = False                  # the provider failing every chat call (a 500), for the fail-closed test
 
     def do_POST(self):
         if self.path != "/v1/embeddings":
+            if OntologyProvider.failing:
+                self.rfile.read(int(self.headers["Content-Length"]))
+                return self._json(500, {"error": {"message": "the provider is down"}})
             if OntologyProvider.delay:
                 time.sleep(OntologyProvider.delay)
             return super().do_POST()
@@ -714,3 +718,26 @@ def test_ask_your_data_says_what_it_was_grounded_in(stack, compiled):
     r = call(stack, "POST", "/data/ask", who=ADMIN, json={"question": "What is revenue by region?",
                                                           "urns": [ORDERS, CUSTOMERS]})
     assert r.status_code == 200 and r.json()["grounded"]["terms"], r.text
+
+
+def test_a_run_whose_model_calls_fail_is_not_published(stack, compiled):
+    """Fail closed: when the model's answers can't be had (the provider failing, the gateway's rate limit or
+    budget), the run fails with the count and publishes nothing, and resuming it once the model answers compiles
+    those tables again (not the guesses the compiler made without the model)."""
+    s = stack["s"]
+    before = call(stack, "GET", "/v1/ontology/runs").json()["published"]
+    OntologyProvider.failing = True
+    try:
+        started = call(stack, "POST", "/v1/ontology/runs", json={"mode": "full", "sync": False}).json()["run"]
+        run = s.ontology.wait(started["id"], 600)
+    finally:
+        OntologyProvider.failing = False
+    assert run["state"] == "failed" and run["stats"]["model_failures"] > 0, (
+        run, open(f"{stack['dir']}/compiler.log").read()[-4000:])
+    assert "nothing was published" in (run.get("error") or ""), run
+    assert call(stack, "GET", "/v1/ontology/runs").json()["published"] == before
+    r = call(stack, "POST", f"/v1/ontology/runs/{started['id']}/resume")
+    assert r.status_code == 200, r.text
+    run = s.ontology.wait(started["id"], 600)
+    assert run["state"] == "completed" and run["stats"]["processed"] == run["stats"]["tables"], run["stats"]
+    assert call(stack, "GET", "/v1/ontology/runs").json()["published"] == started["id"]

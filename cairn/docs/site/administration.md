@@ -1677,12 +1677,16 @@ metered under that identity (feature `gateway:<agent>`). Create it once with `PO
 (`MANAGE_GLOBAL_SETTINGS`, body `{"owner": "urn:li:corpuser:…"}`); its key is shown once: put it in a Kubernetes
 Secret (`cairn.ontology.model.keySecret`). Answers are validated against their expected shape and retried
 (`CAIRN_ONTOLOGY_MODEL_RETRIES`, 2; timeout `CAIRN_ONTOLOGY_MODEL_TIMEOUT_SECONDS`, 120); at most
-`CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT` (6) calls are in flight. When the model cannot answer, each step falls back
-(a term named after its table, no inferred keys). Without an embeddings model, search by meaning and embedding
+`CAIRN_ONTOLOGY_MODEL_MAX_INFLIGHT` (6) calls are in flight; a 429's `Retry-After` (at most a minute) is waited out
+before the retry, without holding a slot. Without a chat model configured, each step uses its fallback (a term
+named after its table, no inferred keys). With one configured, a run whose model calls still fail after the retries
+(the provider down, the gateway's rate limit or budget) **fails closed**: its state is `failed` with
+`stats.model_failures` and a message, nothing is published (the published ontology stays as it was), and its table
+results are dropped so that resuming it, once the model answers, compiles those tables with the model. Without an embeddings model, search by meaning and embedding
 candidates are off; name heuristics still find keys. The agent's per-minute quota (120 requests by default) also
 counts these calls: a full compile makes up to four model calls a table plus those for relationships and metrics, so
 raise the compiler agent's `per_minute` (`PATCH /admin/agents/<id>` with `{"per_minute": …}`) to what a compile of your
-catalog needs; over the quota the gateway answers 429 and the steps fall back as above.
+catalog needs; over the quota the gateway answers 429, and calls that still fail make the run fail as above.
 
 **Syncing.** The context-miner worker syncs and compiles every `cairn.ontology.intervalSeconds` (3600; 0: on
 demand only), one replica at a time; `cairn ontology sync|compile|import|status` does it from the command line.

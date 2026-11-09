@@ -75,6 +75,8 @@ pub struct Llm {
 enum CallError {
     /// Worth another try: a timeout, a connection failure, 429 or 5xx, or an answer that did not validate.
     Transient(String),
+    /// 429 with the endpoint's Retry-After: retried after that wait (at most a minute), not holding a permit.
+    RateLimited(String, Option<Duration>),
     Fatal(String),
 }
 
@@ -112,8 +114,18 @@ impl Llm {
             })
         })?;
         let status = r.status();
+        // The gateway's Retry-After on 429 (seconds), honoured before the next attempt, at most a minute.
+        let retry_after = (status.as_u16() == 429)
+            .then(|| r.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok()))
+            .flatten();
         let text = r.text().await.map_err(|e| CallError::Transient(format!("model endpoint: {}", e.without_url())))?;
-        if status.as_u16() == 429 || status.is_server_error() {
+        if status.as_u16() == 429 {
+            return Err(CallError::RateLimited(
+                format!("model endpoint answered {status}"),
+                retry_after.map(|s| Duration::from_secs(s.min(60))),
+            ));
+        }
+        if status.is_server_error() {
             return Err(CallError::Transient(format!("model endpoint answered {status}")));
         }
         if !status.is_success() {
@@ -127,9 +139,10 @@ impl Llm {
         serde_json::from_str(&text).map_err(|_| CallError::Transient("the model endpoint answered without JSON".into()))
     }
 
-    async fn backoff(&self, attempt: u32) {
+    async fn backoff(&self, attempt: u32, at_least: Option<Duration>) {
         self.stats.retries.fetch_add(1, Ordering::Relaxed);
-        tokio::time::sleep(Duration::from_millis(250 * 2u64.pow(attempt.min(5)))).await;
+        let exp = Duration::from_millis(250 * 2u64.pow(attempt.min(5)));
+        tokio::time::sleep(at_least.map_or(exp, |d| d.max(exp))).await;
     }
 
     /// A structured answer of type `T` for `system` + `user`, or None when the model could not give one
@@ -175,7 +188,14 @@ impl Llm {
                 Err(CallError::Transient(e)) => {
                     tracing::info!(task, attempt, error = %e, "model call failed; retrying");
                     if attempt < self.cfg.retries {
-                        self.backoff(attempt).await;
+                        self.backoff(attempt, None).await;
+                    }
+                    continue;
+                }
+                Err(CallError::RateLimited(e, wait)) => {
+                    tracing::info!(task, attempt, error = %e, "model call rate limited; retrying");
+                    if attempt < self.cfg.retries {
+                        self.backoff(attempt, wait).await;
                     }
                     continue;
                 }
@@ -190,7 +210,7 @@ impl Llm {
                 Err(e) => {
                     tracing::info!(task, attempt, error = %e, "the model's answer did not validate; retrying");
                     if attempt < self.cfg.retries {
-                        self.backoff(attempt).await;
+                        self.backoff(attempt, None).await;
                     }
                 }
             }
@@ -222,7 +242,13 @@ impl Llm {
                     Err(CallError::Transient(e)) => {
                         last = e;
                         if attempt < self.cfg.retries {
-                            self.backoff(attempt).await;
+                            self.backoff(attempt, None).await;
+                        }
+                    }
+                    Err(CallError::RateLimited(e, wait)) => {
+                        last = e;
+                        if attempt < self.cfg.retries {
+                            self.backoff(attempt, wait).await;
                         }
                     }
                 }

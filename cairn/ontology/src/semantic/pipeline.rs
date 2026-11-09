@@ -557,6 +557,8 @@ impl Engine {
 
     async fn execute(self: &Arc<Self>, run: Run, cancel: Arc<AtomicBool>) -> Result<(), String> {
         let started = Instant::now();
+        // One run at a time, so the model failures counted while it runs are its own.
+        let failures_before = self.llm.stats.failures.load(Ordering::Relaxed);
         let mut tables = repo::tables(&self.store).await.map_err(|e| e.to_string())?;
         let db = self.settings.database.clone();
         tables.sort_by_key(|t| commit_key(&db, t));
@@ -715,6 +717,22 @@ impl Engine {
             repo::set_run_state(&self.store, &run.id, "cancelled", &stats, None).await.map_err(|e| e.to_string())?;
             return Ok(());
         };
+        // Fail closed: a model call that failed (the gateway's rate limit or budget, the provider) leaves the
+        // compiler's guesses where the model's answers belong, so such an ontology is never published. Its
+        // table results go too, so resuming compiles those tables again rather than keeping the guesses.
+        let failed = self.llm.stats.failures.load(Ordering::Relaxed).saturating_sub(failures_before);
+        if failed > 0 {
+            stats["seconds"] = json!(started.elapsed().as_secs_f64());
+            stats["model_failures"] = json!(failed);
+            let why = format!(
+                "{failed} model call(s) failed (the AI gateway's rate limit or budget, or the provider); nothing was \
+                 published. Raise the compiler agent's limits if needed and resume the run."
+            );
+            tracing::warn!(run = %run.id, failed, "model calls failed; the run is not published");
+            repo::clear_table_results(&self.store, &run.id).await.map_err(|e| e.to_string())?;
+            repo::set_run_state(&self.store, &run.id, "failed", &stats, Some(&why)).await.map_err(|e| e.to_string())?;
+            return Ok(());
+        }
         self.set_phase(&run.id, "publishing");
         repo::put_ontology(&self.store, &ontology).await.map_err(|e| e.to_string())?;
         stats["seconds"] = json!(started.elapsed().as_secs_f64());
