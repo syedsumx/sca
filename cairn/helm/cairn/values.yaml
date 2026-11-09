@@ -376,6 +376,13 @@ cairn:
       persistence:
         size: 64Mi
         storageClass: ""
+      # The identity wrapped by a key manager (Vault transit or AWS KMS): a Secret with the settings (configKey,
+      # e.g. {"type": "vault-transit", "addr": "https://vault:8200", "key": "cairn-gateway",
+      # "token_file": "/etc/cairn/gateway-kms/vault-token"}) and the credential files they name. The key Secret
+      # (or volume) then holds only gateway-identity.kms.json; `cairn gateway-keys wrap` makes it.
+      kms:
+        secretName: ""
+        configKey: kms.json
     resources:
       requests: { cpu: 200m, memory: 384Mi }
       limits: { memory: 1Gi }

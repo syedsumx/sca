@@ -105,6 +105,10 @@ send and write to the catalog with the gateway's (least-privilege) rights. It ne
 credentials. Run it as its own service, rotate its token (automatic) and its keys if the host is
 compromised: rotating the gateway key requires agents to re-enrol.
 
+Its keys need not sit on that host in the clear: with `CAIRN_GATEWAY_KEY_KMS` they are kept wrapped by Vault's
+transit engine or AWS KMS and exist only in the gateway's memory; revoking its access to the key stops it within
+`cache_seconds` (see [the operator manual](administration.html#the-gateways-keys-in-a-key-manager)).
+
 ## Operating checklist
 
 * Put the gateway behind TLS (the edge or your ingress) even though payloads are already

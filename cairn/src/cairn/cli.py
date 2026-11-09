@@ -77,13 +77,40 @@ def cmd_pdp(a) -> None:
     _serve(create_pdp_app(s), a.host, a.port, a.root_path)
 
 
+def cmd_gateway_keys(a) -> None:
+    """Wrap the gateway's identity in --key-dir with the configured key manager (a new identity if there is none):
+    gateway-identity.kms.json is written and the clear gateway-identity.json removed. Put the wrapped file in the
+    Secret the gateway's replicas share."""
+    from cairn.agent import keywrap
+    from cairn.agent.gateway import GatewayError, GatewayKeys
+
+    try:
+        wrapper, _ = keywrap.from_env()
+    except keywrap.KmsError as e:
+        raise SystemExit(str(e)) from None
+    if wrapper is None:
+        raise SystemExit("set CAIRN_GATEWAY_KEY_KMS (the key manager to wrap the identity with)")
+    keys = GatewayKeys(a.key_dir, wrapper, 0)
+    try:
+        ident = keys.identity
+    except GatewayError as e:
+        raise SystemExit(str(e)) from None
+    print(json.dumps({"wrapped": keys.wrapped_path, "kms": wrapper.kind, "key": wrapper.key,
+                      "signing_public": ident.signing_public, "encryption_public": ident.encryption_public}))
+
+
 def cmd_gateway(a) -> None:
     from cairn.agent.dispatcher import ExecutionRequestDispatcher
     from cairn.app import create_gateway_app
     import threading
 
+    from cairn.agent.gateway import GatewayError
+
     s = _services(with_ai=False)
-    _ = s.gateway.keys.identity  # type: ignore[union-attr]  # fail fast if the key dir is unusable
+    try:
+        _ = s.gateway.keys.identity  # type: ignore[union-attr]  # fail fast if the key dir (or key manager) is unusable
+    except GatewayError as e:
+        raise SystemExit(str(e)) from None
     tls = gateway_tls()                                       # and if the TLS settings cannot work
     if s.graph is not None and not a.no_dispatcher:
         dispatcher = ExecutionRequestDispatcher(s.gateway, s.graph)  # type: ignore[arg-type]
@@ -869,6 +896,11 @@ def build_parser() -> argparse.ArgumentParser:
     gw = http("gateway", 8820, cmd_gateway, "remote agent gateway")
     gw.add_argument("--no-dispatcher", action="store_true")
     gw.add_argument("--dispatch-interval", type=float, default=10.0)
+    gk = sub.add_parser("gateway-keys", help="the gateway's identity: wrap it with the key manager in "
+                        "CAIRN_GATEWAY_KEY_KMS (for a Secret shared by the replicas)")
+    gk.add_argument("action", choices=["wrap"])
+    gk.add_argument("--key-dir", required=True, help="a directory holding gateway-identity.json (or none: a new one)")
+    gk.set_defaults(fn=cmd_gateway_keys)
 
     sub.add_parser("dbt", help="run dbt on the lakehouse as a Cairn identity and record the run (cairn dbt build ...)")
     sch = sub.add_parser("scheduler", help="data-quality monitor scheduler")

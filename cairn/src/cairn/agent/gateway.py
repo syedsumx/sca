@@ -164,22 +164,80 @@ class GatewayKeys:
 
     Loaded (or created) on first use, so processes that only use the admin side of
     :class:`GatewayService`, such as ``cairn api``, never touch the key material.
+
+    With a key manager (``CAIRN_GATEWAY_KEY_KMS``, :mod:`cairn.agent.keywrap`) the identity is kept on disk only
+    wrapped by it (``gateway-identity.kms.json``); a clear identity found there is wrapped and then removed. The
+    unwrapped keys stay in memory for ``cache_seconds``, then are unwrapped again: a key manager that refuses makes
+    the keys unavailable (503), never stale.
     """
 
-    def __init__(self, key_dir: str):
+    def __init__(self, key_dir: str, wrapper: Any = "env", cache_seconds: Optional[float] = None):
         self.path = os.path.join(key_dir, "gateway-identity.json")
+        self.wrapped_path = os.path.join(key_dir, "gateway-identity.kms.json")
         self._identity: Optional[crypto.Identity] = None
+        self._wrapper, self._cache_s, self._loaded = wrapper, cache_seconds, 0.0
+
+    def _kms(self):
+        if self._wrapper == "env":
+            from cairn.agent import keywrap
+
+            self._wrapper, cache = keywrap.from_env()
+            if self._cache_s is None:
+                self._cache_s = cache
+        return self._wrapper
 
     @property
     def identity(self) -> crypto.Identity:
-        if self._identity is None:
-            if os.path.exists(self.path):
-                self._identity, _ = crypto.Identity.load(self.path)
-            else:
-                identity = crypto.Identity.generate()
-                identity.save(self.path)
-                self._identity = identity
+        from cairn.agent.keywrap import KmsError
+
+        now = time.monotonic()
+        if self._identity is not None and (self._wrapper is None or not self._cache_s or now - self._loaded < self._cache_s):
+            return self._identity
+        try:
+            self._identity, self._loaded = self._load(), now
+        except KmsError as e:
+            self._identity = None
+            logger.error("the gateway's keys are unavailable: %s", e)
+            raise GatewayError(f"the gateway's keys are unavailable: {e}", 503) from e
         return self._identity
+
+    def _load(self) -> crypto.Identity:
+        from cairn.agent.keywrap import CONTEXT, KmsError
+
+        wrapper = self._kms()
+        if os.path.exists(self.wrapped_path):
+            if wrapper is None:
+                raise KmsError(f"{self.wrapped_path} is wrapped by a key manager: set CAIRN_GATEWAY_KEY_KMS")
+            with open(self.wrapped_path) as fh:
+                doc = json.load(fh)
+            if (doc.get("kms"), doc.get("key")) != (wrapper.kind, wrapper.key):
+                raise KmsError(f"the keys are wrapped by {doc.get('kms')} key {doc.get('key')}, not the configured "
+                               f"{wrapper.kind} key {wrapper.key}")
+            try:
+                return crypto.Identity.from_dict(json.loads(wrapper.decrypt(doc["ciphertext"], CONTEXT)))
+            except (KeyError, ValueError) as e:
+                raise KmsError(f"{self.wrapped_path} does not hold a gateway identity: {e}") from e
+        if wrapper is None:
+            if os.path.exists(self.path):
+                return crypto.Identity.load(self.path)[0]
+            identity = crypto.Identity.generate()
+            identity.save(self.path)
+            return identity
+        # First start with a key manager: wrap the clear identity (or a new one), then remove the clear copy.
+        identity = crypto.Identity.load(self.path)[0] if os.path.exists(self.path) else crypto.Identity.generate()
+        doc = {"kms": wrapper.kind, "key": wrapper.key,
+               "ciphertext": wrapper.encrypt(json.dumps(identity.to_dict()).encode(), CONTEXT),
+               "signing_public": identity.signing_public, "encryption_public": identity.encryption_public}
+        os.makedirs(os.path.dirname(os.path.abspath(self.wrapped_path)), exist_ok=True)
+        tmp = f"{self.wrapped_path}.tmp"
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+            json.dump(doc, fh)
+        os.replace(tmp, self.wrapped_path)
+        if os.path.exists(self.path):
+            os.remove(self.path)
+            logger.warning("the gateway's identity is now wrapped by %s key %s; the clear copy was removed",
+                           wrapper.kind, wrapper.key)
+        return identity
 
 
 class GatewayService:

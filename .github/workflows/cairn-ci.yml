@@ -56,6 +56,13 @@ jobs:
           python -m cairn.iac.terraform --check
           python -m cairn.iac.forms --check
           pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py
+      - name: The gateway's keys behind real key managers (Vault transit, a KMS-compatible server)
+        run: |
+          set -o pipefail
+          docker pull -q hashicorp/vault:1.20
+          docker pull -q nsmithuk/local-kms:3
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_gateway_kms.py | tee "$RUNNER_TEMP/gw-kms.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/gw-kms.log"
       - name: Unit and integration tests
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
@@ -89,6 +96,17 @@ jobs:
         run: cargo test --locked
       - name: Build
         run: cargo build --release --locked
+      - name: Throughput at scale (50,000 small objects and 2 GiB of large ones; every byte checked)
+        run: |
+          scripts/bench-ci.sh target/release/cairn-store "$RUNNER_TEMP/store-bench"
+          cat "$RUNNER_TEMP/store-bench/summary.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the store's throughput
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: store-throughput
+          path: ${{ runner.temp }}/store-bench/
+          if-no-files-found: ignore
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

@@ -1408,6 +1408,45 @@ The API is `/cairn/api/sources`:
 - `POST /test`, then poll `GET /test/{id}`;
 - `GET /runs/{run urn}`.
 
+## The gateway's keys in a key manager
+
+The remote agent gateway's identity (the Ed25519 key it signs with and the X25519 key agents seal their batches
+to) can be kept on disk only wrapped by your key manager, the same ones Cairn Store uses for customer-managed keys.
+Set `CAIRN_GATEWAY_KEY_KMS` to the settings as JSON, or `@/path` to a file that holds them:
+
+```json
+{"type": "vault-transit", "addr": "https://vault:8200", "key": "cairn-gateway",
+ "token_file": "/etc/cairn/gateway-kms/vault-token", "mount": "transit", "cache_seconds": 300}
+{"type": "aws-kms", "region": "eu-west-1", "key": "alias/cairn-gateway", "access_key": "AKIA...",
+ "secret_key_file": "/etc/cairn/gateway-kms/secret", "cache_seconds": 300}
+```
+
+- **How it works.** The identity is encrypted with Vault's `transit/encrypt/<key>` (its purpose bound into what is
+  encrypted) or KMS `Encrypt` (its purpose as the encryption context, which KMS checks and CloudTrail records), and
+  written as `gateway-identity.kms.json`. A clear `gateway-identity.json` found at the first start is wrapped, then
+  removed. The keys are only ever in the gateway's memory, and are unwrapped again every `cache_seconds`.
+- **Credentials.** Vault: a token whose policy allows only `update` on `transit/encrypt/<key>` and
+  `transit/decrypt/<key>`, in `token_file` (read on every call, so it can be renewed in place); `namespace` and
+  `ca_file` as needed. AWS KMS (or a KMS-compatible service at `addr`): `access_key` with `secret_key_file` (and
+  `session_token_file`), or the `AWS_*` environment; give only `kms:Encrypt` and `kms:Decrypt` on the one key.
+- **You stay in control.** Revoke the token, remove the permission, or disable the key, and within `cache_seconds`
+  the gateway refuses what needs its keys (enrolments, batches: HTTP 503), and it does not start again until the
+  key manager answers. Rotating the key in Vault or KMS needs nothing from Cairn: old wrappings still open.
+- **Fails closed.** A wrapped identity without `CAIRN_GATEWAY_KEY_KMS`, settings that do not load, another key than
+  the one that wrapped it, or a refusal stops the gateway at start, with the key manager's answer in its log.
+- **Helm.** `cairn.gateway.keys.kms.secretName`: a Secret holding the settings (`configKey`, default `kms.json`)
+  and the credential files they name, mounted at `/etc/cairn/gateway-kms`. With replicas sharing a key Secret
+  (`cairn.gateway.keys.existingSecret`), make its content with `cairn gateway-keys wrap --key-dir DIR` (with
+  `CAIRN_GATEWAY_KEY_KMS` set): it writes `gateway-identity.kms.json` (a new identity, or the clear one in `DIR`,
+  which it removes). Backups (`deploy/ops/backup.sh`) carry the wrapped file: restoring it needs the key manager.
+- **Tested** with the real `cairn gateway` process and a real agent (`tests/test_gateway_kms.py`, CI job `python`):
+  Vault 1.20 transit (a clear identity wrapped and removed, nothing clear left on disk, a revoked token refused at
+  once the cache expired and at the next start, a new token restoring the same keys, a rotated Vault key, no
+  configuration, another key, a token for another key, a wrapping moved to another purpose, bad settings) and
+  `nsmithuk/local-kms` (a key named by alias, a disabled and re-enabled key, `cairn gateway-keys wrap`). That server
+  does not check signatures; the SigV4 signer is Cairn's own. KMIP HSMs, Azure Key Vault and Cloud KMS (which the
+  store supports) are not offered for the gateway yet.
+
 ## Main settings
 
 | Setting | Purpose |
@@ -1419,6 +1458,7 @@ The API is `/cairn/api/sources`:
 | `CAIRN_SLACK_*`, `CAIRN_TEAMS_WEBHOOK_URL`, `CAIRN_SMTP_URL` | notification channels |
 | `CAIRN_EMBED_ALLOWED_ORIGINS` | sites allowed to embed Cairn components |
 | `CAIRN_TOKEN_ROTATE_DAYS`, `CAIRN_TOKEN_GRACE_MINUTES` | service token rotation |
+| `CAIRN_GATEWAY_KEY_KMS` | the remote agent gateway's identity wrapped by a key manager (see below) |
 | `CAIRN_SSO_*` | single sign-on (see above) |
 | `CAIRN_SCIM_TOKEN` | SCIM provisioning token |
 | `CAIRN_MCL_INVALIDATION` | apply metadata changes to access decisions at once (default `true`) |

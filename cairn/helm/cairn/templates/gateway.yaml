@@ -30,6 +30,13 @@
 {{- $mounts = append $mounts (dict "name" "gateway-client-ca" "mountPath" "/etc/cairn/gateway-client-ca" "readOnly" true) }}
 {{- $env = append $env (dict "name" "CAIRN_GATEWAY_CLIENT_CA" "value" (printf "/etc/cairn/gateway-client-ca/%s" (default "ca.crt" $tls.clientCaKey))) }}
 {{- end }}
+{{- /* The identity wrapped by a key manager (Vault transit, AWS KMS): its settings and credential files. */}}
+{{- $kms := default dict $gw.keys.kms }}
+{{- if $kms.secretName }}
+{{- $volumes = append $volumes (dict "name" "gateway-kms" "secret" (dict "secretName" $kms.secretName "defaultMode" 0400)) }}
+{{- $mounts = append $mounts (dict "name" "gateway-kms" "mountPath" "/etc/cairn/gateway-kms" "readOnly" true) }}
+{{- $env = append $env (dict "name" "CAIRN_GATEWAY_KEY_KMS" "value" (printf "@/etc/cairn/gateway-kms/%s" (default "kms.json" $kms.configKey))) }}
+{{- end }}
 {{- $ctx := dict "root" $ "component" "gateway" "cfg" $cfg "replicas" (ternary $gw.replicas 1 $sharedKeys) "recreate" (not $sharedKeys) "port" (int $gw.port) "args" (list "gateway" "--host" "0.0.0.0" "--port" (toString $gw.port)) "extraVolumes" $volumes "extraVolumeMounts" $mounts "extraEnv" $env "tcpProbes" (not (empty $tls.secretName)) }}
 {{ include "cairn.deployment" $ctx }}
 ---
