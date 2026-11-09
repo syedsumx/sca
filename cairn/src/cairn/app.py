@@ -34,6 +34,9 @@ def _principal_dependency(services: Services):
     from cairn.common.licence import LicenceRefused
 
     def current_principal(request: Request) -> Principal:
+        injected = request.scope.get("cairn.principal")
+        if injected is not None:     # an in-process call Cairn makes as someone (cairn.iac.changes): never from outside
+            return injected
         try:
             principal = services.identity.resolve(dict(request.headers), dict(request.cookies))
         except AuthenticationError as e:
@@ -509,6 +512,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     from cairn.iac.api import build_iac_router   # the resource registry, inventory and export (as the caller)
 
     app.include_router(build_iac_router(cp))
+    if getattr(services, "iac_changes", None) is not None:   # change requests agents propose and people approve
+        from cairn.iac.changes import build_changes_router
+
+        app.include_router(build_changes_router(services.iac_changes, cp, getattr(services, "iac_assistant", None)))
     if services.derived is not None:
         from cairn.pipelines.derived import build_derived_router
 
@@ -556,6 +563,7 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
     from cairn.common.deprecation import install as install_deprecations
 
     install_deprecations(app, principal=cp)       # Deprecation/Sunset headers, 410 after sunset, GET /deprecations
+    services.api_app = app                        # what acts as a person in-process (change requests, MCP's IaC tools)
     return app
 
 

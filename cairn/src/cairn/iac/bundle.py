@@ -134,7 +134,13 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
         raise BundleError(f"{path}: {e}")
     if not isinstance(raw, dict):
         raise BundleError(f"{path}: a bundle is a mapping")
-    raw = _subst(raw, vars_ or {})
+    return parse(raw, vars_)
+
+
+def parse(raw: dict, vars_: Optional[dict] = None, substitute: bool = True) -> dict:
+    """A bundle document (already read) checked: {"bundle": name, kind: {key: spec}}. Without ``substitute``,
+    ``${NAME}`` stays as written (a change request keeps references; their values are given when it is applied)."""
+    raw = _subst(dict(raw), vars_ or {}) if substitute else dict(raw)
     name = str(raw.pop("bundle", "") or "")
     if not BUNDLE.match(name):
         raise BundleError("bundle: a name of lowercase letters, digits, '.', '_' and '-'")

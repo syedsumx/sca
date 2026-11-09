@@ -186,6 +186,7 @@ def load_models() -> MetaData:
     from cairn.pipelines import streams as _streams  # noqa: F401
     from cairn.pipelines import derived as _derived  # noqa: F401
     from cairn.iac import state as _bundles  # noqa: F401
+    from cairn.iac import changes as _iac_changes  # noqa: F401
 
     return metadata
 

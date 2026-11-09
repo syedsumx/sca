@@ -43,6 +43,8 @@ EXCLUDED: dict[str, str] = {
     "/v1/agent-apps/{}": "a release, not a declaration: each deploy uploads a code bundle and makes a new version "
                          "(cairn agent deploy, from CI); its identity and access are an agent identity and policies",
     "/v1/agent-memory/{}": "runtime state, not config: what agents remember about the people they serve",
+    "/v1/iac/changes/{}": "workflow state, not config: a change request (proposed, approved, applied) is how code "
+                          "reaches Cairn, not a resource of its own; withdrawing one is its DELETE",
     "/v1/me/agent-memories/{}": "runtime state, not config: a person's own agent memories",
     "/v1/app-installs/{}": "runtime state, not config: installing a published app package (a version) into a "
                            "workspace, upgraded in place by its publisher's releases",

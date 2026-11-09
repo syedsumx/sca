@@ -8,7 +8,9 @@ permissions **narrowed** by the agent's scopes:
 * ``query_data``: preview tables, run SQL, ask questions of data (masked as for the person);
 * ``propose``: create things that wait for a person's review (documentation drafts, workflows,
   access requests, discussions, steward runs);
-* ``write``: change metadata directly.
+* ``write``: change metadata directly;
+* ``iac:propose``: propose infrastructure-as-code change requests (``/v1/iac/changes``) for a person to approve;
+  an agent never approves or applies one.
 
 Administration (``/admin``, licences, other agents) is never reachable with an agent credential.
 
@@ -45,7 +47,7 @@ from sqlalchemy import BigInteger, Boolean, Column, Index, Integer, String, Tabl
 
 from cairn.common.db import JSONText, metadata
 
-SCOPES = ("read", "query_data", "propose", "write", "model", "memory")
+SCOPES = ("read", "query_data", "propose", "write", "model", "memory", "iac:propose")
 DEFAULT_OAUTH_SCOPES = ("read", "query_data", "propose")
 SCOPE_TEXT = {
     "read": "Read the catalog: assets, lineage, quality, definitions",
@@ -54,6 +56,7 @@ SCOPE_TEXT = {
     "write": "Change metadata directly (tags, owners, descriptions)",
     "model": "Call language models through Cairn's AI gateway, metered to you",
     "memory": "Remember and recall what it learns about you, which you can see and delete",
+    "iac:propose": "Propose changes to Cairn's resources as code, which a person must approve before they apply",
 }
 KEY_PREFIX, ACCESS_PREFIX, REFRESH_PREFIX = "ca_", "cat_", "car_"
 ACCESS_TTL_MS, REFRESH_TTL_MS, CODE_TTL_MS = 3600_000, 30 * 86400_000, 600_000
@@ -704,6 +707,11 @@ NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me", "/v1/me/agent-memorie
 MODEL_PATHS = ("/v1/ai/gateway",)                              # the AI gateway: scope "model", reads included
 MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
 READ_ONLY_PATHS = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes")
+# Infrastructure-as-code change requests (cairn.iac.changes): agents plan (a read) and propose; people decide and apply.
+IAC_PROPOSE_ROUTES = {("POST", "/v1/iac/changes"), ("POST", "/v1/iac/changes/{cid}/commit"),
+                      ("DELETE", "/v1/iac/changes/{cid}")}
+IAC_PERSON_ROUTES = {"/v1/iac/changes/draft", "/v1/iac/changes/{cid}/approve", "/v1/iac/changes/{cid}/reject",
+                     "/v1/iac/changes/{cid}/apply"}
 
 
 def _under(path: str, prefixes: tuple[str, ...]) -> bool:
@@ -716,6 +724,12 @@ def required_scope(method: str, path: str, read_posts: set[str]) -> Optional[str
     reading = method in ("GET", "HEAD", "OPTIONS")
     if _under(path, NEVER_PATHS) or (_under(path, READ_ONLY_PATHS) and not reading):
         return None
+    if path in IAC_PERSON_ROUTES:
+        return None
+    if (method, path) in IAC_PROPOSE_ROUTES:
+        return "iac:propose"
+    if method == "POST" and path == "/v1/iac/changes/plan":
+        return "read"
     if _under(path, MODEL_PATHS):
         return "model"
     if _under(path, MEMORY_PATHS):
@@ -733,6 +747,10 @@ def tool_scope(tool: str) -> str:
     """The scope an agent needs for an MCP tool."""
     if tool.startswith("suggest_") or tool in ("generate_documentation", "request_access", "start_discussion"):
         return "propose"
+    if tool in ("iac_propose", "iac_open_pr"):
+        return "iac:propose"
+    if tool == "iac_apply":
+        return "never"                                   # a person applies what they approved; no agent scope does
     return {"ask_data": "query_data", "query_metric": "query_data", "run_python": "query_data",
             "run_flow": "write"}.get(tool, "read")
 

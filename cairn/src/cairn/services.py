@@ -625,7 +625,38 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_pipeline_health(services)
     _build_medallion(services)
     _build_flows(services)
+    _build_iac_changes(services)
     return services
+
+
+def _build_iac_changes(s: Services) -> None:
+    """Infrastructure-as-code change requests (cairn.iac.changes) and Ask an agent (cairn.iac.assistant): planned and
+    applied through Cairn's own API as a person, so built after everything that API serves."""
+    from cairn.iac.assistant import IacAssistant
+    from cairn.iac.changes import ChangeRequests
+
+    hub = s.notify
+
+    def tell(type_, title, body, recipients, payload):
+        if hub is None:
+            return
+        from cairn.notify.hub import Event
+
+        hub.publish(Event(type=type_, title=title, body=body, recipients=list(recipients), payload=payload,
+                          url=f"{hub.public_url}/cairn/settings/iac?change={payload.get('change', '')}"))
+
+    def authz(principal, privilege, urn):
+        return s.authorize(principal, privilege, urn, raise_on_deny=False)
+
+    def app():
+        if getattr(s, "api_app", None) is None:      # the MCP server's process: the API in-process, as in Cairn's
+            from cairn.app import create_api_app
+
+            create_api_app(s)
+        return s.api_app
+
+    s.iac_changes = ChangeRequests(s.engine, s.audit, authz, s.is_admin, tell, getattr(s, "git_folders", None), app)
+    s.iac_assistant = IacAssistant(s.iac_changes, lambda: getattr(s, "ai_gateway", None) is not None)
 
 
 def _build_medallion(s: Services) -> None:
