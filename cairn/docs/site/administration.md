@@ -1132,8 +1132,19 @@ notification, links elsewhere opening in the browser, "Sign in the command line 
 person from the keychain, a dashboard kept encrypted and read offline after Cairn stopped, cleared on sign-out, and an
 administrator's `offline_cache: false` honoured; the settings API itself in `tests/test_desktop_policy.py`; unit tests
 in `desktop/test`; a Linux build (unpacked and AppImage) smoke-tested, and an AppImage updating itself from a local
-feed (and not past a pinned version). Not tested end to end: a real browser vendor's push service (a browser's
-subscription needs it), and the macOS and Windows installers (built only on GitHub's runners).
+feed (and not past a pinned version); the .deb installed with apt, run from /opt with safeStorage on GNOME Keyring,
+and removed. Not tested end to end: a real browser vendor's push service (a browser's subscription needs it).
+
+**The desktop release builds** (`cairn-desktop-release` workflow, on every push that changes the app or the CLI; a
+`desktop-v*` tag publishes) smoke-test each packaged app against a stand-in Cairn: a workspace opened, a deep link
+followed, a page's notification reaching the main process; on macOS and Windows also the tray icon and safeStorage on
+the OS keychain (a round trip; the "Cairn Safe Storage" Keychain item on macOS, the DPAPI-wrapped key in Local State
+on Windows); on Linux the .deb installed, run and removed. A packaged app's fuses keep debuggers out, so the app
+reports this itself when started with `CAIRN_DESKTOP_SELF_TEST=/absolute/path/report.json`: twice a second for two
+minutes it writes (0600) whether the tray exists, the notifications that reached it (workspace, title, whether handed
+to the OS), and safeStorage's state (available, the Linux backend, a round trip of a throwaway string); never a token,
+cookie or page content. Whether the OS then shows a notification is up to the OS (macOS asks the person first) and
+can't be seen from a hosted runner.
 
 ## The command line: `cairn login` and people's commands
 
@@ -1201,9 +1212,19 @@ warehouses, search, show, ask (a stand-in model provider), flows, iac and ontolo
 refresh rotation and reuse, sign-out from the profile page and with `cairn logout`. Also: the device flow and
 sessions on a real database (`tests/test_device_login.py`), the client pieces (`tests/test_cli_client.py`), the
 `cairn-cli` wheel installed alone without server dependencies (`tests/test_cli_client_only.py`), and the install
-script against an HTTPS mirror (`tests/test_cli_install_script.py`). Not tested here: the release binaries on macOS,
-Windows and Linux arm64 (the release workflow builds and smoke-tests them on GitHub's runners), signing (off until its
-secrets exist), and the OS keychains themselves (macOS Keychain, Windows Credential Manager, Secret Service).
+script against an HTTPS mirror (`tests/test_cli_install_script.py`). `cairn ontology status` and `cairn ontology
+compile --wait` against Cairn with the real compiler (`tests/test_ontology_e2e.py`, the package and the binary).
+
+**The release builds** (`cairn-cli-release` workflow, on every push that changes the CLI; a `cli-v*` tag publishes):
+each of the five binaries (Linux x86_64 and arm64, macOS arm64 and x86_64, Windows x86_64) is smoke-tested, then signs
+in through the platform's real keychain with `cli/ci/keychain-smoke.sh` (macOS Keychain, Windows Credential Manager,
+the Secret Service of an unlocked GNOME Keyring in a D-Bus session): `cairn login --token-stdin` against a stand-in
+Cairn, `cairn whoami --output json` (its `credential_store` is `keyring` and `credential_backend` names the keyring
+backend, e.g. `keyring.backends.macOS.Keyring`; `file` when the tokens went to `credentials.json`), the item found
+with the OS's own tool (`security`, `cmdkey`, `secret-tool`) and gone after `cairn logout`. The macOS builds also
+install the Homebrew formula from a local tap (`cli/ci/homebrew-smoke.sh`: `brew tap-new`, the formula pointing at
+the build with its sha256, `brew install`, `brew test`, the completions, `brew uninstall`). Run either script by hand
+on a computer to check it the same way (they leave nothing behind). Signing stays off until its secrets exist.
 
 ## The guided experience: onboarding, capabilities and help
 
