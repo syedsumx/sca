@@ -84,7 +84,8 @@ it('a resource view lists an area from the API, shows a row, and runs a row acti
 it('a refused list says so instead of failing the page', async () => {
     const spec = RESOURCE_SPECS['limits'];
     wrap(<ResourceView spec={spec} />, { [`GET ${spec.path}`]: new Response(JSON.stringify({ detail: 'needs MANAGE_SYSTEM_OPERATIONS' }), { status: 403 }) });
-    expect(await screen.findByText('You do not have access to this area')).toBeTruthy();
+    expect(await screen.findByText('You don’t have permission to see Request limits')).toBeTruthy();
+    expect(screen.getByText(/Ask an owner of Request limits, or an admin, to give you access\. It needs MANAGE_SYSTEM_OPERATIONS\./)).toBeTruthy();
 });
 
 it('a hub page shows its areas as tabs and loads the open one', async () => {

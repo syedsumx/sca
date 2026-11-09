@@ -13,11 +13,15 @@ interface Props {
     tables: SchemaTable[];
     onRun?: () => void;
     placeholder?: string;
+    /** For a form: the field's id (its label points at it), help text and error, when not the page's one SQL box. */
+    id?: string;
+    describedBy?: string;
+    invalid?: boolean;
 }
 
 /** The SQL editor: a text area with autocomplete from the tables the person may query. Suggestions open as
  * you type a name or a dot (and with Ctrl+Space); arrows move, Enter or Tab takes one, Escape closes. */
-export function SqlEditor({ value, onChange, tables, onRun, placeholder }: Props) {
+export function SqlEditor({ value, onChange, tables, onRun, placeholder, id, describedBy, invalid }: Props) {
     const ref = useRef<TextAreaRef>(null);
     const [open, setOpen] = useState<Completion | null>(null);
     const [active, setActive] = useState(0);
@@ -53,7 +57,10 @@ export function SqlEditor({ value, onChange, tables, onRun, placeholder }: Props
         <div style={{ position: 'relative' }}>
             <Input.TextArea
                 ref={ref}
-                aria-label="SQL"
+                id={id}
+                aria-label={id ? undefined : 'SQL'}
+                aria-describedby={describedBy}
+                aria-invalid={invalid || undefined}
                 aria-autocomplete="list"
                 aria-controls={open ? 'sql-suggestions' : undefined}
                 aria-activedescendant={open ? `sql-suggestion-${active}` : undefined}
