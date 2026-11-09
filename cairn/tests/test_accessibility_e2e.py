@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import threading
 import time
@@ -24,9 +25,12 @@ DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
          "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions", "/flows",
-         "/flows?flow=a11y-flow",
+         "/flows?flow=a11y-flow", "/usage?tab=budgets", "/compute?tab=jobs",
          # Without a compiler here; tests/test_ontology_ui_e2e.py runs axe on the same pages with a compiled ontology.
          "/ontology", "/ontology?tab=review", "/ontology?tab=compile"]
+# Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
+FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
+         ("/trust?tab=secret-scopes", "Create scope")]
 BLOCKING = {"serious", "critical"}
 
 
@@ -135,6 +139,20 @@ def test_the_main_pages_pass_axe(cairn):
                 bad = audit(page)
                 if bad:
                     found[path] = bad
+            for path, button in FORMS:
+                page.goto(f"{cairn}/host#{path}", wait_until="networkidle")
+                page.get_by_role("button", name=button, exact=True).first.click()
+                dialog = page.get_by_role("dialog").last
+                dialog.wait_for()
+                more = dialog.get_by_role("button", name=re.compile("Advanced options"))
+                if more.count():
+                    more.click()
+                dialog.get_by_role("button", name=button, exact=True).last.click()     # empty: required fields say so
+                dialog.get_by_role("alert").first.wait_for()
+                bad = audit(page)
+                if bad:
+                    found[f"{path} ({button})"] = bad
+                page.keyboard.press("Escape")
         finally:
             browser.close()
     assert not errors, errors

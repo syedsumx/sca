@@ -51,10 +51,11 @@ jobs:
           java-version: "17"
       - name: Lint
         run: ruff check .
-      - name: Everything as code (the registry's coverage gate; the Terraform provider generated from it; agents' change requests)
+      - name: Everything as code (the registry's coverage gate; the Terraform provider and the UI's forms generated from it; agents' change requests)
         run: |
           python -m cairn.iac.terraform --check
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py
+          python -m cairn.iac.forms --check
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py tests/test_ui_forms.py
       - name: Unit and integration tests
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
@@ -476,6 +477,11 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_flows_ui_e2e.py | tee "$RUNNER_TEMP/flowsui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/flowsui.log"
+      - name: Friendly forms (create, edit and delete in four hubs with forms only, pickers, field errors, a 403 in words; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_forms_ui_e2e.py | tee "$RUNNER_TEMP/formsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/formsui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail
