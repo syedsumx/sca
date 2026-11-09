@@ -1,0 +1,171 @@
+# The `cairn` command line as single-file binaries (PyInstaller), for Linux (x86_64, arm64), macOS (arm64, x86_64)
+# and Windows (x86_64): built and smoke-tested on every change to the CLI, and published as a GitHub release with
+# SHA256SUMS and a filled-in Homebrew formula on a `cli-v*` tag (cli-v0.2.0 releases version 0.2.0).
+#
+# Signing is off until its secrets exist; adding them turns it on (see docs/site/command-line.md, "Signed binaries"):
+#   macOS:   APPLE_CERTIFICATE_P12 (base64 of a "Developer ID Application" .p12), APPLE_CERTIFICATE_PASSWORD,
+#            APPLE_DEVELOPER_ID (the identity, e.g. "Developer ID Application: Acme Ltd (TEAMID)"), and for
+#            notarization APPLE_NOTARY_KEY (an App Store Connect API key, .p8 text), APPLE_NOTARY_KEY_ID,
+#            APPLE_NOTARY_ISSUER.
+#   Windows: WINDOWS_CERT (base64 of a code-signing .pfx) and WINDOWS_CERT_PASSWORD.
+name: cairn-cli-release
+
+on:
+  push:
+    tags: ["cli-v*"]
+    branches: ["**"]
+    paths:
+      - "cairn/src/cairn_cli/**"
+      - "cairn/cli/**"
+      - "cairn/src/cairn/flows/**"
+      - "cairn/src/cairn/iac/**"
+      - "cairn/deploy/cli/**"
+      - "cairn/deploy/homebrew/**"
+      - ".github/workflows/cairn-cli-release.yml"
+  pull_request:
+    paths:
+      - "cairn/src/cairn_cli/**"
+      - "cairn/cli/**"
+      - "cairn/deploy/cli/**"
+      - "cairn/deploy/homebrew/**"
+      - ".github/workflows/cairn-cli-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-24.04, platform: linux-x86_64 }
+          - { os: ubuntu-24.04-arm, platform: linux-arm64 }
+          - { os: macos-15, platform: macos-arm64 }
+          - { os: macos-15-intel, platform: macos-x86_64 }
+          - { os: windows-2022, platform: windows-x86_64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      APPLE_DEVELOPER_ID: ${{ secrets.APPLE_DEVELOPER_ID }}
+      APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+      WINDOWS_CERT: ${{ secrets.WINDOWS_CERT }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: cairn
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: The release's version (a cli-v* tag)
+        if: startsWith(github.ref, 'refs/tags/cli-v')
+        run: |
+          version="${GITHUB_REF_NAME#cli-v}"
+          sed -i.bak "s/^__version__ = .*/__version__ = \"$version\"/" src/cairn_cli/__init__.py
+          rm -f src/cairn_cli/__init__.py.bak
+          grep -q "^__version__ = \"$version\"$" src/cairn_cli/__init__.py
+      - name: Install the CLI (client dependencies only) and PyInstaller
+        run: |
+          python -m pip install -q --upgrade pip
+          python -m pip install -q ./cli "pyinstaller==6.22.3"
+      - name: Import the Developer ID certificate (macOS, when its secret is set)
+        if: runner.os == 'macOS' && env.APPLE_DEVELOPER_ID != ''
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      - name: Build
+        env:
+          CAIRN_CODESIGN_IDENTITY: ${{ runner.os == 'macOS' && secrets.APPLE_DEVELOPER_ID || '' }}
+        run: pyinstaller --clean --noconfirm cli/cairn.spec
+      - name: Notarize (macOS, when its secrets are set)
+        if: runner.os == 'macOS' && env.APPLE_DEVELOPER_ID != '' && env.APPLE_NOTARY_KEY_ID != ''
+        env:
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_ISSUER: ${{ secrets.APPLE_NOTARY_ISSUER }}
+        run: |
+          umask 077
+          key="$RUNNER_TEMP/notary.p8"
+          printf '%s' "$APPLE_NOTARY_KEY" > "$key"
+          codesign --verify --strict --verbose=2 dist/cairn
+          ditto -c -k dist/cairn "$RUNNER_TEMP/cairn.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/cairn.zip" --key "$key" --key-id "$APPLE_NOTARY_KEY_ID" \
+            --issuer "$APPLE_NOTARY_ISSUER" --wait
+          rm -f "$key"
+      - name: Sign (Windows, when its secret is set)
+        if: runner.os == 'Windows' && env.WINDOWS_CERT != ''
+        shell: pwsh
+        env:
+          WINDOWS_CERT_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERT))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERT_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $pfx -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $pfx
+          $out = Set-AuthenticodeSignature -FilePath dist\cairn.exe -Certificate $cert -HashAlgorithm SHA256 `
+            -TimestampServer "http://timestamp.digicert.com"
+          if ($out.Status -ne "Valid") { throw "signing failed: $($out.StatusMessage)" }
+      - name: Smoke test
+        run: |
+          exe=dist/cairn; [ "$RUNNER_OS" = "Windows" ] && exe=dist/cairn.exe
+          export CAIRN_CONFIG_DIR="$RUNNER_TEMP/cairn-config"
+          "$exe" --version
+          "$exe" completion bash | grep -q _cairn_complete
+          "$exe" completion powershell | grep -q Register-ArgumentCompleter
+          "$exe" login --help | grep -q -- --token-stdin
+          "$exe" query --help >/dev/null
+          set +e; "$exe" whoami; rc=$?; set -e
+          [ "$rc" = 3 ] || { echo "whoami without a sign-in should exit 3, got $rc"; exit 1; }
+      - name: Name the binary for its platform
+        run: |
+          mkdir -p out
+          if [ "$RUNNER_OS" = "Windows" ]; then cp dist/cairn.exe "out/cairn-${{ matrix.platform }}.exe"
+          else cp dist/cairn "out/cairn-${{ matrix.platform }}"; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cairn-${{ matrix.platform }}
+          path: cairn/out/*
+          if-no-files-found: error
+
+  install-script:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: shellcheck -S warning cairn/deploy/cli/install.sh
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/cli-v')
+    needs: [build, install-script]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Checksums and the Homebrew formula
+        run: |
+          version="${GITHUB_REF_NAME#cli-v}"
+          cd artifacts
+          sha256sum cairn-* > SHA256SUMS
+          cat SHA256SUMS
+          sum() { grep " $1\$" SHA256SUMS | cut -d' ' -f1; }
+          sed -e "s|@@VERSION@@|$version|g" -e "s|@@REPOSITORY@@|$GITHUB_REPOSITORY|g" \
+              -e "s|@@SHA256_MACOS_ARM64@@|$(sum cairn-macos-arm64)|" -e "s|@@SHA256_MACOS_X86_64@@|$(sum cairn-macos-x86_64)|" \
+              -e "s|@@SHA256_LINUX_ARM64@@|$(sum cairn-linux-arm64)|" -e "s|@@SHA256_LINUX_X86_64@@|$(sum cairn-linux-x86_64)|" \
+              ../cairn/deploy/homebrew/cairn.rb > cairn.rb
+          ! grep -q "@@" cairn.rb
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "cairn CLI ${GITHUB_REF_NAME#cli-v}" \
+            --notes "The cairn command line, ${GITHUB_REF_NAME#cli-v}. Install: see docs/site/command-line.md. Verify a download with SHA256SUMS." \
+            cairn-* SHA256SUMS cairn.rb
