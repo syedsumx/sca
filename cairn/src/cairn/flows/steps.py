@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
@@ -239,10 +240,29 @@ def _stream(b: Backends, ctx: Ctx) -> Any:
 
 
 # ---- compute ------------------------------------------------------------------------------------------
+_CAUSE = re.compile(r"^(?:Caused by: )?[\w.$]+(?:Exception|Error)\b.*")
+
+
+def _failure_lines(text: str, limit: int = 12) -> list[str]:
+    """The exception lines of a failure (``x.y.SomeException: why`` and each ``Caused by:``), wherever they are in
+    the output: a JVM puts them above a stack trace long enough to push them out of the tail."""
+    out: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if _CAUSE.match(line) and line not in out:
+            out.append(line[:500])
+            if len(out) >= limit:
+                break
+    return out
+
+
 def _job_result(ctx: Ctx, status: str, output: Optional[str], log: Optional[str], error: Optional[str]) -> Done:
     if status != "succeeded":
         tail = "\n".join(x for x in ((log or "").strip(), (output or "").strip()) if x)
         if tail:                                     # what dbt, Spark or the script said, in the step's log
+            causes = _failure_lines(tail) if len(tail) > 8000 else []
+            if causes:
+                ctx.log("the job failed with:\n" + "\n".join(causes))
             ctx.log("the job's last output:\n" + tail[-8000:])
         raise StepFailed(error or "the job failed")
     text = output or ""

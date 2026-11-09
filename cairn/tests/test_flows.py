@@ -688,3 +688,28 @@ def test_deleting_a_runner_airflow_flow_removes_its_dag(env, tmp_path):
     assert dag.exists() and "cairn-flow-version:1" in dag.read_text()
     env.delete(ANA, "on-af")
     assert not dag.exists()
+
+
+def test_a_failed_jobs_log_leads_with_its_exception_lines():
+    """A JVM's exception is above a stack trace long enough to push it out of the log's tail: the step's log
+    names it first."""
+    from cairn.flows.steps import StepFailed, _job_result
+
+    said: list[str] = []
+
+    class Ctx:
+        def log(self, text):
+            said.append(text)
+
+    trace = "\n".join(["org.apache.iceberg.exceptions.ForbiddenException: Cairn's policies do not let bob read analytics.x",
+                       *["\tat org.apache.Some.frame(Some.java:1)"] * 600, "Caused by: java.io.IOException: refused"])
+    with pytest.raises(StepFailed):
+        _job_result(Ctx(), "failed", None, trace, "spark-submit exited 1")
+    assert said[0] == ("the job failed with:\norg.apache.iceberg.exceptions.ForbiddenException: Cairn's policies do not let "
+                       "bob read analytics.x\nCaused by: java.io.IOException: refused")
+    assert said[1].startswith("the job's last output:\n") and len(said[1]) < 8100
+    # A short output is shown whole, once.
+    said.clear()
+    with pytest.raises(StepFailed):
+        _job_result(Ctx(), "failed", "ValueError: bad", None, None)
+    assert said == ["the job's last output:\nValueError: bad"]

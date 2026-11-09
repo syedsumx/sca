@@ -102,7 +102,7 @@ def test_a_spark_step_runs_as_the_owner_on_the_lakehouse(flows, lake, cairn):  #
     assert run["status"] == "failed" and run["run_as"] == BOB, run
     said = flows.step_log(BOB, run["id"], "build")["log"]
     assert "analytics" in said and ("Forbidden" in said or "do not let" in said or "NoSuchTable" in said
-                                    or "TABLE_OR_VIEW_NOT_FOUND" in said), said[-4000:]
+                                    or "TABLE_OR_VIEW_NOT_FOUND" in said), said[:3000] + "\n...\n" + said[-2000:]
     from pyiceberg.exceptions import NoSuchTableError
 
     with pytest.raises(NoSuchTableError):
