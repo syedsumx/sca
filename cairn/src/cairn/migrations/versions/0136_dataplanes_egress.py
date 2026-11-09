@@ -1,8 +1,8 @@
 """Split control and data plane (data planes, their connectors, calls through the tunnel, compute per workspace) and
 egress rules for user code
 
-Revision ID: 0138
-Revises: 0137
+Revision ID: 0136
+Revises: 0135
 Create Date: 2026-11-09 23:30:00.000000
 """
 
@@ -11,8 +11,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0138'
-down_revision = '0137'
+revision = '0136'
+down_revision = '0135'
 branch_labels = None
 depends_on = None
 
