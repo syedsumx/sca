@@ -148,7 +148,7 @@ import type {
     TrendingItem,
     UiConfig,
 } from './types';
-import type { Profile, ProfileUpdate, PushState } from './types';
+import type { DeviceCodeInfo, Profile, ProfileUpdate, PushState, SignedInDevice } from './types';
 
 export const DEFAULT_GRAPHQL_URL = '/api/v2/graphql';
 
@@ -1565,6 +1565,24 @@ export class ConsumerClient extends CairnClient {
 
     unsubscribePush(endpoint: string) {
         return this.request<PushState>('POST', '/v1/me/push/unsubscribe', { endpoint });
+    }
+
+    // --- the command line: signed-in devices, and approving a device code (cairn login) ---------------------
+
+    myDevices(opts?: RequestOptions) {
+        return this.request<{ devices: SignedInDevice[] }>('GET', '/v1/me/devices', undefined, opts);
+    }
+
+    signOutDevice(id: string) {
+        return this.request<void>('DELETE', `/v1/me/devices/${encodeURIComponent(id)}`);
+    }
+
+    deviceCode(code: string, opts: RequestOptions = {}) {
+        return this.request<DeviceCodeInfo>('GET', '/oauth/device', undefined, { ...opts, query: { code } });
+    }
+
+    decideDeviceCode(code: string, decision: 'approve' | 'deny') {
+        return this.request<{ approved: boolean; name: string | null }>('POST', '/oauth/device', { user_code: code, decision });
     }
 
     createEmbedToken(input: EmbedTokenRequest) {

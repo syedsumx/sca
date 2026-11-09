@@ -1994,6 +1994,28 @@ export interface ProfilePin {
     label: string;
 }
 
+/** A device signed in with `cairn login` (GET /v1/me/devices). */
+export interface SignedInDevice {
+    id: string;
+    name: string;
+    client: string;
+    signed_in_ms: number;
+    last_used_ms: number;
+    expires_ms: number;
+    current?: boolean;
+}
+
+/** What a device code asks for, shown before the person approves it (GET /oauth/device). */
+export interface DeviceCodeInfo {
+    client: string;
+    name: string | null;
+    address: string | null;
+    requested_ms: number;
+    expires_ms: number;
+    access_token_seconds: number;
+    refresh_token_days: number;
+}
+
 export interface PushState {
     enabled: boolean;
     public_key: string | null;

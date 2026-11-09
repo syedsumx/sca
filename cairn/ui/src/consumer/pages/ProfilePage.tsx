@@ -5,6 +5,7 @@ import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { PinKind, Profile, ProfileChannel, ProfileLanguage, ProfilePin } from '../api/types';
+import { SignedInDevices } from '../components/SignedInDevices';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { LOCALES, Locale, useI18n } from '../i18n';
 import { deviceSubscribed, disablePush, enablePush, pushSupported } from '../utils/push';
@@ -293,6 +294,10 @@ export function ProfilePage() {
                 <Button type="primary" onClick={save} loading={saving}>Save profile</Button>
                 <Button onClick={() => setDraft(draftOf(p))} disabled={saving}>Discard changes</Button>
             </Space>
+
+            <Section as="section" aria-labelledby="profile-devices" style={{ marginTop: 24 }}>
+                <SignedInDevices />
+            </Section>
         </Page>
     );
 }

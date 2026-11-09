@@ -25,7 +25,7 @@ DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
          "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions", "/flows",
-         "/flows?flow=a11y-flow", "/usage?tab=budgets", "/compute?tab=jobs",
+         "/flows?flow=a11y-flow", "/usage?tab=budgets", "/compute?tab=jobs", "/device?code=BCDF-GHJK",
          # Without a compiler here; tests/test_ontology_ui_e2e.py runs axe on the same pages with a compiled ontology.
          "/ontology", "/ontology?tab=review", "/ontology?tab=compile"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
