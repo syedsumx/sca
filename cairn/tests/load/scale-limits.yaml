@@ -7,9 +7,13 @@
 #   cached, 2,000/s offered for 20 s: 1,964-1,990/s answered, p99 0.4-1.9 s (300/s offered: p99 18 ms)
 #   uncached, 2,000/s offered: 105-273/s answered (each new question reads about 15 aspects from Cairn Core)
 #   gateway, 20 agents, 141 MiB: 6.9 MiB/s, batch (1 MiB) p99 3.2 s
+#   CI runs the PDP at 1,000/s (CAIRN_LOAD_RATE), which the runner sustains: at 2,000/s the driver and the replicas
+#   saturate its 4 vCPUs and the p99 measures the growing backlog (run 345: 1,614/s answered, p99 14 s), not Cairn.
+#   cached, 1,000/s offered for 60 s here: 1,000/s answered, p50 2.6 ms, p99 204 ms.
 pdp:
-  cached: {min_rps: 1500, max_p99_ms: 5000}
-  uncached: {min_rps: 50, max_p99_ms: 60000}
+  cached: {min_fraction: 0.95, max_p99_ms: 2000}
+  # Uncached decisions top out near 190/s on 4 vCPUs (each reads ~15 aspects from Core): gated at 150/s offered.
+  uncached: {rate: 150, min_fraction: 0.95, max_p99_ms: 5000}
 gateway:
   min_mib_per_second: 3
   max_batch_p99_ms: 30000

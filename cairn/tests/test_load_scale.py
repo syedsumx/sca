@@ -152,13 +152,16 @@ def test_the_pdp_at_a_fixed_rate_cached_and_uncached(tmp_path, report):
         lim = limits()["pdp"]
         modes = os.environ.get("CAIRN_LOAD_PDP_MODES", "cached,uncached").split(",")
         for mode, target_p99 in [m for m in (("cached", 5.0), ("uncached", 25.0)) if m[0] in modes]:
-            got = scale.pdp_load(urls, TOKEN, RATE, DURATION, mode)
+            rate = float(lim[mode].get("rate", RATE))     # a rate the machine sustains: past it, p99 is the backlog
+            got = scale.pdp_load(urls, TOKEN, rate, DURATION, mode)
             report[f"pdp_{mode}"] = got
-            met = got["achieved_rps"] >= 0.98 * RATE and got["p99_ms"] <= target_p99
-            report["targets"][f"pdp_{mode}"] = f"{'met' if met else 'not met'}: p99 < {target_p99:g} ms at {RATE:.0f}/s"
+            met = got["achieved_rps"] >= 0.98 * 2000 and got["p99_ms"] <= target_p99
+            report["targets"][f"pdp_{mode}"] = (f"{'met' if met else 'not met'}: p99 < {target_p99:g} ms at 2000/s "
+                                                f"(measured at {rate:.0f}/s offered)")
             print(f"pdp {mode}: {json.dumps(got)}")
             assert got["errors"] == 0, got
-            assert got["achieved_rps"] >= lim[mode]["min_rps"], (got, lim[mode])
+            floor = lim[mode]["min_rps"] if "min_rps" in lim[mode] else lim[mode]["min_fraction"] * rate
+            assert got["achieved_rps"] >= floor, (got, lim[mode])
             assert got["p99_ms"] <= lim[mode]["max_p99_ms"], (got, lim[mode])
     finally:
         for p in procs:

@@ -3522,10 +3522,13 @@ python tests/load/loadtest.py --api https://cairn.example.com/cairn/api --token 
 ```
 
 **At scale** (`tests/test_load_scale.py`, CI job `python`, published as the `load-scale` artifact): three `cairn pdp`
-replicas driven open-loop at 2,000 decisions a second for 60 seconds, latency counted from each request's scheduled
-time, once with a working set the decision cache holds and once with every question new; and `cairn gateway` with 100
+replicas driven open-loop for 60 seconds, latency counted from each request's scheduled time, once with a working set
+the decision cache holds and once with every question new; and `cairn gateway` with 100
 real agents (in pools of 50) uploading 1 GiB of sealed metadata in one run. Cairn Core is a stand-in that answers at
-once, so the numbers are Cairn's own work. To drive your own deployment:
+once, so the numbers are Cairn's own work. CI's 4-vCPU runner holds the driver and the replicas, so it offers what
+that machine sustains (1,000/s cached, 150/s uncached; past that the p99 measures the backlog, not Cairn) and fails on
+a regression below those rates (`tests/load/scale-limits.yaml`); the 2,000/s targets are for a deployment's own
+machines, measured with the commands below. To drive your own deployment:
 
 ```bash
 python tests/load/scale.py pdp --url http://pdp-1:8810 --url http://pdp-2:8810 --token-file svc.token \
