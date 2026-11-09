@@ -164,7 +164,10 @@ jobs:
         env:
           CAIRN_DESKTOP_APP: ${{ github.workspace }}/cairn/desktop/${{ matrix.unpacked }}
           CAIRN_SMOKE_EXPECT: ${{ runner.os != 'Linux' && 'tray,keychain' || '' }}
-        run: node --test test/electron.smoke.test.js
+        run: |
+          # macOS: the packaged app makes its own "Cairn Safe Storage" item; one left by another binary would refuse it.
+          if [ "$RUNNER_OS" = macOS ]; then security delete-generic-password -s "Cairn Safe Storage" >/dev/null 2>&1 || true; fi
+          node --test --test-force-exit test/electron.smoke.test.js
       - name: The AppImage itself starts (Linux)
         if: runner.os == 'Linux'
         working-directory: cairn/desktop

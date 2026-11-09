@@ -68,16 +68,19 @@ test('the real app opens a workspace and follows a deep link from a second launc
     const appLog = path.join(home, 'app.log');
     const env = { ...process.env, XDG_CONFIG_HOME: path.join(home, '.config'), HOME: home, APPDATA: path.join(home, 'AppData'),
         ELECTRON_DISABLE_SECURITY_WARNINGS: '1', CAIRN_DESKTOP_NO_PROTOCOL: '1', CAIRN_DESKTOP_SELF_TEST: report };
-    // macOS finds the login keychain under the real home, and safeStorage reaches for it at start: with a home that
-    // has no keychain the app waits on a keychain dialog nobody answers. The app's own files stay in the temporary
-    // folder all the same (XDG_CONFIG_HOME and --user-data-dir).
-    if (process.platform === 'darwin') env.HOME = os.homedir();
+    // macOS: safeStorage reaches for the keychain at start. When the keychain is what is checked (the packaged app),
+    // the real home's login keychain; otherwise Chromium's mock keychain, so the run neither waits on a keychain
+    // dialog nobody answers nor leaves a "Cairn Safe Storage" item that the packaged app (signed differently) is
+    // then refused. The app's own files stay in the temporary folder (XDG_CONFIG_HOME and --user-data-dir).
+    const macKeychain = process.platform === 'darwin' && expect.has('keychain');
+    if (macKeychain) env.HOME = os.homedir();
+    const keychainArgs = process.platform === 'darwin' && !macKeychain ? ['--use-mock-keychain'] : [];
     for (const k of Object.keys(env)) if (/^(https?|all|no)_proxy$/i.test(k)) delete env[k];   // a local Cairn
     const run = (args) => {
         // Its own profile folder on every OS: Windows takes the app-data folder from the OS, not %APPDATA%, so without
         // it a run would read (and write) the runner's real Cairn Desktop preferences.
         const argv = [...(packaged ? [] : [path.join(__dirname, '..')]), '--no-sandbox', '--no-proxy-server',
-            `--user-data-dir=${path.join(home, 'user-data')}`, ...extraArgs, ...args];
+            `--user-data-dir=${path.join(home, 'user-data')}`, ...keychainArgs, ...extraArgs, ...args];
         const exe = packaged || electron;
         // Its own process group, so the app, its helpers and the virtual display all stop at the end.
         // Its output goes to a log that a failure prints.
