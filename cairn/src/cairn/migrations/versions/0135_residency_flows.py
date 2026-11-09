@@ -1,7 +1,7 @@
 """Data residency follows copies made by SQL: what each Trino statement read from pinned namespaces and writes
 
-Revision ID: 0136
-Revises: 0135
+Revision ID: 0135
+Revises: 0134
 Create Date: 2026-11-09 22:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0136'
-down_revision = '0135'
+revision = '0135'
+down_revision = '0134'
 branch_labels = None
 depends_on = None
 
