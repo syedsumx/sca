@@ -19,6 +19,10 @@ Trino, Snowflake, DuckDB) from Cairn Catalog:
   whose ``region`` its pin allows, also checked on every request: a recipient with no region gets no pinned
   table.
 
+The same share is served through the open Delta Sharing protocol too (``cairn.dataaccess.delta_sharing``): the
+answer to making a share holds a Delta Sharing profile (``delta_sharing``) with the same credential as a bearer
+token, under the same rules.
+
 Only people who may manage every table they share (``MANAGE`` on it) make shares; operators
 (``MANAGE_SYSTEM_OPERATIONS``) see and revoke all of them. Only a hash of the credential is kept. Every
 change is audited in the same transaction, and so is every token the recipient gets.
@@ -131,6 +135,7 @@ class Shares:
         self.catalog_url = catalog_url or os.environ.get("CAIRN_SHARES_CATALOG_URL", "")
         self.token_url = token_url or os.environ.get("CAIRN_SHARES_TOKEN_URL", "")
         self.residency = None                  # cairn.governance.residency.Residency, when rules are in force
+        self.delta = None                      # cairn.dataaccess.delta_sharing.DeltaSharing: the open protocol too
         self.step_up = None                    # (principal, request, action): a passkey check (cairn.identity.passkeys)
         # quality_status(urns) -> {urn: HEALTHY | WARNING | FAILING | ERROR | None} (the quality module's)
         self.quality_status = None
@@ -556,7 +561,10 @@ def build_shares_router(shares: Shares, current_principal, authorize, groups_of)
                 shares.step_up(p, request, "share.create")
             except PasskeyError as e:
                 raise HTTPException(e.status, str(e), headers=e.headers)
-        return call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region)
+        out = call(shares.create, p.urn, list(groups_of(p.urn)), name, recipient, tables, expires_days, region)
+        if shares.delta is not None:          # the Delta Sharing profile file: the same credential, as a bearer token
+            out["delta_sharing"] = shares.delta.profile(out, str(request.base_url))
+        return out
 
     @router.get("")
     def list_(p=Depends(current_principal)):

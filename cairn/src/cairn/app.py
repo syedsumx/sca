@@ -436,6 +436,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_shares_router(services.shares, cp, authz,
                                                lambda urn: services.attributes.subject(urn).get("groups", [])))
+        if getattr(services.shares, "delta", None) is not None:   # the open Delta Sharing protocol, for recipients
+            from cairn.dataaccess.delta_sharing import build_delta_sharing_router
+
+            app.include_router(build_delta_sharing_router(services.shares.delta))
         if getattr(services, "share_packages", None) is not None:   # data packages, agents on shared data
             from cairn.dataaccess.share_packages import build_share_packages_router
 

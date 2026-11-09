@@ -1957,6 +1957,10 @@ def _build_data_access(s: Services) -> None:
 
             s.shares = Shares(s.engine, s.trino_tokens, s.lakehouse, s.audit)
             s.lakehouse.shares = s.shares
+            # The same shares through the open Delta Sharing protocol (pre-signed Parquet files of the tables).
+            from cairn.dataaccess.delta_sharing import DeltaSharing
+
+            s.shares.delta = DeltaSharing(s.shares)
             # Usage overview: the quality of the tables recipients read; notices to the share's maker.
             s.shares.quality_status = lambda urns: {u: v.get("quality_status") for u, v in s.trust(urns).items()}
 
