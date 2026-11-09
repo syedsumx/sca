@@ -26,7 +26,7 @@ test('the configuration folder is the CLI\'s', () => {
     assert.equal(configDir({ CAIRN_CONFIG_DIR: '/etc/cairn-x' }, 'linux', home), '/etc/cairn-x');
     assert.equal(configDir({ CAIRN_CONFIG_DIR: '~/c' }, 'linux', home), '/home/ana/c');
     assert.equal(configDir({ XDG_CONFIG_HOME: '/x' }, 'linux', home), '/x/cairn');
-    assert.equal(configDir({ APPDATA: 'C:\\Users\\ana\\AppData\\Roaming' }, 'win32', home), path.join('C:\\Users\\ana\\AppData\\Roaming', 'cairn'));
+    assert.equal(configDir({ APPDATA: 'C:\\Users\\ana\\AppData\\Roaming' }, 'win32', home), path.win32.join('C:\\Users\\ana\\AppData\\Roaming', 'cairn'));
     assert.equal(configDir({}, 'darwin', home), '/home/ana/.config/cairn');
     assert.equal(configDir({ APPDATA: 'C:\\x' }, 'linux', home), '/home/ana/.config/cairn');
 });

@@ -22,12 +22,13 @@ const path = require('path');
 const { PROFILE_NAME } = require('./logic');
 
 function configDir(env = process.env, platform = process.platform, home = os.homedir()) {
+    const p = platform === 'win32' ? path.win32 : path.posix;       // the platform asked about, not the host's
     const explicit = (env.CAIRN_CONFIG_DIR || '').trim();
     if (explicit) return explicit.replace(/^~(?=$|[\\/])/, home);
     const xdg = (env.XDG_CONFIG_HOME || '').trim();
-    if (xdg) return path.join(xdg.replace(/^~(?=$|[\\/])/, home), 'cairn');
-    if (platform === 'win32' && env.APPDATA) return path.join(env.APPDATA, 'cairn');
-    return path.join(home, '.config', 'cairn');
+    if (xdg) return p.join(xdg.replace(/^~(?=$|[\\/])/, home), 'cairn');
+    if (platform === 'win32' && env.APPDATA) return p.join(env.APPDATA, 'cairn');
+    return p.join(home, '.config', 'cairn');
 }
 
 class TomlError extends Error {}

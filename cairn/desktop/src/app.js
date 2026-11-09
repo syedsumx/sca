@@ -916,6 +916,57 @@ function start(electron, options = {}) {
         updateTray();
     }
 
+    /**
+     * The release builds' self-test (CAIRN_DESKTOP_SELF_TEST names an absolute file): what only the packaged app's
+     * main process can tell a smoke test, since its fuses keep debuggers out (no Playwright there). The tray, the
+     * notifications that reached this process, and safeStorage on the OS keychain (available, which backend, and an
+     * encrypt-decrypt round trip of a throwaway string) are written to that file (0600) twice a second for two
+     * minutes. Nothing secret goes in it: no tokens, no cookies, no page content.
+     */
+    function selfTest(out) {
+        if (typeof out !== 'string' || !path.isAbsolute(out)) return;
+        const probe = `cairn-self-test-${process.pid}-${Date.now()}`;
+        let roundTrip = false;
+        let error = null;
+        try {
+            roundTrip = encryptor.available() && encryptor.decrypt(encryptor.encrypt(probe)) === probe;
+        } catch (e) {
+            error = String((e && e.message) || e).slice(0, 200);
+        }
+        let backend = null;
+        try {
+            if (platform === 'linux' && typeof safeStorage.getSelectedStorageBackend === 'function') {
+                backend = safeStorage.getSelectedStorageBackend();
+            }
+        } catch { /* not on this platform */ }
+        const write = () => {
+            const tray = state.tray && !state.tray.isDestroyed() ? state.tray : null;
+            let bounds = null;
+            try {
+                bounds = tray && tray.getBounds ? tray.getBounds() : null;
+            } catch { /* not on this desktop */ }
+            const report = {
+                version: app.getVersion(), platform, at: Date.now(),
+                tray: tray ? { exists: true, bounds, tooltip: state.trayModel ? state.trayModel.tooltip : null } : { exists: false },
+                notifications: {
+                    supported: !!(Notification && Notification.isSupported && Notification.isSupported()),
+                    received: state.notifications.map((n) => ({ workspace: n.workspace, title: n.title, source: n.source, shown: !!n.shown })),
+                },
+                safeStorage: { available: encryptor.available(), backend, roundTrip, error },
+                workspaces: workspaceList().map((w) => ({ name: w.name, status: w.status })),
+            };
+            try {
+                const tmp = `${out}.${process.pid}.tmp`;
+                fs.writeFileSync(tmp, JSON.stringify(report), { mode: 0o600 });
+                fs.renameSync(tmp, out);
+            } catch { /* the test sees no report */ }
+        };
+        write();
+        const timer = setInterval(write, 500);
+        timer.unref();
+        setTimeout(() => clearInterval(timer), 120000).unref();
+    }
+
     function applyShortcut() {
         globalShortcut.unregisterAll();
         state.shortcut = null;
@@ -1152,6 +1203,7 @@ function start(electron, options = {}) {
         seedFromPolicy();
         createWindow();
         createTray();
+        if (env.CAIRN_DESKTOP_SELF_TEST) selfTest(env.CAIRN_DESKTOP_SELF_TEST);
         applyShortcut();
         syncProfiles();
         fs.watchFile(profiles.file, { interval: 2000 }, () => syncProfiles());

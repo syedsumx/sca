@@ -44,5 +44,9 @@ Versions: Electron 45.2.3, electron-builder 26.18.0, electron-updater 6.8.11, pi
 ## Release
 
 `.github/workflows/cairn-desktop-release.yml` builds on macOS (arm64, x64), Windows and Linux, CLI first, smoke-tests
-each build, and on a `desktop-v*` tag publishes the release and refreshes `desktop-latest` (the update feed).
+each build, and on a `desktop-v*` tag publishes the release and refreshes `desktop-latest` (the update feed). The
+packaged app's fuses keep debuggers (and Playwright) out, so `test/electron.smoke.test.js` reads the app's own
+self-test report (`CAIRN_DESKTOP_SELF_TEST=<absolute file>`: tray, notifications received, safeStorage) and checks
+what `CAIRN_SMOKE_EXPECT` asks (`tray`, `keychain`); `CAIRN_SMOKE_ARGS` adds app arguments
+(`--password-store=gnome-libsecret` for the .deb in a D-Bus session with GNOME Keyring).
 Signing turns on when its secrets exist (`docs/site/desktop.md`, "Signing").

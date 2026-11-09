@@ -110,7 +110,8 @@ class Config:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = self.path.with_name(f".config.toml.{os.getpid()}")
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        # "\n" on every OS: the same bytes Cairn Desktop writes (desktop/src/profiles.js), Windows included.
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(_dumps(self.data))
         os.replace(tmp, self.path)
 

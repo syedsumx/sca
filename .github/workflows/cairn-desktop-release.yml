@@ -1,7 +1,9 @@
 # Cairn Desktop's installers: macOS (dmg and zip, Apple silicon and Intel), Windows (NSIS) and Linux (AppImage and
 # deb), each with the platform's `cairn` command line inside (built first with PyInstaller from cli/cairn.spec, as the
-# CLI's own release does). Every build is smoke-tested: the packaged app opens a stand-in Cairn and follows a deep
-# link (under xvfb on Linux), and the CLI inside runs --version. Artifacts are uploaded on every run; a `desktop-v*`
+# CLI's own release does). Every build is smoke-tested: the packaged app opens a stand-in Cairn, follows a deep link
+# and receives a page's notification (under xvfb on Linux), and the CLI inside runs --version; on macOS and Windows the
+# tray and safeStorage on the OS keychain are checked too, and on Linux the .deb is installed, run and removed. Only a
+# tag publishes; a branch push builds and tests. Artifacts are uploaded on every run; a `desktop-v*`
 # tag publishes a GitHub release (desktop-v1.2.0 releases 1.2.0) with SHA256SUMS and electron-updater's latest*.yml,
 # and refreshes the rolling `desktop-latest` release the app updates from.
 #
@@ -38,7 +40,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-14, platform: macos-arm64, builder: "--mac --arm64", unpacked: "dist/mac-arm64/Cairn.app/Contents/MacOS/Cairn", cli: "dist/mac-arm64/Cairn.app/Contents/Resources/cli/cairn" }
+          - { os: macos-15, platform: macos-arm64, builder: "--mac --arm64", unpacked: "dist/mac-arm64/Cairn.app/Contents/MacOS/Cairn", cli: "dist/mac-arm64/Cairn.app/Contents/Resources/cli/cairn" }
           - { os: macos-15-intel, platform: macos-x64, builder: "--mac --x64", unpacked: "dist/mac/Cairn.app/Contents/MacOS/Cairn", cli: "dist/mac/Cairn.app/Contents/Resources/cli/cairn" }
           - { os: windows-latest, platform: windows-x64, builder: "--win --x64", unpacked: "dist/win-unpacked/Cairn.exe", cli: "dist/win-unpacked/resources/cli/cairn.exe" }
           - { os: ubuntu-latest, platform: linux-x64, builder: "--linux --x64", unpacked: "dist/linux-unpacked/cairn-desktop", cli: "dist/linux-unpacked/resources/cli/cairn" }
@@ -107,7 +109,11 @@ jobs:
       # ---- the installers -----------------------------------------------------------------------------------
       - name: Install
         working-directory: cairn/desktop
-        run: npm ci --no-audit --no-fund
+        # Electron's binary comes from GitHub's releases, which answer 504 for minutes at a time: retried.
+        run: |
+          npm ci --no-audit --no-fund
+          for _ in 1 2 3 4 5 6; do node node_modules/electron/install.js && break; echo "Electron download failed; retrying"; sleep 30; done
+          node -e "require('electron')"
       - name: Unit tests
         working-directory: cairn/desktop
         run: npm test
@@ -124,7 +130,14 @@ jobs:
             [ "$RUNNER_OS" = "macOS" ] && extra+=(-c.mac.identity=null)
           fi
           [ "${CAIRN_NOTARIZE:-}" = "true" ] && extra+=(-c.mac.notarize=true)
-          npx electron-builder ${{ matrix.builder }} --publish never "${extra[@]}"
+          # electron-builder downloads its tools (dmg-builder, fpm, NSIS, AppImage) from GitHub's releases, which
+          # answer 504 for minutes at a time: the build is retried, what was downloaded staying in its cache.
+          for i in 1 2 3 4; do
+            rm -rf dist
+            npx electron-builder ${{ matrix.builder }} --publish never "${extra[@]}" && break
+            [ "$i" = 4 ] && exit 1
+            echo "electron-builder failed (attempt $i); retrying in 60 s"; sleep 60
+          done
           ls -la dist
       - name: Remove the notary key
         if: always() && runner.os == 'macOS'
@@ -139,10 +152,17 @@ jobs:
       - name: Virtual display (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q xvfb
-      - name: The packaged app opens a Cairn and follows a deep link
+      # The packaged app (unsigned until the signing secrets exist), against a stand-in Cairn: it opens the
+      # workspace, follows a deep link, and the page's notification reaches the main process (its self-test
+      # report, CAIRN_DESKTOP_SELF_TEST). On macOS and Windows also: the tray exists and safeStorage is on the OS
+      # keychain (macOS Keychain; DPAPI on Windows), with a round trip. Whether the OS then displays the
+      # notification can't be seen from a hosted runner (macOS asks the person first): the report says whether
+      # the app handed it to the OS.
+      - name: The packaged app opens a Cairn, follows a deep link, notifies; tray and keychain (macOS, Windows)
         working-directory: cairn/desktop
         env:
           CAIRN_DESKTOP_APP: ${{ github.workspace }}/cairn/desktop/${{ matrix.unpacked }}
+          CAIRN_SMOKE_EXPECT: ${{ runner.os != 'Linux' && 'tray,keychain' || '' }}
         run: node --test test/electron.smoke.test.js
       - name: The AppImage itself starts (Linux)
         if: runner.os == 'Linux'
@@ -152,6 +172,28 @@ jobs:
           chmod +x "$app"
           APPIMAGE_EXTRACT_AND_RUN=1 CAIRN_DESKTOP_APP="$PWD/$app" node --test test/electron.smoke.test.js
           dpkg-deb --info dist/*.deb | grep -q "Package: cairn-desktop"
+      # The .deb as people install it: apt installs it (and its dependencies), the installed app runs in a D-Bus
+      # session with an unlocked GNOME Keyring (safeStorage on gnome-libsecret, a round trip), follows a deep link,
+      # notifies, and the CLI inside runs; then apt removes it.
+      - name: The .deb installed, run and removed (Linux)
+        if: runner.os == 'Linux'
+        working-directory: cairn/desktop
+        run: |
+          sudo apt-get install -y -q gnome-keyring dbus >/dev/null
+          deb=$(ls dist/*.deb)
+          sudo apt-get install -y -q "./$deb"
+          exe=$(dpkg -L cairn-desktop | grep -E '^/opt/.*/cairn-desktop$' | head -n 1)
+          [ -x "$exe" ] || { echo "the package installed no /opt/.../cairn-desktop"; dpkg -L cairn-desktop; exit 1; }
+          desktop=$(dpkg -L cairn-desktop | grep -E '^/usr/share/applications/.*\.desktop$' | head -n 1)
+          grep -q "x-scheme-handler/cairn" "$desktop"         # cairn:// links go to the app
+          "$(dirname "$exe")/resources/cli/cairn" --version
+          # The keyring's password is random, read from standard input (never on a command line).
+          CAIRN_DESKTOP_APP="$exe" CAIRN_SMOKE_EXPECT=keychain CAIRN_SMOKE_ARGS=--password-store=gnome-libsecret \
+            dbus-run-session -- bash -c 'head -c 24 /dev/urandom | od -An -tx1 | tr -d " \n" \
+              | gnome-keyring-daemon --unlock --components=secrets >/dev/null && node --test test/electron.smoke.test.js'
+          sudo apt-get remove -y -q cairn-desktop
+          [ ! -e "$exe" ] || { echo "$exe is still there after apt remove"; exit 1; }
+          ! dpkg -s cairn-desktop 2>/dev/null | grep -q "Status: install ok installed"
       - name: Verify the signature (when signed)
         if: env.CAIRN_SIGNED == 'true'
         working-directory: cairn/desktop
