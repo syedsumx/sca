@@ -119,6 +119,24 @@ fn lite_sql(sql: &str) -> String {
     out
 }
 
+/// A PostgreSQL column as a value: integers (int2, int4, int8) as `V::I`, the rest as text. A column of another
+/// type is an error for that query, never a panic: a panic would end the database thread, and with it every later
+/// query (`SELECT 1`, the readiness check, is int4).
+fn pg_value(r: &postgres::Row, i: usize) -> std::result::Result<V, String> {
+    use postgres::types::Type;
+    let t = r.columns()[i].type_().clone();
+    let v = if t == Type::INT8 {
+        r.try_get::<_, Option<i64>>(i).map(|o| o.map(V::I))
+    } else if t == Type::INT4 {
+        r.try_get::<_, Option<i32>>(i).map(|o| o.map(|x| V::I(i64::from(x))))
+    } else if t == Type::INT2 {
+        r.try_get::<_, Option<i16>>(i).map(|o| o.map(|x| V::I(i64::from(x))))
+    } else {
+        r.try_get::<_, Option<String>>(i).map(|o| o.map(V::T))
+    };
+    v.map(|o| o.unwrap_or(V::Null)).map_err(|e| format!("column {i} ({t}): {e}"))
+}
+
 impl Backend {
     fn exec(&mut self, sql: &str, params: &[P]) -> std::result::Result<u64, String> {
         match self {
@@ -140,20 +158,7 @@ impl Backend {
                 let owned: Vec<Box<dyn postgres::types::ToSql + Sync>> = params.iter().map(pg_param).collect();
                 let refs: Vec<&(dyn postgres::types::ToSql + Sync)> = owned.iter().map(|b| b.as_ref()).collect();
                 let rows = c.query(sql, &refs).map_err(|e| e.to_string())?;
-                Ok(rows
-                    .iter()
-                    .map(|r| {
-                        (0..r.len())
-                            .map(|i| {
-                                if *r.columns()[i].type_() == postgres::types::Type::INT8 {
-                                    r.get::<_, Option<i64>>(i).map(V::I).unwrap_or(V::Null)
-                                } else {
-                                    r.get::<_, Option<String>>(i).map(V::T).unwrap_or(V::Null)
-                                }
-                            })
-                            .collect()
-                    })
-                    .collect())
+                rows.iter().map(|r| (0..r.len()).map(|i| pg_value(r, i)).collect::<std::result::Result<Row, String>>()).collect()
             }
             Backend::Lite(c) => {
                 let vals: Vec<rusqlite::types::Value> = params.iter().map(lite_param).collect();

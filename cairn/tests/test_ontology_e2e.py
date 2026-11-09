@@ -741,3 +741,43 @@ def test_a_run_whose_model_calls_fail_is_not_published(stack, compiled):
     run = s.ontology.wait(started["id"], 600)
     assert run["state"] == "completed" and run["stats"]["processed"] == run["stats"]["tables"], run["stats"]
     assert call(stack, "GET", "/v1/ontology/runs").json()["published"] == started["id"]
+
+
+def test_the_command_line_compiles_against_the_configured_compiler(stack, compiled, monkeypatch, tmp_path):
+    """`cairn ontology status` and `cairn ontology compile --wait` (the command line run as its own process, the way
+    tests/test_cli_e2e.py runs it: from source, or the PyInstaller binary in CAIRN_CLI_BIN) against this Cairn with
+    the real compiler configured; a person without MANAGE_GLOSSARIES is refused with exit code 4."""
+    import test_cli_e2e
+
+    s = stack["s"]
+    pats = {"pat-onto-stew-" + "s" * 16: STEW, "pat-onto-dana-" + "d" * 16: DANA}
+    real = s.identity._me_lookup
+    monkeypatch.setattr(s.identity, "_me_lookup",
+                        lambda u, h, c: pats.get((h.get("Authorization") or "")[7:]) or real(u, h, c))
+    stew_pat, dana_pat = list(pats)
+
+    def cli(*args, **kw):
+        return test_cli_e2e.cli(tmp_path, *args, **kw)
+
+    for profile, pat in (("stew", stew_pat), ("dana", dana_pat)):
+        rc, out, err = cli("login", "--url", stack["url"], "--profile", profile, "--token-stdin", input=pat + "\n")
+        assert rc == 0 and pat not in out + err, err
+    rc, out, err = cli("ontology", "status", "--profile", "stew")
+    assert rc == 0, out + err
+    before = json.loads(out)
+    # Ready: the compiler's readiness check (SELECT 1 on its PostgreSQL) once a compile has run.
+    assert before["configured"] is True and before["ready"] is True and before["published"], (
+        before, open(f"{stack['dir']}/compiler.log").read()[-3000:])
+    rc, out, err = cli("ontology", "compile", "--wait", "--profile", "stew", timeout=900)
+    assert rc == 0, out + err
+    doc = json.loads(out)
+    run = doc["run"]
+    assert run["state"] == "completed" and run["stats"]["tables"] >= 8, run
+    assert run["stats"]["reused"] + run["stats"]["processed"] == run["stats"]["tables"], run["stats"]
+    assert doc["sync"]["catalog"]["tables"] >= 8, doc["sync"]
+    # The compiler published the command line's run, and Cairn's status says so.
+    after = json.loads(cli("ontology", "status", "--profile", "stew")[1])
+    assert after["published"] == run["id"] != before["published"], after
+    # Compiling is for glossary managers: dana may read the ontology, not compile it.
+    rc, out, err = cli("ontology", "compile", "--profile", "dana")
+    assert rc == 4 and "MANAGE_GLOSSARIES" in err, out + err

@@ -321,14 +321,17 @@ jobs:
         env:
           CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_ONTOLOGY_BIN: ${{ github.workspace }}/cairn/ontology/target/release/cairn-ontology
         run: |
           set -o pipefail
           python -m venv "$RUNNER_TEMP/cli"
           "$RUNNER_TEMP/cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
           "$RUNNER_TEMP/cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/cli-dist" \
             --workpath "$RUNNER_TEMP/cli-build" cli/cairn.spec
+          # The binary too: `cairn ontology compile --wait` against the real compiler (test_ontology_e2e's Cairn).
           CAIRN_CLI_BIN="$RUNNER_TEMP/cli-dist/cairn" \
-            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_cli_e2e.py | tee "$RUNNER_TEMP/cli-bin.log"
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_cli_e2e.py \
+            tests/test_ontology_e2e.py -k "not test_ontology_e2e or compile_builds or command_line" | tee "$RUNNER_TEMP/cli-bin.log"
           ! grep -q "skipped" "$RUNNER_TEMP/cli-bin.log"
       - name: Cairn's warnings and errors, on failure (its access decisions, the catalog's callbacks)
         if: failure()
