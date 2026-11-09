@@ -399,9 +399,14 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 
         app.include_router(build_databases_router(services.databases, cp))
     if getattr(services, "profiles", None) is not None:      # /v1/me/profile and web push subscriptions
-        from cairn.identity.profiles import build_router as profiles_router
+        from cairn.identity.capabilities import capabilities as _capabilities
+        from cairn.identity.profiles import build_router as profiles_router, build_ui_settings_router
 
-        app.include_router(profiles_router(services.profiles, cp))
+        ui_settings = getattr(services, "ui_settings", None)
+        app.include_router(profiles_router(services.profiles, cp, lambda p: _capabilities(
+            services.authorize, p, {"onboarding": ui_settings.onboarding() if ui_settings is not None else True})))
+        if ui_settings is not None:                          # /v1/ui/settings: onboarding on or off for everyone
+            app.include_router(build_ui_settings_router(ui_settings, cp))
     if getattr(services, "ai_workspace", None) is not None:
         from cairn.ai.workspace import build_workspace_router
 
@@ -865,6 +870,7 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
                 "email": bool(cfg.smtp_url),
                 "embeds": bool(cfg.embed_signing_secret),
                 "masking_proxy": cfg.masking_proxy_enabled or bool(cfg.session_signing_key),
+                "onboarding": services.ui_settings.onboarding() if getattr(services, "ui_settings", None) else True,
             },
         }
 

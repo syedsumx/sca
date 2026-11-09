@@ -131,6 +131,7 @@ class Services:
     semantic_layer: Optional[Any] = None
     addins: Optional[Any] = None
     profiles: Optional[Any] = None
+    ui_settings: Optional[Any] = None       # workspace UI settings (onboarding on or off)
     sheets: Optional[Any] = None
     ticketing: Optional[Any] = None
     steward: Optional[Any] = None
@@ -897,6 +898,11 @@ def _build_active_metadata(s: Services) -> None:
     def profile_can_view(actor: str, urn: str) -> bool:
         return bool(s.can_view(Principal(urn=actor, via="delegated"))(urn))
     s.profiles = ProfileService(s.engine, hub, personas_of, profile_can_view, s.audit, push)
+    # Workspace UI settings (onboarding on or off): changing them is decided by the policy engine.
+    from cairn.identity.profiles import UiSettings
+
+    s.ui_settings = UiSettings(s.engine, lambda actor, privilege: s.authorize(
+        Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False), s.audit)
 
     def entity_name(urn: str) -> str:
         return (s.summaries([urn]).get(urn) or {}).get("name") or urn

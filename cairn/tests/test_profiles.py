@@ -284,3 +284,77 @@ def test_vapid_configuration_fails_closed(tmp_path, engine):
         WebPush(engine, good, "ops@corp.example")
     off = WebPush(engine, None, None)
     assert not off.enabled and off.state(ANA) == {"enabled": False, "public_key": None, "subscriptions": 0}
+
+
+def test_guided_experience_state_follows_the_person_and_is_validated(cairn):
+    """Onboarding progress and sidebar choices (L128) are kept in the profile: the same on every device."""
+    url = cairn["url"]
+    with httpx.Client(base_url=url, headers=as_(ANA), timeout=30) as c:
+        ui = c.get("/v1/me/profile").json()["ui"]
+        assert ui == {"onboarding": {"role": None, "done": [], "dismissed": False, "asked": False},
+                      "sidebar": {"pinned": [], "hidden": [], "show_all": False}}
+        r = c.put("/v1/me/profile", json={"ui": {"onboarding": {"role": "analyst", "asked": True,
+                                                                "done": ["run-query", "save-query", "run-query"]}}})
+        assert r.status_code == 200, r.text
+        r = c.put("/v1/me/profile", json={"ui": {"sidebar": {"pinned": ["/sql", "/dashboards"], "hidden": ["/ml"]}}})
+        got = c.get("/v1/me/profile").json()["ui"]          # a part given leaves the other part as it was
+        assert got["onboarding"] == {"role": "analyst", "done": ["run-query", "save-query"], "dismissed": False,
+                                     "asked": True}
+        assert got["sidebar"] == {"pinned": ["/sql", "/dashboards"], "hidden": ["/ml"], "show_all": False}
+        c.put("/v1/me/profile", json={"ui": {"onboarding": {"dismissed": True}}, "team": "FP&A"})
+        got = c.get("/v1/me/profile").json()
+        assert got["ui"]["onboarding"]["dismissed"] is True and got["ui"]["onboarding"]["role"] == "analyst"
+        for bad, why in [({"ui": {"onboarding": {"role": "wizard"}}}, "one of analyst"),
+                         ({"ui": {"onboarding": {"done": ["Run Query"]}}}, "ui.onboarding.done"),
+                         ({"ui": {"onboarding": {"done": [f"s{i}" for i in range(61)]}}}, "up to 60"),
+                         ({"ui": {"sidebar": {"pinned": ["https://evil.example"]}}}, "ui.sidebar.pinned"),
+                         ({"ui": {"sidebar": {"show_all": "yes"}}}, "true or false"),
+                         ({"ui": {"theme": "dark"}}, "ui:"), ({"ui": []}, "ui:")]:
+            r = c.put("/v1/me/profile", json=bad)
+            assert r.status_code == 422 and why in r.text, (bad, r.text)
+    # Bob's is his own.
+    assert httpx.get(f"{url}/v1/me/profile", headers=as_(BOB)).json()["ui"]["onboarding"]["role"] is None
+
+
+def test_capabilities_come_from_the_policy_engine_and_fail_closed(cairn):
+    url, s = cairn["url"], cairn["s"]
+    admin = httpx.get(f"{url}/v1/me/capabilities", headers=as_(ADMIN)).json()
+    assert admin["actor"] == ADMIN and admin["is_admin"] is True
+    assert admin["privileges"]["MANAGE_GLOBAL_SETTINGS"] is True and admin["features"] == {"onboarding": True}
+    ana = httpx.get(f"{url}/v1/me/capabilities", headers=as_(ANA)).json()
+    assert ana["is_admin"] is False and not any(ana["privileges"].values())
+    # A policy engine that cannot decide grants nothing.
+    real = s.pdp.decide
+
+    def broken(*a, **k):
+        raise RuntimeError("policy store unreachable")
+    s.pdp.decide = broken
+    try:
+        down = httpx.get(f"{url}/v1/me/capabilities", headers=as_(ADMIN)).json()
+    finally:
+        s.pdp.decide = real
+    assert down["is_admin"] is False and not any(down["privileges"].values())
+    # People only, and never strangers.
+    agent = {"Authorization": f"Bearer {cairn['agent_key']}"}
+    assert httpx.get(f"{url}/v1/me/capabilities", headers=agent).status_code == 403
+    assert httpx.get(f"{url}/v1/me/capabilities", headers={"Authorization": "Bearer svc-secret"}).status_code == 403
+    assert httpx.get(f"{url}/v1/me/capabilities").status_code == 401
+
+
+def test_admins_turn_onboarding_off_for_everyone(cairn):
+    url, s = cairn["url"], cairn["s"]
+    assert httpx.get(f"{url}/v1/ui/settings", headers=as_(ANA)).json()["onboarding"] is True
+    assert httpx.get(f"{url}/ui/config", headers=as_(ANA)).json()["features"]["onboarding"] is True
+    r = httpx.put(f"{url}/v1/ui/settings", headers=as_(ANA), json={"onboarding": False})
+    assert r.status_code == 403 and "MANAGE_GLOBAL_SETTINGS" in r.text
+    for bad in ({"onboarding": "off"}, {"theme": "dark"}, {}):
+        assert httpx.put(f"{url}/v1/ui/settings", headers=as_(ADMIN), json=bad).status_code == 422, bad
+    r = httpx.put(f"{url}/v1/ui/settings", headers=as_(ADMIN), json={"onboarding": False})
+    assert r.status_code == 200 and r.json()["onboarding"] is False and r.json()["changed_by"] == ADMIN
+    assert httpx.get(f"{url}/ui/config", headers=as_(ANA)).json()["features"]["onboarding"] is False
+    assert httpx.get(f"{url}/v1/me/capabilities", headers=as_(ANA)).json()["features"]["onboarding"] is False
+    assert any(e["action"] == "ui.settings.updated" and e["actor"] == ADMIN for e in s.audit.export(category="identity"))
+    agent = {"Authorization": f"Bearer {cairn['agent_key']}"}
+    assert httpx.put(f"{url}/v1/ui/settings", headers=agent, json={"onboarding": True}).status_code == 403
+    httpx.put(f"{url}/v1/ui/settings", headers=as_(ADMIN), json={"onboarding": True})
+    assert httpx.get(f"{url}/v1/ui/settings", headers=as_(BOB)).json()["onboarding"] is True
