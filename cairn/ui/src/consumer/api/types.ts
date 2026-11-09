@@ -908,6 +908,8 @@ export interface AskResult {
     explanation: string | null;
     result: DataResult | null;
     error: string | null;
+    /** The ontology's terms and relationships the answer was grounded in (Cairn Ontology). */
+    grounded?: { terms: { id: string; name: string; table: string }[]; relationships: { id: string; label: string }[] };
 }
 
 export interface StewardProposal {

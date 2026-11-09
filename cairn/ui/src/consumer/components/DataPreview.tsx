@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { CairnApiError } from '../../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { AskResult, DataResult } from '../api/types';
+import { GroundedChips } from '../ontology/Embeds';
 import { Feedback } from './Feedback';
 import { Muted } from './tokens';
 
@@ -87,6 +88,7 @@ function AskBox({ urn, onUseSql }: { urn: string; onUseSql: (sql: string) => voi
                             ))}
                         </span>
                     )}
+                    <GroundedChips grounded={answer.grounded} />
                     {answer.sql && (
                         <pre aria-label="Generated SQL" style={{ whiteSpace: 'pre-wrap', margin: 0 }}>
                             {answer.sql}

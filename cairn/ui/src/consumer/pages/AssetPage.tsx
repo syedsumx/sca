@@ -24,6 +24,7 @@ import { AssetHistory } from '../components/History';
 import { useDheSession } from '../context/CairnProvider';
 import { useCoreHref } from '../context/NativeLinks';
 import { useT } from '../i18n';
+import { BusinessTerms } from '../ontology/Embeds';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 
@@ -259,6 +260,7 @@ export function AssetPage() {
                                         </p>
                                     )}
                                 </Surface>
+                                <BusinessTerms urn={urn} />
                                 <KnowledgeDocs urn={urn} />
                                 <SimilarAssets urn={urn} />
                             </>

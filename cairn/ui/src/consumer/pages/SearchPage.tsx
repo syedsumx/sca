@@ -12,6 +12,7 @@ import { FACET_LABELS, FacetPanel } from '../components/FacetPanel';
 import { OmniSearchBar } from '../components/OmniSearchBar';
 import { RelatedByMeaning } from '../components/Semantic';
 import { Muted, Page, Skeleton } from '../components/tokens';
+import { TermSearchResults } from '../ontology/Embeds';
 import { SearchState, parseSearchState, serializeSearchState, toggleFilter } from '../utils/urlState';
 import { useHotkeys } from '../utils/useHotkeys';
 
@@ -128,6 +129,7 @@ export function SearchPage() {
                                 <Skeleton h={12} w="70%" />
                             </div>
                         ))}
+                    {state.page === 1 && <TermSearchResults query={state.query} />}
                     {result.error && <div role="alert">Search failed: {result.error.message}</div>}
                     {result.data && result.data.results.length === 0 && (
                         <Empty

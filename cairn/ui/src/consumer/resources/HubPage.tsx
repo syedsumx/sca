@@ -1,6 +1,6 @@
 import { Tabs } from 'antd';
 import React from 'react';
-import { useHistory, useLocation } from 'react-router-dom';
+import { Link, useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { Icon } from '../components/Icons';
@@ -56,6 +56,7 @@ export function HubPage({ hub }: { hub: Hub }) {
                 <div>
                     <h1>{hub.title}</h1>
                     <p>{hub.description}</p>
+                    {hub.route === '/semantic' && <p><Link to="/ontology">Open the Ontology explorer: graph, review queue and compile wizard</Link></p>}
                 </div>
             </Head>
             {tabs.length === 1 ? (

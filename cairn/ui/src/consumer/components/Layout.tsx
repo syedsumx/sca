@@ -43,6 +43,7 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
             { to: '/dashboards', label: 'nav.dashboards', icon: 'chart' },
             { to: '/sql/metrics', label: 'nav.metrics', icon: 'metric' },
             { to: '/semantic', label: 'nav.semantic', icon: 'cube' },
+            { to: '/ontology', label: 'nav.ontology', icon: 'layers' },
             { to: '/sql/input-tables', label: 'nav.inputTables', icon: 'table' },
             { to: '/queries', label: 'nav.queries', icon: 'pulse' },
         ],

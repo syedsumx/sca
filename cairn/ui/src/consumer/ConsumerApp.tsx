@@ -37,6 +37,8 @@ const SqlWorkspacePage = React.lazy(() => import('./pages/SqlWorkspacePage').the
 const QueryInsightPage = React.lazy(() => import('./pages/QueryInsightPage').then((m) => ({ default: m.QueryInsightPage })));
 const SqlWorkflowsPage = React.lazy(() => import('./pages/SqlWorkflowsPage').then((m) => ({ default: m.SqlWorkflowsPage })));
 const FlowsPage = React.lazy(() => import('./pages/FlowsPage').then((m) => ({ default: m.FlowsPage })));
+const OntologyPage = React.lazy(() => import('./pages/OntologyPage').then((m) => ({ default: m.OntologyPage })));
+const OntologyTermPage = React.lazy(() => import('./pages/OntologyPage').then((m) => ({ default: m.OntologyTermPage })));
 const MetricsPage = React.lazy(() => import('./pages/MetricsPage').then((m) => ({ default: m.MetricsPage })));
 const InputTablesPage = React.lazy(() => import('./pages/InputTablesPage').then((m) => ({ default: m.InputTablesPage })));
 const WorkbooksPage = React.lazy(() => import('./pages/WorkbooksPage').then((m) => ({ default: m.WorkbooksPage })));
@@ -65,6 +67,8 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/pipelines', component: PipelinesPage, exact: true },
     { path: '/sql', component: SqlWorkspacePage, exact: true },
     { path: '/flows', component: FlowsPage, exact: true },
+    { path: '/ontology', component: OntologyPage, exact: true },
+    { path: '/ontology/terms/:id', component: OntologyTermPage },
     { path: '/sql/workflows', component: SqlWorkflowsPage, exact: true },
     { path: '/sql/workbooks', component: WorkbooksPage, exact: true },
     { path: '/sql/input-tables', component: InputTablesPage, exact: true },

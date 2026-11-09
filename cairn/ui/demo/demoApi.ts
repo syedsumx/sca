@@ -6,6 +6,7 @@
 
 import { installAirflowIacDemo } from './airflowIacSamples';
 import { installFlowsDemo } from './flowSamples';
+import { DEMO_GROUNDED, installOntologyDemo } from './ontologySamples';
 import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
 
 type Json = any; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -1340,6 +1341,7 @@ on('POST', '/data/ask', (body: { question?: string }) => ({
     definitions: [{ name: 'net_revenue', kind: 'metric', version: 3 }], examples: ['Net revenue by region, last quarter'],
     sql: "select date_trunc('day', order_ts) as day, sum(amount) - sum(refunds) as net_revenue\nfrom analytics.core.orders\nwhere order_ts >= dateadd(day, -7, current_date)\ngroup by 1 order by 1",
     explanation: 'Net revenue per day for the last 7 days, using the approved net_revenue definition.',
+    grounded: DEMO_GROUNDED,
     result: { columns: ['day', 'net_revenue'], rows: [['2026-10-21', 48210.4], ['2026-10-22', 51877.15], ['2026-10-23', 49902.8],
               ['2026-10-24', 61344.0], ['2026-10-25', 38120.55], ['2026-10-26', 35870.1], ['2026-10-27', 52411.9]],
               masked_columns: [], truncated: false, elapsed_ms: 820, tables: [ORDERS] },
@@ -1854,6 +1856,9 @@ const flowsDemo = installFlowsDemo(on, (status, msg) => {
 installAirflowIacDemo(on, (status, msg) => {
     throw new HttpError(status, msg);
 }, ME, flowsDemo.addFlow);
+installOntologyDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
 
 const GIT_FOLDERS: Json[] = [
     { id: 'gf_analytics', owner: ME, name: 'analytics', repo: 'northwind/analytics', url: 'https://git.northwind.example/northwind/analytics.git',
