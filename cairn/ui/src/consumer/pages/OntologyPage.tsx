@@ -210,16 +210,16 @@ function ListTab({ data }: { data: ExplorerData }) {
             <Table<ExplorerTerm>
                 size="small"
                 rowKey="id"
-                dataSource={data.terms}
+                dataSource={[...data.terms].sort((a, b) => a.name.localeCompare(b.name))}
                 pagination={{ pageSize: 25, hideOnSinglePage: true }}
                 columns={[
-                    { title: 'Term', dataIndex: 'name', sorter: (a, b) => a.name.localeCompare(b.name), render: (n: string, t) => <Link to={termHref(t.id)}>{n}</Link> },
+                    { title: 'Term', dataIndex: 'name', render: (n: string, t) => <Link to={termHref(t.id)}>{n}</Link> },
                     { title: 'Synonyms', dataIndex: 'synonyms', render: (s: string[]) => s.join(', ') },
                     { title: 'Domain', dataIndex: 'domain_name', render: (d: string | null, t) => d ?? <Muted>schema {t.schema}</Muted> },
                     { title: 'Table', dataIndex: 'table', render: (u: string, t) => <Link to={assetHref(u)}>{t.table_name}</Link> },
                     { title: 'Columns', dataIndex: 'attributes' },
                     { title: 'Status', dataIndex: 'status', render: (s: ElementStatus) => <StatusTag status={s} /> },
-                    { title: 'Confidence', dataIndex: 'confidence', sorter: (a, b) => a.confidence - b.confidence, render: (c: number) => `${Math.round(c * 100)}%` },
+                    { title: 'Confidence', dataIndex: 'confidence', render: (c: number) => `${Math.round(c * 100)}%` },
                 ]}
             />
             <h2 style={{ fontSize: 16, marginTop: 16 }}>Relationships ({data.relationships.length})</h2>

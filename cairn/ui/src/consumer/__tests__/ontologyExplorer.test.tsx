@@ -7,6 +7,7 @@ import { CairnProvider } from '../context/CairnProvider';
 import { I18nProvider } from '../i18n';
 import type { ExplorerData, OntologyRun, Proposal } from '../ontology/api';
 import { CompileWizard } from '../ontology/CompileWizard';
+import { BusinessTerms, GroundedChips, TermSearchResults } from '../ontology/Embeds';
 import {
     CLUSTER_THRESHOLD,
     NO_FILTERS,
@@ -271,6 +272,43 @@ describe('the compile wizard', () => {
         expect(screen.getByText('Legacy Order')).toBeTruthy();
     }, 30_000);
 });
+
+describe('the ontology elsewhere', () => {
+    const wrap = (node: React.ReactNode) => {
+        const { client, cache } = makeClient(demoRoutes());
+        return render(<MemoryRouter><CairnProvider client={client} cache={cache}>{node}</CairnProvider></MemoryRouter>);
+    };
+
+    it('an asset page lists the business terms of the table and of each column', async () => {
+        wrap(<BusinessTerms urn="urn:li:dataset:(urn:li:dataPlatform:postgres,billing.public.invoices,PROD)" />);
+        const box = await screen.findByTestId('business-terms');
+        expect(box.querySelector('a[href="/ontology/terms/term_invoices"]')?.textContent).toBe('Invoice');
+        expect(box.textContent).toContain('also bill');
+        expect(box.textContent).toContain('YYYY-MM-DD');
+    });
+
+    it('search shows a term found by its synonym, with a Term badge', async () => {
+        wrap(<TermSearchResults query="vendor" />);
+        const hits = await screen.findByTestId('term-results');
+        expect(hits.textContent).toContain('Term');
+        expect(hits.textContent).toContain('Supplier');
+        expect(hits.textContent).toContain('synonym “vendor”');
+    });
+
+    it('an answer says what it was grounded in', () => {
+        wrap(<GroundedChips grounded={{ terms: [{ id: 'term_orders', name: 'Order', table: 'u' }],
+            relationships: [{ id: 'r', label: 'orders.customer_id → customers.id' }] }} />);
+        expect(screen.getByTestId('grounded-in').textContent).toBe('Grounded in: Orderorders.customer_id → customers.id');
+        expect(screen.getByRole('link', { name: 'Order' }).getAttribute('href')).toBe('/ontology/terms/term_orders');
+        cleanupGrounded();
+    });
+});
+
+function cleanupGrounded() {
+    // Nothing is shown without grounding.
+    const { container } = render(<MemoryRouter><GroundedChips grounded={{ terms: [], relationships: [] }} /></MemoryRouter>);
+    expect(container.textContent).toBe('');
+}
 
 describe('the explorer page', () => {
     it('searches a term, zooms to it and opens its details beside the graph', async () => {

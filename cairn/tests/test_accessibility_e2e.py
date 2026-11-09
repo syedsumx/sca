@@ -24,7 +24,9 @@ DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
          "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions", "/flows",
-         "/flows?flow=a11y-flow"]
+         "/flows?flow=a11y-flow",
+         # Without a compiler here; tests/test_ontology_ui_e2e.py runs axe on the same pages with a compiled ontology.
+         "/ontology", "/ontology?tab=review", "/ontology?tab=compile"]
 BLOCKING = {"serious", "critical"}
 
 

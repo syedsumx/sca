@@ -130,12 +130,12 @@ export function CompileWizard({ onFinished }: { onFinished?: () => void }) {
                         </Space>
                     </Radio.Group>
                     {s.scope === 'schemas' && (
-                        <Select mode="multiple" aria-label="Schemas" placeholder="Pick schemas" style={{ width: '100%', marginTop: 8 }}
+                        <Select mode="multiple" showSearch aria-label="Schemas" placeholder="Pick schemas" style={{ width: '100%', marginTop: 8 }}
                             value={s.schemas} onChange={(schemas) => setS({ ...s, schemas })}
                             options={(catalog?.schemas ?? []).map((x) => ({ value: x, label: x }))} />
                     )}
                     {s.scope === 'tables' && (
-                        <Select mode="multiple" aria-label="Tables" placeholder="Pick tables" style={{ width: '100%', marginTop: 8 }}
+                        <Select mode="multiple" showSearch aria-label="Tables" placeholder="Pick tables (type to search)" style={{ width: '100%', marginTop: 8 }}
                             value={s.tables} onChange={(tables) => setS({ ...s, tables })} optionFilterProp="label" options={tableOptions} />
                     )}
                     <p><Muted>Tables outside the scope keep what the last run made of them.</Muted></p>
