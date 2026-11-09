@@ -420,7 +420,7 @@ KINDS: list[Kind] = [
     Kind("workspace_compute", "workspace_compute", "compute",
          "Where a workspace's queries and jobs run: on its data plane (customer) or on Cairn's managed pool (managed).",
          (R("workspace", force_new=True), R("compute", description="customer or managed"),
-          F("dataplane", default=None, description="customer: the data plane")),
+          F("dataplane", default=None, ref="dataplanes.name", description="customer: the data plane")),
          read="/v1/compute/workspaces", list_key="workspaces", id="workspace", key=("workspace",),
          create=op("PUT /v1/compute/workspaces/{workspace}", omit=("workspace",)),
          update=op("PUT /v1/compute/workspaces/{workspace}", omit=("workspace",)),
