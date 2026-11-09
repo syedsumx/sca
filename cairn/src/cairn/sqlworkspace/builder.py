@@ -44,17 +44,45 @@ degrees). Controls filter every tile with their column: {{"id": "region", "label
 "kind": "values"|"range"|"date_range"|"text"}}; a values control also names "source": {{"table": "schema.table"}}.
 Use only the metric names, tables and columns listed. At most {MAX_TILES} tiles. {UNTRUSTED_NOTICE}"""
 
-SCHEMA: dict = {
-    "type": "object", "additionalProperties": False, "required": ["title", "tiles", "controls"],
-    "properties": {
-        "title": {"type": "string"},
-        "tiles": {"type": "array", "items": {
-            "type": "object", "required": ["kind", "title"],
-            "properties": {"kind": {"type": "string", "enum": ["metric", "element"]}, "title": {"type": "string"},
-                           "metric": {"type": "object"}, "element": {"type": "object"}, "chart": {"type": "object"}}}},
-        "controls": {"type": "array", "items": {"type": "object"}},
-    },
-}
+def _obj(properties: dict, required: list[str]) -> dict:
+    """A closed object: structured outputs need every object's properties named, with nothing else allowed."""
+    return {"type": "object", "additionalProperties": False, "required": required, "properties": properties}
+
+
+_STR, _STRS = {"type": "string"}, {"type": "array", "items": {"type": "string"}}
+_TABLE = _obj({"table": _STR}, ["table"])
+# Every object the system prompt describes, closed: structured outputs refuse an object whose properties are open.
+SCHEMA: dict = _obj({
+    "title": _STR,
+    "tiles": {"type": "array", "items": _obj({
+        "kind": {"type": "string", "enum": ["metric", "element"]},
+        "title": _STR,
+        "metric": _obj({"metrics": _STRS, "dimensions": _STRS,
+                        "grain": {"type": "string", "enum": ["day", "week", "month", "quarter", "year"]}},
+                       ["metrics"]),
+        "element": _obj({
+            "source": _TABLE,
+            "group_by": _STRS,
+            "aggregates": {"type": "array", "items": _obj({"name": _STR, "formula": _STR}, ["name", "formula"])},
+            "filters": {"type": "array", "items": _obj({
+                "column": _STR, "op": _STR,
+                "value": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]}},
+                ["column", "op", "value"])},
+            "sort": {"type": "array", "items": _obj({"column": _STR, "desc": {"type": "boolean"}}, ["column"])},
+            "limit": {"type": "integer"},
+        }, ["source"]),
+        "chart": _obj({
+            "type": {"type": "string", "enum": ["bar", "line", "area", "pie", "number", "table", "stacked_bar",
+                                                "scatter", "heatmap", "map"]},
+            "x": _STR, "y": _STRS, "series": _STR, "lat": _STR, "lon": _STR,
+        }, ["type"]),
+    }, ["kind", "title"])},
+    "controls": {"type": "array", "items": _obj({
+        "id": _STR, "label": _STR, "column": _STR,
+        "kind": {"type": "string", "enum": ["values", "range", "date_range", "text"]},
+        "source": _TABLE,
+    }, ["id", "label", "column", "kind"])},
+}, ["title", "tiles", "controls"])
 
 
 class BuilderError(Exception):

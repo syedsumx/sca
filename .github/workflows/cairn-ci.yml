@@ -407,32 +407,52 @@ jobs:
           echo "live-model: skipped: no ANTHROPIC_API_KEY secret" >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/checkout@v4
         if: env.HAVE_KEY == 'true'
+        with:
+          fetch-depth: 0
+      # Each run costs model calls: a manual run (Actions, "Run workflow") always runs; a push runs only when it
+      # changes the AI features or this suite.
+      - name: Whether this change needs the live model
+        if: env.HAVE_KEY == 'true'
+        env:
+          BEFORE: ${{ github.event.before }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          live=false
+          if [ "$EVENT" = workflow_dispatch ]; then
+            live=true
+          elif [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            live=true
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qE '^cairn/(src/cairn/(ai|agentkit|flows)/|src/cairn/sqlworkspace/(builder|autopilot)[.]py|src/cairn/iac/changes[.]py|src/cairn/pipelines/(parse|enrich)[.]py|tests/test_live_model[.]py|tests/live_model_standin[.]py)'; then
+            live=true
+          fi
+          echo "LIVE=$live" >> "$GITHUB_ENV"
+          [ "$live" = true ] || echo "live-model: skipped: this push changes no AI feature (run it from Actions to force)" >> "$GITHUB_STEP_SUMMARY"
       - uses: dtolnay/rust-toolchain@stable
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
       - uses: Swatinem/rust-cache@v2
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         with:
           workspaces: |
             cairn/catalog
             cairn/store
       - uses: actions/setup-python@v5
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: cairn/pyproject.toml
       - name: Build the catalog and the store
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         run: |
           (cd catalog && cargo build --release --locked)
           (cd store && cargo build --release --locked)
       - name: Install Cairn and pull Trino
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         run: |
           pip install -e ".[server,ai,test,trino]"
           docker pull -q trinodb/trino:484
       - name: The provider key, in a file only this job reads
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
@@ -441,7 +461,7 @@ jobs:
           (umask 077 && printf '%s' "$ANTHROPIC_API_KEY" > "$RUNNER_TEMP/provider.key")
           chmod 600 "$RUNNER_TEMP/provider.key"
       - name: Live-model checks
-        if: env.HAVE_KEY == 'true'
+        if: env.LIVE == 'true'
         env:
           CAIRN_LIVE_MODEL: "1"
           ANTHROPIC_API_KEY_FILE: ${{ runner.temp }}/provider.key
