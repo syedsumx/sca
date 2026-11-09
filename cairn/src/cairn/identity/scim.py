@@ -85,10 +85,13 @@ def parse_filter(expr: Optional[str]) -> Optional[tuple[str, str]]:
 
 class ScimService:
     def __init__(self, engine: Engine, graph, audit=None, base_url: str = "/scim/v2",
-                 on_change: Optional[Callable[[str], Any]] = None):
+                 on_change: Optional[Callable[[str], Any]] = None,
+                 on_deactivate: Optional[Callable[[str], Any]] = None):
+        """``on_deactivate(urn)``: told when a person is deactivated (their command-line sessions end)."""
         self.engine, self.graph, self.audit = engine, graph, audit
         self.base_url = base_url.rstrip("/")
         self.on_change = on_change
+        self.on_deactivate = on_deactivate
 
     # ---- bookkeeping ----------------------------------------------------------------
     def _row(self, rtype: str, rid: str) -> Optional[dict]:
@@ -180,6 +183,8 @@ class ScimService:
         self.graph.emit([make_mcp(urn, "corpUserInfo", info),
                          make_mcp(urn, "corpUserStatus", {"status": "ACTIVE" if active else "SUSPENDED",
                                                           "lastModified": stamp})])
+        if not active and self.on_deactivate is not None:
+            self.on_deactivate(urn)
 
     def create_user(self, body: dict) -> dict:
         uid = (body.get("userName") or "").strip()

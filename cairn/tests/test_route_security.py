@@ -17,6 +17,9 @@ PUBLIC = {
     ("POST", "/oauth/token"): "OAuth token endpoint: the client authenticates in the body (400 without it)",
     ("POST", "/oauth/revoke"): "RFC 7009: revocation answers 200 whatever the token",
     ("POST", "/oauth/register"): "RFC 7591 registration: off, admin-approved or open by setting; public clients only",
+    ("POST", "/oauth/device_authorization"): "RFC 8628: `cairn login` starts here without a credential; the code it gets "
+                                             "is useless until a person signed in to Cairn approves it (400 without "
+                                             "the client id)",
     ("POST", "/v1/lakehouse/oauth/tokens"): "engines exchange client credentials for catalog tokens (400 without)",
     ("POST", "/v1/shares/oauth/tokens"): "share recipients exchange their credential (400 without)",
     ("GET", "/governance/privacy/proof-keys"): "the public key erasure proofs are signed with: auditors check them without Cairn",

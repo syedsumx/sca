@@ -32,7 +32,7 @@ def build_flows_router(flows, current_principal, sql_workflows=None) -> Any:
             return JSONResponse({"detail": str(e), "errors": e.errors}, status_code=e.status)
 
     def trigger_of(p) -> str:
-        return "agent" if p.via == "agent" else "api" if p.via in ("token", "pat") else "manual"
+        return "agent" if p.via == "agent" else "api" if p.via in ("token", "pat", "cli") else "manual"
 
     # ---- without a flow ------------------------------------------------------------------------------------
     @router.get("")

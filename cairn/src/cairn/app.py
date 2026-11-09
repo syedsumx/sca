@@ -168,7 +168,14 @@ def _base_app(name: str, services: Services) -> FastAPI:
 
     @app.get("/me")
     def me(p: Principal = Depends(_principal_dependency(services))):
-        return {"urn": p.urn, "via": p.via}
+        groups: list[str] = []
+        if not p.is_service and getattr(services, "attributes", None) is not None:
+            try:
+                groups = sorted(str(g) for g in (services.attributes.subject(p.urn).get("groups") or []))
+            except Exception:  # noqa: BLE001 - who you are does not depend on the groups being readable now
+                groups = []
+        return {"urn": p.urn, "via": p.via, "groups": groups,
+                **({"device": p.run} if p.via == "cli" else {})}
 
     return app
 
@@ -205,8 +212,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.identity.scim import build_router as scim_router
 
         public = services.settings.active.public_url.rstrip("/")
+        devices = getattr(services, "device_logins", None)
         scim = ScimService(services.engine, _provisioning_graph(services), services.audit,
-                           f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate)
+                           f"{public}/cairn/api/scim/v2", on_change=services.attributes.invalidate,
+                           on_deactivate=(lambda urn: devices.end_all(urn, "scim")) if devices is not None else None)
         app.include_router(scim_router(scim))
         install_error_handler(app)
     if services.ai_systems is not None:
@@ -559,6 +568,17 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.identity.agents_api import build_router as agents_iam_router
 
         app.include_router(agents_iam_router(services.agents, services, cp, authz))
+    if getattr(services, "device_logins", None) is not None:   # cairn login: the device flow, signed-in devices
+        from cairn.identity.device import build_device_router
+
+        app.include_router(build_device_router(services.device_logins, services, cp, authz))
+    if getattr(services, "data_access", None) is not None:      # cairn query: SQL on Trino as the person, page by page
+        from cairn.sqlworkspace.statements import build_statements_router
+
+        app.include_router(build_statements_router(services, cp, authz))
+    from cairn.ai.assets import build_assets_router
+
+    app.include_router(build_assets_router(services, cp, authz))
     _include_active_metadata(app, services, modules, cp, authz)
     from cairn.common.deprecation import install as install_deprecations
 

@@ -77,6 +77,17 @@ def parse_dataset_urn(urn: str) -> tuple[str, list[str]]:
 
 
 @dataclass
+class Prepared:
+    """A checked statement, ready to run (:meth:`DataAccessService.prepare`)."""
+    source: "Source"
+    tree: exp.Expression
+    urns: list[str]
+    policies: dict
+    run_as: str
+    limit: int
+
+
+@dataclass
 class QueryResult:
     columns: list[str]
     rows: list[list[Any]]
@@ -394,8 +405,11 @@ class DataAccessService:
         _, tables = tables_in(sql, source.dialect)
         return [source.urn(t.db or "", t.name, t.catalog or None) for t in tables]
 
-    def query(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
-              limit: int = 200) -> dict:
+    def prepare(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
+                limit: int = 200) -> "Prepared":
+        """Every check :meth:`query` makes before it runs anything: one read-only statement over catalogued tables the
+        caller may read, rewritten for their aggregation and projection policies and row filters. Also used by
+        statements that are read page by page (:mod:`cairn.sqlworkspace.statements`)."""
         source = self._source(connection, urn)
         try:
             validate_readonly_sql(sql)
@@ -413,7 +427,8 @@ class DataAccessService:
                 raise DataAccessError(f"{t.db}.{t.name} is not in the catalog", 403)
             if not self.can_read(actor, u):
                 self._audit(actor, "data.query_denied", source.connection, {"sql": mask_sql(sql), "table": u})
-                raise DataAccessError(f"you may not query {t.db}.{t.name}", 403)
+                raise DataAccessError(f"you may not query {t.db}.{t.name}: reading its rows needs VIEW_DATASET_PROFILE "
+                                      f"on {u}", 403)
             urns.append(u)
         limit = max(1, min(limit, self.max_rows))
         policies = self._policies(actor, sorted(set(urns)))
@@ -441,6 +456,14 @@ class DataAccessService:
                                           "up on this connection", 503)
                 run_as = self.checked_identity(actor, sorted(policies))
         tree = self._filter_tables(actor, source, tree, tables)
+        return Prepared(source, tree, sorted(set(urns)), policies, run_as, limit)
+
+    def query(self, actor: str, sql: str, connection: Optional[str] = None, urn: Optional[str] = None,
+              limit: int = 200) -> dict:
+        prepared = self.prepare(actor, sql, connection, urn, limit)
+        source, tree, policies, run_as, limit = (prepared.source, prepared.tree, prepared.policies, prepared.run_as,
+                                                  prepared.limit)
+        urns = prepared.urns
         wrapped = capped(tree, limit + 1, source.dialect)
         started = time.monotonic()
         try:

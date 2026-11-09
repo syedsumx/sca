@@ -8,6 +8,8 @@ Three credential types are accepted, in order:
    token*, so Cairn Core remains the source of truth for token validity and revocation.
    Agent credentials (``ca_`` keys, ``cat_`` OAuth access tokens) resolve to the person the agent
    acts for, with ``via="agent"``, the agent's id and its scopes (see :mod:`cairn.identity.agents`).
+   Command-line access tokens (``cla_``, from ``cairn login``) resolve to the person who approved the
+   device, with ``via="cli"`` and the device's session in ``run`` (see :mod:`cairn.identity.device`).
 3. Cairn Core UI session cookies (``PLAY_SESSION``/``actor``) when Cairn is served
    same-origin behind the edge proxy: validated by forwarding the cookies to the
    frontend's GraphQL ``me`` query.
@@ -34,11 +36,11 @@ _ME_QUERY = "query { me { corpUser { urn username } } }"
 @dataclass(frozen=True)
 class Principal:
     urn: str
-    via: str  # service | token | session | dev | extension | agent
+    via: str  # service | token | session | dev | extension | agent | cli
     groups: tuple[str, ...] = field(default_factory=tuple)
     agent: Optional[str] = None                 # via=agent: the agent acting for ``urn``
     scopes: tuple[str, ...] = ()                # via=agent: what it may do (read, query_data, …)
-    run: Optional[str] = None                   # via=agent: the run (or token session) the request is part of
+    run: Optional[str] = None                   # via=agent: the run (or token session); via=cli: the signed-in device
     intent: Optional[object] = None             # via=agent: the declared intent (cairn.identity.intents.Intent)
     identity: str = "person"                    # via=agent: person, or share-recipient (a share's recipient)
     sponsor: Optional[str] = None               # share-recipient: the provider who attached the agent
@@ -83,6 +85,8 @@ class IdentityResolver:
         # the token is not one, ValueError if it is Cairn's but no longer valid.
         self.workload_lookup: Optional[Callable[[str], Optional[str]]] = None
         self.notebook_lookup: Optional[Callable[[str], Optional[str]]] = None   # JupyterHub kernels' tokens
+        # Command-line access tokens (cla_…): token -> CliGrant(actor, session, expires_ms), or None.
+        self.cli_lookup: Optional[Callable[[str], Optional[object]]] = None
 
     def resolve(self, headers: dict[str, str], cookies: dict[str, str]) -> Principal:
         p = self._resolve(headers, cookies)
@@ -114,6 +118,11 @@ class IdentityResolver:
                                  run=getattr(grant, "run", None), intent=getattr(grant, "intent", None),
                                  identity=getattr(grant, "identity", "person"),
                                  sponsor=getattr(grant, "sponsor", None))
+            if token.startswith(("cla_", "clr_")):
+                grant = self.cli_lookup(token) if self.cli_lookup is not None and token.startswith("cla_") else None
+                if grant is None:      # never on to Cairn Core: a refresh token, expired or signed out
+                    raise AuthenticationError("expired or signed-out command-line sign-in: run `cairn login`")
+                return Principal(grant.actor, "cli", run=grant.session)
             if token.count(".") == 2 and self.notebook_lookup is not None:
                 try:
                     urn = self.notebook_lookup(token)

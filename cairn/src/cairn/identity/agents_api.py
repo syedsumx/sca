@@ -23,6 +23,7 @@ from cairn.common.security import AuthenticationError, Principal
 from cairn.identity.agents import (
     SCOPES, AgentError, AgentIn, AgentPatch, AgentService, ClientRegistration, describe,
 )
+from cairn.identity.device import CLIENT_ID as CLI_CLIENT, DEVICE_GRANT, DeviceError
 
 MANAGE = "MANAGE_GLOBAL_SETTINGS"
 CONSENT_TTL_S = 600
@@ -73,6 +74,7 @@ async def _form(request: Request) -> dict[str, list[str]]:
 def build_router(svc: AgentService, services, current_principal, authorize) -> APIRouter:
     router = APIRouter(tags=["agents"])
     secret = (services.settings.service_token or "cairn-dev") + "|oauth-consent"
+    devices = getattr(services, "device_logins", None)      # cairn login (cairn.identity.device)
 
     def public() -> str:
         return services.settings.active.public_url.rstrip("/")
@@ -84,7 +86,11 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
         i = issuer()
         return {"issuer": i, "authorization_endpoint": f"{i}/authorize", "token_endpoint": f"{i}/token",
                 "registration_endpoint": f"{i}/register", "revocation_endpoint": f"{i}/revoke",
-                "response_types_supported": ["code"], "grant_types_supported": ["authorization_code", "refresh_token"],
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"] + (
+                    [DEVICE_GRANT] if devices is not None and devices.enabled else []),
+                **({"device_authorization_endpoint": f"{i}/device_authorization"}
+                   if devices is not None and devices.enabled else {}),
                 "code_challenge_methods_supported": ["S256"], "token_endpoint_auth_methods_supported": ["none"],
                 "scopes_supported": list(SCOPES), "service_documentation": f"{public()}/docs/context-and-ai.html"}
 
@@ -191,6 +197,15 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
     @router.post("/oauth/token")
     async def token(request: Request):
         form = {k: v[0] for k, v in (await _form(request)).items() if v}
+        if devices is not None and (form.get("grant_type") == DEVICE_GRANT or (
+                form.get("grant_type") == "refresh_token" and form.get("client_id") == CLI_CLIENT)):
+            try:      # the command line: the device code grant (RFC 8628) and its refresh tokens
+                out = (devices.poll(form.get("device_code", ""), form.get("client_id", ""))
+                       if form["grant_type"] == DEVICE_GRANT else devices.refresh(form.get("refresh_token", ""), CLI_CLIENT))
+            except DeviceError as e:
+                return JSONResponse({"error": e.oauth_error, "error_description": str(e)}, status_code=e.status,
+                                    headers={"Cache-Control": "no-store"})
+            return JSONResponse(out, headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
         try:
             if form.get("grant_type") == "authorization_code":
                 out = svc.exchange_code(form.get("code", ""), form.get("client_id", ""), form.get("redirect_uri", ""),
@@ -207,7 +222,9 @@ def build_router(svc: AgentService, services, current_principal, authorize) -> A
     @router.post("/oauth/revoke")
     async def revoke(request: Request):
         form = await _form(request)
-        svc.revoke_token((form.get("token") or [""])[0])
+        token = (form.get("token") or [""])[0]
+        if devices is None or not devices.revoke_token(token):     # a CLI token ends its whole session
+            svc.revoke_token(token)
         return Response(status_code=200)
 
     # ---- administration ----------------------------------------------------------------------------

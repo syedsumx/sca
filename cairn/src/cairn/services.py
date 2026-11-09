@@ -139,6 +139,7 @@ class Services:
     extensions: Optional[Any] = None
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
+    device_logins: Optional[Any] = None          # cairn.identity.device: command-line sign-in
     playbooks: Optional[Any] = None
     sources: Optional[Any] = None
     openlineage: Optional[Any] = None
@@ -603,6 +604,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     services.agents = AgentService(engine, audit, ai_system_state,
                                    registration if registration in ("open", "admin", "off") else "open")
     identity.agent_lookup = services.agents.resolve
+    _build_device_logins(services)
     # The spreadsheet add-ins (Excel, Google Sheets): OAuth clients from the operator's configuration.
     from cairn.identity.addins import SpreadsheetAddins
 
@@ -627,6 +629,30 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_flows(services)
     _build_iac_changes(services)
     return services
+
+
+def _build_device_logins(s: Services) -> None:
+    """Command-line sign-in (cairn.identity.device): the device flow and the access tokens it hands out; a suspended
+    person's devices cannot approve or refresh."""
+    from cairn.identity.device import DeviceLogins
+
+    graph = s.graph
+
+    def why_not(actor: str) -> Optional[str]:
+        if not actor.startswith("urn:li:corpuser:"):
+            return f"{actor} is not a person"
+        if graph is not None:
+            try:
+                status = (graph.get_aspect(actor, "corpUserStatus") or {}).get("status", "ACTIVE")
+            except Exception:  # noqa: BLE001 - fail closed: an unknown state is not a yes
+                return "the account's state cannot be read now; try again"
+            if str(status).upper() not in ("ACTIVE",):
+                return f"the account is {str(status).lower()}"
+        return None
+    verify = os.environ.get("CAIRN_DEVICE_VERIFICATION_URL", "").strip() or \
+        f"{s.settings.active.public_url.rstrip('/')}/cairn/device"
+    s.device_logins = DeviceLogins(s.engine, s.audit, verify, why_not)
+    s.identity.cli_lookup = s.device_logins.resolve
 
 
 def _build_iac_changes(s: Services) -> None:
