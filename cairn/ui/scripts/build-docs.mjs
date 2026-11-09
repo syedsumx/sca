@@ -20,7 +20,9 @@ const LEAK = /data\s?hub|acryl|atlan(?![a-z])/i;
 // Absolute paths outside /docs/ that the docs may link to (served by other Cairn components).
 const EXTERNAL_OK = [/^\/cairn\/api\/docs$/];
 
-const slug = (s) => s.toLowerCase().replace(/<[^>]+>/g, '').replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
+// HTML entities (an apostrophe is rendered as &#39;) count as punctuation, never as their code's digits.
+const slug = (s) => s.toLowerCase().replace(/<[^>]+>/g, '').replace(/&(#\d+|#x[0-9a-f]+|[a-z]+);/g, ' ')
+    .replace(/[^\p{L}\p{N}]+/gu, '-').replace(/^-|-$/g, '');
 const LANGS = { en: 'English', de: 'Deutsch', fr: 'Français', es: 'Español', ja: '日本語' };
 const UNTRANSLATED = {
     de: 'Diese Seite ist noch nicht übersetzt.',
