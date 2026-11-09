@@ -81,6 +81,17 @@ test('Cairn Desktop against real Cairns', { skip, timeout: 420000 }, async (t) =
             assert.deepEqual(listed.profiles.map((p) => p.name), ['alpha']);
         });
 
+        // The web UI asks a person's role on their first visit to its home page (L128): "Not now" answers it, so
+        // the dialog doesn't sit over what follows.
+        async function answerRoleQuestion(page) {
+            const skip = page.getByRole('button', { name: 'Not now' });
+            try {
+                await skip.waitFor({ state: 'visible', timeout: 5000 });
+                await skip.click();
+                await skip.waitFor({ state: 'hidden', timeout: 5000 });
+            } catch { /* not asked: onboarding off, or already answered */ }
+        }
+
         let alpha;
         await t.test('signing in (the web UI\'s own sign-in, in the app\'s window)', async () => {
             alpha = await pageOf((u) => u.startsWith(`${ALPHA}/login`), 'alpha\'s sign-in page');
@@ -89,6 +100,7 @@ test('Cairn Desktop against real Cairns', { skip, timeout: 420000 }, async (t) =
             await alpha.click('button[type=submit]');
             await alpha.waitForURL((u) => u.href.includes('/cairn-ui/app.html'), { timeout: 30000 });
             await alpha.waitForSelector('nav[aria-label]', { timeout: 30000 });
+            await answerRoleQuestion(alpha);
             await until(async () => (await ws('alpha')).signedIn === true, 'alpha signed in');
             const me = await alpha.evaluate(() => fetch('/cairn/api/me').then((r) => r.json()));
             assert.equal(me.urn, 'urn:li:corpuser:ana');
@@ -109,6 +121,7 @@ test('Cairn Desktop against real Cairns', { skip, timeout: 420000 }, async (t) =
             await beta.fill('input[name=username]', 'bob');
             await beta.click('button[type=submit]');
             await beta.waitForSelector('nav[aria-label]', { timeout: 30000 });
+            await answerRoleQuestion(beta);
             assert.equal((await beta.evaluate(() => fetch('/cairn/api/me').then((r) => r.json()))).urn, 'urn:li:corpuser:bob');
             const jars = await main(async ({ session }) => {
                 const s = global.cairnDesktop;
