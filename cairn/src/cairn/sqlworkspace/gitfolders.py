@@ -531,6 +531,63 @@ class GitFolders:
                 self.audit.record("sql", "git_folder.pushed", actor, None, {"id": fid, **out})
         return out
 
+    def commit_files(self, actor: Optional[str], fid: str, files: dict[str, Optional[str]], message: str,
+                     new_branch: Optional[str] = None, pr_body: str = "") -> dict:
+        """Commits ``files`` (a path under the folder's path -> its text, or None to remove it) to the folder's
+        repository. With ``new_branch``, on a new branch made from the folder's branch (``cairn/<new_branch>``), with
+        a pull request for a configured repository: a reviewable change (an infrastructure-as-code change request).
+        Without it, straight onto the folder's branch: what a deployment does (Airflow's DAG folder kept by
+        git-sync). ``actor``: the person committing, who must own the folder (None: Cairn itself, for a folder the
+        operator configured)."""
+        if actor is None:
+            with self.engine.connect() as conn:
+                r = conn.execute(select(git_folders).where(git_folders.c.id == fid)).first()
+            if r is None:
+                raise WorkspaceError(f"no git folder {fid!r}", 404)
+            f = dict(r._mapping)
+        else:
+            f = self.get(actor, fid)
+        for rel in files:
+            if not SUBPATH.match(rel) or not rel or rel.endswith("/") or ".." in rel.split("/") or rel.startswith("/"):
+                raise WorkspaceError(f"{rel!r} is not a file path in the folder")
+        user = (actor or "urn:li:corpuser:cairn").removeprefix("urn:li:corpuser:")
+        with self._locks.setdefault(fid, threading.Lock()):
+            d, opts, repo = self._checkout(f)
+            base = os.path.join(d, f["path"]) if f["path"] else d
+            for rel, text in files.items():
+                full = os.path.join(base, rel)
+                if text is None:
+                    if os.path.exists(full):
+                        os.remove(full)
+                    continue
+                os.makedirs(os.path.dirname(full), exist_ok=True)
+                with open(full, "w", encoding="utf-8") as fh:
+                    fh.write(text)
+            self._git(d, "add", "--all", "--", f["path"] or ".")
+            if not self._git(d, "status", "--porcelain").strip():
+                return {"changed": 0, "branch": None, "commit": None, "pull_request": None}
+            branch = f["branch"]
+            if new_branch:
+                branch = f"cairn/{_slug(new_branch)}"
+                if not BRANCH.match(branch):
+                    raise WorkspaceError("not a branch name")
+                self._git(d, "checkout", "--quiet", "-B", branch)
+            ident = ["-c", f"user.name={user}", "-c", f"user.email={_slug(user)}@users.noreply.cairn"]
+            self._git(d, "commit", "--quiet", "-m", message, opts=ident)
+            self._git(d, "push", "--quiet", *(["--force"] if new_branch else []), "origin",
+                      f"{branch}:refs/heads/{branch}", opts=opts)
+            sha = self._git(d, "rev-parse", "HEAD").strip()
+            if new_branch:
+                self._git(d, "checkout", "--quiet", "--force", f["branch"])
+            pr = None
+            if new_branch and repo is not None and self.git is not None:
+                pr = self.git.provider(repo).create_pull(branch, f["branch"], message.splitlines()[0][:200], pr_body)
+            out = {"changed": len(files), "branch": branch, "commit": sha, "pull_request": pr, "folder": f["name"]}
+            if self.audit is not None:
+                self.audit.record("sql", "git_folder.committed", actor or "urn:li:corpuser:cairn", None,
+                                  {"id": fid, "files": sorted(files), **{k: out[k] for k in ("branch", "commit")}})
+        return out
+
     def run_due(self) -> int:
         n = 0
         now = _now()

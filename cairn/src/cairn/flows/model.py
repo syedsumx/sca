@@ -4,6 +4,7 @@
 kind: flow
 name: nightly-sales                      # lowercase letters, digits, - and _
 description: Refresh, check, report
+runner: cairn                            # cairn (default), or airflow: Cairn deploys the flow as a DAG and Airflow runs it
 params:
   - {name: date, type: date, default: "{{ run.logical_date }}"}
 triggers:
@@ -104,7 +105,9 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
 CHILD_TYPES = ("sql", "derived", "check", "pipe", "notebook", "python", "spark", "dbt", "airflow", "agent", "notify")
 COMMON = {"name", "type", "after", "when", "retries", "retry_delay_s", "retry_backoff", "timeout_s", "description",
           "reads", "writes"}
-TOP = ("kind", "name", "description", "params", "triggers", "concurrency", "sla_minutes", "notify", "steps", "layout")
+TOP = ("kind", "name", "description", "runner", "params", "triggers", "concurrency", "sla_minutes", "notify", "steps",
+       "layout")
+RUNNERS = ("cairn", "airflow")
 
 
 class FlowError(Exception):
@@ -521,7 +524,13 @@ def normalize(raw: Any) -> dict:
     if not isinstance(desc, str) or len(desc) > 4000:
         errs.add("description", "is text up to 4000 characters")
         desc = ""
-    out: dict[str, Any] = {"kind": "flow", "name": name, "description": desc, "params": _params(errs, raw.get("params")),
+    runner = raw.get("runner", "cairn")
+    if runner not in RUNNERS:
+        errs.add("runner", f"is one of {', '.join(RUNNERS)} (who runs the steps' order: Cairn, or Airflow from a DAG "
+                 "Cairn deploys)")
+        runner = "cairn"
+    out: dict[str, Any] = {"kind": "flow", "name": name, "description": desc, "runner": runner,
+                           "params": _params(errs, raw.get("params")),
                            "triggers": _triggers(errs, raw.get("triggers"), name)}
     conc = raw.get("concurrency") or {}
     if isinstance(conc, str):
@@ -707,6 +716,8 @@ def compact(defn: dict) -> dict:
     out: dict[str, Any] = {"kind": "flow", "name": defn["name"]}
     if defn.get("description"):
         out["description"] = defn["description"]
+    if defn.get("runner", "cairn") != "cairn":
+        out["runner"] = defn["runner"]
     if defn.get("params"):
         out["params"] = [{k: v for k, v in p.items() if not (k == "required" and v is False)
                           and not (k == "description" and not v) and not (k == "default" and v is None)

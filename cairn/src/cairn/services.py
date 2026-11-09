@@ -696,6 +696,12 @@ def _build_flows(s: Services) -> None:
                         is_operator=operator, lakehouse_sessions=getattr(s, "lakehouse_sessions", None), public_url=public)
     s.flows = Flows(s.engine, backends, s.audit, tell, s.is_admin, groups_of, getattr(s, "dataset_changes", None),
                     table_urn, (lambda event: ol.handle(event)) if ol is not None else None, may_run)
+    # Airflow both ways (cairn.flows.airflow_interop): the DAG folder runner-airflow flows deploy to (a bad setting
+    # stops Cairn at start), and Airflow's DAGs shown to the people they belong to.
+    from cairn.flows.airflow_interop import AirflowDags, DagFolder
+
+    s.flows.dag_folder = DagFolder.from_env(getattr(s, "git_folders", None))
+    s.airflow_dags = AirflowDags(backends.airflow, groups_of, s.is_admin, s.flows)
 
 
 def _build_pipeline_health(s: Services) -> None:

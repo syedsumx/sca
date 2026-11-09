@@ -278,6 +278,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.flows.api import build_flows_router
 
         app.include_router(build_flows_router(services.flows, cp, getattr(services, "sql_workflows", None)))
+    if getattr(services, "airflow_dags", None) is not None:
+        from cairn.flows.api import build_airflow_router
+
+        app.include_router(build_airflow_router(services.airflow_dags, cp))
     if getattr(services, "sql_workflows", None) is not None:
         from cairn.sqlworkspace.workflows import build_workflows_router
 

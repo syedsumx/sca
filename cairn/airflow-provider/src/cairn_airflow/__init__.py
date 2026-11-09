@@ -15,6 +15,9 @@
 * :class:`~cairn_airflow.secrets.CairnSecretsBackend`: Airflow's own Trino and SQL operators with a
   fresh token as the pipeline user.
 * :class:`~cairn_airflow.lineage.CairnTokenProvider`: OpenLineage to Cairn without a stored key.
+* :mod:`cairn_airflow.flows`: one step of a Cairn flow, run in Cairn as the flow's owner
+  (:class:`~cairn_airflow.flows.CairnFlowStepOperator`, :class:`~cairn_airflow.flows.CairnFlowBranchOperator`), for
+  the DAGs Cairn generates from flows; :class:`~cairn_airflow.quality.CairnCheckOperator`, a flow's check on Trino.
 """
 
 __version__ = "0.1.0"

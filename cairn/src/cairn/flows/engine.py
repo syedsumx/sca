@@ -192,6 +192,12 @@ class Flows:
         self.keep_days = _int_env("CAIRN_FLOWS_KEEP_DAYS", 90, 1, 3650)
         self.min_interval = _int_env("CAIRN_FLOWS_MIN_INTERVAL_MINUTES", 5, 1, 1440)
         self.pool = ThreadPoolExecutor(max_workers=_int_env("CAIRN_FLOWS_WORKERS", 8, 1, 256), thread_name_prefix="cairn-flow")
+        # runner: airflow (cairn.flows.airflow_interop): where the DAGs go, how often Airflow is asked, how long a new
+        # version may take to appear there, how long Airflow may be unreachable before a run fails.
+        self.dag_folder = None
+        self.airflow_poll_ms = _int_env("CAIRN_FLOWS_AIRFLOW_POLL_SECONDS", 10, 2, 600) * 1000
+        self.airflow_deploy_ms = _int_env("CAIRN_FLOWS_AIRFLOW_DEPLOY_TIMEOUT_SECONDS", 300, 10, 7200) * 1000
+        self.airflow_unreachable_ms = _int_env("CAIRN_FLOWS_AIRFLOW_UNREACHABLE_MINUTES", 30, 1, 1440) * 60_000
         self._lock = threading.Lock()
         self._driving: dict[str, threading.Event] = {}
         self._last_sweep = 0
@@ -379,6 +385,12 @@ class Flows:
                 errs.add(p, str(e), s["name"])
             except Exception as e:  # noqa: BLE001 - a lookup that refuses (404, 403) is a problem with the step
                 errs.add(p, str(e) or type(e).__name__, s["name"])
+        if defn.get("runner") == "airflow":
+            if self.dag_folder is None:
+                errs.add("runner", "runner airflow needs Airflow's DAG folder: set CAIRN_FLOWS_AIRFLOW_DAGS "
+                                   "(path:<directory> or git:<git folder id>)")
+            if not (b.airflow or {}).get("url"):
+                errs.add("runner", "runner airflow needs Airflow's REST API: set CAIRN_AIRFLOW_URL and its credentials")
         for i, t in enumerate(defn["triggers"]):
             if t["type"] == "schedule":
                 a = next_fire(t["cron"], t["timezone"], _now())
@@ -406,6 +418,12 @@ class Flows:
         watch = sorted({self.table_urn(x) for t in defn["triggers"] if t["type"] == "dataset" and t["enabled"]
                         for x in t["tables"]})
         follows = [{"flow": t["flow"], "on": t["on"]} for t in defn["triggers"] if t["type"] == "flow" and t["enabled"]]
+        deployed = None
+        if defn.get("runner") == "airflow":           # the DAG first: a version is published once Airflow can run it
+            with self.engine.connect() as conn:
+                current = conn.execute(select(func.max(flow_versions.c.version))
+                                       .where(flow_versions.c.flow_id == row["id"])).scalar()
+            deployed = self._deploy(row, defn, int(current or 0) + 1)
         with self.engine.begin() as conn:
             current = conn.execute(select(func.max(flow_versions.c.version)).where(flow_versions.c.flow_id == row["id"])).scalar()
             version = int(current or 0) + 1
@@ -417,8 +435,78 @@ class Flows:
             conn.execute(update(flows).where(flows.c.id == row["id"]).values(
                 published_version=version, updated_ms=now, updated_by=actor, watch=watch, follows=follows,
                 seen_change=seen, next_run_ms=next_fire(sched["cron"], sched["timezone"], now) if sched else None))
-        self._audit(actor, "flow.published", row["name"], {"version": version, "steps": len(defn["steps"])})
-        return {"flow": row["name"], "version": version}
+        self._audit(actor, "flow.published", row["name"], {"version": version, "steps": len(defn["steps"]),
+                                                             **({"airflow": deployed} if deployed else {})})
+        return {"flow": row["name"], "version": version, **({"airflow": deployed} if deployed else {})}
+
+    # ---- Airflow (cairn.flows.airflow_dag, cairn.flows.airflow_interop) -------------------------------------
+    def _deploy(self, row: dict, defn: dict, version: int) -> dict:
+        from cairn.flows.airflow_dag import dag_id_for, to_dag
+
+        if self.dag_folder is None:
+            raise FlowError("runner airflow needs Airflow's DAG folder: set CAIRN_FLOWS_AIRFLOW_DAGS", 503)
+        text = to_dag(defn, owner=row["owner"], version=version, runner=True)
+        out = self.dag_folder.write(row["name"], text, f"Cairn: deploy flow {row['name']} version {version}")
+        return {**out, "dag_id": dag_id_for(row["name"], True)}
+
+    def airflow_dag(self, actor: str, ref: str, version: Optional[Any] = None, operators: str = "native",
+                    conn_id: str = "cairn_default", dag_id: Optional[str] = None) -> tuple[str, str]:
+        """(file name, the flow as an Airflow DAG file): its published version, a version, or ``draft``."""
+        import re
+
+        from cairn.flows.airflow_dag import to_dag
+
+        row = self._row(ref)
+        self._need(actor, row, "view")
+        if version == "draft" or (version is None and not row["published_version"]):
+            defn, v = model.normalize(json.loads(row["draft"])), None
+        else:
+            v = int(version or row["published_version"])
+            defn = self._version(row["id"], v)
+        ident = re.compile(r"^[A-Za-z0-9_.-]{1,250}$")
+        if not ident.match(conn_id) or (dag_id and not ident.match(dag_id)):
+            raise FlowError("conn_id and dag_id are letters, digits, '.', '_' and '-'")
+        try:
+            text = to_dag(defn, owner=row["owner"], version=v, operators=operators, conn_id=conn_id, dag_id=dag_id)
+        except ValueError as e:
+            raise FlowError(str(e))
+        return f"{dag_id or row['name']}.py", text
+
+    def airflow_run(self, actor: str, ref: str, dag_id: str, dag_run_id: str, logical_date: Optional[str] = None,
+                    params: Optional[dict] = None) -> dict:
+        """The Cairn run of an Airflow DAG run of an exported flow (one per DAG run, made by its first task to ask):
+        its published version, recorded in the run history and followed through Airflow's REST API."""
+        row = self._row(ref)
+        self._need(actor, row, "run")
+        if not row["published_version"]:
+            raise FlowError(f"{row['name']} has no published version", 409)
+        if not dag_run_id or len(dag_run_id) > 250 or not dag_id or len(dag_id) > 250:
+            raise FlowError("dag_id and dag_run_id name the DAG run")
+        if logical_date is not None:
+            try:
+                logical_date = date.fromisoformat(str(logical_date)[:10]).isoformat()
+            except ValueError:
+                raise FlowError("logical_date is a date (YYYY-MM-DD)")
+        rid = uuid.uuid5(uuid.NAMESPACE_URL, f"cairn-flow:{row['id']}/airflow:{dag_id}/{dag_run_id}").hex
+        try:
+            self._run_row(rid)
+            return {"run": rid, "created": False}
+        except FlowError:
+            pass
+        defn = self._version(row["id"], row["published_version"])
+        try:
+            self._new_run(row, row["published_version"], defn, "airflow", actor, params or {}, logical_date,
+                          {"airflow": {"dag_id": dag_id, "dag_run_id": dag_run_id, "external": True}}, rid=rid,
+                          status="running")
+        except Exception as e:  # noqa: BLE001 - another task made it at the same moment
+            try:
+                self._run_row(rid)
+                return {"run": rid, "created": False}
+            except FlowError:
+                if isinstance(e, FlowError):
+                    raise
+                raise FlowError(f"could not record the DAG run: {type(e).__name__}", 500)
+        return {"run": rid, "created": True}
 
     def set_enabled(self, actor: str, ref: str, enabled: bool) -> dict:
         row = self._row(ref)
@@ -443,6 +531,12 @@ class Flows:
             conn.execute(delete(flow_runs).where(flow_runs.c.flow_id == row["id"]))
             conn.execute(delete(flow_versions).where(flow_versions.c.flow_id == row["id"]))
             conn.execute(delete(flows).where(flows.c.id == row["id"]))
+        if row["published_version"] and self.dag_folder is not None:
+            try:
+                if self._version(row["id"], row["published_version"]).get("runner") == "airflow":
+                    self.dag_folder.write(row["name"], None, f"Cairn: remove flow {row['name']}")
+            except FlowError as e:
+                logger.warning("flow %s: could not remove its DAG: %s", row["name"], e)
         self._audit(actor, "flow.deleted", row["name"], {})
 
     def _version(self, fid: str, version: int) -> dict:
@@ -537,11 +631,12 @@ class Flows:
 
     def _new_run(self, row: dict, version: int, defn: dict, trigger: str, by: Optional[str], params: Optional[dict],
                  logical_date: Optional[str] = None, detail: Optional[dict] = None, force_queue: bool = False,
-                 reuse: Optional[dict[str, dict]] = None) -> str:
-        rid, now = uuid.uuid4().hex, _now()
+                 reuse: Optional[dict[str, dict]] = None, rid: Optional[str] = None, status: str = "queued") -> str:
+        rid, now = rid or uuid.uuid4().hex, _now()
+        start_status = status
         logical_date = logical_date or datetime.now(timezone.utc).date().isoformat()
         values = self._params(defn, params, {"id": rid, "logical_date": logical_date, "trigger": trigger})
-        status, error = "queued", None
+        status, error = start_status, None
         why = None
         try:
             why = self.may_run(row["owner"]) if self.may_run is not None else None
@@ -559,7 +654,8 @@ class Flows:
             conn.execute(insert(flow_runs).values(
                 id=rid, flow_id=row["id"], version=version, definition=json.dumps(defn), status=status, trigger=trigger,
                 triggered_by=by, run_as=row["owner"], params=values, logical_date=logical_date, detail=detail or {},
-                created_ms=now, started_ms=None, finished_ms=now if status in DONE else None, wake_ms=None,
+                created_ms=now, started_ms=now if status == "running" else None,
+                finished_ms=now if status in DONE else None, wake_ms=None,
                 lease_owner=None, lease_until_ms=None, cancel_requested=False, sla_alerted=False, error=error))
             conn.execute(insert(flow_step_runs), [
                 {"run_id": rid, "key": s["name"], "step": s["name"], "parent": None, "type": s["type"],
@@ -567,7 +663,7 @@ class Flows:
                      "output": None, "log": None, "error": None, "state": None, "decision": None}
                     if not (reuse and s["name"] in reuse) else reuse[s["name"]])}
                 for s in defn["steps"]])
-        self._audit(by or row["owner"], "flow.run_" + ("started" if status == "queued" else status), row["name"],
+        self._audit(by or row["owner"], "flow.run_" + ("started" if status in ("queued", "running") else status), row["name"],
                     {"run": rid, "trigger": trigger, "version": version, **({"error": error} if error else {})})
         if status == "failed":
             self._tell(row, defn, rid, "failed", error or "")
@@ -769,6 +865,13 @@ class Flows:
 
     def _drive(self, rid: str) -> None:
         if not self._claim(rid):
+            return
+        first = self._run_row(rid)
+        if json.loads(first["definition"]).get("runner") == "airflow" or (first["detail"] or {}).get("airflow"):
+            try:
+                self._drive_airflow(rid)
+            finally:
+                self._release(rid)                       # still held (an unexpected error): the next tick looks again
             return
         futures: dict[str, tuple[Future, stepmod.Ctx]] = {}
         cancel = threading.Event()
@@ -1105,6 +1208,267 @@ class Flows:
             self.lineage(end)
         except Exception:  # noqa: BLE001 - lineage never fails a step
             logger.exception("flow run %s: lineage for %s failed", rid, s["name"])
+
+    # ---- runs Airflow carries out (runner: airflow, and exported DAGs) -----------------------------------------
+    def _set_detail(self, rid: str, detail: dict) -> None:
+        with self.engine.begin() as conn:
+            conn.execute(update(flow_runs).where(flow_runs.c.id == rid).values(detail=detail))
+
+    def _fail_run(self, rid: str, rows: dict[str, dict], error: str) -> None:
+        now = _now()
+        for key, r in rows.items():
+            if r["status"] not in STEP_DONE:
+                self._set_step(rid, key, status="skipped" if r["status"] == "pending" else "failed", finished_ms=now,
+                               error=error if r["status"] != "pending" else "not run: " + error, next_ms=None)
+        with self.engine.begin() as conn:
+            conn.execute(update(flow_runs).where(flow_runs.c.id == rid).values(error=error[:4000]))
+        self._finish(rid, "failed")
+
+    def _drive_airflow(self, rid: str) -> None:
+        """A run Airflow carries out: started through Airflow's REST API (``runner: airflow``) and followed there, each
+        step's status from its task instance. The steps' own work is done in Cairn, as the owner, when their tasks
+        ask (:meth:`execute_step`)."""
+        from urllib.parse import quote
+
+        from cairn.flows.airflow_dag import dag_id_for
+
+        run = self._run_row(rid)
+        defn = json.loads(run["definition"])
+        detail = dict(run["detail"] or {})
+        info = dict(detail.get("airflow") or {})
+        now = _now()
+        rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
+        cfg = self.b.airflow or {}
+        if run["cancel_requested"]:
+            if info.get("dag_run_id") and cfg.get("url"):
+                try:
+                    stepmod.Airflow(cfg).call("PATCH", f"/dags/{quote(info['dag_id'], safe='')}/dagRuns/"
+                                              f"{quote(info['dag_run_id'], safe='')}", {"state": "failed"})
+                except stepmod.StepFailed as e:
+                    logger.warning("flow run %s: Airflow did not stop its DAG run: %s", rid, e)
+            for key, r in rows.items():
+                if r["status"] not in STEP_DONE:
+                    self._set_step(rid, key, status="cancelled", finished_ms=now, error="the run was cancelled")
+            self._finish(rid, "cancelled")
+            return
+        if not cfg.get("url"):
+            if info.get("external"):                   # an exported DAG Airflow runs alone: its tasks report here
+                if rows and all(r["status"] in STEP_DONE for r in rows.values()):
+                    self._finish(rid, "failed" if any(r["status"] == "failed" for r in rows.values()) else "succeeded")
+                else:
+                    self._release(rid, status="waiting", wake_ms=now + 60_000)
+                return
+            self._fail_run(rid, rows, "runner airflow: Airflow is not configured (CAIRN_AIRFLOW_URL)")
+            return
+        try:
+            af = stepmod.Airflow(cfg)
+            if not info.get("dag_run_id"):
+                dag_id = dag_id_for(defn["name"], True)
+                q = quote(dag_id, safe="")
+                try:
+                    dag = af.call("GET", f"/dags/{q}")
+                except stepmod.StepFailed as e:
+                    if "said 404" not in str(e):
+                        raise
+                    dag = None
+                want = f"cairn-flow-version:{run['version']}"
+                tags = [t.get("name") if isinstance(t, dict) else str(t) for t in (dag or {}).get("tags") or []]
+                if dag is None or want not in tags or dag.get("has_import_errors"):
+                    started = run["started_ms"] or run["created_ms"]
+                    if now - started > self.airflow_deploy_ms:
+                        self._fail_run(rid, rows, f"Airflow has not loaded version {run['version']} of {dag_id} within "
+                                                  f"{self.airflow_deploy_ms // 1000} s: is CAIRN_FLOWS_AIRFLOW_DAGS the "
+                                                  "folder Airflow reads, and does the DAG import there?")
+                        return
+                    self._release(rid, status="waiting", wake_ms=now + min(self.airflow_poll_ms, 5000))
+                    return
+                if dag.get("is_paused"):
+                    af.call("PATCH", f"/dags/{q}", {"is_paused": False})
+                dag_run_id = f"cairn-{rid}"
+                body: dict[str, Any] = {"dag_run_id": dag_run_id,
+                                        "conf": {"cairn_run": rid, "cairn_flow": defn["name"], "cairn_user": run["run_as"],
+                                                 "params": run["params"] or {}}}
+                if cfg.get("api") == "v2":
+                    body["logical_date"] = None
+                try:
+                    af.call("POST", f"/dags/{q}/dagRuns", body)
+                except stepmod.StepFailed as e:
+                    if "said 409" not in str(e):         # 409: made before Cairn could record it
+                        raise
+                detail["airflow"] = {"dag_id": dag_id, "dag_run_id": dag_run_id}
+                detail.pop("airflow_error", None)
+                detail.pop("airflow_error_since", None)
+                self._set_detail(rid, detail)
+                self._audit(run["triggered_by"] or run["run_as"], "flow.airflow_run_started", defn["name"],
+                            {"run": rid, "dag_id": dag_id, "dag_run_id": dag_run_id})
+            else:
+                dq, rq = quote(info["dag_id"], safe=""), quote(info["dag_run_id"], safe="")
+                state = af.call("GET", f"/dags/{dq}/dagRuns/{rq}").get("state")
+                tis = af.call("GET", f"/dags/{dq}/dagRuns/{rq}/taskInstances?limit=1000").get("task_instances") or []
+                self._sync_airflow(rid, defn, rows, tis)
+                if detail.pop("airflow_error_since", None) is not None:
+                    detail.pop("airflow_error", None)
+                    self._set_detail(rid, detail)
+                if state in ("success", "failed"):
+                    rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
+                    for key, r in rows.items():
+                        if r["status"] not in STEP_DONE:
+                            self._set_step(rid, key, status="skipped", finished_ms=_now(), next_ms=None,
+                                           error=f"Airflow ended the DAG run ({state}) before it ran")
+                    rows = {r["key"]: r for r in self._step_rows(rid) if r["parent"] is None}
+                    failed = state == "failed" or any(r["status"] == "failed" for r in rows.values())
+                    if failed and state == "failed" and not any(r["status"] == "failed" for r in rows.values()):
+                        with self.engine.begin() as conn:
+                            conn.execute(update(flow_runs).where(flow_runs.c.id == rid)
+                                         .values(error="Airflow marked the DAG run failed"))
+                    self._finish(rid, "failed" if failed else "succeeded")
+                    return
+            self._release(rid, status="waiting", wake_ms=_now() + self.airflow_poll_ms)
+        except stepmod.StepFailed as e:
+            since = detail.get("airflow_error_since") or now
+            if now - since > self.airflow_unreachable_ms:
+                self._fail_run(rid, rows, f"Airflow failed for {(now - since) // 60_000} minutes: {e}")
+                return
+            detail.update(airflow_error=str(e)[:500], airflow_error_since=since)
+            self._set_detail(rid, detail)
+            logger.warning("flow run %s: Airflow: %s", rid, e)
+            self._release(rid, status="waiting", wake_ms=now + self.airflow_poll_ms)
+
+    def _sync_airflow(self, rid: str, defn: dict, rows: dict[str, dict], tis: list[dict]) -> None:
+        """Each step's status from its task instance; what a step's own execution recorded (its output) stays."""
+        from cairn.flows.airflow_interop import TI_STATUS
+
+        by = {ti["task_id"]: ti for ti in tis if ti.get("map_index", -1) in (-1, 0)}
+        now = _now()
+        for s in defn["steps"]:
+            ti, r = by.get(s["name"]), rows.get(s["name"])
+            if ti is None or r is None:
+                continue
+            state = ti.get("state")
+            want = TI_STATUS.get(state, "running")
+            cur, tries = r["status"], int(ti.get("try_number") or 0)
+            values: dict[str, Any] = {}
+            if want in STEP_DONE:
+                if cur == want:
+                    continue
+                values = {"status": want, "finished_ms": now, "next_ms": None}
+                if want == "failed":
+                    values["error"] = r["error"] if cur == "failed" and r["error"] else \
+                        f"the Airflow task failed (try {tries}): see its log in Airflow"
+                elif want == "skipped":
+                    values["error"] = ("a step before it failed (Airflow: upstream_failed)" if state == "upstream_failed"
+                                       else r["error"] or "Airflow skipped it")
+                elif want == "cancelled":
+                    values["error"] = "Airflow removed the task"
+                else:
+                    values["error"] = None
+                if tries and tries > (r["attempt"] or 0):
+                    values["attempt"] = tries
+            elif cur == "pending" or (cur in STEP_DONE and tries > (r["attempt"] or 0)):
+                if want == "pending":
+                    continue
+                values = {"status": want, "started_ms": r["started_ms"] or now, "next_ms": None,
+                          **({"attempt": tries} if tries > (r["attempt"] or 0) else {})}
+                if cur in STEP_DONE:
+                    values.update(finished_ms=None, error=None)
+            if values:
+                self._set_step(rid, s["name"], **values)
+
+    def execute_step(self, actor: str, rid: str, step: str, try_number: int = 1) -> dict:
+        """Runs one step of a run Airflow carries out, in Cairn, as the flow's owner, with the outputs of the steps
+        before it; or says how it is going. Its task asks again until it has finished. ``try_number``: Airflow's try
+        (a later try runs the step again)."""
+        run = self._run_row(rid)
+        row = self._row(run["flow_id"])
+        self._need(actor, row, "run")
+        defn = json.loads(run["definition"])
+        s = next((x for x in defn["steps"] if x["name"] == step), None)
+        if s is None:
+            raise FlowError(f"no step {step!r} in that run", 404)
+        if not (defn.get("runner") == "airflow" or (run["detail"] or {}).get("airflow")):
+            raise FlowError("only the steps of a run Airflow carries out are run one by one", 409)
+        tries = max(1, min(int(try_number or 1), 1000))
+        r = next(x for x in self._step_rows(rid) if x["key"] == step)
+
+        def report(x: dict) -> dict:
+            return {"run": rid, "step": step, "status": x["status"], "attempt": x["attempt"], "error": x["error"],
+                    "next_ms": x["next_ms"], "output": json.loads(x["output"]) if x["output"] else None}
+        now = _now()
+        if r["status"] in STEP_DONE and (r["attempt"] or 0) >= tries:
+            return report(r)                                 # this try's answer
+        if run["status"] not in ACTIVE:
+            raise FlowError(f"the run has finished ({run['status']})", 409)
+        if run["cancel_requested"]:
+            return {**report(r), "status": "cancelled", "error": "the run was cancelled"}
+        if r["status"] == "running" and (r["next_ms"] or 0) > now:
+            return report(r)                                 # running here or on another replica
+        resume = r["status"] == "waiting" and (r["attempt"] or 0) >= tries
+        if resume and (r["next_ms"] or 0) > now:
+            return report(r)                                 # waiting: not yet time to look again
+        attempt = r["attempt"] if resume else max(tries, (r["attempt"] or 0) + (0 if r["status"] == "pending" else 1))
+        values: dict[str, Any] = {"status": "running", "next_ms": now + self.lease_ms, "attempt": attempt}
+        if not resume:
+            values.update(started_ms=now, finished_ms=None, error=None, output=None)
+        with self.engine.begin() as conn:
+            got = conn.execute(update(flow_step_runs).where(and_(
+                flow_step_runs.c.run_id == rid, flow_step_runs.c.key == step, flow_step_runs.c.status == r["status"],
+                flow_step_runs.c.attempt == r["attempt"])).values(**values)).rowcount
+        if not got:                                          # another call started it at the same moment
+            return report(next(x for x in self._step_rows(rid) if x["key"] == step))
+        if not resume:
+            self._audit(actor, "flow.step_started", defn["name"], {"run": rid, "step": step, "attempt": attempt,
+                                                                    "by": "airflow"})
+        self.pool.submit(self._run_external, rid, defn, s, {**r, **values}, resume)
+        return {"run": rid, "step": step, "status": "running", "attempt": attempt, "error": None, "next_ms": None,
+                "output": None}
+
+    def _run_external(self, rid: str, defn: dict, s: dict, r: dict, resume: bool) -> None:
+        run = self._run_row(rid)
+        rows = {x["key"]: x for x in self._step_rows(rid) if x["parent"] is None}
+        cancel, done = threading.Event(), threading.Event()
+        started = r["started_ms"] or _now()
+        ctx = stepmod.Ctx(owner=run["run_as"], flow=defn["name"], run_id=rid, step=s, attempt=r["attempt"],
+                          values=self._values(run, defn, rows), started_ms=started,
+                          deadline_ms=started + s["timeout_s"] * 1000, timezone=self._tz(defn),
+                          state=dict(r["state"] or {}) if resume else {}, decision=r["decision"], cancelled=cancel)
+
+        def heartbeat() -> None:                             # the lease: another replica takes over when it lapses
+            while not done.wait(self.lease_ms / 3000):
+                try:
+                    with self.engine.begin() as conn:
+                        conn.execute(update(flow_step_runs).where(and_(
+                            flow_step_runs.c.run_id == rid, flow_step_runs.c.key == s["name"],
+                            flow_step_runs.c.status == "running", flow_step_runs.c.attempt == r["attempt"]))
+                            .values(next_ms=_now() + self.lease_ms))
+                    if self._run_row(rid)["cancel_requested"] or _now() > ctx.deadline_ms:
+                        cancel.set()
+                except Exception:  # noqa: BLE001 - tried again on the next beat
+                    logger.exception("flow run %s: heartbeat of %s failed", rid, s["name"])
+        beat = threading.Thread(target=heartbeat, daemon=True, name=f"cairn-flow-beat-{rid[:8]}")
+        beat.start()
+        now = _now
+        try:
+            res = self._execute(ctx)
+        except stepmod.StepFailed as e:
+            self._set_step(rid, s["name"], status="failed", finished_ms=now(), next_ms=None, error=str(e),
+                           log="\n".join(ctx.lines))
+            self._emit_lineage(rid, None, s, "FAIL", started, None, str(e))
+            return
+        except Exception as e:  # noqa: BLE001 - the step's own failure
+            logger.exception("flow run %s: step %s raised", rid, s["name"])
+            self._set_step(rid, s["name"], status="failed", finished_ms=now(), next_ms=None,
+                           error=f"{type(e).__name__}: {e}", log="\n".join(ctx.lines))
+            return
+        finally:
+            done.set()
+        log = "\n".join(ctx.lines + ([res.log] if getattr(res, "log", "") else []))
+        if isinstance(res, stepmod.Wait):
+            self._set_step(rid, s["name"], status="waiting", next_ms=res.next_ms, state=res.state,
+                           log=((r["log"] + "\n") if r["log"] and resume else "") + log if log else r["log"])
+            return
+        self._set_step(rid, s["name"], status="ok", finished_ms=now(), output=res.output, error=None, next_ms=None,
+                       log=((r["log"] + "\n") if r["log"] and resume else "") + log)
+        self._emit_lineage(rid, ctx, s, "COMPLETE", started, res.output)
 
     # ---- decisions, cancels ------------------------------------------------------------------------------------
     def decide(self, actor: str, rid: str, step: str, decision: str, comment: str = "") -> dict:

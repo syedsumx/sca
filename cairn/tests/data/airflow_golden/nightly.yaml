@@ -1,0 +1,42 @@
+kind: flow
+name: nightly-sales
+description: Refresh the revenue mart, check it, report and tell the team
+params:
+  - {name: day, type: date, default: "{{ run.logical_date }}"}
+  - {name: region, type: string, default: EU, description: The region to report}
+  - {name: min_rows, type: int, default: 1}
+triggers:
+  - {type: schedule, cron: "0 2 * * *", timezone: Europe/Berlin}
+  - {type: dataset, tables: [raw.orders]}
+  - {type: flow, flow: ingest-orders, on: [succeeded]}
+concurrency: {policy: skip, max_active: 1}
+sla_minutes: 90
+notify: {on: [failure], to: ["urn:li:corpuser:bob"]}
+steps:
+  - {name: refresh, type: derived, table: revenue, retries: 2, retry_delay_s: 60}
+  - name: enough
+    type: check
+    after: [refresh]
+    sql: |-
+      SELECT count(*) AS n
+      FROM marts.revenue
+      WHERE region = '{{ params.region }}'
+    connection: lakehouse
+    measure: n
+    op: ">="
+    value: 1
+  - {name: build, type: dbt, after: [enough], command: build, select: "tag:nightly", project_dir: /dbt/sales}
+  - {name: score, type: spark, after: [build], application: "s3a://jobs/score.py", args: ["--day", "{{ params.day }}"],
+     conf: {spark.executor.instances: "2"}}
+  - {name: export, type: airflow, after: [build], dag_id: partner_export, conf: {target: s3}, wait: true, poll_s: 60}
+  - {name: rows, type: sql, after: [build], sql: "SELECT region, total FROM marts.revenue", connection: lakehouse}
+  - {name: big, type: branch, after: [rows], condition: "steps.rows.rows > 10", then: [signoff], else: [note]}
+  - {name: signoff, type: approval, after: [big], approvers: ["urn:li:corpuser:ana"], message: "Publish the report?"}
+  - {name: note, type: notify, after: [big], message: "only {{ steps.rows.rows }} regions"}
+  - name: each
+    type: for_each
+    after: [signoff]
+    items: "{{ steps.rows.preview }}"
+    step: {type: notify, message: "region {{ item[0] }}"}
+  - {name: done, type: notify, after: [each, note, score, export], when: all_done, message: "nightly finished",
+     timeout_s: 120}

@@ -1,4 +1,5 @@
-"""``cairn flows list|validate|deploy|run|logs``: flows from the command line (and from CI, or an agent's shell).
+"""``cairn flows list|validate|deploy|run|logs|export-airflow``: flows from the command line (and from CI, or an
+agent's shell).
 
 ``validate FILE`` checks a definition here, without Cairn. The others call Cairn's API as you: ``CAIRN_URL`` and
 ``CAIRN_TOKEN`` (or ``CAIRN_TOKEN_FILE``; never on the command line), ``CAIRN_CA_FILE`` for a private CA.
@@ -7,6 +8,8 @@
     cairn flows deploy flows/nightly.yaml            # creates or updates the flow, then publishes it
     cairn flows run nightly --param date=2026-11-01 --wait
     cairn flows logs <run id> --step report
+    cairn flows export-airflow nightly --out dags/nightly.py      # the flow as an Airflow DAG (no secrets)
+    cairn flows export-airflow --file flows/nightly.yaml           # from a file, here, without Cairn
 """
 
 from __future__ import annotations
@@ -87,6 +90,8 @@ def main(a) -> int:
                     for e in out["errors"]:
                         print(f"{path}: {e['path'] or 'flow'}: {e['message']}")
             return 0 if ok else 1
+        if a.flows_cmd == "export-airflow":
+            return _export_airflow(a)
         call = _client()
         if a.flows_cmd == "list":
             for f in call("GET", "/v1/flows"):
@@ -145,6 +150,50 @@ def main(a) -> int:
     return 2
 
 
+def _export_airflow(a) -> int:
+    from cairn.flows import model
+    from cairn.flows.airflow_dag import to_dag
+
+    if bool(a.name) == bool(a.file):
+        raise CliError("give a flow's name (read from Cairn) or --file (a definition here)")
+    if a.file:
+        out = model.validate(_load(a.file))
+        if not out["valid"]:
+            raise CliError("; ".join(f"{e['path'] or 'flow'}: {e['message']}" for e in out["errors"]))
+        text = to_dag(out["flow"], owner=os.environ.get("CAIRN_FLOW_OWNER", "urn:li:corpuser:me"), operators=a.operators,
+                      conn_id=a.conn_id, dag_id=a.dag_id)
+    else:
+        import httpx
+
+        url = os.environ.get("CAIRN_URL", "").rstrip("/")
+        token = os.environ.get("CAIRN_TOKEN", "")
+        if not token and os.environ.get("CAIRN_TOKEN_FILE"):
+            token = open(os.environ["CAIRN_TOKEN_FILE"]).read().strip()
+        if not url or not token:
+            raise CliError("set CAIRN_URL and CAIRN_TOKEN (or CAIRN_TOKEN_FILE)")
+        q: dict[str, Any] = {"operators": a.operators, "conn_id": a.conn_id}
+        if a.version:
+            q["version"] = a.version
+        if a.dag_id:
+            q["dag_id"] = a.dag_id
+        r = httpx.get(f"{url}/v1/flows/{quote(a.name, safe='')}/airflow", params=q, timeout=60,
+                      headers={"Authorization": f"Bearer {token}"}, verify=os.environ.get("CAIRN_CA_FILE") or True)
+        if r.status_code >= 300:
+            try:
+                why = r.json().get("detail", r.text)
+            except ValueError:
+                why = r.text
+            raise CliError(f"{r.status_code} {why}")
+        text = r.text
+    if a.out:
+        with open(a.out, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        print(f"wrote {a.out}")
+    else:
+        sys.stdout.write(text)
+    return 0
+
+
 def _print_run(run: dict) -> None:
     print(f"run {run['id']} of {run['flow']} v{run['version'] or 'draft'}: {run['status']}"
           + (f" ({run['error']})" if run.get("error") else ""))
@@ -193,4 +242,15 @@ def add_parser(sub) -> None:
     lg.add_argument("--step", help="a step (a for-each's items are name[i])")
     lg.add_argument("--follow", action="store_true")
     lg.add_argument("--timeout", type=float, default=3600)
+    ea = fs.add_parser("export-airflow", help="a flow as an Airflow DAG file (cairn-airflow-provider's operators, no "
+                                              "secrets)")
+    ea.add_argument("name", nargs="?", help="the flow in Cairn (its published version, or --version)")
+    ea.add_argument("--file", help="a flow definition here (YAML or JSON) instead of one in Cairn")
+    ea.add_argument("--version", help="a version number, or draft")
+    ea.add_argument("--operators", choices=("native", "cairn"), default="native",
+                    help="native: Trino, check, dbt, Spark and DAG triggers on Airflow; cairn: every step delegated to "
+                         "Cairn as the flow's owner")
+    ea.add_argument("--conn-id", default="cairn_default", help="Airflow's cairn connection (default cairn_default)")
+    ea.add_argument("--dag-id", help="the DAG's id (default: the flow's name)")
+    ea.add_argument("--out", help="write the file here (default: standard output)")
     fl.set_defaults(fn=lambda a: sys.exit(main(a)))
