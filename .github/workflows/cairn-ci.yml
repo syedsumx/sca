@@ -67,6 +67,24 @@ jobs:
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
         run: pytest -q
+      - name: Scale (PDP replicas at 2,000 decisions/s for 60 s, cached and uncached; the gateway with 100 agents and 1 GB)
+        env:
+          CAIRN_LOAD_SCALE: "1"
+          CAIRN_LOAD_REPORT: ${{ runner.temp }}/load-scale
+          CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_load_scale.py | tee "$RUNNER_TEMP/load-scale.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/load-scale.log"
+      - name: Publish the scale measurements
+        if: always()
+        run: cat "$RUNNER_TEMP/load-scale/summary.md" >> "$GITHUB_STEP_SUMMARY" || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: load-scale
+          path: ${{ runner.temp }}/load-scale/
+          if-no-files-found: ignore
       - name: Policy bundle and its decision tests
         run: |
           cairn policies validate config/policies
