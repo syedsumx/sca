@@ -10,7 +10,7 @@
   "homepage": "https://github.com/syedsumx/sca",
   "scripts": {
     "start": "electron .",
-    "test": "node --test test/*.test.js",
+    "test": "node --test --test-force-exit test/*.test.js",
     "dist": "electron-builder"
   },
   "dependencies": {

@@ -65,10 +65,13 @@ test('the real app opens a workspace and follows a deep link from a second launc
     fs.writeFileSync(path.join(home, '.config', 'cairn', 'config.toml'),
         `default_profile = "smoke"\n\n[profiles."smoke"]\nurl = "${url}/cairn/api"\n`);
     const report = path.join(home, 'self-test.json');
+    const appLog = path.join(home, 'app.log');
     const env = { ...process.env, XDG_CONFIG_HOME: path.join(home, '.config'), HOME: home, APPDATA: path.join(home, 'AppData'),
         ELECTRON_DISABLE_SECURITY_WARNINGS: '1', CAIRN_DESKTOP_NO_PROTOCOL: '1', CAIRN_DESKTOP_SELF_TEST: report };
-    // macOS finds the login keychain under the real home: keep it when the keychain is what is being checked.
-    if (process.platform === 'darwin' && expect.has('keychain')) env.HOME = os.homedir();
+    // macOS finds the login keychain under the real home, and safeStorage reaches for it at start: with a home that
+    // has no keychain the app waits on a keychain dialog nobody answers. The app's own files stay in the temporary
+    // folder all the same (XDG_CONFIG_HOME and --user-data-dir).
+    if (process.platform === 'darwin') env.HOME = os.homedir();
     for (const k of Object.keys(env)) if (/^(https?|all|no)_proxy$/i.test(k)) delete env[k];   // a local Cairn
     const run = (args) => {
         // Its own profile folder on every OS: Windows takes the app-data folder from the OS, not %APPDATA%, so without
@@ -77,18 +80,32 @@ test('the real app opens a workspace and follows a deep link from a second launc
             `--user-data-dir=${path.join(home, 'user-data')}`, ...extraArgs, ...args];
         const exe = packaged || electron;
         // Its own process group, so the app, its helpers and the virtual display all stop at the end.
-        const opts = { env, detached: process.platform !== 'win32', stdio: process.env.CAIRN_SMOKE_DEBUG ? 'inherit' : 'ignore' };
+        // Its output goes to a log that a failure prints.
+        const out = process.env.CAIRN_SMOKE_DEBUG ? 'inherit' : fs.openSync(appLog, 'a');
+        const opts = { env, detached: process.platform !== 'win32', stdio: ['ignore', out, out] };
         return xvfb ? spawn(xvfb, ['-a', exe, ...argv], opts) : spawn(exe, argv, opts);
     };
+    // Stops the app and its helpers; one that ignores SIGTERM (a dialog, a stuck helper) is killed after 15 s, so a
+    // failed run ends instead of waiting on it.
     const stop = (child) => new Promise((resolve) => {
         if (child.exitCode !== null || child.signalCode !== null) return resolve();
-        child.on('exit', resolve);
-        try {
-            if (process.platform === 'win32') child.kill();
-            else process.kill(-child.pid, 'SIGTERM');
-        } catch {
+        const signal = (sig) => {
+            try {
+                if (process.platform === 'win32') child.kill(sig);
+                else process.kill(-child.pid, sig);
+            } catch {
+                resolve();
+            }
+        };
+        const kill = setTimeout(() => {
+            signal('SIGKILL');
+            setTimeout(resolve, 2000).unref();
+        }, 15000);
+        child.on('exit', () => {
+            clearTimeout(kill);
             resolve();
-        }
+        });
+        signal('SIGTERM');
         return undefined;
     });
     const until = async (fn, ms = 60000) => {
@@ -147,8 +164,18 @@ test('the real app opens a workspace and follows a deep link from a second launc
                 });
             }
         }
+    } catch (err) {
+        let log = '';
+        try {
+            log = fs.readFileSync(appLog, 'utf8').slice(-8000);
+        } catch {
+            log = '(no app log)';
+        }
+        console.error(`the app's output:\n${log}`);
+        throw err;
     } finally {
         await stop(first);
+        server.closeAllConnections?.();
         server.close();
     }
 });

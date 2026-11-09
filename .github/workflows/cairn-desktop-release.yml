@@ -116,6 +116,7 @@ jobs:
           node -e "require('electron')"
       - name: Unit tests
         working-directory: cairn/desktop
+        timeout-minutes: 10
         run: npm test
       - name: Build the installers
         working-directory: cairn/desktop
