@@ -141,6 +141,7 @@ class Services:
     ai_systems: Optional[Any] = None
     agents: Optional[Any] = None
     device_logins: Optional[Any] = None          # cairn.identity.device: command-line sign-in
+    desktop_policy: Optional[Any] = None         # cairn.identity.desktop: what Cairn Desktop may do here
     playbooks: Optional[Any] = None
     sources: Optional[Any] = None
     openlineage: Optional[Any] = None
@@ -606,6 +607,9 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
                                    registration if registration in ("open", "admin", "off") else "open")
     identity.agent_lookup = services.agents.resolve
     _build_device_logins(services)
+    from cairn.identity.desktop import DesktopPolicy
+
+    services.desktop_policy = DesktopPolicy(engine, audit)
     # The spreadsheet add-ins (Excel, Google Sheets): OAuth clients from the operator's configuration.
     from cairn.identity.addins import SpreadsheetAddins
 

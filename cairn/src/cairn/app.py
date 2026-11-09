@@ -579,6 +579,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.identity.device import build_device_router
 
         app.include_router(build_device_router(services.device_logins, services, cp, authz))
+    if getattr(services, "desktop_policy", None) is not None:   # Cairn Desktop's workspace settings
+        from cairn.identity.desktop import build_router as desktop_router
+
+        app.include_router(desktop_router(services.desktop_policy, cp, authz))
     if getattr(services, "data_access", None) is not None:      # cairn query: SQL on Trino as the person, page by page
         from cairn.sqlworkspace.statements import build_statements_router
 
