@@ -1418,6 +1418,29 @@ The API is `/cairn/api/sources`:
 Secrets (`CAIRN_*_SECRET`, `*_KEY`, `*_PASSWORD`) must be long random values
 (`openssl rand -hex 32`).
 
+### Additive or authoritative
+
+`CAIRN_AUTHZ_MODE` and `CAIRN_NATIVE_POLICIES_ENABLED` go together: `additive` with `true` (the default), or
+`authoritative` with `false`. Set them on Cairn Core and on Cairn's services alike (Compose and the chart's
+`authoritative` profile do), then restart both.
+
+- **Additive.** Core's authorizer chain is first-allow-wins: a Cairn allow grants, and where Cairn has no rule
+  (`NOT_APPLICABLE`) or denies, Core's native policies still decide. A Cairn deny on something a native policy
+  allows does not hold.
+- **Authoritative.** The Cairn authorizer is Core's only authorizer and the policy decision point alone decides:
+  where no rule grants, the answer is a deny (not "not applicable"); Core's native policies count only as imported
+  into the PDP (every 2 minutes, and at once on a policy change), where a Cairn deny overrides them; and when the PDP
+  cannot be reached, Core refuses (fail closed). Only the break-glass users in the authorizer's `rootUsers`
+  (`urn:li:corpuser:admin`) are let in without the PDP, so keep that account's password in your break-glass process.
+- **Switching** from additive to authoritative changes nothing anyone may do that a native policy grants (it is
+  imported), but every Cairn deny starts to hold. Check the posture report's `authz_mode` finding, and try the
+  policies in the access simulator first.
+- **Tested** against a live Cairn Core (CI job `stack`): after the additive suite the stack is switched to
+  authoritative and `tests/e2e/test_authoritative_live.py` checks, as a person with their own token through Core's
+  GraphQL, a default deny, a Cairn allow granting alone, a native Core policy overruled by a Cairn deny and counting
+  once imported, and Core refusing the person (but not the break-glass admin) while the PDP is stopped; the
+  additive suite's `test_14` checks the same deny on viewing a dataset in both modes.
+
 ## Network
 
 Users only need the edge (port 9000, or your ingress). The internal APIs are not exposed; developer
@@ -5058,7 +5081,9 @@ The platform hubs' create, edit and run actions are forms, not JSON (Getting sta
 
 - **Where the forms come from.** `python -m cairn.iac.forms` writes `ui/src/consumer/resources/forms.generated.json`, one form per action that sends a body in the UI's area catalog (`ui/src/consumer/resources/catalog.ts`). A form's fields come from the resource registry when the action is a resource type's create or update call (types, required fields, defaults, descriptions, sensitive and write-only fields, references to other types, and which fields go in the path), else from the route's request model in the API's OpenAPI document, else from the action's example body. Field names choose the widget: SQL editors, cron with its meaning in words, durations with units, password fields for secrets, and pickers that search the API. The file is bundled with the UI, so forms need no request to draw and the offline demo has them too.
 - **Keeping them current.** After changing the registry, a route's request model or the catalog, run `python -m cairn.iac.forms`; CI runs `python -m cairn.iac.forms --check` and fails when the file is stale. A UI test fails when an action that sends a body has no form and is not on the reasoned exclusion list (`FORM_EXCLUSIONS` in `ui/src/consumer/resources/forms.ts`; empty today).
-- **Errors.** Every area shows API errors through one presenter: a sentence and what to do (403: the permission named in the refusal and whom to ask; 409; 422 with each problem on its field; 429; 503 "not configured": a link to the area's section of this manual), with the API's answer under **Details**. A form's fields are checked before sending (required, patterns, ranges, cron, JSON), and FastAPI's 422 `loc` places the API's own problems on the fields.
+- **Errors.** Every page, the hubs and the purpose-built pages alike, shows API errors through one presenter: a sentence and what to do (403: the permission named in the refusal and whom to ask; 409; 422 with each problem on its field; 429; 503 "not configured": a link to the area's section of this manual), with the API's answer under **Details** (a toast or a line under a field carries the sentence only). A UI test fails when a page puts an error's raw text on screen. A form's fields are checked before sending (required, patterns, ranges, cron, JSON), and FastAPI's 422 `loc` places the API's own problems on the fields.
+- **Pickers.** A field that names something in Cairn lists what the person may use: tables and datasets (Cairn Core's catalog search, else the connections' tables), people and groups, connections, Cairn's warehouses (`CAIRN_WAREHOUSES`, with their state from the warehouse proxy), secret scopes and secret references (`scope:<scope>/<key>`, from the scopes the person may read; never a value), the person's git folders (sent by id), flows, agents, and resources of another type. A picker never blocks: a value it does not list can be typed. The same pickers are used outside the hubs: a flow's **After another flow succeeds** trigger and an infrastructure-as-code change's **Commit to a branch for review**. An external catalog's **Warehouse** is the other catalog's own warehouse name, typed, not one of Cairn's.
+- **A budget's scope** is one choice among everything, a domain, an owner, a platform, tables, a Cairn warehouse or AI spend; the form refuses two at once before sending.
 - **Docs links.** Each area in the catalog names its section of these docs (`docs`); a UI test fails when the section does not exist.
 - **What it doesn't change.** A form sends the same request the API always took, as the person signed in: it adds no permission and checks nothing the API does not check again. Raw JSON is always there for keys a form does not show.
 
