@@ -3,19 +3,45 @@
 Cairn resources in Terraform (or OpenTofu), managed through Cairn's API as the token's user, so Cairn's
 permissions and audit apply:
 
-| Resource | What it is |
-|---|---|
-| `cairn_pipe` | Files landing in a Cairn Store prefix, loaded into a lakehouse table once each |
-| `cairn_stream` | A Kafka topic (Debezium change events included) written into a lakehouse table, exactly once |
-| `cairn_derived_table` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
-| `cairn_maintenance_policy` | Compaction, snapshot expiry and orphan cleanup for `*`, a schema or a table |
-| `cairn_vector_index` | Vector search over a table's text, kept in step with it, searched under Cairn's policies |
-| `cairn_saved_query` | A saved read-only query and its chart (`connection_name`, `chart = jsonencode({...})`) |
-| `cairn_dashboard` | Saved queries shown together (`tiles = jsonencode([{query = cairn_saved_query.x.id}])`) |
-| `cairn_sql_alert` | A saved query checked on a schedule, telling its owner when a condition starts and stops |
-| `cairn_sql_workflow` | Steps that depend on each other (refreshes, checks, reports) on a cron schedule |
-| `cairn_policy` | One of Cairn's own access policies, set on its own (`policy_id`, `effect`, `actions`, `target`, `condition`) |
-| `cairn_connection` | An ingestion source: `connector`, `values` (secret fields name a Cairn secret), `schedule`, `executor` |
+<!-- BEGIN GENERATED RESOURCES -->
+
+14 resources, each also a data source:
+
+**Identity and access**
+
+| Resource | Bundle section | What it is |
+|---|---|---|
+| `cairn_policy` | `policies` | One of Cairn's own access policies (source cairn), set and deleted on its own: the rest of the policy bundle stays as it is |
+
+**Data and pipelines**
+
+| Resource | Bundle section | What it is |
+|---|---|---|
+| `cairn_connection` | `connections` | An ingestion source: a connector, its form values (secret fields name a Cairn secret, never its value), where it runs and when |
+| `cairn_maintenance_policy` | `maintenance` | Table maintenance (compaction, snapshot expiry, orphan cleanup) for *, a schema or schema.table |
+| `cairn_pipe` | `pipes` | Files landing in a Cairn Store prefix, loaded into a lakehouse table once each |
+| `cairn_stream` | `streams` | A Kafka topic (Debezium change events included) written into a lakehouse table, exactly once |
+| `cairn_derived_table` | `derived` | A SELECT kept as a lakehouse table, refreshed on Trino as the token's user |
+
+**SQL and BI**
+
+| Resource | Bundle section | What it is |
+|---|---|---|
+| `cairn_input_table` | `input_tables` | A lakehouse table people type into, written on Trino as the person writing |
+| `cairn_saved_query` | `queries` | A saved SQL query (read-only), with its chart; the token user's own |
+| `cairn_metric` | `metrics` | A business measure defined once (a workbook aggregate over one table), the same number in every query, workbook and dashboard; run as the person asking |
+| `cairn_workbook` | `workbooks` | A spreadsheet workbook: elements compiled to SQL and run as the person looking |
+| `cairn_dashboard` | `dashboards` | Saved queries shown together, each run as its viewer |
+| `cairn_sql_alert` | `alerts` | A saved query checked on a schedule as its owner; its owner and recipients are told when the condition starts and stops holding |
+| `cairn_sql_workflow` | `workflows` | Steps that depend on each other (derived-table refreshes, checks, report queries), on a schedule, run as their owner |
+
+**AI and agents**
+
+| Resource | Bundle section | What it is |
+|---|---|---|
+| `cairn_vector_index` | `vectors` | Vector search over a lakehouse table's text, kept in step with the table and searched under Cairn's policies |
+
+<!-- END GENERATED RESOURCES -->
 
 Warehouses are part of the deployment (Helm values `cairn.trino.warehouses`, or Terraform's `helm_release`);
 who may use one is a `cairn_policy` granting `USE_WAREHOUSE` on `urn:li:warehouse:<name>`.

@@ -26,8 +26,13 @@ bundles = Table(
 )
 
 NAME = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
-KINDS = ("policies", "connections", "pipes", "streams", "derived", "maintenance", "vectors", "queries", "dashboards", "alerts",
-         "workflows", "workbooks", "metrics", "input_tables")
+VERSIONS = "~versions"     # write-only values' versions ({kind: {key: {field_version: n}}}), kept beside the names
+
+
+def kinds() -> tuple[str, ...]:
+    from cairn.iac.registry import kinds as registered
+
+    return tuple(k.name for k in registered())
 
 
 class BundleStateError(Exception):
@@ -46,27 +51,37 @@ class BundleState:
         with self.engine.connect() as conn:
             r = conn.execute(select(bundles).where(bundles.c.name == name)).first()
         if r is None:
-            return {"name": name, "resources": {k: [] for k in KINDS}, "version": 0, "digest": ""}
-        return {"name": r.name, "resources": json.loads(r.resources), "version": r.version, "digest": r.digest,
-                "applied_by": r.applied_by, "applied_ms": r.applied_ms}
+            return {"name": name, "resources": {k: [] for k in kinds()}, "versions": {}, "version": 0, "digest": ""}
+        stored = json.loads(r.resources)
+        versions = stored.pop(VERSIONS, {})
+        return {"name": r.name, "resources": {**{k: [] for k in kinds()}, **stored}, "versions": versions,
+                "version": r.version, "digest": r.digest, "applied_by": r.applied_by, "applied_ms": r.applied_ms}
 
     def put(self, name: str, body: dict, actor: str) -> dict:
         cur = self.get(name)
         if body.get("version") != cur["version"]:
             raise BundleStateError("the bundle was applied meanwhile: plan again", 409)
         res = body.get("resources") or {}
-        if not isinstance(res, dict) or set(res) - set(KINDS) or \
+        known = kinds()
+        if not isinstance(res, dict) or set(res) - set(known) or \
                 not all(isinstance(v, list) and all(isinstance(x, str) and len(x) <= 512 for x in v) for v in res.values()):
-            raise BundleStateError(f"resources is {{kind: [names]}} for kinds {', '.join(KINDS)}")
-        out = {k: sorted(set(res.get(k) or [])) for k in KINDS}
+            raise BundleStateError(f"resources is {{kind: [names]}} for kinds {', '.join(known)}")
+        out = {k: sorted(set(res.get(k) or [])) for k in known}
+        versions = body.get("versions") or {}
+        if not isinstance(versions, dict) or set(versions) - set(known) or not all(
+                isinstance(v, dict) and all(isinstance(key, str) and key in out[kind] and isinstance(fv, dict) and all(
+                    isinstance(n, str) and n.endswith("_version") and isinstance(x, int) and not isinstance(x, bool)
+                    for n, x in fv.items()) for key, fv in v.items()) for kind, v in versions.items()):
+            raise BundleStateError("versions is {kind: {name: {field_version: number}}}, for resources the bundle has")
+        stored = json.dumps({**out, **({VERSIONS: versions} if versions else {})})
         digest = str(body.get("digest") or "")[:64]
         now = int(time.time() * 1000)
         with self.engine.begin() as conn:
             if cur["version"] == 0:
-                conn.execute(bundles.insert().values(name=name, resources=json.dumps(out), version=1, digest=digest,
+                conn.execute(bundles.insert().values(name=name, resources=stored, version=1, digest=digest,
                                                      applied_by=actor, applied_ms=now))
             elif not conn.execute(update(bundles).where(bundles.c.name == name, bundles.c.version == cur["version"])
-                                  .values(resources=json.dumps(out), version=cur["version"] + 1, digest=digest,
+                                  .values(resources=stored, version=cur["version"] + 1, digest=digest,
                                           applied_by=actor, applied_ms=now)).rowcount:
                 raise BundleStateError("the bundle was applied meanwhile: plan again", 409)
             if self.audit is not None:

@@ -58,54 +58,16 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
-from urllib.parse import quote
 
-KINDS: dict[str, dict] = {
-    # Cairn's own policies (source cairn), set and deleted one at a time; compared exactly, as Cairn holds them.
-    "policies": {"path": "/governance/policies", "key": "id", "required": ("id", "effect", "actions"), "defaults": {},
-                 "optional": ("description", "priority", "target", "condition", "obligations", "enabled"),
-                 "list_key": "policies", "upsert": True, "exact": True},
-    # Ingestion sources (connector + form values; secrets by name). Owners are kept when not declared.
-    "connections": {"path": "/sources", "key": "name", "id": "urn", "item": "/sources/{id}/detail",
-                    "required": ("name", "connector"), "optional": ("owners", "recipe"),
-                    "defaults": {"values": {}, "advanced": {}, "executor": "default", "schedule": None}},
-    "pipes": {"path": "/v1/pipes", "key": "name", "required": ("name", "bucket", "format", "target"),
-              "defaults": {"prefix": "", "create_table": False, "enabled": True}},
-    "streams": {"path": "/v1/streams", "key": "name", "required": ("name", "topic", "target"),
-                "defaults": {"format": "json", "encoding": "json", "mode": "append", "key": [], "create_table": False, "evolve": False,
-                             "start": "earliest", "source": None, "batch_rows": 5000, "batch_seconds": 10, "enabled": True}},
-    "derived": {"path": "/v1/derived", "key": "name", "required": ("name", "sql", "target"),
-                "defaults": {"mode": "full", "watermark": None, "key": [], "every_minutes": None, "on_change": False,
-                             "enabled": True}},
-    "maintenance": {"path": "/maintenance/policies", "key": "scope", "required": ("scope",),
-                    "defaults": {"optimize": True, "optimize_threshold": "128MB", "expire_days": None, "orphan_days": None,
-                                 "every_hours": 24, "enabled": True}},
-    "vectors": {"path": "/v1/vectors", "key": "name", "required": ("name", "source", "key", "text"),
-                "defaults": {"chunk_chars": 1500, "every_minutes": None, "enabled": True}, "fixed": ("source",)},
-    # The token user's own: saved queries, dashboards, alerts and SQL workflows.
-    "queries": {"path": "/sql/saved", "key": "name", "required": ("name", "sql", "connection"), "mine": True,
-                "defaults": {"description": "", "shared": False, "chart": {}}},
-    "dashboards": {"path": "/sql/dashboards", "key": "name", "required": ("name", "tiles"), "mine": True,
-                   "defaults": {"description": "", "shared": False, "controls": []}},
-    # BI: spreadsheet workbooks, metrics (known by name) and input tables (created once; never rewritten by a bundle).
-    "workbooks": {"path": "/sql/workbooks", "key": "name", "required": ("name", "connection", "spec"), "mine": True,
-                  "defaults": {"description": "", "shared": False}},
-    "metrics": {"path": "/sql/metrics", "key": "name", "required": ("name", "label", "connection", "table", "measure"),
-                "mine": True, "by_key": True,
-                "defaults": {"description": "", "filters": [], "time_column": None, "dimensions": []}},
-    "input_tables": {"path": "/sql/input-tables", "key": "table", "row_key": "table_name", "owner_field": "created_by",
-                     "required": ("table", "connection", "columns"), "mine": True, "immutable": True,
-                     "defaults": {"description": ""}},
-    "alerts": {"path": "/sql/alerts", "key": "name", "required": ("name", "query", "op", "value"), "mine": True,
-               "defaults": {"measure": "rows", "every_minutes": 60, "recipients": [], "enabled": True}},
-    "workflows": {"path": "/v1/sql-workflows", "key": "name", "required": ("name", "steps"), "mine": True,
-                  "defaults": {"cron": None, "recipients": [], "notify": "failure", "enabled": True}},
-}
-# Created and changed in this order (policies first, so what follows is reachable as declared; derived tables
-# may read the others' tables; dashboards, alerts and workflows name saved queries); deleted in the reverse
-# order, so access goes last.
-ORDER = ("policies", "connections", "maintenance", "pipes", "streams", "derived", "vectors", "input_tables", "queries",
-         "metrics", "workbooks", "dashboards", "alerts", "workflows")
+from cairn.iac import registry
+from cairn.iac.engine import Engine, EngineError, declared
+
+# The sections a bundle may hold: every kind in the registry (cairn.iac.registry), created in the registry's
+# order (policies first, so what follows is reachable as declared; derived tables may read the others' tables;
+# dashboards, alerts and workflows name saved queries) and deleted in the reverse order, so access goes last.
+KINDS: dict[str, registry.Kind] = registry.by_name()
+ORDER = tuple(k.name for k in registry.kinds())
+EXACT = {"policies"}           # compared exactly, as Cairn holds them (Cairn's own policies)
 CHART = {"type": "table", "x": "", "y": []}
 STEP = {"after": [], "retries": 0}
 VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -118,7 +80,7 @@ class BundleError(Exception):
 
 @dataclass
 class Change:
-    action: str          # create | update | delete | keep
+    action: str          # create | update | replace | delete | keep
     kind: str
     key: str
     diff: dict = field(default_factory=dict)   # field: [current, desired]
@@ -126,7 +88,7 @@ class Change:
     current: Optional[dict] = None
 
     def line(self) -> str:
-        sign = {"create": "+", "update": "~", "delete": "-", "keep": " "}[self.action]
+        sign = {"create": "+", "update": "~", "replace": "-/+", "delete": "-", "keep": " "}[self.action]
         out = f"{sign} {self.kind}/{self.key}"
         for k, (a, b) in sorted(self.diff.items()):
             out += f"\n      {k}: {json.dumps(a)} -> {json.dumps(b)}"
@@ -173,23 +135,28 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
     if unknown:
         raise BundleError(f"unknown sections: {', '.join(sorted(unknown))} (the sections are {', '.join(KINDS)})")
     out: dict[str, Any] = {"bundle": name}
-    for kind, cfg in KINDS.items():
+    for kind, k in KINDS.items():
         items = raw.get(kind) or []
         if not isinstance(items, list):
             raise BundleError(f"{kind}: a list")
-        allowed = (set(cfg["required"]) | set(cfg["defaults"]) | set(cfg.get("optional", ()))
-                   | ({"owner"} if kind == "derived" else set()))
+        if k.singleton and not k.parents and len(items) > 1:
+            raise BundleError(f"{kind}: a setting declared once")
+        allowed = ({f.name for f in k.fields} | set(k.bundle_fields) | {f"{w}_version" for w in k.write_only})
         seen: dict[str, dict] = {}
         for i, it in enumerate(items):
             if not isinstance(it, dict):
                 raise BundleError(f"{kind}[{i}]: a mapping")
-            missing = [k for k in cfg["required"] if it.get(k) in (None, "")]
+            missing = [f for f in k.required if it.get(f) in (None, "")]
             if missing:
                 raise BundleError(f"{kind}[{i}]: needs {', '.join(missing)}")
             extra = set(it) - allowed
             if extra:
                 raise BundleError(f"{kind}[{i}]: unknown fields {', '.join(sorted(extra))}")
-            key = str(it[cfg["key"]])
+            for w in k.write_only:
+                v = it.get(f"{w}_version")
+                if v is not None and (isinstance(v, bool) or not isinstance(v, int)):
+                    raise BundleError(f"{kind}[{i}]: {w}_version is a number (raise it to set {w} again)")
+            key = key_of(k, it)
             if key in seen:
                 raise BundleError(f"{kind}: {key} is declared twice")
             seen[key] = desired(kind, it)
@@ -199,7 +166,7 @@ def load(path: str, vars_: Optional[dict] = None) -> dict:
 
 def desired(kind: str, spec: dict) -> dict:
     """A spec with Cairn's defaults filled in, normalized the way Cairn returns it."""
-    d = {**KINDS[kind]["defaults"], **spec}
+    d = {**KINDS[kind].defaults, **spec}
     if kind == "policies":
         from pydantic import ValidationError
 
@@ -334,7 +301,26 @@ def _refs(kind: str, spec: dict) -> list[str]:
 
 
 def digest(bundle: dict) -> str:
-    return hashlib.sha256(json.dumps(bundle, sort_keys=True, default=str).encode()).hexdigest()
+    """What was applied, without write-only values (secrets never leave the bundle, not even hashed)."""
+    clean = {kind: ({key: {f: v for f, v in spec.items() if f not in KINDS[kind].write_only}
+                     for key, spec in specs.items()} if kind in KINDS else specs)
+             for kind, specs in bundle.items()}
+    return hashlib.sha256(json.dumps(clean, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def key_of(k: registry.Kind, spec: dict) -> str:
+    """How a bundle knows a resource: its key fields' values joined by / (a setting: its kind's name)."""
+    return "/".join(str(spec.get(f)) for f in k.key) or k.name
+
+
+def _rec_key(k: registry.Kind, r: dict) -> str:
+    return "/".join(str(r.get(k.field(f).read_name)) for f in k.key) or k.name
+
+
+class ApiError(BundleError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
 
 
 class Client:
@@ -351,41 +337,56 @@ class Client:
                 why = r.json().get("detail", r.text)
             except ValueError:
                 why = r.text
-            raise BundleError(f"{method} {path}: {r.status_code} {why}")
+            raise ApiError(f"{method} {path}: {r.status_code} {why}", r.status_code)
         return r.json() if r.content else None
+
+
+def _rows(engine: Engine, k: registry.Kind, bundle: dict, owned: dict) -> list[dict]:
+    """Cairn's records of a kind; a child kind's under each parent the bundle declares or created before."""
+    if not k.parents:
+        return engine.records(k)
+    n = len(k.parents)
+    groups = {tuple(str(s[p]) for p in k.parents) for s in bundle[k.name].values()}
+    groups |= {tuple(key.split("/", n)[:n]) for key in owned.get(k.name, ())}
+    out: list[dict] = []
+    for g in sorted(groups):
+        try:
+            out += engine.records(k, dict(zip(k.parents, g)))
+        except ApiError as e:
+            if e.status != 404:          # a parent this bundle has not created yet has no children
+                raise
+    return out
 
 
 def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change], dict]:
     """What applying ``bundle`` would do, and the bundle's recorded state."""
     state = client.call("GET", f"/v1/bundles/{bundle['bundle']}")
     owned = {k: set(v) for k, v in (state.get("resources") or {}).items()}
+    versions = state.get("versions") or {}
+    engine = Engine(client.call)
     me = None
-    if any(bundle[k] or (prune and owned.get(k)) for k in KINDS if KINDS[k].get("mine")):
+    if any(bundle[k] or (prune and owned.get(k)) for k in KINDS if KINDS[k].mine):
         me = client.call("GET", "/me")["urn"]
     changes: list[Change] = []
     deletes: list[Change] = []
     names: dict[str, str] = {}
     for kind in ORDER:
-        cfg = KINDS[kind]
-        if cfg.get("mine") and me is None:
+        k = KINDS[kind]
+        if k.mine and me is None:
             continue
         if not bundle[kind] and not owned.get(kind) and not (kind == "queries" and any(
-                bundle[k] for k in ("dashboards", "alerts", "workflows"))):
+                bundle[x] for x in ("dashboards", "alerts", "workflows"))):
             continue                                       # not used here: a service that is off is not asked
-        rows = client.call("GET", cfg["path"])
-        if cfg.get("list_key"):
-            rows = rows[cfg["list_key"]]
         if kind == "policies":
-            for r in rows:
+            for r in client.call("GET", k.read)[k.list_key]:
                 if r.get("source") != "cairn" and r["id"] in bundle[kind]:
                     raise BundleError(f"policies/{r['id']}: that id is a {r.get('source')} policy, managed there")
-            rows = [r for r in rows if r.get("source") == "cairn"]
-        if cfg.get("mine"):
-            who = cfg.get("owner_field", "owner")
-            rows = [r for r in rows if r.get(who) == me]              # shared ones of others are not this bundle's
+        rows = _rows(engine, k, bundle, owned)
+        if k.mine:
+            rows = [r for r in rows if r.get(k.owner_field) == me]     # shared ones of others are not this bundle's
         current: dict[str, dict] = {}
         for r in rows:
-            key = str(r[cfg.get("row_key", cfg["key"])])
+            key = _rec_key(k, r)
             if key in current and (key in bundle[kind] or key in owned.get(kind, set())):
                 raise BundleError(f"{kind}/{key}: you have two of that name; rename or delete one")
             current[key] = r
@@ -397,23 +398,32 @@ def plan(client: Client, bundle: dict, prune: bool = False) -> tuple[list[Change
                     missing = [q for q in _refs(k2, spec) if q not in known]
                     if missing:
                         raise BundleError(f"{k2}/{key}: no saved query of yours named {missing[0]!r}")
+        skip = {"owner", *k.write_only, *(f"{w}_version" for w in k.write_only)}
         for key, want in bundle[kind].items():
             have = current.get(key)
             if have is None:
                 changes.append(Change("create", kind, key, desired=want))
                 continue
-            seen = _as_declared(kind, have, names)
-            same = _equal if cfg.get("exact") else _same
-            diff = {k: [seen.get(k), v] for k, v in want.items() if k != "owner" and not same(v, seen.get(k))}
+            seen = _as_declared(kind, {**have, **declared(k, have)}, names)
+            same = _equal if kind in EXACT else _same
+            diff = {f: [seen.get(f), v] for f, v in want.items() if f not in skip and not same(v, seen.get(f))}
+            done = (versions.get(kind) or {}).get(key) or {}
+            for w in k.write_only:                         # a write-only value is set again when its version rises
+                vn = f"{w}_version"
+                if want.get(vn) is not None and want[vn] != done.get(vn):
+                    diff[vn] = [done.get(vn), want[vn]]
             if kind == "derived" and want.get("owner") and want["owner"] != have.get("owner"):
                 raise BundleError(f"derived/{key}: its owner is {have.get('owner')}; delete it to change the owner")
-            if cfg.get("immutable") and diff:
-                raise BundleError(f"{kind}/{key}: {', '.join(sorted(diff))} differ from the table in Cairn; a bundle "
-                                  "creates an input table but never rewrites one (its rows are people's work)")
-            for f in cfg.get("fixed", ()):
-                if f in diff:
+            action = "update" if diff else "keep"
+            if diff and k.immutable:
+                if k.never_replace:
+                    raise BundleError(f"{kind}/{key}: {', '.join(sorted(diff))} differ from the one in Cairn; a bundle "
+                                      "creates it but never rewrites it (people's work is inside)")
+                action = "replace"
+            for f in diff:
+                if not k.immutable and f in {x.name for x in k.fields} and k.field(f).force_new:
                     raise BundleError(f"{kind}/{key}: its {f} is {have.get(f)}; delete it to change the {f}")
-            changes.append(Change("update" if diff else "keep", kind, key, diff, want, have))
+            changes.append(Change(action, kind, key, diff, want, have))
         if prune:
             for key in sorted(owned.get(kind, set()) - set(bundle[kind])):
                 if key in current:
@@ -426,69 +436,60 @@ def apply(client: Client, bundle: dict, changes: list[Change], state: dict, log=
     owned = {k: set(v) for k, v in (state.get("resources") or {}).items()}
     for kind in KINDS:
         owned.setdefault(kind, set())
+    versions = {k: dict(v) for k, v in (state.get("versions") or {}).items()}
     version = state.get("version", 0)
 
     def record():
         nonlocal version
         version = client.call("PUT", f"/v1/bundles/{bundle['bundle']}",
                               {"version": version, "digest": digest(bundle),
-                               "resources": {k: sorted(v) for k, v in owned.items()}})["version"]
+                               "resources": {k: sorted(v) for k, v in owned.items()},
+                               "versions": {k: v for k, v in versions.items() if v}})["version"]
 
     # Adopt what already matches or will be updated, so a failure later does not leave it unowned.
-    adopted = {(c.kind, c.key) for c in changes if c.action in ("keep", "update")}
+    adopted = {(c.kind, c.key) for c in changes if c.action in ("keep", "update", "replace")}
     if any(c.key not in owned[c.kind] for c in changes if (c.kind, c.key) in adopted):
         for kind, key in adopted:
             owned[kind].add(key)
         record()
+    engine = Engine(client.call)
     ids = {str(c.current["name"]): c.current["id"] for c in changes if c.kind == "queries" and c.current}
-    if any(KINDS[c.kind].get("mine") for c in changes):
+    if any(KINDS[c.kind].mine for c in changes):
         me = client.call("GET", "/me")["urn"]
         ids = {**{str(r["name"]): r["id"] for r in client.call("GET", "/sql/saved") if r.get("owner") == me}, **ids}
     for c in changes:
-        cfg = KINDS[c.kind]
-        body = _with_ids(c.kind, dict(c.desired or {}), ids) if c.action != "delete" else {}
         if c.action == "keep":
             continue
-        if c.kind == "maintenance":
-            path = f"{cfg['path']}/{quote(c.key, safe='')}"
+        k = KINDS[c.kind]
+        try:
             if c.action == "delete":
-                client.call("DELETE", path)
+                engine.delete(k, c.current)
             else:
-                client.call("PUT", path, {k: v for k, v in body.items() if k != "scope"})
-        elif cfg.get("by_key"):                         # metrics: created, then known by name
-            if c.action == "create":
-                client.call("POST", cfg["path"], body)
-            elif c.action == "update":
-                client.call("PUT", f"{cfg['path']}/{quote(c.key, safe='')}", {k: v for k, v in body.items() if k != "owner"})
-            else:
-                client.call("DELETE", f"{cfg['path']}/{quote(c.key, safe='')}")
-        elif cfg.get("upsert"):                         # policies: known by the id the bundle gives them
-            path = f"{cfg['path']}/{quote(c.key, safe='')}"
-            if c.action == "delete":
-                client.call("DELETE", path)
-            else:
-                client.call("PUT", path, body)
-        elif cfg.get("item"):                           # connections: their own item path, by Cairn's id
-            if c.action == "create":
-                client.call("POST", cfg["path"], body)
-            else:
-                item = cfg["item"].format(id=quote(str(c.current[cfg["id"]]), safe=":"))
+                values = _with_ids(c.kind, dict(c.desired or {}), ids)
                 if c.action == "update":
-                    client.call("PUT", item, {**body, "owners": body.get("owners") or c.current.get("owners") or []})
+                    values = {f: v for f, v in values.items() if f != "owner"}
+                    if c.kind == "connections":          # owners are kept when not declared
+                        values["owners"] = values.get("owners") or c.current.get("owners") or []
+                    made = engine.update(k, c.current, values)
                 else:
-                    client.call("DELETE", item)
-        elif c.action == "create":
-            made = client.call("POST", cfg["path"], body)
-            if c.kind == "queries":
-                ids[c.key] = made["id"]
-        elif c.action == "update":
-            client.call("PUT", f"{cfg['path']}/{c.current['id']}", {k: v for k, v in body.items() if k != "owner"})
-        else:
-            client.call("DELETE", f"{cfg['path']}/{c.current['id']}")
+                    if c.action == "replace":
+                        engine.delete(k, c.current)
+                    made = engine.create(k, values)
+                if c.kind == "queries" and c.action != "update":
+                    ids[c.key] = made["id"]
+        except EngineError as e:
+            raise BundleError(f"{c.kind}/{c.key}: {e}")
         if c.action == "delete":
             owned[c.kind].discard(c.key)
+            versions.get(c.kind, {}).pop(c.key, None)
         else:
             owned[c.kind].add(c.key)
+            got = {f"{w}_version": c.desired.get(f"{w}_version") for w in k.write_only
+                   if c.desired.get(f"{w}_version") is not None}
+            if got:
+                versions.setdefault(c.kind, {})[c.key] = got
+            else:
+                versions.get(c.kind, {}).pop(c.key, None)
         record()
         log(c.line())
     if not any(c.action != "keep" for c in changes):
