@@ -56,6 +56,11 @@ def airflow_or_error(cfg: dict) -> Airflow:
         raise FlowError(str(e), 503)
 
 
+def newest_first(af: Airflow) -> str:
+    """The order of a DAG's runs, newest first: Airflow 3 orders by ``run_after``, Airflow 2 by ``execution_date``."""
+    return "-execution_date" if af.cfg.get("api") == "v1" else "-run_after"
+
+
 def call(af: Airflow, method: str, path: str, body: Any = None) -> Any:
     try:
         return af.call(method, path, body)
@@ -190,13 +195,13 @@ class AirflowDags:
         for d in mine[:500]:
             last = None
             try:
-                runs = call(af, "GET", f"/dags/{quote(d['dag_id'], safe='')}/dagRuns?limit=1&order_by=-run_after")
+                runs = call(af, "GET", f"/dags/{quote(d['dag_id'], safe='')}/dagRuns?limit=1&order_by={newest_first(af)}")
                 last = (runs.get("dag_runs") or [None])[0]
             except FlowError:
                 pass
             out.append({"dag_id": d["dag_id"], "description": d.get("description") or "", "owners": d.get("owners") or [],
                         "tags": _names(d.get("tags")), "is_paused": bool(d.get("is_paused")),
-                        "schedule": d.get("timetable_summary"), "schedule_text": d.get("timetable_description"),
+                        "schedule": schedule_of(d) or None, "schedule_text": d.get("timetable_description"),
                         "has_import_errors": bool(d.get("has_import_errors")),
                         "cairn_flow": next((t.split(":", 1)[1] for t in _names(d.get("tags"))
                                             if t.startswith("cairn-flow:")), None),
@@ -208,6 +213,9 @@ class AirflowDags:
     def _dag(self, af: Airflow, actor: str, dag_id: str) -> dict:
         try:
             dag = call(af, "GET", f"/dags/{quote(dag_id, safe='')}/details")
+            if af.cfg.get("api") == "v1":            # Airflow 2's details leave owners and tags empty: the DAG has them
+                listed = call(af, "GET", f"/dags/{quote(dag_id, safe='')}")
+                dag = {**dag, "owners": listed.get("owners") or [], "tags": listed.get("tags") or []}
         except FlowError as e:
             if e.status == 404:
                 raise FlowError("no such DAG", 404)
@@ -221,7 +229,7 @@ class AirflowDags:
         dag = self._dag(af, actor, dag_id)
         q = quote(dag_id, safe="")
         tasks = call(af, "GET", f"/dags/{q}/tasks").get("tasks") or []
-        runs = call(af, "GET", f"/dags/{q}/dagRuns?limit=10&order_by=-run_after").get("dag_runs") or []
+        runs = call(af, "GET", f"/dags/{q}/dagRuns?limit=10&order_by={newest_first(af)}").get("dag_runs") or []
         chosen = next((r for r in runs if r["dag_run_id"] == run), None) if run else (runs[0] if runs else None)
         if run and chosen is None:
             try:
@@ -249,7 +257,7 @@ class AirflowDags:
         conversion = self._conversion(af, dag, tasks, up)
         return {"dag_id": dag_id, "description": dag.get("description") or "", "owners": dag.get("owners") or [],
                 "tags": _names(dag.get("tags")), "is_paused": bool(dag.get("is_paused")),
-                "schedule": dag.get("timetable_summary"), "schedule_text": dag.get("timetable_description"),
+                "schedule": schedule_of(dag) or None, "schedule_text": dag.get("timetable_description"),
                 "timezone": dag.get("timezone"), "file": dag.get("relative_fileloc") or dag.get("fileloc"),
                 "steps": steps,
                 "runs": [{"dag_run_id": r["dag_run_id"], "state": r.get("state"), "run_type": r.get("run_type"),
@@ -261,14 +269,18 @@ class AirflowDags:
                 "conversion": conversion}
 
     # ---- converting ---------------------------------------------------------------------------------------
-    def _source(self, af: Airflow, dag_id: str) -> Optional[str]:
+    def _source(self, af: Airflow, dag: dict) -> Optional[str]:
+        """The DAG file's source: by DAG id (Airflow 3), or by the DAG's file token (Airflow 2)."""
         try:
-            return call(af, "GET", f"/dagSources/{quote(dag_id, safe='')}").get("content")
+            if af.cfg.get("api") == "v1":
+                token = dag.get("file_token") or call(af, "GET", f"/dags/{quote(dag['dag_id'], safe='')}").get("file_token")
+                return call(af, "GET", f"/dagSources/{quote(str(token), safe='')}").get("content") if token else None
+            return call(af, "GET", f"/dagSources/{quote(dag['dag_id'], safe='')}").get("content")
         except FlowError:
             return None
 
     def _conversion(self, af: Airflow, dag: dict, tasks: list[dict], up: dict[str, list[str]]) -> dict:
-        source = self._source(af, dag["dag_id"])
+        source = self._source(af, dag)
         calls = _calls(source) if source else {}
         blockers: list[dict] = []
         notes: list[str] = []
@@ -337,7 +349,7 @@ class AirflowDags:
         defn: dict[str, Any] = {"kind": "flow", "name": name,
                                 "description": (dag.get("description") or f"Converted from the Airflow DAG {dag['dag_id']}")[:4000],
                                 "steps": flow_steps}
-        sched = str(dag.get("timetable_summary") or "").strip()
+        sched = schedule_of(dag).strip()
         cron = PRESETS.get(sched, sched)
         if cron and len(cron.split()) == 5:
             tz = dag.get("timezone") or "UTC"
@@ -398,6 +410,17 @@ def _canvas_type(cls: str) -> str:
             "CairnQualityGateOperator": "check", "CairnQualitySensor": "wait", "BranchPythonOperator": "branch",
             "CairnFlowBranchOperator": "branch", "EmptyOperator": "wait",
             "CairnDbtTaskGroup": "dbt"}.get(cls, "python")
+
+
+def schedule_of(dag: dict) -> str:
+    """A DAG's schedule as text: Airflow 3's ``timetable_summary``, or Airflow 2's ``schedule_interval`` (a cron
+    expression or a preset, as ``{"__type": "CronExpression", "value": ...}``)."""
+    if dag.get("timetable_summary"):
+        return str(dag["timetable_summary"])
+    si = dag.get("schedule_interval")
+    if isinstance(si, dict):
+        return str(si.get("value") or "") if si.get("__type") == "CronExpression" else ""
+    return str(si or "")
 
 
 def _seconds(td: Any) -> Optional[int]:

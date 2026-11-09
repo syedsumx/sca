@@ -524,6 +524,9 @@ class Flows:
     def delete(self, actor: str, ref: str) -> None:
         row = self._row(ref)
         self._need(actor, row, "own")
+        # Whether its DAG is deployed: read before its versions go.
+        on_airflow = bool(row["published_version"]) and \
+            self._version(row["id"], row["published_version"]).get("runner") == "airflow"
         with self.engine.begin() as conn:
             ids = [r[0] for r in conn.execute(select(flow_runs.c.id).where(flow_runs.c.flow_id == row["id"]))]
             for chunk in range(0, len(ids), 500):
@@ -531,10 +534,9 @@ class Flows:
             conn.execute(delete(flow_runs).where(flow_runs.c.flow_id == row["id"]))
             conn.execute(delete(flow_versions).where(flow_versions.c.flow_id == row["id"]))
             conn.execute(delete(flows).where(flows.c.id == row["id"]))
-        if row["published_version"] and self.dag_folder is not None:
+        if on_airflow and self.dag_folder is not None:
             try:
-                if self._version(row["id"], row["published_version"]).get("runner") == "airflow":
-                    self.dag_folder.write(row["name"], None, f"Cairn: remove flow {row['name']}")
+                self.dag_folder.write(row["name"], None, f"Cairn: remove flow {row['name']}")
             except FlowError as e:
                 logger.warning("flow %s: could not remove its DAG: %s", row["name"], e)
         self._audit(actor, "flow.deleted", row["name"], {})

@@ -674,3 +674,17 @@ def test_the_cli_validates_here_and_needs_cairn_for_the_rest(tmp_path, monkeypat
     assert cli.main(argparse.Namespace(flows_cmd="list")) == 1
     err = capsys.readouterr().err
     assert "set CAIRN_URL" in err and "cairn login" in err
+
+
+def test_deleting_a_runner_airflow_flow_removes_its_dag(env, tmp_path):
+    """Publishing a runner-airflow flow writes its DAG; deleting the flow removes it (read before its versions go)."""
+    from cairn.flows.airflow_interop import DagFolder
+
+    env.dag_folder = DagFolder(f"path:{tmp_path / 'dags'}")
+    env.b.airflow = {"url": "http://airflow.invalid", "api": "v2"}
+    env.create(ANA, {"name": "on-af", "runner": "airflow", "steps": [{"name": "a", "type": "wait", "seconds": 1}]},
+               publish=True)
+    dag = tmp_path / "dags" / "cairn__on-af.py"
+    assert dag.exists() and "cairn-flow-version:1" in dag.read_text()
+    env.delete(ANA, "on-af")
+    assert not dag.exists()

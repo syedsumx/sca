@@ -23,6 +23,8 @@ no secret. What maps, and how:
   Cairn evaluates): Airflow skips the side it did not choose, as Cairn does.
 * ``operators="cairn"`` delegates every step (what a flow with ``runner: airflow`` deploys), so every step runs as the
   owner whatever the Airflow connection's user may do.
+* The file Cairn deploys for ``runner: airflow`` imports ``DAG`` and ``Param`` from ``airflow.sdk`` on Airflow 3 and from
+  their Airflow 2 modules otherwise, so the same file runs on either (``CAIRN_AIRFLOW_API`` v2 or v1).
 """
 
 from __future__ import annotations
@@ -333,6 +335,12 @@ def to_dag(defn: dict, *, owner: str, version: Optional[int] = None, operators: 
             continue
         mod, _, names = line[5:].partition(" import ")
         airflow_imports.setdefault(mod, set()).update(n.strip() for n in names.split(","))
+    if runner:                                      # every step delegated: the same file on Airflow 3 and Airflow 2
+        sdk = sorted(airflow_imports.pop("airflow.sdk", set()))
+        body += ["try:  # Airflow 3", f"    from airflow.sdk import {', '.join(sdk)}", "except ImportError:  # Airflow 2",
+                 "    from airflow import DAG"]
+        if "Param" in sdk:
+            body.append("    from airflow.models.param import Param")
     for mod in sorted(m for m in airflow_imports if not m.startswith("cairn_airflow")):
         body.append(f"from {mod} import {', '.join(sorted(airflow_imports[mod]))}")
     body.append("")

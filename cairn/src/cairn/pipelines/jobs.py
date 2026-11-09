@@ -113,7 +113,8 @@ def script(kind: str, timeout_s: int) -> str:
                f"--ExecutePreprocessor.timeout={timeout_s} >/tmp/log 2>&1")
         out = "/tmp/out.ipynb"
     else:
-        run = "python -u /work/job.py >/tmp/out.txt 2>/tmp/log"
+        # python3 where an image has no plain python (the Spark image); a virtualenv's first on PATH either way.
+        run = '"$(command -v python3 || command -v python)" -u /work/job.py >/tmp/out.txt 2>/tmp/log'
         out = "/tmp/out.txt"
     return f"{run}; rc=$?; cat /tmp/log; echo '{MARKER}'; cat {out} 2>/dev/null; exit $rc"
 
@@ -132,6 +133,7 @@ class DockerRunner:
 
     def __init__(self, image: str = IMAGE, network: str = "", memory: str = "2g", cpus: str = "2", docker: str = "docker"):
         self.image, self.network, self.memory, self.cpus, self.docker = image, network, memory, cpus, docker
+        self.uid = 1000
 
     def run(self, run_id: str, kind: str, files: dict[str, str], env: dict[str, str], timeout_s: int) -> tuple[int, str]:
         work = tempfile.mkdtemp(prefix=f"cairn-job-{run_id}-")       # the code, mounted read-only at /work
@@ -151,10 +153,10 @@ class DockerRunner:
                     fh.write(f"{k}={v}\n")
             name = f"cairn-job-{run_id}"
             cmd = [self.docker, "run", "--rm", "--name", name, "--env-file", env_file,
-                   "--user", "1000:1000", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+                   "--user", f"{self.uid}:{self.uid}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                    "--memory", self.memory, "--cpus", self.cpus, "--pids-limit", "512",
                    "--read-only", "--tmpfs", "/tmp:rw,size=512m",
-                   "--tmpfs", "/home/job:rw,size=256m,uid=1000,gid=1000,mode=0700",
+                   "--tmpfs", f"/home/job:rw,size=256m,uid={self.uid},gid={self.uid},mode=0700",
                    "-v", f"{work}:/work:ro", *(["--network", self.network] if self.network else []),
                    "--entrypoint", "sh", self.image, "-c", script(kind, timeout_s)]
             try:
@@ -183,6 +185,7 @@ class KubeRunner:
         self.token_file = token_file or f"{self.SA}/token"
         self.verify: Any = ca_file or (f"{self.SA}/ca.crt" if os.path.exists(f"{self.SA}/ca.crt") else True)
         self.resources = resources or {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}}
+        self.uid = 1000
 
     def _call(self, method: str, path: str, body: Any = None, ok404: bool = False, raw: bool = False) -> Any:
         import httpx
@@ -206,7 +209,8 @@ class KubeRunner:
             self._call("POST", f"{base}/secrets", {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                                                     "metadata": {"name": name, "labels": labels}, "stringData": env})
             pod = {"restartPolicy": "Never", "automountServiceAccountToken": False, "enableServiceLinks": False,
-                   "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "runAsGroup": 1000, "fsGroup": 1000,
+                   "securityContext": {"runAsNonRoot": True, "runAsUser": self.uid, "runAsGroup": self.uid,
+                                       "fsGroup": self.uid,
                                        "seccompProfile": {"type": "RuntimeDefault"}},
                    "containers": [{"name": "job", "image": self.image, "command": ["sh", "-c", script(kind, timeout_s)],
                                    "envFrom": [{"secretRef": {"name": name}}], "resources": self.resources,
@@ -246,12 +250,17 @@ class KubeRunner:
                     logger.warning("could not delete %s", path)
 
 
-def with_image(runner: Any, image: str) -> Any:
-    """The same runtime (Docker or Kubernetes, same limits) with another image: a flow's dbt or Spark step."""
+def with_image(runner: Any, image: str, uid: Optional[int] = None) -> Any:
+    """The same runtime (Docker or Kubernetes, same limits) with another image: a flow's dbt or Spark step; ``uid``:
+    the image's own non-root user, for an image whose tools need a named user (Spark's Hadoop)."""
     import copy
 
     other = copy.copy(runner)
     other.image = image
+    if uid is not None:
+        if int(uid) <= 0:
+            raise JobError("jobs never run as root", 400)
+        other.uid = int(uid)
     return other
 
 

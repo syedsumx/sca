@@ -87,6 +87,10 @@ class Backends:
         self.spark_image: str = kw.get("spark_image", os.environ.get("CAIRN_FLOWS_SPARK_IMAGE", ""))
         self.cairn_url: str = kw.get("cairn_url", os.environ.get("CAIRN_FLOWS_CAIRN_URL", ""))
         self.catalog_uri: str = kw.get("catalog_uri", os.environ.get("CAIRN_FLOWS_CATALOG_URI", ""))
+        # The Trino catalog dbt steps build in (their profile's database), and the uid Spark steps run as (the
+        # cairn/spark image's own non-root user: Hadoop needs a user name for the uid).
+        self.trino_catalog: str = kw.get("trino_catalog", os.environ.get("CAIRN_FLOWS_TRINO_CATALOG", "lakehouse"))
+        self.spark_uid: int = int(kw.get("spark_uid", os.environ.get("CAIRN_FLOWS_SPARK_UID", "185")))
         self.public_url: str = kw.get("public_url", "")
 
 
@@ -199,11 +203,20 @@ def _pipe(b: Backends, ctx: Ctx) -> Done:
 def _stream_end(streams: Any, stream: dict) -> dict[int, int]:
     from kafka import KafkaConsumer, TopicPartition
 
-    consumer = KafkaConsumer(**streams.kafka)
     try:
-        parts = consumer.partitions_for_topic(stream["topic"]) or set()
+        consumer = KafkaConsumer(**{"request_timeout_ms": 30_000, **streams.kafka})
+    except Exception as e:  # noqa: BLE001 - no broker: the step fails, it never counts as caught up
+        raise StepFailed(f"Kafka could not be reached for {stream['name']}: {type(e).__name__}")
+    try:
+        parts = consumer.partitions_for_topic(stream["topic"])
+        if not parts:
+            raise StepFailed(f"Kafka has no topic {stream['topic']!r} for {stream['name']}")
         ends = consumer.end_offsets([TopicPartition(stream["topic"], p) for p in parts])
         return {tp.partition: int(off) for tp, off in ends.items()}
+    except StepFailed:
+        raise
+    except Exception as e:  # noqa: BLE001 - the broker went away while Cairn asked
+        raise StepFailed(f"Kafka could not say where {stream['name']} ends: {type(e).__name__}")
     finally:
         consumer.close()
 
@@ -220,13 +233,17 @@ def _stream(b: Backends, ctx: Ctx) -> Any:
         ctx.log(f"waiting for {st['name']} to reach {target}")
     have = {str(p): o for p, o in streams.offsets(st).items()}
     if all(have.get(p, 0) >= o for p, o in target.items()):
-        return Done({"stream": st["name"], "offsets": have})
+        ctx.log(f"{st['name']} reached {have}")
+        return Done({"stream": st["name"], "offsets": have, "target": target})
     return Wait(int(time.time() * 1000) + ctx.step.get("poll_s", 15) * 1000, {"target": target})
 
 
 # ---- compute ------------------------------------------------------------------------------------------
 def _job_result(ctx: Ctx, status: str, output: Optional[str], log: Optional[str], error: Optional[str]) -> Done:
     if status != "succeeded":
+        tail = "\n".join(x for x in ((log or "").strip(), (output or "").strip()) if x)
+        if tail:                                     # what dbt, Spark or the script said, in the step's log
+            ctx.log("the job's last output:\n" + tail[-8000:])
         raise StepFailed(error or "the job failed")
     text = output or ""
     out: dict[str, Any] = {"status": status, "output": text[-4000:]}
@@ -280,27 +297,32 @@ sys.exit(rc)
 DBT_DRIVER = """
 import json, os, subprocess, sys
 from urllib.parse import urlsplit
+import yaml
 spec = json.loads(os.environ["CAIRN_DBT_STEP"])
 url = urlsplit(os.environ["CAIRN_TRINO_URL"])
 project = spec["project_dir"]
-name = "cairn"
-for line in open(os.path.join(project, "dbt_project.yml")):
-    if line.strip().startswith("profile:"):
-        name = line.split(":", 1)[1].strip().strip("'\\"")
+with open(os.path.join(project, "dbt_project.yml")) as f:
+    name = str((yaml.safe_load(f) or {}).get("profile") or "cairn")
 os.makedirs("/tmp/profiles", exist_ok=True)
 out = {"type": "trino", "method": "jwt", "jwt_token": os.environ["CAIRN_TRINO_TOKEN"], "host": url.hostname,
        "port": url.port or 443, "http_scheme": url.scheme, "user": os.environ["CAIRN_USER"],
-       "database": os.environ.get("CAIRN_TRINO_CATALOG", "lakehouse"), "schema": os.environ.get("CAIRN_DBT_SCHEMA", "analytics"),
-       "threads": 4}
-if os.environ.get("CAIRN_TRINO_CA_FILE"):
-    out["cert"] = os.environ["CAIRN_TRINO_CA_FILE"]
+       "database": os.environ.get("CAIRN_TRINO_CATALOG", "lakehouse"),
+       "schema": os.environ.get("CAIRN_DBT_SCHEMA", "analytics"), "threads": 4,
+       # Trino's certificate is always checked: Cairn's CA when it has one, else the system's.
+       "cert": os.environ.get("CAIRN_TRINO_CA_FILE") or True}
 fd = os.open("/tmp/profiles/profiles.yml", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
 with os.fdopen(fd, "w") as f:
     f.write(json.dumps({name: {"target": "cairn", "outputs": {"cairn": out}}}))
-cmd = ["dbt", spec["command"], "--project-dir", project, "--profiles-dir", "/tmp/profiles", "--target-path", "/tmp/target"]
+cmd = ["dbt", "--no-use-colors", spec["command"], "--project-dir", project, "--profiles-dir", "/tmp/profiles",
+       "--target-path", "/tmp/target"]
 if spec.get("select"):
     cmd += ["--select", spec["select"]]
-sys.exit(subprocess.call(cmd))
+# dbt writes under /tmp only (the image's /tmp/cairn belongs to the image's own user); the token is in its profile only.
+env = {k: v for k, v in os.environ.items() if k != "CAIRN_TRINO_TOKEN"}
+env.update(DBT_LOG_PATH="/tmp/dbt/logs", DBT_PACKAGES_INSTALL_PATH="/tmp/dbt/packages", HOME="/tmp/dbt",
+           DBT_SEND_ANONYMOUS_USAGE_STATS="false")
+os.makedirs("/tmp/dbt/logs", exist_ok=True)
+sys.exit(subprocess.call(cmd, env=env))
 """
 
 
@@ -320,7 +342,8 @@ def _dbt(b: Backends, ctx: Ctx) -> Done:
         status, output, log, error = jobs.contained(ctx.owner, "python", DBT_DRIVER, {}, s["timeout_s"],
                                                     f"{ctx.flow}.{s['name']}", f"{ctx.run_id[:16]}-dbt",
                                                     runner=with_image(jobs.runner, b.dbt_image),
-                                                    extra_env={"CAIRN_DBT_STEP": json.dumps(spec)})
+                                                    extra_env={"CAIRN_DBT_STEP": json.dumps(spec),
+                                                               "CAIRN_TRINO_CATALOG": b.trino_catalog})
     except JobError as e:
         raise StepFailed(str(e))
     return _job_result(ctx, status, output, log, error)
@@ -345,7 +368,7 @@ def _spark(b: Backends, ctx: Ctx) -> Done:
     try:
         status, output, log, error = jobs.contained(
             ctx.owner, "python", SPARK_DRIVER, {}, s["timeout_s"], f"{ctx.flow}.{s['name']}", f"{ctx.run_id[:16]}-spark",
-            runner=with_image(jobs.runner, b.spark_image),
+            runner=with_image(jobs.runner, b.spark_image, uid=b.spark_uid),
             extra_env={"CAIRN_URL": b.cairn_url, "CAIRN_CATALOG_URI": b.catalog_uri,
                        "CAIRN_LAKEHOUSE_CREDENTIAL": sess["credential"], "CAIRN_LAKEHOUSE_TOKEN": sess["token"],
                        "CAIRN_SPARK_APP": json.dumps(spec), "CAIRN_SPARK_CONF": json.dumps(s.get("conf") or {})})
@@ -398,8 +421,9 @@ class Airflow:
         import httpx
 
         try:
+            # JSON asked for explicitly: Airflow 2 answers some calls (a DAG's source) in plain text otherwise.
             r = httpx.request(method, f"{self.cfg['url']}/api/{self.cfg['api']}{path}", json=body,
-                              headers=self._headers(), verify=self.verify, timeout=60)
+                              headers={**self._headers(), "Accept": "application/json"}, verify=self.verify, timeout=60)
         except httpx.HTTPError as e:
             raise StepFailed(f"Airflow could not be reached: {type(e).__name__}")
         if r.status_code >= 300:
@@ -408,7 +432,10 @@ class Airflow:
             except ValueError:
                 why = r.text
             raise StepFailed(f"Airflow said {r.status_code}: {str(why)[:300]}")
-        return r.json() if r.content else {}
+        try:
+            return r.json() if r.content else {}
+        except ValueError:
+            raise StepFailed(f"Airflow answered {method} {path.split('?')[0]} with something other than JSON")
 
 
 def _airflow(b: Backends, ctx: Ctx) -> Any:

@@ -12,7 +12,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from airflow.sdk import DAG, Param
+try:  # Airflow 3
+    from airflow.sdk import DAG, Param
+except ImportError:  # Airflow 2
+    from airflow import DAG
+    from airflow.models.param import Param
 
 from cairn_airflow.flows import CairnFlowBranchOperator, CairnFlowStepOperator
 
