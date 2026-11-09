@@ -158,6 +158,7 @@ errors! {
     LOGGING_TARGET = "InvalidTargetBucketForLogging", 400, "The target bucket for logging does not exist.";
     BACKUPS_OFF = "NotImplemented", 501, "Backups are off: set CAIRN_STORE_BACKUP_DIR.";
     BACKUP_NAME = "InvalidArgument", 400, "A backup name is 1-64 letters, digits, '.', '_' or '-' (not starting with '.').";
+    RESIDENCY = "AccessDenied", 403, "Data residency: the destination is not in a region the pin of this data allows (see the store's log).";
     REPL_TARGET_UNKNOWN = "InvalidArgument", 400, "The Role must name one of this store's replication targets (arn:cairn:store:::<id>).";
     REPL_NEEDS_VERSIONING = "InvalidRequest", 400, "Versioning must be 'Enabled' on the bucket to apply a replication configuration";
     REPL_FEATURE = "NotImplemented", 501, "This replication feature (existing objects, replication time control, metrics, encryption settings or source selection) is not supported.";

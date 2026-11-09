@@ -50,6 +50,9 @@ pub struct ReplTarget {
     pub secret_key_file: String,
     #[serde(default = "us_east_1")]
     pub region: String,
+    /// The data residency region the destination keeps data in ("" for none: it gets no pinned data).
+    #[serde(default)]
+    pub residency_region: String,
 }
 
 fn us_east_1() -> String {
@@ -70,6 +73,9 @@ pub fn load_targets(text: &str) -> Result<Vec<ReplTarget>, String> {
             return Err(format!("replication target {}: endpoint must be http:// or https://", t.id));
         }
         t.endpoint = t.endpoint.trim_end_matches('/').to_string();
+        if !t.residency_region.is_empty() && !super::residency::valid_region(&t.residency_region) {
+            return Err(format!("replication target {}: residency_region is a region name such as eu or us-east", t.id));
+        }
     }
     Ok(ts)
 }
@@ -266,6 +272,14 @@ impl Server {
         if rules.is_empty() || rules.len() > 1000 {
             return Err(e::MALFORMED_XML.clone());
         }
+        // Data residency: every enabled rule's objects may go to the target's region.
+        let dest = self.replicator.as_ref().and_then(|r| r.targets.get(&target)).map(|t| t.residency_region.clone()).unwrap_or_default();
+        for r in rules.iter().filter(|r| r.enabled) {
+            if let Err(why) = self.residency.check_prefix(&c.bucket, &r.prefix, &dest) {
+                tracing::warn!(bucket = %c.bucket, target = %target, reason = %why, "replication refused: data residency");
+                return Err(e::RESIDENCY.clone());
+            }
+        }
         let cfg = ReplConfig { target, role, rules };
         let v = serde_json::to_vec(&cfg).map_err(|_| e::INTERNAL.clone())?;
         self.set_config(c, "replication", Some(&v))?;
@@ -308,6 +322,10 @@ impl Server {
         let rep = self.replicator.as_ref().ok_or_else(|| Failure::Permanent("replication is not configured".into()))?;
         let t =
             rep.targets.get(target).ok_or_else(|| Failure::Permanent(format!("replication target {target} is no longer configured")))?;
+        // Data residency, again for every object: rules that change later stop what they no longer allow.
+        self.residency
+            .check_object(&ent.bucket, &ent.key, &t.residency_region)
+            .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
         let path = object_path(dest_bucket, &ent.key);
         if ent.event.ends_with("DeleteMarkerCreated") {
             let h = [("x-cairn-replica".to_string(), ent.modified.max(1).to_string())];

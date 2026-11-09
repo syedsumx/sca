@@ -13,7 +13,8 @@ data:
 {{- end }}
 {{- if include "cairn.residencyConfigMap" . }}
 ---
-# Data residency: one file for Cairn (CAIRN_RESIDENCY_FILE) and Cairn Catalog (CAIRN_CATALOG_RESIDENCY_FILE).
+# Data residency: one file for Cairn (CAIRN_RESIDENCY_FILE), Cairn Catalog (CAIRN_CATALOG_RESIDENCY_FILE) and Cairn
+# Store (CAIRN_STORE_RESIDENCY_FILE).
 apiVersion: v1
 kind: ConfigMap
 metadata:

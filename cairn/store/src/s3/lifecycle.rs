@@ -393,6 +393,13 @@ impl Server {
                 if !class.is_empty() && !self.tiers.as_ref().is_some_and(|t| t.has(class)) {
                     return Err(e::INVALID_STORAGE_CLASS.clone());
                 }
+                if !class.is_empty() {
+                    let dest = self.tiers.as_ref().map(|t| t.residency_region(class)).unwrap_or_default();
+                    if let Err(why) = self.residency.check_prefix(&c.bucket, &r.filter.prefix, &dest) {
+                        tracing::warn!(bucket = %c.bucket, tier = %class, reason = %why, "lifecycle transition refused: data residency");
+                        return Err(e::RESIDENCY.clone());
+                    }
+                }
             }
         }
         let v = serde_json::to_vec(&rules).map_err(|_| e::INTERNAL.clone())?;

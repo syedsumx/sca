@@ -58,6 +58,9 @@ pub struct RemoteSpec {
     /// Storage tiers only: the storage class the tier serves.
     #[serde(default)]
     pub storage_class: String,
+    /// The data residency region the bucket keeps data in ("" for none: it gets no pinned data).
+    #[serde(default)]
+    pub residency_region: String,
     #[serde(skip)]
     service_account: Option<ServiceAccount>,
 }
@@ -193,6 +196,9 @@ pub fn check_spec(s: &mut RemoteSpec, what: &str, normalize_prefix: bool) -> Res
         s.kind = "s3".into();
     }
     let kind = s.kind.clone();
+    if !s.residency_region.is_empty() && !super::residency::valid_region(&s.residency_region) {
+        return Err(format!("{what} {name}: residency_region is a region name such as eu or us-east"));
+    }
     let refuse = |field: &str, set: bool| if set { Err(format!("{what} {name}: {field} does not apply to kind {kind}")) } else { Ok(()) };
     if !s.secret_key_file.is_empty() {
         if !s.secret_key.is_empty() {

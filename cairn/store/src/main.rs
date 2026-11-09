@@ -63,7 +63,9 @@
 //! CAIRN_STORE_COMPACT_INTERVAL seconds between compaction passes over packs (3600; 0: off)
 //! CAIRN_STORE_COMPACT_DEAD_RATIO  a pack is compacted when this share of it is dead (0.5)
 //! CAIRN_STORE_TIERS_FILE  storage tiers for lifecycle transitions: remote buckets with a "storage_class" instead of an "id"
-//! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region"}]
+//! CAIRN_STORE_REPLICATION_TARGETS_FILE  bucket replication destinations: [{"id", "endpoint", "access_key", "secret_key", "region", "residency_region"}]
+//! CAIRN_STORE_RESIDENCY_FILE  data residency rules (the file Cairn and Cairn Catalog read): pinned data is replicated, backed up,
+//!                             written back or tiered only to destinations whose residency_region its pin allows
 //! CAIRN_STORE_CLUSTER_NODE   run as this node of a cluster (off when empty; needs CAIRN_STORE_META, shared by the nodes)
 //! CAIRN_STORE_CLUSTER_URL    this node's address for the other nodes, e.g. http://store-0.store:8333
 //! CAIRN_STORE_STS_SECRET      turns on temporary credentials (STS): at least 32 characters, the same on every node (or _FILE)
@@ -539,6 +541,7 @@ async fn serve(addr: String, data: String) {
                 kafka: kafka_config().unwrap_or_else(|e| fail("CAIRN_STORE_KAFKA_ADDR", e)),
                 lifecycle_secs: env("CAIRN_STORE_LIFECYCLE_INTERVAL", "3600").parse().unwrap_or(3600),
                 sts: sts_config().unwrap_or_else(|e| fail("STS", e)),
+                residency: s3::residency::Residency::from_env().unwrap_or_else(|e| fail("CAIRN_STORE_RESIDENCY_FILE", e)),
                 remotes: match env("CAIRN_STORE_REMOTES_FILE", "") {
                     f if f.is_empty() => vec![],
                     f => s3::remote::load_specs(&std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e)), "remote")
@@ -558,6 +561,10 @@ async fn serve(addr: String, data: String) {
     let continuous = env("CAIRN_STORE_BACKUP_CONTINUOUS", "");
     if !continuous.is_empty() && !backup_sinks().unwrap_or_default().iter().any(|s| s.id == continuous) {
         fail("CAIRN_STORE_BACKUP_CONTINUOUS", format!("no backup sink {continuous} in CAIRN_STORE_BACKUP_SINKS_FILE"));
+    }
+    if !continuous.is_empty() {
+        // Data residency: every change goes to the sink, so the buckets' pinned data must be allowed there.
+        server.residency_backup_check(&continuous).unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_CONTINUOUS", e));
     }
     eng.set_journal((!continuous.is_empty()).then_some(continuous.as_str())).unwrap_or_else(|e| fail("CAIRN_STORE_BACKUP_CONTINUOUS", e));
     let sink_auto = env("CAIRN_STORE_BACKUP_SINK_SCHEDULE", "");

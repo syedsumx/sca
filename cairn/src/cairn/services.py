@@ -2514,7 +2514,17 @@ def _wire_residency(s: Services) -> None:
         lake = getattr(s, "lakehouse", None)
         return getattr(lake, "trino_catalog", None) or default_catalog
     if getattr(s, "trino_access", None) is not None:
+        from cairn.dataaccess.trino import COPY_OPS
+        from cairn.governance.residency import CopyGuard
+
         s.trino_access.resident = lambda catalog, schema: catalog != lake_catalog() or r.processing_allowed(schema)
+        s.residency_copies = guard = CopyGuard(s.engine, r)
+
+        def copies(op: str, query_id, catalog: str, schema: str):
+            pinned_as = schema if catalog == lake_catalog() else None
+            ns = f"{catalog}.{schema}".lower()
+            return guard.write(query_id, ns, pinned_as) if op in COPY_OPS else guard.read(query_id, ns, pinned_as)
+        s.trino_access.copies = copies
     if getattr(s, "shares", None) is not None:
         s.shares.residency = r
     if getattr(s, "reverse_syncs", None) is not None:

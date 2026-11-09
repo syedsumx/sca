@@ -28,6 +28,7 @@ mod post;
 pub mod queues;
 pub mod remote;
 pub mod replication;
+pub mod residency;
 pub mod sftp;
 pub mod sinks;
 pub mod sse;
@@ -104,6 +105,8 @@ pub struct Config {
     pub backup_sinks: Vec<remote::RemoteSpec>,
     /// Remote buckets that can be mounted into local buckets.
     pub remotes: Vec<remote::RemoteSpec>,
+    /// Data residency: where pinned data may be sent (inactive: no rules).
+    pub residency: residency::Residency,
     /// The Kafka listener (None: off).
     pub kafka: Option<kafka::KafkaConfig>,
     /// Seconds between lifecycle passes (0: lifecycle processing is off).
@@ -149,6 +152,7 @@ pub struct Server {
     pub(crate) cluster: Option<Arc<cluster::Cluster>>,
     pub(crate) sinks: Option<sinks::Sinks>,
     pub(crate) remotes: Arc<BTreeMap<String, remote::Remote>>,
+    pub(crate) residency: residency::Residency,
     pub(crate) queue_notify: tokio::sync::Notify,
     pub(crate) queue_metrics: queues::QueueMetrics,
     /// The Kafka listener's advertised address (None: off).
@@ -256,6 +260,7 @@ impl Server {
             sftp_metrics: Default::default(),
             cluster,
             remotes,
+            residency: cfg.residency,
             queue_notify: tokio::sync::Notify::new(),
             queue_metrics: Default::default(),
             kafka: cfg.kafka,

@@ -221,6 +221,10 @@ spec:
             - name: CAIRN_STORE_REPLICATION_TARGETS_FILE
               value: /etc/cairn-store-replication/targets.json
             {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: CAIRN_STORE_RESIDENCY_FILE
+              value: /etc/cairn-residency/residency.json
+            {{- end }}
             {{- if $u.extraCredentialsSecret }}
             - name: CAIRN_STORE_CREDENTIALS_FILE
               value: /etc/cairn-store/credentials.json
@@ -315,6 +319,11 @@ spec:
               mountPath: /etc/cairn-store-replication
               readOnly: true
             {{- end }}
+            {{- if include "cairn.residencyConfigMap" $ }}
+            - name: residency
+              mountPath: /etc/cairn-residency
+              readOnly: true
+            {{- end }}
             {{- if $u.tlsSecret }}
             - name: tls
               mountPath: /etc/cairn-store-tls
@@ -325,8 +334,13 @@ spec:
               mountPath: /etc/cairn-store-client-ca
               readOnly: true
             {{- end }}
-      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) $u.metadata.secretName $u.backupSinks.secretName $u.remotesSecret }}
+      {{- if or $u.extraCredentialsSecret $u.secret.keyringSecret $u.eventTargetsSecret $u.replicationTargetsSecret $u.tiersSecret $u.tlsSecret (and $u.sftp.enabled $u.sftp.hostKeySecret) $u.metadata.secretName $u.backupSinks.secretName $u.remotesSecret (include "cairn.residencyConfigMap" $) }}
       volumes:
+        {{- if include "cairn.residencyConfigMap" $ }}
+        - name: residency
+          configMap:
+            name: {{ include "cairn.residencyConfigMap" $ }}
+        {{- end }}
         {{- if $u.extraCredentialsSecret }}
         - name: credentials
           secret:

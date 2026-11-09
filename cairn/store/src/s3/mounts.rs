@@ -91,8 +91,15 @@ impl Server {
 
     /// Mounts the remote `m.remote` into `bucket` (blocking).
     pub(crate) fn mount(&self, bucket: &str, m: &Mount, actor: &str) -> Result<Value, ApiError> {
-        self.remote(&m.remote)?;
+        let dest = self.remote(&m.remote)?.spec.residency_region.clone();
         self.eng.head_bucket(bucket)?;
+        if m.write_back {
+            // Data residency: what is written here goes to the remote, so the bucket's pinned data must be allowed there.
+            if let Err(why) = self.residency.check_prefix(bucket, "", &dest) {
+                tracing::warn!(bucket, remote = %m.remote, reason = %why, "write-back mount refused: data residency");
+                return Err(e::RESIDENCY.clone());
+            }
+        }
         for b in self.eng.list_buckets()? {
             if b.name != bucket && self.mount_of(&b.name)?.is_some_and(|o| o.remote == m.remote) {
                 return Err(e::REMOTE_IN_USE.clone());
@@ -278,6 +285,9 @@ impl Server {
     pub(crate) async fn write_back(&self, id: &str, ent: &OutboxEntry) -> Result<(), super::replication::Failure> {
         use super::replication::Failure;
         let r = self.remotes.get(id).ok_or_else(|| Failure::Permanent(format!("remote {id} is no longer configured")))?;
+        self.residency
+            .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
+            .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
         if ent.event.contains("ObjectRemoved") {
             return tokio::task::block_in_place(|| r.delete(&ent.key)).map_err(|e| Failure::Retry(e.to_string()));
         }

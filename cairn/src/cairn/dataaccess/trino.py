@@ -71,6 +71,8 @@ TABLE_OPS: dict[str, str] = {
     "ExecuteTableProcedure": MANAGE,
 }
 # Operations that remove or rewrite a table's rows or its history: refused for everyone while a legal hold is on.
+# Writes whose rows can come from other tables in the same statement: data residency follows them (CopyGuard).
+COPY_OPS = {"InsertIntoTable", "CreateTable", "UpdateTableColumns", "CreateMaterializedView", "RefreshMaterializedView"}
 HOLD_OPS = {"DeleteFromTable", "TruncateTable", "UpdateTableColumns", "DropTable", "RenameTable", "DropColumn",
             "AlterColumn", "RenameColumn", "SetTableProperties", "ExecuteTableProcedure"}
 # Operations every signed-in Trino user may perform (what they reach is still filtered per table).
@@ -264,6 +266,9 @@ class TrinoAccess:
         # resident(catalog, schema): may this deployment read and write the schema's tables (data residency,
         # cairn.governance.residency)? None: no residency rules.
         self.resident: Optional[Callable[[str, str], bool]] = None
+        # copies(op, query_id, catalog, schema): copies made by SQL follow residency pins (CopyGuard): the reason to
+        # refuse a read or write of the statement, or None; None: no residency rules.
+        self.copies: Optional[Callable[[str, Optional[str], str, str], Optional[str]]] = None
         self.plan_for = plan_for
         self.catalogs = catalogs
         # metric_view_source(table): a published metric's view (SECURITY INVOKER) is read on the terms of the
@@ -559,9 +564,24 @@ class TrinoAccess:
             if ok and op in ("RenameTable", "RenameView", "RenameMaterializedView"):
                 target = (action.get("targetResource") or {}).get("table")
                 ok = bool(target) and self.allowed(actor, groups, MANAGE, self.table_urn(target))
+            if ok and self.copies is not None and (TABLE_OPS[op] == READ or op in COPY_OPS):
+                ok = self._copy_allowed(op, inp.get("context"), t)
             return ok
         logger.info("trino operation %s is not known to Cairn: refused", op)
         return False
+
+    def _copy_allowed(self, op: str, ctx: Optional[dict], t: dict) -> bool:
+        """Data residency follows copies: a statement reading a pinned table writes only where its pin allows."""
+        qid = str((ctx or {}).get("queryId") or "") or None
+        try:
+            why = self.copies(op, qid, str(t.get("catalogName") or ""), str(t.get("schemaName") or ""))
+        except Exception as e:  # noqa: BLE001 - fail closed: a copy that cannot be followed is refused
+            logger.warning("residency copy check failed for %s on %s: %s", op, self._tkey(t), e)
+            return False
+        if why:
+            logger.info("%s on %s refused (data residency): %s", op, self._tkey(t), why)
+            return False
+        return True
 
     @staticmethod
     def _raw_rows(f: dict) -> bool:

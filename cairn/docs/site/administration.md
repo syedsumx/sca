@@ -285,7 +285,7 @@ Cairn checks its own configuration and state for the mistakes that expose data, 
 
 Data residency pins lakehouse namespaces to a region. Their tables are then stored only in that region's storage, are read and written only by a deployment in a region the pin allows, and are sent out only to such regions.
 
-- **The rules are deployment configuration.** They live in one JSON file, which Cairn reads as `CAIRN_RESIDENCY_FILE` and Cairn Catalog as `CAIRN_CATALOG_RESIDENCY_FILE`. In Kubernetes, set `cairn.residency.rules` in the chart: it becomes a ConfigMap mounted into every Cairn component and the catalog.
+- **The rules are deployment configuration.** They live in one JSON file, which Cairn reads as `CAIRN_RESIDENCY_FILE`, Cairn Catalog as `CAIRN_CATALOG_RESIDENCY_FILE` and Cairn Store as `CAIRN_STORE_RESIDENCY_FILE`. In Kubernetes, set `cairn.residency.rules` in the chart: it becomes a ConfigMap mounted into every Cairn component, the catalog and the store.
   - A pin changes only through a reviewed deployment change. No administrator moves pinned data by changing a setting, and there is no API that does.
   - A file that is set but invalid stops Cairn and the catalog at start. Unknown keys are refused too, so a misspelt key cannot leave namespaces unpinned.
 
@@ -307,14 +307,22 @@ Data residency pins lakehouse namespaces to a region. Their tables are then stor
 - **What leaves.**
   - **Shares.** A share takes the recipient's `region` (`POST /v1/shares` with `"region": "eu"`). A pinned table is shared only with a recipient whose region its pin allows, and that is checked again on every request the recipient makes. A recipient with no region gets no pinned table.
   - **Reverse syncs.** A reverse sync takes the `region` the app keeps its data in, checked at save and at every run.
+  - **Copies made with SQL.** A Trino statement that reads a pinned table and writes a table (`CREATE TABLE … AS SELECT`, `INSERT … SELECT`, `UPDATE`, `MERGE`, materialized views) is refused before it runs, administrators included, unless the table it writes is in a namespace pinned to a region the source's pin allows. An unpinned namespace, or a table in another catalog (PostgreSQL through Trino, say), has no region and is refused. Copies within the pin, into another allowed region's pinned namespace, and from unpinned tables into pinned ones are allowed.
+    - How: Trino asks Cairn about each table of a statement separately (the OPA protocol), and each question carries the statement's query id. Cairn records the pinned namespaces each statement reads and the namespaces it writes (`cairn_residency_flows`, in Cairn's database so every replica sees them, kept a day) and refuses the question that completes a forbidden pair, whichever comes first. A pinned read or a write that carries no query id cannot be followed and is refused.
+    - Namespaces do not inherit a pin when they are created. Pins come only from the rules file, so to copy pinned data, pin the destination namespace (a reviewed change) and copy into it.
+    - Engines that read files directly (pyiceberg, Spark with lakehouse tokens) can only read pinned tables in a region the pin allows; what such a client then writes elsewhere is outside what Cairn sees.
+  - **Cairn Store's own transfers.** Bucket replication (and two-way sync), backups to a sink (on request, on a schedule and continuous), write-back to a mounted remote bucket and lifecycle transitions to a storage tier send objects to another store. Each replication target, backup sink, remote and tier names the region it keeps data in: `"residency_region": "eu"` in its entry in `CAIRN_STORE_REPLICATION_TARGETS_FILE`, `CAIRN_STORE_BACKUP_SINKS_FILE`, `CAIRN_STORE_REMOTES_FILE` or `CAIRN_STORE_TIERS_FILE`. An object under a region's location goes only to a destination whose region the pin of its namespace allows; a destination with no `residency_region` gets none. Objects under a region's location that no pin names stay in that region.
+    - When configured: a replication configuration (each enabled rule's prefix; a prefix that names no single namespace counts every pin of the region), a lifecycle rule with a transition, and a write-back mount are refused with `403 AccessDenied`; a whole-store backup to a sink is refused when any bucket holding a region's location may not go there; continuous backup (`CAIRN_STORE_BACKUP_CONTINUOUS`) stops the store at start in the same case.
+    - When it runs: every object replicated, journalled, written back or tiered is checked again, so rules that change later stop what they no longer allow (a replicated object is marked `FAILED`; a journal entry or write-back is dropped; a transition is skipped). The reason is in the store's log.
 - **Seeing the rules.** `GET /governance/residency` (`MANAGE_POLICIES`) shows the deployment's region, the regions and the pins.
 - **Fail closed.** If a namespace cannot be decided, it is refused: for example, when two pins put it in different regions, or when the check itself fails.
 - **Pinning a namespace that already has tables.** Tables stored outside the region's location refuse commits until they are moved, for example with `CREATE TABLE … AS SELECT` into the pinned namespace.
-- **What it does not follow.** A copy made with SQL into an unpinned namespace is a new table, and the pin does not follow it. Keep the deployment's default warehouse in the deployment's own region, and use lineage to find copies of pinned tables. Reads still need `allow` to include the deployment's region.
 - **Tested** in `tests/test_residency_e2e.py`, with the real store and catalog and the Cairn API:
   - locations, refusals for an administrator, renames and `write.data.path`;
   - reads from an allowed and a refused region, through the catalog and through Trino's access decisions;
-  - shares by region, rechecked when the rules change, and reverse syncs.
+  - shares by region, rechecked when the rules change, and reverse syncs;
+  - copies on real Trino: `CREATE TABLE … AS SELECT`, `INSERT … SELECT` (with a join), `UPDATE` with a subquery and a copy into PostgreSQL refused, for an administrator too, leaving nothing written; copies within the pin, into an allowed region and from unpinned tables allowed;
+  - a second Cairn Store standing in for the other regions: replication configurations refused or allowed by region and prefix, objects replicated within what pins allow, whole-store backups refused, continuous backup journalling us and unpinned data but no eu data, a write-back mount and a tier transition refused, and replication configured before a pin stopping (`FAILED`) once the store restarts with the pin.
 
 ## Tokenisation
 

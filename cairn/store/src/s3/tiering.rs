@@ -88,6 +88,11 @@ impl Tiers {
         self.tiers.contains_key(class)
     }
 
+    /// The data residency region of a tier ("" for none, or no such tier).
+    pub fn residency_region(&self, class: &str) -> String {
+        self.tiers.get(class).map(|t| t.spec.residency_region.clone()).unwrap_or_default()
+    }
+
     fn tier(&self, class: &str) -> std::io::Result<&Remote> {
         self.tiers.get(class).ok_or_else(|| std::io::Error::other(format!("storage tier {class} is not configured")))
     }
@@ -195,6 +200,10 @@ impl Server {
     /// Moves a version's blobs to the tier `class` (blocking). Returns whether it moved.
     pub(crate) fn move_to_tier(&self, bucket: &str, o: &Object, class: &str) -> bool {
         let Some(tiers) = self.tiers.as_ref() else { return false };
+        if let Err(why) = self.residency.check_object(bucket, &o.key, &tiers.residency_region(class)) {
+            tracing::warn!(bucket, key = %o.key, tier = class, reason = %why, "transition refused: data residency");
+            return false;
+        }
         let mut new: Vec<Segment> = o.segments.clone();
         let mut uploaded: Vec<String> = vec![];
         let mut bytes = 0u64;

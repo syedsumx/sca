@@ -131,6 +131,7 @@ impl Server {
             return Err(e::BACKUP_NAME.clone());
         }
         let r = self.sink(id)?;
+        self.residency_backup_check(id)?;
         let _one = self.sinks.as_ref().unwrap().lock.lock().unwrap();
         let started = std::time::Instant::now();
         if r.head(&format!("backups/{name}/manifest.json")).map_err(io)?.is_some() {
@@ -196,11 +197,25 @@ impl Server {
         Ok(out)
     }
 
+    /// Data residency for a whole-store backup to the sink `id`: every bucket's pinned data may go to its region.
+    pub(crate) fn residency_backup_check(&self, id: &str) -> Result<(), ApiError> {
+        let dest = self.sink(id)?.spec.residency_region.clone();
+        let buckets: Vec<String> = self.eng.list_buckets()?.into_iter().map(|b| b.name).collect();
+        self.residency.check_buckets(&buckets, &dest).map_err(|why| {
+            tracing::warn!(sink = id, reason = %why, "backup refused: data residency");
+            e::RESIDENCY.clone()
+        })
+    }
+
     /// Ships one change to the sink's journal (continuous backup): the version's blobs first (each once),
     /// then the record, so a record never names a missing blob.
     pub(crate) async fn journal_backup(&self, sink: &str, seq: u64, ent: &engine::OutboxEntry) -> Result<(), super::replication::Failure> {
         use super::replication::Failure;
         let r = self.sink(sink).map_err(|e| Failure::Permanent(e.message.to_string()))?;
+        // Data residency, for every change: pinned data reaches only a sink in a region its pin allows.
+        self.residency
+            .check_object(&ent.bucket, &ent.key, &r.spec.residency_region)
+            .map_err(|why| Failure::Permanent(format!("data residency: {why}")))?;
         let put = ent.event.contains("ObjectCreated");
         let mut rec = JournalRecord {
             seq,

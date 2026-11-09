@@ -19,6 +19,17 @@ administrator, however privileged, moves pinned data by changing a setting::
   deployment elsewhere sees the table but no rows. Unset, pinned tables are processed nowhere.
 * Leaving: a share's recipient and a reverse sync's destination carry a ``region``; a pinned table goes only
   to a region its pin allows. A destination without one is refused.
+* Copies made by SQL follow the pin (``CopyGuard``): a Trino statement that reads a pinned table and writes a
+  table (``CREATE TABLE ... AS``, ``INSERT ... SELECT``, ``UPDATE``, ``MERGE``, materialized views) is refused
+  before it runs unless the written table's namespace is pinned to a region the source's pin allows. An
+  unpinned namespace, or a table in another catalog, is a destination with no region: refused. Trino asks
+  about the statement's tables one at a time; each question carries the statement's query id, and Cairn keeps
+  what each statement read and writes (``cairn_residency_flows``, shared by Cairn's replicas, for a day), so
+  whichever question completes a forbidden pair is refused. Namespaces never inherit a pin when they are
+  created: pins come only from the rules file, so a copy goes into a namespace the file already pins.
+* Cairn Store follows the same file (``CAIRN_STORE_RESIDENCY_FILE``): objects under a region's location are
+  replicated, backed up, written back or tiered only to a destination whose ``residency_region`` their pin
+  allows, checked when that is configured and again for every object sent.
 
 Anything that cannot be decided (a file that does not load, a namespace that two pins name with different
 regions) refuses: Cairn fails closed. A file that is set but invalid stops Cairn at start.
@@ -31,13 +42,33 @@ import json
 import logging
 import os
 import re
-from typing import Any, Optional
+import time
+from typing import Any, Callable, Optional
+
+from sqlalchemy import BigInteger, Column, PrimaryKeyConstraint, String, Table, Text, delete, insert, select
+
+from cairn.common.db import metadata
 
 logger = logging.getLogger(__name__)
 
 REGION = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 LOCATION = re.compile(r"^s3://[a-z0-9][a-z0-9.-]{1,61}[a-z0-9](/[^\s]*)?$")
 NAMESPACE = re.compile(r"^[A-Za-z0-9_*.?-]{1,256}$")
+
+
+# What each Trino statement read from pinned namespaces and writes (CopyGuard): one row per statement, side and
+# namespace, kept a day (a statement is analysed in seconds; the rows only have to outlive its analysis).
+residency_flows = Table(
+    "cairn_residency_flows", metadata,
+    Column("query_id", String(128), nullable=False),
+    Column("side", String(8), nullable=False),                 # source (a pinned namespace read) or target
+    Column("namespace", String(512), nullable=False),          # catalog.schema
+    Column("region", String(32), nullable=True),               # target: its pin's region (None: no region)
+    Column("allow", Text, nullable=True),                      # source: JSON list of the regions its pin allows
+    Column("created_ms", BigInteger, nullable=False, index=True),
+    PrimaryKeyConstraint("query_id", "side", "namespace"),
+)
+FLOW_TTL_MS = 24 * 3600 * 1000
 
 
 class ResidencyError(Exception):
@@ -134,6 +165,80 @@ class Residency:
 
     def describe(self) -> dict:
         return {"region": self.region, "regions": dict(self.regions), "pins": [dict(p) for p in self.pins]}
+
+
+class CopyGuard:
+    """Copies made by SQL follow the pin: a statement that reads a pinned namespace writes only into a namespace
+    pinned to a region that pin allows. Trino asks about each table of a statement separately, with the statement's
+    query id; the guard remembers (in the database, so every Cairn replica sees it) the pinned namespaces each
+    statement read and the namespaces it writes, and refuses the question that would complete a forbidden pair,
+    whichever comes first. A question it cannot decide (no query id, the database down) is refused."""
+
+    def __init__(self, engine, residency: Residency, clock: Callable[[], int] = lambda: int(time.time() * 1000)):
+        self.engine, self.residency, self.clock = engine, residency, clock
+        self._swept = 0
+
+    def _rows(self, c, query_id: str, side: str) -> list:
+        return list(c.execute(select(residency_flows).where(residency_flows.c.query_id == query_id,
+                                                            residency_flows.c.side == side)))
+
+    def _record(self, c, query_id: str, side: str, namespace: str, region=None, allow=None) -> None:
+        now = self.clock()
+        if now - self._swept > 600_000:                # now and then: statements analysed long ago
+            self._swept = now
+            c.execute(delete(residency_flows).where(residency_flows.c.created_ms < now - FLOW_TTL_MS))
+        exists = c.execute(select(residency_flows.c.query_id).where(
+            residency_flows.c.query_id == query_id, residency_flows.c.side == side,
+            residency_flows.c.namespace == namespace)).first()
+        if exists is None:
+            c.execute(insert(residency_flows).values(query_id=query_id, side=side, namespace=namespace, region=region,
+                                                     allow=None if allow is None else json.dumps(allow),
+                                                     created_ms=now))
+
+    def read(self, query_id: Optional[str], namespace: str, pinned_as: Optional[str]) -> Optional[str]:
+        """A statement reads ``namespace`` (``catalog.schema``); ``pinned_as`` is the schema when the namespace is
+        in the lakehouse catalog (pins name its schemas), else None. The reason to refuse, or None."""
+        if pinned_as is None:
+            return None
+        try:
+            pin = self.residency.pin(pinned_as)
+        except ResidencyError as e:
+            return str(e)
+        if pin is None:
+            return None
+        if not query_id:
+            return f"a read of {namespace} (pinned to {pin['region']}) carries no query id to follow"
+        with self.engine.begin() as c:
+            for t in self._rows(c, query_id, "target"):
+                if t.region not in pin["allow"]:
+                    return (f"{namespace} is pinned to {pin['region']} and may go only to {', '.join(pin['allow'])}: "
+                            f"this statement writes into {t.namespace} ({_where(t.region)})")
+            self._record(c, query_id, "source", namespace, allow=pin["allow"])
+        return None
+
+    def write(self, query_id: Optional[str], namespace: str, pinned_as: Optional[str]) -> Optional[str]:
+        """A statement writes a table of ``namespace``: the reason to refuse, or None."""
+        region = None
+        if pinned_as is not None:
+            try:
+                pin = self.residency.pin(pinned_as)
+            except ResidencyError as e:
+                return str(e)
+            region = pin["region"] if pin else None
+        if not query_id:
+            return f"a write into {namespace} carries no query id to follow"
+        with self.engine.begin() as c:
+            for s in self._rows(c, query_id, "source"):
+                allow = json.loads(s.allow or "[]")
+                if region not in allow:
+                    return (f"this statement reads {s.namespace}, which may go only to {', '.join(allow)}, "
+                            f"and writes into {namespace} ({_where(region)})")
+            self._record(c, query_id, "target", namespace, region=region)
+        return None
+
+
+def _where(region: Optional[str]) -> str:
+    return f"region {region}" if region else "a namespace with no region"
 
 
 def valid_region(value: Any) -> Optional[str]:

@@ -115,6 +115,7 @@ def load_models() -> MetaData:
     from cairn.dataaccess import trino_oauth as _trino_oauth  # noqa: F401
     from cairn.dataaccess import lakehouse as _lakehouse  # noqa: F401
     from cairn.dataaccess import shares as _shares  # noqa: F401
+    from cairn.governance import residency as _residency  # noqa: F401
     from cairn.dataaccess import share_packages as _share_packages  # noqa: F401
     from cairn.ml import mlflow_gateway as _ml  # noqa: F401
     from cairn.dataaccess import query_history as _query_history  # noqa: F401
