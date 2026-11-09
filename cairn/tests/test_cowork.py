@@ -114,9 +114,16 @@ def test_a_scheduled_task_runs_as_its_owner_and_sends_only_when_approved(stack, 
     assert t["enabled"] and t["next_run_ms"] > time.time() * 1000
 
     research(model, f"# Weekly orders\n\nOrders in [{DS}] look normal. Questions to ana.lee@corp.example.")
-    assert c.run_due(t["next_run_ms"] - 1) == 0                         # not due yet
-    assert c.run_due(t["next_run_ms"] + 1) == 1
-    assert c.run_due(t["next_run_ms"] + 1) == 0                         # it runs once; the next run moved on
+    # The runs happen on the schedule's clock (up to a week ahead), and so does the outbox item they make: on the
+    # real clock the item looked days old to the second run_due, which expires pending items after 72 hours.
+    due = t["next_run_ms"] + 1
+    c._ms = lambda: due
+    try:
+        assert c.run_due(t["next_run_ms"] - 1) == 0                     # not due yet
+        assert c.run_due(due) == 1
+        assert c.run_due(due) == 0                                      # it runs once; the next run moved on
+    finally:
+        del c._ms
     t = c.task(ANA, t["id"])
     [run] = t["runs"]
     assert run["status"] == "done" and t["last_status"] == "done", run["error"]
