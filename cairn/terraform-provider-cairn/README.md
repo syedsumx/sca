@@ -42,6 +42,9 @@ permissions and audit apply:
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |
 | `cairn_external_catalog` | `external_catalogs` | Another organisation's Iceberg REST catalog, read (and optionally written) under Cairn's policies |
 | `cairn_flow` | `flows` | A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, Airflow DAGs, approvals, branches, for-each, notifications) run as its owner |
+| `cairn_storage_credential` | `storage_credentials` | How Cairn Catalog reaches the customer's own storage: an Azure storage account, an S3 bucket through an IAM role, or a GCS bucket |
+| `cairn_external_location` | `external_locations` | A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it |
+| `cairn_external_location_grant` | `external_location_grants` | CREATE_TABLE, READ_FILES and WRITE_FILES on an external location for a person or a group (policies in the decision point's storage layer) |
 
 **SQL and BI**
 

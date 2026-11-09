@@ -160,6 +160,7 @@ def load_models() -> MetaData:
     from cairn.sqlworkspace import metric_alerts as _metric_alerts  # noqa: F401
     from cairn.pipelines import jobs as _jobs  # noqa: F401
     from cairn.dataaccess import volumes as _volumes  # noqa: F401
+    from cairn.dataaccess import storage_locations as _storage_locations  # noqa: F401
     from cairn.pipelines import saas as _saas  # noqa: F401
     from cairn.pipelines import reverse_etl as _reverse_etl  # noqa: F401
     from cairn.ml import serving as _ml_serving  # noqa: F401

@@ -92,6 +92,7 @@ class Services:
     saml: Optional[Any] = None
     secret_scopes: Optional[Any] = None
     volumes: Optional[Any] = None
+    storage_locations: Optional[Any] = None   # storage credentials and external locations (the customer's storage)
     saas: Optional[Any] = None
     reverse_syncs: Optional[Any] = None
     ml_serving: Optional[Any] = None
@@ -437,6 +438,8 @@ class Services:
                         self.personas.reload()
                     if self.workspaces is not None:
                         self.workspaces.reload()
+                    if self.storage_locations is not None:
+                        self.storage_locations.reload()
                     latest = self.policy_repo.latest()
                     if latest is not None and latest != self.pdp.bundle:
                         self.pdp.set_bundle(latest)
@@ -1139,6 +1142,7 @@ def _build_active_metadata(s: Services) -> None:
         _build_saml(s)
         _build_secret_scopes(s)
         _build_volumes(s)
+        _build_storage_locations(s)
         _build_saas(s)
         _build_reverse_etl(s)
         _build_doc_sources(s)
@@ -2696,6 +2700,16 @@ def _build_volumes(s: Services) -> None:
         return lambda actor: s.authorize(Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False)
     s.volumes = Volumes(s.engine, store, groups_of, allowed(PRIVILEGE), allowed("MANAGE_SYSTEM_OPERATIONS"), s.audit,
                         os.environ.get("CAIRN_VOLUMES_ENDPOINT", url))
+
+
+def _build_storage_locations(s: Services) -> None:
+    """Storage credentials and external locations (cairn.dataaccess.storage_locations): always on; their grants are
+    the policy decision point's ``storage`` layer."""
+    from cairn.dataaccess.storage_locations import StorageLocations
+
+    def authorize(actor: str, privilege: str, resource: Optional[str]) -> bool:
+        return bool(s.authorize(Principal(urn=actor, via="delegated"), privilege, resource, raise_on_deny=False))
+    s.storage_locations = StorageLocations(s.engine, s.pdp, authorize, s.audit)
 
 
 def _build_saas(s: Services) -> None:

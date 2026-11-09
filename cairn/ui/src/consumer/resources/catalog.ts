@@ -294,6 +294,110 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "external-locations": {
+        "key": "external-locations",
+        "iac": {"kind": "external_locations", "id": "name"},
+        "title": "External locations",
+        "path": "/v1/storage/locations",
+        "listKey": "locations",
+        "rowKey": "name",
+        "description": "Places on your own cloud storage (ADLS Gen2, S3, GCS) where governed lakehouse tables may live, each with the storage credential Cairn Catalog reaches it with. Tables outside every location are refused; CREATE_TABLE, READ_FILES and WRITE_FILES are granted to people and groups, and every credential handed out is audited.",
+        "docs": "administration.html#storage-credentials-and-external-locations",
+        "columns": [
+            "name",
+            "url",
+            "credential",
+            "read_only",
+            "privileges",
+            "owner"
+        ],
+        "actions": [
+            {
+                "label": "Grant",
+                "method": "PUT",
+                "path": "/v1/storage/locations/{name}/grants",
+                "body": {
+                    "principal": "urn:li:corpGroup:analysts",
+                    "privileges": ["CREATE_TABLE", "READ_FILES"]
+                }
+            },
+            {
+                "label": "Make read-only",
+                "method": "PATCH",
+                "path": "/v1/storage/locations/{name}",
+                "body": {
+                    "read_only": true
+                },
+                "fixed": true
+            },
+            {
+                "label": "Register",
+                "method": "POST",
+                "path": "/v1/storage/locations",
+                "body": {
+                    "name": "contoso-sales",
+                    "url": "abfss://sales@contosolake.dfs.core.windows.net/lakehouse",
+                    "credential": "lake-adls"
+                }
+            },
+            {
+                "label": "Remove",
+                "method": "DELETE",
+                "path": "/v1/storage/locations/{name}",
+                "body": null
+            }
+        ]
+    },
+    "storage-credentials": {
+        "key": "storage-credentials",
+        "iac": {"kind": "storage_credentials", "id": "name"},
+        "title": "Storage credentials",
+        "path": "/v1/storage/credentials",
+        "listKey": "credentials",
+        "rowKey": "name",
+        "description": "How Cairn Catalog reaches your storage: an Azure storage account (account key, Entra service principal or workload identity), an S3 bucket through an IAM role, or a GCS bucket. Secrets are only ever references (a file, a Kubernetes Secret, Vault, or the workload identity); Cairn never holds them.",
+        "docs": "administration.html#storage-credentials-and-external-locations",
+        "columns": [
+            "name",
+            "provider",
+            "config",
+            "secret_ref",
+            "owner",
+            "updated_ms"
+        ],
+        "actions": [
+            {
+                "label": "Add",
+                "method": "POST",
+                "path": "/v1/storage/credentials",
+                "body": {
+                    "name": "lake-adls",
+                    "provider": "azure",
+                    "config": {
+                        "account": "contosolake",
+                        "auth": "service_principal",
+                        "tenant_id": "contoso-tenant",
+                        "client_id": "cairn-catalog"
+                    },
+                    "secret_ref": "k8s:contoso-lake/client-secret"
+                }
+            },
+            {
+                "label": "Change the secret reference",
+                "method": "PATCH",
+                "path": "/v1/storage/credentials/{name}",
+                "body": {
+                    "secret_ref": "k8s:contoso-lake/client-secret-2"
+                }
+            },
+            {
+                "label": "Remove",
+                "method": "DELETE",
+                "path": "/v1/storage/credentials/{name}",
+                "body": null
+            }
+        ]
+    },
     "semantic-models": {
         "key": "semantic-models",
         "title": "Semantic model drafts",

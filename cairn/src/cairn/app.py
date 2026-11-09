@@ -686,6 +686,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
         from cairn.dataaccess.volumes import build_volumes_router
 
         app.include_router(build_volumes_router(services.volumes, cp))
+    if getattr(services, "storage_locations", None) is not None:   # storage credentials and external locations
+        from cairn.dataaccess.storage_locations import build_storage_router
+
+        app.include_router(build_storage_router(services.storage_locations, cp))
     if getattr(services, "saml", None) is not None:          # SAML sign-in, handed on as OIDC (public routes)
         from cairn.identity.saml import build_sso_router
 

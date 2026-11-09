@@ -201,6 +201,48 @@ KINDS: list[Kind] = [
          update=op("PATCH /v1/external-catalogs/{id}", only=("writable",)),
          delete=op("DELETE /v1/external-catalogs/{id}", no_body=True), order=65, service="external_catalogs",
          docs="external-catalogs"),
+    Kind("storage_credentials", "storage_credential", "data",
+         "How Cairn Catalog reaches the customer's own storage: an Azure storage account, an S3 bucket through an IAM "
+         "role, or a GCS bucket. Its secret is a reference (file:, k8s:, vault: or workload), never a value.",
+         (R("name", force_new=True), R("provider", force_new=True, tf="storage_provider", description="azure, s3 or gcs"),
+          F("config", "json", default={}, description="non-secret settings: azure account, endpoint, auth, tenant_id, "
+                                                      "client_id, hierarchical_namespace; s3 role_arn, region, endpoint, "
+                                                      "sts_endpoint, access_key_id, external_id; gcs project_id"),
+          F("secret_ref", default=None, description="file:/path, k8s:<secret>/<key>, vault:<mount>/<path>#<field> or "
+                                                    "workload"),
+          F("comment", default="")),
+         read="/v1/storage/credentials", list_key="credentials", id="name", create=op("POST /v1/storage/credentials"),
+         update=op("PATCH /v1/storage/credentials/{id}", only=("config", "secret_ref", "comment")),
+         delete=op("DELETE /v1/storage/credentials/{id}", no_body=True), order=67, service="storage_locations",
+         docs="storage-credentials-and-external-locations",
+         example={"name": "lake-adls", "provider": "azure",
+                  "config": {"account": "contosolake", "auth": "service_principal", "tenant_id": "contoso-tenant",
+                             "client_id": "cairn-catalog"},
+                  "secret_ref": "k8s:contoso-lake/client-secret"},
+         example_update={"comment": "rotated quarterly"}),
+    Kind("external_locations", "external_location", "data",
+         "A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it. "
+         "Tables and namespaces outside Cairn Store must be in one; locations never overlap.",
+         (R("name", force_new=True), R("url", force_new=True),
+          R("credential", ref="storage_credentials.name"), F("read_only", "bool", default=False),
+          F("comment", default="")),
+         read="/v1/storage/locations", list_key="locations", id="name", create=op("POST /v1/storage/locations"),
+         update=op("PATCH /v1/storage/locations/{id}", only=("credential", "read_only", "comment")),
+         delete=op("DELETE /v1/storage/locations/{id}", no_body=True), order=68, service="storage_locations",
+         docs="storage-credentials-and-external-locations",
+         example={"name": "contoso-sales", "url": "abfss://sales@contosolake.dfs.core.windows.net/lakehouse",
+                  "credential": "lake-adls"},
+         example_update={"read_only": True}),
+    Kind("external_location_grants", "external_location_grant", "data",
+         "CREATE_TABLE, READ_FILES and WRITE_FILES on an external location for a person or a group (policies in the "
+         "decision point's storage layer).",
+         (R("location", force_new=True, ref="external_locations.name"), R("principal", force_new=True),
+          R("privileges", "list", description="CREATE_TABLE, READ_FILES, WRITE_FILES")),
+         read="/v1/storage/locations/{location}", list_key="grants", id="principal", key=("location", "principal"),
+         create=op("PUT /v1/storage/locations/{location}/grants", only=("principal", "privileges")),
+         update=op("PUT /v1/storage/locations/{location}/grants", only=("principal", "privileges")),
+         delete=op("DELETE /v1/storage/locations/{location}/grants", query=("principal",), no_body=True),
+         order=69, service="storage_locations", docs="storage-credentials-and-external-locations"),
     Kind("flows", "flow", "data",
          "A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, "
          "Airflow DAGs, approvals, branches, for-each, notifications) run as its owner. Saved and published together; "
