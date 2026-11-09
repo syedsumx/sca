@@ -1099,6 +1099,76 @@ width. Cairn Desktop's main process is tested against a stand-in for Electron, a
 app opened a Cairn and followed a deep link from a second launch (`desktop/test`). Not tested end to end: a real
 browser vendor's push service (a browser's subscription needs it), and the installers on Windows and macOS.
 
+## The command line: `cairn login` and people's commands
+
+People use `cairn` (the [Command line](command-line.html) page: `pipx install ./cli`, release binaries, Homebrew, an
+install script) to query, search, show and ask as themselves. What the operator decides:
+
+**Sign-in (device flow, RFC 8628).** `cairn login` asks `POST /cairn/api/oauth/device_authorization` (client
+`cairn-cli`, public: what it gets is useless until approved) for a code, the person approves it on the web UI's
+`/cairn/device` page, and the CLI polls `POST /oauth/token` with `grant_type=urn:ietf:params:oauth:grant-type:device_code`
+(answers `authorization_pending`, `slow_down`, `expired_token`, `access_denied`, as the RFC says). The authorization
+server metadata (`/.well-known/oauth-authorization-server`) lists the device endpoint and grant. Approving needs the
+person's browser session (never a token, so a signed-in CLI cannot approve another device), takes JSON only (no
+cross-site form posts), shows the device's name and address first, and asks for a passkey when `device.approve` is in
+`CAIRN_STEP_UP_ACTIONS` (see Passkeys and step-up). A suspended person cannot approve. Each person gets
+`CAIRN_DEVICE_LOOKUPS_PER_10_MIN` (20) wrong codes in ten minutes; codes are eight letters without vowels (about 34
+bits) and live `CAIRN_DEVICE_CODE_SECONDS` (600).
+
+**Tokens.** The CLI acts as the person, with their rights (`via` "cli" in `/me` and the audit), never more:
+
+| Setting | Default | What |
+|---|---|---|
+| `CAIRN_DEVICE_LOGIN` | `on` | `off` turns command-line sign-in off (the device endpoints refuse, existing tokens stop) |
+| `CAIRN_CLI_ACCESS_TOKEN_SECONDS` | 3600 | access tokens (`cla_…`), 300 to 43,200 |
+| `CAIRN_CLI_REFRESH_TOKEN_DAYS` | 30 | refresh tokens (`clr_…`) unused this long expire, 1 to 365 |
+| `CAIRN_CLI_SESSION_MAX_DAYS` | 90 | a sign-in ends after this whatever its refreshes |
+| `CAIRN_DEVICE_CODE_SECONDS` | 600 | how long a code waits for approval |
+| `CAIRN_DEVICE_POLL_SECONDS` | 5 | the polling interval given to the CLI (faster polls get `slow_down`, +5 s) |
+| `CAIRN_DEVICE_STARTS_PER_10_MIN` | 30 | sign-ins one address may start in ten minutes (the start is public) |
+| `CAIRN_DEVICE_LOOKUPS_PER_10_MIN` | 20 | wrong codes one person may enter in ten minutes |
+| `CAIRN_DEVICE_VERIFICATION_URL` | `<public url>/cairn/device` | the page in the codes' instructions (the web UI's `/device` route) |
+
+Refresh tokens rotate: each works once, and one that comes back after use (it was copied) signs the whole device out
+(`device.refresh_reused`). A refresh is refused, and the device signed out, once the person's account is not active
+(`corpUserStatus`); SCIM deactivation signs out all of a person's devices at once. Tokens are kept in Cairn only as
+SHA-256 hashes, in the agents' token table (`cairn_agent_tokens`, kinds `cli_*`): no migration.
+
+**Signed-in devices.** People see theirs on the profile page (`GET /v1/me/devices`) and sign one out there
+(`DELETE /v1/me/devices/{id}`) or with `cairn logout` (`POST /oauth/revoke`, which ends the session whichever of its
+tokens is given). Administrators (`MANAGE_GLOBAL_SETTINGS`): `GET /admin/devices[?actor=]`, `DELETE
+/admin/devices/{id}`, and `POST /admin/devices/sign-out` `{"actor": "urn:li:corpuser:…"}` for every device of a
+person (offboarding). Audited: `device.approved`, `device.denied`, `device.signed_in`, `device.signed_out`,
+`device.all_signed_out`, `device.refresh_reused` (category `identity`).
+
+**Queries from the command line.** `cairn query` uses `POST /v1/statements` (then `/next` and `/cancel`): the SQL
+workspace's checks (`DataAccessService.prepare`: read-only, catalogued tables, `VIEW_DATASET_PROFILE`, aggregation and
+projection policies), then the statement runs on Trino signed in as the person with a five-minute Cairn token, so
+Trino's access control applies their masks and row filters. Pages stream for any result size. The next-page cursor
+is sealed with AES-GCM for the person who started the query (no state on the API; any replica serves any page;
+nobody else can read or cancel it); cancelling deletes the query in Trino. People only (agents keep `/data/query`).
+Settings: `CAIRN_QUERY_CONNECTION` (the `trino://` connection with `run_as_user` to use; default the only one, or
+`lakehouse`), `CAIRN_QUERY_MAX_RUN_TIME` (`1h`, Trino's `query_max_run_time`). `--warehouse` checks `USE_WAREHOUSE`
+and runs on that warehouse's port of the warehouse proxy (`CAIRN_WAREHOUSES_URL`, `CAIRN_WAREHOUSE_PORTS`). Every
+statement is audited (`data.queried` with `streamed: true` and Trino's query id; `data.query_cancelled`).
+
+`cairn search` and `cairn show` use `GET /v1/assets/search` and `GET /v1/assets/describe` (only what the caller may
+see; `VIEW_ENTITY_PAGE`); `cairn ask` uses `/data/ask`; `cairn whoami` uses `/me`, which now also gives the
+person's groups.
+
+Tested end to end (`tests/test_cli_e2e.py`): the CLI as separate processes (the Python package, and the PyInstaller
+binary in CI) against a real Cairn API, a real Trino asking Cairn before every action, Cairn Catalog and Store: device
+sign-in approved through the API and on the built `/device` page in headless Chromium, tokens in a keyring backend
+and in the 0600 file, profiles and environment precedence, every query format streamed over many pages with masks
+and row filters as the person, Ctrl-C cancelling the query in Trino, a refused table (exit 4, privilege named),
+warehouses, search, show, ask (a stand-in model provider), flows, iac and ontology through the signed-in profile,
+refresh rotation and reuse, sign-out from the profile page and with `cairn logout`. Also: the device flow and
+sessions on a real database (`tests/test_device_login.py`), the client pieces (`tests/test_cli_client.py`), the
+`cairn-cli` wheel installed alone without server dependencies (`tests/test_cli_client_only.py`), and the install
+script against an HTTPS mirror (`tests/test_cli_install_script.py`). Not tested here: the release binaries on macOS,
+Windows and Linux arm64 (the release workflow builds and smoke-tests them on GitHub's runners), signing (off until its
+secrets exist), and the OS keychains themselves (macOS Keychain, Windows Credential Manager, Secret Service).
+
 ## Excel and Google Sheets
 
 Cairn for Excel (an Office add-in) and Cairn for Google Sheets (an Apps Script add-on) put governed answers in

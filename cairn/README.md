@@ -23,6 +23,15 @@ part safely: through MCP (`iac_plan`, `iac_propose`) they propose change request
 privileges approves and applies as themselves (`/v1/iac/changes`, **Settings → Infrastructure as code → Changes**,
 with **Ask an agent** to draft one from plain words).
 
+People also work from a terminal: the **`cairn` command line** (`src/cairn_cli`; light package `cli/`, single-file
+binaries, Homebrew, `deploy/cli/install.sh`) signs in through the browser (`cairn login`, the device flow), then runs
+`cairn query`, `search`, `show` and `ask` as the person, with profiles for several Cairns and shell completion. See
+[docs/site/command-line.md](docs/site/command-line.md).
+
+```bash
+pipx install ./cli && cairn login --url http://localhost:9000 && cairn query "SELECT 1 FROM sales.orders LIMIT 1"
+```
+
 Read **[ARCHITECTURE.md](ARCHITECTURE.md)** for the design, **[UX_ACTIVE_METADATA_SPEC.md](UX_ACTIVE_METADATA_SPEC.md)** for the consumer UX and
 active-metadata blueprint (module E), and **[ROADMAP.md](ROADMAP.md)** for the platform map (Cairn as the one data platform), design decisions and what comes next.
 Deployment of module E is covered in [deploy/README-active-metadata.md](deploy/README-active-metadata.md).
@@ -33,6 +42,8 @@ Deployment of module E is covered in [deploy/README-active-metadata.md](deploy/R
 src/cairn/                   Python services (one package, many entry points: `cairn …`)
   common/  quality/  governance/  agent/  ai/  services.py  app.py  cli.py
   collab/  marketplace/  context/  notify/  embed/  coreproxy/      (module E)
+src/cairn_cli/               the `cairn` command line for people (login, query, search, show, ask; no server imports)
+cli/                         its light `cairn-cli` wheel and the PyInstaller spec for the single-file binaries
 plugins/java/cairn-authorizer/   Cairn Core Authorizer plugin → PDP
 ui/                          @cairn/web-react-modules + consumer workspace MFE (src/consumer) + embed SDK (src/embed)
 embeds/                      Tableau / Looker / Power BI / portal packaging for the embed components
