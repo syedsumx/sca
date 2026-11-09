@@ -1,8 +1,9 @@
-import { Alert, Button, Input, Modal, Space, Table, Tag, Typography } from 'antd';
+import { Alert, Button, Input, Modal, Space, Table, Tabs, Tag, Typography } from 'antd';
 import React, { useMemo, useState } from 'react';
 
 import { useDheQuery } from '../api/hooks';
 import { Muted } from '../components/tokens';
+import { ChangesPanel } from './ChangesPanel';
 
 /** One resource type of the registry (GET /v1/iac/schema). */
 export interface IacKind {
@@ -72,8 +73,21 @@ export function CopyAsCode({ kind, id }: { kind: string; id: string }) {
     );
 }
 
+/** Infrastructure as code: the resource types (and exports), and the change requests agents and people propose. */
+export function IacPanel({ change }: { change?: string | null }) {
+    return (
+        <Tabs
+            defaultActiveKey={change ? 'changes' : 'types'}
+            items={[
+                { key: 'types', label: 'Resource types', children: <IacTypes /> },
+                { key: 'changes', label: 'Changes', children: <ChangesPanel initial={change} /> },
+            ]}
+        />
+    );
+}
+
 /** Every resource type that can be kept as code, whether this workspace holds any, and an export of all of it. */
-export function IacPanel() {
+function IacTypes() {
     const schema = useDheQuery<IacSchema>('iac-schema', (c, signal) => c.request<IacSchema>('GET', '/v1/iac/schema', undefined, { signal }));
     const inventory = useDheQuery<{ kinds: Record<string, number | null> }>('iac-inventory', (c, signal) =>
         c.request('GET', '/v1/iac/inventory', undefined, { signal }),

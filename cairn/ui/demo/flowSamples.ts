@@ -244,4 +244,10 @@ export function installFlowsDemo(on: (method: string, pattern: string, h: Handle
         const days = Math.max(1, Math.round((Date.parse(b.end) - Date.parse(b.start)) / (24 * HOUR)) + 1);
         return { runs: Array.from({ length: Math.min(days, 366) }, () => startRun(f, 'backfill', {}).id) };
     });
+    return {
+        /** A draft flow made elsewhere in the demo (an Airflow DAG converted to a flow). */
+        addFlow: (def: Json) => {
+            FLOWS.push({ def: { kind: 'flow', ...def }, id: `fl_${Date.now()}`, owner: me, role: 'owner', version: 0, enabled: true, next: null, published: null });
+        },
+    };
 }

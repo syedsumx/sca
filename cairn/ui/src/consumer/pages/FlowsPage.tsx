@@ -3,9 +3,12 @@ import { Link, useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi } from '../api/hooks';
 import { Icon } from '../components/Icons';
+import { AirflowTab } from '../flows/AirflowTab';
 import { FlowApproval, FlowDetail, FlowSummary, flowsApi } from '../flows/api';
+import { FlowCanvas } from '../flows/FlowCanvas';
 import { FlowEditor, withLayout } from '../flows/FlowEditor';
-import { FLOW_NAME } from '../flows/model';
+import { positions } from '../flows/layout';
+import { FLOW_NAME, FlowDef, Problem } from '../flows/model';
 import { FlowsRoot } from '../flows/styles';
 import { TEMPLATES } from '../flows/templates';
 
@@ -27,6 +30,9 @@ export function FlowsPage() {
     const location = useLocation();
     const query = new URLSearchParams(location.search);
     const current = query.get('flow');
+    const tab = query.get('tab') === 'airflow' ? 'airflow' : 'flows';
+    const change = query.get('change');
+    const preview = query.get('preview');
     const [flows, setFlows] = useState<FlowSummary[] | null>(null);
     const [approvals, setApprovals] = useState<FlowApproval[]>([]);
     const [detail, setDetail] = useState<FlowDetail | null>(null);
@@ -59,6 +65,20 @@ export function FlowsPage() {
     }, [api, current]);
 
     const open = (name: string | null) => history.push(name ? `/flows?flow=${encodeURIComponent(name)}` : '/flows');
+    const showTab = (t: string) => history.push(t === 'airflow' ? '/flows?tab=airflow' : '/flows');
+    const downloadDag = async (name: string) => {
+        try {
+            const text = await client.request<string>('GET', `/v1/flows/${encodeURIComponent(name)}/airflow`);
+            const url = URL.createObjectURL(new Blob([text], { type: 'text/x-python' }));
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `${name}.py`;
+            a.click();
+            URL.revokeObjectURL(url);
+        } catch (e) {
+            setError((e as Error).message);
+        }
+    };
     const changeTheme = (t: string) => {
         setTheme(t);
         try {
@@ -68,6 +88,13 @@ export function FlowsPage() {
         }
     };
 
+    if (change && preview) {
+        return (
+            <FlowsRoot data-theme={theme}>
+                <ProposedFlow client={client} change={change} flow={preview} onBack={() => history.push('/flows')} />
+            </FlowsRoot>
+        );
+    }
     return (
         <FlowsRoot data-theme={theme}>
             {detail ? (
@@ -75,6 +102,10 @@ export function FlowsPage() {
                     <div className="fl-top" style={{ paddingTop: 8, paddingBottom: 8 }}>
                         <button type="button" className="fl-btn" onClick={() => open(null)}>{'←'} All flows</button>
                         <span className="fl-muted">Owner {detail.owner.split(':').pop()} {'·'} you are {detail.role}</span>
+                        <span style={{ flex: 1 }} />
+                        <button type="button" className="fl-btn" title="This flow as an Airflow DAG file (no secrets)" onClick={() => void downloadDag(detail.name)}>
+                            Airflow DAG
+                        </button>
                     </div>
                     <FlowEditor
                         detail={detail}
@@ -109,6 +140,16 @@ export function FlowsPage() {
                             <Icon name="plus" size={14} /> New flow
                         </button>
                     </div>
+                    <div className="fl-tabs" role="tablist" aria-label="Flows and Airflow" style={{ padding: '0 24px' }}>
+                        {[['flows', 'Flows'], ['airflow', 'Airflow']].map(([k, label]) => (
+                            <button key={k} type="button" role="tab" aria-selected={tab === k} className="fl-tab" onClick={() => showTab(k)}>{label}</button>
+                        ))}
+                    </div>
+                    {tab === 'airflow' ? (
+                        <div className="fl-pane" style={{ maxWidth: 1280 }}>
+                            <AirflowTab client={client} theme={theme} onOpenFlow={(name) => { void load(); open(name); }} />
+                        </div>
+                    ) : (
                     <div className="fl-pane" style={{ maxWidth: 1280 }}>
                         {error && <div className="fl-err" role="alert">{error}</div>}
                         {approvals.length > 0 && (
@@ -164,9 +205,59 @@ export function FlowsPage() {
                             </table>
                         )}
                     </div>
+                    )}
                 </>
             )}
         </FlowsRoot>
+    );
+}
+
+interface ChangeForPreview {
+    id: string;
+    title: string;
+    status: string;
+    sponsor: string;
+    agent: string | null;
+    plan: { changes: { action: string; kind: string; key: string; fields: { field: string; after: unknown }[] }[] };
+}
+
+const NO_PROBLEMS = new Map<string, Problem[]>();
+
+/** A flow a change request proposes (an agent's draft), on the canvas, read-only until the change is approved. */
+function ProposedFlow({ client, change, flow, onBack }: { client: ReturnType<typeof useConsumerApi>['client']; change: string; flow: string; onBack: () => void }) {
+    const [cr, setCr] = useState<ChangeForPreview | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const [selected, setSelected] = useState<string[]>([]);
+    useEffect(() => {
+        client.request<ChangeForPreview>('GET', `/v1/iac/changes/${encodeURIComponent(change)}`).then(setCr).catch((e) => setError((e as Error).message));
+    }, [client, change]);
+    const item = cr?.plan.changes.find((c) => c.kind === 'flows' && c.key === flow);
+    const spec = item?.fields.find((f) => f.field === 'spec')?.after as FlowDef | undefined;
+    const steps = useMemo(() => spec?.steps ?? [], [spec]);
+    const pos = useMemo(() => positions(steps, spec?.layout), [steps, spec]);
+    return (
+        <div className="fl-pane" style={{ maxWidth: 1280 }}>
+            <div className="fl-top" style={{ paddingLeft: 0 }}>
+                <button type="button" className="fl-btn" onClick={onBack}>{'←'} All flows</button>
+                <strong>{flow}</strong>
+                <span className="fl-badge waiting">proposed draft</span>
+            </div>
+            {error && <div className="fl-err" role="alert">{error}</div>}
+            {cr && !spec && <div className="fl-err" role="alert">The change {cr.title} does not propose a flow named {flow}.</div>}
+            {cr && spec && (
+                <>
+                    <p className="fl-muted">
+                        Proposed in the change request <Link to={`/settings?tab=iac&change=${encodeURIComponent(cr.id)}`}>{cr.title}</Link>
+                        {cr.agent ? ` by the agent ${cr.agent}` : ''} for {cr.sponsor.split(':').pop()} ({cr.status}). Once someone approves and
+                        applies it, the flow is created and opens here to edit.
+                    </p>
+                    <div style={{ height: 460, position: 'relative' }}>
+                        <FlowCanvas steps={steps} pos={pos} selected={selected} selectedEdge={null} problems={NO_PROBLEMS} readOnly snapOn={false}
+                            onSelect={(names) => setSelected(names)} onMove={() => undefined} onConnect={() => undefined} onDropType={() => undefined} />
+                    </div>
+                </>
+            )}
+        </div>
     );
 }
 

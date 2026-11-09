@@ -244,12 +244,16 @@ export function RemoteAgentsSettings() {
 export function SettingsPage() {
     const session = useDheSession();
     const t = useT();
+    // Links into a tab (a notification about a change request: ?tab=iac&change=<id>); read without a router, since
+    // the page is also mounted on its own.
+    const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
                 {t('settings.title')}
             </SectionTitle>
             <Tabs
+                defaultActiveKey={params.get('tab') ?? undefined}
                 items={[
                     { key: 'notifications', label: t('settings.notifications'), children: <NotificationSettings /> },
                     {
@@ -263,7 +267,7 @@ export function SettingsPage() {
                         ),
                     },
                     { key: 'embeds', label: t('settings.embeds'), children: <EmbedBuilder /> },
-                    { key: 'iac', label: t('settings.iac'), children: <IacPanel /> },
+                    { key: 'iac', label: t('settings.iac'), children: <IacPanel change={params.get('change')} /> },
                     {
                         key: 'ai-agents',
                         label: t('settings.aiAgents'),

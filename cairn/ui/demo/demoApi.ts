@@ -4,6 +4,7 @@
  * findings behave like the real backend until the page is reloaded. All data is fictional.
  */
 
+import { installAirflowIacDemo } from './airflowIacSamples';
 import { installFlowsDemo } from './flowSamples';
 import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
 
@@ -1847,9 +1848,12 @@ on('POST', '/v1/sql-workflows/:id/run', (_b, _q, [id]) => {
     return run;
 });
 
-installFlowsDemo(on, (status, msg) => {
+const flowsDemo = installFlowsDemo(on, (status, msg) => {
     throw new HttpError(status, msg);
 }, ME);
+installAirflowIacDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME, flowsDemo.addFlow);
 
 const GIT_FOLDERS: Json[] = [
     { id: 'gf_analytics', owner: ME, name: 'analytics', repo: 'northwind/analytics', url: 'https://git.northwind.example/northwind/analytics.git',
