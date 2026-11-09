@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-55 resources, each also a data source:
+58 resources, each also a data source:
 
 **Identity and access**
 
@@ -78,6 +78,9 @@ permissions and audit apply:
 | Resource | Bundle section | What it is |
 |---|---|---|
 | `cairn_job` | `jobs` | A scheduled job: a notebook or a Python script, run as its owner on a cron schedule (or on demand) |
+| `cairn_dataplane` | `dataplanes` | A data plane: compute in a customer's cluster (Trino, Spark, jobs) that Cairn reaches only through its connector's outbound tunnel |
+| `cairn_workspace_compute` | `workspace_compute` | Where a workspace's queries and jobs run: on its data plane (customer) or on Cairn's managed pool (managed) |
+| `cairn_egress_rule` | `egress_rules` | An egress rule for user code (jobs, notebooks, flows' steps, sandboxes, agent apps): a host (or *.domain) or a CIDR, on ports (80 and 443 when none), for one workspace or all (*) |
 
 **AI and agents**
 

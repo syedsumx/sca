@@ -23,6 +23,12 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  {{- if $.Values.cairn.egress.enforce }}
+  # Egress enforced: the workspace's NetworkPolicy for its runs' pods (cairn.network.egress).
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "create", "update"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

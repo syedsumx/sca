@@ -540,6 +540,18 @@ def cmd_agent_run(a) -> None:
     main(a.config)
 
 
+def cmd_dataplane_connect(a) -> None:
+    from cairn.dataplane.connector import main
+
+    raise SystemExit(main())
+
+
+def cmd_egress_proxy(a) -> None:
+    from cairn.network.proxy import main
+
+    raise SystemExit(main(a.rest))
+
+
 def cmd_bootstrap(a) -> None:
     from cairn.governance.certification import bootstrap_mcps
 
@@ -1052,6 +1064,13 @@ def build_parser() -> argparse.ArgumentParser:
     run = agent_sub.add_parser("run")
     run.add_argument("--config", default=os.environ.get("CAIRN_AGENT_CONFIG", "/etc/cairn-agent/agent.yml"))
     run.set_defaults(fn=cmd_agent_run)
+    dpl = sub.add_parser("dataplane", help="data plane connector: runs in the customer's cluster, outbound only")
+    dpl_sub = dpl.add_subparsers(dest="dataplane_command", required=True)
+    dpl_sub.add_parser("connect", help="enrol (once) and serve the tunnel; settings from CAIRN_DATAPLANE_*") \
+        .set_defaults(fn=cmd_dataplane_connect)
+    egp = sub.add_parser("egress-proxy", help="the egress proxy user code leaves through (cairn.network.proxy)")
+    egp.add_argument("rest", nargs=argparse.REMAINDER, help="--listen, --key-file, --always")
+    egp.set_defaults(fn=cmd_egress_proxy)
 
     boot = sub.add_parser("bootstrap", help="create Cairn structured properties, tags and PII glossary terms")
     boot.add_argument("--dry-run", action="store_true")

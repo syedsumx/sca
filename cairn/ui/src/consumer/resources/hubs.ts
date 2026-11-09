@@ -105,7 +105,7 @@ export const HUBS: Hub[] = [
         "route": "/trust",
         "title": "Trust & security",
         "icon": "lock",
-        "description": "Controls that keep data safe and auditable: access reviews, data residency, tokenisation, security posture, consent, data contracts, passkeys, secrets, SIEM export, where notifications go, and limits.",
+        "description": "Controls that keep data safe and auditable: access reviews, data residency, tokenisation, security posture, consent, data contracts, passkeys, secrets, network egress for user code, data planes, SIEM export, where notifications go, and limits.",
         "tabs": [
             "access-reviews",
             "residency",
@@ -115,6 +115,9 @@ export const HUBS: Hub[] = [
             "contracts",
             "passkeys",
             "secret-scopes",
+            "egress-rules",
+            "dataplanes",
+            "workspace-compute",
             "siem",
             "notification-routes",
             "limits",

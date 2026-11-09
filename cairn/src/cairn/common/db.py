@@ -62,6 +62,8 @@ def get_engine(url: str) -> Engine:
 def load_models() -> MetaData:
     """Import every table module so its tables register on :data:`metadata`."""
     from cairn.agent import store as _agent_store  # noqa: F401
+    from cairn.dataplane import store as _dataplane_store  # noqa: F401
+    from cairn.network import egress as _egress  # noqa: F401
     from cairn.ai import assistant as _assistant  # noqa: F401
     from cairn.ai import workspace as _ai_workspace  # noqa: F401
     from cairn.governance import aggregation as _aggregation  # noqa: F401

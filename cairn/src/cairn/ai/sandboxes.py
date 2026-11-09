@@ -309,6 +309,8 @@ class Policy:
 
 
 def _deny(c: socket.socket, code: int, text: str) -> None:
+    if code == 403:                # every refused egress attempt is in the log (one JSON line)
+        logger.warning(json.dumps({"event": "egress.denied", "source": "sandbox", "reason": text}))
     body = text.encode()
     reason = {400: "Bad Request", 403: "Forbidden", 407: "Proxy Authentication Required", 502: "Bad Gateway"}.get(code, "Error")
     try:
@@ -825,6 +827,7 @@ class Sandboxes:
         self.max_input = int(float(e("CAIRN_SANDBOX_MAX_INPUT_MB", "20")) * (1 << 20))
         self.max_output = int(float(e("CAIRN_SANDBOX_MAX_OUTPUT_MB", "5")) * (1 << 20))
         self.keep_days = int(e("CAIRN_SANDBOX_KEEP_DAYS", "30"))
+        self.egress = None             # cairn.network.egress.Egress: admins' egress rules also allow hosts
         self._lock = threading.Lock()
 
     def limits(self) -> dict:
@@ -835,7 +838,18 @@ class Sandboxes:
                 "allowed_hosts": sorted(self.allowed_hosts), "cairn_access": bool(self.cairn_url and self.agents)}
 
     # ---- checking a request ------------------------------------------------------------------------
-    def _check(self, body: Any) -> dict:
+    def _egress_allows(self, actor: str, target: str) -> bool:
+        """An admin's egress rule (cairn.network.egress) for the actor's workspace allows this host name."""
+        if self.egress is None:
+            return False
+        from cairn.network.proxy import _host_matches, _port_ok
+
+        host, _, port = target.partition(":")
+        rules = self.egress.effective(self.egress.workspace_of(actor))
+        return any(r.get("host") and _host_matches(r["host"], host) and _port_ok(r, int(port) if port else 443)
+                   for r in rules)
+
+    def _check(self, body: Any, actor: str = "") -> dict:
         if not isinstance(body, dict):
             raise SandboxError("a run is an object: language, code, files, network, limits")
         unknown = sorted(set(body) - {"language", "code", "files", "network", "limits"})
@@ -872,10 +886,14 @@ class Sandboxes:
                 isinstance(h, str) and HOST.match(h.lower()) and not _is_address(h.rsplit(":", 1)[0]) for h in allow):
             raise SandboxError("network.allow: up to 20 host names (host or host:port), no addresses or wildcards")
         allow = sorted({h.lower() for h in allow})
-        refused = [h for h in allow if h not in self.allowed_hosts and h.split(":")[0] not in self.allowed_hosts]
+        refused = [h for h in allow if h not in self.allowed_hosts and h.split(":")[0] not in self.allowed_hosts
+                   and not self._egress_allows(actor, h)]
         if refused:
+            for h in refused:      # audited where every refused egress is: the cairn.egress log
+                logger.warning(json.dumps({"event": "egress.denied", "source": "sandbox", "actor": actor, "target": h,
+                                           "reason": "not in CAIRN_SANDBOX_ALLOWED_HOSTS or the egress rules"}))
             raise SandboxError(f"network.allow: {', '.join(refused)} may not be reached from sandboxes (an operator "
-                               "allows hosts in CAIRN_SANDBOX_ALLOWED_HOSTS)", 403)
+                               "allows hosts in CAIRN_SANDBOX_ALLOWED_HOSTS or in the egress rules)", 403)
         lim = body.get("limits") or {}
         if not isinstance(lim, dict) or set(lim) - {"timeout_s", "memory_mb", "cpus"}:
             raise SandboxError("limits: {timeout_s, memory_mb, cpus}")
@@ -942,7 +960,7 @@ class Sandboxes:
             raise SandboxError("running code in a sandbox needs RUN_CODE", 403)
         if self.runtime is None:
             raise SandboxError("sandboxes are not configured: set CAIRN_SANDBOX_RUNTIME (docker or kubernetes)", 503)
-        spec = self._check(body)
+        spec = self._check(body, actor)
         token = self._token(p, spec["timeout_s"] + 120) if spec["network"]["cairn"] else None
         try:
             rid = self._claim(actor, agent, spec)

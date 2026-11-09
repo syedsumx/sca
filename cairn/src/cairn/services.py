@@ -203,6 +203,8 @@ class Services:
     trino_access: Optional[Any] = None
     trino_key: str = ""
     trino_tokens: Optional[Any] = None
+    dataplanes: Optional[Any] = None        # split control and data plane (cairn.dataplane)
+    egress: Optional[Any] = None            # egress rules for user code (cairn.network.egress)
     trino_outbox: Optional[Any] = None
     trino_usage: Optional[Any] = None
     trino_catalog: Optional[Any] = None
@@ -633,8 +635,38 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_pipeline_health(services)
     _build_medallion(services)
     _build_flows(services)
+    _build_split_compute(services)
     _build_iac_changes(services)
     return services
+
+
+def _build_split_compute(s: Services) -> None:
+    """Egress rules for user code (cairn.network.egress) and data planes in customers' clusters (cairn.dataplane):
+    jobs, notebooks and flows' steps run where their owner's workspace computes, contained by the egress rules."""
+    from cairn.agent.gateway import GatewayKeys
+    from cairn.dataplane.service import ComputeRouter, DataPlanes
+    from cairn.network.egress import Egress
+
+    def workspaces_of(actor: str) -> list[str]:
+        ws = getattr(s, "workspaces", None)
+        return [w["id"] for w in ws.mine(actor)] if ws is not None else []
+
+    s.egress = Egress(s.engine, s.audit, workspaces_of)
+    keys = s.gateway.keys if s.gateway is not None else GatewayKeys(s.settings.gateway.key_dir)
+    s.dataplanes = DataPlanes(s.engine, keys, s.audit, getattr(s, "trino_access", None), workspaces_of)
+    jobs = getattr(s, "jobs", None)
+    if jobs is not None:
+        jobs.egress = s.egress
+        # Routed per workspace when there is a managed pool to route from, or when jobs run only on data planes.
+        if jobs.runner is not None or not s.dataplanes.managed:
+            jobs.runner = ComputeRouter(jobs.runner, s.dataplanes, s.egress)
+    if getattr(s, "sandboxes", None) is not None:
+        s.sandboxes.egress = s.egress
+    apps = getattr(s, "agent_apps", None)
+    if apps is not None:
+        apps.egress = s.egress
+        if hasattr(apps.runtime, "ingress_from"):          # the Kubernetes runtime: its pods get the egress policy
+            apps.runtime.egress = s.egress
 
 
 def _build_device_logins(s: Services) -> None:

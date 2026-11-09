@@ -91,7 +91,7 @@ module "cairn" {
   profile    = var.profile
   chart_path = var.chart_path
   secrets    = var.secrets
-  values_yaml = [
+  values_yaml = concat([
     yamlencode({
       cairn = {
         serviceAccount = { create = true, name = local.service_account,
@@ -99,8 +99,7 @@ module "cairn" {
         metadataExport = { enabled = true, destination = "gs://${google_storage_bucket.cairn.name}/cairn" }
       }
     }),
-    yamlencode(var.values),
-  ]
+  ], local.internal_lb_yaml, [yamlencode(var.values)])
   depends_on = [google_service_account_iam_member.workload]
 }
 

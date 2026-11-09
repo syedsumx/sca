@@ -76,6 +76,7 @@ class KubeRuntime:
         self.procs: dict = {}                         # the process runtime's; nothing runs in Cairn's process here
         self._cache: dict[str, tuple[int, str, str]] = {}  # name -> (version, url, secret)
         self._lock = threading.Lock()
+        self.egress = None      # cairn.network.egress.Egress: when enforced, the pods' egress follows the global rules
 
     @classmethod
     def from_env(cls, cairn_url: str) -> "KubeRuntime":
@@ -156,6 +157,17 @@ class KubeRuntime:
                 "containers": [container],
                 "volumes": [{"name": "project", "secret": {"secretName": n, "defaultMode": 0o440}},
                             {"name": "tmp", "emptyDir": {}}]}
+        policy = {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress"],
+                  "ingress": [{"from": self.ingress_from, "ports": [{"port": PORT, "protocol": "TCP"}]}]}
+        pod_labels = dict(labels)
+        if self.egress is not None and self.egress.enforced:
+            # Egress as for all user code: DNS, Cairn's namespace, CIDR rules, and hosts through the egress proxy.
+            policy["policyTypes"] = ["Ingress", "Egress"]
+            policy["egress"] = self.egress.networkpolicy("*", self.namespace)["spec"]["egress"]
+            pod_labels.update(self.egress.pod_labels("*"))
+            days = int(os.environ.get("CAIRN_EGRESS_APP_CREDENTIAL_DAYS", "30"))
+            container["env"] += [{"name": k, "value": v} for k, v in
+                                 self.egress.proxy_env("*", f"agent-app-{name}-v{version}", days * 86400).items()]
         stamp = {VERSION: str(version), "cairn.io/secret": hashlib.sha256(secret.encode()).hexdigest()[:16]}
         return [
             {"apiVersion": "v1", "kind": "Secret", "metadata": {**meta, "annotations": {VERSION: str(version)}},
@@ -164,15 +176,13 @@ class KubeRuntime:
             {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta,
              "spec": {"replicas": 1, "selector": {"matchLabels": {LABEL: name}}, "revisionHistoryLimit": 2,
                       "strategy": {"type": "Recreate"},
-                      "template": {"metadata": {"labels": labels, "annotations": stamp}, "spec": spec}}},
+                      "template": {"metadata": {"labels": pod_labels, "annotations": stamp}, "spec": spec}}},
             {"apiVersion": "v1", "kind": "Service", "metadata": meta,
              "spec": {"selector": {LABEL: name}, "ports": [{"name": "http", "port": PORT, "targetPort": PORT}],
                       # Node ports keep the caller's address (Local), so the network policy sees that it is Cairn.
                       **({"type": "NodePort", "externalTrafficPolicy": "Local"} if self.access == "node-port"
                          else {"type": "ClusterIP"})}},
-            {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta,
-             "spec": {"podSelector": {"matchLabels": {LABEL: name}}, "policyTypes": ["Ingress"],
-                      "ingress": [{"from": self.ingress_from, "ports": [{"port": PORT, "protocol": "TCP"}]}]}},
+            {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta, "spec": policy},
         ]
 
     # ---- the runtime interface (as ProcessRuntime) ----------------------------------------------

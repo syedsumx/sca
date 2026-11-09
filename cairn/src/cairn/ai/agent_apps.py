@@ -247,6 +247,10 @@ class AgentApps:
     def deploy(self, actor: str, body: dict) -> dict:
         if not self.authorize(actor, "BUILD_AGENTS", None):
             raise AgentAppError("deploying an agent needs BUILD_AGENTS", 403)
+        egress = getattr(self, "egress", None)
+        if egress is not None and egress.enforced and getattr(self.runtime, "egress", False) is False:
+            raise AgentAppError("egress is enforced for user code: agent apps run only on Kubernetes then "
+                                "(CAIRN_AGENT_APPS_RUNTIME=kubernetes), where a NetworkPolicy contains them", 503)
         m, raw = body.get("manifest"), body.get("bundle")
         if not isinstance(m, dict) or not isinstance(raw, str):
             raise AgentAppError("manifest (agent.toml) and bundle (base64 tar.gz)")

@@ -356,6 +356,14 @@ jobs:
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+      - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
+        working-directory: cairn
+        run: |
+          set -o pipefail
+          docker build -q -f docker/store.Dockerfile -t cairn/store:ci .   # the data plane's own storage
+          CAIRN_STORE_IMAGE=cairn/store:ci pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dataplane_e2e.py \
+            tests/test_egress_e2e.py | tee "$RUNNER_TEMP/split.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/split.log"
       - name: The UI on real engines (the secret-reference picker against a real catalog; a 600-term ontology measured in Chromium)
         working-directory: cairn
         env:
@@ -863,6 +871,7 @@ jobs:
           docker build -q -f docker/spark.Dockerfile -t cairn/spark:ci .
           docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
           docker build -q -f docker/agent-runtime.Dockerfile -t cairn/agent-runtime:ci .
+          docker build -q -f docker/dataplane.Dockerfile -t cairn/dataplane-connector:ci .
       - name: Kind cluster
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
@@ -883,7 +892,7 @@ jobs:
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
           # Model serving (test_ml_serving_k8s.py): MLflow's model server.
           echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
-          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -918,6 +927,16 @@ jobs:
           CAIRN_JOBS_TEST_IMAGE=cairn/jobs:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_jobs_k8s.py | tee "$RUNNER_TEMP/jobs.log"
           ! grep -q "skipped" "$RUNNER_TEMP/jobs.log"
+          # Egress rules (L136): a job's pod under its workspace's NetworkPolicy (kindnet enforces NetworkPolicy since
+          # kind v0.24) and Cairn's egress proxy, which logs every refusal.
+          CAIRN_EGRESS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_egress_kind.py | tee "$RUNNER_TEMP/egress.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/egress.log"
+          # The data plane chart (L135): the connector enrols out to a control plane on this host, runs a workspace's
+          # job as a Kubernetes Job with only the chart's Role, is reached by nothing outside, and is refused once revoked.
+          CAIRN_DATAPLANE_TEST_IMAGE=cairn/dataplane-connector:ci CAIRN_APPS_TEST_IMAGE=cairn-test/python:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_dataplane_kind.py | tee "$RUNNER_TEMP/dataplane.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/dataplane.log"
           # Model deployments as Deployments of MLflow's model server, scaled by Cairn, with only the chart's Role.
           python -m venv "$RUNNER_TEMP/mlflow" && "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
@@ -935,6 +954,9 @@ jobs:
           for p in $(kubectl -n pipelines get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n pipelines logs "$p" --tail=200 || true; done
           kubectl -n cairn-apps get events --sort-by=.lastTimestamp || true
           kubectl -n cairn-jobs-test get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-dp get pods,events -o wide || true
+          kubectl -n cairn-dp logs deploy/dp-cairn-dataplane-connector --tail=200 || true
+          kubectl -n cairn-egress-cp logs egress-proxy --tail=100 || true
           for p in $(kubectl -n cairn-apps get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-apps logs "$p" --all-containers --tail=100 || true; done
           kubectl -n cairn-agents get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-agents get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-agents logs "$p" --tail=100 || true; done
@@ -1046,6 +1068,12 @@ jobs:
         run: |
           set -o pipefail   # a chart that fails to render must fail the step, not validate nothing
           helm lint helm/cairn helm/cairn-remote-agent
+          helm lint helm/cairn-dataplane --set enrollment.token=lint
+          helm template dp helm/cairn-dataplane --set enrollment.existingSecret=enrol --set storage.endpoint=https://s3.example.com \
+              --set storage.credentialsSecret=keys --set 'storage.presignBuckets={lakehouse}' \
+              | kubeconform -strict -summary -kubernetes-version 1.30.0
+          helm template cairn helm/cairn --set cairn.jobs.runtime=kubernetes --set cairn.egress.enforce=true \
+              --set cairn.egress.keySecret.name=egress | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
           for values in "" "-f helm/cairn/values-active-metadata.yaml" "-f helm/cairn/values-authoritative.yaml" \
               "-f helm/cairn/values-ha.yaml" "-f helm/cairn/values-ha.yaml -f helm/cairn/values-tenant.yaml" \
               "--set core.database.type=postgres" \

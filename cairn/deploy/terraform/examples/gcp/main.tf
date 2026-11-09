@@ -34,6 +34,12 @@ variable "bucket_name" {
   type = string
 }
 
+variable "private_networking" {
+  description = "The module's private_networking (private endpoints, an internal load balancer); null: public."
+  type        = any
+  default     = null
+}
+
 variable "cairn_secrets" {
   type      = map(string)
   sensitive = true
@@ -72,4 +78,6 @@ module "cairn" {
   bucket_name = var.bucket_name
   profile     = "ha"
   secrets     = { "cairn-secrets" = var.cairn_secrets }
+  # Private endpoints and an internal load balancer (see the module's private_networking): null keeps them public.
+  private_networking = var.private_networking
 }

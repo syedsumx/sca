@@ -13,6 +13,9 @@ Trino (Ctrl-C in ``cairn query``). Nothing is kept on the API: the cursor holds 
   ``urn:li:warehouse:<name>``; the warehouse's Trino asks Cairn as that warehouse too).
 * ``limit``: at most this many rows (Trino stops there). Without it the result streams to the end.
 * ``CAIRN_QUERY_MAX_RUN_TIME`` (``1h``): Trino's ``query_max_run_time`` for these statements.
+* ``workspace``: run it where that workspace computes (``/v1/compute/workspaces``): on its data plane's Trino, through
+  the data plane's tunnel (a connection whose URL has ``?dataplane=<name>``), or on Cairn's managed pool. A data plane
+  whose tunnel is down refuses the statement (503).
 
 People only: agents query through ``/data/query`` within their scopes. Every statement is audited
 (``data.queried`` with ``streamed: true``) and counted as a read of its tables.
@@ -47,6 +50,7 @@ class Statements:
         self.default_connection = default_connection
         self.max_run_time = max_run_time
         self._key = hashlib.sha256(b"cairn-statements|" + key.encode()).digest() if key else None
+        self.planes = None          # cairn.dataplane.service.DataPlanes: connections on a data plane go through its tunnel
 
     # ---- where it runs -------------------------------------------------------------------------------
     def _connections(self) -> dict[str, dict]:
@@ -76,6 +80,34 @@ class Statements:
         except Exception:  # noqa: BLE001 - fail closed
             return False
 
+    def _dataplane(self, connection: str) -> Optional[str]:
+        from cairn.quality.collectors import _expand_env
+
+        definition = self._connections().get(connection) or {}
+        q = parse_qs(urlsplit(_expand_env(str(definition.get("url", "")))).query)
+        return q["dataplane"][-1] if q.get("dataplane") else None
+
+    def _for_workspace(self, workspace: str, connection: Optional[str]) -> Optional[str]:
+        if self.planes is None:
+            raise StatementError("this Cairn has no data planes: run without a workspace", 422)
+        from cairn.dataplane.service import DataPlaneError
+
+        try:
+            where = self.planes.get_compute(workspace)
+            if where["compute"] == "customer":
+                dp = self.planes.get(str(where["dataplane"]))
+                if not dp.get("connection"):
+                    raise StatementError(f"data plane {dp['name']} has no Trino connection set", 503)
+                if connection and connection != dp["connection"]:
+                    raise StatementError(f"workspace {workspace} computes on data plane {dp['name']} "
+                                         f"(connection {dp['connection']}), not {connection}", 409)
+                return dp["connection"]
+        except DataPlaneError as e:
+            raise StatementError(str(e), e.status)
+        if connection and self._dataplane(connection):
+            raise StatementError(f"workspace {workspace} computes on Cairn's managed pool, not on a data plane", 409)
+        return connection
+
     def _endpoint(self, connection: str, warehouse: Optional[str], actor: str) -> tuple[str, Any, dict]:
         from cairn.quality.collectors import _expand_env
 
@@ -95,6 +127,8 @@ class Statements:
         path = [unquote(p) for p in url.path.split("/") if p]
         session = {"catalog": path[0] if path else None, "schema": path[1] if len(path) > 1 else None}
         base = f"{scheme}://{url.hostname}:{url.port or (443 if scheme == 'https' else 8080)}"
+        if opts.get("dataplane") and self.planes is None:
+            raise StatementError(f"{connection} is on a data plane, and this Cairn has no data planes", 503)
         if warehouse:
             if self.warehouses is None or warehouse not in self.warehouses.ports:
                 raise StatementError(f"no warehouse {warehouse}", 404)
@@ -130,9 +164,14 @@ class Statements:
         return doc
 
     # ---- running -------------------------------------------------------------------------------------
-    def _client(self, verify):
+    def _client(self, verify, connection: str = "", actor: str = ""):
         import httpx
 
+        dp = self._dataplane(connection) if connection else None
+        if dp:                                         # the data plane's Trino, only through its tunnel
+            from cairn.dataplane.service import tunnel_client
+
+            return tunnel_client(self.planes, dp, actor)
         return httpx.Client(verify=verify, timeout=httpx.Timeout(60.0, connect=10.0))
 
     def _headers(self, run_as: str, session: dict) -> dict:
@@ -148,13 +187,15 @@ class Statements:
         return h
 
     def start(self, actor: str, sql: str, connection: Optional[str] = None, warehouse: Optional[str] = None,
-              limit: Optional[int] = None) -> dict:
+              limit: Optional[int] = None, workspace: Optional[str] = None) -> dict:
         from cairn.coreproxy.masking import mask_sql
         from cairn.dataaccess.service import DataAccessError, capped, output_sources
 
         if self._key is None or self.tokens is None:
             raise StatementError("statements are not configured: they need Trino sign-in through Cairn "
                                  "(CAIRN_TRINO_ACCESS_KEY)", 503)
+        if workspace:
+            connection = self._for_workspace(workspace, connection)
         connection = connection or self._default()
         if not connection:
             raise StatementError("name a connection (--connection); this Cairn has "
@@ -167,7 +208,7 @@ class Statements:
         dialect = prepared.source.dialect
         text = capped(prepared.tree, limit, dialect) if limit else prepared.tree.sql(dialect=dialect)
         sources = [sorted(s) if s is not None else None for s in output_sources(prepared.tree)]
-        with self._client(verify) as http:
+        with self._client(verify, connection, actor) as http:
             r = http.post(f"{base}/v1/statement", content=text.encode(), headers=self._headers(prepared.run_as, session))
             doc = self._answer(r)
         self.data._audit(actor, "data.queried", connection, {"sql": mask_sql(sql), "tables": prepared.urns,
@@ -186,7 +227,7 @@ class Statements:
         if base != state["b"] or not str(state.get("n", "")).startswith(base + "/"):
             raise StatementError("the statement's Trino moved: run it again", 409)
         end = time.monotonic() + max(0.0, min(wait_s, 30.0))
-        with self._client(verify) as http:
+        with self._client(verify, state["c"], actor) as http:
             while True:          # Trino's first pages are often empty while the query starts: wait a little here
                 doc = self._answer(http.get(state["n"], headers=self._headers(state["r"], state["s"])))
                 if doc.get("data") or not doc.get("nextUri") or doc.get("columns") and not state.get("cols") \
@@ -200,7 +241,7 @@ class Statements:
         base, verify, _ = self._endpoint(state["c"], state.get("w"), actor)
         if base != state["b"] or not str(state.get("n", "")).startswith(base + "/"):
             raise StatementError("the statement's Trino moved", 409)
-        with self._client(verify) as http:
+        with self._client(verify, state["c"], actor) as http:
             r = http.delete(state["n"], headers=self._headers(state["r"], state["s"]))
         self.data._audit(actor, "data.query_cancelled", state["c"], {"query_id": state.get("id")})
         return {"id": state.get("id"), "cancelled": r.status_code in (200, 204, 404, 410)}
@@ -266,6 +307,7 @@ def build_statements_router(services, current_principal, authorize) -> Any:
                      getattr(services, "trino_key", "") or (services.settings.service_token or ""),
                      WarehouseStatus.from_env(), may, os.environ.get("CAIRN_QUERY_CONNECTION", "").strip(),
                      os.environ.get("CAIRN_QUERY_MAX_RUN_TIME", "1h").strip())
+    svc.planes = getattr(services, "dataplanes", None)
     services.statements = svc
     router = APIRouter(prefix="/v1/statements", tags=["sql"])
 
@@ -275,9 +317,13 @@ def build_statements_router(services, current_principal, authorize) -> Any:
         return p
 
     async def call(fn, *a):
+        from cairn.dataplane.service import DataPlaneError
+
         try:
             return await run_in_threadpool(fn, *a)
         except StatementError as e:
+            raise HTTPException(e.status, str(e))
+        except DataPlaneError as e:                   # a data plane's tunnel down, or its Trino refused: fail closed
             raise HTTPException(e.status, str(e))
 
     @router.get("/targets")
@@ -287,8 +333,8 @@ def build_statements_router(services, current_principal, authorize) -> Any:
     @router.post("")
     async def start(sql: str = Body(..., min_length=1, max_length=200_000), connection: Optional[str] = Body(None),
                     warehouse: Optional[str] = Body(None), limit: Optional[int] = Body(None, ge=1, le=100_000_000),
-                    p=Depends(current_principal)):
-        return await call(svc.start, person(p).urn, sql, connection, warehouse, limit)
+                    workspace: Optional[str] = Body(None, max_length=64), p=Depends(current_principal)):
+        return await call(svc.start, person(p).urn, sql, connection, warehouse, limit, workspace)
 
     @router.post("/next")
     async def next_page(cursor: str = Body(..., embed=True, max_length=20_000), p=Depends(current_principal)):

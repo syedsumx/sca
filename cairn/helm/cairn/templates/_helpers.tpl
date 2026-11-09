@@ -235,6 +235,22 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail "cairn.jobs.runtime: \"\" or kubernetes" }}
 {{- end }}
 {{- end }}
+{{- with .Values.cairn.egress }}
+{{- if .enforce }}
+{{- if not .keySecret.name }}
+{{- fail "cairn.egress.enforce needs cairn.egress.keySecret.name (the proxy's key, 16+ bytes)" }}
+{{- end }}
+- name: CAIRN_EGRESS_ENFORCE
+  value: "true"
+- name: CAIRN_EGRESS_PROXY_URL
+  value: {{ printf "http://%s.%s.svc:3128" (include "cairn.componentName" (dict "root" $ "component" "egress-proxy")) $.Release.Namespace | quote }}
+- name: CAIRN_EGRESS_PROXY_KEY
+  valueFrom:
+    secretKeyRef: { name: {{ .keySecret.name }}, key: {{ .keySecret.key }} }
+- name: CAIRN_EGRESS_K8S_CAIRN_NAMESPACE
+  value: {{ $.Release.Namespace | quote }}
+{{- end }}
+{{- end }}
 {{- with .Values.cairn.agentApps }}
 {{- if eq .runtime "kubernetes" }}
 {{- $api := include "cairn.componentName" (dict "root" $ "component" "api") }}

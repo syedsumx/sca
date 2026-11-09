@@ -3277,6 +3277,163 @@ also form Kafka's controller quorum.
 - **Tested.** CI runs the rendered manifest's containers, three of each in Docker, and stops nodes. It also runs the
   manifest on k3s and deletes pods there.
 
+## Data planes
+
+A split deployment keeps Cairn's control plane hosted (the API and UI, catalog metadata, the policy decision point and
+the gateway) and runs compute in the customer's cluster or VNet: Trino, Spark, jobs and notebooks, flows' compute
+steps. The data stays in the customer's storage. That compute is a **data plane**; workspaces choose per workspace
+whether their queries and jobs run there or on Cairn's own managed pool.
+
+**Install.** Register the data plane, get a single-use enrolment token, and install `helm/cairn-dataplane` in the
+customer's cluster:
+
+```bash
+curl -X POST $CAIRN/v1/dataplanes -d '{"name": "acme-eu", "connection": "acme-trino"}'
+curl -X POST $CAIRN/v1/dataplanes/acme-eu/enrollment-tokens          # {"token": "cairn_dpe_...", "expires_at": ...}
+kubectl -n cairn-dp create secret generic enrol --from-file=token=./token
+helm install dp helm/cairn-dataplane -n cairn-dp --set controlPlane.gatewayUrl=https://gateway.cairn.example \
+  --set enrollment.existingSecret=enrol --set storage.endpoint=https://s3.eu-central-1.amazonaws.com \
+  --set storage.credentialsSecret=acme-s3 --set 'storage.presignBuckets={lakehouse}'
+```
+
+The chart installs the **connector** (`docker/dataplane.Dockerfile`: Python, httpx and cryptography only), the data
+plane's Trino (`trino.catalogs`, their keys from `trino.catalogEnvSecret`), a Role that lets the connector run jobs as
+Kubernetes Jobs in its namespace and nothing else, and NetworkPolicies: the connector takes connections only from its
+Trino (port 8181) and connects out only to DNS, the gateway (`networkPolicy.gatewayCIDRs`, `gatewayPort`), its Trino
+and the Kubernetes API; Trino only from the connector and the jobs' pods; the jobs' pods only out to DNS, Trino and the
+storage (`networkPolicy.storageEgress`). Register the data plane's Trino in Cairn as a connection that runs as the
+person, with `?dataplane=<name>` in its URL (`trino://cairn@dp-cairn-dataplane-trino:8080/lake?dataplane=acme-eu`),
+and name it on the data plane (`connection`).
+
+**The tunnel.** The connector enrols like a remote agent: it makes its own Ed25519 (signing) and X25519 (encryption)
+keys, registers them with the token, keeps them in its state volume and rotates them by signed re-enrolment; with
+`controlPlane.clientCertSecret` it presents a client certificate to a gateway that asks for one
+(`CAIRN_GATEWAY_CLIENT_CA`). It then only connects **out**: it long-polls the gateway (`/dataplanes/tunnel/...`, every
+`connector.pollSeconds`) for calls, each sealed to its key, runs them and posts the answers sealed to the gateway's
+key. Nothing in the customer's network listens for Cairn, and no inbound port is opened. Cairn reaches data-plane
+compute only by queueing calls (in its database, so any replica can):
+
+- `trino.http`: a statement and its pages (`POST /v1/statements` with the data plane's connection, or with
+  `"workspace"`), only to the data plane's own Trino (`CAIRN_DATAPLANE_TRINO_URL`; any other URL is refused). Cairn's
+  sign-in token is not passed on into the customer's cluster.
+- `job.run`: a run of a job, notebook or flow step, as a Kubernetes Job (or a container through the Docker engine),
+  with the owner's short-lived Trino token and `CAIRN_TRINO_URL` set to the data plane's Trino. Images are limited to
+  `jobs.image` and `jobs.images`.
+- `storage.presign`: see scoped credentials below.
+
+**Trino asks the hosted PDP.** The data plane's Trino uses Trino's OPA access control pointed at the connector
+(`http://<connector>:8181/allow`, `/batch`, `/row-filters`, `/column-mask`); the connector asks Cairn's PDP through the
+gateway (signed), so masks, row filters and refusals are those of hosted Trino. A connector that gets no decision (the
+gateway away, the connector revoked) answers 503 and Trino refuses the query.
+
+**Fail closed.** When no connector of a data plane has called in for `CAIRN_DATAPLANE_OFFLINE_SECONDS` (30), its tunnel
+is down (`GET /v1/dataplanes/<name>`: `"tunnel": "down"`): statements on it are refused with 503 ("the tunnel to data
+plane ... is down ...") and its jobs fail with that message. A connector that never enrolled, one signing with another
+key, and a revoked one (`POST /v1/dataplanes/<name>/connectors/<id>/revoke`) are refused on every call (401), Trino's
+questions included; a revoked connector reports itself unready. A call nobody answers in time fails (504); answers are
+not kept once read.
+
+**Scoped credentials.** The storage keys stay in the customer's Secret. When Cairn needs an object (a job's output, a
+report), `POST /v1/dataplanes/<name>/storage/presign` with `{"bucket", "key", "method": "GET"|"PUT", "ttl_seconds"}`
+asks the connector, which signs a URL for that one object and method (SigV4 query signing), at most
+`storage.maxPresignSeconds` (900), in `storage.presignBuckets` only. Jobs get their owner's Trino token for their run.
+
+**Compute per workspace.** `PUT /v1/compute/workspaces/<id>` with `{"compute": "customer", "dataplane": "acme-eu"}` or
+`{"compute": "managed"}` (Cairn's own pool in the hosted cluster: the hosted Trino and job runtime). Workspaces without
+a setting use `CAIRN_COMPUTE_DEFAULT` (`managed`; with `customer`, `CAIRN_COMPUTE_DEFAULT_DATAPLANE`).
+`CAIRN_MANAGED_COMPUTE=false` turns the managed pool off (then only data planes run jobs). A job runs where its owner's
+workspace computes; an owner in workspaces that compute in different places is refused rather than placed on one.
+Statements with `"workspace"` go to that workspace's data plane connection, or are refused there on a managed one.
+
+| Setting | Default | |
+|---|---|---|
+| `CAIRN_DATAPLANE_OFFLINE_SECONDS` | 30 | a data plane with no connector call for this long is down |
+| `CAIRN_DATAPLANE_POLL_SECONDS` | 10 | how long a connector's poll waits for calls |
+| `CAIRN_DATAPLANE_MAX_PRESIGN_SECONDS` | 900 | the longest a presigned URL Cairn asks for lives |
+| `CAIRN_MANAGED_COMPUTE` | true | Cairn's managed pool exists |
+| `CAIRN_COMPUTE_DEFAULT`, `CAIRN_COMPUTE_DEFAULT_DATAPLANE` | managed | where workspaces without a setting compute |
+
+The connector's own settings (`CAIRN_DATAPLANE_*`: `URL`, `STATE_DIR`, `ENROLLMENT_TOKEN_FILE`, `CA_FILE`,
+`CLIENT_CERT`/`_KEY`, `TRINO_URL`, `OPA_LISTEN`, `JOBS_RUNTIME` (`kubernetes` or `docker`), `JOBS_IMAGE(S)`,
+`JOBS_NAMESPACE`, `JOBS_NETWORK`, `JOBS_TRINO_URL`, `JOBS_PROXY`, `STORAGE_ENDPOINT`, `STORAGE_ACCESS_KEY_FILE`,
+`STORAGE_SECRET_KEY_FILE`, `STORAGE_BUCKETS`) are set by the chart; `cairn dataplane connect` runs it outside
+Kubernetes. Audited: `dataplane.created`, `dataplane.connector_enrolled`, `dataplane.connector_revoked`,
+`dataplane.keys_rotated`, `dataplane.compute_set`, `dataplane.presigned`.
+
+Tested with real components (`tests/test_dataplane_e2e.py`): the control plane in this process; Trino, Cairn Store
+and the connector in containers, Trino and the store on an internal network the control plane has no route to, the
+connector also on an outside one. A governed statement from the API runs on the data plane's Trino with the PDP's
+row filter and mask (Trino's questions answered through the tunnel), a job runs there reading as its owner, a
+presigned URL works for its object only, and the tunnel down, a forged connector and a revoked one are refused. The
+chart is installed on kind in CI (`tests/test_dataplane_kind.py`, job `spark-kind`).
+
+## Egress rules for user code
+
+Admins decide where user code may connect: jobs, notebooks, flows' Python, Spark and dbt steps, code sandboxes and
+agent apps. `POST /v1/network/egress-rules` with `{"name", "workspace": "*" | "<id>", "host": "pypi.org" |
+"*.example.com" | "cidr": "10.20.0.0/16", "ports": [443]}` (no ports: 80 and 443); `PUT` and `DELETE`
+`/v1/network/egress-rules/<name>`; `POST /v1/network/egress-rules/check` says what the proxy would decide for a host;
+in the UI, **Trust & security › Network egress**; as code, `cairn_egress_rule`. A run gets the global rules and those
+of its owner's workspace (when the owner is in exactly one).
+
+**Enforced** (`CAIRN_EGRESS_ENFORCE=true`, chart `cairn.egress.enforce`) means fail closed: no rule, no egress, except
+Cairn itself and the lakehouse.
+
+- **Kubernetes.** Jobs' pods are labelled `cairn.io/user-code: "true"` and `cairn.io/workspace`; before each run Cairn
+  applies the workspace's NetworkPolicy (`cairn-egress-<workspace>`, `cairn-egress-all` for global rules) in the jobs
+  namespace with the chart's Role: egress only to DNS (kube-dns), Cairn's namespace (the API, the lakehouse and the
+  egress proxy) and the workspace's CIDR rules on their ports. Host rules need layer 7: runs get `HTTP(S)_PROXY`
+  pointing at Cairn's egress proxy with a credential. Agent apps' pods get the same egress (global rules) in their
+  NetworkPolicy; with egress enforced, agent apps run only on Kubernetes. Sandboxes keep their own per-run proxy;
+  the egress rules add to the hosts an operator allows them (`CAIRN_SANDBOX_ALLOWED_HOSTS`).
+- **Docker.** Runs join only `CAIRN_EGRESS_DOCKER_NETWORK`, an internal network (`docker network create --internal`)
+  that the egress proxy also joins; the proxy is their only way out.
+- **The egress proxy** (`cairn egress-proxy`, `docker/egress-proxy.Dockerfile`, chart `cairn.egress.proxy`) lets
+  `CONNECT` (TLS) and plain HTTP through only to what the run's credential allows. The credential is signed by Cairn
+  with `CAIRN_EGRESS_PROXY_KEY` (chart `cairn.egress.keySecret`, shared with the proxy) and carries the workspace, the
+  run and its rules, with an expiry; the proxy keeps no state and has no access to Cairn's database. Names are
+  resolved by the proxy and the connection is made to the address checked; a host rule that resolves to a private or
+  loopback address is refused unless a CIDR rule covers it (`CAIRN_EGRESS_ALLOW_PRIVATE=true`, chart
+  `proxy.allowPrivate`, for allowed hosts on a private network), and the link-local metadata address always is. With
+  TLS the server name the client asks for must be the host it connected to (no domain fronting). `CAIRN_EGRESS_ALWAYS`
+  (the chart: Cairn's namespace) is reachable by every run.
+- **Audit.** Every refusal is one JSON line in the proxy's log: `{"event": "egress.denied", "workspace", "run",
+  "client", "target", "reason", "time"}` (sandboxes log theirs the same way); ship them with the rest of the logs. A
+  NetworkPolicy drop is the CNI's to log. Rule changes are audited (`network.egress_rule_set`, `..._deleted`).
+
+| Setting | |
+|---|---|
+| `CAIRN_EGRESS_ENFORCE` | enforce the rules (fail closed) |
+| `CAIRN_EGRESS_PROXY_URL` | the egress proxy (`http://<release>-egress-proxy.<ns>.svc:3128` with the chart) |
+| `CAIRN_EGRESS_PROXY_KEY` (or `_FILE`) | the key run credentials are signed with, 16+ bytes |
+| `CAIRN_EGRESS_DOCKER_NETWORK` | Docker runtime: the internal network runs join |
+| `CAIRN_EGRESS_K8S_CAIRN_NAMESPACE` | Kubernetes: Cairn's namespace (allowed to every run) |
+| `CAIRN_EGRESS_K8S_DNS` | Kubernetes: the DNS peers (network policy peers, JSON; default kube-dns) |
+| `CAIRN_EGRESS_APP_CREDENTIAL_DAYS` | agent apps: how long their proxy credential lives (30; a redeploy renews it) |
+
+Tested with a real proxy and real containers (`tests/test_egress_e2e.py`: a job on the internal network reaches the
+allowed host, is refused the other and cannot go around the proxy; with no rule nothing outside is reachable; the
+refusals are in the proxy's log) and on real sockets (`tests/test_egress.py`: wildcards, ports, CIDRs, forged and
+expired credentials, domain fronting, the metadata address). On kind in CI (`tests/test_egress_kind.py`, job
+`spark-kind`), a job's pod reaches the allowed host through the proxy and the allowed address directly, and the
+NetworkPolicy drops the other address; kind's default CNI (kindnet, since kind v0.24) enforces NetworkPolicy.
+
+**Private networking in the cloud modules.** `deploy/terraform/modules/aws|gcp|azure` take `private_networking`
+(null keeps endpoints public):
+
+- **AWS**: an S3 gateway VPC endpoint on the given route tables (optionally a bucket policy that refuses requests not
+  through it), the gateway Service and the Ingress on internal load balancers, and with `api_nlb_arn` a PrivateLink
+  endpoint service (acceptance required, `allowed_principals`) other VPCs (customers' data planes) connect to.
+- **GCP**: Cloud Storage through Private Service Connect (an internal address for Google's APIs and a private DNS zone
+  for `storage.googleapis.com`), internal load balancers, and with `api_forwarding_rule` a Private Service Connect
+  service attachment (`consumer_projects`).
+- **Azure**: Private Endpoints for the storage account's blob and dfs endpoints with their private DNS zones linked to
+  the VNet, an internal load balancer, and with `api_frontend_ip_config_id` a Private Link service
+  (`allowed_subscriptions`).
+
+`terraform fmt`, `tflint` and `terraform validate` run on the modules and examples in CI (job `terraform-modules`);
+the private endpoints have not been applied to cloud accounts.
+
 ## Outages: what fails closed and what is kept
 
 Tested by stopping real components under load in CI (chaos tests):

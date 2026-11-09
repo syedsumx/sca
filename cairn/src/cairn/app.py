@@ -595,6 +595,14 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.sqlworkspace.statements import build_statements_router
 
         app.include_router(build_statements_router(services, cp, authz))
+    if getattr(services, "dataplanes", None) is not None:       # split deployments: data planes, compute per workspace
+        from cairn.dataplane.api import build_dataplanes_router
+
+        app.include_router(build_dataplanes_router(services.dataplanes, cp, authz))
+    if getattr(services, "egress", None) is not None:           # egress rules for user code
+        from cairn.network.egress import build_egress_router
+
+        app.include_router(build_egress_router(services.egress, cp, authz))
     from cairn.ai.assets import build_assets_router
 
     app.include_router(build_assets_router(services, cp, authz))
@@ -914,6 +922,10 @@ def create_gateway_app(services: Services) -> FastAPI:
         raise RuntimeError("gateway service not configured")
     app = _base_app("gateway", services)
     app.include_router(agents_router(services.gateway, admin=False, protocol=True))
+    if getattr(services, "dataplanes", None) is not None:      # data plane connectors: the tunnel, outbound from them
+        from cairn.dataplane.api import build_tunnel_router
+
+        app.include_router(build_tunnel_router(services.dataplanes))
     # The gateway faces private networks directly: cap request bodies before anything reads them.
     app.add_middleware(BodyLimit, max_bytes=int(os.environ.get("CAIRN_GATEWAY_MAX_BODY_BYTES", 32 << 20)))
     return app

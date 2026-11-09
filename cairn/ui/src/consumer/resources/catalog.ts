@@ -2687,6 +2687,139 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "egress-rules": {
+        "key": "egress-rules",
+        "iac": {"kind": "egress_rules", "id": "name"},
+        "title": "Network egress",
+        "path": "/v1/network/egress-rules",
+        "listKey": "rules",
+        "description": "Where user code (jobs, notebooks, flows' steps, sandboxes, agent apps) may connect: hosts and CIDRs on their ports, for all workspaces or one. With egress enforced, nothing else but Cairn and the lakehouse is reachable, and every refused attempt is logged by the egress proxy.",
+        "docs": "administration.html#egress-rules-for-user-code",
+        "columns": [
+            "name",
+            "workspace",
+            "host",
+            "cidr",
+            "ports",
+            "description"
+        ],
+        "rowKey": "name",
+        "actions": [
+            {
+                "label": "Allow a host",
+                "method": "POST",
+                "path": "/v1/network/egress-rules",
+                "body": {
+                    "name": "pypi",
+                    "workspace": "*",
+                    "host": "pypi.org",
+                    "ports": [443],
+                    "description": "Python packages"
+                }
+            },
+            {
+                "label": "Allow a CIDR",
+                "method": "POST",
+                "path": "/v1/network/egress-rules",
+                "body": {
+                    "name": "warehouse-vpc",
+                    "workspace": "finance",
+                    "cidr": "10.20.0.0/16",
+                    "ports": [5432]
+                }
+            },
+            {
+                "label": "Check a host",
+                "method": "POST",
+                "path": "/v1/network/egress-rules/check",
+                "body": {
+                    "workspace": "*",
+                    "host": "pypi.org",
+                    "port": 443
+                }
+            },
+            {
+                "label": "Delete rule",
+                "method": "DELETE",
+                "path": "/v1/network/egress-rules/{name}",
+                "body": null
+            }
+        ]
+    },
+    "dataplanes": {
+        "key": "dataplanes",
+        "iac": {"kind": "dataplanes", "id": "name"},
+        "title": "Data planes",
+        "path": "/v1/dataplanes",
+        "listKey": null,
+        "description": "Compute in customers' clusters (Trino, jobs, Spark) that Cairn reaches only through each data plane's outbound tunnel; the data stays in the customer's storage. A data plane whose tunnel is down refuses queries and jobs.",
+        "docs": "administration.html#data-planes",
+        "columns": [
+            "name",
+            "tunnel",
+            "connectors_online",
+            "connection",
+            "description"
+        ],
+        "rowKey": "name",
+        "actions": [
+            {
+                "label": "Add data plane",
+                "method": "POST",
+                "path": "/v1/dataplanes",
+                "body": {
+                    "name": "acme-eu",
+                    "description": "Acme's EU cluster",
+                    "connection": "acme-trino"
+                }
+            },
+            {
+                "label": "Enrolment token",
+                "method": "POST",
+                "path": "/v1/dataplanes/{name}/enrollment-tokens",
+                "body": null
+            },
+            {
+                "label": "Delete data plane",
+                "method": "DELETE",
+                "path": "/v1/dataplanes/{name}",
+                "body": null
+            }
+        ]
+    },
+    "workspace-compute": {
+        "key": "workspace-compute",
+        "iac": {"kind": "workspace_compute", "id": "workspace"},
+        "title": "Workspace compute",
+        "path": "/v1/compute/workspaces",
+        "listKey": "workspaces",
+        "description": "Where each workspace's queries and jobs run: on its data plane in the customer's cluster (customer) or on Cairn's managed pool (managed).",
+        "docs": "administration.html#data-planes",
+        "columns": [
+            "workspace",
+            "compute",
+            "dataplane",
+            "updated_by"
+        ],
+        "rowKey": "workspace",
+        "actions": [
+            {
+                "label": "Set compute",
+                "method": "PUT",
+                "path": "/v1/compute/workspaces/{workspace}",
+                "body": {
+                    "compute": "customer",
+                    "dataplane": "acme-eu"
+                }
+            },
+            {
+                "label": "Clear",
+                "method": "DELETE",
+                "path": "/v1/compute/workspaces/{workspace}",
+                "body": null
+            }
+        ]
+    },
     "siem": {
         "key": "siem",
         "title": "SIEM export",

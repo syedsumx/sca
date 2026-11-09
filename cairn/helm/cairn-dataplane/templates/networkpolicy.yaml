@@ -1,0 +1,128 @@
+{{- if .Values.networkPolicy.enabled }}
+# The connector: in, only Trino's access-control questions from this release's Trino; out, DNS, the gateway, Trino,
+# the Kubernetes API (jobs) and the storage (presigned URLs are signed locally, but the store is not called).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dp.fullname" . }}-connector
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dp.connectorSelector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "dp.trinoSelector" . | nindent 14 }}
+      ports:
+        - { port: 8181, protocol: TCP }
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - {{- if .Values.networkPolicy.gatewayCIDRs }}
+      to:
+        {{- range .Values.networkPolicy.gatewayCIDRs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+      ports:
+        - { port: {{ .Values.networkPolicy.gatewayPort }}, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "dp.trinoSelector" . | nindent 14 }}
+      ports:
+        - { port: 8080, protocol: TCP }
+    {{- if .Values.jobs.enabled }}
+    - {{- if .Values.networkPolicy.kubeAPICIDRs }}
+      to:
+        {{- range .Values.networkPolicy.kubeAPICIDRs }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+      ports:
+        {{- range .Values.networkPolicy.kubeAPIPorts }}
+        - { port: {{ . }}, protocol: TCP }
+        {{- end }}
+    {{- end }}
+---
+{{- if .Values.trino.enabled }}
+# Trino: in, the connector and the jobs' pods; out, DNS, the connector (access control) and the storage.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dp.fullname" . }}-trino
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "dp.trinoSelector" . | nindent 6 }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "dp.connectorSelector" . | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ include "dp.jobsNamespace" . }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: dataplane-job
+      ports:
+        - { port: 8080, protocol: TCP }
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "dp.connectorSelector" . | nindent 14 }}
+      ports:
+        - { port: 8181, protocol: TCP }
+    {{- with .Values.networkPolicy.storageEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+---
+{{- end }}
+{{- if .Values.jobs.enabled }}
+# The jobs' pods (user code): no way in; out, DNS, this data plane's Trino and the storage only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "dp.fullname" . }}-jobs
+  namespace: {{ include "dp.jobsNamespace" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: dataplane-job
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    {{- if .Values.trino.enabled }}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+          podSelector:
+            matchLabels:
+              {{- include "dp.trinoSelector" . | nindent 14 }}
+      ports:
+        - { port: 8080, protocol: TCP }
+    {{- end }}
+    {{- with .Values.networkPolicy.storageEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}

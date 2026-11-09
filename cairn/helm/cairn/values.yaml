@@ -1171,6 +1171,20 @@ cairn:
     resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }
     keepDays: 30
 
+  # Egress for user code (jobs, notebooks, flows' steps, sandboxes, agent apps): with enforce, nothing but Cairn, the
+  # lakehouse and the admins' egress rules (/v1/network/egress-rules) is reachable. Pods get a NetworkPolicy per
+  # workspace (DNS, this namespace, CIDR rules) and leave for hosts through the egress proxy, which logs every refusal.
+  egress:
+    enforce: false
+    # A Secret with the key Cairn signs the runs' proxy credentials with (16+ bytes), shared with the proxy.
+    keySecret: { name: "", key: key }
+    proxy:
+      image: cairn/egress-proxy:0.1.0
+      replicas: 2
+      allowPrivate: false       # allowed host names may resolve to private addresses (hosts on a private network)
+      always: []                # more than this namespace that every run may reach (host[:port] or CIDR)
+      resources: { requests: { cpu: 50m, memory: 64Mi }, limits: { memory: 256Mi } }
+
   notebooks:
     jupyterhub:
       enabled: false

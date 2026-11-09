@@ -1,0 +1,107 @@
+{{- if .Values.trino.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dp.fullname" . }}-trino
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+data:
+  config.properties: |
+    coordinator=true
+    node-scheduler.include-coordinator=true
+    http-server.http.port=8080
+    discovery.uri=http://localhost:8080
+  jvm.config: |
+    -server
+    -Xmx{{ .Values.trino.jvmMaxHeap }}
+    -XX:+UseG1GC
+    -XX:+ExitOnOutOfMemoryError
+    -Djdk.attach.allowAttachSelf=true
+  node.properties: |
+    node.environment=cairn_dataplane
+    node.data-dir=/data/trino
+  # Every access decision is Cairn's: Trino asks the connector, the connector asks Cairn's PDP through the tunnel.
+  # Without an answer (the tunnel down, the connector revoked) the query is refused.
+  access-control.properties: |
+    access-control.name=opa
+    opa.policy.uri=http://{{ include "dp.connectorService" . }}:8181/allow
+    opa.policy.batched-uri=http://{{ include "dp.connectorService" . }}:8181/batch
+    opa.policy.row-filters-uri=http://{{ include "dp.connectorService" . }}:8181/row-filters
+    opa.policy.column-masking-uri=http://{{ include "dp.connectorService" . }}:8181/column-mask
+  {{- range $name, $props := .Values.trino.catalogs }}
+  catalog-{{ $name }}.properties: |
+    {{- $props | nindent 4 }}
+  {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dp.fullname" . }}-trino
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+    {{- include "dp.trinoSelector" . | nindent 4 }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      {{- include "dp.trinoSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dp.labels" . | nindent 8 }}
+        {{- include "dp.trinoSelector" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ toJson .Values.trino.catalogs | sha256sum | trunc 16 }}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: trino
+          image: {{ .Values.trino.image }}
+          {{- with .Values.trino.catalogEnvSecret }}
+          envFrom:
+            - secretRef: { name: {{ . }} }
+          {{- end }}
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /v1/info, port: http }
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.trino.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: config, mountPath: /etc/trino/config.properties, subPath: config.properties }
+            - { name: config, mountPath: /etc/trino/jvm.config, subPath: jvm.config }
+            - { name: config, mountPath: /etc/trino/node.properties, subPath: node.properties }
+            - { name: config, mountPath: /etc/trino/access-control.properties, subPath: access-control.properties }
+            {{- range $name, $_ := .Values.trino.catalogs }}
+            - { name: config, mountPath: /etc/trino/catalog/{{ $name }}.properties, subPath: catalog-{{ $name }}.properties }
+            {{- end }}
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: config
+          configMap: { name: {{ include "dp.fullname" . }}-trino }
+        - { name: data, emptyDir: {} }
+---
+# In-cluster only: the connector (queries from Cairn) and the jobs' pods reach it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "dp.trinoService" . }}
+  labels:
+    {{- include "dp.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "dp.trinoSelector" . | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- end }}

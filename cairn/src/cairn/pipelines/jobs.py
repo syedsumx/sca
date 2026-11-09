@@ -186,6 +186,7 @@ class KubeRunner:
         self.verify: Any = ca_file or (f"{self.SA}/ca.crt" if os.path.exists(f"{self.SA}/ca.crt") else True)
         self.resources = resources or {"requests": {"cpu": "250m", "memory": "512Mi"}, "limits": {"memory": "2Gi"}}
         self.uid = 1000
+        self.pod_labels: dict[str, str] = {}      # egress: the workspace's NetworkPolicy selects pods by these
 
     def _call(self, method: str, path: str, body: Any = None, ok404: bool = False, raw: bool = False) -> Any:
         import httpx
@@ -225,7 +226,7 @@ class KubeRunner:
             self._call("POST", f"/apis/batch/v1/namespaces/{ns}/jobs", {
                 "apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": name, "labels": labels},
                 "spec": {"backoffLimit": 0, "activeDeadlineSeconds": timeout_s + 30, "ttlSecondsAfterFinished": 600,
-                         "template": {"metadata": {"labels": labels}, "spec": pod}}})
+                         "template": {"metadata": {"labels": {**labels, **self.pod_labels}}, "spec": pod}}})
             end = time.time() + timeout_s + 300
             while True:
                 job = self._call("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
@@ -291,6 +292,7 @@ class Jobs:
         self.engine, self.runner, self.allowed, self.is_operator = engine, runner, allowed, is_operator
         self.mint_token, self.trino_url, self.notify, self.audit = mint_token, trino_url, notify, audit
         self.trino_ca = open(trino_ca_file).read() if trino_ca_file else ""   # Trino's CA, for a private certificate
+        self.egress = None            # cairn.network.egress.Egress: the owner's workspace's egress rules, when enforced
         self.max_output = int(os.environ.get("CAIRN_JOBS_MAX_OUTPUT_BYTES", str(2 << 20)))
         self.keep_days = int(os.environ.get("CAIRN_JOBS_KEEP_DAYS", "30"))
         # Runs happen beside the scheduler's tick and the API's request, a few at a time.
@@ -458,6 +460,15 @@ class Jobs:
         if token:                                          # Trino configured: the run reads as its owner
             env["CAIRN_TRINO_TOKEN"] = token
             env["CAIRN_TRINO_URL"] = self.trino_url
+        if self.egress is not None and self.egress.enforced:   # no rule, no way out but Cairn and the lakehouse
+            from cairn.network.egress import EgressError
+
+            workspace = self.egress.workspace_of(owner)
+            try:
+                env.update(self.egress.proxy_env(workspace, rid, timeout_s + 300))
+                runner = self.egress.contain(runner, workspace)
+            except EgressError as e:
+                raise JobError(str(e), e.status)
         files = ({"job.ipynb": json.dumps(with_params(json.loads(source), params or {}))}
                  if kind == "notebook" else {"job.py": source})
         if token and self.trino_ca:
