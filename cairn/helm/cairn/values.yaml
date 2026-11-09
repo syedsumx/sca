@@ -1205,6 +1205,34 @@ cairn:
       # Network policy peers that may reach the models (default: Cairn's API pods in this release's namespace).
       ingressFrom: []
       resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }
+    # Model servers the chart runs (any registered version, e.g. one a Spark training job registered): a
+    # Deployment of MLflow's model server per item, fetching models:/<model>/<version> (or @<alias>) from this
+    # MLflow, no store key in the pod. Cairn's API forwards predictions for <model> to it (USE_ML_MODEL checked)
+    # and is the only thing a NetworkPolicy lets reach it. For models scaled with their load, use
+    # servingKubernetes (deployments made from Cairn) instead.
+    modelServers:
+      trackingUri: ""      # where the servers fetch models; default: this release's MLflow
+      image: ""            # default: cairn.mlflow.image; an image of your own for models needing other libraries
+      resources: { requests: { cpu: 250m, memory: 512Mi }, limits: { memory: 2Gi } }
+      items: []
+      #  - { name: churn, model: churn, version: "3", replicas: 2, workers: 2 }
+      #  - { name: spend, model: spend-spark, alias: champion }
+    # Spark training on a schedule: spark-submit in the Spark image as a CronJob (a Job without a schedule) in
+    # cairn.spark's namespace (needs cairn.spark.enabled). The driver signs in with its service account's projected
+    # token (bind the account to a pipeline user: /v1/workload-identity/bindings); there is no Secret. Runs and
+    # models go through Cairn's MLflow (cairn_spark.mlflow.use_mlflow), owned by that user, with table lineage.
+    trainingJobs:
+      cairnUrl: ""         # Cairn's API as the job reaches it; default: this release's API Service
+      items: []
+      #  - name: churn-weekly
+      #    schedule: "17 3 * * 1"    # cron; empty: a Job that runs once
+      #    script: |                  # the program (a ConfigMap), or main: a .py path in the image
+      #      from cairn_spark.mlflow import use_mlflow
+      #      ...
+      #    master: local[2]           # Spark in the pod; sparkArgs: ["--conf", "..."]; args: [...]
+      #    serviceAccount: ""         # default: cairn.spark.driverServiceAccount
+      #    env: {}                    # no secrets (refused)
+      #    resources: { requests: { cpu: "2", memory: 4Gi }, limits: { memory: 6Gi } }
     resources:
       requests: { cpu: 100m, memory: 512Mi }
       limits: { memory: 2Gi }

@@ -466,7 +466,7 @@ jobs:
 
   terraform-modules:
     # Cairn's platform as Terraform (deploy/terraform): every module and example formatted, linted and validated;
-    # modules/cairn applied on a kind cluster (examples/kind), then the API's /health asked.
+    # modules/cairn applied on a kind cluster (examples/kind): the API, PDP and gateway Deployments Ready, each /health asked.
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -513,10 +513,17 @@ jobs:
           export TF_VAR_service_token
           terraform init -input=false
           terraform apply -auto-approve -input=false
-          kubectl -n cairn rollout status deploy/cairn-api --timeout=600s
+          # The API, the policy decision point and the agent gateway (its identity on a volume) all become Ready.
+          for d in cairn-api cairn-pdp cairn-gateway; do kubectl -n cairn rollout status "deploy/$d" --timeout=600s; done
+          kubectl -n cairn wait --for=condition=Available deploy/cairn-api deploy/cairn-pdp deploy/cairn-gateway --timeout=120s
+          kubectl -n cairn get deploy,pods -o wide
           kubectl -n cairn port-forward svc/cairn-api 18080:8800 >"$RUNNER_TEMP/pf.log" 2>&1 &
-          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18080/health && break; sleep 2; done
-          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
+          kubectl -n cairn port-forward svc/cairn-pdp 18081:8810 >"$RUNNER_TEMP/pf-pdp.log" 2>&1 &
+          kubectl -n cairn port-forward svc/cairn-gateway 18082:8820 >"$RUNNER_TEMP/pf-gw.log" 2>&1 &
+          for p in 18080 18081 18082; do
+            for i in $(seq 1 30); do curl -fsS "http://127.0.0.1:$p/health" && break; sleep 2; done
+            curl -fsS "http://127.0.0.1:$p/health" | grep -q '"status":"ok"'
+          done
           terraform plan -detailed-exitcode -input=false     # applied: nothing left to change
           terraform destroy -auto-approve -input=false
       - name: Cluster state on failure
@@ -525,6 +532,8 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl -n cairn describe pods | tail -80 || true
           kubectl -n cairn logs deploy/cairn-api --tail=200 || true
+          kubectl -n cairn logs deploy/cairn-pdp --tail=100 || true
+          kubectl -n cairn logs deploy/cairn-gateway --tail=100 || true
 
   ml:
     runs-on: ubuntu-latest
@@ -802,6 +811,11 @@ jobs:
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_serving_k8s.py | tee "$RUNNER_TEMP/models.log"
           ! grep -q "skipped" "$RUNNER_TEMP/models.log"
+          # The chart's Spark training Job and model server (ml-workloads.yaml): trained in a pod as its service
+          # account's user, registered through Cairn, served by the chart's Deployment, reached only by Cairn.
+          CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_chart_kind.py | tee "$RUNNER_TEMP/ml-chart.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/ml-chart.log"
       - name: Cluster state on failure
         if: failure()
         run: |
@@ -938,7 +952,9 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.catalog.replicas=3 --set cairn.catalog.database.existingSecret=cairn-catalog-db --set cairn.ha.spreadReplicas=true" \
               "--set cairn.store.enabled=true --set cairn.store.cluster.enabled=true --set cairn.store.metadata.secretName=cairn-store-meta --set cairn.store.tlsSecret=cairn-store-tls --set cairn.store.cluster.mutualTls=true" \
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
-              "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca"; do
+              "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
+              "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
@@ -972,6 +988,12 @@ jobs:
           # Trino without TLS is refused unless asked for explicitly.
           ! helm template cairn helm/cairn --set cairn.store.enabled=true --set cairn.catalog.enabled=true \
               --set cairn.trino.enabled=true >/dev/null 2>&1
+          # Training jobs without Spark, or with a secret in their environment, are refused.
+          ! helm template cairn helm/cairn --set cairn.mlflow.enabled=true --set cairn.mlflow.database.secretName=x \
+              --set cairn.mlflow.artifacts.credentialsSecret=x --set cairn.mlflow.trainingJobs.items[0].name=t \
+              --set cairn.mlflow.trainingJobs.items[0].main=/t.py >/dev/null 2>&1
+          ! helm template cairn helm/cairn -f helm/cairn/ci/ml-workloads-values.yaml \
+              --set cairn.mlflow.trainingJobs.items[0].env.API_TOKEN=x >/dev/null 2>&1
           helm template agent helm/cairn-remote-agent --set enrollment.existingSecret=cairn-agent-enrollment \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
 

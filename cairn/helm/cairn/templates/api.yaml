@@ -111,7 +111,11 @@
 {{- if .Values.cairn.mlflow.enabled }}
 {{- $mlCtx := dict "root" $ "component" "mlflow" "cfg" .Values.cairn.mlflow }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_MLFLOW_URL" "value" (printf "http://%s:5000" (include "cairn.componentName" $mlCtx))) }}
-{{- with .Values.cairn.mlflow.serving }}
+{{- $mlServing := deepCopy (.Values.cairn.mlflow.serving | default dict) }}
+{{- range (default dict .Values.cairn.mlflow.modelServers).items | default list }}
+{{- $_ := set $mlServing (toString .model) (printf "http://%s:8080" (include "cairn.componentName" (dict "root" $ "component" (printf "model-%s" .name)))) }}
+{{- end }}
+{{- with $mlServing }}
 {{- $scimEnv = append $scimEnv (dict "name" "CAIRN_ML_SERVING" "value" (toJson .)) }}
 {{- end }}
 {{- with .Values.cairn.mlflow.servingKubernetes }}

@@ -97,6 +97,11 @@ spec:
         - podSelector:
             matchLabels:
               {{- include "cairn.selectorLabels" (dict "root" $ "component" "api" "cfg" .Values.cairn.api) | nindent 14 }}
+        {{- if (default dict .Values.cairn.mlflow.modelServers).items }}
+        # The chart's model servers (ml-workloads.yaml) fetch their model too.
+        - podSelector:
+            matchExpressions: [{ key: cairn.io/model-server, operator: Exists }]
+        {{- end }}
         {{- if .Values.cairn.mlflow.servingKubernetes.enabled }}
         # Model servers fetch their model (artifacts served by MLflow) when they start.
         - namespaceSelector:

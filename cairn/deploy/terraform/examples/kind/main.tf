@@ -73,8 +73,8 @@ module "cairn" {
     cairn = {
       core          = { url = "http://cairn-core.invalid:8080", frontendUrl = "http://cairn-core.invalid:9002" }
       api           = { replicas = 1, autoscaling = { enabled = false } }
-      pdp           = { enabled = false }
-      gateway       = { enabled = false }
+      pdp           = { replicas = 1, autoscaling = { enabled = false }, pdb = { enabled = false } }
+      gateway       = { replicas = 1, autoscaling = { enabled = false }, pdb = { enabled = false } }
       mcp           = { enabled = false }
       scheduler     = { enabled = false }
       coreProxy     = { enabled = false }

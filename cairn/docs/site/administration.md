@@ -2294,6 +2294,34 @@ with mlflow.start_run():
   file was tracked as its user: the run, the registered model's owner, and lineage from the table. Without a token
   it was refused before reaching MLflow. Training with `pyspark.ml` inside the Spark image isn't run in CI yet.
 
+### Model servers and Spark training in the chart
+
+Besides deployments made from Cairn, the chart can run fixed model servers and scheduled Spark training
+(`templates/ml-workloads.yaml`, with `cairn.mlflow.enabled`).
+
+- **Model servers** (`cairn.mlflow.modelServers.items`: `name`, `model`, `version` or `alias`, `replicas`,
+  `workers`, `resources`, `image`). Each is a Deployment and a Service running MLflow's model server for
+  `models:/<model>/<version>` (or `@<alias>`), fetched from this release's MLflow (`trackingUri` to change it), which
+  serves the artifacts: no store key, no Kubernetes token, a non-root user with a read-only root file system. Cairn's
+  API is told where they are (`CAIRN_ML_SERVING`, merged with `cairn.mlflow.serving`), so predictions go through
+  `POST /v1/ml/serve/<model>/invocations` with `USE_ML_MODEL` checked and every call logged. With
+  `cairn.networkPolicy.enabled`, only the API's pods reach them, and MLflow admits them to fetch their model. A model
+  served twice is refused.
+- **Spark training** (`cairn.mlflow.trainingJobs.items`: `name`, `schedule`, `script` or `main`, `master`,
+  `sparkArgs`, `args`, `env`, `serviceAccount`, `resources`, `image`; needs `cairn.spark.enabled`). Each is a CronJob
+  (a Job without `schedule`) in `cairn.spark.namespace` running `spark-submit` in the Spark image, the program from a
+  ConfigMap (`script`) or the image (`main`). The pod signs in to Cairn with its service account's token projected
+  for Cairn's audience (`CAIRN_WORKLOAD_TOKEN_FILE`): bind the account to a pipeline user at
+  `/v1/workload-identity/bindings`. There is no Secret, and `env` names that look like secrets are refused.
+  `cairn_spark.mlflow.use_mlflow()` points MLflow at Cairn as that user, so runs and registered models are the
+  user's, with `log_table_input` giving the model its lineage. Training pods take no connections.
+- **Tested** on kind (`tests/test_ml_chart_kind.py`, CI job `spark-kind`): the chart's Job trained with pyspark.ml in
+  the Spark image, signed in by its service account only (no Secret volume), and registered the model through
+  Cairn's MLflow as the bound user, with lineage from its table; the chart's model server then served that version,
+  predictions went through Cairn for the owner and were refused (403) to someone without `USE_ML_MODEL`, and a pod
+  that is not Cairn's API could not reach it. Every profile is rendered and validated with kubeconform (CI job
+  `helm`), and training without Spark or with a secret in `env` is refused.
+
 ## Fine-tuning on governed data
 
 Cairn tunes a language model on examples read from your data and serves it, all inside Cairn.
@@ -3244,6 +3272,27 @@ On this node, throughput stops growing at about 10 concurrent clients; past that
 ```bash
 python tests/load/loadtest.py --api https://cairn.example.com/cairn/api --token "$TOKEN" --users 10 --duration 30
 ```
+
+**At scale** (`tests/test_load_scale.py`, CI job `python`, published as the `load-scale` artifact): three `cairn pdp`
+replicas driven open-loop at 2,000 decisions a second for 60 seconds, latency counted from each request's scheduled
+time, once with a working set the decision cache holds and once with every question new; and `cairn gateway` with 100
+real agents (in pools of 50) uploading 1 GiB of sealed metadata in one run. Cairn Core is a stand-in that answers at
+once, so the numbers are Cairn's own work. To drive your own deployment:
+
+```bash
+python tests/load/scale.py pdp --url http://pdp-1:8810 --url http://pdp-2:8810 --token-file svc.token \
+    --rate 2000 --duration 60 --mode uncached --json pdp.json
+python tests/load/scale.py gateway --url https://gateway.example.com --db "$GATEWAY_DB_URL" \
+    --agents 100 --megabytes 1024 --json gateway.json
+```
+
+Measured on a shared 4-vCPU machine running the driver and the servers side by side: cached decisions kept up with
+2,000 a second (about 1,990 answered) with p99 between 0.4 and 1.9 s, and p99 18 ms at 300 a second; uncached
+decisions reached about 100 to 270 a second, because each new question reads about 15 aspects from Cairn Core; the
+gateway took 1.09 GiB from 100 agents in 167 s (6.7 MiB/s, batch p99 6.1 s), every MCP accepted and forwarded. The
+targets (p99 under 5 ms cached and 25 ms uncached at 2,000 a second) are not met on such a machine; run the PDP on
+nodes of its own, with more replicas, and cache subject and resource attributes close to it.
+
 
 The command exits non-zero if a path breaks its limit. Pass `--limits your-limits.yaml` to check your own targets, and `--json out.json` to keep the measurements.
 

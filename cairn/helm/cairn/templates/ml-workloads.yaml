@@ -1,0 +1,261 @@
+{{- /* Machine learning workloads the chart runs (L7): model servers for registered versions, and Spark training jobs.
+       Model servers: MLflow's model server per entry of cairn.mlflow.modelServers.items, fetching
+       models:/<model>/<version> from MLflow (which serves the artifacts: no store key in these pods); Cairn's API
+       forwards predictions to them (CAIRN_ML_SERVING, USE_ML_MODEL checked) and is the only thing that reaches them.
+       Training: spark-submit in the Spark image per entry of cairn.mlflow.trainingJobs.items, as a CronJob (or a Job
+       without a schedule) in cairn.spark's namespace. The job signs in to Cairn with its service account's
+       projected token (workload identity: no Secret), and tracks runs and registers models through Cairn's MLflow
+       (cairn_spark.mlflow), so the model is owned by the job's Cairn user, with lineage from its tables. */}}
+{{- $ml := .Values.cairn.mlflow }}
+{{- $servers := (default dict $ml.modelServers).items | default list }}
+{{- $jobs := (default dict $ml.trainingJobs).items | default list }}
+{{- if and (or $servers $jobs) (not $ml.enabled) }}
+{{- fail "cairn.mlflow.modelServers / trainingJobs need cairn.mlflow.enabled" }}
+{{- end }}
+{{- $mlCtx := dict "root" $ "component" "mlflow" "cfg" $ml }}
+{{- $tracking := $ml.modelServers.trackingUri | default (printf "http://%s:5000" (include "cairn.componentName" $mlCtx)) }}
+{{- $seen := dict }}
+{{- range $servers }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$" (toString .name)) }}{{ fail (printf "cairn.mlflow.modelServers.items: name %q: lowercase letters, digits and -, up to 32" (toString .name)) }}{{ end }}
+{{- if not .model }}{{ fail (printf "cairn.mlflow.modelServers.items[%s].model: the registered model" .name) }}{{ end }}
+{{- if not (or .version .alias) }}{{ fail (printf "cairn.mlflow.modelServers.items[%s]: a version or an alias" .name) }}{{ end }}
+{{- if hasKey $seen (toString .model) }}{{ fail (printf "cairn.mlflow.modelServers.items: model %s is served twice" .model) }}{{ end }}
+{{- $_ := set $seen (toString .model) true }}
+{{- $ctx := dict "root" $ "component" (printf "model-%s" .name) "cfg" $ml }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+    cairn.io/model-server: {{ .name | quote }}
+spec:
+  replicas: {{ .replicas | default 1 }}
+  selector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "cairn.componentLabels" $ctx | nindent 8 }}
+        cairn.io/model-server: {{ .name | quote }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with $.Values.global.cairn.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: model
+          image: {{ .image | default $ml.modelServers.image | default (printf "%s:%s" $ml.image.repository $ml.image.tag) | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["mlflow", "models", "serve", "-m", {{ printf "models:/%s%s" .model (ternary (printf "@%s" (toString .alias)) (printf "/%s" (toString .version)) (not (empty .alias))) | quote }},
+                    "--env-manager", "local", "--host", "0.0.0.0", "--port", "8080",
+                    "--workers", {{ toString (.workers | default 1) | quote }}]
+          env:
+            - { name: MLFLOW_TRACKING_URI, value: {{ $tracking | quote }} }
+            - { name: HOME, value: /tmp }
+          ports:
+            - { name: http, containerPort: 8080 }
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 3
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 60          # fetching and loading the model can take minutes
+          resources:
+            {{- toYaml (.resources | default $ml.modelServers.resources | default dict) | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "cairn.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+{{- if $.Values.cairn.networkPolicy.enabled }}
+---
+# Only Cairn's API reaches the model: predictions go through Cairn's sign-in and USE_ML_MODEL.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "cairn.selectorLabels" $ctx | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "cairn.selectorLabels" (dict "root" $ "component" "api" "cfg" $.Values.cairn.api) | nindent 14 }}
+      ports:
+        - port: http
+{{- end }}
+{{- end }}
+{{- if $jobs }}
+{{- $sp := .Values.cairn.spark }}
+{{- if not $sp.enabled }}{{ fail "cairn.mlflow.trainingJobs need cairn.spark.enabled (its namespace, its drivers' service account, workload identity)" }}{{ end }}
+{{- $ns := $sp.namespace | default .Release.Namespace }}
+{{- $apiCtx := dict "root" $ "component" "api" "cfg" .Values.cairn.api }}
+{{- $cairnUrl := $ml.trainingJobs.cairnUrl | default (printf "http://%s.%s.svc:%v" (include "cairn.componentName" $apiCtx) .Release.Namespace (.Values.cairn.api.port | default 8800)) }}
+{{- range $jobs }}
+{{- if not (regexMatch "^[a-z0-9]([a-z0-9-]{0,40}[a-z0-9])?$" (toString .name)) }}{{ fail (printf "cairn.mlflow.trainingJobs.items: name %q: lowercase letters, digits and -, up to 42" (toString .name)) }}{{ end }}
+{{- if eq (empty .script) (empty .main) }}{{ fail (printf "cairn.mlflow.trainingJobs.items[%s]: script (the program) or main (a path in the image), one of them" .name) }}{{ end }}
+{{- $jn := .name }}
+{{- range $k, $v := (.env | default dict) }}
+{{- if regexMatch "(?i)token|secret|password|credential|key" $k }}{{ fail (printf "cairn.mlflow.trainingJobs.items[%s].env.%s: no secrets here; the job signs in with its service account" $jn $k) }}{{ end }}
+{{- end }}
+{{- $name := printf "%s-train-%s" (include "cairn.fullname" $) .name | trunc 52 | trimSuffix "-" }}
+{{- $labels := dict "app.kubernetes.io/instance" $.Release.Name "app.kubernetes.io/component" "ml-training" "cairn.io/training-job" .name }}
+{{- if .script }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+    {{- toYaml $labels | nindent 4 }}
+data:
+  train.py: {{ .script | quote }}
+{{- end }}
+{{- $podSpec := include "cairn.mlTrainingPod" (dict "root" $ "job" . "name" $name "labels" $labels "cairnUrl" $cairnUrl "sa" ($sp.driverServiceAccount | default "svc-spark")) }}
+---
+{{- if .schedule }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+    {{- toYaml $labels | nindent 4 }}
+spec:
+  schedule: {{ .schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .backoffLimit | default 1 }}
+      activeDeadlineSeconds: {{ .timeoutSeconds | default 7200 }}
+      template:
+        {{- $podSpec | nindent 8 }}
+{{- else }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+    {{- toYaml $labels | nindent 4 }}
+spec:
+  backoffLimit: {{ .backoffLimit | default 1 }}
+  activeDeadlineSeconds: {{ .timeoutSeconds | default 7200 }}
+  ttlSecondsAfterFinished: {{ .ttlSecondsAfterFinished | default 86400 }}
+  template:
+    {{- $podSpec | nindent 4 }}
+{{- end }}
+{{- end }}
+{{- if .Values.cairn.networkPolicy.enabled }}
+---
+# Training pods take no connections: they only call out (Cairn's API, the catalog and the store, as the job).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "cairn.fullname" $ }}-ml-training
+  namespace: {{ $ns }}
+  labels:
+    {{- include "cairn.labels" $ | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/instance: {{ .Release.Name | quote }}, app.kubernetes.io/component: ml-training }
+  policyTypes: [Ingress]
+  ingress: []
+{{- end }}
+{{- end }}
+
+{{- define "cairn.mlTrainingPod" -}}
+{{- $j := .job }}
+{{- $root := .root }}
+metadata:
+  labels:
+    {{- toYaml .labels | nindent 4 }}
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ $j.serviceAccount | default .sa }}
+  automountServiceAccountToken: false
+  {{- with $root.Values.global.cairn.imagePullSecrets }}
+  imagePullSecrets:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 185                    # the Spark image's user
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: train
+      image: {{ $j.image | default $root.Values.cairn.spark.image | default (include "cairn.namedImage" (dict "root" $root "name" "spark")) | quote }}
+      imagePullPolicy: IfNotPresent
+      command: ["/opt/spark/bin/spark-submit", "--master", {{ $j.master | default "local[2]" | quote }},
+                {{- range $j.sparkArgs | default list }} {{ . | quote }},{{ end }}
+                {{ ternary "/job/train.py" (toString $j.main) (not (empty $j.script)) | quote }}
+                {{- range $j.args | default list }}, {{ . | quote }}{{ end }}]
+      env:
+        - { name: CAIRN_URL, value: {{ .cairnUrl | quote }} }
+        # The service account's token, projected for Cairn's audience and exchanged at Cairn: no Secret.
+        - { name: CAIRN_WORKLOAD_TOKEN_FILE, value: /var/run/secrets/cairn/token }
+        - { name: HOME, value: /tmp }
+        {{- range $k, $v := ($j.env | default dict) }}
+        - { name: {{ $k }}, value: {{ $v | toString | quote }} }
+        {{- end }}
+      resources:
+        {{- toYaml ($j.resources | default (dict "requests" (dict "cpu" "1" "memory" "2Gi") "limits" (dict "memory" "4Gi"))) | nindent 8 }}
+      securityContext:
+        allowPrivilegeEscalation: false
+        capabilities: { drop: [ALL] }
+      volumeMounts:
+        - { name: cairn-identity, mountPath: /var/run/secrets/cairn, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+        {{- if $j.script }}
+        - { name: job, mountPath: /job, readOnly: true }
+        {{- end }}
+  volumes:
+    - name: cairn-identity
+      projected:
+        sources:
+          - serviceAccountToken: { audience: {{ $j.audience | default "cairn" | quote }}, expirationSeconds: 3600, path: token }
+    - name: tmp
+      emptyDir: {}
+    {{- if $j.script }}
+    - name: job
+      configMap: { name: {{ .name }} }
+    {{- end }}
+{{- end -}}
