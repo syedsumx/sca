@@ -41,7 +41,7 @@ func (p *cairnProvider) Metadata(_ context.Context, _ provider.MetadataRequest, 
 
 func (p *cairnProvider) Schema(_ context.Context, _ provider.SchemaRequest, resp *provider.SchemaResponse) {
 	resp.Schema = schema.Schema{
-		Description: "Cairn: pipes, streams, derived tables and table maintenance, through Cairn's API as the token's user.",
+		Description: "Cairn: every configurable resource (its registry's types), through Cairn's API as the token's user.",
 		Attributes: map[string]schema.Attribute{
 			"url":     schema.StringAttribute{Optional: true, Description: "Cairn's API (default: CAIRN_URL)."},
 			"token":   schema.StringAttribute{Optional: true, Sensitive: true, Description: "A Cairn token (default: CAIRN_TOKEN, or the file CAIRN_TOKEN_FILE)."},

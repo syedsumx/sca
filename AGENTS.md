@@ -17,7 +17,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `src/cairn/dataaccess/` | Trino access (OPA protocol), shares, clean rooms, data apps, warehouses | Python |
 | `src/cairn/sqlworkspace/` | Saved queries, dashboards, alerts, SQL workflows, procedures, git folders | Python |
 | `src/cairn/pipelines/` | Pipes, streams, derived tables, maintenance, Delta, vectors, DR | Python |
-| `src/cairn/iac/` | `cairn bundle` (resources from git) | Python |
+| `src/cairn/iac/` | Everything as code: the resource registry (`registry.py`, `kinds.py`), `cairn bundle`, `cairn export`, `/v1/iac`, the provider's generator (`terraform.py`) | Python |
 | `src/cairn/ml/`, `ai/`, `agent/`, `context/` | MLflow integration, feature tables, AI functions, assistants, context agents | Python |
 | `src/cairn/quality/`, `marketplace/`, `identity/`, `notify/`, `export/` | Quality, access requests, SSO/SCIM, notifications, metadata export | Python |
 | `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0131) | Python |
@@ -26,7 +26,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `ontology/` | Cairn Ontology: the ontology compiler (a port of NVIDIA Auto Ontology's; see `ontology/NOTICE`) | Rust |
 | `spark/` | `cairn-spark`: governed Spark submit, Kubernetes pod templates | Python |
 | `airflow-provider/` | Airflow provider for Cairn | Python |
-| `terraform-provider-cairn/` | Terraform provider | Go |
+| `terraform-provider-cairn/` | Terraform provider; its resource table `zz_generated_kinds.go` is generated from the registry | Go |
 | `sdks/js`, `sdks/java` | Clients for the main APIs (no dependencies; `tests/test_sdk_clients.py`) | JavaScript, Java |
 | `ui/` | Web UI and micro-frontend | TypeScript, React |
 | `core/`, `plugins/` | Cairn Core (white-labelled DataHub engine) patches and Java plugins | Java |
@@ -34,6 +34,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `deploy/hosting/tenant.sh` | Hosted tenants: one release per namespace | Bash |
 | `deploy/hetzner/` | Hetzner cluster: node prep, k3s, platform services, Terraform LB, CI smoke test | Bash, HCL |
 | `deploy/versions/` | Pinned versions for the upgrade matrix | JSON |
+| `deploy/terraform/` | The platform as Terraform: `modules/cairn` (the chart), `modules/hetzner`, `modules/aws`, `gcp`, `azure`; `examples/` | HCL |
 | `tests/` | Python tests, unit and end-to-end | Python |
 | `docs/site/` | In-product documentation (also `de/ es/ fr/ ja/`) | Markdown |
 
@@ -55,11 +56,18 @@ Run everything from `cairn/`.
 - **Helm:** `helm lint helm/cairn` and `helm template` with each values profile; CI runs kubeconform.
 - **Terraform provider:** `gofmt -l . && go vet ./...` in `terraform-provider-cairn/`; the end-to-end test is
   `tests/test_terraform_provider.py`.
+- **Everything as code:** a new configurable API (create and delete) needs a `Kind` in `src/cairn/iac/kinds.py` (or
+  a reasoned entry in `tests/test_iac_coverage.py`'s `EXCLUDED`), then `python -m cairn.iac.terraform` to regenerate
+  the provider (CI fails if it is stale). Tests: `tests/test_iac_coverage.py`, `tests/test_iac_roundtrip.py`, and
+  the Terraform ones in `tests/test_terraform_provider.py`.
+- **Terraform modules:** in `deploy/terraform`, `terraform fmt -check -recursive`, `tflint --recursive --config
+  "$PWD/.tflint.hcl"`, and `terraform init -backend=false && terraform validate` in each module and example; CI
+  job `terraform-modules` also applies `examples/kind` on kind.
 - **Shell:** `shellcheck -S warning` on scripts in `deploy/`.
 - **Hetzner setup:** `deploy/hetzner/ci/k3s-smoke.sh` runs the whole setup on one Linux machine (sudo,
   internet); CI runs it as job `hetzner`.
 
-CI is `.github/workflows/cairn-ci.yml` (15 jobs); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
+CI is `.github/workflows/cairn-ci.yml` (16 jobs); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
 
 ## Conventions
 

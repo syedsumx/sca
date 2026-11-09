@@ -69,8 +69,8 @@ permissions and audit apply:
 | `cairn_form` | `forms` | A governance form: questions asked of the owners of the assets that match a condition |
 | `cairn_budget` | `budgets` | A cost budget for a scope (all, a domain, an owner, a platform, tables, a warehouse or AI), with alerts at thresholds and on the forecast |
 | `cairn_cost_centre` | `cost_centres` | A chargeback cost centre: the teams (groups) whose use it pays for |
-| `cairn_marketplace_listing` | `marketplace_listings` | An agent or skill listed in the marketplace, with who approves access requests and for which purposes |
 | `cairn_notification_route` | `notification_routes` | A notification route: events of these types (in these domains) to Slack, Teams, a webhook, a ticketing system, Kafka, EventBridge or Pub/Sub |
+| `cairn_marketplace_listing` | `marketplace_listings` | An agent or skill listed in the marketplace, with who approves access requests and for which purposes |
 
 **Compute and jobs**
 
@@ -97,6 +97,22 @@ permissions and audit apply:
 | `cairn_data_app` | `data_apps` | A data app: one Cairn starts (a command, from git or on Kubernetes) or one running elsewhere (a URL), reached only through Cairn |
 
 <!-- END GENERATED RESOURCES -->
+
+The list and the provider's resource table (`internal/provider/zz_generated_kinds.go`) are generated from Cairn's
+resource registry (`src/cairn/iac/registry.py` and `kinds.py` in the Cairn repository) by
+`python -m cairn.iac.terraform`; Cairn's CI fails when they are stale. One engine (`resource.go`) reads and writes
+them all. A few rules hold for every type:
+
+- **Children** live under a parent: a secret's, a secret scope access entry's and a volume grant's id is
+  `<parent>/<id>` (`terraform import cairn_secret.db finance-db/password`).
+- **Write-only values.** A secret's `value` is a write-only attribute (Terraform 1.11 or later): sent to Cairn,
+  never stored in the state, never read back. Raise `value_version` to send it again.
+- **Settings that always exist** (`cairn_agent_abuse_settings`, `cairn_agent_intent_settings`): destroying one
+  only removes it from the state.
+- **Created once.** A type Cairn cannot change in place (a secret scope, a mirror, a serving table, a workload
+  binding) is replaced when any of its attributes changes.
+- **Import** takes what Cairn holds, so a plan right after an import shows no change. `cairn export --format
+  terraform` writes the resource and `import` blocks of a whole workspace.
 
 Warehouses are part of the deployment (Helm values `cairn.trino.warehouses`, or Terraform's `helm_release`);
 who may use one is a `cairn_policy` granting `USE_WAREHOUSE` on `urn:li:warehouse:<name>`.
