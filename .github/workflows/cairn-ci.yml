@@ -883,6 +883,11 @@ jobs:
             https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
           (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
           sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          # kindnet enforces NetworkPolicy (the egress test) through the kernel's netfilter queue; a runner image
+          # without the module loaded lets every connection through.
+          sudo modprobe nfnetlink_queue || true
+          sudo modprobe xt_NFQUEUE || true
+          lsmod | grep -E 'nfnetlink_queue|NFQUEUE' || echo "no netfilter queue module on this runner"
           kind create cluster --name cairn --image kindest/node:v1.33.1 --wait 120s
           kubectl cluster-info --context kind-cairn
       - name: Load the images into the cluster

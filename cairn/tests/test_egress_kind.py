@@ -133,7 +133,9 @@ def test_a_jobs_pod_reaches_only_what_its_rules_allow(cluster, tmp_path):
     status, output, log, error = jobs.contained(OWNER, "python", CODE, cluster["ips"], 180, "egress", "kindrun1")
     assert status == "succeeded", (error, log)
     res = json.loads(output.strip().splitlines()[-1])
-    assert res["direct_blocked"] != "connected", f"the cluster's CNI does not enforce NetworkPolicy: {res}"
+    if res["direct_blocked"] == "connected":
+        cni = kubectl("-n", "kube-system", "logs", "-l", "app=kindnet", "--tail=80", check=False)
+        raise AssertionError(f"the cluster's CNI does not enforce NetworkPolicy: {res}\nkindnet:\n{cni}")
     assert res == {"allowed": 200, "blocked": 403, "direct_allowed": "connected", "direct_blocked": res["direct_blocked"]}, res
     pol = json.loads(kubectl("-n", JOBS, "get", "networkpolicy", "cairn-egress-all", "-o", "json"))
     assert pol["spec"]["podSelector"]["matchLabels"] == {"cairn.io/user-code": "true", "cairn.io/workspace": "all"}
