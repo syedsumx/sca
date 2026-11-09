@@ -342,8 +342,29 @@ pub struct Engine {
     pub llm: Arc<Llm>,
     pub settings: Settings,
     active: Mutex<Option<(String, Arc<AtomicBool>)>>,
+    progress: Mutex<Option<Progress>>,
     pub runs_completed: AtomicUsize,
     pub runs_failed: AtomicUsize,
+}
+
+/// How far the active run is (kept in memory: a run that is not active has its final statistics instead).
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Progress {
+    pub run_id: String,
+    /// `tables`, `relationships`, `metrics`, `bridges` or `publishing`.
+    pub phase: String,
+    pub tables_total: usize,
+    pub tables_done: usize,
+    /// How many tables the run's scope names (None: every table).
+    pub scope: Option<usize>,
+}
+
+/// Upper bound of model calls for one table processed (column descriptions, foreign keys, Terms, synonyms).
+pub const CHAT_CALLS_PER_TABLE: usize = 4;
+
+/// The tables of a run's scope (`stats.scope`): None when the run covers every table.
+fn run_scope(stats: &Value) -> Option<BTreeSet<String>> {
+    stats.get("scope").and_then(|s| s.as_array()).map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
 }
 
 #[derive(Debug)]
@@ -356,7 +377,77 @@ pub enum StartError {
 
 impl Engine {
     pub fn new(store: Store, llm: Arc<Llm>, settings: Settings) -> Engine {
-        Engine { store, llm, settings, active: Mutex::new(None), runs_completed: AtomicUsize::new(0), runs_failed: AtomicUsize::new(0) }
+        Engine {
+            store,
+            llm,
+            settings,
+            active: Mutex::new(None),
+            progress: Mutex::new(None),
+            runs_completed: AtomicUsize::new(0),
+            runs_failed: AtomicUsize::new(0),
+        }
+    }
+
+    /// The active run's progress, when `run_id` is the active run.
+    pub fn progress(&self, run_id: &str) -> Option<Progress> {
+        self.progress.lock().expect("progress").as_ref().filter(|p| p.run_id == run_id).cloned()
+    }
+
+    fn set_phase(&self, run_id: &str, phase: &str) {
+        if let Some(p) = self.progress.lock().expect("progress").as_mut().filter(|p| p.run_id == run_id) {
+            p.phase = phase.to_string();
+        }
+    }
+
+    fn table_done(&self, run_id: &str) {
+        if let Some(p) = self.progress.lock().expect("progress").as_mut().filter(|p| p.run_id == run_id) {
+            p.tables_done += 1;
+        }
+    }
+
+    /// What a run would do, before it starts: how many tables it compiles (the others are reused from the
+    /// published run) and an upper bound of the model calls that takes. `scope`: only these tables (ids).
+    pub async fn estimate(&self, mode: &str, scope: Option<&BTreeSet<String>>) -> Result<Value, String> {
+        let tables = repo::tables(&self.store).await.map_err(|e| e.to_string())?;
+        let published = self.store.meta(repo::PUBLISHED).await.map_err(|e| e.to_string())?;
+        let previous = match &published {
+            Some(id) => repo::table_results(&self.store, id).await.map_err(|e| e.to_string())?,
+            None => BTreeMap::new(),
+        };
+        let (mut process, mut reuse, mut out_of_scope, mut empty) = (0usize, 0usize, 0usize, 0usize);
+        for t in &tables {
+            if t.columns.is_empty() {
+                empty += 1;
+            } else if scope.is_some_and(|s| !s.contains(&t.id)) {
+                out_of_scope += 1;
+            } else if mode == "incremental"
+                && previous.get(&t.id).is_some_and(|r| r.facts.fingerprint == table_fingerprint(t, self.settings.probe_distinct_values))
+            {
+                reuse += 1;
+            } else {
+                process += 1;
+            }
+        }
+        let unknown: Vec<&String> = scope.map(|s| s.iter().filter(|id| !tables.iter().any(|t| &t.id == *id)).collect()).unwrap_or_default();
+        let (chat, embed) = (self.llm.chat_configured(), self.llm.embed_configured());
+        Ok(json!({
+            "mode": mode,
+            "tables": tables.len(),
+            "to_process": process,
+            "reused": reuse,
+            "out_of_scope": out_of_scope,
+            "without_columns": empty,
+            "unknown_tables": unknown,
+            "published": published,
+            "model": {
+                "chat_configured": chat,
+                "embeddings_configured": embed,
+                "chat_calls_per_table": if chat { CHAT_CALLS_PER_TABLE } else { 0 },
+                "chat_calls_max": if chat { process * CHAT_CALLS_PER_TABLE } else { 0 },
+                "embedding_calls_max": if embed { process } else { 0 },
+                "note": "an upper bound for the tables compiled; relationships, metrics and bridge tables add calls in proportion to the candidates found",
+            },
+        }))
     }
 
     pub fn active_run(&self) -> Option<String> {
@@ -365,6 +456,19 @@ impl Engine {
 
     /// Starts a run (`mode` full or incremental), or resumes `resume`. One run at a time.
     pub async fn start(self: &Arc<Self>, mode: &str, requested_by: &str, resume: Option<&str>) -> Result<Run, StartError> {
+        self.start_scoped(mode, requested_by, resume, None).await
+    }
+
+    /// As `start`, limited to `scope` (table ids): only those tables are compiled; every other table keeps what
+    /// the published run made of it (or is left out when it has none), so the ontology stays whole. The scope is
+    /// kept in the run's statistics, so a resumed run keeps it too.
+    pub async fn start_scoped(
+        self: &Arc<Self>,
+        mode: &str,
+        requested_by: &str,
+        resume: Option<&str>,
+        scope: Option<Vec<String>>,
+    ) -> Result<Run, StartError> {
         let cancel = Arc::new(AtomicBool::new(false));
         let run = {
             let reserve = {
@@ -390,9 +494,23 @@ impl Engine {
                             .map_err(|e| StartError::Store(e.to_string()))?;
                         repo::get_run(&self.store, id).await.map_err(|e| StartError::Store(e.to_string()))?.ok_or(StartError::NotFound)
                     }
-                    None => repo::create_run(&self.store, &crate::model::new_id("run"), mode, requested_by)
-                        .await
-                        .map_err(|e| StartError::Store(e.to_string())),
+                    None => {
+                        let r = repo::create_run(&self.store, &crate::model::new_id("run"), mode, requested_by)
+                            .await
+                            .map_err(|e| StartError::Store(e.to_string()))?;
+                        match &scope {
+                            None => Ok(r),
+                            Some(tables) => {
+                                repo::set_run_state(&self.store, &r.id, "running", &json!({"scope": tables}), None)
+                                    .await
+                                    .map_err(|e| StartError::Store(e.to_string()))?;
+                                repo::get_run(&self.store, &r.id)
+                                    .await
+                                    .map_err(|e| StartError::Store(e.to_string()))?
+                                    .ok_or(StartError::NotFound)
+                            }
+                        }
+                    }
                 }
             }
             .await;
@@ -414,6 +532,7 @@ impl Engine {
         tokio::spawn(async move {
             let id = r.id.clone();
             let outcome = me.execute(r, cancel).await;
+            *me.progress.lock().expect("progress") = None;
             if let Err(e) = outcome {
                 me.runs_failed.fetch_add(1, Ordering::Relaxed);
                 tracing::error!(run = %id, error = %e, "compilation failed");
@@ -445,7 +564,8 @@ impl Engine {
         let stored_q = repo::queries(&self.store, self.settings.max_queries).await.map_err(|e| e.to_string())?;
         let log = querylog::parse_log(&stored_q, &index);
         let committed = repo::table_results(&self.store, &run.id).await.map_err(|e| e.to_string())?;
-        let reuse: BTreeMap<String, TableResult> = if run.mode == "incremental" {
+        let scope = Arc::new(run_scope(&run.stats));
+        let reuse: BTreeMap<String, TableResult> = if run.mode == "incremental" || scope.is_some() {
             match self.store.meta(repo::PUBLISHED).await.map_err(|e| e.to_string())? {
                 Some(prev) if prev != run.id => repo::table_results(&self.store, &prev).await.map_err(|e| e.to_string())?,
                 _ => BTreeMap::new(),
@@ -457,8 +577,16 @@ impl Engine {
         let queue = Arc::new(CommitQueue::default());
         let names = Arc::new(tokio::sync::Mutex::new(Names::default()));
         let workers = Arc::new(Semaphore::new(self.settings.workers.max(1)));
-        let counters = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)]); // processed, reused, resumed, skipped
+        // processed, reused, resumed, skipped, out of scope
+        let counters = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0), AtomicUsize::new(0)]);
         let total = index.tables.len();
+        *self.progress.lock().expect("progress") = Some(Progress {
+            run_id: run.id.clone(),
+            phase: "tables".into(),
+            tables_total: total,
+            tables_done: 0,
+            scope: scope.as_ref().as_ref().map(|s| s.len()),
+        });
         let committed = Arc::new(committed);
         let reuse = Arc::new(reuse);
         let mut handles = vec![];
@@ -476,55 +604,79 @@ impl Engine {
                 cancel.clone(),
             );
             let run_id = run.id.clone();
+            let (scope, incremental) = (scope.clone(), run.mode == "incremental");
             handles.push(tokio::spawn(async move {
-                let mut slot = Slot::new(queue, position);
-                let t = &index.tables[position];
-                if let Some(done) = committed.get(&t.id) {
-                    // Resuming: this table committed before the run stopped; its names are claimed again in turn.
+                let outcome = async {
+                    let mut slot = Slot::new(queue, position);
+                    let t = &index.tables[position];
+                    if let Some(done) = committed.get(&t.id) {
+                        // Resuming: this table committed before the run stopped; its names are claimed again in turn.
+                        slot.enter().await;
+                        let mut n = names.lock().await;
+                        for term in &done.terms {
+                            n.allocate(&term.name, t);
+                        }
+                        counters[2].fetch_add(1, Ordering::Relaxed);
+                        slot.exit();
+                        return Ok::<(), String>(());
+                    }
+                    let _permit = workers.acquire().await.map_err(|e| e.to_string())?;
+                    // Checked here, not before queueing: this is what turns a cancelled backlog into no-ops.
+                    if cancel.load(Ordering::SeqCst) {
+                        counters[3].fetch_add(1, Ordering::Relaxed);
+                        slot.skip_if_unused();
+                        return Ok(());
+                    }
+                    if t.columns.is_empty() {
+                        tracing::warn!(table = %t.qualified(), "table has no columns — skipping");
+                        slot.skip_if_unused();
+                        return Ok(());
+                    }
+                    let fp = table_fingerprint(t, me.settings.probe_distinct_values);
+                    let in_scope = scope.as_ref().as_ref().is_none_or(|s| s.contains(&t.id));
+                    if !in_scope {
+                        // Outside the run's scope: what the published run made of the table, or nothing.
+                        counters[4].fetch_add(1, Ordering::Relaxed);
+                        let Some(prev) = reuse.get(&t.id).cloned() else {
+                            slot.skip_if_unused();
+                            return Ok(());
+                        };
+                        drop(_permit);
+                        slot.enter().await;
+                        let r = {
+                            let mut n = names.lock().await;
+                            rename(prev, &mut n, t)
+                        };
+                        let stored = repo::put_table_result(&me.store, &run_id, position as i64, &r).await.map_err(|e| e.to_string());
+                        slot.exit();
+                        return stored;
+                    }
+                    let result = match reuse.get(&t.id).filter(|r| incremental && r.facts.fingerprint == fp) {
+                        Some(prev) => {
+                            counters[1].fetch_add(1, Ordering::Relaxed);
+                            prev.clone()
+                        }
+                        None => {
+                            tracing::info!(run = %run_id, position = position + 1, total, table = %t.qualified(), "processing table");
+                            let empty = BTreeSet::new();
+                            let r = process_table(&me.llm, t, &index, targets.get(&t.id).unwrap_or(&empty), &me.settings, &run_id).await;
+                            counters[0].fetch_add(1, Ordering::Relaxed);
+                            r
+                        }
+                    };
+                    drop(_permit);
                     slot.enter().await;
-                    let mut n = names.lock().await;
-                    for term in &done.terms {
-                        n.allocate(&term.name, t);
-                    }
-                    counters[2].fetch_add(1, Ordering::Relaxed);
+                    let r = {
+                        let mut n = names.lock().await;
+                        rename(result, &mut n, t)
+                    };
+                    let stored = repo::put_table_result(&me.store, &run_id, position as i64, &r).await.map_err(|e| e.to_string());
                     slot.exit();
-                    return Ok::<(), String>(());
+                    stored
                 }
-                let _permit = workers.acquire().await.map_err(|e| e.to_string())?;
-                // Checked here, not before queueing: this is what turns a cancelled backlog into no-ops.
-                if cancel.load(Ordering::SeqCst) {
-                    counters[3].fetch_add(1, Ordering::Relaxed);
-                    slot.skip_if_unused();
-                    return Ok(());
-                }
-                if t.columns.is_empty() {
-                    tracing::warn!(table = %t.qualified(), "table has no columns — skipping");
-                    slot.skip_if_unused();
-                    return Ok(());
-                }
-                let fp = table_fingerprint(t, me.settings.probe_distinct_values);
-                let result = match reuse.get(&t.id).filter(|r| r.facts.fingerprint == fp) {
-                    Some(prev) => {
-                        counters[1].fetch_add(1, Ordering::Relaxed);
-                        prev.clone()
-                    }
-                    None => {
-                        tracing::info!(run = %run_id, position = position + 1, total, table = %t.qualified(), "processing table");
-                        let empty = BTreeSet::new();
-                        let r = process_table(&me.llm, t, &index, targets.get(&t.id).unwrap_or(&empty), &me.settings, &run_id).await;
-                        counters[0].fetch_add(1, Ordering::Relaxed);
-                        r
-                    }
-                };
-                drop(_permit);
-                slot.enter().await;
-                let r = {
-                    let mut n = names.lock().await;
-                    rename(result, &mut n, t)
-                };
-                let stored = repo::put_table_result(&me.store, &run_id, position as i64, &r).await.map_err(|e| e.to_string());
-                slot.exit();
-                stored
+                .await;
+                me.table_done(&run_id);
+                outcome
             }));
         }
         let mut errors = vec![];
@@ -543,6 +695,10 @@ impl Engine {
             "skipped": counters[3].load(Ordering::Relaxed),
             "queries": log.len(),
         });
+        if let Some(s) = scope.as_ref() {
+            stats["scope"] = json!(s);
+            stats["out_of_scope"] = json!(counters[4].load(Ordering::Relaxed));
+        }
         if let Some(e) = errors.first() {
             return Err(e.clone());
         }
@@ -559,6 +715,7 @@ impl Engine {
             repo::set_run_state(&self.store, &run.id, "cancelled", &stats, None).await.map_err(|e| e.to_string())?;
             return Ok(());
         };
+        self.set_phase(&run.id, "publishing");
         repo::put_ontology(&self.store, &ontology).await.map_err(|e| e.to_string())?;
         stats["seconds"] = json!(started.elapsed().as_secs_f64());
         stats["model_calls"] = json!(self.llm.stats.calls.load(Ordering::Relaxed));
@@ -587,6 +744,7 @@ impl Engine {
         if cancel.load(Ordering::SeqCst) {
             return Ok(None);
         }
+        self.set_phase(&run.id, "relationships");
         let ctx = semantic_fk::Context { llm: &self.llm, tables: index, results: &results, run_id: &run.id };
         let declared = semantic_fk::declared(&ctx);
         let inferred = semantic_fk::inferred(&ctx, &declared).await;
@@ -605,12 +763,14 @@ impl Engine {
         if cancel.load(Ordering::SeqCst) {
             return Ok(None);
         }
+        self.set_phase(&run.id, "metrics");
         let sctx = sql_attributes::Ctx { llm: &self.llm, tables: index, results: &results, log, run_id: &run.id };
         let mut metrics = sql_attributes::suggest(&sctx).await;
         stats["metrics"] = json!(metrics.len());
         if cancel.load(Ordering::SeqCst) {
             return Ok(None);
         }
+        self.set_phase(&run.id, "bridges");
         let (bridges, bridge_metrics) = sql_attributes::bridges(&sctx, &rels, &metrics).await;
         metrics.extend(bridge_metrics);
         stats["bridges"] = json!(bridges.len());
@@ -791,6 +951,56 @@ mod tests {
         // A completed run is not resumable; an unknown one is not found.
         assert!(matches!(e.start("", "", Some(&run.id)).await, Err(StartError::NotResumable(_))));
         assert!(matches!(e.start("", "", Some("run_nope")).await, Err(StartError::NotFound)));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_scoped_run_compiles_its_tables_keeps_the_others_and_estimates_first() {
+        use crate::model::Column;
+        let dir = std::env::temp_dir().join(format!("onto-scope-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = engine(&dir);
+        let col = |n: &str| Column { name: n.into(), data_type: "bigint".into(), ..Default::default() };
+        let table = |id: &str, name: &str| Table {
+            id: id.into(),
+            schema: "s".into(),
+            name: name.into(),
+            primary_key: vec!["id".into()],
+            columns: vec![col("id"), col("qty")],
+            ..Default::default()
+        };
+        let (a, mut b, c) = (table("A", "alpha"), table("B", "beta"), table("C", "gamma"));
+        repo::put_tables(&e.store, &[a.clone(), b.clone()], &[]).await.unwrap();
+        // Before anything is published every table would be compiled; without a model, no model calls.
+        let est = e.estimate("incremental", None).await.unwrap();
+        assert_eq!((est["tables"].as_i64(), est["to_process"].as_i64(), est["reused"].as_i64()), (Some(2), Some(2), Some(0)));
+        assert_eq!(est["model"]["chat_calls_max"], 0);
+        let first = e.start("full", "tester", None).await.unwrap();
+        assert_eq!(finish(&e, &first.id).await.state, "completed");
+        assert!(e.progress(&first.id).is_none(), "progress is only kept while a run is active");
+        // B changes and C is new; a run scoped to B and C compiles those two and keeps A as published.
+        b.description = Some("changed".into());
+        repo::put_tables(&e.store, &[b, c], &[]).await.unwrap();
+        let scope: BTreeSet<String> = ["B".to_string(), "C".to_string()].into();
+        let est = e.estimate("incremental", Some(&scope)).await.unwrap();
+        assert_eq!((est["to_process"].as_i64(), est["out_of_scope"].as_i64()), (Some(2), Some(1)), "{est}");
+        let est = e.estimate("incremental", None).await.unwrap();
+        assert_eq!((est["to_process"].as_i64(), est["reused"].as_i64()), (Some(2), Some(1)), "{est}");
+        let scoped = e.start_scoped("full", "tester", None, Some(vec!["B".into(), "C".into()])).await.unwrap();
+        assert_eq!(scoped.stats["scope"], json!(["B", "C"]), "the scope is kept with the run, for a resume");
+        let done = finish(&e, &scoped.id).await;
+        assert_eq!(done.state, "completed", "{done:?}");
+        assert_eq!((done.stats["processed"].as_i64(), done.stats["out_of_scope"].as_i64()), (Some(2), Some(1)), "{}", done.stats);
+        let o = repo::published(&e.store).await.unwrap().unwrap();
+        assert_eq!(o.run_id, scoped.id);
+        assert_eq!(o.terms.iter().map(|t| t.table_id.as_str()).collect::<BTreeSet<_>>(), ["A", "B", "C"].into());
+        // A table outside the scope that the published run never compiled is left out.
+        repo::put_tables(&e.store, &[table("D", "delta")], &[]).await.unwrap();
+        let only_a = e.start_scoped("incremental", "tester", None, Some(vec!["A".into()])).await.unwrap();
+        let done = finish(&e, &only_a.id).await;
+        assert_eq!((done.stats["reused"].as_i64(), done.stats["out_of_scope"].as_i64()), (Some(1), Some(3)), "{}", done.stats);
+        let o = repo::published(&e.store).await.unwrap().unwrap();
+        assert!(!o.terms.iter().any(|t| t.table_id == "D"));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

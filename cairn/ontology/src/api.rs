@@ -76,6 +76,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/v1/runs/{id}", get(get_run))
         .route("/v1/runs/{id}/cancel", post(cancel_run))
         .route("/v1/runs/{id}/resume", post(resume_run))
+        .route("/v1/estimate", post(estimate))
         .route("/v1/ontology", get(get_ontology))
         .route("/v1/terms", get(list_terms))
         .route("/v1/terms/{id}", get(get_term))
@@ -192,6 +193,20 @@ struct RunIn {
     mode: Option<String>,
     #[serde(default)]
     requested_by: Option<String>,
+    /// Only these tables (ids) are compiled; the others keep what the published run made of them.
+    #[serde(default)]
+    tables: Option<Vec<String>>,
+}
+
+const MAX_SCOPE: usize = 100_000;
+
+fn scope_of(tables: Option<Vec<String>>) -> R<Option<Vec<String>>> {
+    match tables {
+        None => Ok(None),
+        Some(t) if t.is_empty() => Err(bad("tables, when given, names at least one table")),
+        Some(t) if t.len() > MAX_SCOPE => Err(bad("at most 100000 tables in a scope")),
+        Some(t) => Ok(Some(t.into_iter().collect::<BTreeSet<_>>().into_iter().collect())),
+    }
 }
 
 fn start_error(e: StartError) -> ApiError {
@@ -210,7 +225,8 @@ async fn start_run(State(st): S, body: Option<Json<RunIn>>) -> R<(StatusCode, Js
         return Err(bad("mode is full or incremental"));
     }
     let who: String = b.requested_by.unwrap_or_default().chars().take(512).collect();
-    let run = st.engine.start(&mode, &who, None).await.map_err(start_error)?;
+    let scope = scope_of(b.tables)?;
+    let run = st.engine.start_scoped(&mode, &who, None, scope).await.map_err(start_error)?;
     Ok((StatusCode::ACCEPTED, Json(serde_json::to_value(run).map_err(internal)?)))
 }
 
@@ -222,7 +238,31 @@ async fn list_runs(State(st): S) -> R<Json<Value>> {
 
 async fn get_run(State(st): S, Path(id): Path<String>) -> R<Json<Value>> {
     let run = repo::get_run(&st.engine.store, &id).await.map_err(internal)?.ok_or(ApiError(StatusCode::NOT_FOUND, "no such run".into()))?;
-    Ok(Json(serde_json::to_value(run).map_err(internal)?))
+    let mut v = serde_json::to_value(run).map_err(internal)?;
+    // A run in progress says how far it is (tables done of the total, and the stage after the tables).
+    if let Some(p) = st.engine.progress(&id) {
+        v["progress"] = serde_json::to_value(p).map_err(internal)?;
+    }
+    Ok(Json(v))
+}
+
+#[derive(Deserialize, Default)]
+struct EstimateIn {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    tables: Option<Vec<String>>,
+}
+
+/// What a run would compile and an upper bound of its model calls, before it is started.
+async fn estimate(State(st): S, body: Option<Json<EstimateIn>>) -> R<Json<Value>> {
+    let b = body.map(|b| b.0).unwrap_or_default();
+    let mode = b.mode.unwrap_or_else(|| "incremental".into());
+    if mode != "full" && mode != "incremental" {
+        return Err(bad("mode is full or incremental"));
+    }
+    let scope: Option<BTreeSet<String>> = scope_of(b.tables)?.map(|t| t.into_iter().collect());
+    Ok(Json(st.engine.estimate(&mode, scope.as_ref()).await.map_err(internal)?))
 }
 
 async fn cancel_run(State(st): S, Path(id): Path<String>) -> R<Json<Value>> {
