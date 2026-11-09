@@ -4,6 +4,7 @@ import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { Muted, tokens } from '../components/tokens';
+import { CopyAsCode } from './IacPanel';
 import type { ResourceAction, ResourceSpec } from './types';
 
 type Row = Record<string, unknown>;
@@ -315,6 +316,11 @@ export function ResourceView({ spec }: { spec: ResourceSpec }) {
                                     </Button>
                                 ))}
                             </Space>
+                        )}
+                        {spec.iac && detail[spec.iac.id ?? 'id'] !== undefined && detail[spec.iac.id ?? 'id'] !== null && (
+                            <div style={{ marginTop: 16 }}>
+                                <CopyAsCode kind={spec.iac.kind} id={String(detail[spec.iac.id ?? 'id'])} />
+                            </div>
                         )}
                     </>
                 )}

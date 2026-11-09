@@ -220,7 +220,7 @@ var kinds = []kind{
 		}},
 	{typeName: "mirror", name: "mirrors",
 		desc: "A database table mirrored into the lakehouse from its change log (PostgreSQL, MySQL, SQL Server, MongoDB).",
-		read: "/v1/mirrors", listKey: "", idKey: "name",
+		read: "/v1/mirrors", listKey: "mirrors", idKey: "name",
 		key: []string{"name"}, parents: []string{}, lookup: "name",
 		create: &op{method: "POST", path: "/v1/mirrors"}, update: nil, del: &op{method: "DELETE", path: "/v1/mirrors/{id}", noBody: true},
 		fields: []field{
@@ -325,7 +325,7 @@ var kinds = []kind{
 		}},
 	{typeName: "external_catalog", name: "external_catalogs",
 		desc: "Another organisation's Iceberg REST catalog, read (and optionally written) under Cairn's policies. Its credential is a reference (scope:<scope>/<key> or env:CAIRN_EXTCAT_<NAME>), never a value.",
-		read: "/v1/external-catalogs", listKey: "", idKey: "name",
+		read: "/v1/external-catalogs", listKey: "catalogs", idKey: "name",
 		key: []string{"name"}, parents: []string{}, lookup: "name",
 		create: &op{method: "POST", path: "/v1/external-catalogs"}, update: &op{method: "PATCH", path: "/v1/external-catalogs/{id}", only: []string{"writable"}}, del: &op{method: "DELETE", path: "/v1/external-catalogs/{id}", noBody: true},
 		fields: []field{

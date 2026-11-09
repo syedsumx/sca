@@ -138,6 +138,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "agent-listings": {
         "key": "agent-listings",
+        "iac": {"kind": "marketplace_listings", "id": "id"},
         "title": "Marketplace listings",
         "path": "/marketplace/listings",
         "listKey": "listings",
@@ -224,6 +225,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "external-catalogs": {
         "key": "external-catalogs",
+        "iac": {"kind": "external_catalogs", "id": "name"},
         "title": "External catalogs",
         "path": "/v1/external-catalogs",
         "listKey": "catalogs",
@@ -327,6 +329,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "mirrors": {
         "key": "mirrors",
+        "iac": {"kind": "mirrors", "id": "name"},
         "title": "Mirrors",
         "path": "/v1/mirrors",
         "listKey": "mirrors",
@@ -369,6 +372,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "document-sources": {
         "key": "document-sources",
+        "iac": {"kind": "document_sources", "id": "name"},
         "title": "Document sources",
         "path": "/v1/document-sources",
         "listKey": null,
@@ -399,6 +403,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "saas-syncs": {
         "key": "saas-syncs",
+        "iac": {"kind": "saas_syncs", "id": "name"},
         "title": "SaaS syncs",
         "path": "/v1/saas-syncs",
         "listKey": null,
@@ -429,6 +434,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "reverse-syncs": {
         "key": "reverse-syncs",
+        "iac": {"kind": "reverse_syncs", "id": "name"},
         "title": "Reverse syncs",
         "path": "/v1/reverse-syncs",
         "listKey": null,
@@ -459,6 +465,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "pipes": {
         "key": "pipes",
+        "iac": {"kind": "pipes", "id": "id"},
         "title": "Pipes",
         "path": "/v1/pipes",
         "listKey": null,
@@ -489,6 +496,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "streams": {
         "key": "streams",
+        "iac": {"kind": "streams", "id": "id"},
         "title": "Streams",
         "path": "/v1/streams",
         "listKey": null,
@@ -597,6 +605,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "derived": {
         "key": "derived",
+        "iac": {"kind": "derived", "id": "id"},
         "title": "Derived tables",
         "path": "/v1/derived",
         "listKey": null,
@@ -650,6 +659,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "medallion": {
         "key": "medallion",
+        "iac": {"kind": "medallion_layers", "id": "table"},
         "title": "Medallion layers",
         "path": "/v1/medallion",
         "listKey": null,
@@ -682,6 +692,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "parquet-tables": {
         "key": "parquet-tables",
+        "iac": {"kind": "parquet_tables", "id": "name"},
         "title": "Registered Parquet",
         "path": "/v1/lakehouse/parquet-tables",
         "listKey": null,
@@ -735,6 +746,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "vectors": {
         "key": "vectors",
+        "iac": {"kind": "vectors", "id": "id"},
         "title": "Vector indexes",
         "path": "/v1/vectors",
         "listKey": null,
@@ -774,6 +786,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "volumes": {
         "key": "volumes",
+        "iac": {"kind": "volumes", "id": "name"},
         "title": "Volumes",
         "path": "/v1/volumes",
         "listKey": null,
@@ -850,6 +863,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "maintenance": {
         "key": "maintenance",
+        "iac": {"kind": "maintenance", "id": "scope"},
         "title": "Maintenance policies",
         "path": "/maintenance/policies",
         "listKey": null,
@@ -923,6 +937,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "procedures": {
         "key": "procedures",
+        "iac": {"kind": "procedures", "id": "name"},
         "title": "Procedures",
         "path": "/v1/procedures",
         "listKey": null,
@@ -1016,6 +1031,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "serving-tables": {
         "key": "serving-tables",
+        "iac": {"kind": "serving_tables", "id": "name"},
         "title": "Serving tables",
         "path": "/v1/serving",
         "listKey": "serving_tables",
@@ -1098,6 +1114,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "jobs": {
         "key": "jobs",
+        "iac": {"kind": "jobs", "id": "name"},
         "title": "Jobs",
         "path": "/v1/jobs",
         "listKey": null,
@@ -1127,6 +1144,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "apps": {
         "key": "apps",
+        "iac": {"kind": "data_apps", "id": "name"},
         "title": "Data apps",
         "path": "/v1/apps",
         "listKey": null,
@@ -1269,6 +1287,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "custom-agents": {
         "key": "custom-agents",
+        "iac": {"kind": "custom_agents", "id": "name"},
         "title": "Custom agents",
         "path": "/v1/custom-agents",
         "listKey": null,
@@ -1645,6 +1664,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "agents": {
         "key": "agents",
+        "iac": {"kind": "agent_identities", "id": "id"},
         "title": "Agent identities",
         "path": "/admin/agents",
         "listKey": null,
@@ -1772,6 +1792,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "ml-deployments": {
         "key": "ml-deployments",
+        "iac": {"kind": "model_deployments", "id": "name"},
         "title": "Model deployments",
         "path": "/v1/ml/deployments",
         "listKey": null,
@@ -2058,6 +2079,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "consent": {
         "key": "consent",
+        "iac": {"kind": "consent_purposes", "id": "id"},
         "title": "Consent purposes",
         "path": "/governance/consent/purposes",
         "listKey": null,
@@ -2222,6 +2244,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "secret-scopes": {
         "key": "secret-scopes",
+        "iac": {"kind": "secret_scopes", "id": "name"},
         "title": "Secret scopes",
         "path": "/v1/secret-scopes",
         "listKey": null,
@@ -2331,6 +2354,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "workspaces": {
         "key": "workspaces",
+        "iac": {"kind": "workspaces", "id": "id"},
         "title": "Workspaces",
         "path": "/workspaces",
         "listKey": null,
@@ -2440,6 +2464,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "slos": {
         "key": "slos",
+        "iac": {"kind": "slos", "id": "id"},
         "title": "Service levels",
         "path": "/marketplace/slos",
         "listKey": null,
@@ -2493,6 +2518,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "budgets": {
         "key": "budgets",
+        "iac": {"kind": "budgets", "id": "id"},
         "title": "Budgets",
         "path": "/v1/budgets",
         "listKey": null,
@@ -2555,6 +2581,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "gateway-routes": {
         "key": "gateway-routes",
+        "iac": {"kind": "ai_gateway_routes", "id": "name"},
         "title": "Gateway routes",
         "path": "/v1/ai/gateway/routes",
         "listKey": "routes",
@@ -2642,6 +2669,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "chargeback-cost-centres": {
         "key": "chargeback-cost-centres",
+        "iac": {"kind": "cost_centres", "id": "code"},
         "title": "Cost centres",
         "path": "/v1/chargeback/cost-centres",
         "listKey": "cost_centres",

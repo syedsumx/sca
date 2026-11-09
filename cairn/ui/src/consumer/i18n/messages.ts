@@ -14,6 +14,7 @@ export type Locale = (typeof LOCALES)[number]['code'];
 
 const en = {
     'settings.storage': 'Storage',
+    'settings.iac': 'Infrastructure as code',
     'storage.intro':
         'Buckets in Cairn Store with their usage, settings and quotas, and the store’s tamper-evident audit trail.',
     'storage.bucket': 'Bucket',
@@ -179,6 +180,7 @@ type Catalog = Partial<Record<MessageKey, string>>;
 
 const de: Catalog = {
     'settings.storage': 'Speicher',
+    'settings.iac': 'Infrastruktur als Code',
     'storage.intro':
         'Buckets in Cairn Store mit Belegung, Einstellungen und Kontingenten sowie das manipulationssichere Prüfprotokoll des Speichers.',
     'storage.bucket': 'Bucket',
@@ -343,6 +345,7 @@ const de: Catalog = {
 
 const fr: Catalog = {
     'settings.storage': 'Stockage',
+    'settings.iac': 'Infrastructure as code',
     'storage.intro':
         'Les buckets de Cairn Store avec leur occupation, leurs réglages et leurs quotas, et le journal d’audit infalsifiable du stockage.',
     'storage.bucket': 'Bucket',
@@ -506,6 +509,7 @@ const fr: Catalog = {
 
 const es: Catalog = {
     'settings.storage': 'Almacenamiento',
+    'settings.iac': 'Infraestructura como código',
     'storage.intro':
         'Los buckets de Cairn Store con su uso, su configuración y sus cuotas, y el registro de auditoría a prueba de manipulación del almacenamiento.',
     'storage.bucket': 'Bucket',
@@ -669,6 +673,7 @@ const es: Catalog = {
 
 const ja: Catalog = {
     'settings.storage': 'ストレージ',
+    'settings.iac': 'コードとしてのインフラ',
     'storage.intro': 'Cairn Store のバケットの使用量・設定・クォータと、改ざんを検出できる監査ログ。',
     'storage.bucket': 'バケット',
     'storage.usage': '使用量',

@@ -192,7 +192,8 @@ class Kind:
                "immutable": self.immutable, "order": self.order,
                "create": self.create.schema(), "update": self.update.schema() if self.update else None,
                "delete": self.delete.schema() if self.delete else None,
-               "fields": [f.schema() for f in self.fields], "docs": self.docs or "infrastructure-as-code"}
+               "fields": [f.schema() for f in self.fields],
+               "docs": "/docs/administration.html#infrastructure-as-code"}
         if self.match:
             out["match"] = dict(self.match)
         if self.skip:

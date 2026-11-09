@@ -208,6 +208,16 @@ def test_the_terraform_provider_is_generated_from_the_registry():
         assert f'typeName: "{k.tf}"' in go_source()
 
 
+def test_the_ui_s_copy_as_code_names_registry_types():
+    """Areas of the UI's platform hubs that offer "Copy as Terraform" name a type the registry has, with its id."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "ui", "src", "consumer", "resources", "catalog.ts")
+    kinds = re.findall(r'"iac": \{"kind": "([a-z_]+)", "id": "([a-z_]+)"\}', open(path).read())
+    assert len(kinds) > 20
+    for kind, ident in kinds:
+        k = registry.kind(kind)
+        assert not k.parents and ident == k.id, (kind, ident, k.id)
+
+
 @pytest.mark.parametrize("name", ["pipes", "secrets", "agent_abuse_settings", "secret_scope_acls"])
 def test_ids_split_back_into_parents(name):
     from cairn.iac.engine import split_id, tf_id

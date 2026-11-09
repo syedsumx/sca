@@ -14,6 +14,7 @@ import { StorageSettings } from '../components/Storage';
 import { WorkspacesSettings } from '../components/Workspaces';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
+import { IacPanel } from '../resources/IacPanel';
 import { relativeTime } from '../utils/format';
 import { useT } from '../i18n';
 
@@ -262,6 +263,7 @@ export function SettingsPage() {
                         ),
                     },
                     { key: 'embeds', label: t('settings.embeds'), children: <EmbedBuilder /> },
+                    { key: 'iac', label: t('settings.iac'), children: <IacPanel /> },
                     {
                         key: 'ai-agents',
                         label: t('settings.aiAgents'),

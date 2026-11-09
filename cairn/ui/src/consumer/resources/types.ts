@@ -26,6 +26,9 @@ export interface ResourceSpec {
     /** A dedicated view instead of the table (the list endpoint is what it reads). */
     view?: 'ontology-graph';
     notes?: string;
+    /** The registry type the rows are (GET /v1/iac/schema), and the row field holding its Terraform id (default id):
+     *  a row's details then offer "Copy as Terraform" and "Copy as YAML" (GET /v1/iac/export). */
+    iac?: { kind: string; id?: string };
 }
 
 export interface Hub {
