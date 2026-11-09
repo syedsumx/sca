@@ -38,6 +38,8 @@ class Cairn < Formula
 
   def install
     bin.install Dir["cairn-*"].first => "cairn"
+    # A bare binary is downloaded without its execute bit; it must run for its completions and for people.
+    chmod 0755, bin/"cairn"
     generate_completions_from_executable(bin/"cairn", "completion")
   end
 
