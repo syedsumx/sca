@@ -26,7 +26,9 @@ there lets you check a download: `shasum -a 256 <file>` on macOS and Linux, `Get
 
 - **macOS** says Cairn "cannot be opened because the developer cannot be verified". In Finder, right-click (or
   Control-click) Cairn in Applications, choose **Open**, then **Open** again; macOS remembers that. Or, in Terminal:
-  `xattr -dr com.apple.quarantine /Applications/Cairn.app`.
+  `xattr -dr com.apple.quarantine /Applications/Cairn.app`. Until it has a Developer ID, the Mac app carries an
+  ad-hoc signature: Apple silicon runs only signed code, and the keychain (which keeps the key that encrypts the
+  offline cache) answers only an app whose signature it can check.
 - **Windows** SmartScreen says "Windows protected your PC". Click **More info**, then **Run anyway**.
 - **Linux** does not ask.
 

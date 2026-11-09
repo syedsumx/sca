@@ -128,7 +128,10 @@ jobs:
             extra+=(-c.extraMetadata.cairnSigned=true)
           else
             export CSC_IDENTITY_AUTO_DISCOVERY=false        # unsigned: no identity is looked for
-            [ "$RUNNER_OS" = "macOS" ] && extra+=(-c.mac.identity=null)
+            # macOS: ad-hoc signed ("-"), not unsigned. Apple silicon runs only signed code, and the keychain gives
+            # safeStorage its key only to a process whose signature it can check: an unsigned arm64 app has none
+            # (errSecAuthFailed). An ad-hoc signature has no team for library validation: no hardened runtime.
+            [ "$RUNNER_OS" = "macOS" ] && extra+=(-c.mac.identity=- -c.mac.hardenedRuntime=false)
           fi
           [ "${CAIRN_NOTARIZE:-}" = "true" ] && extra+=(-c.mac.notarize=true)
           # electron-builder downloads its tools (dmg-builder, fpm, NSIS, AppImage) from GitHub's releases, which
@@ -169,6 +172,9 @@ jobs:
           # errSecAuthFailed), so the app gets a keychain of its own, unlocked and the default for this step. Its
           # throwaway password goes to `security` on standard input, never on a command line.
           if [ "$RUNNER_OS" = macOS ]; then
+            # The app's signature (Developer ID, or ad-hoc when unsigned) holds for the whole bundle.
+            codesign --verify --deep --strict --verbose=2 "${CAIRN_DESKTOP_APP%/Contents/MacOS/*}"
+            codesign -dv "${CAIRN_DESKTOP_APP%/Contents/MacOS/*}" 2>&1 | grep -E '^(Identifier|Signature|TeamIdentifier)'
             kc="$RUNNER_TEMP/cairn-smoke.keychain-db"
             pw=$(openssl rand -hex 24)
             printf 'create-keychain -p %s %s\nunlock-keychain -p %s %s\nset-keychain-settings %s\n' \
