@@ -29,14 +29,24 @@ class CliError(Exception):
 def _client():
     import httpx
 
-    url = os.environ.get("CAIRN_URL", "").rstrip("/")
-    token = os.environ.get("CAIRN_TOKEN", "")
-    if not token and os.environ.get("CAIRN_TOKEN_FILE"):
-        token = open(os.environ["CAIRN_TOKEN_FILE"]).read().strip()
-    if not url or not token:
-        raise CliError("set CAIRN_URL and CAIRN_TOKEN (or CAIRN_TOKEN_FILE)")
-    http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"},
-                        verify=os.environ.get("CAIRN_CA_FILE") or True, timeout=120)
+    try:      # CAIRN_URL/CAIRN_TOKEN when set, else the profile `cairn login` signed in (cairn_cli)
+        from cairn_cli.errors import CliError as SignInError
+        from cairn_cli.session import api_credentials
+    except ImportError:  # pragma: no cover - the CLI package ships with Cairn
+        api_credentials = None
+    if api_credentials is not None:
+        try:
+            url, token, verify = api_credentials()
+        except SignInError as e:
+            raise CliError(str(e))
+    else:
+        url, token = os.environ.get("CAIRN_URL", "").rstrip("/"), os.environ.get("CAIRN_TOKEN", "")
+        if not token and os.environ.get("CAIRN_TOKEN_FILE"):
+            token = open(os.environ["CAIRN_TOKEN_FILE"]).read().strip()
+        if not url or not token:
+            raise CliError("set CAIRN_URL and CAIRN_TOKEN (or CAIRN_TOKEN_FILE), or run `cairn login`")
+        verify = os.environ.get("CAIRN_CA_FILE") or True
+    http = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}"}, verify=verify, timeout=120)
 
     def call(method: str, path: str, body: Any = None) -> Any:
         r = http.request(method, path, json=body)

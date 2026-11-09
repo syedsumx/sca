@@ -846,8 +846,14 @@ def cmd_ai_eval(a) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="cairn", description="Cairn extension layer")
-    sub = p.add_subparsers(dest="command", required=True)
+    from cairn import __version__
+    from cairn_cli.main import EPILOG, CairnParser, add_global_options
+
+    p = CairnParser(prog="cairn", description="Cairn: the platform's services and tools, and the command line for "
+                    "people (login, query, search, show, ask)", epilog=EPILOG)
+    p.add_argument("--version", action="version", version=f"cairn {__version__}")
+    add_global_options(p, suppress=False)
+    sub = p.add_subparsers(dest="command", required=True, metavar="COMMAND", parser_class=CairnParser)
 
     def http(name: str, port: int, fn, help_: str):
         sp = sub.add_parser(name, help=help_)
@@ -1117,6 +1123,12 @@ def build_parser() -> argparse.ArgumentParser:
     ev.add_argument("--only", action="append", help="run cases whose id contains this text (repeatable)")
     ev.add_argument("--json", help="also write the report as JSON to this path")
     ev.set_defaults(fn=cmd_ai_eval)
+
+    # The people's commands (cairn_cli): login, logout, whoami, profiles, query, search, show, ask, iac, completion.
+    # `ontology` and `flows` are the operator's and the flows' own here.
+    from cairn_cli.main import register as people
+
+    people(sub, ontology=False, flows=False)
     return p
 
 
@@ -1124,6 +1136,10 @@ def main(argv=None) -> None:
     from cairn.common.config import load_secret_files
 
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["__complete"]:                   # shell completion (cairn completion bash|zsh|fish|powershell)
+        from cairn_cli.completion import run_complete
+
+        sys.exit(run_complete(build_parser(), argv[1:]))
     if argv[:1] == ["dbt"]:
         # Everything after "dbt" is dbt's own command line.
         from cairn.pipelines.dbt_runner import main as dbt_main
@@ -1131,6 +1147,10 @@ def main(argv=None) -> None:
         sys.exit(dbt_main(argv[1:]))
     _setup_logging()
     args = build_parser().parse_args(argv)
+    if getattr(args, "client_command", False):        # as the signed-in person, over HTTP: exit codes of their own
+        from cairn_cli.main import dispatch
+
+        sys.exit(dispatch(args))
     try:
         load_secret_files()
     except RuntimeError as e:

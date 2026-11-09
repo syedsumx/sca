@@ -261,6 +261,12 @@ jobs:
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
+      - uses: actions/setup-node@v4     # the web UI's /device page, approving `cairn login` (tests/test_cli_e2e.py)
+        with:
+          node-version: "22"
+      - name: The web UI bundle (the device page the command line's sign-in is approved on)
+        working-directory: cairn/ui
+        run: npm ci --silent && npm run build:mfe
       - name: Pull Trino (and Vector, stripe-mock and Mailpit for the SIEM and signup tests, Python for flows' job steps)
         run: for i in trinodb/trino:484 timberio/vector:0.43.1-alpine stripe/stripe-mock:v0.194.0 axllent/mailpit:v1.21.8 python:3.12-slim; do docker pull $i; done
       - name: The image scheduled jobs run in
@@ -306,10 +312,24 @@ jobs:
           docker pull -q mcr.microsoft.com/mssql/server:2022-latest   # SQL Server mirrors (change data capture)
           docker pull -q mongo:7.0                     # MongoDB mirrors (change streams)
           docker pull -q mysql:8.4                     # MySQL mirrors (binlog)
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_residency_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_saas_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_flows_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_residency_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_saas_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_ontology_ui_e2e.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+      - name: The command line as a single-file binary (PyInstaller, client dependencies only), end to end
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          set -o pipefail
+          python -m venv "$RUNNER_TEMP/cli"
+          "$RUNNER_TEMP/cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
+          "$RUNNER_TEMP/cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/cli-dist" \
+            --workpath "$RUNNER_TEMP/cli-build" cli/cairn.spec
+          CAIRN_CLI_BIN="$RUNNER_TEMP/cli-dist/cairn" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_cli_e2e.py | tee "$RUNNER_TEMP/cli-bin.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/cli-bin.log"
       - name: Cairn's warnings and errors, on failure (its access decisions, the catalog's callbacks)
         if: failure()
         run: tail -n 300 "$RUNNER_TEMP/cairn-trino.log" || true
