@@ -548,7 +548,7 @@ pub fn sas_token(
     let sig = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
     let mut q = vec![
         format!("sv={SAS_VERSION}"),
-        format!("spr=https"),
+        "spr=https".to_string(),
         format!("st={}", enc(start)),
         format!("se={}", enc(expiry)),
         format!("sr={resource}"),
