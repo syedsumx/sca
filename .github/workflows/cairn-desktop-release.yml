@@ -165,8 +165,20 @@ jobs:
           CAIRN_DESKTOP_APP: ${{ github.workspace }}/cairn/desktop/${{ matrix.unpacked }}
           CAIRN_SMOKE_EXPECT: ${{ runner.os != 'Linux' && 'tray,keychain' || '' }}
         run: |
-          # macOS: the packaged app makes its own "Cairn Safe Storage" item; one left by another binary would refuse it.
-          if [ "$RUNNER_OS" = macOS ]; then security delete-generic-password -s "Cairn Safe Storage" >/dev/null 2>&1 || true; fi
+          # macOS: the runner's login keychain may be locked with no one to unlock it (arm64: every lookup fails with
+          # errSecAuthFailed), so the app gets a keychain of its own, unlocked and the default for this step. Its
+          # throwaway password goes to `security` on standard input, never on a command line.
+          if [ "$RUNNER_OS" = macOS ]; then
+            kc="$RUNNER_TEMP/cairn-smoke.keychain-db"
+            pw=$(openssl rand -hex 24)
+            printf 'create-keychain -p %s %s\nunlock-keychain -p %s %s\nset-keychain-settings %s\n' \
+              "$pw" "$kc" "$pw" "$kc" "$kc" | security -i
+            unset pw
+            # shellcheck disable=SC2046  # the existing search list, one keychain per word
+            security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+            security default-keychain -d user -s "$kc"
+            security show-keychain-info "$kc"
+          fi
           node --test --test-force-exit test/electron.smoke.test.js
       - name: The AppImage itself starts (Linux)
         if: runner.os == 'Linux'
