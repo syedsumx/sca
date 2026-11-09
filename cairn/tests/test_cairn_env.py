@@ -116,3 +116,18 @@ def test_python_services_load_secret_files(tmp_path):
         load_secret_files({"CAIRN_X": "a", "CAIRN_X_FILE": str(tmp_path / "k")})
     with pytest.raises(RuntimeError, match="cannot read"):
         load_secret_files({"CAIRN_X_FILE": str(tmp_path / "nope")})
+
+
+def test_the_provisioning_token_is_a_path_read_when_used(tmp_path):
+    """The SCIM provisioning account's token is minted by the token keeper once Core answers; until then the API
+    starts (CI run 329: terraform-modules) and SCIM writes go without a token, which Core refuses."""
+    from cairn.common.config import load_secret_files
+    from cairn.common.core import CoreClient
+
+    env = {"CAIRN_SCIM_CORE_TOKEN_FILE": str(tmp_path / "provisioner_token")}
+    assert load_secret_files(env) == [] and "CAIRN_SCIM_CORE_TOKEN" not in env
+    c = CoreClient("http://core.invalid:8080", None, 1.0, token_file=env["CAIRN_SCIM_CORE_TOKEN_FILE"])
+    assert "Authorization" not in c._headers
+    (tmp_path / "provisioner_token").write_text("minted-later\n")
+    assert c._headers["Authorization"] == "Bearer minted-later"
+    c.close()

@@ -16,7 +16,10 @@ from pydantic import BaseModel, Field
 
 # Settings whose value *is* a path (read by the code itself), not a secret delivered as a file.
 PATH_SETTINGS = frozenset({
-    "CAIRN_CORE_TOKEN_FILE", "CAIRN_SCIM_TOKEN_FILE", "CAIRN_LOCAL_USERS_FILE", "CAIRN_WEB_USERS_FILE",
+    # Tokens read where they are used and re-read when rotated (CoreClient), so one not minted yet (the SCIM
+    # provisioning account's, before the token keeper reaches Core) stops only what needs it, never the start.
+    "CAIRN_CORE_TOKEN_FILE", "CAIRN_SCIM_CORE_TOKEN_FILE",
+    "CAIRN_SCIM_TOKEN_FILE", "CAIRN_LOCAL_USERS_FILE", "CAIRN_WEB_USERS_FILE",
     "CAIRN_K8S_TOKEN_FILE", "CAIRN_K8S_NAMESPACE_FILE", "CAIRN_K8S_CA_FILE",
 })
 _SECRET_FILE_PREFIXES = ("CAIRN_", "ANTHROPIC_API_KEY")
