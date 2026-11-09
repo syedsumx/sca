@@ -797,6 +797,10 @@ jobs:
           docker pull -q apache/kafka:3.9.1
           docker pull -q apache/airflow:slim-2.10.5-python3.12
           docker pull -q registry.k8s.io/git-sync/git-sync:v4.8.0
+          # Cross-platform flow steps (L138): the BigQuery emulator, and the slim Airflow 3.3 the exported DAG with
+          # Airflow's own providers imports in (and that CairnFlowRunOperator drives Cairn from).
+          docker pull -q ghcr.io/goccy/bigquery-emulator:0.6.6
+          docker pull -q apache/airflow:slim-3.3.2-python3.12
       - name: Kubernetes API server, etcd and kubectl (workload identity)
         run: |
           mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
@@ -830,6 +834,7 @@ jobs:
           pip install -e ".[server,test,trino,export,streams]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
           pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py tests/test_flows_airflow_e2e.py \
             tests/test_flows_engines_e2e.py tests/test_flows_spark_e2e.py tests/test_flows_airflow2_e2e.py \
+            tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
             tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.

@@ -18,6 +18,9 @@
 * :mod:`cairn_airflow.flows`: one step of a Cairn flow, run in Cairn as the flow's owner
   (:class:`~cairn_airflow.flows.CairnFlowStepOperator`, :class:`~cairn_airflow.flows.CairnFlowBranchOperator`), for
   the DAGs Cairn generates from flows; :class:`~cairn_airflow.quality.CairnCheckOperator`, a flow's check on Trino.
+* :mod:`cairn_airflow.flow_runs`: Airflow drives Cairn. :class:`~cairn_airflow.flow_runs.CairnFlowRunOperator` starts a
+  Cairn flow (as the connection's Cairn identity; its steps run as the flow's owner) and waits, deferrable, failing
+  with the run and cancelling it when the task is killed; :class:`~cairn_airflow.flow_runs.CairnFlowRunSensor`.
 """
 
 __version__ = "0.1.0"
