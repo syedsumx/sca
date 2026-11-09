@@ -2902,6 +2902,16 @@ Daily figures per table come from warehouse collectors, which run once a day for
   - **Who sees what.** Operators (`MANAGE_SYSTEM_OPERATIONS`, or everyone with `CAIRN_REPORTS_OPEN`) see every query. Anyone else sees what their own queries cost, and by table only the tables they may see.
   - **In the table report.** The idle and expensive lists add Trino's compute to each table it read, and count each query as a read.
   - Without either rate, the report still shows CPU and data scanned, and no dollars.
+- **The lakehouse's own storage** (Iceberg tables in Cairn Catalog and Cairn Store) is sized every day when `CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH` is set:
+  - **The size.** Each table's current snapshot's files (`total-files-size`), priced for one day of the month. Snapshots kept for time travel are not counted; maintenance expires them.
+  - **The catalog.** The one Cairn's pipes write to (`CAIRN_PIPES_CATALOG`), or `CAIRN_COST_LAKEHOUSE_CATALOG` (the same JSON of catalog properties, or a path to one). Its token must see every table.
+  - **When.** With the warehouses, in the daily collection the scheduler runs after midnight UTC. A table that cannot be loaded is skipped and logged; the others are still sized.
+- **Per team and day.** `GET /reports/costs/teams?days=30` gives each team's costs for each day, with nothing posted by hand:
+  - **SQL:** the team's Trino queries (CPU hours, data scanned, queued seconds and dollars), split evenly among the teams of the person who ran each one;
+  - **Storage** and **table compute:** each table's daily storage and engine compute (the lakehouse, warehouses, Spark runs that wrote it), to its owners' teams: an owning group, or an owning person's teams;
+  - **Runs:** Spark runs that wrote no table, to the teams of their job's owners;
+  - a **total** per team and day. Teams are a person's groups, or only those in `CAIRN_COST_TEAMS`; what has no team is under "(no team)".
+  - **Who sees what.** Operators (or everyone, with `CAIRN_REPORTS_OPEN`) see every team; anyone else sees the teams they are in.
 
   Storage is the `SVV_TABLE_INFO` size, at `storage_usd_per_gb_month` (default 0.024). The connection's user needs to see every user's queries (`SYSLOG ACCESS UNRESTRICTED`).
 
@@ -3909,6 +3919,32 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
     - `global.adhoc.<user>` for everyone else, each person in their own group. 5 at a time each, 20% of memory.
 
     A group's excess queries wait in its queue rather than starving the others.
+  - **A group per team.** Give each team its own group under a common parent, with a selector naming its members, so one team's flood waits in its own queue (or is refused once that queue is full) while other teams' queries start at once:
+
+    ```yaml
+    resourceGroups:
+      rootGroups:
+        - name: global
+          softMemoryLimit: 90%
+          hardConcurrencyLimit: 100
+          maxQueued: 1000
+          subGroups:
+            - name: teams
+              softMemoryLimit: 80%
+              hardConcurrencyLimit: 20
+              maxQueued: 200
+              schedulingPolicy: fair
+              subGroups:
+                - {name: team-a, softMemoryLimit: 40%, hardConcurrencyLimit: 2, maxQueued: 4}
+                - {name: team-b, softMemoryLimit: 40%, hardConcurrencyLimit: 2, maxQueued: 4}
+      selectors:
+        - {user: "(ann|al)", group: global.teams.team-a}
+        - {user: "(bea|bo)", group: global.teams.team-b}
+        - {group: "global.adhoc.${USER}"}
+    ```
+
+    Select by `user` (Trino's user is the person Cairn signed in), not by `source` or client tags, which a client sets as it likes. With a Trino group provider, `userGroup` selects a team as a whole. Each query's queued time is in its profile and in the team cost report below.
+  - **Tested under load.** `tests/test_workload_e2e.py` runs real Trino with such groups, Cairn deciding every action and receiving every finished query. Team A sends ten heavy queries at once: Trino runs two, queues four and refuses the rest (`QUERY_QUEUE_FULL`); meanwhile team B's queries start at once (under 2 seconds queued) and finish. Then each team's compute and storage appear in the per-day team cost report with nothing posted by hand.
   - **Autoscaling:** `cairn.trino.autoscaling` (`enabled`, `minWorkers`, `maxWorkers`, `targetCPUUtilizationPercentage`) adds a HorizontalPodAutoscaler on the workers; set `workers` to at least `minWorkers`. It scales in one worker at a time.
   - **Draining.** A removed worker drains first. Its preStop hook puts it in Trino's `SHUTTING_DOWN` state: it takes no new work, finishes what it runs, then exits. `gracefulShutdownSeconds` (120) sets the wait, and the pod's termination grace period allows for it. Workers check no queries themselves, since the coordinator asks Cairn, so their only rule lets the hook's user, `cairn-drain`, drain them. That user is just a name in a header, but the network policy limits who can reach a worker, and the most it can do is drain one.
   - **Disruption budget:** a PodDisruptionBudget lets drains and upgrades take one worker at a time.

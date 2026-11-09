@@ -2234,6 +2234,14 @@ def _build_costs(s: Services, hub, Event) -> None:
             actor=actor, entity_urn=urn, include_owners=True, include_followers=True, payload=figures))
 
     s.costs = CostService(s.engine, s.graph, has_downstream, notify, registry=s.connections, audit=s.audit)
+    # The lakehouse's own storage, sized every day with the warehouses (CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH).
+    from cairn.pipelines.pipes import _settings as _catalog_settings
+
+    pipes = getattr(s, "pipes", None)
+    lake_props = _catalog_settings("CAIRN_COST_LAKEHOUSE_CATALOG") or (pipes.catalog_props if pipes is not None else None)
+    if lake_props:
+        s.costs.lakehouse = (lake_props, pipes.urn if pipes is not None else
+                             (lambda ns, t: f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{ns}.{t},PROD)"))
     # Hosted signup and Stripe billing (the hosting control plane only: CAIRN_SIGNUP).
     from cairn.hosting.signup import Signup, load_config as load_signup
 

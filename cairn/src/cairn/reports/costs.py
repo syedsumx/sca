@@ -36,6 +36,15 @@ Collectors are configured in ``CAIRN_COST_SOURCES`` (YAML)::
   to teams (a person's groups, or only those in ``CAIRN_COST_TEAMS``; split evenly among a person's teams),
   and to tables (split evenly across the tables a query read), and the per-table totals include it, with each
   query a read of each table it read.
+* **The lakehouse's own storage** (Iceberg tables in Cairn Catalog and Cairn Store) is collected every day with the
+  warehouses: each table's size is its current snapshot's ``total-files-size``, priced at
+  ``CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH`` for one day of the month. The catalog is the one Cairn's pipes write
+  (``CAIRN_PIPES_CATALOG``), or ``CAIRN_COST_LAKEHOUSE_CATALOG``.
+* **Per team and day** (``teams_daily``): every cost above, each day, charged to teams: a query's to the teams of
+  the person who ran it (with its queued time, so a team waiting on its resource group shows), a table's storage
+  and engine compute to its owners' teams (an owning group, or an owning person's teams), and a run that wrote no
+  table to its job's owners' teams. What has no team is ``(no team)``. Nothing is posted by hand: the figures come
+  from Trino's event listener, the Spark runs' lineage and the daily collection.
 """
 
 from __future__ import annotations
@@ -424,8 +433,53 @@ class CostService:
         return [{"job": j, "engine": e, "runs": int(n), "seconds": round(sec or 0, 1), "usd": round(u or 0, 4)}
                 for j, e, n, sec, u in rows]
 
+    # ---- the lakehouse's own storage ---------------------------------------------------------------
+    # (catalog properties, urn(namespace, table)): Cairn Catalog's tables, sized every day; None: not collected.
+    lakehouse: Optional[tuple[dict, Callable[[str, str], str]]] = None
+
+    def lakehouse_rows(self, day: str) -> list[CostRow]:
+        """Each lakehouse table's size on ``day`` (its current snapshot's files), priced for that day."""
+        import calendar
+
+        try:
+            rate = float(os.environ.get("CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH", ""))
+        except ValueError:
+            return []
+        if self.lakehouse is None or rate < 0:
+            return []
+        from pyiceberg.catalog.rest import RestCatalog
+
+        props, urn_of = self.lakehouse
+        cat = RestCatalog("cairn-costs", **props)
+        y, m = int(day[:4]), int(day[5:7])
+        per_byte_day = rate / 1e12 / calendar.monthrange(y, m)[1]
+        rows: list[CostRow] = []
+
+        def walk(ns: tuple) -> None:
+            for ident in cat.list_tables(ns):
+                try:
+                    snap = cat.load_table(ident).current_snapshot()
+                except Exception as e:  # noqa: BLE001 - one table that cannot be loaded does not stop the rest
+                    logger.warning("lakehouse cost: %s: %s", ".".join(ident), e)
+                    continue
+                summary = (snap.summary.additional_properties if snap is not None and snap.summary is not None else {})
+                size = int(summary.get("total-files-size") or 0)
+                rows.append(CostRow(urn=urn_of(".".join(ident[:-1]), ident[-1]), day=day, storage_bytes=size,
+                                    storage_usd=size * per_byte_day))
+            for child in cat.list_namespaces(ns):
+                walk(tuple(child))
+        for top in cat.list_namespaces():
+            walk(tuple(top))
+        return rows
+
     def collect_day(self, day: str) -> dict[str, Any]:
         out: dict[str, Any] = {}
+        if self.lakehouse is not None and os.environ.get("CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH"):
+            try:
+                out["lakehouse"] = self.ingest(self.lakehouse_rows(day), "lakehouse")
+            except Exception as e:  # noqa: BLE001 - the warehouses are still collected
+                logger.warning("lakehouse cost collection failed: %s", e)
+                out["lakehouse"] = {"error": str(e)[:300]}
         for s in self.sources():
             try:
                 out[s.connection] = self.ingest(collect(s, self.registry, day), s.platform)
@@ -452,12 +506,14 @@ class CostService:
 
         from cairn.dataaccess.query_history import query_history as qh
 
-        q = select(qh.c.user, qh.c.cpu_ms, qh.c.input_bytes, qh.c.tables).where(qh.c.create_ms >= since_ms)
+        q = select(qh.c.user, qh.c.cpu_ms, qh.c.input_bytes, qh.c.tables, qh.c.create_ms, qh.c.queued_ms).where(
+            qh.c.create_ms >= since_ms)
         if user:
             q = q.where(qh.c.user == user)
         with self.engine.connect() as conn:
             return [{"user": r.user, "cpu_ms": int(r.cpu_ms or 0), "bytes": int(r.input_bytes or 0),
-                     "tables": json.loads(r.tables or "[]")} for r in conn.execute(q)]
+                     "tables": json.loads(r.tables or "[]"), "create_ms": int(r.create_ms or 0),
+                     "queued_ms": int(r.queued_ms or 0)} for r in conn.execute(q)]
 
     def trino(self, by: str = "user", days: int = 30, now_ms: Optional[int] = None, user: Optional[str] = None,
               groups_of: Optional[Callable[[str], list[str]]] = None, limit: int = 200) -> dict:
@@ -506,6 +562,95 @@ class CostService:
                 # Every query's cost is split across its keys, so the rows add up to the total whatever ``by`` is.
                 "total_usd": round(sum(r["usd"] or 0 for r in rows), 4) if rates != (None, None) else None,
                 "rows": rows[:limit]}
+
+    def teams_daily(self, days: int = 30, now_ms: Optional[int] = None,
+                    groups_of: Optional[Callable[[str], list[str]]] = None, only: Optional[set[str]] = None) -> dict:
+        """Each team's costs per day (UTC) over the last ``days``: Trino queries (CPU, scanned bytes, queued time),
+        table storage, table compute (warehouses, Spark runs that wrote them) and runs that wrote no table. ``only``
+        narrows the rows to those teams."""
+        from cairn.dataaccess.query_history import price, trino_rates
+
+        if groups_of is None:
+            raise ValueError("teams are not known here")
+        rates = trino_rates()
+        now_ms = now_ms or int(time.time() * 1000)
+        since_ms = now_ms - days * DAY_MS
+        first = _day(since_ms)
+        teams_only = {t.strip() for t in os.environ.get("CAIRN_COST_TEAMS", "").split(",") if t.strip()}
+        none = "(no team)"
+        person: dict[str, list[str]] = {}
+        owned: dict[str, list[str]] = {}
+
+        def of_person(user: str) -> list[str]:
+            urn = user if user.startswith("urn:li:") else f"urn:li:corpuser:{user}"
+            if urn not in person:
+                try:
+                    gs = [g for g in groups_of(urn) if not teams_only or g in teams_only]
+                except Exception:  # noqa: BLE001 - unknown groups: no team
+                    logger.warning("could not look up the groups of %s", urn)
+                    gs = []
+                person[urn] = sorted(set(gs))
+            return person[urn]
+
+        def of_owned(urn: str) -> list[str]:
+            if urn not in owned:
+                found: set[str] = set()
+                try:
+                    aspect = (self.graph.get_aspect(urn, "ownership") or {}) if self.graph is not None else {}
+                except Exception:  # noqa: BLE001 - the catalog is unreachable: no team
+                    logger.warning("could not look up the owners of %s", urn)
+                    aspect = {}
+                for o in aspect.get("owners") or []:
+                    owner = str(o.get("owner") or "")
+                    if owner.startswith("urn:li:corpGroup:") and (not teams_only or owner in teams_only):
+                        found.add(owner)
+                    elif owner.startswith("urn:li:corpuser:"):
+                        found.update(of_person(owner))
+                owned[urn] = sorted(found)
+            return owned[urn]
+        rows: dict[tuple[str, str], dict] = {}
+
+        def add(day: str, teams: list[str], **figures: float) -> None:
+            teams = teams or [none]
+            share = 1 / len(teams)
+            for t in teams:
+                r = rows.setdefault((day, t), {"day": day, "team": t, "queries": 0, "cpu_hours": 0.0,
+                                               "scanned_bytes": 0.0, "queued_seconds": 0.0, "sql_usd": 0.0,
+                                               "storage_bytes": 0.0, "storage_usd": 0.0, "table_compute_usd": 0.0,
+                                               "runs_usd": 0.0})
+                for k, v in figures.items():
+                    r[k] += v * share if k != "queries" else v
+        try:
+            queries = self._trino_queries(since_ms)
+        except Exception:  # noqa: BLE001 - no query history (no Trino): the other figures alone
+            logger.debug("no Trino query history for the team costs", exc_info=True)
+            queries = []
+        for q in queries:
+            add(_day(q["create_ms"]), of_person(q["user"]), queries=1, cpu_hours=q["cpu_ms"] / 3_600_000,
+                scanned_bytes=q["bytes"], queued_seconds=q["queued_ms"] / 1000,
+                sql_usd=price(q["cpu_ms"], q["bytes"], rates) or 0.0)
+        with self.engine.connect() as conn:
+            for urn, day, sb, su, cu in conn.execute(select(
+                    asset_costs.c.urn, asset_costs.c.day, asset_costs.c.storage_bytes, asset_costs.c.storage_usd,
+                    asset_costs.c.compute_usd).where(asset_costs.c.day >= first)):
+                add(day, of_owned(urn), storage_bytes=float(sb or 0), storage_usd=su or 0.0, table_compute_usd=cu or 0.0)
+            for job, day, usd in conn.execute(select(run_costs.c.job, run_costs.c.day, run_costs.c.usd).where(
+                    run_costs.c.day >= first, run_costs.c.parent.is_(None), run_costs.c.outputs == "[]",
+                    run_costs.c.usd > 0)):                       # a run charged to no table: to its job's owners
+                add(day, of_owned(job), runs_usd=usd or 0.0)
+        out = []
+        for r in sorted(rows.values(), key=lambda r: (r["day"], r["team"] == none, r["team"])):
+            if only is not None and r["team"] not in only:
+                continue
+            r["total_usd"] = round(r["sql_usd"] + r["storage_usd"] + r["table_compute_usd"] + r["runs_usd"], 6)
+            for k in ("cpu_hours", "sql_usd", "storage_usd", "table_compute_usd", "runs_usd", "queued_seconds"):
+                r[k] = round(r[k], 6)
+            r["scanned_bytes"], r["storage_bytes"] = int(r["scanned_bytes"]), int(r["storage_bytes"])
+            out.append(r)
+        return {"days": days, "priced": rates != (None, None),
+                "rates": {"trino_usd_per_cpu_hour": rates[0], "trino_usd_per_tb_scanned": rates[1],
+                          "lakehouse_usd_per_tb_month": os.environ.get("CAIRN_COST_LAKEHOUSE_USD_PER_TB_MONTH") or None},
+                "rows": out}
 
     def _trino_tables(self, since_ms: int) -> dict[str, dict]:
         """Per table: Trino's cost (split evenly across the tables each query read) and reads, since ``since_ms``."""

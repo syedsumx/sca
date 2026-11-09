@@ -129,6 +129,21 @@ def build_router(reports: ReportService, current_principal, authorize, can_view,
             out["rows"] = [{**r, "name": (names.get(r["key"]) or {}).get("name") or r["key"]} for r in rows]
         return out
 
+    @router.get("/costs/teams")
+    def team_costs(days: int = Query(30, ge=1, le=365), p: Principal = Depends(current_principal)):
+        """Each team's costs per day: SQL (with queued time), storage, table compute and runs. Operators (or
+        everyone, with CAIRN_REPORTS_OPEN) see every team; anyone else sees the teams they are in."""
+        everyone = (os.environ.get("CAIRN_REPORTS_OPEN", "").lower() in ("1", "true", "yes")
+                    or authorize(p, MANAGE, None, raise_on_deny=False))
+        if not everyone and not p.urn.startswith("urn:li:corpuser:"):
+            raise HTTPException(403, "team costs are shown to the teams' members and to operators")
+        if groups_of is None:
+            raise HTTPException(503, "teams are not known here")
+        only = None if everyone else set(groups_of(p.urn))
+        out = costs.teams_daily(days, groups_of=groups_of, only=only)
+        out["scope"] = "all" if everyone else "mine"
+        return out
+
     @router.get("/costs/asset")
     def asset_cost(urn: str, p: Principal = Depends(current_principal)):
         if not can_view(p)(urn):
