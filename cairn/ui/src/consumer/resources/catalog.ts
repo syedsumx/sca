@@ -2926,6 +2926,22 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "my-ai-usage": {
+        "key": "my-ai-usage",
+        "title": "Your usage",
+        "path": "/ai/usage?mine=true&group_by=day",
+        "listKey": "groups",
+        "description": "Your own model calls, tokens and estimated cost, day by day, with today's spend against the AI budget. Everyone may see their own; all usage is on the AI usage tab, for operators.",
+        "docs": "context-and-ai.html#usage-cost-and-budgets",
+        "columns": [
+            "key",
+            "calls",
+            "input_tokens",
+            "output_tokens",
+            "cost_usd"
+        ],
+        "actions": []
+    },
     "ai-usage": {
         "key": "ai-usage",
         "title": "AI usage",

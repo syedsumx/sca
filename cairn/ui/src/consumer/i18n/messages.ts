@@ -1,3 +1,5 @@
+import { GUIDE_DE, GUIDE_EN, GUIDE_ES, GUIDE_FR, GUIDE_JA } from './guide';
+
 /**
  * UI message catalogs. English is the source; other locales may leave keys out, and `t()` falls back
  * to English for them. Placeholders are `{name}`.
@@ -288,6 +290,7 @@ const en = {
     'unit.hour': 'hour',
     'unit.day': 'day',
     'form.requiredSr': 'required',
+    ...GUIDE_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -571,6 +574,7 @@ const de: Catalog = {
     'unit.hour': 'Stunde',
     'unit.day': 'Tag',
     'form.requiredSr': 'Pflichtfeld',
+    ...GUIDE_DE,
 };
 
 const fr: Catalog = {
@@ -785,6 +789,7 @@ const fr: Catalog = {
     'unit.hours': 'heures',
     'unit.days': 'jours',
     'form.requiredSr': 'obligatoire',
+    ...GUIDE_FR,
 };
 
 const es: Catalog = {
@@ -999,6 +1004,7 @@ const es: Catalog = {
     'unit.hours': 'horas',
     'unit.days': 'días',
     'form.requiredSr': 'obligatorio',
+    ...GUIDE_ES,
 };
 
 const ja: Catalog = {
@@ -1212,6 +1218,7 @@ const ja: Catalog = {
     'unit.hours': '時間',
     'unit.days': '日',
     'form.requiredSr': '必須',
+    ...GUIDE_JA,
 };
 
 export const CATALOGS: Record<Locale, Catalog> = { en, de, fr, es, ja };

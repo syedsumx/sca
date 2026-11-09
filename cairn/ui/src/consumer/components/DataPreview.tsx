@@ -7,6 +7,7 @@ import type { AskResult, DataResult } from '../api/types';
 import { GroundedChips } from '../ontology/Embeds';
 import { Feedback } from './Feedback';
 import { Muted } from './tokens';
+import { guideEvent } from '../guide/onboarding';
 
 function ResultTable({ result }: { result: DataResult }) {
     const masked = new Set(result.masked_columns);
@@ -52,6 +53,7 @@ function AskBox({ urn, onUseSql }: { urn: string; onUseSql: (sql: string) => voi
         setAnswer(null);
         try {
             setAnswer(await client.askData(question, [urn]));
+            guideEvent('ask');
         } catch (e) {
             setError(
                 e instanceof CairnApiError && e.status === 503

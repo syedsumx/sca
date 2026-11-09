@@ -1,5 +1,6 @@
 import { Alert, Button, Descriptions, Drawer, Empty, Input, Modal, Skeleton, Space, Table, Typography, message } from 'antd';
 import React, { useEffect, useMemo, useState } from 'react';
+import { useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
 import type { CairnApiError } from '../../api/client';
@@ -297,6 +298,19 @@ export function ResourceView({ spec }: { spec: ResourceSpec }) {
     const docs = spec.docs ? `/docs/${spec.docs}` : null;
     const loading = q.loading && q.data === undefined && !q.error;
     const empty = !!spec.path && !loading && !q.error && rows.length === 0 && !summary;
+    // `?action=<label>` (from the command palette) opens that page-level form once.
+    const location = useLocation();
+    const history = useHistory();
+    useEffect(() => {
+        const params = new URLSearchParams(location.search);
+        const want = params.get('action');
+        if (!want) return;
+        const action = pageActions.find((a) => a.label === want);
+        if (action) setDialog({ action, row: null });
+        params.delete('action');
+        history.replace({ pathname: location.pathname, search: params.toString() ? `?${params}` : '' });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [location.search]);
 
     const columns = [
         ...columnKeys.map((k, i) => ({

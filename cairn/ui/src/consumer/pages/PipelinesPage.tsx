@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DbtRun } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { DerivedTab, MaintenanceTab, PipesTab, SharesTab, StreamsTab, WarehousesTab } from './LakehouseOps';
+import { HelpButton } from '../guide/PageHeader';
 
 const STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -26,7 +27,7 @@ function duration(s: number | null | undefined): string {
 export function PipelinesPage() {
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>Pipelines</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Pipelines</h1><HelpButton /></div>
             <Tabs defaultActiveKey="dbt" destroyInactiveTabPane>
                 <Tabs.TabPane tab="dbt runs" key="dbt"><DbtRuns /></Tabs.TabPane>
                 <Tabs.TabPane tab="Pipes" key="pipes"><PipesTab /></Tabs.TabPane>

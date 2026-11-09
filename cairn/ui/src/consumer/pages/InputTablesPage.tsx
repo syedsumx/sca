@@ -4,6 +4,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { InputColumnType, InputTable } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
+import { HelpButton } from '../guide/PageHeader';
 
 const TYPES: InputColumnType[] = ['text', 'number', 'integer', 'boolean', 'date', 'timestamp'];
 const SYSTEM = ['_row_id', '_updated_by', '_updated_at'];
@@ -129,7 +130,7 @@ export function InputTablesPage() {
 
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>Input tables</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Input tables</h1><HelpButton /></div>
             <p><Muted>Tables you type into, in the lakehouse. Every change runs as you, under your policies, and is audited.</Muted></p>
             <Surface>
                 <Space wrap style={{ marginBottom: 12 }}>

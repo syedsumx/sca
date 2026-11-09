@@ -9,6 +9,7 @@ import { BiAssetButtons } from '../components/BiAdmin';
 import { BiFolders, BiUsageOverview } from '../components/BiCollab';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
+import { HelpButton } from '../guide/PageHeader';
 
 const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
 
@@ -479,7 +480,7 @@ export function DashboardsPage() {
     useEffect(() => { if (openId) setTab('boards'); }, [openId]);
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>Dashboards</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Dashboards</h1><HelpButton /></div>
             <Muted>Saved queries and workbooks with their charts, filters and drill-down, and alerts. Every tile and check runs as a person, under their policies.</Muted>
             <Tabs style={{ marginTop: 12 }} activeKey={tab} onChange={setTab} items={[
                 { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} /> },

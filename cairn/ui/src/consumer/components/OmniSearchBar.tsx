@@ -101,7 +101,7 @@ export function OmniSearchBar({ initialQuery = '', autoFocus, placeholder, onAsk
     const inputRef = useRef<HTMLInputElement>(null);
     const query = useDebounced(text.trim(), 180);
 
-    useHotkeys({ '/': () => inputRef.current?.focus(), 'mod+k': () => inputRef.current?.focus() });
+    useHotkeys({ '/': () => inputRef.current?.focus() });          // ⌘K is the command palette (Layout)
 
     useEffect(() => {
         if (query.length < 2) {

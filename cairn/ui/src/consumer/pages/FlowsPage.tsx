@@ -37,7 +37,7 @@ export function FlowsPage() {
     const [approvals, setApprovals] = useState<FlowApproval[]>([]);
     const [detail, setDetail] = useState<FlowDetail | null>(null);
     const [error, setError] = useState<string | null>(null);
-    const [gallery, setGallery] = useState(false);
+    const [gallery, setGallery] = useState(() => query.get('new') === '1');      // ?new=1: the command palette's New flow
     const [me, setMe] = useState('');
     const [theme, setTheme] = useState(readTheme);
     const [filter, setFilter] = useState('');

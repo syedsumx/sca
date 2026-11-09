@@ -53,9 +53,11 @@ const CapabilitiesPage = React.lazy(() =>
     import('./resources/CapabilitiesPage').then((m) => ({ default: m.CapabilitiesPage })),
 );
 const ExtensionsPage = React.lazy(() => import('./components/Extensions').then((m) => ({ default: m.ExtensionsPage })));
+const GetStartedPage = React.lazy(() => import('./guide/GetStarted').then((m) => ({ default: m.GetStartedPage })));
 
 export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; exact?: boolean }[] = [
     { path: '/discover', component: DiscoverPage, exact: true },
+    { path: '/get-started', component: GetStartedPage, exact: true },
     { path: '/search', component: SearchPage, exact: true },
     { path: '/asset/:urn', component: AssetPage },
     { path: '/marketplace', component: MarketplacePage, exact: true },

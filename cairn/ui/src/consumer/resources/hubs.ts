@@ -139,6 +139,7 @@ export const HUBS: Hub[] = [
         "icon": "coin",
         "description": "What the platform costs and who uses it: AI usage and budgets, the models the AI gateway serves and its routes, and monthly chargeback.",
         "tabs": [
+            "my-ai-usage",
             "ai-usage",
             "budgets",
             "ai-gateway-models",

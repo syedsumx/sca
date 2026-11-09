@@ -172,4 +172,17 @@ export const ConsumerTheme = createGlobalStyle`
     .cairn-consumer .ant-btn-link:not(.ant-btn-dangerous):not([disabled]) { color: ${tokens.color.primary}; }
     .cairn-consumer .ant-tag-cyan { color: #155e75; }
     .cairn-consumer main a:hover { color: ${tokens.color.primaryHover}; }
+    /* Keyboard focus is always visible (WCAG 2.4.7), whatever a component's own styles do. */
+    .cairn-consumer a:focus-visible, .cairn-consumer button:focus-visible, .cairn-consumer [role='button']:focus-visible,
+    .cairn-consumer [role='tab']:focus-visible, .cairn-consumer [role='option']:focus-visible,
+    .cairn-consumer [tabindex]:not([tabindex='-1']):focus-visible, .cairn-consumer summary:focus-visible,
+    .cairn-shell a:focus-visible, .cairn-shell button:focus-visible {
+        outline: 2px solid ${tokens.color.focus};
+        outline-offset: 2px;
+    }
+    .cairn-consumer .ant-tabs-tab-btn:focus-visible, .cairn-consumer .ant-checkbox-input:focus-visible + .ant-checkbox-inner,
+    .cairn-consumer .ant-radio-input:focus-visible + .ant-radio-inner, .cairn-consumer .ant-switch:focus-visible {
+        outline: 2px solid ${tokens.color.focus};
+        outline-offset: 2px;
+    }
 `;

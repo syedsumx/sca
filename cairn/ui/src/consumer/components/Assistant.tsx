@@ -11,6 +11,7 @@ import { MarkdownView } from '../utils/markdown';
 import { assetPath } from './Assets';
 import { Feedback } from './Feedback';
 import { tokens } from './tokens';
+import { guideEvent } from '../guide/onboarding';
 
 export interface ChatTurn {
     role: 'user' | 'assistant';
@@ -65,6 +66,7 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
             const res = await client.chat(q, conversationId);
             setConversationId(res.conversation_id);
             setTurns((t) => [...t, { role: 'assistant', text: res.reply_md, response: res }]);
+            guideEvent('ask');
         } catch (e) {
             setTurns((t) => [...t, { role: 'assistant', text: '', error: (e as Error).message }]);
         } finally {

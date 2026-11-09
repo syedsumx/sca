@@ -2033,7 +2033,14 @@ export interface Profile {
     notifications: { channels: Record<ProfileChannel, boolean>; events: Record<string, boolean> };
     personas: { id: string; name: string }[];
     push: PushState;
+    /** The guided experience: onboarding progress and sidebar choices (L128). */
+    ui?: ProfileUi;
     updated_ms: number | null;
+}
+
+export interface ProfileUi {
+    onboarding: { role: string | null; done: string[]; dismissed: boolean; asked: boolean };
+    sidebar: { pinned: string[]; hidden: string[]; show_all: boolean };
 }
 
 export type ProfileUpdate = Partial<Pick<Profile, 'role' | 'team' | 'default_persona' | 'language' | 'pinned' | 'instructions'>> & {

@@ -6,6 +6,7 @@ import type { DataResult, SchemaTable, Workbook, WorkbookElement, WorkbookFilter
 import { toCsv } from '../components/ResultChart';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { Muted, Page, Surface } from '../components/tokens';
+import { HelpButton } from '../guide/PageHeader';
 
 const OPS: { value: WorkbookFilter['op']; label: string; arity: 0 | 1 | 2 | 'list' }[] = [
     { value: '=', label: '=', arity: 1 }, { value: '!=', label: '≠', arity: 1 }, { value: '>', label: '>', arity: 1 },
@@ -135,7 +136,7 @@ export function WorkbooksPage() {
 
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>Workbooks</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Workbooks</h1><HelpButton /></div>
             <Muted>Explore a table like a spreadsheet. It runs as you: your masks and row filters apply.</Muted>
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) 3fr', gap: 16, marginTop: 16 }}>
                 <Surface>

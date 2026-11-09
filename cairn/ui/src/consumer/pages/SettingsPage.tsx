@@ -17,6 +17,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { IacPanel } from '../resources/IacPanel';
 import { relativeTime } from '../utils/format';
 import { useT } from '../i18n';
+import { GuideSettings } from '../guide/GuideSettings';
 
 export const EVENT_COPY: Record<string, string> = {
     'access.requested': 'Someone requests access to data I own',
@@ -290,6 +291,7 @@ export function SettingsPage() {
                         : []),
                     ...(session.config?.is_admin
                         ? [
+                              { key: 'guide', label: t('settings.guide'), children: <GuideSettings /> },
                               { key: 'extensions', label: t('settings.extensions'), children: <ExtensionsAdmin /> },
                               { key: 'licence', label: t('settings.licence'), children: <LicenceSettings /> },
                           ]

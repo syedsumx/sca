@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DerivedTable, SavedQuery, SqlWorkflow, SqlWorkflowRun, SqlWorkflowStep } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
+import { HelpButton } from '../guide/PageHeader';
 
 const OPS = ['>', '>=', '<', '<=', '==', '!='];
 const STATUS_COLOR: Record<string, string> = { ok: 'green', failed: 'red', error: 'red', skipped: 'default' };
@@ -241,7 +242,7 @@ export function SqlWorkflowsPage() {
 
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>SQL workflows</h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>SQL workflows</h1><HelpButton /></div>
             <Muted>
                 Refresh tables, check them and send reports, in order and on a schedule. Each runs as you, so your access applies; a
                 failed check stops what comes after and tells you.

@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 
 import { useConsumerApi } from '../api/hooks';
 import type { BulkApplyResult, BulkChange, BulkPreview } from '../api/types';
+import { undoToast } from '../guide/Sheets';
 import { Muted } from './tokens';
 
 const WHAT: Record<BulkChange['what'], string> = {
@@ -122,7 +123,15 @@ export function BulkEdit({ query }: { query: string }) {
             setApplied(out);
             cache.invalidate('gql:');
             cache.invalidate('/collab/enrich');
-            message.success(`${out.applied} change(s) applied`);
+            // The API keeps the batch's before-image: the toast offers to take it back, like the dialog's button.
+            undoToast(`${out.applied} change(s) applied`, 'Undo', async () => {
+                const back = await client.bulkUndo(out.batch_id);
+                cache.invalidate('gql:');
+                cache.invalidate('/collab/enrich');
+                setOpen(false);
+                reset();
+                message.success(`Undone: ${back.restored} aspect(s) restored`);
+            });
         });
 
     const doUndo = () =>

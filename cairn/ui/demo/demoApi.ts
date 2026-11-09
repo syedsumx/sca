@@ -1924,12 +1924,25 @@ const PROFILE: Json = {
     notifications: { channels: { in_app: true, email: true, slack: true, teams: false, push: false }, events: {} },
     personas: [{ id: 'finance-analyst', name: 'Finance analyst' }, { id: 'marketing-viewer', name: 'Marketing viewer' }],
     push: { enabled: true, public_key: 'BNbxGYNMhEIi9zrneh7mqV4oUanjLUK3m-mYZBc62frMKrEoMk88r3Lk596T0ck9xlT-RXtYtDhq7ZBbJbs6a4M', subscriptions: 1 },
+    // The guided experience (L128): a first visit, so the demo asks the role and shows the checklist.
+    ui: { onboarding: { role: null, done: [], dismissed: false, asked: false }, sidebar: { pinned: [], hidden: [], show_all: false } },
     updated_ms: now - 6 * DAY,
 };
 on('GET', '/v1/me/profile', () => PROFILE);
+// What the demo's person may do (an admin here), and the workspace's UI settings.
+const UI_SETTINGS: Json = { onboarding: true, changed_by: null, changed_ms: null };
+on('GET', '/v1/me/capabilities', () => ({
+    actor: ME, is_admin: true, features: { onboarding: UI_SETTINGS.onboarding },
+    privileges: Object.fromEntries(['MANAGE_POLICIES', 'MANAGE_GLOBAL_SETTINGS', 'MANAGE_SYSTEM_OPERATIONS', 'MANAGE_INGESTION',
+        'MANAGE_GLOSSARIES', 'MANAGE_DATABASE', 'MANAGE_ML_MODEL', 'MANAGE_FINETUNE', 'MANAGE_DATA_APP', 'MANAGE_VOLUMES',
+        'USE_AI_GATEWAY', 'USE_AGENT', 'RUN_JOBS'].map((p) => [p, true])),
+}));
+on('GET', '/v1/ui/settings', () => UI_SETTINGS);
+on('PUT', '/v1/ui/settings', (b) => Object.assign(UI_SETTINGS, { onboarding: !!b?.onboarding, changed_by: ME, changed_ms: Date.now() }));
 on('PUT', '/v1/me/profile', (b) => {
-    const { notifications, ...rest } = b ?? {};
+    const { notifications, ui, ...rest } = b ?? {};
     Object.assign(PROFILE, rest, { updated_ms: Date.now() });
+    if (ui) PROFILE.ui = { onboarding: { ...PROFILE.ui.onboarding, ...(ui.onboarding ?? {}) }, sidebar: { ...PROFILE.ui.sidebar, ...(ui.sidebar ?? {}) } };
     if (notifications?.channels) PROFILE.notifications.channels = { ...PROFILE.notifications.channels, ...notifications.channels };
     return PROFILE;
 });

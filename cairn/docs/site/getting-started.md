@@ -18,10 +18,72 @@ credentials your administrator gave you. The first administrator account is `adm
 * **Catalog** pages (Home, Glossary, Domains, Data Sources, Settings) are where stewards and
   administrators curate metadata, manage ingestion and configure access.
 
+## A guided start
+
+The first time you open Cairn's home page, it asks what you mostly do here: **Analyst**, **Data engineer**, **Data steward**,
+**Admin**, or **Just exploring**. If your profile already names a role, that answer is suggested. Your answer
+shapes three things, and you can change it at any time under **Get started** in the sidebar:
+
+* **A checklist.** **Get started** lists a few first tasks for your role, each with a link to where it is done:
+  * Analyst: find a dataset, run a query, save it, build a dashboard, ask a question.
+  * Data engineer: connect a source, create a pipe or a flow, schedule it, add a quality check.
+  * Data steward: review the ontology's proposals, add a glossary term, set an owner, review access requests.
+  * Admin: single sign-on, groups, policies, the AI gateway, budgets.
+
+  A step ticks itself when Cairn sees you did it (for example, once you have a saved query), and you can tick any
+  step yourself. Your progress is kept in your profile, so it is the same in every browser, in Cairn Desktop and on
+  your phone. **Hide** puts the checklist away; it stays under **Get started**. An administrator can turn the
+  question and the checklist off for everyone.
+* **The sidebar.** A **For you** group at the top holds the pages your role uses most and the ones you pinned. The
+  groups your role rarely needs are folded away; **Show everything** brings them back.
+* **The command palette** ranks the actions your role uses most first.
+
+The sidebar never offers a page you can't use at all: areas only administrators can open are left out for everyone
+else. That is a convenience, not the control: Cairn checks every request, whatever the sidebar shows.
+
+## Command palette and shortcuts
+
+Press **⌘K** (on Windows and Linux, **Ctrl+K**), or **Search or jump to…** at the top, to open the command palette. Type a
+few letters of what you want: letters can be skipped, so `sqwf` finds **SQL workflows**.
+
+* **Pages and tabs.** Every page and every tab of the platform hubs (for example **Trust & security › Secret
+  scopes**).
+* **Actions.** **New saved query**, **New flow**, **Run flow…**, **Ask the assistant**, and a **Create …** for each
+  form in the hubs (**Create secret scope**, **Create notification route**, …).
+* **Recent.** The pages you opened last, on this device.
+* **Catalog.** Datasets, glossary terms and dashboards from the catalog, found as you type. Cairn searches as you,
+  so you only see what you may see.
+* **Ask.** The last entry, **Ask: …**, hands what you typed to the assistant.
+
+Use **↑** and **↓** to move, **Enter** to open, **Esc** to close. Press **?** anywhere (outside a text field) for the
+list of keyboard shortcuts:
+
+| Keys | What it does |
+|---|---|
+| ⌘K / Ctrl+K | Command palette |
+| / | Search the catalog |
+| ⌘J / Ctrl+J | The assistant |
+| ? | Keyboard shortcuts |
+| g then h | Get started |
+| Esc | Close a dialog, panel or palette |
+
+## Help on every page
+
+The **?** at the top of every page (and next to the title of the platform hubs and most pages) opens the part of these docs about that
+page, beside your work, with **Open full docs** and **Ask the assistant about this page** (which starts a question
+with the page's name and section). The help is part of the app, so it also opens without a connection.
+
+## Customising the sidebar
+
+**Customise sidebar** (at the bottom of the sidebar) lets you pin a page to **For you** or hide one you never use.
+Your choices are kept in your profile and follow you to every device. **Show everything** shows all the pages you
+may use, including the ones you hid; **Reset** goes back to your role's defaults. The platform hubs remember the
+tab you used last.
+
 ## Find data
 
-* Type in the search bar (`⌘K` or `/`). Results show trust signals at a glance: certification,
-  quality status, PII and freshness.
+* Type in the search bar (`/`), or open the command palette (`⌘K`). Results show trust signals at a glance:
+  certification, quality status, PII and freshness.
 * Narrow results with facets: type, platform, domain, certification, quality, sensitivity, owner.
   The query and filters live in the URL, so a search can be shared as a link.
 * Discover shows what is trending in your domain, your bookmarks, recently viewed assets and the

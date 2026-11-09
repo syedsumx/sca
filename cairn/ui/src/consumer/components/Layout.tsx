@@ -1,5 +1,5 @@
-import { Badge, Input, Select, Tooltip } from 'antd';
-import React, { useEffect, useState } from 'react';
+import { Badge, Input, InputRef, Select, Tooltip } from 'antd';
+import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { NavLink, useHistory, useLocation } from 'react-router-dom';
 import styled, { css } from 'styled-components';
 
@@ -9,6 +9,14 @@ import { useDheSession } from '../context/CairnProvider';
 import { isHosted, navigateHost } from '../hostNav';
 import { LOCALES, Locale, MessageKey, useI18n, useT } from '../i18n';
 import { useHotkeys } from '../utils/useHotkeys';
+import { routeAllowed } from '../guide/capabilities';
+import { GuideProvider, useGuide } from '../guide/GuideProvider';
+import { arrangeNav } from '../guide/nav';
+import { RoleDialog } from '../guide/GetStarted';
+import { Breadcrumbs, HelpButton } from '../guide/PageHeader';
+import { pushRecent } from '../guide/palette';
+import { ShortcutsSheet, SidebarCustomiser } from '../guide/Sheets';
+import { HUBS } from '../resources/hubs';
 import { AssistantSlideOver } from './Assistant';
 import { useExtensionSections } from './Extensions';
 import { Icon, IconName } from './Icons';
@@ -90,6 +98,12 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
 
 /** Every section, in sidebar order. */
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
+
+// The command palette and the help panel load on first use (their own chunk: they read the areas' catalog).
+const CommandPalette = React.lazy(() => import('../guide/CommandPalette').then((m) => ({ default: m.CommandPalette })));
+const HelpPanel = React.lazy(() => import('../guide/HelpPanel').then((m) => ({ default: m.HelpPanel })));
+const GET_STARTED: NavItem = { to: '/get-started', label: 'nav.getStarted', icon: 'sparkle' };
+const noTabs = () => undefined;
 
 const COLLAPSE_KEY = 'cairn.sidebar.collapsed';
 
@@ -242,7 +256,56 @@ const SideFoot = styled.div`
     border-top: 1px solid #1f2440;
     padding: 10px;
     display: flex;
+    gap: 4px;
+    align-items: center;
     justify-content: flex-end;
+    .more {
+        flex: 1;
+        min-width: 0;
+        border: 0;
+        background: transparent;
+        color: ${tokens.color.sidebarText};
+        text-align: left;
+        padding: 6px 8px;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 12.5px;
+        ${focusRing}
+        &:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.06);
+        }
+    }
+`;
+
+const PaletteButton = styled.button`
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    height: 34px;
+    padding: 0 10px;
+    border: 1px solid ${tokens.color.border};
+    border-radius: 10px;
+    background: ${tokens.color.surface};
+    color: ${tokens.color.textMuted};
+    cursor: pointer;
+    white-space: nowrap;
+    ${focusRing}
+    &:hover {
+        color: ${tokens.color.text};
+    }
+    kbd {
+        font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+        border: 1px solid ${tokens.color.border};
+        border-radius: 5px;
+        padding: 0 5px;
+    }
+    @media (max-width: 720px) {
+        .text,
+        kbd {
+            display: none;
+        }
+    }
 `;
 
 const IconButton = styled.button`
@@ -384,8 +447,20 @@ function readCollapsed(): boolean {
     }
 }
 
+/** The workspace's shell: sidebar, top bar, and the guided experience (onboarding, palette, help, shortcuts). */
 export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
+    return (
+        <GuideProvider>
+            <Shell0>{children}</Shell0>
+        </GuideProvider>
+    );
+}
+
+function Shell0({ children }: { children?: React.ReactNode }) {
     const session = useDheSession();
+    const guide = useGuide();
+    const searchRef = useRef<InputRef>(null);
+    const gAt = useRef(0);
     const t = useT();
     const history = useHistory();
     const location = useLocation();
@@ -395,23 +470,52 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
     const [collapsed, setCollapsed] = useState(readCollapsed);
     const [open, setOpen] = useState(false);
     const [q, setQ] = useState('');
-    useHotkeys({ 'mod+j': () => session.setAssistantOpen(!session.assistantOpen) });
+    useHotkeys({
+        'mod+j': () => session.setAssistantOpen(!session.assistantOpen),
+        'mod+k': () => guide.setPalette(true),
+        '?': () => guide.setShortcuts(true),
+        '/': () => {
+            // A page's own search box (Discover, Search) takes it first; elsewhere, the top bar's.
+            if (document.activeElement?.tagName !== 'INPUT') searchRef.current?.focus();
+        },
+        g: () => {
+            gAt.current = Date.now();
+        },
+        h: () => {
+            if (Date.now() - gAt.current < 1200) history.push('/get-started');
+        },
+    });
     useEffect(() => setOpen(false), [location.pathname]);
     const unread = inbox.data?.length ?? 0;
     const hasExtensions = useExtensionSections('workspace').length > 0;
-    const visible = (n: NavItem) => !n.feature || session.feature(n.feature);
-    const groups = NAV_GROUPS.map((g) => ({
+    const visible = (n: NavItem) => (!n.feature || session.feature(n.feature)) && routeAllowed(n.to, HUBS, guide.caps);
+    const allGroups = NAV_GROUPS.map((g) => ({
         ...g,
         items: [
-            ...g.items.filter(visible),
+            ...g.items,
             ...(g.label === 'nav.group.platform' && hasExtensions
                 ? [{ to: '/extensions', label: 'nav.extensions' as MessageKey, icon: 'puzzle' as IconName }]
                 : []),
         ],
-    })).filter((g) => g.items.length > 0);
+    }));
+    // What the person may use (capabilities), then arranged for their role and their own pins and hidden entries.
+    const arranged = arrangeNav(allGroups, visible, guide.ui.onboarding.role, guide.ui.sidebar);
+    const groups = [
+        ...(arranged.forYou.length ? [{ label: 'nav.forYou' as MessageKey, items: arranged.forYou }] : []),
+        ...arranged.groups,
+    ];
+    const usable = allGroups.flatMap((g) => g.items).filter(visible);
+    const paletteNav = useMemo(() => [
+        ...(guide.enabled ? [GET_STARTED] : []), ...usable,
+        { to: '/assistant', label: 'nav.ask' as MessageKey, icon: 'sparkle' as IconName },
+    ].map((n) => ({ to: n.to, label: n.to === '/assistant' ? t('palette.askAssistant') : t(n.label) })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [usable.map((n) => n.to).join(), guide.enabled, t]);
+    const toggleEverything = () => void guide.save({ sidebar: { show_all: !guide.ui.sidebar.show_all } });
     const hosted = typeof window !== 'undefined' && isHosted(window.location.pathname);
     // In the catalog shell, sections are shell navigation entries: switching moves the shell along.
-    const onNav = (to: string) => (e: React.MouseEvent) => {
+    const onNav = (to: string, label?: MessageKey) => (e: React.MouseEvent) => {
+        if (label) pushRecent(to, t(label));
         if (hosted && navigateHost(to)) e.preventDefault();
     };
     const toggle = () => {
@@ -435,7 +539,14 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
 
     const askAndSearch = (
         <>
+            <PaletteButton type="button" onClick={() => guide.setPalette(true)} aria-haspopup="dialog"
+                aria-keyshortcuts="Control+K Meta+K" aria-label={t('palette.open')}>
+                <Icon name="search" size={16} />
+                <span className="text">{t('palette.open')}</span>
+                <kbd>⌘K</kbd>
+            </PaletteButton>
             <SearchBox
+                ref={searchRef}
                 aria-label={t('nav.search')}
                 placeholder={t('nav.searchPlaceholder')}
                 prefix={<Icon name="search" size={16} />}
@@ -456,6 +567,7 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
             >
                 {t('nav.ask')}
             </AskButton>
+            <HelpButton />
             <LanguagePicker />
             {name && (
                 <Tooltip title={name}>
@@ -471,15 +583,24 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                 <ConsumerTheme />
                 <Top>{askAndSearch}</Top>
                 <HostedBar aria-label={t('nav.sections')}>
-                    {groups.flatMap((g) => g.items).map((n) => (
-                        <NavLink key={n.to} to={n.to} exact={n.exact} onClick={onNav(n.to)}>
+                    {[...(guide.enabled ? [GET_STARTED] : []), ...usable].map((n) => (
+                        <NavLink key={n.to} to={n.to} exact={n.exact} onClick={onNav(n.to, n.label)}>
                             {label(n)}
                         </NavLink>
                     ))}
                 </HostedBar>
                 <LicenceBanner />
+                <Breadcrumbs tabTitle={noTabs} />
                 <main>{children}</main>
                 <AssistantSlideOver />
+                <RoleDialog />
+                <ShortcutsSheet />
+                <SidebarCustomiser entries={usable.map((n) => ({ to: n.to, label: t(n.label) }))} />
+                {guide.palette && <Suspense fallback={null}><CommandPalette nav={paletteNav} /></Suspense>}
+                {guide.help && <Suspense fallback={null}><HelpPanel pageTitle={(path) => {
+                    const n = usable.find((x) => x.to === path) ?? (path === '/get-started' ? GET_STARTED : undefined);
+                    return n ? t(n.label) : undefined;
+                }} /></Suspense>}
             </div>
         );
     }
@@ -495,14 +616,28 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                     {!collapsed && <span>Cairn</span>}
                 </Brand>
                 <NavScroll aria-label={t('nav.sections')}>
+                    {guide.enabled && (
+                        <Group $collapsed={collapsed}>
+                            <ul>
+                                <li>
+                                    <Tooltip title={collapsed ? t(GET_STARTED.label) : ''} placement="right">
+                                        <Item to={GET_STARTED.to} $collapsed={collapsed} aria-label={collapsed ? t(GET_STARTED.label) : undefined}>
+                                            <Icon name={GET_STARTED.icon} />
+                                            {!collapsed && <span className="label">{t(GET_STARTED.label)}</span>}
+                                        </Item>
+                                    </Tooltip>
+                                </li>
+                            </ul>
+                        </Group>
+                    )}
                     {groups.map((g) => (
                         <Group key={g.label} $collapsed={collapsed}>
-                            <h2>{t(g.label)}</h2>
+                            <h2>{t(g.label as MessageKey)}</h2>
                             <ul>
                                 {g.items.map((n) => (
                                     <li key={n.to}>
                                         <Tooltip title={collapsed ? t(n.label) : ''} placement="right">
-                                            <Item to={n.to} exact={n.exact} $collapsed={collapsed} onClick={onNav(n.to)}
+                                            <Item to={n.to} exact={n.exact} $collapsed={collapsed} onClick={onNav(n.to, n.label)}
                                                 aria-label={collapsed ? t(n.label) : undefined}>
                                                 <Icon name={n.icon} />
                                                 {!collapsed && <span className="label">{label(n)}</span>}
@@ -518,6 +653,18 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                     ))}
                 </NavScroll>
                 <SideFoot>
+                    {!collapsed && guide.available && (
+                        <>
+                            <button type="button" className="more" onClick={toggleEverything} aria-pressed={guide.ui.sidebar.show_all}>
+                                {guide.ui.sidebar.show_all ? t('nav.showLess')
+                                    : `${t('nav.showEverything')}${arranged.folded ? ` ${t('nav.folded', { n: arranged.folded })}` : ''}`}
+                            </button>
+                            <IconButton type="button" onClick={() => guide.setCustomise(true)} aria-label={t('nav.customise')}
+                                title={t('nav.customise')}>
+                                <Icon name="gear" size={16} />
+                            </IconButton>
+                        </>
+                    )}
                     <IconButton type="button" onClick={toggle} aria-label={t(collapsed ? 'nav.expand' : 'nav.collapse')}
                         title={t(collapsed ? 'nav.expand' : 'nav.collapse')}>
                         <span style={{ display: 'inline-flex', transform: collapsed ? 'none' : 'rotate(180deg)' }}>
@@ -535,10 +682,19 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
                     {askAndSearch}
                 </Top>
                 <LicenceBanner />
+                <Breadcrumbs tabTitle={noTabs} />
                 <main style={{ flex: 1 }}>{children}</main>
             </Column>
             {open && <div aria-hidden="true" onClick={() => setOpen(false)} style={{ position: 'fixed', inset: 0, zIndex: 25 }} />}
             <AssistantSlideOver />
+            <RoleDialog />
+            <ShortcutsSheet />
+            <SidebarCustomiser entries={usable.map((n) => ({ to: n.to, label: t(n.label) }))} />
+            {guide.palette && <Suspense fallback={null}><CommandPalette nav={paletteNav} /></Suspense>}
+            {guide.help && <Suspense fallback={null}><HelpPanel pageTitle={(path) => {
+                const n = usable.find((x) => x.to === path) ?? (path === '/get-started' ? GET_STARTED : undefined);
+                return n ? t(n.label) : undefined;
+            }} /></Suspense>}
         </Shell>
     );
 }
