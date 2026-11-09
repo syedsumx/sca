@@ -14,7 +14,14 @@ adds these modules on top:
 
 Orchestration is **Cairn Flows** (`src/cairn/flows`, the **Flows** canvas in the workspace, `cairn flows`, the
 `flows` bundle kind and MCP tools): one DAG mixing SQL, derived tables, checks, notebooks, Python, Spark, dbt,
-agents, Airflow DAGs, approvals, branches and for-each, run as its owner.
+agents, Airflow DAGs, approvals, branches and for-each, run as its owner. It works with Airflow both ways: a
+flow exports as a DAG file (`cairn flows export-airflow`), Airflow can be a flow's runner (`runner: airflow`), and
+Airflow's DAGs show read-only on the canvas and convert to flows.
+
+Everything configurable is code (`src/cairn/iac`: bundles, the Terraform provider, `cairn export`), and agents take
+part safely: through MCP (`iac_plan`, `iac_propose`) they propose change requests that a person with the right
+privileges approves and applies as themselves (`/v1/iac/changes`, **Settings → Infrastructure as code → Changes**,
+with **Ask an agent** to draft one from plain words).
 
 Read **[ARCHITECTURE.md](ARCHITECTURE.md)** for the design, **[UX_ACTIVE_METADATA_SPEC.md](UX_ACTIVE_METADATA_SPEC.md)** for the consumer UX and
 active-metadata blueprint (module E), and **[ROADMAP.md](ROADMAP.md)** for the platform map (Cairn as the one data platform), design decisions and what comes next.

@@ -51,10 +51,10 @@ jobs:
           java-version: "17"
       - name: Lint
         run: ruff check .
-      - name: Everything as code (the registry's coverage gate; the Terraform provider generated from it)
+      - name: Everything as code (the registry's coverage gate; the Terraform provider generated from it; agents' change requests)
         run: |
           python -m cairn.iac.terraform --check
-          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py tests/test_iac_agent_e2e.py
       - name: Unit and integration tests
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
@@ -543,7 +543,7 @@ jobs:
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,export]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-pipelines.log" --log-file-level=WARNING tests/test_dbt_e2e.py tests/test_dbt_more_e2e.py tests/test_airflow_e2e.py tests/test_airflow_more_e2e.py tests/test_flows_airflow_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
             tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
