@@ -389,6 +389,97 @@ jobs:
         if: failure()
         run: tail -n 300 "$RUNNER_TEMP/cairn-trino.log" || true
 
+  # Cairn's AI features against the real model provider, through Cairn's AI gateway, with real Trino, store and
+  # catalog (tests/test_live_model.py): the BI AI builder, custom agents, the pipeline agent, CoWork, the LLM layer
+  # and Ask an agent. Needs the repository secret ANTHROPIC_API_KEY; without it the job passes and says it skipped.
+  # The model is the repository variable CAIRN_LIVE_MODEL_NAME, or a lower-cost one Cairn lists.
+  live-model:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/claude/datahub-enterprise-extension')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      HAVE_KEY: ${{ secrets.ANTHROPIC_API_KEY != '' }}
+    steps:
+      - name: No provider key
+        if: env.HAVE_KEY != 'true'
+        run: |
+          echo "skipped: no ANTHROPIC_API_KEY secret"
+          echo "live-model: skipped: no ANTHROPIC_API_KEY secret" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/checkout@v4
+        if: env.HAVE_KEY == 'true'
+      - uses: dtolnay/rust-toolchain@stable
+        if: env.HAVE_KEY == 'true'
+      - uses: Swatinem/rust-cache@v2
+        if: env.HAVE_KEY == 'true'
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - uses: actions/setup-python@v5
+        if: env.HAVE_KEY == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: cairn/pyproject.toml
+      - name: Build the catalog and the store
+        if: env.HAVE_KEY == 'true'
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+      - name: Install Cairn and pull Trino
+        if: env.HAVE_KEY == 'true'
+        run: |
+          pip install -e ".[server,ai,test,trino]"
+          docker pull -q trinodb/trino:484
+      - name: The provider key, in a file only this job reads
+        if: env.HAVE_KEY == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          echo "::add-mask::${ANTHROPIC_API_KEY}"
+          mkdir -p "$RUNNER_TEMP/live-model"
+          (umask 077 && printf '%s' "$ANTHROPIC_API_KEY" > "$RUNNER_TEMP/provider.key")
+          chmod 600 "$RUNNER_TEMP/provider.key"
+      - name: Live-model checks
+        if: env.HAVE_KEY == 'true'
+        env:
+          CAIRN_LIVE_MODEL: "1"
+          ANTHROPIC_API_KEY_FILE: ${{ runner.temp }}/provider.key
+          CAIRN_LIVE_MODEL_NAME: ${{ vars.CAIRN_LIVE_MODEL_NAME || 'claude-sonnet-5-5' }}
+          CAIRN_LIVE_EFFORT: medium
+          CAIRN_LIVE_MAX_TOKENS: "8000"
+          CAIRN_LIVE_MAX_TURNS: "8"
+          CAIRN_LIVE_USAGE_FILE: ${{ runner.temp }}/live-model/usage.json
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_live_model.py | tee "$RUNNER_TEMP/live-model.log"
+          # Skipped is not passed: every check must have run.
+          ! grep -q "skipped" "$RUNNER_TEMP/live-model.log"
+      - name: Tokens and estimated cost
+        if: always() && env.HAVE_KEY == 'true'
+        run: |
+          rm -f "$RUNNER_TEMP/provider.key"
+          python - "$RUNNER_TEMP/live-model/usage.json" >> "$GITHUB_STEP_SUMMARY" <<'EOF' || true
+          import json, sys
+          d = json.load(open(sys.argv[1]))
+          print(f"### Live-model checks ({d['model']}, effort {d['effort']})\n")
+          print("| Check | Outcome | Attempts | Model calls | Input tokens | Output tokens | Est. cost (USD) |")
+          print("|---|---|---|---|---|---|---|")
+          for name, c in d["checks"].items():
+              print(f"| {name} | {c['outcome']} | {len(c['attempts'])} | {c['model_calls']} | {c['input_tokens']} "
+                    f"| {c['output_tokens']} | {c['cost_usd']:.4f} |")
+          t = d["total"]
+          print(f"| total | | | {t['model_calls']} | {t['input_tokens']} | {t['output_tokens']} | {t['cost_usd']:.4f} |")
+          EOF
+      - uses: actions/upload-artifact@v4
+        if: always() && env.HAVE_KEY == 'true'
+        with:
+          name: live-model-usage
+          path: ${{ runner.temp }}/live-model/
+          if-no-files-found: ignore
+
   # dbt, Airflow 3 and Spark 4 on the lakehouse, as shipped (the cairn/dbt, cairn/airflow and cairn/spark
   # images), against a real Trino, Cairn Catalog, Cairn Store and Cairn API: pipeline identities, policies,
   # run recording, lineage, Airflow sign-in through Cairn and Spark governed table by table.

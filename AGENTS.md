@@ -67,7 +67,7 @@ Run everything from `cairn/`.
 - **Hetzner setup:** `deploy/hetzner/ci/k3s-smoke.sh` runs the whole setup on one Linux machine (sudo,
   internet); CI runs it as job `hetzner`.
 
-CI is `.github/workflows/cairn-ci.yml` (16 jobs); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
+CI is `.github/workflows/cairn-ci.yml` (17 jobs; `live-model` needs the `ANTHROPIC_API_KEY` secret); `.github/workflows/cairn-upgrade-matrix.yml` runs weekly.
 
 ## Conventions
 
