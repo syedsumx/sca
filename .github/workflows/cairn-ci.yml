@@ -51,6 +51,10 @@ jobs:
           java-version: "17"
       - name: Lint
         run: ruff check .
+      - name: Everything as code (the registry's coverage gate; the Terraform provider generated from it)
+        run: |
+          python -m cairn.iac.terraform --check
+          pytest -q -p no:cacheprovider -o addopts="" tests/test_iac_coverage.py tests/test_iac_roundtrip.py
       - name: Unit and integration tests
         env:
           CAIRN_TEST_PG_URL: postgresql+psycopg://postgres:test@localhost:5432/cairn
@@ -337,8 +341,72 @@ jobs:
           set -o pipefail
           pip install -e ".[server,test,streams]"   # vector indexes (their tables) need pyiceberg
           docker pull -q hashicorp/terraform:1.13.4
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py | tee "$RUNNER_TEMP/tf.log"
+          python -m cairn.iac.terraform --check     # the provider's resources are the registry's
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py tests/test_iac_roundtrip.py \
+            | tee "$RUNNER_TEMP/tf.log"
           ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
+
+  terraform-modules:
+    # Cairn's platform as Terraform (deploy/terraform): every module and example formatted, linted and validated;
+    # modules/cairn applied on a kind cluster (examples/kind), then the API's /health asked.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cairn/deploy/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.4
+          terraform_wrapper: false
+      - uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: v0.58.1
+      - name: Format, lint and validate every module and example
+        run: |
+          terraform fmt -check -recursive
+          tflint --recursive --config "$PWD/.tflint.hcl"
+          for d in modules/* examples/*; do
+            echo "== $d"
+            # The registry and GitHub (provider signatures) answer 5xx now and then: try again.
+            for i in 1 2 3; do (cd "$d" && terraform init -backend=false -input=false >/dev/null) && break
+              [ "$i" = 3 ] && exit 1; sleep 15; done
+            (cd "$d" && terraform validate)
+          done
+      - name: Kind cluster and the platform image
+        working-directory: cairn
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind.sha256" \
+            https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
+          (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          kind create cluster --name cairn --image kindest/node:v1.33.1 --wait 120s
+          docker build -q -f docker/Dockerfile --build-arg OCR_LANGUAGES= -t cairn/platform:ci .
+          kind load docker-image cairn/platform:ci --name cairn
+      - name: Apply modules/cairn on kind, then ask the API's /health
+        working-directory: cairn/deploy/terraform/examples/kind
+        run: |
+          set -euo pipefail
+          umask 077
+          openssl rand -hex 32 > "$RUNNER_TEMP/service-token"       # a secret: in a file, never on a command line
+          TF_VAR_service_token="$(cat "$RUNNER_TEMP/service-token")"
+          export TF_VAR_service_token
+          terraform init -input=false
+          terraform apply -auto-approve -input=false
+          kubectl -n cairn rollout status deploy/cairn-api --timeout=600s
+          kubectl -n cairn port-forward svc/cairn-api 18080:8800 >"$RUNNER_TEMP/pf.log" 2>&1 &
+          for i in $(seq 1 30); do curl -fsS http://127.0.0.1:18080/health && break; sleep 2; done
+          curl -fsS http://127.0.0.1:18080/health | grep -q '"status":"ok"'
+          terraform plan -detailed-exitcode -input=false     # applied: nothing left to change
+          terraform destroy -auto-approve -input=false
+      - name: Cluster state on failure
+        if: failure()
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n cairn describe pods | tail -80 || true
+          kubectl -n cairn logs deploy/cairn-api --tail=200 || true
 
   ml:
     runs-on: ubuntu-latest
