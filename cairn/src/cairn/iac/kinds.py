@@ -199,6 +199,21 @@ KINDS: list[Kind] = [
          update=op("PATCH /v1/external-catalogs/{id}", only=("writable",)),
          delete=op("DELETE /v1/external-catalogs/{id}", no_body=True), order=65, service="external_catalogs",
          docs="external-catalogs"),
+    Kind("flows", "flow", "data",
+         "A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, "
+         "Airflow DAGs, approvals, branches, for-each, notifications) run as its owner. Saved and published together; "
+         "the published version is what is compared.",
+         (R("name", force_new=True, description="lowercase letters, digits, - and _"),
+          R("spec", "json", description="the flow's definition (kind: flow without its name): steps, params, triggers, "
+                                        "concurrency, sla_minutes, notify, layout"),
+          F("enabled", "bool", default=True, description="off: no scheduled or triggered runs")),
+         read="/v1/flows", id="name", create=op("POST /v1/flows", body={"publish": True}),
+         update=op("PUT /v1/flows/{name}", body={"publish": True}), delete=op("DELETE /v1/flows/{name}", no_body=True),
+         mine=True, order=66, service="flows", docs="flows-orchestration",
+         example={"name": "nightly-sales", "spec": {
+             "triggers": [{"type": "schedule", "cron": "0 2 * * *", "timezone": "UTC"}],
+             "steps": [{"name": "tell", "type": "notify", "message": "Good morning from {{ flow.name }}"}]}},
+         example_update={"enabled": False}),
 
     # ---- quality and governance ---------------------------------------------------------------------------------
     Kind("quality_monitors", "quality_monitor", "quality",

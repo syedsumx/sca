@@ -34,6 +34,13 @@ workflows:
     steps:
       - {name: refresh, type: derived, table: revenue}
       - {name: not-empty, type: check, query: revenue-by-region, op: ">", value: 0, after: [refresh]}
+flows:                             # Cairn Flows: the definition under spec, saved and published on apply
+  - name: nightly-sales
+    spec:
+      triggers: [{type: schedule, cron: "0 2 * * *", timezone: Europe/Berlin}]
+      steps:
+        - {name: refresh, type: derived, table: revenue}
+        - {name: tell, type: notify, after: [refresh], message: "revenue refreshed"}
 ```
 
 Dashboards, alerts and workflow steps name their saved queries (``query: <name>``): any of the token user's
@@ -217,6 +224,16 @@ def desired(kind: str, spec: dict) -> dict:
             raise BundleError(f"input_tables/{d['table']}: columns is a list of {{name, type}}")
     if kind == "alerts":
         d["value"] = _number(d["value"], f"alerts/{d['name']}: value")
+    if kind == "flows":                    # the definition checked here, as Cairn holds it (cairn.flows.model)
+        from cairn.flows.model import FlowError, normalize
+
+        if not isinstance(d.get("spec"), dict):
+            raise BundleError(f"flows/{d.get('name')}: spec is the flow's definition (steps, triggers, ...)")
+        try:
+            d["spec"] = normalize({**d["spec"], "name": d["name"]})
+        except FlowError as e:
+            raise BundleError(f"flows/{d['name']}: " + "; ".join(
+                f"{x.get('path') or 'flow'}: {x['message']}" for x in e.errors))
     if kind == "workflows":
         if not isinstance(d["steps"], list) or not all(isinstance(x, dict) and x.get("name") for x in d["steps"]):
             raise BundleError(f"workflows/{d['name']}: steps is a list of steps, each with a name")

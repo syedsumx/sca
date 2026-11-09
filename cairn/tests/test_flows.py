@@ -585,10 +585,11 @@ def test_bundles_plan_apply_and_drift(api, tmp_path):
         bundle: ops
         flows:
           - name: nightly
-            triggers: [{type: schedule, cron: "15 2 * * *", timezone: UTC}]
-            steps:
-              - {name: q, type: sql, sql: "SELECT count(*) AS n FROM main.orders", connection: wh}
-              - {name: tell, type: notify, after: [q], message: "{{ steps.q.rows }} rows"}
+            spec:
+              triggers: [{type: schedule, cron: "15 2 * * *", timezone: UTC}]
+              steps:
+                - {name: q, type: sql, sql: "SELECT count(*) AS n FROM main.orders", connection: wh}
+                - {name: tell, type: notify, after: [q], message: "{{ steps.q.rows }} rows"}
     """))
     spec = b.load(str(path))
     changes, state = b.plan(c, spec)
@@ -603,11 +604,18 @@ def test_bundles_plan_apply_and_drift(api, tmp_path):
     d["steps"][1]["message"] = "changed"
     s.flows.save(ADM, "nightly", d, publish=True)
     changes, state = b.plan(c, spec)
-    assert changes[0].action == "update" and "steps" in changes[0].diff
+    assert changes[0].action == "update" and "spec" in changes[0].diff
     b.apply(c, spec, changes, state, log=lambda line: None)
     assert s.flows.get(ADM, "nightly")["published_version"] == 3
+    assert s.flows.get(ADM, "nightly")["published"]["steps"][1]["message"] == "{{ steps.q.rows }} rows"
+    # Turned off by the bundle: kept as declared.
+    spec["flows"]["nightly"]["enabled"] = False
+    changes, state = b.plan(c, spec)
+    assert changes[0].action == "update" and "enabled" in changes[0].diff
+    b.apply(c, spec, changes, state, log=lambda line: None)
+    assert s.flows.get(ADM, "nightly")["enabled"] is False and [x.action for x in b.plan(c, spec)[0]] == ["keep"]
     bad = tmp_path / "bad.yaml"
-    bad.write_text("bundle: ops\nflows:\n  - {name: x, steps: [{name: a, type: nope}]}\n")
+    bad.write_text("bundle: ops\nflows:\n  - {name: x, spec: {steps: [{name: a, type: nope}]}}\n")
     with pytest.raises(b.BundleError, match="steps\\[0\\].type"):
         b.load(str(bad))
     path.write_text("bundle: ops\n")
@@ -646,3 +654,21 @@ def test_the_mcp_tools_run_as_the_caller(api):
     from cairn.identity.agents import tool_scope
 
     assert tool_scope("run_flow") == "write" and tool_scope("list_flows") == "read"
+
+
+def test_the_cli_validates_here_and_needs_cairn_for_the_rest(tmp_path, monkeypatch, capsys):
+    import argparse
+
+    from cairn.flows import cli
+
+    good, bad = tmp_path / "good.yaml", tmp_path / "bad.yaml"
+    good.write_text(FLOW)
+    bad.write_text("name: x\nsteps:\n  - {name: a, type: notify, message: hi, after: [zz]}\n")
+    assert cli.main(argparse.Namespace(flows_cmd="validate", files=[str(good)])) == 0
+    assert "flow nightly, 7 steps, valid" in capsys.readouterr().out
+    assert cli.main(argparse.Namespace(flows_cmd="validate", files=[str(bad)])) == 1
+    assert "steps[0].after: no step 'zz' to come after" in capsys.readouterr().out
+    for v in ("CAIRN_URL", "CAIRN_TOKEN", "CAIRN_TOKEN_FILE"):
+        monkeypatch.delenv(v, raising=False)
+    assert cli.main(argparse.Namespace(flows_cmd="list")) == 1
+    assert "set CAIRN_URL" in capsys.readouterr().err

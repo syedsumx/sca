@@ -257,6 +257,14 @@ class Flows:
         if "definition" in body:
             d = body["definition"]
             return (model.from_text(d) if isinstance(d, str) else d), {k: body[k] for k in ("editors", "viewers") if k in body}
+        if isinstance(body.get("spec"), dict):         # the IaC shape (bundles, Terraform): {name, spec, enabled}
+            spec = {**body["spec"], **({"name": body["name"]} if body.get("name") else {})}
+            opts = {k: body[k] for k in ("editors", "viewers") if k in body}
+            if "enabled" in body:
+                opts["_enabled"] = bool(body["enabled"])
+            if body.get("publish"):
+                opts["_publish"] = True
+            return spec, opts
         return body, {}
 
     @staticmethod
@@ -267,6 +275,7 @@ class Flows:
 
     def create(self, actor: str, body: Any, publish: bool = False, note: Optional[str] = None) -> dict:
         raw, sharing = self._split(body)
+        publish, enabled = publish or sharing.pop("_publish", False), sharing.pop("_enabled", None)
         if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not model.NAME.match(raw["name"]):
             raise FlowError("name: lowercase letters, digits, - and _ (starting with a letter)", 400,
                             [{"path": "name", "message": "is lowercase letters, digits, - and _"}])
@@ -286,6 +295,8 @@ class Flows:
         self._audit(actor, "flow.created", raw["name"], {"valid": check["valid"]})
         if publish:
             self.publish(actor, fid, note)
+        if enabled is False:
+            self.set_enabled(actor, fid, False)
         return self.get(actor, fid)
 
     def save(self, actor: str, ref: str, body: Any, publish: bool = False, note: Optional[str] = None) -> dict:
@@ -293,6 +304,7 @@ class Flows:
         row = self._row(ref)
         self._need(actor, row, "edit")
         raw, sharing = self._split(body)
+        publish, enabled = publish or sharing.pop("_publish", False), sharing.pop("_enabled", None)
         if not isinstance(raw, dict):
             raise FlowError("a flow is a mapping")
         if raw.get("name", row["name"]) != row["name"]:
@@ -311,6 +323,8 @@ class Flows:
             self.share(actor, row["id"], sharing.get("editors", row["editors"]), sharing.get("viewers", row["viewers"]))
         if publish:
             self.publish(actor, row["id"], note)
+        if enabled is not None and enabled != bool(row["enabled"]):
+            self.set_enabled(actor, row["id"], enabled)
         return self.get(actor, row["id"])
 
     def share(self, actor: str, ref: str, editors: list, viewers: list) -> dict:

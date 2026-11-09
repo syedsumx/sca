@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-54 resources, each also a data source:
+55 resources, each also a data source:
 
 **Identity and access**
 
@@ -41,6 +41,7 @@ permissions and audit apply:
 | `cairn_volume` | `volumes` | A governed volume: files under Cairn's grants, in a Cairn Store bucket of its own |
 | `cairn_volume_grant` | `volume_grants` | Read or write access to a volume for a person or a group |
 | `cairn_external_catalog` | `external_catalogs` | Another organisation's Iceberg REST catalog, read (and optionally written) under Cairn's policies |
+| `cairn_flow` | `flows` | A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, Airflow DAGs, approvals, branches, for-each, notifications) run as its owner |
 
 **SQL and BI**
 
