@@ -316,6 +316,19 @@ jobs:
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+      - name: The UI on real engines (the secret-reference picker against a real catalog; a 600-term ontology measured in Chromium)
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_ONTOLOGY_BIN: ${{ github.workspace }}/cairn/ontology/target/release/cairn-ontology
+          CAIRN_ONTOLOGY_SCALE_REPORT: ${{ runner.temp }}/ontology-scale.json
+        run: |
+          set -o pipefail
+          pytest -q -s -p no:cacheprovider -o addopts="" -rs tests/test_ontology_scale_ui_e2e.py \
+            "tests/test_forms_ui_e2e.py::test_a_secret_reference_is_picked_for_an_external_catalog" | tee "$RUNNER_TEMP/ui-engines.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/ui-engines.log"
+          cat "$RUNNER_TEMP/ontology-scale.json"
       - name: The command line as a single-file binary (PyInstaller, client dependencies only), end to end
         working-directory: cairn
         env:
@@ -503,14 +516,15 @@ jobs:
       - name: Friendly forms (create, edit and delete in four hubs with forms only, pickers, field errors, a 403 in words; built UI against Cairn)
         run: |
           set -o pipefail
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_forms_ui_e2e.py | tee "$RUNNER_TEMP/formsui.log"
+          # The secret-reference picker registers an external catalog: it needs a real one (the trino job runs it).
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_forms_ui_e2e.py -k "not secret_reference" | tee "$RUNNER_TEMP/formsui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/formsui.log"
       - name: The common tasks (fifteen tasks from the home page with the palette, sidebar, Get started and forms; built UI against Cairn)
         run: |
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_tasks_ui_e2e.py | tee "$RUNNER_TEMP/tasksui.log"
           # Only the ontology task may skip here (it needs the compiler's stack: the trino job runs it).
-          grep -q "2 passed" "$RUNNER_TEMP/tasksui.log"
+          grep -q "3 passed" "$RUNNER_TEMP/tasksui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail
@@ -1011,6 +1025,21 @@ jobs:
         run: |
           CAIRN_ADMIN_PASSWORD="$(grep ^CAIRN_ADMIN_PASSWORD= .env | cut -d= -f2-)" CAIRN_SINK_URL=http://127.0.0.1:8099/ \
             NODE_PATH="$RUNNER_TEMP/pw/node_modules" node core/tools/leak_scan.mjs http://localhost:9000
+
+      # Last, as it changes the stack: Cairn Core with its native policies off, the PDP the only authorizer (2.5).
+      - name: Authoritative mode (native policies off; the PDP alone decides)
+        run: |
+          sed -i -e 's/^CAIRN_AUTHZ_MODE=.*/CAIRN_AUTHZ_MODE=authoritative/' \
+                 -e 's/^CAIRN_NATIVE_POLICIES_ENABLED=.*/CAIRN_NATIVE_POLICIES_ENABLED=false/' .env
+          grep -q '^CAIRN_AUTHZ_MODE=authoritative$' .env && grep -q '^CAIRN_NATIVE_POLICIES_ENABLED=false$' .env
+          docker compose -f docker-compose.cairn.yml up -d --no-build --wait --wait-timeout 900
+          docker compose -f docker-compose.cairn.yml exec -T cairn-core env | grep -qx 'CAIRN_NATIVE_POLICIES_ENABLED=false'
+          set -o pipefail
+          CAIRN_E2E_SSO=0 CAIRN_E2E_TLS=0 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" \
+            tests/e2e/run.sh -v -rs -k authoritative | tee "$RUNNER_TEMP/authoritative.log"
+          # Every authoritative test must have run (none skipped as "additive").
+          ! grep -q "SKIPPED" "$RUNNER_TEMP/authoritative.log"
+          grep -qE "[0-9]+ passed" "$RUNNER_TEMP/authoritative.log"
 
       - name: Stack logs
         if: failure()
