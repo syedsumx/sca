@@ -3267,6 +3267,81 @@ def test_a_missing_day_in_an_iceberg_table_fails_its_partitioned_volume_monitor(
     trino("DROP TABLE lake.sales.daily_events")
 
 
+def test_partition_metadata_finds_missing_and_thin_partitions_without_a_scan(trino, cairn):
+    """1.8 on Trino: volume per partition for an Iceberg table partitioned by day(ts), read from the table's own
+    partition metadata (``$partitions``: the row counts its data files record, no scan), and for a Delta Lake table
+    partitioned by a date column, counted by that column (Trino's Delta ``$partitions`` has no row counts, so the
+    metadata source says so rather than guess). Yesterday goes missing and the day before is under-filled while a
+    third day takes their rows, so each table's total is unchanged: the monitors fail on both partitions, and pass
+    again once they are reloaded."""
+    from datetime import datetime, timezone
+
+    from cairn.quality.collectors import ConnectionRegistry, SqlCollector
+    from cairn.quality.engine import QualityEngine
+    from cairn.quality.models import MonitorSpec
+    from cairn.quality.store import QualityStore
+
+    _, s = cairn
+    day = 86_400_000
+    now = int(time.time() * 1000)
+    start = lambda back: datetime.fromtimestamp((now // day - back) * day / 1000, tz=timezone.utc)  # noqa: E731
+    normal = {back: 20 + back % 3 for back in range(1, 29)}
+    broken = {**normal, 1: 0, 2: 3, 3: normal[3] + normal[1] + normal[2] - 3}
+    tables = {
+        "lake.sales.events_by_day": ("CREATE TABLE IF NOT EXISTS lake.sales.events_by_day (id integer, ts timestamp(6)) "
+                                     "WITH (partitioning = ARRAY['day(ts)'])", "ts_day", "iceberg", "metadata"),
+        "delta.dsales.events_by_date": ("CREATE TABLE IF NOT EXISTS delta.dsales.events_by_date (id integer, d date) "
+                                        "WITH (partitioned_by = ARRAY['d'])", "d", "delta-lake", "data"),
+    }
+    trino("CREATE SCHEMA IF NOT EXISTS delta.dsales")
+
+    def load(table, counts):
+        rows = ", ".join(f"(DATE '{start(b):%Y-%m-%d}', {n})" for b, n in counts.items() if n)
+        value = "CAST(d AS timestamp(6)) + n * INTERVAL '1' MINUTE" if table.startswith("lake.") else "d"
+        trino(f"DELETE FROM {table}")
+        trino(f"INSERT INTO {table} SELECT n, {value} FROM (VALUES {rows}) AS v(d, c) "
+              "CROSS JOIN UNNEST(sequence(1, c)) AS u(n)")
+
+    lake_conn = {"url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem",
+                 "run_as_user": True, "service_user": "urn:li:corpuser:admin"}
+    reg = ConnectionRegistry({"lake": lake_conn})
+    reg.trino_tokens = s.trino_tokens
+    qe = QualityEngine(QualityStore(s.engine), None, {"sql": SqlCollector(reg)})
+    def monitor(table, field, platform, source):
+        name = table.split(".", 1)[1] if table.startswith("lake.") else table
+        return qe.store.create_monitor(MonitorSpec(
+            name=f"{table} by partition ({source})", type="volume",
+            dataset_urn=f"urn:li:dataset:(urn:li:dataPlatform:{platform},{table.split('.', 1)[1]},PROD)",
+            config={"source": "sql", "connection": "lake", "table": name, "partition_column": field,
+                    "partition_source": source, "min_ratio": 0.5}), "urn:li:corpuser:admin")
+    for table, (ddl, field, platform, source) in tables.items():
+        trino(ddl)
+        load(table, normal)
+        m = monitor(table, field, platform, source)
+        if platform == "delta-lake":
+            no_counts = qe.evaluate(qe.store.get_monitor(monitor(table, field, platform, "metadata").id), now=now)
+            assert no_counts.status == "ERROR" and "no row counts" in no_counts.message, no_counts.message
+        ok = qe.evaluate(qe.store.get_monitor(m.id), now=now)
+        assert ok.status == "PASS" and ok.metric_value == normal[1], (table, ok.status, ok.message)
+        load(table, broken)
+        total = trino(f"SELECT count(*) AS n FROM {table}")[0]["n"]
+        assert total == sum(normal.values())                                    # the table's total looks fine
+        bad = qe.evaluate(qe.store.get_monitor(m.id), now=now + 1)
+        assert bad.status == "FAIL", (table, bad.status, bad.message)
+        assert f"missing {start(1):%Y-%m-%d}" in bad.message and f"thin {start(2):%Y-%m-%d} (3 rows)" in bad.message, bad.message
+        load(table, normal)
+        assert qe.evaluate(qe.store.get_monitor(m.id), now=now + 2).status == "PASS"
+        if platform == "iceberg":     # the per-column profile: every column's nulls and distinct values in one scan
+            from cairn.quality.profiler import profile_table
+
+            prof = profile_table(reg.engine("lake"), m.dataset_urn, drop_database=False)
+            assert prof["rowCount"] == sum(normal.values()) and prof["columnCount"] == 2, prof
+            by = {f["fieldPath"]: f for f in prof["fieldProfiles"]}
+            assert by["id"]["nullCount"] == 0 and by["id"]["uniqueCount"] == max(normal.values())
+            assert by["id"]["min"] == "1.0" and by["ts"]["uniqueCount"] == sum(normal.values()), by
+        trino(f"DROP TABLE {table}")
+
+
 def test_outages_under_load_fail_closed_and_lose_no_writes(trino, cairn, lake):
     """L46, chaos: writers insert into an Iceberg table through Trino without pause while Cairn (the PDP Trino asks
     before every action) is stopped and started, then the catalog process is killed and started again. During each

@@ -250,6 +250,9 @@ class SqlCollector:
             if monitor.type == "custom_sql":
                 row = conn.execute(text(c["sql"])).first()
                 return Sample(_f(row[0]) if row else None)
+            if monitor.type == "volume" and c.get("partition_column") and c.get("partition_source") == "metadata":
+                return self._metadata_partitions(conn, self._table(monitor, q, "$partitions"),
+                                                 q.quote(c["partition_column"]), c, now_ms)
             if monitor.type == "volume" and c.get("partition_column"):
                 return self._partitions(conn, engine.dialect.name, table, q.quote(c["partition_column"]), c, now_ms)
             if monitor.type == "volume":
@@ -311,6 +314,40 @@ class SqlCollector:
         return Sample(newest, {"partitions": {str(k): v for k, v in counts.items()}})
 
     @staticmethod
+    def _metadata_partitions(conn, meta: str, field: str, c: dict, now_ms: int) -> Sample:
+        """Rows per partition from the table format's own partition metadata (Trino's ``"<table>$partitions"`` for
+        Iceberg, and for Delta Lake where Trino keeps row counts), not from a scan: each data file records how many
+        rows it holds, so this reads metadata only, however large the table. ``partition_column`` is the partition
+        field (``ts_day`` for ``day(ts)``, ``ts_hour`` for ``hour(ts)``, or a date column partitioned as it is).
+        The value is the newest complete partition's rows."""
+        from cairn.quality.detectors import GRAIN_MS
+
+        grain = c.get("grain", "day")
+        g = GRAIN_MS[grain]
+        span = int(c.get("partitions", 28)) + int(c.get("check", 3)) + int(c.get("lag", 1))
+        since = ((now_ms // g) - span) * g
+        try:
+            rows = conn.execute(text(f"SELECT partition.{field} AS p, record_count AS n FROM {meta}")).all()
+        except Exception as e:  # noqa: BLE001 - the table has no such partition field, or no row counts
+            raise CollectorError(f"the table's partition metadata has no row counts for {field}: {e}"[:500]) from e
+        counts: dict[int, float] = {}
+        for p, n in rows:
+            if p is None or n is None:
+                continue
+            if isinstance(p, int) and not isinstance(p, bool):     # a transform's ordinal: days or hours since 1970
+                ms = p * g
+            elif isinstance(p, str) and grain == "hour" and len(p) == 13:
+                ms = _to_epoch_ms(p + ":00:00")
+            else:
+                ms = _to_epoch_ms(p)
+            if ms is None or ms < since:
+                continue
+            start = (ms // g) * g
+            counts[start] = counts.get(start, 0.0) + float(n)
+        newest = counts.get(((now_ms // g) - int(c.get("lag", 1))) * g, 0.0)
+        return Sample(newest, {"partitions": {str(k): v for k, v in counts.items()}, "source": "metadata"})
+
+    @staticmethod
     def _field_metric(conn, table: str, col: str, metric: str) -> Optional[float]:
         exprs = {
             "null_pct": f"100.0 * SUM(CASE WHEN {col} IS NULL THEN 1 ELSE 0 END) / NULLIF(COUNT(*), 0)",
@@ -328,11 +365,14 @@ class SqlCollector:
         return value
 
     @staticmethod
-    def _table(monitor: Monitor, quoter) -> str:
+    def _table(monitor: Monitor, quoter, suffix: str = "") -> str:
+        """The monitored table, quoted; ``suffix`` names one of its metadata tables (``$partitions``)."""
         name = monitor.config.get("table") or dataset_name_from_urn(monitor.dataset_urn)
         parts = [p for p in name.split(".") if p]
         if not parts or any(not re.fullmatch(r"[A-Za-z0-9_$\- ]+", p) for p in parts):
             raise CollectorError(f"unsafe table identifier {name!r}")
+        if suffix:                                   # always quoted: "orders$partitions"
+            return ".".join([*(quoter.quote(p) for p in parts[:-1]), quoter.quote_identifier(parts[-1] + suffix)])
         return ".".join(quoter.quote(p) for p in parts)
 
 

@@ -46,6 +46,19 @@ instead, and fails on a missing or thin partition whatever the total says.
 * **Partition values.** By default the column is truncated to the day or hour (`date_trunc` on Trino, PostgreSQL
   and most warehouses, `date()` on SQLite, `DATE()` on MySQL). When the column already holds the partition, such
   as a `ds` text column `2026-11-05` (or `2026-11-05 13` for hours), set `truncate: false`.
+* **From the table's partition metadata.** Set `partition_source: "metadata"` to read each partition's row count
+  from the table format's own metadata (Trino's `"<table>$partitions"`) instead of counting rows: every data file
+  records how many rows it holds, so nothing is scanned however large the table. `partition_column` is then the
+  partition field: `ts_day` for an Iceberg table partitioned by `day(ts)`, `ts_hour` for `hour(ts)`, or the column
+  itself for a date column partitioned as it is. This works for Iceberg tables. Trino's Delta Lake `$partitions`
+  has no row counts, so on Delta Lake the monitor reports an error saying so: use the default
+  (`partition_source: "data"`) with the partition column, which Trino answers from those partitions only. Reading
+  `$partitions` needs `MANAGE_DATASET` on the table for the monitor's service user (it carries column bounds).
+
+  ```json
+  {"type": "volume", "config": {"source": "sql", "connection": "lakehouse", "table": "sales.events",
+                                "partition_column": "ts_day", "partition_source": "metadata"}}
+  ```
 * The value recorded is the newest checked partition's rows; the result lists each checked partition's rows, and
   `missing` and `thin` when it fails. It cannot be combined with `model: learned`.
 

@@ -89,6 +89,9 @@ class MonitorSpec(BaseModel):
             if c.get("min_rows_per_partition") is not None and float(c["min_rows_per_partition"]) < 0:
                 raise ValueError("config.min_rows_per_partition must not be negative")
             c.setdefault("truncate", True)
+            if c.setdefault("partition_source", "data") not in ("data", "metadata"):
+                raise ValueError("config.partition_source must be 'data' (count rows by partition_column) or "
+                                 "'metadata' (row counts of the table's partitions, Iceberg and Delta Lake on Trino)")
         if self.type == "freshness" and source == "sql" and not c.get("timestamp_column"):
             raise ValueError("SQL freshness requires config.timestamp_column")
         return self

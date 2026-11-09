@@ -205,7 +205,7 @@ certification structured properties, the `Certified` tag and the `Classification
 | 1.5 | Leader-elected scheduler (pg advisory lock) with hash partitioning | ✅ leadership acquired on Postgres in the live stack |
 | 1.6 | REST API + React dashboard, monitor editor, evaluation chart, dataset health badge | ✅ |
 | 1.7 | Smart-monitor auto-provisioning (create volume/freshness monitors for every certified or top-usage dataset) | ✅ auto-monitor rules (`quality/scheduler.py`, `tests/test_auto_monitors.py`) |
-| 1.8 | Per-column profiling collector (null/distinct for all columns in one scan) and partition-aware volume | 🟡 per-column profiling (`quality/profiler.py`); ⬜ partition-aware volume (L43) |
+| 1.8 | Per-column profiling collector (null/distinct for all columns in one scan) and partition-aware volume | ✅ per-column profiling (`quality/profiler.py`, also run on Trino against an Iceberg table); partition-aware volume (L43): rows per day or hour counted by a partition column, or read from the table's partition metadata without a scan (`partition_source: metadata`, Iceberg `$partitions`; Trino's Delta Lake `$partitions` has no row counts, so Delta tables are counted by their partition column). A missing or under-filled partition fails while the table's total looks normal; tested on Trino with a partitioned Iceberg table (both sources) and a Delta Lake table partitioned by date (`tests/test_trino_e2e.py`) |
 | 1.9 | Next: optional Kafka-sink of evaluations for real-time alerting fan-out (PagerDuty/Opsgenie native) | ⬜ |
 
 **DoD:** a volume monitor on a demo table pages within one interval when rows drop 90%. It auto-resolves
