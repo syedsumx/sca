@@ -74,7 +74,9 @@ KINDS: list[Kind] = [
     Kind("workload_bindings", "workload_binding", "access",
          "A workload identity binding: tokens from an issuer with this subject (and claims) act as a Cairn user.",
          (R("issuer", force_new=True), R("subject", force_new=True, description="the token's sub, exactly"),
-          R("user", force_new=True), F("conditions", "json", default={}, force_new=True)),
+          R("user", force_new=True, description="urn:li:corpuser:…, as Cairn keeps it (a bare name would be a change "
+                                                "on every plan)"),
+          F("conditions", "json", default={}, force_new=True)),
          read="/v1/workload-identity/bindings", create=op("POST /v1/workload-identity/bindings"), update=None,
          delete=op("DELETE /v1/workload-identity/bindings/{id}", no_body=True), key=("issuer", "subject"),
          order=16, service="workload", docs="workload-identity"),

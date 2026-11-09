@@ -100,7 +100,7 @@ var kinds = []kind{
 		fields: []field{
 			{name: "issuer", typ: "string", required: true, forceNew: true},
 			{name: "subject", typ: "string", required: true, forceNew: true, desc: "the token's sub, exactly"},
-			{name: "user", typ: "string", required: true, forceNew: true},
+			{name: "user", typ: "string", required: true, forceNew: true, desc: "urn:li:corpuser:…, as Cairn keeps it (a bare name would be a change on every plan)"},
 			{name: "conditions", typ: "json", computed: true, forceNew: true},
 		}},
 	{typeName: "secret_scope", name: "secret_scopes",

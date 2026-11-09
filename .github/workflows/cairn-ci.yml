@@ -391,6 +391,42 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py tests/test_iac_roundtrip.py \
             | tee "$RUNNER_TEMP/tf.log"
           ! grep -q "skipped" "$RUNNER_TEMP/tf.log"
+      # The ten types that need outside systems, by bundle and by Terraform, against the real ones: Cairn Store and
+      # Catalog with Trino, PostgreSQL (logical decoding), Mailpit, MLflow, and a kube-apiserver with etcd.
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            cairn/catalog
+            cairn/store
+      - name: The outside systems (store, catalog, Trino, PostgreSQL, Mailpit, MLflow, kube-apiserver and etcd)
+        run: |
+          (cd catalog && cargo build --release --locked)
+          (cd store && cargo build --release --locked)
+          docker pull -q trinodb/trino:484
+          docker pull -q postgres:16-alpine
+          docker pull -q axllent/mailpit:v1.21.8
+          python -m venv "$RUNNER_TEMP/mlflow"
+          "$RUNNER_TEMP/mlflow/bin/pip" install -q "mlflow==3.5.0" "scikit-learn>=1.4" "sqlalchemy<2.1" "fastapi<0.120" "starlette<0.50"
+          mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
+          for b in kube-apiserver kubectl; do
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
+            echo "$(curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
+          done
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
+            | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
+          chmod +x kube-apiserver kubectl etcd
+      - name: Everything as code against the outside systems (bundles and Terraform)
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
+          CAIRN_MLFLOW_PYTHON: ${{ runner.temp }}/mlflow/bin/python
+        run: |
+          set -o pipefail
+          pip install -e ".[server,test,streams,trino,postgres]"
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_iac_outside_e2e.py | tee "$RUNNER_TEMP/tf-outside.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/tf-outside.log"
 
   terraform-modules:
     # Cairn's platform as Terraform (deploy/terraform): every module and example formatted, linted and validated;
