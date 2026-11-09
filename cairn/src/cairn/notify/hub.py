@@ -49,6 +49,7 @@ EVENT_TYPES = [
     "bi.shared", "privacy.erasure_proved", "input.change_requested", "input.change_decided",
     "bi.mentioned", "bi.commented", "metric.alert_triggered", "metric.alert_resolved", "job.failed", "job.finished",
     "saas.sync_failed", "share.expiring", "share.unused",
+    "flow.failed", "flow.succeeded", "flow.sla_missed", "flow.approval_requested", "flow.notice",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook", "push")
 

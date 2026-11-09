@@ -225,28 +225,21 @@ class Workflows:
 
     # ---- running --------------------------------------------------------------------------
     def _step(self, owner: str, s: dict) -> dict:
-        if s["type"] == "derived":
-            dt = self.derived.get(s["derived_id"])
-            if dt["owner"] != owner and not self.operator(owner):
-                raise WorkspaceError(f"{dt['name']} is not the owner's any more")
-            out = self.derived.refresh(s["derived_id"], s.get("full", False), trigger="workflow")
-            if out.get("status") not in ("ok", "running", None):
-                raise WorkspaceError(out.get("error") or f"the refresh of {dt['name']} ended {out.get('status')}")
-            return {"rows": out.get("rows"), "detail": out.get("status")}
-        res = self.ws.run_saved(owner, s["query"], 1000) if s.get("query") else self.ws.run(owner, s["sql"], s["connection"], 1000)
-        rows, cols = res.get("rows") or [], res.get("columns") or []
-        if s["type"] == "check":
-            names = [c["name"] if isinstance(c, dict) else c for c in cols]
-            if s["measure"] == "rows":
-                got = float(len(rows))
-            elif s["measure"] in names and rows:
-                got = float(rows[0][names.index(s["measure"])])
-            else:
-                raise WorkspaceError(f"no column {s['measure']} (or no rows) to check")
-            if not OPS[s["op"]](got, s["value"]):
-                raise WorkspaceError(f"check failed: {s['measure']} is {got:g}, not {s['op']} {s['value']:g}")
-            return {"rows": len(rows), "detail": f"{s['measure']} is {got:g}"}
-        return {"rows": len(rows), "columns": [c["name"] if isinstance(c, dict) else c for c in cols], "preview": rows[:20]}
+        """One step, through the same executors as Cairn Flows (cairn.flows.steps), as the owner."""
+        from cairn.flows import steps as flow_steps
+
+        try:
+            if s["type"] == "derived":
+                out = flow_steps.refresh_derived(self.derived, self.operator, owner, s.get("table", ""),
+                                                 s.get("full", False), "workflow", did=s["derived_id"])
+                return {"rows": out.get("rows"), "detail": out.get("detail")}
+            if s["type"] == "check":
+                out = flow_steps.check(self.ws, owner, s)
+                return {"rows": out["rows"], "detail": out["detail"]}
+            out = flow_steps.run_query(self.ws, owner, s, 1000)
+        except flow_steps.StepFailed as e:
+            raise WorkspaceError(str(e))
+        return {"rows": out["rows"], "columns": out["columns"], "preview": out["_rows"][:20]}
 
     def run(self, wid: str, trigger: str = "manual") -> dict:
         with self.engine.connect() as conn:

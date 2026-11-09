@@ -246,6 +246,15 @@ class KubeRunner:
                     logger.warning("could not delete %s", path)
 
 
+def with_image(runner: Any, image: str) -> Any:
+    """The same runtime (Docker or Kubernetes, same limits) with another image: a flow's dbt or Spark step."""
+    import copy
+
+    other = copy.copy(runner)
+    other.image = image
+    return other
+
+
 def runner_from_env() -> Optional[Any]:
     rt = os.environ.get("CAIRN_JOBS_RUNTIME", "")
     image = os.environ.get("CAIRN_JOBS_IMAGE", IMAGE)
@@ -415,34 +424,58 @@ class Jobs:
         return rid
 
     def _execute(self, j: dict, rid: str, trigger: str) -> dict:
-        owner = j["owner"]
         status, output, log, error = "failed", None, None, None
         try:
-            if not self.allowed(owner):                    # the owner may since have lost the right to run jobs
-                raise JobError(f"{owner} may no longer run jobs (RUN_JOBS)", 403)
-            timeout_s = j["timeout_minutes"] * 60
-            env = {"CAIRN_USER": owner.removeprefix("urn:li:corpuser:"), "CAIRN_JOB": j["name"], "CAIRN_JOB_RUN": rid,
-                   "CAIRN_JOB_PARAMS": json.dumps(j["params"] or {})}
-            token = self.mint_token(owner, timeout_s + 300) if self.mint_token is not None else None
-            if token:                                      # Trino configured: the run reads as its owner
-                env["CAIRN_TRINO_TOKEN"] = token
-                env["CAIRN_TRINO_URL"] = self.trino_url
-            files = ({"job.ipynb": json.dumps(with_params(json.loads(j["source"]), j["params"] or {}))}
-                     if j["kind"] == "notebook" else {"job.py": j["source"]})
-            if token and self.trino_ca:
-                files["trino-ca.pem"] = self.trino_ca
-                env["CAIRN_TRINO_CA_FILE"] = "/work/trino-ca.pem"
-            rc, text = self.runner.run(rid, j["kind"], files, env, timeout_s)
-            log, output = split_output(text)
-            if rc == 0:
-                status = "succeeded"
-            else:
-                error = ("it went over its time limit" if rc == 124 else f"it exited with status {rc}") + \
-                        (f": {log.strip().splitlines()[-1][:500]}" if log.strip() else "")
+            status, output, log, error = self.contained(j["owner"], j["kind"], j["source"], j["params"] or {},
+                                                        j["timeout_minutes"] * 60, j["name"], rid)
         except Exception as e:  # noqa: BLE001 - recorded on the run and told, never raised into the scheduler
             error = str(e)[:1000]
         self._finish(j, rid, trigger, status, output, log, error)
         return {"run": rid, "status": status, "error": error}
+
+    def contained(self, owner: str, kind: str, source: str, params: dict, timeout_s: int, label: str, rid: str,
+                  runner=None, extra_env: Optional[dict[str, str]] = None) -> tuple[str, Optional[str], Optional[str], Optional[str]]:
+        """Runs code in a container of its own as ``owner`` (their Trino token): (status, output, log, error).
+        ``runner``: another image's runner (a flow's dbt or Spark step); ``extra_env``: more settings, which go
+        through the same env file as the token, never a command line. Raises JobError when it cannot run."""
+        runner = runner or self.runner
+        if runner is None:
+            raise JobError("jobs are not configured: set CAIRN_JOBS_RUNTIME (docker or kubernetes)", 503)
+        if not self.allowed(owner):                        # the owner may since have lost the right to run jobs
+            raise JobError(f"{owner} may no longer run jobs (RUN_JOBS)", 403)
+        env = {"CAIRN_USER": owner.removeprefix("urn:li:corpuser:"), "CAIRN_JOB": label, "CAIRN_JOB_RUN": rid,
+               "CAIRN_JOB_PARAMS": json.dumps(params or {}), **(extra_env or {})}
+        token = self.mint_token(owner, timeout_s + 300) if self.mint_token is not None else None
+        if token:                                          # Trino configured: the run reads as its owner
+            env["CAIRN_TRINO_TOKEN"] = token
+            env["CAIRN_TRINO_URL"] = self.trino_url
+        files = ({"job.ipynb": json.dumps(with_params(json.loads(source), params or {}))}
+                 if kind == "notebook" else {"job.py": source})
+        if token and self.trino_ca:
+            files["trino-ca.pem"] = self.trino_ca
+            env["CAIRN_TRINO_CA_FILE"] = "/work/trino-ca.pem"
+        rc, text = runner.run(rid, kind, files, env, timeout_s)
+        log, output = split_output(text)
+        if rc == 0:
+            return "succeeded", output, log, None
+        error = ("it went over its time limit" if rc == 124 else f"it exited with status {rc}") + \
+            (f": {log.strip().splitlines()[-1][:500]}" if log.strip() else "")
+        return "failed", output, log, error
+
+    def run_for_flow(self, owner: str, name: str, params: dict, timeout_s: Optional[int] = None) -> dict:
+        """A defined job run as a step of ``owner``'s flow (``owner`` must own the job or be an operator), its
+        parameters merged with the step's; recorded with the job's runs (trigger ``flow``)."""
+        j = self._get(name)
+        if j["owner"] != owner and not self.is_operator(owner):
+            raise JobError(f"{name} is not the flow owner's job", 403)
+        j = {**j, "params": {**(j["params"] or {}), **(params or {})}}
+        if timeout_s:
+            j["timeout_minutes"] = max(1, min(j["timeout_minutes"], -(-timeout_s // 60)))
+        rid = self._start(j, "flow")
+        out = self._execute(j, rid, "flow")
+        with self.engine.connect() as conn:
+            r = conn.execute(select(job_runs.c.output, job_runs.c.log).where(job_runs.c.id == rid)).first()
+        return {**out, "output": r.output if r else None, "log": r.log if r else None}
 
     def _finish(self, j: dict, rid: str, trigger: str, status: str, output, log, error) -> None:
         owner, cap = j["owner"], self.max_output

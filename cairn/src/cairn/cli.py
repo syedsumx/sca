@@ -162,6 +162,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.derived.run_due)      # derived tables: on schedule or upstream change
     if getattr(s, "sql_workflows", None) is not None:
         sch.extra.append(s.sql_workflows.run_due)    # SQL workflows on their cron
+    if getattr(s, "flows", None) is not None:
+        sch.extra.append(s.flows.run_due)            # Cairn Flows: schedules, dataset changes, parked and orphaned runs
     if getattr(s, "vectors", None) is not None:
         sch.extra.append(s.vectors.run_due)      # vector indexes kept in step with their tables
     if getattr(s, "parquet_tables", None) is not None:
@@ -885,6 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
     bd.add_argument("--detailed-exitcode", action="store_true", help="plan exits 2 when there are changes")
     bd.add_argument("-v", "--verbose", action="store_true", help="list unchanged resources too")
     bd.set_defaults(fn=cmd_bundle)
+    from cairn.flows.cli import add_parser as flows_parser
+
+    flows_parser(sub)
 
     ex = sub.add_parser("export", help="write a live Cairn as code: Terraform with import blocks, or a bundle")
     ex.add_argument("--format", choices=["terraform", "yaml"], default="terraform")

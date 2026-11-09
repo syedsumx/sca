@@ -185,6 +185,7 @@ class Services:
     bi_actions: Optional[Any] = None
     reports: Optional[Any] = None
     sql_workflows: Optional[Any] = None
+    flows: Optional[Any] = None
     notebook_catalog: Optional[Any] = None
     workload: Optional[Any] = None
     dataset_changes: Optional[Any] = None
@@ -623,6 +624,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_active_metadata(services)
     _build_pipeline_health(services)
     _build_medallion(services)
+    _build_flows(services)
     return services
 
 
@@ -641,6 +643,59 @@ def _build_medallion(s: Services) -> None:
     for name in ("pipes", "streams", "derived"):
         if getattr(s, name, None) is not None:
             getattr(s, name).medallion = s.medallion
+
+
+def _build_flows(s: Services) -> None:
+    """Cairn Flows (cairn.flows): DAGs of any steps, run as their owner; built last, on every service steps use."""
+    from cairn.flows.engine import Flows
+    from cairn.flows.steps import Backends
+
+    def operator(actor: str) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), "MANAGE_SYSTEM_OPERATIONS", None, raise_on_deny=False)
+
+    hub = s.notify
+    public = getattr(s.settings, "public_url", "") or ""
+
+    def tell(type_, title, body, recipients, payload):
+        if hub is None:
+            return
+        from cairn.notify.hub import Event
+
+        hub.publish(Event(type=type_, title=title, body=body, recipients=list(recipients), payload=payload,
+                          url=f"{hub.public_url}/cairn/flows?flow={payload.get('flow', '')}&run={payload.get('run', '')}"))
+
+    def groups_of(actor: str) -> list[str]:
+        return [str(g) for g in (s.attributes.subject(actor).get("groups") or [])]
+
+    graph = s.graph
+
+    def may_run(owner: str) -> Optional[str]:
+        """Fail closed: a suspended (or unknown-state) owner's flows do not run."""
+        if not owner.startswith("urn:li:corpuser:"):
+            return f"{owner} is not a Cairn user"
+        if graph is not None:
+            status = (graph.get_aspect(owner, "corpUserStatus") or {}).get("status", "ACTIVE")
+            if status not in ("ACTIVE", "active"):
+                return f"{owner} is {str(status).lower()}"
+        return None
+
+    lake = getattr(s, "lakehouse", None)
+
+    def table_urn(name: str) -> str:
+        if name.startswith("urn:li:dataset:"):
+            return name
+        ns, _, t = name.rpartition(".")
+        if lake is not None and ns:
+            return lake.urn(ns.split("."), t)
+        return f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{name},PROD)"
+
+    ol = getattr(s, "openlineage", None)
+    backends = Backends(workspace=getattr(s, "sql_workspace", None), derived=getattr(s, "derived", None),
+                        jobs=getattr(s, "jobs", None), agent_apps=getattr(s, "agent_apps", None),
+                        pipes=getattr(s, "pipes", None), streams=getattr(s, "streams", None), notify=tell,
+                        is_operator=operator, lakehouse_sessions=getattr(s, "lakehouse_sessions", None), public_url=public)
+    s.flows = Flows(s.engine, backends, s.audit, tell, s.is_admin, groups_of, getattr(s, "dataset_changes", None),
+                    table_urn, (lambda event: ol.handle(event)) if ol is not None else None, may_run)
 
 
 def _build_pipeline_health(s: Services) -> None:

@@ -344,6 +344,48 @@ class CairnTools:
                 raise ValueError(str(e))
             raise RuntimeError(str(e))
 
+    # ---- Cairn Flows: the caller's flows, as the caller (owner, editor, viewer or admin) -----------------
+    def _flows(self):
+        if getattr(self.s, "flows", None) is None:
+            raise RuntimeError("flows are not set up in this Cairn")
+        return self.s.flows
+
+    def list_flows(self, query: str = "") -> dict:
+        p = self.principal()
+        q = query.lower().strip()
+        items = [{"name": f["name"], "description": f["description"], "owner": f["owner"], "role": f["role"],
+                  "published_version": f["published_version"], "enabled": f["enabled"],
+                  "last_run": f["last_run"], "next_run_ms": f["next_run_ms"]}
+                 for f in self._flows().list(p.urn) if not q or q in f["name"].lower() or q in f["description"].lower()]
+        return {"flows": items[:200]}
+
+    def run_flow(self, flow: str, params: Optional[dict] = None) -> dict:
+        from cairn.flows.model import FlowError
+
+        p = self.principal()
+        try:
+            run = self._flows().run(p.urn, flow, params or {}, None, "agent" if p.via == "agent" else "api")
+        except FlowError as e:
+            if e.status in (403, 404):
+                raise Forbidden(str(e))
+            raise ValueError(str(e))
+        return {"run": run["id"], "flow": run["flow"], "version": run["version"], "status": run["status"]}
+
+    def get_flow_run(self, run: str) -> dict:
+        from cairn.flows.model import FlowError
+
+        p = self.principal()
+        try:
+            r = self._flows().run_detail(p.urn, run)
+        except FlowError as e:
+            if e.status in (403, 404):
+                raise Forbidden(str(e))
+            raise ValueError(str(e))
+        return {"run": r["id"], "flow": r["flow"], "version": r["version"], "status": r["status"], "error": r["error"],
+                "started_ms": r["started_ms"], "finished_ms": r["finished_ms"],
+                "steps": [{"step": s["key"], "type": s["type"], "status": s["status"], "error": s["error"],
+                           "output": s["output"], "attempt": s["attempt"]} for s in r["steps"]]}
+
     def list_pending_reviews(self) -> dict:
         p = self.principal()
         items = [w for w in self.s.workflows.list() if w.state in ("SUBMITTED", "IN_REVIEW")
@@ -626,6 +668,28 @@ def build_mcp_server(services: Services):
         ``CAIRN_URL`` and ``CAIRN_TOKEN`` let the code query Cairn (POST {CAIRN_URL}/data/query) as the caller,
         under their policies and masks."""
         return tools.run_python(code, files, cairn_data, timeout_s)
+
+    @server.tool(annotations=read_only, structured_output=True, title="List flows")
+    @_safe
+    def list_flows(query: str = "") -> dict[str, Any]:
+        """The Cairn Flows (orchestrated pipelines) the caller may see, with their last run and next scheduled run.
+        ``query`` filters by name or description."""
+        return tools.list_flows(query)
+
+    @server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False,
+                                             openWorldHint=False), structured_output=True, title="Run a flow")
+    @_safe
+    def run_flow(flow: str, params: Optional[dict] = None) -> dict[str, Any]:
+        """Start a run of a flow's published version (its owner, an editor or an admin may). Every step runs as the
+        flow's owner, under their grants. ``params``: the flow's parameters by name. Returns the run id; follow it
+        with get_flow_run."""
+        return tools.run_flow(flow, params)
+
+    @server.tool(annotations=read_only, structured_output=True, title="Get a flow run")
+    @_safe
+    def get_flow_run(run: str) -> dict[str, Any]:
+        """A flow run's status and each step's status, error and output (bounded)."""
+        return tools.get_flow_run(run)
 
     @server.tool(annotations=read_only, structured_output=True, title="List pending reviews")
     @_safe
