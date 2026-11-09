@@ -26,6 +26,12 @@ const { chromium } = require('playwright');
     // The palette: the dataset from Core's search, opened from the keyboard.
     await page.goto(`${EDGE}/mfe/cairn#/discover`, { waitUntil: 'domcontentloaded' });
     await header().waitFor({ timeout: 90000 });
+    // A first sign-in asks the person's role (a dialog over the page): answered "Not now", as a person would.
+    const notNow = page.getByRole('dialog').getByRole('button', { name: 'Not now' });
+    if (await notNow.waitFor({ state: 'visible', timeout: 10000 }).then(() => true, () => false)) {
+      await notNow.click();
+      await notNow.waitFor({ state: 'hidden', timeout: 15000 });
+    }
     await page.keyboard.press('Control+k');
     const box = page.getByRole('combobox', { name: 'Type a page, an action or a dataset…' });
     await box.waitFor({ timeout: 30000 });
