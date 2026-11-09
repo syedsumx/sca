@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hmac
 import http.server
+import socketserver
 import json
 import os
 
@@ -53,7 +54,14 @@ def main() -> None:
         def log_message(self, *args):  # nothing is logged
             pass
 
-    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    class Server(http.server.ThreadingHTTPServer):
+        def server_bind(self):
+            # HTTPServer.server_bind looks the address up by name (socket.getfqdn), which stalls for a long time on
+            # macOS runners; only the port matters here.
+            socketserver.TCPServer.server_bind(self)
+            self.server_name, self.server_port = "127.0.0.1", self.server_address[1]
+
+    server = Server(("127.0.0.1", 0), Handler)
     tmp = a.port_file + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(str(server.server_address[1]))

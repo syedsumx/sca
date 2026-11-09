@@ -71,7 +71,10 @@ test('the real app opens a workspace and follows a deep link from a second launc
     if (process.platform === 'darwin' && expect.has('keychain')) env.HOME = os.homedir();
     for (const k of Object.keys(env)) if (/^(https?|all|no)_proxy$/i.test(k)) delete env[k];   // a local Cairn
     const run = (args) => {
-        const argv = [...(packaged ? [] : [path.join(__dirname, '..')]), '--no-sandbox', '--no-proxy-server', ...extraArgs, ...args];
+        // Its own profile folder on every OS: Windows takes the app-data folder from the OS, not %APPDATA%, so without
+        // it a run would read (and write) the runner's real Cairn Desktop preferences.
+        const argv = [...(packaged ? [] : [path.join(__dirname, '..')]), '--no-sandbox', '--no-proxy-server',
+            `--user-data-dir=${path.join(home, 'user-data')}`, ...extraArgs, ...args];
         const exe = packaged || electron;
         // Its own process group, so the app, its helpers and the virtual display all stop at the end.
         const opts = { env, detached: process.platform !== 'win32', stdio: process.env.CAIRN_SMOKE_DEBUG ? 'inherit' : 'ignore' };
@@ -129,9 +132,8 @@ test('the real app opens a workspace and follows a deep link from a second launc
                 assert.equal(found.status, 0, 'no "Cairn Safe Storage" item in the login keychain');
             } else if (process.platform === 'win32') {
                 // Chromium keeps safeStorage's key in Local State, wrapped by DPAPI (the user's Windows credentials),
-                // written a few seconds after it is made. The roaming AppData folder is Windows' own, not %APPDATA%.
-                const files = [path.join(home, 'AppData'), process.env.APPDATA || ''].filter(Boolean)
-                    .map((d) => path.join(d, 'Cairn Desktop', 'Local State'));
+                // written a few seconds after it is made, in the profile folder the run gives it (--user-data-dir).
+                const files = [path.join(home, 'user-data', 'Local State')];
                 const dpapi = (f) => {
                     try {
                         const st = JSON.parse(fs.readFileSync(f, 'utf8'));

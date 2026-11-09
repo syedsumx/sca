@@ -52,7 +52,11 @@ function start(electron, options = {}) {
 
     // Its own folder (Windows folds case: "Cairn" would be the command line's %APPDATA%\cairn).
     const oldUserData = app.getPath('userData');
-    app.setPath('userData', path.join(app.getPath('appData'), 'Cairn Desktop'));
+    // Chromium's own --user-data-dir (an IT-managed or test profile) wins; otherwise the app's folder. On Windows the
+    // app-data folder comes from the OS, never %APPDATA%, so this switch is the way to give it another one.
+    if (!app.commandLine.hasSwitch('user-data-dir')) {
+        app.setPath('userData', path.join(app.getPath('appData'), 'Cairn Desktop'));
+    }
     const userData = app.getPath('userData');
     const file = (name) => path.join(userData, name);
 
