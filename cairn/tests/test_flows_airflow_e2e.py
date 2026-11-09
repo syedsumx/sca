@@ -64,7 +64,9 @@ HELLO = {"kind": "flow", "name": "af-hello", "description": "Airflow carries it 
                    {"name": "pick", "type": "branch", "after": ["hello"], "condition": "params.n > 1",
                     "then": ["big"], "else": ["small"]},
                    {"name": "big", "type": "wait", "after": ["pick"], "seconds": 1},
-                   {"name": "small", "type": "notify", "after": ["pick"], "message": "small"}]}
+                   {"name": "small", "type": "notify", "after": ["pick"], "message": "small"},
+                   {"name": "kick", "type": "airflow", "after": ["hello"], "dag_id": "finance_report",
+                    "conf": {"why": "a report"}, "wait": False}]}
 
 
 @pytest.fixture(scope="module")
@@ -127,6 +129,11 @@ def airflow(cairn, airflow_user, tmp_path_factory):  # noqa: F811
             except Exception:  # noqa: BLE001 - shown by the assertions
                 pass
     threading.Thread(target=tick, daemon=True).start()
+    from cairn.governance.abac import Policy, PolicyBundle
+
+    bundle = s.pdp.bundle() if callable(s.pdp.bundle) else s.pdp.bundle
+    s.pdp.set_bundle(PolicyBundle(policies=[*bundle.policies, Policy(     # Ana's flow triggers a DAG: compute steps
+        id="ana-jobs", effect="allow", actions=["RUN_JOBS"], condition={"attr": "subject.urn", "op": "eq", "value": ANA})]))
     groups = {ANA: [], BOB: [], CARL: ["urn:li:corpGroup:finance"]}
     for who, gs in groups.items():
         s.graph.aspects[(who, "groupMembership")] = {"groups": gs}
@@ -205,7 +212,8 @@ def test_a_flow_runs_on_airflow_and_cairn_keeps_its_history(airflow):
     steps = {x["key"]: x for x in detail["steps"]}
     assert detail["status"] == "succeeded", (detail, subprocess.run(["docker", "logs", "--tail", "80", af["name"]],
                                                                     capture_output=True, text=True).stdout[-4000:])
-    assert {k: v["status"] for k, v in steps.items()} == {"hello": "ok", "pick": "ok", "big": "ok", "small": "skipped"}
+    assert {k: v["status"] for k, v in steps.items()} == {"hello": "ok", "pick": "ok", "big": "ok", "small": "skipped",
+                                                           "kick": "ok"}
     assert steps["pick"]["output"]["chosen"] == "then" and steps["hello"]["output"]["sent_to"] == [ANA]
     assert detail["detail"]["airflow"]["dag_id"] == "cairn__af-hello" and detail["run_as"] == ANA
     # Airflow ran it: its DAG run (started by Cairn through the REST API) and task instances agree.
@@ -215,12 +223,17 @@ def test_a_flow_runs_on_airflow_and_cairn_keeps_its_history(airflow):
     dag_run = detail["detail"]["airflow"]["dag_run_id"]
     tis = {t["task_id"]: t["state"] for t in client.call("GET", f"/dags/cairn__af-hello/dagRuns/{dag_run}/taskInstances")
            ["task_instances"]}
-    assert tis == {"hello": "success", "pick": "success", "big": "success", "small": "skipped"}
+    assert tis == {"hello": "success", "pick": "success", "big": "success", "small": "skipped", "kick": "success"}
     assert client.call("GET", f"/dags/cairn__af-hello/dagRuns/{dag_run}")["conf"]["cairn_run"] == rid
+    # The airflow step (run in Cairn as the owner) started the other DAG through Airflow's REST API.
+    kicked = client.call("GET", f"/dags/finance_report/dagRuns/{steps['kick']['output']['dag_run_id']}")
+    assert kicked["conf"]["cairn_flow"] == "af-hello" and kicked["conf"]["cairn_user"] == ANA
+    assert kicked["conf"]["why"] == "a report"
     # Each step was run in Cairn when its task asked, as svc-airflow (an editor), for the owner.
     started = [e for e in s.audit.entries(category="flows", limit=1000) if e["action"] == "flow.step_started"
                and e["details"].get("run") == rid]
-    assert {e["details"]["step"] for e in started} == {"hello", "pick", "big"} and {e["actor"] for e in started} == {USER}
+    assert {e["details"]["step"] for e in started} == {"hello", "pick", "big", "kick"}
+    assert {e["actor"] for e in started} == {USER}
     # Someone who may not run the flow cannot run its steps.
     r = api(af, "POST", f"/v1/flows/runs/{rid}/steps/hello/execute", BOB, json={"try_number": 1})
     assert r.status_code == 404, r.text
@@ -240,7 +253,8 @@ def test_airflow_dags_in_cairn_for_the_people_they_belong_to(airflow):
     d = api(af, "GET", "/v1/airflow/dags/cairn__af-hello", ANA).json()
     steps = {x["name"]: x for x in d["steps"]}
     assert steps["pick"]["after"] == ["hello"] and steps["pick"]["type"] == "branch"
-    assert d["run_state"] == "success" and d["statuses"] == {"hello": "ok", "pick": "ok", "big": "ok", "small": "skipped"}
+    assert d["run_state"] == "success" and d["statuses"] == {"hello": "ok", "pick": "ok", "big": "ok", "small": "skipped",
+                                                             "kick": "ok"}
     assert d["conversion"]["convertible"] is False                      # Cairn's own: open the flow instead
     # A run started now shows live in Cairn, task by task.
     from cairn.flows.steps import Airflow
