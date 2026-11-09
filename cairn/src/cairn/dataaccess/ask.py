@@ -133,6 +133,8 @@ class AskService:
             "tables": list(tables), "definitions": [{"name": d["name"], "kind": d["kind"], "version": d["version"]}
                                                     for d in defs],
             "examples": [e["title"] for e in examples], "attempts": 0, "result": None, "error": None}
+        if self.ontology is not None:            # the terms and relationships the answer is grounded in
+            out["grounded"] = self.ontology.grounding(set(tables), defs)
         asked = question
         for attempt in (1, 2):
             out["attempts"] = attempt

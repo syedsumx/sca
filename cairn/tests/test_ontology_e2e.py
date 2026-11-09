@@ -10,7 +10,12 @@ local stand-in for the provider that answers each compilation step with the stru
   when the compiler is down); /validate-sql flagging a join that contradicts the known keys;
 - the MCP tools; reads filtered to the datasets a person may see; compiling needs MANAGE_GLOSSARIES;
 - incremental runs reuse unchanged tables; a cancelled run resumes;
-- every model call metered under the compiler's agent identity, the provider seeing Cairn's key only.
+- every model call metered under the compiler's agent identity, the provider seeing Cairn's key only;
+- the explorer (L129): a term with its evidence (keys, query-log joins with counts, the model's confidence),
+  provenance, date formats and open proposals; the terms of a dataset; a term found by its synonym; proposals
+  accepted and rejected in batches with a comment and audited, a term edited as it is accepted, refusals without
+  the privilege and for agents; nothing about a dataset a person may not see; a run scoped to one table, estimated
+  first, watched as it progresses, and diffed against the run before; Ask-your-data naming what grounded it.
 
 Needs docker, CAIRN_STORE_BIN, CAIRN_CATALOG_BIN and CAIRN_ONTOLOGY_BIN (cargo build --release in ontology/)."""
 
@@ -258,6 +263,11 @@ def stack(provider, cairn, trino):  # noqa: F811
             time.sleep(1)
         time.sleep(2)
         agent = s.ontology.create_agent(BOT, ADMIN)
+        # A compile, a cancelled run and its resume make more model calls in a minute than an agent's default
+        # quota (120): over it the gateway answers 429 and the compiler falls back without the model.
+        from cairn.identity.agents import AgentPatch
+
+        s.agents.update(agent["id"], AgentPatch(per_minute=5000), ADMIN)
         d = provider["dir"]
         with open(f"{d}/model-key", "w") as fh:          # a file, never the command line
             fh.write(agent["key"])
@@ -494,3 +504,213 @@ def test_model_calls_are_metered_under_the_compilers_agent(stack, compiled):
     keys = {x.get("authorization") for x in Provider.seen}
     assert keys == {"Bearer sk-oai-upstream"}, keys
     assert stack["agent"]["key"] not in open(f"{stack['dir']}/compiler.log").read()
+
+
+# ------------------------------------------------------------------------------------------ the explorer (L129)
+def _term(st, name, who=STEW):
+    ex = call(st, "GET", "/v1/ontology/explorer", who=who).json()
+    return next(t for t in ex["terms"] if t["name"] == name), ex
+
+
+def test_explorer_and_term_detail_with_evidence_and_provenance(stack, compiled):
+    orders, ex = _term(stack, "Purchase Order (retail.orders)")
+    assert orders["schema"] == "retail" and orders["attributes"] >= 4 and orders["date_formats"] == 1, orders
+    customer = next(t for t in ex["terms"] if t["name"] == "Customer")
+    assert customer["status"] == "accepted" and orders["status"] == "proposed" and orders["proposal"], (customer, orders)
+    # The bridge table and its relationships are marked as such.
+    assert [b["table"] for b in ex["bridges"]] == [BRIDGE] and {t["table"] for t in ex["bridges"][0]["targets"]} == {
+        PRODUCTS, CATEGORIES}
+    assert all(r["bridge"] for r in ex["relationships"] if r["source"] == BRIDGE)
+    assert any(t["id"] == BRIDGE and t["bridge"] for t in ex["tables"])
+    d = call(stack, "GET", f"/v1/ontology/terms/{orders['id']}").json()
+    assert d["synonyms"] == ["PO"] and d["table"] == ORDERS and d["description"]
+    assert {(f["column"], f["format"]) for f in d["date_formats"]} == {("order_day", "DD/MM/YYYY")}
+    assert "customer_id" not in {a["column"] for a in d["attributes"]}
+    rels = {r["source_column"]: r for r in d["relationships"] if r["direction"] == "out"}
+    observed, inferred = rels["buyer_ref"], rels["customer_id"]
+    # (Ask-your-data's own query, run through Trino above, is in the query log too by now.)
+    assert observed["evidence"]["query_log"]["queries"] >= 2 and observed["evidence"]["query_log"]["executions"] >= 3
+    assert observed["evidence"]["query_log"]["query_ids"]
+    assert "model" not in observed["evidence"] and observed["other_term"]["name"] == "Customer"
+    assert inferred["evidence"]["model"]["confidence"] > 0 and inferred["status"] == "accepted", inferred
+    assert inferred["join"] == "orders.customer_id = customers.id" and inferred["cardinality"] == "many_to_one"
+    assert {"Revenue", "Paid Orders"} <= {m["name"] for m in d["metrics"]}
+    prov = d["provenance"]
+    assert prov["run"]["id"] and prov["run"]["mode"] in ("full", "incremental") and prov["run"]["requested_by"]
+    assert prov["sources"][0]["source"] == "model" and ORDERS in prov["inputs"]["tables"]
+    assert "order_day" in prov["inputs"]["columns"] and prov["inputs"]["queries"]
+    assert any(p["kind"] == "term" and p["element_id"] == orders["id"] for p in d["proposals"]), d["proposals"]
+    assert all(p["status"] == "OPEN" for p in d["proposals"])
+    assert "sample_values" not in json.dumps(d)          # sampled as the compiler's identity: never shown
+    assert call(stack, "GET", "/v1/ontology/terms/term_nope").status_code == 404
+    # The CSV export, over what the caller may see.
+    csv_text = call(stack, "GET", "/v1/ontology/graph", params={"format": "csv"}, who=DANA).text
+    assert csv_text.startswith("kind,id,name") and "Purchase Order (retail.orders)" in csv_text
+    assert "Supplier" not in csv_text and "retail.suppliers" not in csv_text
+
+
+def test_terms_on_an_asset_and_search_by_synonym(stack, compiled):
+    a = call(stack, "GET", "/v1/ontology/asset", params={"urn": ORDERS}).json()
+    assert [t["name"] for t in a["terms"]] == ["Purchase Order (retail.orders)"]
+    cols = {c["column"]: c for c in a["columns"]}
+    assert cols["order_day"]["format"] == "DD/MM/YYYY" and cols["status"]["term_name"] == "Purchase Order (retail.orders)"
+    assert {r["column"] for r in a["relationships"]} >= {"customer_id", "buyer_ref"}
+    assert call(stack, "GET", "/v1/ontology/asset", params={"urn": BRIDGE}).json()["bridge"] is True
+    # Dana may not see suppliers: not found, as for a dataset that does not exist.
+    assert call(stack, "GET", "/v1/ontology/asset", params={"urn": SUPPLIERS}, who=DANA).status_code == 404
+    hits = call(stack, "GET", "/v1/ontology/search-terms", params={"q": "po"}).json()["terms"]
+    assert hits[0]["name"] == "Purchase Order (retail.orders)" and hits[0]["matched"] == "synonym", hits
+    assert hits[0]["synonym"] == "PO"
+    assert not call(stack, "GET", "/v1/ontology/search-terms", params={"q": "supplier"}, who=DANA).json()["terms"]
+    assert call(stack, "GET", "/v1/ontology/search-terms", params={"q": "supplier"}).json()["terms"]
+
+
+def test_batch_review_with_comments_edits_audit_and_refusals(stack, compiled):
+    s = stack["s"]
+    props = call(stack, "GET", "/v1/ontology/proposals").json()["proposals"]
+    by_title = {p["title"]: p for p in props}
+    product, category = by_title["Add glossary term “Product”"], by_title["Add glossary term “Category”"]
+    supplier = by_title["Add glossary term “Supplier”"]
+    rel = next(p for p in props if p["kind"] == "relationship" and "customer_id" not in p["title"])
+    # Without the privilege: every item refused, nothing changes.
+    r = call(stack, "POST", "/v1/ontology/proposals/batch", who=DANA,
+             json={"ids": [product["id"], category["id"]], "action": "accept", "comment": "lgtm"})
+    assert r.status_code == 200 and r.json()["done"] == 0, r.text
+    assert {x["status_code"] for x in r.json()["results"]} == {403}
+    # A proposal over a dataset Dana may not see is not found for her, whatever she may do.
+    r = call(stack, "POST", "/v1/ontology/proposals/batch", who=DANA,
+             json={"ids": [supplier["id"]], "action": "reject"})
+    assert r.json()["results"][0]["status_code"] == 404
+    # Agents never decide, even for a person who could.
+    from cairn.common.security import Principal
+    from cairn.context.ontology_explorer import OntologyExplorer, ReviewError
+
+    ex = OntologyExplorer(s.ontology, s.graph, s.context, s.audit)
+    with pytest.raises(ReviewError) as e:
+        ex.decide_many(Principal(STEW, "agent", agent="agt_x", scopes=("read",)), lambda *a: True,
+                       lambda u: True, [product["id"]], "accept")
+    assert e.value.status == 403
+    assert {p["id"] for p in call(stack, "GET", "/v1/ontology/proposals").json()["proposals"]} >= {
+        product["id"], category["id"], rel["id"]}
+    # The steward: two accepted in one go, one rejected; each with the comment, audited.
+    r = call(stack, "POST", "/v1/ontology/proposals/batch",
+             json={"ids": [product["id"], category["id"]], "action": "accept", "comment": "reviewed with finance"})
+    assert r.status_code == 200 and r.json()["done"] == 2, r.text
+    r = call(stack, "POST", "/v1/ontology/proposals/batch",
+             json={"ids": [rel["id"], "fnd_missing"], "action": "reject", "comment": "a bridge, not a join"})
+    out = r.json()
+    assert out["done"] == 1 and out["results"][1]["status_code"] == 404, out
+    assert s.graph.get_aspect("urn:li:glossaryTerm:Ontology.Product", "glossaryTermInfo")["name"] == "Product"
+    again = call(stack, "POST", "/v1/ontology/proposals/batch", json={"ids": [product["id"]], "action": "reject"})
+    assert again.json()["results"][0]["status_code"] == 409             # already decided
+    audit = s.audit.entries("ontology", limit=200)
+    acc = [e for e in audit if e["action"] == "ontology.proposal_accepted" and e["subject"] == category["id"]]
+    rej = [e for e in audit if e["action"] == "ontology.proposal_rejected" and e["subject"] == rel["id"]]
+    assert acc and acc[0]["actor"] == STEW and acc[0]["details"]["comment"] == "reviewed with finance", acc
+    assert rej and rej[0]["details"]["comment"] == "a bridge, not a join"
+    assert any(e["action"] == "ontology.proposals_accept_batch" and e["details"]["done"] == 2 for e in audit)
+    assert s.context.get(rel["id"])["status"] == "DISMISSED"
+    # The explorer shows the new states.
+    product_term, _ = _term(stack, "Product")
+    assert product_term["status"] == "accepted"
+    # A term edited as it is accepted.
+    line = by_title["Add glossary term “Order Line”"]
+    r = call(stack, "POST", f"/v1/ontology/proposals/{line['id']}/accept",
+             json={"comment": "our word", "edits": {"name": "Order Item", "definition": "One line of an order.",
+                                                    "synonyms": ["line item"]}})
+    assert r.status_code == 200, r.text
+    info = s.graph.get_aspect("urn:li:glossaryTerm:Ontology.OrderLine", "glossaryTermInfo")
+    assert info["name"] == "Order Item" and info["definition"] == "One line of an order."
+    assert info["customProperties"]["cairn_synonyms"] == "line item"
+    # Edits are for terms only.
+    metric = next(p for p in call(stack, "GET", "/v1/ontology/proposals").json()["proposals"] if p["kind"] == "metric")
+    r = call(stack, "POST", f"/v1/ontology/proposals/{metric['id']}/accept", json={"edits": {"name": "x"}})
+    assert r.status_code == 422
+
+
+def test_explorer_follows_visibility(stack, compiled):
+    _, mine = _term(stack, "Customer", who=DANA)
+    assert all(t["table"] != SUPPLIERS for t in mine["terms"]) and "Supplier" not in {t["name"] for t in mine["terms"]}
+    assert all(SUPPLIERS not in (r["source"], r["target"]) for r in mine["relationships"])
+    assert all(t["id"] != SUPPLIERS for t in mine["tables"])
+    full = call(stack, "GET", "/v1/ontology/explorer").json()
+    supplier = next(t for t in full["terms"] if t["name"] == "Supplier")
+    assert call(stack, "GET", f"/v1/ontology/terms/{supplier['id']}", who=DANA).status_code == 404
+    products = next(t for t in mine["terms"] if t["name"] == "Product")
+    d = call(stack, "GET", f"/v1/ontology/terms/{products['id']}", who=DANA).json()
+    # suppliers.product_id → products.id exists, but not for someone who may not see suppliers.
+    assert all(SUPPLIERS not in (r["source"], r["target"]) for r in d["relationships"]), d["relationships"]
+    assert SUPPLIERS not in d["provenance"]["inputs"]["tables"]
+    stew = call(stack, "GET", f"/v1/ontology/terms/{products['id']}").json()
+    assert any(r["source"] == SUPPLIERS for r in stew["relationships"])
+    # The wizard's catalog: the tables each person may see.
+    assert SUPPLIERS not in {t["id"] for t in call(stack, "GET", "/v1/ontology/catalog", who=DANA).json()["tables"]}
+    assert "retail" in call(stack, "GET", "/v1/ontology/catalog").json()["schemas"]
+    # Estimating, scoping and diffs are for people who compile.
+    assert call(stack, "POST", "/v1/ontology/estimate", who=DANA, json={}).status_code == 403
+    assert call(stack, "GET", f"/v1/ontology/runs/{compiled['run']['id']}/diff", who=DANA).status_code == 403
+
+
+def test_a_scoped_run_with_estimate_progress_and_diff(stack, compiled):
+    est = call(stack, "POST", "/v1/ontology/estimate", json={"mode": "full", "schemas": ["retail"]}).json()
+    assert est["scope"] >= 7 and est["to_process"] == est["scope"] and est["out_of_scope"] >= 1, est
+    assert est["model"]["chat_calls_max"] == est["to_process"] * est["model"]["chat_calls_per_table"] > 0
+    est = call(stack, "POST", "/v1/ontology/estimate", json={"mode": "incremental"}).json()
+    assert est["to_process"] == 0 and est["reused"] == est["tables"] - est["without_columns"], est
+    # A table the steward may not see cannot be in his scope.
+    r = call(stack, "POST", "/v1/ontology/runs", json={"tables": [test_trino_e2e.DELTA_ORDERS], "sync": False})
+    assert r.status_code == 422, r.text
+    assert call(stack, "POST", "/v1/ontology/runs", json={"schemas": ["nowhere"], "sync": False}).status_code == 422
+    before = call(stack, "GET", "/v1/ontology/runs").json()["published"]
+    # A full run of one table, slowed down so its progress can be watched.
+    OntologyProvider.delay = 0.3
+    try:
+        started = call(stack, "POST", "/v1/ontology/runs",
+                       json={"mode": "full", "tables": [CUSTOMERS], "sync": False}).json()["run"]
+        seen = []
+        end = time.time() + 300
+        while time.time() < end:
+            run = call(stack, "GET", f"/v1/ontology/runs/{started['id']}").json()
+            if run["state"] != "running":
+                break
+            if run.get("progress"):
+                seen.append(run["progress"])
+            time.sleep(0.2)
+    finally:
+        OntologyProvider.delay = 0.0
+    assert run["state"] == "completed", run
+    assert run["stats"]["processed"] == 1 and run["stats"]["scope"] == [CUSTOMERS], run["stats"]
+    assert run["stats"]["out_of_scope"] == run["stats"]["tables"] - 1
+    assert seen and seen[0]["scope"] == 1 and seen[0]["tables_total"] == run["stats"]["tables"], seen
+    assert {p["phase"] for p in seen} & {"tables", "relationships", "metrics", "bridges", "publishing"}
+    stack["s"].ontology.import_run(started["id"], STEW)
+    # Every other table kept its terms; the diff against the run before says what changed.
+    names = {t["name"] for t in call(stack, "GET", "/v1/ontology/terms").json()["terms"]}
+    assert {"Customer", "Supplier", "Product", "Purchase Order (retail.orders)"} <= names
+    diff = call(stack, "GET", f"/v1/ontology/runs/{started['id']}/diff").json()
+    assert diff["against"] == before and diff["run"] == started["id"], diff
+    assert diff["terms"]["counts"]["removed"] == 0 and diff["terms"]["counts"]["unchanged"] >= 6, diff["terms"]
+    # Against nothing (the first run), everything is added; a run in progress or unknown has no diff.
+    first = min((r for r in call(stack, "GET", "/v1/ontology/runs").json()["runs"] if r["state"] == "completed"),
+                key=lambda r: r["version"])
+    d0 = call(stack, "GET", f"/v1/ontology/runs/{first['id']}/diff").json()
+    assert d0["against"] is None and d0["terms"]["counts"]["added"] >= 6        # retail's tables but the bridge
+    assert call(stack, "GET", "/v1/ontology/runs/run_nope/diff").status_code == 404
+    audit = stack["s"].audit.entries("ontology", limit=200)
+    assert any(e["action"] == "ontology.compile_started" and e["details"].get("tables") == 1 for e in audit)
+
+
+def test_ask_your_data_says_what_it_was_grounded_in(stack, compiled):
+    from cairn.ai.llm import StaticProvider
+
+    s = stack["s"]
+    s.ask.sql.llm = StaticProvider(lambda system, user, schema: {
+        "sql": "SELECT c.region, sum(o.amount) AS revenue FROM retail.orders o JOIN retail.customers c "
+               "ON o.customer_id = c.id GROUP BY c.region", "explanation": "Revenue by region."})
+    a = s.ask.ask(ADMIN, "What is revenue by region?", lambda u: True, [ORDERS, CUSTOMERS])
+    g = a["grounded"]
+    assert {"Customer", "Purchase Order (retail.orders)"} <= {t["name"] for t in g["terms"]}, g
+    assert any(r["label"] == "orders.buyer_ref → customers.id" for r in g["relationships"]), g
+    r = call(stack, "POST", "/data/ask", who=ADMIN, json={"question": "What is revenue by region?",
+                                                          "urns": [ORDERS, CUSTOMERS]})
+    assert r.status_code == 200 and r.json()["grounded"]["terms"], r.text

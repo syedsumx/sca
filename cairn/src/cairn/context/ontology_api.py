@@ -1,9 +1,11 @@
 """``/v1/ontology``: Cairn Ontology (the ontology compiler) through Cairn.
 
 Reads follow catalog visibility (an element is shown only when the caller may see every dataset it is about);
-syncing, compiling, cancelling, resuming and importing need ``MANAGE_GLOSSARIES``; accepting a proposal needs
-``EDIT_ENTITY_GLOSSARY_TERMS`` on each of its datasets (as in the context inbox); creating the compiler's agent
-identity needs ``MANAGE_GLOBAL_SETTINGS``.
+syncing, compiling, estimating, cancelling, resuming, importing and run diffs need ``MANAGE_GLOSSARIES``; deciding a
+proposal is a person's act and needs ``MANAGE_GLOSSARIES``, and accepting one ``EDIT_ENTITY_GLOSSARY_TERMS`` on each
+of its datasets too (as in the context inbox); creating the compiler's agent identity needs
+``MANAGE_GLOBAL_SETTINGS``. The explorer's reads (``/explorer``, ``/terms/{id}``, ``/asset``, ``/search-terms``,
+``/catalog``) are in :mod:`cairn.context.ontology_explorer`.
 """
 
 from __future__ import annotations
@@ -16,12 +18,41 @@ from pydantic import BaseModel, Field
 
 from cairn.common.security import Principal
 from cairn.context.ontology_compiler import COMPILE_PRIVILEGE, OntologyCompiler, OntologyError
+from cairn.context.ontology_explorer import MAX_BATCH, OntologyExplorer, ReviewError
 
 
-class CompileIn(BaseModel):
+class ScopeIn(BaseModel):
+    """A run limited to these tables (dataset urns) and the tables of these schemas (``schema`` or
+    ``catalog.schema``); none: every table."""
+    tables: Optional[list[str]] = Field(default=None, max_length=100_000)
+    schemas: Optional[list[str]] = Field(default=None, max_length=1000)
+
+
+class CompileIn(ScopeIn):
     mode: str = Field(default="incremental", pattern="^(full|incremental)$")
     sync: bool = True
     wait: bool = False
+
+
+class EstimateIn(ScopeIn):
+    mode: str = Field(default="incremental", pattern="^(full|incremental)$")
+
+
+class TermEdits(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    definition: Optional[str] = Field(default=None, min_length=1, max_length=5000)
+    synonyms: Optional[list[str]] = Field(default=None, max_length=50)
+
+
+class DecisionIn(BaseModel):
+    comment: str = Field(default="", max_length=2000)
+    edits: Optional[TermEdits] = None
+
+
+class BatchIn(BaseModel):
+    ids: list[str] = Field(min_length=1, max_length=MAX_BATCH)
+    action: str = Field(pattern="^(accept|reject)$")
+    comment: str = Field(default="", max_length=2000)
 
 
 class ValidateIn(BaseModel):
@@ -41,10 +72,18 @@ def build_router(onto: Optional[OntologyCompiler], current_principal, authorize,
             raise HTTPException(503, "Cairn Ontology is not configured (CAIRN_ONTOLOGY_URL)")
         return onto
 
+    explorer = OntologyExplorer(onto, onto.graph, context, onto.audit) if onto is not None else None
+
+    def ex() -> OntologyExplorer:
+        svc()
+        return explorer  # type: ignore[return-value]
+
     def call(fn):
         try:
             return fn()
         except OntologyError as e:
+            raise HTTPException(e.status, str(e))
+        except ReviewError as e:
             raise HTTPException(e.status, str(e))
 
     def manager(p: Principal) -> None:
@@ -65,8 +104,33 @@ def build_router(onto: Optional[OntologyCompiler], current_principal, authorize,
 
     @router.post("/runs")
     def compile_now(body: CompileIn = Body(default_factory=CompileIn), p: Principal = Depends(current_principal)):
+        """A run; ``tables``/``schemas`` limit it to those tables (each one the caller may see), the others keeping
+        what the published run made of them."""
         manager(p)
-        return call(lambda: svc().compile(p.urn, body.mode, body.sync, body.wait))
+        scope = call(lambda: ex().scope(can_view(p), body.tables, body.schemas))
+        return call(lambda: svc().compile(p.urn, body.mode, body.sync, body.wait, tables=scope))
+
+    @router.post("/estimate")
+    def estimate(body: EstimateIn = Body(default_factory=EstimateIn), p: Principal = Depends(current_principal)):
+        """What a run would compile (the rest reused) and an upper bound of its model calls, before it starts."""
+        manager(p)
+        scope = call(lambda: ex().scope(can_view(p), body.tables, body.schemas))
+        out = call(lambda: svc().client.estimate(body.mode, scope))
+        out["scope"] = len(scope) if scope else None
+        out.pop("unknown_tables", None)
+        return out
+
+    @router.get("/catalog")
+    def catalog(p: Principal = Depends(current_principal)):
+        """The compiler's tables the caller may see, and their schemas (the compile wizard's pickers)."""
+        return call(lambda: ex().catalog(can_view(p)))
+
+    @router.get("/runs/{rid}/diff")
+    def run_diff(rid: str, against: Optional[str] = Query(None, max_length=64), p: Principal = Depends(current_principal)):
+        """What changed in a completed run since the completed run before it (or ``against``), over what the
+        caller may see."""
+        manager(p)
+        return call(lambda: ex().diff(can_view(p), rid, against))
 
     @router.get("/runs")
     def runs(p: Principal = Depends(current_principal)):
@@ -102,6 +166,29 @@ def build_router(onto: Optional[OntologyCompiler], current_principal, authorize,
     def terms(q: str = Query("", max_length=200), p: Principal = Depends(current_principal)):
         return {"terms": call(lambda: svc().terms(can_view(p), q))}
 
+    @router.get("/explorer")
+    def explorer_view(p: Principal = Depends(current_principal)):
+        """The ontology shaped for the explorer: terms with their domain, schema, review status and confidence;
+        relationships between them; bridge tables; metrics; tables."""
+        return call(lambda: ex().explorer(can_view(p)))
+
+    @router.get("/terms/{tid}")
+    def term_detail(tid: str, p: Principal = Depends(current_principal)):
+        """One term: definition, synonyms, domain, owners, mapped columns, relationships with their evidence,
+        metrics, provenance (run and inputs), date formats, and its open proposals."""
+        return call(lambda: ex().term(can_view(p), tid))
+
+    @router.get("/asset")
+    def asset_terms(urn: str = Query(..., min_length=1, max_length=2000), p: Principal = Depends(current_principal)):
+        """The business terms of one dataset, per table and per column (404 for a dataset the caller may not see)."""
+        return call(lambda: ex().asset(can_view(p), urn))
+
+    @router.get("/search-terms")
+    def search_terms(q: str = Query(..., min_length=1, max_length=200), limit: int = Query(10, ge=1, le=50),
+                     p: Principal = Depends(current_principal)):
+        """Terms by name or synonym, for search results."""
+        return {"terms": call(lambda: ex().search_terms(can_view(p), q, limit))}
+
     @router.get("/relationships")
     def relationships(datasets: Optional[list[str]] = Query(None), between: bool = False,
                       p: Principal = Depends(current_principal)):
@@ -123,8 +210,11 @@ def build_router(onto: Optional[OntologyCompiler], current_principal, authorize,
         return {"hits": call(lambda: svc().search(can_view(p), q, mode, limit))}
 
     @router.get("/graph")
-    def graph(format: str = Query("json", pattern="^(json|jsonld|turtle)$"),  # noqa: A002
+    def graph(format: str = Query("json", pattern="^(json|jsonld|turtle|csv)$"),  # noqa: A002
               p: Principal = Depends(current_principal)):
+        if format == "csv":
+            return PlainTextResponse(call(lambda: ex().csv(can_view(p))), media_type="text/csv",
+                                     headers={"Content-Disposition": 'attachment; filename="ontology.csv"'})
         out = call(lambda: svc().graph_export(can_view(p), format))
         if format == "turtle":
             return PlainTextResponse(out, media_type="text/turtle")
@@ -146,30 +236,26 @@ def build_router(onto: Optional[OntologyCompiler], current_principal, authorize,
                   p: Principal = Depends(current_principal)):
         return {"proposals": svc().proposals(can_view(p), status, kind)}
 
-    @router.post("/proposals/{fid}/{action}")
-    def decide(fid: str, action: str, p: Principal = Depends(current_principal)):
-        """``accept``: writes the glossary term and its column links, or records the approved join or metric;
-        ``reject``: dismisses it (a later run does not bring it back)."""
+    @router.post("/proposals/batch")
+    def decide_batch(body: BatchIn, p: Principal = Depends(current_principal)):
+        """Accepts or rejects many proposals with one comment, each as if decided alone (and audited); the
+        outcome of each, so one refusal does not stop the others."""
         if context is None:
             raise HTTPException(503, "the context inbox is not configured")
-        try:
-            f = context.get(fid)
-        except KeyError:
-            raise HTTPException(404, "proposal not found")
-        if not all(can_view(p)(e) for e in f["entities"] if e.startswith("urn:li:")):
-            raise HTTPException(404, "proposal not found")
-        if action == "reject":
-            manager(p)
-            return context.set_status(fid, "DISMISSED", p.urn)
-        if action != "accept":
+        return call(lambda: ex().decide_many(p, authorize, can_view(p), body.ids, body.action, body.comment))
+
+    @router.post("/proposals/{fid}/{action}")
+    def decide(fid: str, action: str, body: DecisionIn = Body(default_factory=DecisionIn),
+               p: Principal = Depends(current_principal)):
+        """``accept``: writes the glossary term and its column links, or records the approved join or metric (a
+        term's name, definition and synonyms can be edited as it is accepted); ``reject``: dismisses it (a later
+        run does not bring it back). The comment is kept with the proposal and in the audit log."""
+        if context is None:
+            raise HTTPException(503, "the context inbox is not configured")
+        if action not in ("accept", "reject"):
             raise HTTPException(404, "unknown action")
-        for e in f["entities"]:
-            if e.startswith("urn:li:dataset:"):
-                authorize(p, "EDIT_ENTITY_GLOSSARY_TERMS", e)
-        try:
-            return context.accept(fid, p.urn)
-        except ValueError as e:
-            raise HTTPException(409, str(e))
+        edits = body.edits.model_dump() if body.edits else None
+        return call(lambda: ex().decide(p, authorize, can_view(p), fid, action, body.comment, edits))
 
     @router.post("/agent")
     def create_agent(body: AgentIn, p: Principal = Depends(current_principal)):

@@ -130,8 +130,17 @@ class OntologyClient:
     def post_queries(self, queries: list[dict], dialects: Optional[list[str]] = None) -> dict:
         return self._call("POST", "/v1/queries", {"queries": queries, "dialects": dialects or []}, timeout=300)
 
-    def start_run(self, mode: str, requested_by: str) -> dict:
-        return self._call("POST", "/v1/runs", {"mode": mode, "requested_by": requested_by})
+    def start_run(self, mode: str, requested_by: str, tables: Optional[list[str]] = None) -> dict:
+        body: dict = {"mode": mode, "requested_by": requested_by}
+        if tables:
+            body["tables"] = tables
+        return self._call("POST", "/v1/runs", body)
+
+    def estimate(self, mode: str, tables: Optional[list[str]] = None) -> dict:
+        return self._call("POST", "/v1/estimate", {"mode": mode, **({"tables": tables} if tables else {})})
+
+    def catalog(self) -> dict:
+        return self._call("GET", "/v1/catalog", timeout=120)
 
     def runs(self) -> dict:
         return self._call("GET", "/v1/runs")
@@ -348,12 +357,14 @@ class OntologyCompiler:
         return out
 
     def compile(self, actor: str, mode: str = "incremental", sync: bool = True, wait: bool = False,
-                timeout: float = 1800) -> dict:
+                timeout: float = 1800, tables: Optional[list[str]] = None) -> dict:
+        """A run (``tables``: only these are compiled; the others keep what the published run made of them)."""
         if mode not in ("full", "incremental"):
             raise OntologyError("mode is full or incremental", 422)
         synced = self.sync(actor) if sync else None
-        run = self.client.start_run(mode, actor)
-        self._audit("ontology.compile_started", actor, run["id"], {"mode": mode})
+        run = self.client.start_run(mode, actor, tables)
+        self._audit("ontology.compile_started", actor, run["id"],
+                    {"mode": mode, **({"tables": len(tables)} if tables else {})})
         out: dict = {"run": run, "sync": synced}
         if wait:
             run = self.wait(run["id"], timeout)
@@ -615,6 +626,23 @@ class OntologyCompiler:
                                     "description": f"from the ontology ({role}; "
                                                    + ", ".join(p["source"] for p in r.get("provenance") or []) + ")"}})
         return out
+
+    def grounding(self, urns: set[str], definitions: list[dict]) -> dict:
+        """What of the ontology an answer was grounded in: the terms of its tables and the compiled relationships
+        given to the model (the ``ontology:`` join definitions). Empty when the compiler is down."""
+        try:
+            o = self.published()
+        except OntologyError:
+            return {"terms": [], "relationships": []}
+        if o is None:
+            return {"terms": [], "relationships": []}
+        used = {d["name"].split(":", 1)[1] for d in definitions if str(d.get("name", "")).startswith("ontology:")}
+        terms = [{"id": t["id"], "name": t["name"], "table": t["table_id"]}
+                 for t in o.get("terms") or [] if t["table_id"] in urns]
+        rels = [{"id": r["id"], "label": f"{table_parts(r['source_table'])[3]}.{r['source_column']} → "
+                                         f"{table_parts(r['target_table'])[3]}.{r['target_column']}"}
+                for r in o.get("relationships") or [] if r["id"] in used]
+        return {"terms": terms, "relationships": rels}
 
     def check(self, sql: str, dialect: Optional[str], can_view, definitions: Optional[list[dict]] = None) -> dict:
         """Ask-your-data's check of generated SQL: findings, or a warning when the compiler cannot answer (fail
