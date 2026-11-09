@@ -9,6 +9,9 @@ import { SignedInDevices } from '../components/SignedInDevices';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { LOCALES, Locale, useI18n } from '../i18n';
 import { deviceSubscribed, disablePush, enablePush, pushSupported } from '../utils/push';
+import { ErrorNotice, describeError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const KINDS: { value: PinKind; label: string }[] = [
     { value: 'asset', label: 'Asset' },
@@ -115,15 +118,15 @@ export function ProfilePage() {
     if (profile.error) {
         return (
             <Page>
-                <h1>Your profile</h1>
-                <Alert type="error" showIcon message={profile.error.message} />
+                <PageHeader title="Your profile" help={pageHelp('/profile')} />
+                <ErrorNotice error={profile.error} />
             </Page>
         );
     }
     if (!profile.data || !draft) {
         return (
             <Page aria-busy="true">
-                <h1>Your profile</h1>
+                <PageHeader title="Your profile" help={pageHelp('/profile')} />
             </Page>
         );
     }
@@ -145,7 +148,7 @@ export function ProfilePage() {
             if (out.language) setLocale(out.language as Locale);
             message.success('Profile saved');
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setSaving(false);
         }
@@ -172,7 +175,7 @@ export function ProfilePage() {
                 if (!draft.channels.push) set({ channels: { ...draft.channels, push: true } });
             }
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setDeviceBusy(false);
         }
@@ -180,13 +183,8 @@ export function ProfilePage() {
 
     return (
         <Page>
-            <h1 style={{ marginBottom: 0 }}>Your profile</h1>
-            <p>
-                <Muted>
-                    What Cairn knows about you to help: the assistant and your scheduled tasks use it as context. It never
-                    changes what you may see or do.
-                </Muted>
-            </p>
+            <PageHeader title="Your profile" help={pageHelp('/profile')}
+                description="What Cairn knows about you to help: the assistant and your scheduled tasks use it as context. It never changes what you may see or do." />
             {error && <Alert type="error" showIcon message={error} style={{ marginBottom: 16 }} />}
 
             <Section as="section" aria-labelledby="profile-about">

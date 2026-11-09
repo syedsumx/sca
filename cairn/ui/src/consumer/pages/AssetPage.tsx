@@ -27,6 +27,9 @@ import { useT } from '../i18n';
 import { BusinessTerms } from '../ontology/Embeds';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 export const ASSET_QUERY = `
 query cairnConsumerAsset($urn: String!) {
@@ -157,7 +160,7 @@ export function AssetPage() {
         try {
             setExplain(await client.explainLineage(urn));
         } catch (err) {
-            message.error(`Explanation unavailable: ${(err as Error).message}`);
+            notifyError(err, { action: 'Explain' });
         } finally {
             setExplaining(false);
         }
@@ -177,11 +180,14 @@ export function AssetPage() {
     if (details.error || d === null) {
         return (
             <Page>
-                <Alert
-                    type={d === null ? 'warning' : 'error'}
-                    message={d === null ? 'Asset not found or you do not have access to it.' : `Could not load asset: ${details.error?.message}`}
-                    action={<Link to={`/search?q=${encodeURIComponent(shortUrn(urn))}`}>Search instead</Link>}
-                />
+                {details.error ? (
+                    <ErrorNotice error={details.error} area="this asset" />
+                ) : (
+                    <Alert type="warning" message="Asset not found or you do not have access to it." />
+                )}
+                <div style={{ marginTop: 8 }}>
+                    <Link to={`/search?q=${encodeURIComponent(shortUrn(urn))}`}>Search instead</Link>
+                </div>
             </Page>
         );
     }
@@ -189,12 +195,17 @@ export function AssetPage() {
     return (
         <Page>
             <Header>
-                <Muted style={{ fontSize: 12 }}>
-                    {entityTypeLabel(d?.type)}
-                    {d?.platform?.name ? ` · ${platformName(d.platform.name)}` : ''}
-                    {d?.domain?.domain.properties?.name ? ` · ${d.domain.domain.properties.name}` : ''}
-                </Muted>
-                <h1>{name}</h1>
+                <PageHeader
+                    title={name}
+                    help={pageHelp('/asset')}
+                    description={
+                        <span data-asset-kind="">
+                            {entityTypeLabel(d?.type)}
+                            {d?.platform?.name ? ` · ${platformName(d.platform.name)}` : ''}
+                            {d?.domain?.domain.properties?.name ? ` · ${d.domain.domain.properties.name}` : ''}
+                        </span>
+                    }
+                />
                 <div style={{ margin: '10px 0' }}>
                     <TrustBadges
                         certification={e?.certification}

@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi } from '../api/hooks';
 import type { PublishOptions, PublishPlan, PublishTarget } from '../api/types';
 import { Muted, Surface } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const split = (s: string) =>
     s
@@ -27,7 +28,7 @@ export function ProductPublish({ urn }: { urn: string }) {
         try {
             setPlan(await fn());
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         }
     };
 

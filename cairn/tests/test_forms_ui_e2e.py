@@ -69,6 +69,15 @@ def cairn(settings, graph, tmp_path, monkeypatch):
     monkeypatch.setenv("CAIRN_QUALITY_CONNECTIONS", str(conns))
     monkeypatch.setenv("CAIRN_SECRETS_KEY", base64.b64encode(os.urandom(32)).decode())
     monkeypatch.setenv("CAIRN_JOBS_RUNTIME", "docker")       # jobs are defined here, not run
+    # A team warehouse (its proxy is not running here: listed as unreachable, which the picker does not mind).
+    monkeypatch.setenv("CAIRN_WAREHOUSES", '{"warehouses": [{"name": "sales"}]}')
+    monkeypatch.setenv("CAIRN_WAREHOUSES_URL", f"http://127.0.0.1:{_port()}")
+    monkeypatch.setenv("CAIRN_WAREHOUSE_PORTS", f'{{"sales": {_port()}}}')
+    monkeypatch.setenv("CAIRN_GIT_FOLDER_URLS", "file://")                 # git folders on local bare repositories
+    monkeypatch.setenv("CAIRN_GIT_FOLDERS_DIR", str(tmp_path / "git-work"))
+    if os.environ.get("CAIRN_CATALOG_BIN"):     # external catalogs ride on Trino's access control (no Trino needed here)
+        monkeypatch.setenv("CAIRN_TRINO_ACCESS_KEY", "forms-e2e-trino-key-" + "k" * 16)
+        monkeypatch.setenv("CAIRN_TRINO_CATALOGS", '{"lakehouse": {"platform": "iceberg", "database": ""}}')
     graph.aspects[(DS, "schemaMetadata")] = {"fields": [{"fieldPath": c, "nativeDataType": "TEXT"}
                                                         for c in ("id", "region", "amount")]}
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
@@ -303,7 +312,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             d = dialog()
             d.get_by_label(label("Name")).fill("AI spend")
             d.get_by_label(label("Amount")).fill("2000")
-            d.get_by_label(label("Scope")).fill('{"ai": true}')
+            d.get_by_label(label("AI")).click()                                  # the scope: one of; here AI spend
             submit(d, "Create")
             closed(d)
             budget = api.get("/v1/budgets").json()[0]
@@ -352,7 +361,7 @@ def test_a_person_without_the_right_sees_why_in_words(cairn):
             d = page.get_by_role("dialog").last
             d.get_by_label(re.compile("^Name")).fill("Mine")
             d.get_by_label(re.compile("^Amount")).fill("10")
-            d.get_by_label(re.compile("^Scope")).fill('{"all": true}')
+            d.get_by_label(re.compile("^All")).click()                           # the scope: everything
             d.get_by_role("button", name=re.compile(r"(^|loading )Create$")).last.click()
             notice = d.locator('[data-error-kind="forbidden"]')
             expect(notice).to_contain_text("You don’t have permission for “Create”")
@@ -364,3 +373,181 @@ def test_a_person_without_the_right_sees_why_in_words(cairn):
         finally:
             browser.close()
     assert not errors, errors
+
+
+def _git(cwd, *args):
+    import subprocess
+
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@example.com", *args], cwd=cwd, check=True,
+                   capture_output=True)
+
+
+def _pick(page, box, option):
+    """Open a picker (an antd select) and take the option with this text."""
+    box.click()
+    page.locator(".ant-select-dropdown:visible .ant-select-item-option", has_text=option).first.click()
+
+
+def test_the_warehouse_git_folder_and_flow_pickers_choose_from_cairn(cairn, tmp_path):
+    """The pickers that name a Cairn warehouse (a budget's scope), one of the person's git folders (committing a change
+    request for review) and another flow (a flow's "after another flow" trigger) list what Cairn has, and the choice
+    is what the API receives."""
+    import json
+    import subprocess
+
+    from playwright.sync_api import expect, sync_playwright
+
+    s, url = cairn
+    api = _api(url)
+    # A git repository of Ana's, as a folder in Cairn; a change request proposed through the API.
+    remote = tmp_path / "infra.git"
+    _git(tmp_path, "init", "--quiet", "--bare", "--initial-branch=main", str(remote))
+    _git(tmp_path, "clone", "--quiet", str(remote), str(tmp_path / "seed"))
+    (tmp_path / "seed" / "README.md").write_text("infra\n")
+    _git(tmp_path / "seed", "add", ".")
+    _git(tmp_path / "seed", "commit", "--quiet", "-m", "init")
+    _git(tmp_path / "seed", "push", "--quiet", "origin", "HEAD:main")
+    folder = api.post("/v1/git-folders", json={"name": "infra", "url": f"file://{remote}", "branch": "main"})
+    assert folder.status_code == 201, folder.text
+    change = api.post("/v1/iac/changes", json={
+        "title": "Revenue query", "intent": "a saved query for the finance team",
+        "bundle_yaml": "queries:\n  - {name: picked-q, connection: wh, sql: SELECT 1 AS n}\n"})
+    assert change.status_code in (200, 201), change.text
+    cid = change.json()["id"]
+    # Two flows: the second starts after the first.
+    s.flows.create(ANA, {"name": "ingest-orders", "steps": [
+        {"name": "count", "type": "sql", "sql": "SELECT count(*) AS n FROM main.orders", "connection": "wh"}]},
+        publish=True)
+    s.flows.create(ANA, {"name": "orders-report", "steps": [
+        {"name": "count", "type": "sql", "sql": "SELECT count(*) AS n FROM main.orders", "connection": "wh"}]})
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": ANA}, viewport={"width": 1440, "height": 900})
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        try:
+            # ---- a budget for a warehouse's node-hours: the warehouse picker lists Cairn's warehouses -------------
+            page.goto(f"{url}/host#/usage?tab=budgets", wait_until="networkidle")
+            page.get_by_role("button", name="Create", exact=True).first.click()
+            d = page.get_by_role("dialog").last
+            d.get_by_label(re.compile("^Name")).fill("Sales warehouse")
+            d.get_by_label(re.compile("^Amount")).fill("300")
+            _pick(page, d.get_by_label(re.compile("^Warehouse")), "sales")
+            d.get_by_label(re.compile("^AI")).click()                             # two choices: the form says one
+            d.get_by_role("button", name=re.compile(r"(^|loading )Create$")).last.click()
+            expect(d.get_by_text("Choose only one for Scope.")).to_be_visible()
+            d.get_by_label(re.compile("^AI")).click()
+            d.get_by_role("button", name=re.compile(r"(^|loading )Create$")).last.click()
+            expect(d).to_be_hidden(timeout=20_000)
+            assert [(b["name"], b["scope"]) for b in api.get("/v1/budgets").json()] == [
+                ("Sales warehouse", {"warehouse": "sales"})]
+
+            # ---- a change request committed to a branch of a git folder chosen with the git folder picker --------
+            page.goto(f"{url}/host#/settings", wait_until="networkidle")
+            page.get_by_role("tab", name="Infrastructure as code").click()
+            page.get_by_role("tab", name="Changes").click()
+            page.get_by_role("button", name="Revenue query").click()
+            box = page.get_by_role("combobox", name="Git folder")
+            expect(box).to_be_visible(timeout=20_000)
+            _pick(page, box, "infra")
+            page.get_by_role("button", name="Commit to a branch for review").click()
+            branch = f"cairn/iac-change-{cid[:12]}"
+            end = time.time() + 30
+            while branch not in subprocess.run(["git", "--git-dir", str(remote), "branch", "--list", "cairn/*"],
+                                               capture_output=True, text=True).stdout:
+                assert time.time() < end, "the change was not committed"
+                time.sleep(0.5)
+            files = subprocess.run(["git", "--git-dir", str(remote), "ls-tree", "-r", "--name-only", branch],
+                                   capture_output=True, text=True).stdout.split()
+            assert f"iac/changes/{cid[:12]}/change.yaml" in files
+            assert api.get(f"/v1/iac/changes/{cid}").json()["commit"]["branch"] == branch
+
+            # ---- a flow that starts after another: the flow picker lists the person's flows ----------------------
+            page.goto(f"{url}/host#/flows?flow=orders-report", wait_until="domcontentloaded")
+            expect(page.get_by_role("heading", name="orders-report")).to_be_visible(timeout=30_000)
+            page.get_by_role("tab", name="Settings").click()
+            _pick(page, page.get_by_label("After another flow succeeds"), "ingest-orders")
+            page.get_by_role("button", name="Save draft").click()
+            expect(page.get_by_text("Draft saved")).to_be_visible(timeout=20_000)
+            triggers = api.get("/v1/flows/orders-report").json()["draft"]["triggers"]
+            assert [(t["type"], t["flow"], t["on"]) for t in triggers] == [("flow", "ingest-orders", ["succeeded"])], \
+                json.dumps(triggers)
+        finally:
+            browser.close()
+    assert not errors, errors
+
+
+def _catalog_ready():
+    return _ready() and bool(os.environ.get("CAIRN_CATALOG_BIN")) and bool(os.environ.get("CAIRN_STORE_BIN"))
+
+
+@pytest.mark.skipif(not _catalog_ready(), reason="needs CAIRN_CATALOG_BIN and CAIRN_STORE_BIN (a real Iceberg catalog)")
+def test_a_secret_reference_is_picked_for_an_external_catalog(cairn, tmp_path):
+    """Registering another organisation's Iceberg catalog (a real Cairn Catalog stands for it): its credential is a
+    reference chosen with the secret-reference picker (scope / key, never the value), and Cairn signs in with it."""
+    import subprocess
+
+    from playwright.sync_api import expect, sync_playwright
+
+    _s, url = cairn
+    api = _api(url)
+    token = "partner-catalog-token-" + "t" * 24
+    assert api.post("/v1/secret-scopes", json={"name": "partner"}).status_code in (200, 201)
+    r = api.put("/v1/secret-scopes/partner/secrets/catalog-token", json={"value": token})
+    assert r.status_code in (200, 201, 204), r.text
+    # The partner's lakehouse: its own store and catalog.
+    sp, cp = _port(), _port()
+    key = ("partner-store", "partner-store-secret-" + "s" * 12)
+    procs = [subprocess.Popen([os.environ["CAIRN_STORE_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_STORE_ACCESS_KEY": key[0], "CAIRN_STORE_SECRET_KEY": key[1],
+        "CAIRN_STORE_DATA": str(tmp_path / "store"), "CAIRN_STORE_ADDR": f"127.0.0.1:{sp}",
+        "CAIRN_STORE_BUCKETS": "partner", "CAIRN_STORE_FSYNC": "false", "CAIRN_STORE_META": ""})]
+    procs.append(subprocess.Popen([os.environ["CAIRN_CATALOG_BIN"]], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env={
+        **os.environ, "CAIRN_CATALOG_ADDR": f"127.0.0.1:{cp}", "CAIRN_CATALOG_DATA": str(tmp_path / "catalog"),
+        "CAIRN_CATALOG_TOKEN": token, "CAIRN_CATALOG_WAREHOUSE": "s3://partner/warehouse",
+        "CAIRN_CATALOG_S3_ENDPOINT": f"http://127.0.0.1:{sp}", "CAIRN_CATALOG_S3_ACCESS_KEY": key[0],
+        "CAIRN_CATALOG_S3_SECRET_KEY": key[1], "CAIRN_CATALOG_FSYNC": "false"}))
+    try:
+        for port_, proc in ((sp, procs[0]), (cp, procs[1])):
+            end = time.time() + 30
+            while True:
+                try:
+                    socket.create_connection(("127.0.0.1", port_), 0.3).close()
+                    break
+                except OSError:
+                    assert time.time() < end and proc.poll() is None, "the partner's store or catalog did not start"
+                    time.sleep(0.2)
+        from pyiceberg.catalog.rest import RestCatalog
+        import pyarrow as pa
+
+        cat = RestCatalog("partner", uri=f"http://127.0.0.1:{cp}", token=token)
+        cat.create_namespace("sales")
+        orders = pa.table({"id": pa.array([1, 2], pa.int64()), "region": ["EU", "US"]})
+        cat.create_table("sales.orders", orders.schema).append(orders)
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": ANA}, viewport={"width": 1440, "height": 900})
+            page = ctx.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            try:
+                page.goto(f"{url}/host#/lakehouse?tab=external-catalogs", wait_until="networkidle")
+                page.get_by_role("button", name="Register").first.click()
+                d = page.get_by_role("dialog").last
+                d.get_by_label(re.compile("^Name")).fill("partner")
+                d.get_by_label(re.compile("^URI")).fill(f"http://127.0.0.1:{cp}")
+                _pick(page, d.get_by_label(re.compile("^Auth")), "token")
+                _pick(page, d.get_by_label(re.compile("^Credential ref")), "partner / catalog-token")
+                assert token not in page.content()                                # a reference, never the value
+                d.get_by_role("button", name=re.compile(r"(^|loading )Register$")).last.click()
+                expect(d).to_be_hidden(timeout=30_000)
+                cat = api.get("/v1/external-catalogs/partner").json()
+                assert cat["credential_ref"] == "scope:partner/catalog-token" and cat["auth"] == "token", cat
+            finally:
+                browser.close()
+            assert not errors, errors
+    finally:
+        for proc in reversed(procs):
+            proc.terminate()
+            proc.wait(15)

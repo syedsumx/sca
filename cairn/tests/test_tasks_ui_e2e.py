@@ -179,6 +179,8 @@ def workspace(settings, graph, tmp_path, monkeypatch):
     app.add_api_route("/api/v2/graphql", graphql, methods=["POST"])
     app.mount("/ui", StaticFiles(directory=BUNDLE), name="ui")
     app.add_api_route("/host", lambda: HTMLResponse(HOST), methods=["GET"])
+    # The catalog shell's entries (deploy/mfe/mfe.config.yaml): each mounts the same bundle at /mfe/<entry>.
+    app.add_api_route("/mfe/{entry}", lambda entry: HTMLResponse(HOST), methods=["GET"])
     p = _port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=p, timeout_keep_alive=75, log_level="warning"))
     threading.Thread(target=server.run, daemon=True).start()
@@ -504,6 +506,72 @@ def test_the_palette_finds_pages_and_actions_and_the_sidebar_fits_the_person(wor
         finally:
             browser.close()
     assert not bob.errors, bob.errors
+
+
+def test_the_catalog_shells_compact_bar(workspace):
+    """Hosted by the catalog shell (a page under /mfe/<entry>), the workspace has no sidebar of its own: a compact bar
+    of its sections under its top bar (palette, search, ask, help). A bare entry opens its own section; a section
+    owned by another entry moves the shell there (the shell's URL, which the shell then mounts); one it owns opens in
+    place; the palette and the help work there too; and axe finds nothing serious."""
+    import json
+
+    from playwright.sync_api import expect, sync_playwright
+
+    _s, url = workspace
+    axe = os.path.join(ROOT, "ui", "node_modules", "axe-core", "axe.min.js")
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ana = Person(browser, url, ANA)
+        page = ana.page
+        try:
+            page.goto(f"{url}/mfe/cairn-marketplace", wait_until="domcontentloaded")
+            bar = page.get_by_role("navigation", name="Workspace sections")
+            expect(bar).to_be_visible(timeout=30_000)
+            expect(page).to_have_url(re.compile(r"/mfe/cairn-marketplace#/marketplace$"))    # the entry's own section
+            expect(page.get_by_role("heading", level=1, name="Data Marketplace")).to_be_visible()
+            expect(bar.get_by_role("link", name="Marketplace")).to_have_attribute("aria-current", "page")
+            expect(page.get_by_role("button", name="Collapse sidebar")).to_have_count(0)      # the shell has the sidebar
+            for name in ("Discover", "Search", "Requests", "Settings"):
+                expect(bar.get_by_role("link", name=re.compile(rf"^{name}"))).to_be_visible()
+            # The top bar above it: the palette, search, ask and help.
+            expect(page.get_by_role("button", name="Search or jump to…")).to_be_visible()
+            expect(page.get_by_role("textbox", name="Search", exact=True)).to_be_visible()
+            expect(page.get_by_role("button", name="✨ Ask")).to_be_visible()
+            # Requests belongs to another shell entry: the shell's URL moves (the shell then mounts the entry there).
+            bar.get_by_role("link", name=re.compile("^Requests")).click()
+            expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/requests$"))
+            page.reload(wait_until="domcontentloaded")                                         # what the shell does
+            expect(page.get_by_role("heading", level=1, name="Requests")).to_be_visible(timeout=30_000)
+            expect(bar.get_by_role("link", name=re.compile("^Requests"))).to_have_attribute("aria-current", "page")
+            # Search has no entry of its own: it opens in place.
+            bar.get_by_role("link", name="Search").click()
+            expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/search"))
+            # The palette and the help, as everywhere.
+            page.keyboard.press("Control+k")
+            expect(page.get_by_role("combobox", name="Type a page, an action or a dataset…")).to_be_focused(timeout=10_000)
+            page.keyboard.press("Escape")
+            page.goto(f"{url}/mfe/cairn-settings", wait_until="domcontentloaded")
+            header = page.locator("[data-page-header]")
+            expect(header.get_by_role("heading", level=1, name="Settings")).to_be_visible(timeout=30_000)
+            assert header.get_attribute("data-help-anchor") == "integrations.html#notifications"
+            header.get_by_role("button", name=re.compile("help", re.I)).click()
+            help_panel = page.get_by_role("dialog").last
+            expect(help_panel).to_be_visible()
+            expect(help_panel.get_by_role("link", name=re.compile("Open full docs"))).to_have_attribute(
+                "href", re.compile("integrations.html#notifications"))
+            page.keyboard.press("Escape")
+            # axe on the hosted layout (WCAG 2.1 A and AA): nothing serious or critical.
+            page.add_script_tag(path=axe)
+            found = page.evaluate("""async () => {
+                const r = await axe.run(document, {runOnly: {type: 'tag', values: ['wcag2a', 'wcag2aa', 'wcag21a', 'wcag21aa']},
+                                                   resultTypes: ['violations']});
+                return r.violations.filter(v => v.impact === 'serious' || v.impact === 'critical')
+                    .map(v => ({id: v.id, nodes: v.nodes.slice(0, 3).map(n => n.target.join(' '))}));
+            }""")
+            assert not found, json.dumps(found, indent=1)
+        finally:
+            browser.close()
+    assert not ana.errors, ana.errors
 
 
 # ---- 11. Accepting an ontology proposal: the compiler's stack ------------------------------------------------------------

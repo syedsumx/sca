@@ -65,7 +65,7 @@ describe('completing a form task', () => {
         fireEvent.click(await screen.findByRole('button', { name: 'Complete' }));
         await screen.findByLabelText('What is in it?');
         fireEvent.click(screen.getByRole('button', { name: 'Submit' }));
-        expect(await screen.findByText('Retention: an answer is required')).toBeTruthy();
+        expect(await screen.findByText(/Retention: an answer is required/)).toBeTruthy();
     });
 });
 

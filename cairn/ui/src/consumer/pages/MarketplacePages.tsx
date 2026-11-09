@@ -22,6 +22,9 @@ import { useDheSession } from '../context/CairnProvider';
 import { actorName, entityTypeLabel, platformName, relativeTime } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
 import { useT } from '../i18n';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 export function MarketplacePage() {
     const t = useT();
@@ -54,10 +57,7 @@ export function MarketplacePage() {
 
     return (
         <Page>
-            <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                {t('page.marketplace')}
-            </SectionTitle>
-            <Muted>{t('page.marketplaceIntro')}</Muted>
+            <PageHeader title={t('page.marketplace')} description={t('page.marketplaceIntro')} help={pageHelp('/marketplace')} />
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '16px 0', alignItems: 'center' }}>
                 <Input.Search
                     aria-label="Search data products"
@@ -114,7 +114,7 @@ export function MarketplacePage() {
                     ))}
                 </CardGrid>
             )}
-            {products.error && <Alert type="error" message={`Could not load products: ${products.error.message}`} />}
+            {products.error && <ErrorNotice error={products.error} area="Data products" />}
             {products.data && shown.length === 0 && <Empty description="No data products match these filters." />}
             <CardGrid>
                 {shown.map((p) => (
@@ -143,7 +143,7 @@ export function ProductPage() {
             message.success(on ? 'Subscribed — you will hear about schema changes, incidents and deprecations.' : 'Unsubscribed');
         } catch (e) {
             cache.set<ProductDetail>(key, (prev) => ({ ...(prev as ProductDetail), subscribed: !on }));
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -154,7 +154,7 @@ export function ProductPage() {
             </Page>
         );
     }
-    if (product.error || !p) return <Page>{product.error && <Alert type="error" message={product.error.message} />}</Page>;
+    if (product.error || !p) return <Page>{product.error && <ErrorNotice error={product.error} />}</Page>;
     const access = accessLabel(p.access.status, p.access.expires_at);
     const me = session.config?.user.urn;
     const canPublish = !!session.config?.is_admin || (!!me && p.owners.includes(me));
@@ -163,8 +163,7 @@ export function ProductPage() {
         <Page>
             <Link to="/marketplace">← Marketplace</Link>
             <Surface style={{ padding: 20, marginTop: 12 }}>
-                <Muted>{p.domain?.name ?? 'Data product'}</Muted>
-                <h1 style={{ margin: '4px 0 8px', fontSize: 24 }}>{p.name}</h1>
+                <PageHeader title={p.name} description={p.domain?.name ?? 'Data product'} help={pageHelp('/marketplace')} />
                 <TrustBadges certification={p.certification} qualityStatus={p.quality_status} />
                 <p style={{ marginTop: 10 }}>{p.description}</p>
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -285,7 +284,7 @@ export function RequestsPage() {
             setDialog(null);
             setComment('');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -353,9 +352,8 @@ export function RequestsPage() {
 
     return (
         <Page>
-            <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                {t('page.requests')}
-            </SectionTitle>
+            <PageHeader title={t('page.requests')} help={pageHelp('/requests')}
+                description="Access you asked for and requests waiting for your decision, compliance forms to complete, and your grants." />
             <Tabs
                 items={[
                     {

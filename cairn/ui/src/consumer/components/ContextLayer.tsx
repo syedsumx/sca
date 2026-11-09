@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Input, Modal, Select, Space, Table, Tag, message } from 'antd';
+import { Alert, Button, Empty, Input, Modal, Select, Space, Table, Tag } from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
@@ -6,6 +6,7 @@ import type { ContextDefinition, DefinitionEdits, Finding, PastAnswer } from '..
 import { actorName, shortUrn } from '../utils/format';
 import { download } from './BulkEdit';
 import { Muted } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 export const DEFINABLE = ['METRIC_DEFINITION', 'TERM_SUGGESTION', 'JOIN_RELATIONSHIP'];
 
@@ -87,10 +88,10 @@ export function DefinitionsView() {
             );
             download(`cairn-${format}.sql`, sql, 'application/sql;charset=utf-8');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     if (q.data && !q.data.length)
         return <Empty description="No approved definitions yet. Approve metric and join findings to build them." />;
     return (
@@ -147,7 +148,7 @@ export function PastAnswersView() {
         try {
             setAnswers(await client.pastAnswers(question));
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }

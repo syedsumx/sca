@@ -5,6 +5,7 @@ import { useConsumerApi } from '../api/hooks';
 import { Muted } from '../components/tokens';
 import { CatalogTables, DiffPart, Estimate, OntologyRun, RunDiff, ontologyApi } from './api';
 import { INITIAL, STEPS, WizardState, back, canNext, isFinal, next, percent, phaseLabel, resumable, scopeBody } from './wizard';
+import { describeError } from '../components/ErrorNotice';
 
 function DiffSection({ title, part }: { title: string; part: DiffPart }) {
     return (
@@ -56,21 +57,21 @@ export function CompileWizard({ onFinished }: { onFinished?: () => void }) {
     const finished = useRef<string | null>(null);
 
     useEffect(() => {
-        api.catalog().then(setCatalog).catch((e) => setError((e as Error).message));
+        api.catalog().then(setCatalog).catch((e) => setError(describeError(e)));
     }, [api]);
 
     useEffect(() => {
         if (s.step !== 2) return;
         setEstimate(null);
         setError(null);
-        api.estimate(s.mode, scopeBody(s)).then(setEstimate).catch((e) => setError((e as Error).message));
+        api.estimate(s.mode, scopeBody(s)).then(setEstimate).catch((e) => setError(describeError(e)));
     }, [api, s]);
 
     // Follow the run until it ends; a completed run's proposals are imported and its diff shown.
     useEffect(() => {
         if (!run || isFinal(run)) return undefined;
         const t = window.setTimeout(() => {
-            api.run(run.id).then(setRun).catch((e) => setError((e as Error).message));
+            api.run(run.id).then(setRun).catch((e) => setError(describeError(e)));
         }, 800);
         return () => window.clearTimeout(t);
     }, [api, run]);
@@ -84,7 +85,7 @@ export function CompileWizard({ onFinished }: { onFinished?: () => void }) {
                 setDiff(await api.diff(run.id));
                 onFinished?.();
             } catch (e) {
-                setError((e as Error).message);
+                setError(describeError(e));
             }
         })();
     }, [api, run, onFinished]);
@@ -97,7 +98,7 @@ export function CompileWizard({ onFinished }: { onFinished?: () => void }) {
             setRun(out.run);
             setS(next(s));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -109,7 +110,7 @@ export function CompileWizard({ onFinished }: { onFinished?: () => void }) {
             await fn();
             if (run) setRun(await api.run(run.id));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }

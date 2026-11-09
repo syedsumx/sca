@@ -9,6 +9,7 @@ import { CHART_TYPES } from '../api/types';
 import { SqlEditor } from '../components/SqlEditor';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { describeError, notifyError } from '../components/ErrorNotice';
 
 const ago = (ms: number) => new Date(ms).toLocaleString();
 
@@ -47,7 +48,7 @@ export function SqlWorkspacePage() {
             setResult(await client.runSql(sql, connection, limit));
         } catch (e) {
             setResult(null);
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setRunning(false);
             setTick((t) => t + 1);
@@ -73,7 +74,7 @@ export function SqlWorkspacePage() {
             setTick((t) => t + 1);
             message.success(form.shared ? 'Saved and shared' : 'Saved');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 

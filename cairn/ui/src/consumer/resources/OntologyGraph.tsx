@@ -4,6 +4,7 @@ import styled from 'styled-components';
 
 import { useDheQuery } from '../api/hooks';
 import { Muted, tokens } from '../components/tokens';
+import { ErrorNotice } from '../components/ErrorNotice';
 
 /** The compiled ontology's graph as Cairn serves it (`GET /v1/ontology/graph?format=json`). */
 export interface OntologyGraphData {
@@ -55,7 +56,7 @@ export function OntologyGraphView({ path }: { path: string }) {
     const q = useDheQuery<OntologyGraphData>(`resource:${path}`, (c, signal) => c.request<OntologyGraphData>('GET', path, undefined, { signal }));
     const [hover, setHover] = useState<string | null>(null);
     const laid = useMemo(() => (q.data ? layout(q.data) : null), [q.data]);
-    if (q.error) return <Alert type="warning" showIcon message="The ontology graph is not available" description={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} area="The ontology graph" />;
     if (!laid) return <Spin />;
     if (!laid.terms.length) return <Empty description="No compiled terms you may see yet" />;
     const size = 560;

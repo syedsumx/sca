@@ -6,6 +6,7 @@ import { useDheQuery } from '../api/hooks';
 import type { Contract, ContractPart, ContractStatus } from '../api/types';
 import { actorName, relativeTime } from '../utils/format';
 import { Muted } from './tokens';
+import { ErrorNotice } from './ErrorNotice';
 
 const COLOR: Record<ContractStatus, string> = { MET: 'green', BROKEN: 'red', PENDING: 'default' };
 const PART: Record<ContractPart['part'], string> = {
@@ -30,7 +31,7 @@ export function ContractPanel({ urn }: { urn: string }) {
                 }
             />
         );
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     const c = q.data;
     if (!c) return null;
     return (

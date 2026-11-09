@@ -7,6 +7,7 @@ import type { StewardProposal } from '../api/types';
 import { actorName } from '../utils/format';
 import { assetPath } from './Assets';
 import { Muted } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const KIND = { owner: 'Owner', term: 'Classification', tag: 'Tag', description: 'Description' } as const;
 
@@ -60,7 +61,7 @@ export function StewardReview() {
             message.success(await fn());
             refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -107,7 +108,7 @@ export function StewardReview() {
                     Datasets without a description, owner or classification, most used first. Edit before accepting.
                 </Muted>
             </Space>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {q.data && !q.data.length && (
                 <Empty description="Nothing to review. Find gaps to ask the steward for proposals." />
             )}

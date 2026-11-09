@@ -15,6 +15,7 @@ import { Muted, Page, Skeleton } from '../components/tokens';
 import { TermSearchResults } from '../ontology/Embeds';
 import { SearchState, parseSearchState, serializeSearchState, toggleFilter } from '../utils/urlState';
 import { useHotkeys } from '../utils/useHotkeys';
+import { ErrorNotice } from '../components/ErrorNotice';
 
 const PAGE_SIZE = 20;
 
@@ -130,7 +131,7 @@ export function SearchPage() {
                             </div>
                         ))}
                     {state.page === 1 && <TermSearchResults query={state.query} />}
-                    {result.error && <div role="alert">Search failed: {result.error.message}</div>}
+                    {result.error && <ErrorNotice error={result.error} area="Search" />}
                     {result.data && result.data.results.length === 0 && (
                         <Empty
                             description={

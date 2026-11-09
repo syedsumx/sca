@@ -23,6 +23,7 @@ import { useDheClient, useMutation, usePolling } from '../api/hooks';
 import type { Agent, AgentPool, AgentPoolInput, AgentRun, AgentStatus, EnrollmentToken, TaskLogs } from '../api/types';
 import { formatRelative, formatTimestamp } from '../common/format';
 import { EmptyState, ErrorState, LoadingState, Mono, PageContainer, PageHeader } from '../common/States';
+import { ErrorNotice, describeError, notifyError } from '../consumer/components/ErrorNotice';
 
 const AGENT_STATUS_COLOR: Record<AgentStatus, string> = { ONLINE: 'green', OFFLINE: 'default', REVOKED: 'red' };
 
@@ -105,7 +106,7 @@ export function RunLogs({ taskId, pollIntervalMs = 2000 }: { taskId: string; pol
                 if (!page.done) timer = setTimeout(tick, pollIntervalMs);
             } catch (e) {
                 if (stopped || (e as Error).name === 'AbortError') return;
-                setError((e as Error).message);
+                setError(describeError(e));
                 timer = setTimeout(tick, pollIntervalMs * 2);
             }
         };
@@ -174,7 +175,7 @@ export function AgentFleet({
             const t = await tokenMutation.mutate(pool);
             setToken({ pool, token: t });
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -186,7 +187,7 @@ export function AgentFleet({
             );
             message.success(`Revoked ${agent.hostname}`);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -198,7 +199,7 @@ export function AgentFleet({
             );
             message.success(out.was === 'QUEUED' ? 'Cancelled before it started' : 'Cancelling: the agent stops at its next step');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -482,7 +483,7 @@ function CreatePoolModal({ open, onClose, onCreated }: CreatePoolModalProps) {
                 }
             }}
         >
-            {error && <Alert type="error" showIcon message={error.message} style={{ marginBottom: 12 }} />}
+            {error && <ErrorNotice error={error} style={{ marginBottom: 12 }} />}
             <Form form={form} layout="vertical" initialValues={{ max_concurrency: 2, allowed_platforms: [] }}>
                 <Form.Item
                     name="name"

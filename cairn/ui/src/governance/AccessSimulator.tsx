@@ -5,6 +5,7 @@ import { useDheClient, useMutation } from '../api/hooks';
 import type { SimulateRequest, SimulateResponse, TraceEntry } from '../api/types';
 import { decisionColor } from '../common/format';
 import { Mono, PageContainer, PageHeader } from '../common/States';
+import { ErrorNotice } from '../consumer/components/ErrorNotice';
 
 /** Common Cairn Core privileges; free text is also accepted. */
 export const COMMON_PRIVILEGES = [
@@ -31,7 +32,7 @@ export function parseJsonObject(label: string, text: string | undefined): Record
     try {
         parsed = JSON.parse(text);
     } catch (e) {
-        throw new Error(`${label}: invalid JSON (${(e as Error).message})`);
+        throw new Error(`${label}: invalid JSON (${(e as Error).message})`); // presenter-exempt: the JSON the person typed
     }
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
         throw new Error(`${label}: must be a JSON object`);
@@ -69,7 +70,7 @@ export function AccessSimulator() {
                 environment: parseJsonObject('Environment', values.environment),
             };
         } catch (e) {
-            setParseError((e as Error).message);
+            setParseError((e as Error).message); // presenter-exempt: the JSON the person typed (parseJsonObject)
             return;
         }
         try {
@@ -131,9 +132,8 @@ export function AccessSimulator() {
                 </Col>
                 <Col xs={24} lg={14}>
                     <Card title="Decision" size="small" aria-live="polite">
-                        {(parseError || error) && (
-                            <Alert type="error" showIcon message={parseError ?? error?.message} style={{ marginBottom: 12 }} />
-                        )}
+                        {parseError && <Alert type="error" showIcon message={parseError} style={{ marginBottom: 12 }} />}
+                        {!parseError && error && <ErrorNotice error={error} action="Simulate" style={{ marginBottom: 12 }} />}
                         {!result && !parseError && !error && <span>Submit a request to see the decision and trace.</span>}
                         {result && <DecisionView result={result} />}
                     </Card>

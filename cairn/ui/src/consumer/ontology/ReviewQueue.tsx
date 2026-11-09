@@ -7,6 +7,7 @@ import { useConsumerApi } from '../api/hooks';
 import { Muted, tokens } from '../components/tokens';
 import { BatchResult, Proposal, ontologyApi, termHref } from './api';
 import { QueueFilter, aboveThreshold, filterQueue, keyIntent, queueReducer, targets } from './review';
+import { describeError } from '../components/ErrorNotice';
 
 const List = styled.div`
     border: 1px solid ${tokens.color.border};
@@ -60,7 +61,7 @@ export function ReviewQueue({ onChanged }: { onChanged?: () => void }) {
             setItems((await api.proposals()).proposals);
             setError(null);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [api]);
     useEffect(() => {
@@ -81,7 +82,7 @@ export function ReviewQueue({ onChanged }: { onChanged?: () => void }) {
             dispatch({ type: 'removed', ids: done, count: shown.length - done.length });
             if (done.length) onChanged?.();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
             listRef.current?.focus();

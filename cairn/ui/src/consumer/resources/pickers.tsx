@@ -89,7 +89,7 @@ async function loadList(c: ConsumerClient, kind: PickerKind, field: FormField, s
             return out;
         }
         case 'git_folder':
-            return listOf(await get('/v1/git-folders')).map((r) => ({ value: str(r.name ?? r.id), label: str(r.name ?? r.id) }));
+            return listOf(await get('/v1/git-folders')).map((r) => ({ value: str(r.id ?? r.name), label: str(r.name ?? r.id) }));
         case 'flow':
             return listOf(await get('/v1/flows')).map((r) => ({ value: str(r.name), label: str(r.title ?? r.name) }));
         case 'agent': {
@@ -150,7 +150,7 @@ export function labelOf(kind: PickerKind | undefined, value: string): string {
     return value;
 }
 
-export function Picker({ id, field, value, onChange, describedBy, invalid, disabled, placeholder }: {
+export function Picker({ id, field, value, onChange, describedBy, invalid, disabled, placeholder, ariaLabel }: {
     id: string;
     field: FormField;
     value: unknown;
@@ -159,6 +159,8 @@ export function Picker({ id, field, value, onChange, describedBy, invalid, disab
     invalid?: boolean;
     disabled?: boolean;
     placeholder?: string;
+    /** Where no <label> names it. */
+    ariaLabel?: string;
 }) {
     const t = useT();
     const { client } = useConsumerApi();
@@ -203,6 +205,7 @@ export function Picker({ id, field, value, onChange, describedBy, invalid, disab
         <Select
             id={id}
             aria-describedby={describedBy}
+            aria-label={ariaLabel}
             data-invalid={invalid || undefined}
             showSearch
             allowClear

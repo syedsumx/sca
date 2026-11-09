@@ -51,6 +51,11 @@ export function helpAnchorFor(pathname: string, search: string, hubs: Hub[], spe
     return prefix ? PAGE_TOPICS[prefix] : null;
 }
 
+/** A purpose-built page's docs section (`help-topics.json`), for its header. */
+export function pageHelp(route: string): string | undefined {
+    return PAGE_TOPICS[route];
+}
+
 /** What the page is called in the help's question to the assistant. */
 export function pageTitleFor(pathname: string, search: string, hubs: Hub[], specs: Record<string, ResourceSpec>): string {
     const hub = hubs.find((h) => h.route === pathname);

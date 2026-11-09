@@ -6,6 +6,7 @@ import type { DbtRun } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { DerivedTab, MaintenanceTab, PipesTab, SharesTab, StreamsTab, WarehousesTab } from './LakehouseOps';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice } from '../components/ErrorNotice';
 
 const STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -71,7 +72,7 @@ function DbtRuns() {
                     </a>
                 )}
             </Space>
-            {q.error && <Alert type="error" message={q.error.message} showIcon />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Surface>
                 <Table<DbtRun>
                     rowKey="invocation"

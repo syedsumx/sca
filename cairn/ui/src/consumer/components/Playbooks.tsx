@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { Playbook, PlaybookRun } from '../api/types';
 import { Muted } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const TRIGGER: Record<string, string> = {
     'quality.incident.raised': 'when a quality incident is raised',
@@ -66,7 +67,7 @@ function PlaybookCard({ p, onChange }: { p: Playbook; onChange: () => void }) {
                             setTried(await client.runPlaybook(p.id, urn));
                             onChange();
                         } catch (e) {
-                            setError(e instanceof Error ? e.message : String(e));
+                            setError(describeError(e));
                         }
                     }}
                 >

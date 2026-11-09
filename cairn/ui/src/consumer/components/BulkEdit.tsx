@@ -5,6 +5,7 @@ import { useConsumerApi } from '../api/hooks';
 import type { BulkApplyResult, BulkChange, BulkPreview } from '../api/types';
 import { undoToast } from '../guide/Sheets';
 import { Muted } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const WHAT: Record<BulkChange['what'], string> = {
     description: 'Description',
@@ -92,7 +93,7 @@ export function BulkEdit({ query }: { query: string }) {
         try {
             await fn();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }

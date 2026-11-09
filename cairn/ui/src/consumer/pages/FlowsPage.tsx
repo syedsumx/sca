@@ -11,6 +11,9 @@ import { positions } from '../flows/layout';
 import { FLOW_NAME, FlowDef, Problem } from '../flows/model';
 import { FlowsRoot } from '../flows/styles';
 import { TEMPLATES } from '../flows/templates';
+import { describeError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const THEME_KEY = 'cairn.flows.theme';
 
@@ -47,7 +50,7 @@ export function FlowsPage() {
             setFlows(await api.list());
             setApprovals(await api.approvals().catch(() => []));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [api]);
 
@@ -61,7 +64,7 @@ export function FlowsPage() {
             setDetail(null);
             return;
         }
-        api.get(current).then(setDetail).catch((e) => setError((e as Error).message));
+        api.get(current).then(setDetail).catch((e) => setError(describeError(e)));
     }, [api, current]);
 
     const open = (name: string | null) => history.push(name ? `/flows?flow=${encodeURIComponent(name)}` : '/flows');
@@ -76,7 +79,7 @@ export function FlowsPage() {
             a.click();
             URL.revokeObjectURL(url);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     };
     const changeTheme = (t: string) => {
@@ -125,20 +128,22 @@ export function FlowsPage() {
                 </>
             ) : (
                 <>
-                    <div className="fl-top">
-                        <Icon name="flow" size={22} />
-                        <h1 className="fl-title">Flows</h1>
-                        <span className="fl-muted">Orchestrate SQL, tables, notebooks, Spark, dbt, agents, approvals and more as one DAG, run as its owner.</span>
-                        <span style={{ flex: 1 }} />
-                        <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => changeTheme(e.target.value)}>
-                            <option value="light">Light</option>
-                            <option value="dark">Dark</option>
-                            <option value="auto">System</option>
-                        </select>
-                        <Link to="/sql/workflows" className="fl-btn">SQL workflows</Link>
-                        <button type="button" className="fl-btn primary" onClick={() => setGallery(true)}>
-                            <Icon name="plus" size={14} /> New flow
-                        </button>
+                    <div style={{ padding: '20px 24px 0' }}>
+                        <PageHeader title="Flows" icon="flow" help={pageHelp('/flows')}
+                            description="Orchestrate SQL, tables, notebooks, Spark, dbt, agents, approvals and more as one DAG, run as its owner."
+                            actions={
+                                <>
+                                    <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => changeTheme(e.target.value)}>
+                                        <option value="light">Light</option>
+                                        <option value="dark">Dark</option>
+                                        <option value="auto">System</option>
+                                    </select>
+                                    <Link to="/sql/workflows" className="fl-btn">SQL workflows</Link>
+                                    <button type="button" className="fl-btn primary" onClick={() => setGallery(true)}>
+                                        <Icon name="plus" size={14} /> New flow
+                                    </button>
+                                </>
+                            } />
                     </div>
                     <div className="fl-tabs" role="tablist" aria-label="Flows and Airflow" style={{ padding: '0 24px' }}>
                         {[['flows', 'Flows'], ['airflow', 'Airflow']].map(([k, label]) => (
@@ -229,7 +234,7 @@ function ProposedFlow({ client, change, flow, onBack }: { client: ReturnType<typ
     const [error, setError] = useState<string | null>(null);
     const [selected, setSelected] = useState<string[]>([]);
     useEffect(() => {
-        client.request<ChangeForPreview>('GET', `/v1/iac/changes/${encodeURIComponent(change)}`).then(setCr).catch((e) => setError((e as Error).message));
+        client.request<ChangeForPreview>('GET', `/v1/iac/changes/${encodeURIComponent(change)}`).then(setCr).catch((e) => setError(describeError(e)));
     }, [client, change]);
     const item = cr?.plan.changes.find((c) => c.kind === 'flows' && c.key === flow);
     const spec = item?.fields.find((f) => f.field === 'spec')?.after as FlowDef | undefined;
@@ -298,7 +303,7 @@ function Gallery({ me, onClose, onCreate }: { me: string; onClose: () => void; o
                 try {
                     await onCreate(TEMPLATES.find((t) => t.id === picked)!.make(name, me || 'urn:li:corpuser:me'));
                 } catch (e) {
-                    setErr((e as Error).message);
+                    setErr(describeError(e));
                 }
             }}>Create draft</button>
         </section>

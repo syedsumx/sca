@@ -1,4 +1,4 @@
-import { Avatar, Button, Empty, Input, Tag, message } from 'antd';
+import { Avatar, Button, Empty, Input, Tag } from 'antd';
 import React, { useEffect, useRef, useState } from 'react';
 import styled from 'styled-components';
 
@@ -7,6 +7,7 @@ import type { Comment, Thread } from '../api/types';
 import { actorName, relativeTime } from '../utils/format';
 import { MarkdownView, extractMentions } from '../utils/markdown';
 import { Skeleton, tokens } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const REACTIONS = ['👍', '🎉', '👀', '❓'];
 
@@ -198,7 +199,7 @@ export function ThreadView({ thread, me }: { thread: Thread; me?: string }) {
                           },
                 ),
             () => client.toggleReaction(comment.id, emoji, add),
-        ).catch((e: Error) => message.error(`Reaction failed: ${e.message}`));
+        ).catch((e: unknown) => notifyError(e, { action: 'React' }));
 
     const reply = async (body: string) => {
         try {
@@ -207,7 +208,7 @@ export function ThreadView({ thread, me }: { thread: Thread; me?: string }) {
                 (prev ?? []).map((t) => (t.id === thread.id ? { ...t, comments: [...t.comments, created] } : t)),
             );
         } catch (e) {
-            message.error(`Could not post reply: ${(e as Error).message}`);
+            notifyError(e, { action: 'Reply' });
             throw e;
         }
     };
@@ -217,7 +218,7 @@ export function ThreadView({ thread, me }: { thread: Thread; me?: string }) {
             const updated = await client.setThreadStatus(thread.id, thread.status === 'OPEN' ? 'resolve' : 'reopen');
             cache.set<Thread[]>(key, (prev) => (prev ?? []).map((t) => (t.id === thread.id ? updated : t)));
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -260,7 +261,7 @@ export function DiscussionPanel({ entityUrn, me, fieldPath }: { entityUrn: strin
             const created = await client.createThread(entityUrn, body, fieldPath ?? null);
             cache.set<Thread[]>(key, (prev) => [created, ...(prev ?? [])]);
         } catch (e) {
-            message.error(`Could not start discussion: ${(e as Error).message}`);
+            notifyError(e, { action: 'Start discussion' });
             throw e;
         }
     };
@@ -276,7 +277,7 @@ export function DiscussionPanel({ entityUrn, me, fieldPath }: { entityUrn: strin
                         <Skeleton h={60} />
                     </>
                 )}
-                {error && <div role="alert">Could not load discussions: {error.message}</div>}
+                {error && <ErrorNotice error={error} area="Discussions" />}
                 {!loading && !error && threads.length === 0 && (
                     <Empty description="No discussions yet — ask the owners a question or share context." />
                 )}

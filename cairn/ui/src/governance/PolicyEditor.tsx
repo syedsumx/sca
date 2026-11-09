@@ -4,6 +4,7 @@ import { Alert, Button, Input, List, Popconfirm, Space, Table, Tag, message } fr
 import { useAsync, useDheClient, useMutation } from '../api/hooks';
 import type { Policy } from '../api/types';
 import { ErrorState, LoadingState, Mono, PageContainer, PageHeader } from '../common/States';
+import { describeError, notifyError } from '../consumer/components/ErrorNotice';
 
 export interface LocalLintResult {
     policies: Policy[] | null;
@@ -19,7 +20,7 @@ export function lintPolicyText(text: string): LocalLintResult {
     try {
         parsed = JSON.parse(text);
     } catch (e) {
-        return { policies: null, errors: [`Invalid JSON: ${(e as Error).message}`] };
+        return { policies: null, errors: [`Invalid JSON: ${(e as Error).message}`] }; // presenter-exempt: the JSON the person typed
     }
     const list =
         parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'policies' in parsed
@@ -79,7 +80,7 @@ export function PolicyEditor() {
             setValidated(res.valid);
             return res.valid ? local.policies : null;
         } catch (e) {
-            setErrors([(e as Error).message]);
+            setErrors([describeError(e, { action: 'Validate' })]);
             setValidated(false);
             return null;
         }
@@ -94,7 +95,7 @@ export function PolicyEditor() {
             setDirty(false);
             message.success(`Saved ${res.policies.length} policies`);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e, { action: 'Save' });
         }
     };
 

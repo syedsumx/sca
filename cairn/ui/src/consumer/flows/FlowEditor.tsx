@@ -9,7 +9,9 @@ import {
     FlowDef, FlowStep, FlowTrigger, GROUPS, Problem, STEP_TYPES, TYPE_BY, compact, diff, findCycle, newStep, problemsByStep, validate,
 } from './model';
 import { StepForm } from './StepForm';
-import { YamlError, parse as parseYaml, stringify } from './yaml';
+import { parse as parseYaml, stringify } from './yaml';
+import { describeError } from '../components/ErrorNotice';
+import { Picker } from '../resources/pickers';
 
 // ---- the definition, with undo and redo ------------------------------------------------------------------------
 interface History {
@@ -130,7 +132,7 @@ const took = (a: number | null, b: number | null) => (a && b ? `${((b - a) / 100
 function apiProblems(e: unknown): Problem[] {
     if (e instanceof CairnApiError && e.body && typeof e.body === 'object' && Array.isArray((e.body as { errors?: unknown }).errors))
         return (e.body as { errors: Problem[] }).errors;
-    return [{ path: '', message: (e as Error).message }];
+    return [{ path: '', message: describeError(e) }];
 }
 
 export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme }: Props) {
@@ -281,7 +283,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             return out;
         } catch (e) {
             setServerProblems(apiProblems(e));
-            flash('err', (e as Error).message);
+            flash('err', describeError(e));
             return null;
         } finally {
             setBusy(false);
@@ -300,7 +302,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             onSaved(await api.get(detail.name));
         } catch (e) {
             setServerProblems(apiProblems(e));
-            flash('err', (e as Error).message);
+            flash('err', describeError(e));
         } finally {
             setBusy(false);
         }
@@ -310,7 +312,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
         try {
             setRuns(await api.runs(detail.name));
         } catch (e) {
-            flash('err', (e as Error).message);
+            flash('err', describeError(e));
         }
     }, [api, detail.name]);
 
@@ -320,7 +322,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             setTab('canvas');
             setSelected([]);
         } catch (e) {
-            flash('err', (e as Error).message);
+            flash('err', describeError(e));
         }
     };
 
@@ -333,7 +335,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             setModal(null);
             await openRun(r.id);
         } catch (e) {
-            flash('err', (e as Error).message);
+            flash('err', describeError(e));
         } finally {
             setBusy(false);
         }
@@ -384,7 +386,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             fromCode.current = true;
             set(withLayout({ ...raw, kind: 'flow' }));
         } catch (e) {
-            setCodeErr(e instanceof YamlError ? e.message : (e as Error).message);
+            setCodeErr((e as Error).message); // presenter-exempt: the YAML the person typed, checked here
         }
     };
 
@@ -528,7 +530,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
                                         setRun(await api.decide(run.id, selRun.key, d, comment));
                                         flash('ok', d === 'approve' ? 'Approved' : 'Rejected');
                                     } catch (e) {
-                                        flash('err', (e as Error).message);
+                                        flash('err', describeError(e));
                                     }
                                 }}
                             />
@@ -806,7 +808,7 @@ function Backfill({ name, params, api, onClose, onDone }: { name: string; params
                     try {
                         onDone((await api.backfill(name, start, end, param || undefined)).runs.length);
                     } catch (e) {
-                        setErr((e as Error).message);
+                        setErr(describeError(e, { action: 'Queue runs' }));
                     }
                 }}>Queue runs</button>
             </div>
@@ -865,8 +867,9 @@ function Settings({ def, readOnly, onChange, problems }: { def: FlowDef; readOnl
                         }} />
                 </label>
                 <label className="fl-field" htmlFor="fl-after"><span>After another flow succeeds</span>
-                    <input id="fl-after" readOnly={readOnly} placeholder="ingest-orders" value={after?.flow ?? ''}
-                        onChange={(e) => put('flow', e.target.value ? { type: 'flow', flow: e.target.value, on: after?.on ?? ['succeeded'] } : null)} />
+                    <Picker id="fl-after" disabled={readOnly} placeholder="ingest-orders" value={after?.flow ?? ''}
+                        field={{ name: 'flow', label: 'After another flow succeeds', type: 'picker', picker: 'flow' }}
+                        onChange={(v) => put('flow', v ? { type: 'flow', flow: String(v), on: after?.on ?? ['succeeded'] } : null)} />
                 </label>
                 {err('triggers') && <div className="fl-err">{err('triggers')}</div>}
             </section>

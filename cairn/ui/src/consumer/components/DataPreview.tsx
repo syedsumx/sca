@@ -8,6 +8,7 @@ import { GroundedChips } from '../ontology/Embeds';
 import { Feedback } from './Feedback';
 import { Muted } from './tokens';
 import { guideEvent } from '../guide/onboarding';
+import { ErrorNotice, describeError } from './ErrorNotice';
 
 function ResultTable({ result }: { result: DataResult }) {
     const masked = new Set(result.masked_columns);
@@ -58,7 +59,7 @@ function AskBox({ urn, onUseSql }: { urn: string; onUseSql: (sql: string) => voi
             setError(
                 e instanceof CairnApiError && e.status === 503
                     ? 'Asking questions needs an AI provider; an administrator can set one up.'
-                    : (e as Error).message,
+                    : describeError(e),
             );
         } finally {
             setBusy(false);
@@ -144,7 +145,7 @@ export function DataPreview({ urn, tableName }: { urn: string; tableName: string
         try {
             setResult(await client.runQuery(sql, urn));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -153,7 +154,7 @@ export function DataPreview({ urn, tableName }: { urn: string; tableName: string
     return (
         <Space direction="vertical" style={{ width: '100%' }} size="large">
             <section aria-label="Preview">
-                {err && <Alert type="error" message={err.message} />}
+                {err && <ErrorNotice error={err} area="Preview" />}
                 {preview.data && <ResultTable result={preview.data} />}
             </section>
             <AskBox urn={urn} onUseSql={setSql} />

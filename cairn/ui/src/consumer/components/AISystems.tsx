@@ -6,6 +6,7 @@ import type { AIAssessment, AISystem, AISystemInput, AISystemsReport, AITier, Pu
 import { useDheSession } from '../context/CairnProvider';
 import { download } from './BulkEdit';
 import { Surface } from './tokens';
+import { describeError } from './ErrorNotice';
 
 export const TIER_COLOR: Record<AITier, string> = {
     unacceptable: 'red',
@@ -95,7 +96,7 @@ function Editor({ system, onDone }: { system: AISystem | null; onDone: () => voi
             await client.saveAISystem(form, system?.id);
             onDone();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         }
     };
     return (
@@ -228,7 +229,7 @@ export function AISystemsAdmin() {
             await fn();
             q.refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         }
     };
 

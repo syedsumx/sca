@@ -438,7 +438,7 @@ export function FormRenderer({ form, action, state, setState, errors, editing, r
         try {
             parsed = raw.trim() ? JSON.parse(raw) : {};
         } catch (e) {
-            setRawError(t('form.rawJsonInvalid', { error: (e as Error).message }));
+            setRawError(t('form.rawJsonInvalid', { error: (e as Error).message })); // presenter-exempt: the JSON the person typed
             return;
         }
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {

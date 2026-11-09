@@ -26,6 +26,7 @@ import type {
     StoreKey,
 } from '../api/types';
 import { useT } from '../i18n';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const BUCKETS = '/storage/buckets';
 const AUDIT = '/storage/audit';
@@ -61,7 +62,7 @@ function QuotaModal({ bucket, onClose }: { bucket: StoreBucket; onClose: (change
             message.success(t('storage.quotaSaved'));
             onClose(true); // unmounts this dialog
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
             setBusy(false);
         }
     };
@@ -139,7 +140,7 @@ function CreateKeyModal({ onClose }: { onClose: (created: StoreKey | null) => vo
             });
             onClose(k); // unmounts this dialog
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
             setBusy(false);
         }
     };
@@ -194,7 +195,7 @@ function AccessKeys() {
             setSecret(await client.rotateStorageKey(k.access_key));
             q.refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const remove = async (k: StoreKey) => {
@@ -203,7 +204,7 @@ function AccessKeys() {
             message.success(t('storage.keyDeleted'));
             q.refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     return (
@@ -216,7 +217,7 @@ function AccessKeys() {
             }
         >
             <Typography.Paragraph type="secondary">{t('storage.keysIntro')}</Typography.Paragraph>
-            {q.error && <Alert type="error" showIcon message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Table<StoreKey>
                 size="small"
                 rowKey="access_key"
@@ -304,7 +305,7 @@ function Cluster() {
             message.success(done);
             q.refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -446,7 +447,7 @@ function AuditTrail() {
         try {
             setCheck(await client.verifyStorageAudit());
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -512,14 +513,14 @@ export function StorageSettings() {
             message.success(t('storage.quotaRemoved'));
             q.refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const pct = (b: StoreBucket) => (b.quota?.max_bytes ? Math.round((100 * b.usage.bytes) / b.quota.max_bytes) : null);
     return (
         <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Typography.Paragraph type="secondary">{t('storage.intro')}</Typography.Paragraph>
-            {q.error && <Alert type="error" showIcon message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Table<StoreBucket>
                 rowKey="name"
                 loading={q.loading}

@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { SignedInDevice } from '../api/types';
 import { Muted, SectionTitle, tokens } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 function when(ms: number): string {
     return new Date(ms).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -22,7 +23,7 @@ export function SignedInDevices() {
             devices.mutate((prev) => ({ devices: (prev?.devices ?? []).filter((x) => x.id !== d.id) }));
             message.success(`Signed out ${d.name}`);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(null);
         }
@@ -37,7 +38,7 @@ export function SignedInDevices() {
                     and its tokens stop working at once.
                 </Muted>
             </p>
-            {devices.error && <Alert type="error" showIcon message={devices.error.message} />}
+            {devices.error && <ErrorNotice error={devices.error} />}
             {devices.data && devices.data.devices.length === 0 && (
                 <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="No devices are signed in with the command line" />
             )}

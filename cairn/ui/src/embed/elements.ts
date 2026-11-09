@@ -9,7 +9,7 @@
  * URL), `theme` = light | dark. Rendering uses shadow DOM and textContent only (no innerHTML of data).
  */
 
-import { EmbedAssetCard, EmbedLineage, EmbedQuality, defaultBaseUrl, embedFetch } from './api';
+import { EmbedAssetCard, EmbedLineage, EmbedQuality, defaultBaseUrl, embedErrorText, embedFetch } from './api';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -115,7 +115,7 @@ abstract class CairnElement extends HTMLElement {
         try {
             await this.load(urn, token);
         } catch (e) {
-            if (seq === this.seq) this.body.replaceChildren(el('span', 'err', (e as Error).message));
+            if (seq === this.seq) this.body.replaceChildren(el('span', 'err', embedErrorText(e)));
         } finally {
             if (seq === this.seq) this.body.removeAttribute('aria-busy');
         }

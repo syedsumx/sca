@@ -95,15 +95,22 @@ export interface PageHeaderProps {
     /** The page's primary action(s). */
     actions?: React.ReactNode;
     children?: React.ReactNode;
+    /**
+     * The docs section the page's help opens (`page.html#anchor`, from `help-topics.json` for a purpose-built page;
+     * a hub's comes from its open tab). Kept on the header so a test can check every page names one that exists.
+     */
+    help?: string;
+    /** Something beside the title and its help (a persona switch, a status tag). */
+    extra?: React.ReactNode;
 }
 
 /** The same header on every page: title, a short description, the primary action, and help. */
-export function PageHeader({ title, description, icon, actions, children }: PageHeaderProps) {
+export function PageHeader({ title, description, icon, actions, children, help, extra }: PageHeaderProps) {
     return (
-        <Head>
+        <Head data-page-header="" data-help-anchor={help}>
             {icon && <IconBadge><Icon name={icon} size={22} /></IconBadge>}
             <div className="titles">
-                <div className="title-row"><h1>{title}</h1><HelpButton /></div>
+                <div className="title-row"><h1>{title}</h1><HelpButton />{extra}</div>
                 {description && <p>{description}</p>}
                 {children}
             </div>

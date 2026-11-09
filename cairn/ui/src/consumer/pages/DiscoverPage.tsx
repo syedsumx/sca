@@ -14,14 +14,11 @@ import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { actorName, relativeTime, shortUrn } from '../utils/format';
 import { serializeSearchState } from '../utils/urlState';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const Hero = styled.section`
     padding: 28px 0 8px;
-    h1 {
-        font-size: 26px;
-        font-weight: 600;
-        margin: 0 0 14px;
-    }
 `;
 
 const Columns = styled.div`
@@ -103,12 +100,11 @@ export function DiscoverPage() {
     return (
         <Page>
             <Hero>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-                    <h1>
-                        {greeting()}
-                        {name ? `, ${name}` : ''}
-                    </h1>
-                    {(personas.data?.length ?? 0) > 0 && (
+                <PageHeader
+                    title={`${greeting()}${name ? `, ${name}` : ''}`}
+                    description="Find data you may use, see what it means and whether to trust it, and ask for access."
+                    help={pageHelp('/discover')}
+                    actions={(personas.data?.length ?? 0) > 0 && (
                         <Select
                             aria-label="Browse as persona"
                             style={{ minWidth: 220 }}
@@ -120,7 +116,7 @@ export function DiscoverPage() {
                             ]}
                         />
                     )}
-                </div>
+                />
                 <OmniSearchBar autoFocus />
                 <div style={{ marginTop: 12 }} aria-label="Quick filters">
                     {QUICK_FILTERS.map((q) => (

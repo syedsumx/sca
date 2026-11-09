@@ -3,6 +3,7 @@ import { Alert, Form, Input, InputNumber, Modal, Radio, Select, Switch } from 'a
 
 import { useDheClient, useMutation } from '../api/hooks';
 import type { Monitor, MonitorInput, MonitorType, Sensitivity, Severity } from '../api/types';
+import { ErrorNotice } from '../consumer/components/ErrorNotice';
 
 type FieldKind = 'text' | 'number' | 'select' | 'boolean' | 'sql';
 
@@ -266,7 +267,7 @@ export function MonitorEditor({ open, monitor, defaultDatasetUrn, onClose, onSav
             width={680}
             destroyOnClose
         >
-            {error && <Alert type="error" showIcon message={error.message} style={{ marginBottom: 16 }} />}
+            {error && <ErrorNotice error={error} style={{ marginBottom: 16 }} />}
             <Form form={form} layout="vertical" initialValues={initialValues} requiredMark="optional">
                 <Form.Item name="name" label="Name" rules={[{ required: true, whitespace: true }]}>
                     <Input placeholder="orders freshness" />

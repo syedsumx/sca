@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiImpact, BiKind, BiRole, BiShares, BiVersion, BiVersionDiff } from '../api/types';
 import { BiCollabButtons } from './BiCollab';
 import { Muted } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const KIND_NAME: Record<BiKind, string> = { query: 'saved query', workbook: 'workbook', dashboard: 'dashboard' };
 const when = (ms: number) => new Date(ms).toLocaleString();
@@ -27,14 +28,14 @@ export function ShareDialog({ kind, id, name, role, open, onClose }: {
             setWho('');
             setN((x) => x + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const principal = who.startsWith('urn:li:') ? who : who.startsWith('group:') ? `urn:li:corpGroup:${who.slice(6)}` : `urn:li:corpuser:${who}`;
     return (
         <Modal title={`Share ${KIND_NAME[kind]} “${name}”`} open={open} onCancel={onClose} footer={null} destroyOnClose>
             <Muted>Sharing never shares data: everyone sees only the rows their own policies allow.</Muted>
-            {q.error && <Alert type="error" message={q.error.message} style={{ marginTop: 8 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 8 }} />}
             {owner && (
                 <Space style={{ margin: '12px 0' }} wrap>
                     <Input aria-label="Share with" placeholder="person, or group:name" value={who} onChange={(e) => setWho(e.target.value)}
@@ -71,7 +72,7 @@ export function HistoryDialog({ kind, id, name, role, open, onClose, onRestored 
         try {
             setDiff(await client.biVersionDiff(kind, id, v - 1, v));
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const restore = async (v: number) => {
@@ -82,13 +83,13 @@ export function HistoryDialog({ kind, id, name, role, open, onClose, onRestored 
             setN((x) => x + 1);
             onRestored?.();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const latest = list.data?.[0]?.version;
     return (
         <Modal title={`History of “${name}”`} open={open} onCancel={onClose} footer={null} width={760} destroyOnClose>
-            {list.error && <Alert type="error" message={list.error.message} />}
+            {list.error && <ErrorNotice error={list.error} />}
             <Table size="small" rowKey="version" pagination={{ pageSize: 8, hideOnSinglePage: true }} loading={list.loading}
                 dataSource={list.data ?? []}
                 columns={[
@@ -149,7 +150,7 @@ export function BiImpactPanel({ dataset, columns }: { dataset: string; columns: 
                 <Select aria-label="Column" allowClear placeholder="the whole table" style={{ minWidth: 200 }} value={column}
                     onChange={(v) => setColumn(v || undefined)} options={columns.map((c) => ({ value: c, label: c }))} />
             </Space>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Table size="small" rowKey={(r) => `${r.kind}:${r.id}`} pagination={false} loading={q.loading}
                 dataSource={q.data?.assets ?? []}
                 locale={{ emptyText: 'No saved query, workbook or dashboard you can see would break' }}

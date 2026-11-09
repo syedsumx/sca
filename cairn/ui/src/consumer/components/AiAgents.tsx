@@ -1,26 +1,11 @@
-import {
-    Alert,
-    Button,
-    Checkbox,
-    Input,
-    InputNumber,
-    List,
-    Modal,
-    Popconfirm,
-    Select,
-    Space,
-    Switch,
-    Table,
-    Tabs,
-    Tag,
-    Typography,
-} from 'antd';
+import { Alert, Button, Checkbox, Input, InputNumber, List, Modal, Popconfirm, Select, Space, Switch, Table, Tabs, Tag, Typography } from 'antd';
 import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { AgentCall, AgentScope, AIDatasetRead, AiAgent } from '../api/types';
 import { DatasetsRead } from './AiUsage';
 import { Muted, SectionTitle } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const SCOPES: { value: AgentScope; label: string }[] = [
     { value: 'read', label: 'Read the catalog' },
@@ -186,7 +171,7 @@ function AllAgents() {
             await fn();
             q.refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         }
     };
 

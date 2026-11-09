@@ -7,6 +7,7 @@ import type {
     WarehouseState,
 } from '../api/types';
 import { Muted, Surface } from '../components/tokens';
+import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
 const who = (urn: string) => urn.replace('urn:li:corpuser:', '');
@@ -24,7 +25,7 @@ export function PipesTab() {
                 Each file under a pipe&apos;s prefix is loaded once, as soon as the store announces it (and by a sweep for
                 anything an event missed). A file that does not fit is recorded and the next one still loads.
             </Muted>
-            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
                 <Table<Pipe>
                     rowKey="id"
@@ -126,7 +127,7 @@ export function StreamsTab() {
                 Each batch is one table commit that also records its Kafka offsets, so nothing is written twice. Messages
                 that cannot be rows are set aside with their offset and the reason.
             </Muted>
-            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
                 <Table<Stream>
                     rowKey="id"
@@ -209,7 +210,7 @@ export function DerivedTab() {
                 Refreshed fully, by watermark or by merge, on a schedule or when a table they read changes (upstream ones
                 first). Each refresh runs as its owner, so their masks and row filters apply.
             </Muted>
-            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
                 <Table<DerivedTable>
                     rowKey="id"
@@ -337,7 +338,7 @@ export function WarehousesTab() {
             message.success(`${name}: starting; it takes queries in a minute or two`);
             await q.refresh();
         } catch (e) {
-            message.error(e instanceof Error ? e.message : String(e));
+            notifyError(e);
         }
     };
     return (
@@ -346,7 +347,7 @@ export function WarehousesTab() {
                 A warehouse stops after its idle time with no queries and starts again on the next one (that query waits
                 for the start), or when you start it. Its workers follow the load. You see the warehouses you may use.
             </Muted>
-            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
                 <Table<WarehouseState>
                     rowKey="name"
@@ -429,7 +430,7 @@ export function SharesTab() {
                 A recipient reads the shared tables with any Iceberg REST client, read-only. Revoking a share stops it at
                 once. Tables with a column mask or row filter are never shared.
             </Muted>
-            {q.error && <Alert type="error" message={q.error.message} showIcon style={{ marginTop: 12 }} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
             <Surface style={{ marginTop: 12 }}>
                 <Table<LakehouseShare>
                     rowKey="id"
@@ -479,7 +480,7 @@ function NewShare({ onClose, onCreate }: {
                 tables: String(v.tables ?? '').split(/[\s,]+/).map((t: string) => t.trim()).filter(Boolean),
             });
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         } finally {
             setSaving(false);
         }
@@ -522,7 +523,7 @@ function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body
         try {
             await onCreate(body);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setSaving(false);
         }

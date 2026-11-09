@@ -12,6 +12,7 @@ import { assetPath } from './Assets';
 import { Feedback } from './Feedback';
 import { tokens } from './tokens';
 import { guideEvent } from '../guide/onboarding';
+import { describeError } from './ErrorNotice';
 
 export interface ChatTurn {
     role: 'user' | 'assistant';
@@ -68,7 +69,7 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
             setTurns((t) => [...t, { role: 'assistant', text: res.reply_md, response: res }]);
             guideEvent('ask');
         } catch (e) {
-            setTurns((t) => [...t, { role: 'assistant', text: '', error: (e as Error).message }]);
+            setTurns((t) => [...t, { role: 'assistant', text: '', error: describeError(e) }]);
         } finally {
             setBusy(false);
         }

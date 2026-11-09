@@ -18,6 +18,9 @@ import { IacPanel } from '../resources/IacPanel';
 import { relativeTime } from '../utils/format';
 import { useT } from '../i18n';
 import { GuideSettings } from '../guide/GuideSettings';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 export const EVENT_COPY: Record<string, string> = {
     'access.requested': 'Someone requests access to data I own',
@@ -49,7 +52,7 @@ function NotificationSettings() {
     useEffect(() => {
         if (settings.data) setDraft(settings.data);
     }, [settings.data]);
-    if (settings.error) return <Alert type="error" message={settings.error.message} />;
+    if (settings.error) return <ErrorNotice error={settings.error} />;
     if (!draft) return <Muted>Loading…</Muted>;
     const ch = draft.channels;
     const setCh = (patch: Partial<NotifySettings['channels']>) => setDraft({ ...draft, channels: { ...ch, ...patch } });
@@ -59,7 +62,7 @@ function NotificationSettings() {
             cache.set('/notify/settings', await client.saveNotifySettings(draft));
             message.success('Notification preferences saved');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -128,7 +131,7 @@ function Inbox() {
                 onClick={() =>
                     client.markRead(unread).then(
                         () => cache.invalidate('/notify/inbox'),
-                        (e: Error) => message.error(e.message),
+                        (e: unknown) => notifyError(e),
                     )
                 }
             >
@@ -173,7 +176,7 @@ export function EmbedBuilder() {
                 }),
             );
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -250,9 +253,8 @@ export function SettingsPage() {
     const params = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
     return (
         <Page>
-            <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                {t('settings.title')}
-            </SectionTitle>
+            <PageHeader title={t('settings.title')} help={pageHelp('/settings')}
+                description="Your notifications and inbox, embeds, infrastructure as code, AI agents, workspaces, sources and the platform's own settings." />
             <Tabs
                 defaultActiveKey={params.get('tab') ?? undefined}
                 items={[

@@ -5,6 +5,7 @@ import styled from 'styled-components';
 import { useAsync, useDheClient } from '../api/hooks';
 import type { DatasetHealth } from '../api/types';
 import { formatRelative, statusColor } from '../common/format';
+import { describeError } from '../consumer/components/ErrorNotice';
 
 const List = styled.ul`
     list-style: none;
@@ -48,7 +49,7 @@ export function DatasetHealthBadge({ datasetUrn, health: provided, onClick }: Da
     if (loading && !health) return <Tag>Quality…</Tag>;
     if (error && !health) {
         return (
-            <Tooltip title={error.message}>
+            <Tooltip title={describeError(error)}>
                 <Tag>Quality unavailable</Tag>
             </Tooltip>
         );

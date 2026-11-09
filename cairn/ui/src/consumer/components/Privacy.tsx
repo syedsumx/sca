@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { PrivacyFinding, PrivacyPart, PrivacyRequest, RetentionPolicy } from '../api/types';
 import { download } from './BulkEdit';
 import { Muted, SectionTitle, Surface } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const datasetName = (urn: string) => urn.split(',')[1] ?? urn;
 const day = (ms: number) => new Date(ms).toLocaleDateString();
@@ -68,7 +69,7 @@ function Requests() {
                             form.resetFields(['identifier', 'reference']);
                             list.refresh();
                         } catch (e) {
-                            setError(e instanceof Error ? e.message : String(e));
+                            setError(describeError(e));
                         } finally {
                             setBusy(false);
                         }

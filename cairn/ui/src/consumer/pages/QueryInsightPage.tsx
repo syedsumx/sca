@@ -5,6 +5,7 @@ import { useDheQuery } from '../api/hooks';
 import type { QueryProfile, QueryRecord } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice } from '../components/ErrorNotice';
 
 export const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`);
 
@@ -24,7 +25,7 @@ const STATE_COLOR: Record<string, string> = { FINISHED: 'green', FAILED: 'red', 
 /** One query: its statistics, the tables it read, its SQL and why it was slow. */
 function Profile({ id }: { id: string }) {
     const q = useDheQuery<QueryProfile>(`/v1/queries/${id}`, (c, signal) => c.queryProfile(id, { signal }));
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     if (!q.data) return <Muted>Loading…</Muted>;
     const p = q.data;
     return (
@@ -115,7 +116,7 @@ export function QueryInsightPage() {
                     </Checkbox>
                     <Button onClick={() => void list.refresh()}>Refresh</Button>
                 </Space>
-                {list.error && <Alert type="error" message={list.error.message} />}
+                {list.error && <ErrorNotice error={list.error} />}
                 <Table<QueryRecord>
                     rowKey="query_id"
                     size="small"

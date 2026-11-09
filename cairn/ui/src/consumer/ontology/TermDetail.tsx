@@ -18,6 +18,7 @@ import {
     tableLabel,
     termHref,
 } from './api';
+import { describeError } from '../components/ErrorNotice';
 
 const Section = styled.section`
     margin-top: 16px;
@@ -90,7 +91,7 @@ export function ProposalActions({ p, onDone, term }: { p: Proposal; onDone: () =
             setEditing(false);
             onDone();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -155,7 +156,7 @@ export function TermDetailView({ id, compact = false }: { id: string; compact?: 
         try {
             setD(await api.term(id));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [api, id]);
     useEffect(() => {

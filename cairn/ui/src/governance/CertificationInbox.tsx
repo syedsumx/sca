@@ -6,6 +6,7 @@ import type { Workflow, WorkflowAction, WorkflowKind, WorkflowState } from '../a
 import { datasetNameFromUrn, formatRelative, formatTimestamp, workflowStateColor } from '../common/format';
 import { EmptyState, ErrorState, LoadingState, Mono, PageContainer, PageHeader } from '../common/States';
 import { DocDraftReview } from '../ai/DocDraftReview';
+import { ErrorNotice } from '../consumer/components/ErrorNotice';
 
 export const WORKFLOW_STATES: WorkflowState[] = [
     'DRAFT',
@@ -270,7 +271,7 @@ function WorkflowDrawer({ workflow, onClose, onChange }: WorkflowDrawerProps) {
 
                     {workflow.kind === 'CERTIFICATION' && actionsForState(workflow.state).length > 0 && (
                         <Space direction="vertical" style={{ width: '100%' }}>
-                            {error && <Alert type="error" showIcon message={error.message} />}
+                            {error && <ErrorNotice error={error} />}
                             <Input.TextArea
                                 aria-label="Comment"
                                 rows={3}

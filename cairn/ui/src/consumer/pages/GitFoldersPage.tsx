@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { GitFolder, GitPullResult, GitPushResult, SavedQuery } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 
 type Outcome = { kind: 'pull'; folder: string; result: GitPullResult } | { kind: 'push'; folder: string; result: GitPushResult };
 
@@ -102,7 +103,7 @@ export function GitFoldersPage() {
             setTick((t) => t + 1);
             message.success('Folder linked: pull it to bring its queries in');
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     };
 
@@ -111,7 +112,7 @@ export function GitFoldersPage() {
         try {
             setOutcome({ kind: 'pull', folder: f.id, result: await client.pullGitFolder(f.id, force) });
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(null);
             setTick((t) => t + 1);
@@ -127,7 +128,7 @@ export function GitFoldersPage() {
             setPushing(null);
             setOutcome({ kind: 'push', folder: f.id, result });
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(null);
             setTick((t) => t + 1);
@@ -139,7 +140,7 @@ export function GitFoldersPage() {
             await client.deleteGitFolder(id);
             setTick((t) => t + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -156,7 +157,7 @@ export function GitFoldersPage() {
                 <Button type="primary" style={{ marginBottom: 12 }} onClick={() => setCreating(true)}>
                     Link a folder
                 </Button>
-                {list.error && <Alert type="error" message={list.error.message} />}
+                {list.error && <ErrorNotice error={list.error} />}
                 <Table<GitFolder>
                     rowKey="id"
                     size="small"

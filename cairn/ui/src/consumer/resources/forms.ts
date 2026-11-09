@@ -42,6 +42,8 @@ export interface FormField {
     multiple?: boolean;
     ref?: { kind: string; read: string; list_key: string; value: string; label: string };
     fields?: FormField[];
+    /** A group of which exactly one field is filled in (a budget's scope: everything, a domain, a warehouse…). */
+    one_of?: boolean;
     advanced?: boolean;
     write_only?: boolean;
     sensitive?: boolean;
@@ -183,6 +185,8 @@ export function fromEditor(f: FormField, v: unknown, where = f.name): unknown {
         }
         case 'group': {
             const out = toBodyFields(f.fields ?? [], v as Values, where);
+            // One of: a switch left off is not a choice.
+            if (f.one_of) for (const [k, x] of Object.entries(out)) if (x === false) delete out[k];
             return Object.keys(out).length ? out : undefined;
         }
         case 'objects': {
@@ -339,15 +343,23 @@ export function fillPath(action: ResourceAction, form: FormSchema | null, values
 export type Problem =
     | { code: 'required' } | { code: 'pattern' } | { code: 'min'; n: number } | { code: 'max'; n: number }
     | { code: 'minLength'; n: number } | { code: 'maxLength'; n: number } | { code: 'json' } | { code: 'number' }
-    | { code: 'cron' } | { code: 'option' };
+    | { code: 'cron' } | { code: 'option' } | { code: 'oneOf' };
 
 function empty(f: FormField, v: unknown): boolean {
     if (v === undefined || v === null) return true;
     if (typeof v === 'string') return v.trim() === '';
     if (Array.isArray(v)) return v.length === 0;
     if (f.type === 'group' && isPlainObject(v)) return Object.values(v).every((x) => x === undefined || x === '' ||
-        (Array.isArray(x) && !x.length));
+        (Array.isArray(x) && !x.length) || (f.one_of && x === false));
     return false;
+}
+
+/** How many of a one-of group's fields are filled in. */
+function chosen(f: FormField, v: Values): number {
+    return (f.fields ?? []).filter((sub) => {
+        const x = v[sub.name];
+        return !(x === undefined || x === null || x === false || x === '' || (Array.isArray(x) && !x.length));
+    }).length;
 }
 
 function check(f: FormField, v: unknown, key: string, out: Record<string, Problem>) {
@@ -379,6 +391,10 @@ function check(f: FormField, v: unknown, key: string, out: Record<string, Proble
         return;
     }
     if (f.type === 'group') {
+        if (f.one_of && chosen(f, v as Values) > 1) {
+            out[key] = { code: 'oneOf' };
+            return;
+        }
         for (const sub of f.fields ?? []) check(sub, (v as Values)[sub.name], `${key}.${sub.name}`, out);
         return;
     }

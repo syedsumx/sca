@@ -44,6 +44,22 @@ export class EmbedError extends Error {
 }
 
 /**
+ * A failed load as a sentence for the host page's readers. The embed bundle has no dependencies, so it keeps its own
+ * short version of the consumer UI's error presenter (`consumer/utils/errors.ts`) rather than the API's words.
+ */
+export function embedErrorText(e: unknown): string {
+    // embedFetch words its own errors by status; anything else is the network or the host page.
+    return e instanceof EmbedError ? e.message : 'Cairn could not be reached. Check your connection, then try again.';
+}
+
+function embedStatusText(status: number): string {
+    if (status === 401 || status === 403) return 'This embed link has expired or was revoked.';
+    if (status === 404) return 'This was not found in Cairn. It may have been renamed or removed.';
+    if (status === 429) return 'Too many requests right now. Try again in a minute.';
+    return `Cairn could not load this right now (${status}). Try again in a minute.`;
+}
+
+/**
  * Script tag `data-cairn-base`, else derived from the SDK script URL (…/<base>/embed/v1/sdk.js), else
  * '/cairn/api'. `document.currentScript` is only set while the script first executes, so this is
  * computed once at load time.
@@ -81,8 +97,7 @@ export async function embedFetch<T>(
         credentials: 'omit',
     });
     if (!res.ok) {
-        const msg = res.status === 401 || res.status === 403 ? 'This embed link has expired or was revoked.' : `Unavailable (${res.status})`;
-        throw new EmbedError(msg, res.status);
+        throw new EmbedError(embedStatusText(res.status), res.status);
     }
     return (await res.json()) as T;
 }

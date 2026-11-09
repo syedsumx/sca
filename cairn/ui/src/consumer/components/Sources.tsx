@@ -29,6 +29,7 @@ import type {
 } from '../api/types';
 import { GitRepositories } from './GitDocs';
 import { Muted, SectionTitle } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const HEALTH_COLOR: Record<SourceHealthState, string> = {
     healthy: 'green',
@@ -174,7 +175,7 @@ function SourceForm({
                 setTest(t);
             }
         } catch (e) {
-            setError((e as Error & { body?: { detail?: string } }).body?.detail ?? (e as Error).message);
+            setError(describeError(e, { action: 'Test connection' }));
         }
     };
 
@@ -189,8 +190,8 @@ function SourceForm({
             message.success(source ? 'Source saved' : 'Source added');
             onDone();
         } catch (e) {
-            const detail = (e as Error & { body?: { detail?: string } }).body?.detail;
-            if (detail || !(e as { errorFields?: unknown }).errorFields) setError(detail ?? (e as Error).message);
+            const formCheck = Boolean((e as { errorFields?: unknown }).errorFields);
+            if (!formCheck) setError(describeError(e, { action: source ? 'Save' : 'Add source' }));
         } finally {
             setBusy(false);
         }

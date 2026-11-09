@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { Muted } from './tokens';
+import { notifyError } from './ErrorNotice';
 
 /** "Send docs to dbt": opens a pull request with the descriptions written in Cairn, for datasets a
  * configured dbt repository builds. Hidden for everything else. */
@@ -31,7 +32,7 @@ export function SendDocsToDbt({ urn }: { urn: string }) {
                         );
                     else message.info(out.note ?? 'Nothing to send');
                 } catch (e) {
-                    message.error(e instanceof Error ? e.message : String(e));
+                    notifyError(e);
                 } finally {
                     setBusy(false);
                 }

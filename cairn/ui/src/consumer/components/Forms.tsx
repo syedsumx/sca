@@ -14,8 +14,10 @@ import type {
     FormTaskDetail,
 } from '../api/types';
 import { actorName, shortUrn } from '../utils/format';
+import { errorStatus } from '../utils/errors';
 import { assetPath } from './Assets';
 import { Muted } from './tokens';
+import { describeError, notifyError } from './ErrorNotice';
 
 const label = (urn: string) => (urn.startsWith('urn:li:corp') ? actorName(urn) : urn.split(':').pop() ?? urn);
 
@@ -76,7 +78,7 @@ export function FormTaskDrawer({ task, onClose, onDone }: { task: FormTask | nul
                 setDetail(d);
                 setAnswers(d.answers ?? {});
             },
-            (e) => setError((e as Error).message),
+            (e) => setError(describeError(e)),
         );
     }, [client, task]);
     const submit = async () => {
@@ -88,7 +90,7 @@ export function FormTaskDrawer({ task, onClose, onDone }: { task: FormTask | nul
             message.success(out.state === 'VERIFIED' ? 'Answers saved and verified' : 'Answers saved to the catalog');
             onDone();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -264,7 +266,7 @@ function FormBuilder({ open, onClose, onCreated }: { open: boolean; onClose: () 
             setD(EMPTY_DRAFT);
             onCreated();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -370,10 +372,10 @@ export function FormsAdmin() {
                 refresh();
             }
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
-    if (forms.error && /403|forbidden|denied/i.test(forms.error.message))
+    if (forms.error && errorStatus(forms.error) === 403)
         return <Alert type="info" message="Managing compliance forms needs the Manage Global Settings privilege." />;
     return (
         <>

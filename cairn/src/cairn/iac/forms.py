@@ -23,6 +23,7 @@ the offline demo has every form too); ``--check`` fails when that file is not cu
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -60,7 +61,17 @@ def _hint(**kw) -> dict:
     return kw
 
 
-BUDGET = {"scope": _hint(type="json"), "period": _hint(type="select", enum=["month", "week", "day"]),
+# A budget covers one thing (cairn.reports.budgets.SCOPES): a group of which exactly one is filled in.
+BUDGET_SCOPE = _hint(type="group", one_of=True, description="what the budget covers: fill in one", fields=[
+    {"name": "all", "type": "boolean", "description": "everything on the platform"},
+    {"name": "domain", "type": "text", "pattern": r"^urn:li:domain:.+", "description": "a domain (urn:li:domain:…)"},
+    {"name": "owner", "type": "picker", "picker": "principal", "description": "what a person or a group owns"},
+    {"name": "platform", "type": "text", "pattern": r"^[a-z0-9_-]{1,64}$", "description": "a platform, such as snowflake"},
+    {"name": "tables", "type": "picker", "picker": "dataset", "multiple": True, "description": "these tables"},
+    {"name": "warehouse", "type": "picker", "picker": "warehouse", "description": "a Cairn warehouse's node-hours"},
+    {"name": "ai", "type": "boolean", "description": "AI spend"},
+])
+BUDGET = {"scope": BUDGET_SCOPE, "period": _hint(type="select", enum=["month", "week", "day"]),
           "thresholds": _hint(item="integer", unit="%"), "notify": _hint(picker="principal")}
 
 # Per action ("METHOD path" as the catalog writes it), per field: what the request itself cannot say.
@@ -113,6 +124,9 @@ HINTS: dict[str, dict[str, dict]] = {
     "PUT /marketplace/slos/{id}": {"kind": _hint(type="select", enum=["freshness", "volume", "quality", "all"]),
                                    "objective": _hint(unit="%", min=0, max=100)},
     "POST /v1/apps/{name}/chat": {"view": _hint(type="keyvalue")},
+    # The other organisation's Iceberg warehouse, not one of Cairn's: typed, not picked from Cairn's warehouses.
+    "POST /v1/external-catalogs": {"warehouse": _hint(no_picker=True, description="the warehouse name the other "
+                                                      "catalog expects, if it asks for one")},
 }
 
 
@@ -461,7 +475,7 @@ def _widget(f: dict, path_has_secret: bool) -> dict:
             f.setdefault("unit", "per minute")
         elif name in ("objective",) or name.endswith("_percent") or name.endswith("_pct"):
             f.setdefault("unit", "%")
-    picker = PICKERS.get(name)
+    picker = None if f.pop("no_picker", False) else PICKERS.get(name)
     if f.get("picker") and f["type"] in ("text", "list") and f["picker"] != "ref":     # a hint named the picker
         if f["type"] == "list":
             f["multiple"] = True
@@ -619,7 +633,7 @@ def build_form(spec: dict, action: dict, doc: dict, seen: Optional[dict] = None)
         if h:
             if h.get("type") in ("json", "keyvalue", "list"):
                 f.pop("fields", None)
-            f.update(h)
+            f.update(copy.deepcopy(h))
             if "enum" in h and f["type"] not in ("select", "multiselect"):
                 f["type"] = "select"
     path_secret = "/secrets/" in path

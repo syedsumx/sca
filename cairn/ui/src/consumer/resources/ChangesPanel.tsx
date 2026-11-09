@@ -4,6 +4,8 @@ import { Link } from 'react-router-dom';
 
 import { useConsumerApi } from '../api/hooks';
 import { Muted } from '../components/tokens';
+import { describeError } from '../components/ErrorNotice';
+import { Picker } from './pickers';
 
 /** One resource of a change's plan: what happens to it, field by field. */
 export interface PlanItem {
@@ -137,7 +139,7 @@ function AskAnAgent({ onProposed }: { onProposed: (c: ChangeRequest) => void }) 
             setDraft(out);
             if (out.change) onProposed(out.change);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -200,7 +202,7 @@ function ChangeDetail({ id, onChanged }: { id: string; onChanged: () => void }) 
         try {
             setCr(await client.request<ChangeRequest>('GET', `/v1/iac/changes/${enc(id)}`));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [client, id]);
     useEffect(() => {
@@ -220,7 +222,7 @@ function ChangeDetail({ id, onChanged }: { id: string; onChanged: () => void }) 
             onChanged();
         } catch (e) {
             const err = e as Error & { body?: { plan?: ChangePlan } };
-            setError(err.message);
+            setError(describeError(e));
             if (err.body?.plan) setDrift(err.body.plan);
             await load();
         } finally {
@@ -297,8 +299,11 @@ function ChangeDetail({ id, onChanged }: { id: string; onChanged: () => void }) 
             )}
             {['proposed', 'approved'].includes(cr.status) && folders.length > 0 && (
                 <Space style={{ marginTop: 12 }} wrap aria-label="Commit to git">
-                    <Select aria-label="Git folder" placeholder="A git folder of yours" style={{ minWidth: 220 }} value={folder} onChange={setFolder}
-                        options={folders.map((f) => ({ value: f.id, label: f.name }))} />
+                    <div style={{ minWidth: 260 }}>
+                        <Picker id={`iac-git-folder-${id}`} ariaLabel="Git folder" placeholder="A git folder of yours"
+                            field={{ name: 'git_folder', label: 'Git folder', type: 'picker', picker: 'git_folder' }}
+                            value={folder} onChange={(v) => setFolder(v ? String(v) : undefined)} />
+                    </div>
                     <Button disabled={!folder} loading={busy} onClick={() => act('commit')}>Commit to a branch for review</Button>
                 </Space>
             )}
@@ -317,7 +322,7 @@ export function ChangesPanel({ initial }: { initial?: string | null }) {
         try {
             setItems(await client.request<ChangeRequest[]>('GET', '/v1/iac/changes', undefined, status ? { query: { status } } : undefined));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [client, status]);
     useEffect(() => {

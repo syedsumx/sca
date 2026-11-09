@@ -4,6 +4,7 @@ import React, { useMemo, useState } from 'react';
 import { useDheQuery } from '../api/hooks';
 import { Muted } from '../components/tokens';
 import { ChangesPanel } from './ChangesPanel';
+import { ErrorNotice } from '../components/ErrorNotice';
 
 /** One resource type of the registry (GET /v1/iac/schema). */
 export interface IacKind {
@@ -46,7 +47,7 @@ function ExportDialog({ title, query, onClose }: { title: string; query: Record<
                 <Button key="close" onClick={onClose}>Close</Button>,
                 <Button key="copy" type="primary" disabled={!text} onClick={copy}>{copied ? 'Copied' : 'Copy'}</Button>,
             ]}>
-            {q.error && <Alert type="error" showIcon message="Cairn refused" description={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} area="Export" />}
             <Typography.Paragraph type="secondary" style={{ marginBottom: 8 }}>
                 Secrets are variables here, never values: give them when you plan and apply.
             </Typography.Paragraph>
@@ -108,7 +109,7 @@ function IacTypes() {
                 <Button onClick={() => setAll('terraform')}>Export as Terraform</Button>
                 <Button onClick={() => setAll('yaml')}>Export as a bundle</Button>
             </Space>
-            {schema.error && <Alert type="error" showIcon message="Could not load the registry" description={schema.error.message} />}
+            {schema.error && <ErrorNotice error={schema.error} area="The registry" />}
             <Table<IacKind>
                 size="middle"
                 loading={schema.loading && !schema.data}

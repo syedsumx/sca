@@ -4,6 +4,7 @@ import type { ConsumerClient } from '../api/client';
 import { FlowCanvas } from './FlowCanvas';
 import { positions } from './layout';
 import type { FlowStep, Problem } from './model';
+import { describeError } from '../components/ErrorNotice';
 
 /** One of Airflow's DAGs as Cairn lists it (GET /v1/airflow/dags): only those that are the person's. */
 export interface AirflowDagSummary {
@@ -72,7 +73,7 @@ export function AirflowTab({ client, onOpenFlow, theme }: { client: ConsumerClie
     const [current, setCurrent] = useState<string | null>(null);
 
     useEffect(() => {
-        api.list().then(setDags).catch((e) => setError((e as Error).message));
+        api.list().then(setDags).catch((e) => setError(describeError(e)));
     }, [api]);
 
     if (current) {
@@ -130,7 +131,7 @@ function AirflowDagView({ api, dagId, onBack, onOpenFlow, theme }: {
         try {
             setDetail(await api.get(dagId, run));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [api, dagId, run]);
 
@@ -208,7 +209,7 @@ function AirflowDagView({ api, dagId, onBack, onOpenFlow, theme }: {
                                 const out = await api.convert(detail.dag_id, name.trim());
                                 onOpenFlow(out.flow);
                             } catch (e) {
-                                setError((e as Error).message);
+                                setError(describeError(e));
                             } finally {
                                 setConverting(false);
                             }

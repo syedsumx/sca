@@ -10,6 +10,7 @@ import { CapabilityState, useCapabilities } from './capabilities';
 import {
     EMPTY_UI, GuideUi, Role, detectDone, normaliseUi, roleFromProfile, stepsForEvent, stepsVisited, withDone,
 } from './onboarding';
+import { describeError } from '../components/ErrorNotice';
 
 export interface GuidePatch {
     onboarding?: Partial<GuideUi['onboarding']>;
@@ -91,7 +92,7 @@ export function GuideProvider({ children }: { children?: React.ReactNode }) {
         } catch (e) {
             cache.set<Profile>(PROFILE_KEY, before);
             uiRef.current = normaliseUi(before.ui);
-            message.error(t('guide.saveFailed', { reason: (e as Error).message }));
+            message.error(t('guide.saveFailed', { reason: describeError(e) }));
         }
     }, [cache, client, t]);
 

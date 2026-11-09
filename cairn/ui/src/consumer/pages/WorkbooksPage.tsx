@@ -7,6 +7,7 @@ import { toCsv } from '../components/ResultChart';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { describeError, notifyError } from '../components/ErrorNotice';
 
 const OPS: { value: WorkbookFilter['op']; label: string; arity: 0 | 1 | 2 | 'list' }[] = [
     { value: '=', label: '=', arity: 1 }, { value: '!=', label: '≠', arity: 1 }, { value: '>', label: '>', arity: 1 },
@@ -97,7 +98,7 @@ export function WorkbooksPage() {
             setResult(await client.runWorkbook(element(), connection));
         } catch (e) {
             setResult(null);
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setRunning(false);
         }
@@ -128,7 +129,7 @@ export function WorkbooksPage() {
             setTick((t) => t + 1);
             message.success(form.shared ? 'Saved and shared' : 'Saved');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 

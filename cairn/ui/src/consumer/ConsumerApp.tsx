@@ -10,6 +10,7 @@ import { tokens } from './components/tokens';
 import { CairnProvider } from './context/CairnProvider';
 import { I18nProvider, useT } from './i18n';
 import { HUBS } from './resources/hubs';
+import { describeError } from './components/ErrorNotice';
 
 // Platform hubs (/agents, /ingestion, …) load one chunk between them; each is a page of ResourceView tabs.
 const HubPage = React.lazy(() => import('./resources/HubPage').then((m) => ({ default: m.HubPage })));
@@ -93,7 +94,7 @@ function ErrorView({ error }: { error: Error }) {
         <Result
             status="error"
             title={t('error.title')}
-            subTitle={error.message}
+            subTitle={describeError(error)}
             extra={<a href={window.location.pathname}>{t('error.reload')}</a>}
         />
     );

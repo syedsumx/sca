@@ -10,6 +10,7 @@ import { BiFolders, BiUsageOverview } from '../components/BiCollab';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 
 const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
 
@@ -71,7 +72,7 @@ function Actions({ board, row, onDone }: { board: string; row: Record<string, un
             setInputs({});
             onDone();
         } catch (e) {
-            message.error(`${a.label}: ${(e as Error).message}`);
+            notifyError(e, { action: a.label });
         } finally {
             setBusy(false);
         }
@@ -132,7 +133,7 @@ function ScheduleExport({ board, name }: { board: string; name: string }) {
             } else message.success('Export scheduled');
             setOpen(false);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -172,7 +173,7 @@ function Board({ id }: { id: string }) {
     const [last, setLast] = useState<RenderedDashboard | null>(null);
     useEffect(() => { if (q.data) setLast(q.data); }, [q.data]);
     const board = q.data ?? last;
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     if (!board) return <Muted>Loading…</Muted>;
     const selection = state.selection ?? [];
     const select = (from: number, column: string, value: unknown) => {
@@ -298,7 +299,7 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
             setTick((t) => t + 1);
             setOpen(d.id);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const build = async () => {
@@ -311,7 +312,7 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
             if (out.dashboard) setOpen(out.dashboard.id);
             if (!out.refused.length) setAsking(false);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBuilding(false);
         }
@@ -411,7 +412,7 @@ function Alerts({ saved }: { saved: SavedQuery[] }) {
             await fn();
             setTick((t) => t + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 

@@ -13,6 +13,7 @@ import { relativeTime, shortUrn } from '../utils/format';
 import { forceLayout } from '../utils/forceLayout';
 import { MarkdownView } from '../utils/markdown';
 import { useT } from '../i18n';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 
 export const FINDING_LABELS: Record<FindingType, { label: string; icon: string; color: string }> = {
     TERM_SUGGESTION: { label: 'New business term', icon: '📖', color: 'purple' },
@@ -209,7 +210,7 @@ export function ContextInboxPage() {
             cache.invalidate('/context');
         } catch (e) {
             cache.invalidate(key);
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -261,7 +262,7 @@ export function ContextInboxPage() {
                                     />
                                 </div>
                                 {findings.loading && <Skeleton h={90} />}
-                                {findings.error && <Alert type="error" message={findings.error.message} />}
+                                {findings.error && <ErrorNotice error={findings.error} />}
                                 {findings.data?.length === 0 && <Empty description="Inbox zero — no findings with these filters." />}
                                 {Object.entries(grouped).map(([t, items]) => (
                                     <section key={t} aria-label={FINDING_LABELS[t as FindingType]?.label ?? t}>
@@ -284,7 +285,7 @@ export function ContextInboxPage() {
                         children: ontology.loading ? (
                             <Skeleton h={300} />
                         ) : ontology.error ? (
-                            <Alert type="error" message={ontology.error.message} />
+                            <ErrorNotice error={ontology.error} />
                         ) : (
                             <OntologyView ontology={ontology.data ?? { nodes: [], edges: [] }} />
                         ),

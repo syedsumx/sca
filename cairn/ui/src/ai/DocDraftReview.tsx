@@ -4,6 +4,7 @@ import { Alert, Button, Card, Descriptions, Input, Progress, Space, Table, Tag, 
 import { useDheClient, useMutation } from '../api/hooks';
 import type { ColumnDraft, DocumentationDraft, Workflow } from '../api/types';
 import { datasetNameFromUrn } from '../common/format';
+import { ErrorNotice, notifyError } from '../consumer/components/ErrorNotice';
 
 /** Narrows an arbitrary workflow payload to a DocumentationDraft when it has the expected shape. */
 export function draftFromPayload(payload: Record<string, unknown> | undefined): DocumentationDraft | null {
@@ -118,7 +119,7 @@ export function DocDraftReview({ workflow, datasetUrn, onTransition }: DocDraftR
             setComment('');
             onTransition?.(wf);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -154,7 +155,7 @@ export function DocDraftReview({ workflow, datasetUrn, onTransition }: DocDraftR
                         </Button>
                     </Space.Compact>
                 )}
-                {generate.error && <Alert type="error" showIcon message={generate.error.message} />}
+                {generate.error && <ErrorNotice error={generate.error} />}
                 {!draft && workflow && <Alert type="warning" showIcon message="This proposal has no readable draft payload." />}
                 {draft && <DraftView draft={draft} />}
                 {draft && workflowId && reviewable && (

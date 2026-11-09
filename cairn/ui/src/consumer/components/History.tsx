@@ -5,7 +5,9 @@ import type { CairnApiError } from '../../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { FieldChange, MetadataChange } from '../api/types';
 import { relativeTime } from '../utils/format';
+import { apiDetail } from '../utils/errors';
 import { Muted, Surface } from './tokens';
+import { notifyError } from './ErrorNotice';
 
 const ASPECT_LABEL: Record<string, string> = {
     globalTags: 'Tags',
@@ -66,9 +68,9 @@ export function AssetHistory({ urn }: { urn: string }) {
             history.refresh();
         } catch (e) {
             const err = e as CairnApiError;
-            const detail = String((err.body as { detail?: string } | undefined)?.detail ?? err.message);
+            const detail = apiDetail(err);
             if (err.status === 409 && detail.includes('changed since')) setConflict(id);
-            else message.error(detail);
+            else notifyError(e, { action: 'Revert' });
         }
     };
     const rows: MetadataChange[] = history.data ?? [];

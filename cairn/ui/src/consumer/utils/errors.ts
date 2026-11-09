@@ -2,6 +2,7 @@
  * The consumer UI's one error presenter: any error from Cairn's API as a sentence a person understands, what to do
  * about it, and the technical detail kept for "Details".
  */
+import { detectLocale, translate } from '../i18n';
 import type { MessageKey } from '../i18n/messages';
 
 type T = (key: MessageKey, vars?: Record<string, string | number>) => string;
@@ -93,4 +94,15 @@ export function presentError(e: unknown, t: T, ctx: ErrorContext = {}): Presente
         return { ...base, kind: 'unavailable', title: t('err.unavailable.title', { area }), hint: t('err.unavailable.hint') };
     }
     return { ...base, kind: 'server', title: t('err.server.title'), hint: t('err.server.hint') };
+}
+
+/**
+ * The presenter's sentence where there is no room for a panel (a toast, a line in a list): the title and what to do,
+ * in the person's language. The API's words stay for the presenter's "Details"; only a 400's short sentence and a
+ * 403's privilege, which say what to change or ask for, are part of the hint.
+ */
+export function describeError(e: unknown, ctx: ErrorContext = {}): string {
+    const t: T = (key, vars) => translate(detectLocale(), key, vars);
+    const p = presentError(e, t, ctx);
+    return `${p.title}. ${p.kind === 'server' ? t('err.server.short') : p.hint}`;
 }

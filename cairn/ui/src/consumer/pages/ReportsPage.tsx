@@ -10,6 +10,7 @@ import { download } from '../components/BulkEdit';
 import { SloDashboard } from '../components/Slos';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 
 const FACETS: { key: CoverageFacet; label: string }[] = [
     { key: 'description', label: 'Described' },
@@ -59,7 +60,7 @@ function MissingDrawer({ drill, onClose }: { drill: DrillDown | null; onClose: (
     );
     return (
         <Drawer open={!!drill} width={560} title={drill?.title} onClose={onClose}>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Table<ReportAsset>
                 size="small"
                 rowKey="urn"
@@ -135,7 +136,7 @@ function jobName(urn: string): string {
 /** What each Spark application cost: the cores it reserved times its running time. */
 function JobCostTable() {
     const q = useDheQuery<JobCost[]>('/reports/costs/jobs', (c, signal) => c.jobCosts(30, { signal }));
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     if (q.data && !q.data.length)
         return <Muted>No Spark runs priced yet. Set CAIRN_COST_SPARK_USD_PER_CORE_HOUR to price them.</Muted>;
     return (
@@ -180,7 +181,7 @@ function TrinoCostTable() {
                     </Muted>
                 )}
             </Space>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {q.data && !q.data.priced && (
                 <Alert type="info" showIcon style={{ marginBottom: 8 }}
                     message="Trino is not priced: set CAIRN_COST_TRINO_USD_PER_CPU_HOUR and CAIRN_COST_TRINO_USD_PER_TB_SCANNED. CPU and data scanned are shown." />
@@ -220,10 +221,10 @@ function CostTable({ kind }: { kind: 'idle' | 'expensive' }) {
             setProposed([...proposed, t.urn]);
             message.success('Owners and followers have been asked');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
-    if (q.error) return <Alert type="error" message={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} />;
     if (q.data && !q.data.length)
         return <Muted>{kind === 'idle' ? 'No idle tables in the last 30 days.' : 'No cost figures yet.'}</Muted>;
     return (
@@ -272,7 +273,7 @@ export function ReportsPage() {
             cache.set('/reports', await client.refreshReport());
             message.success('Report recomputed');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -300,7 +301,7 @@ export function ReportsPage() {
                     </Button>
                 </Space>
             </Space>
-            {q.error && <Alert type="error" style={{ marginTop: 16 }} message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 16 }} />}
             {s && (
                 <>
                     <SectionTitle style={{ marginTop: 24 }}>Coverage</SectionTitle>

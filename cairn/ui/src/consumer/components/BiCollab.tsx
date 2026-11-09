@@ -1,16 +1,17 @@
-import { Alert, Button, Checkbox, Drawer, Empty, Input, List, Modal, Popconfirm, Select, Space, Table, Tag, Tree, message } from 'antd';
+import { Alert, Button, Checkbox, Drawer, Empty, Input, List, Modal, Popconfirm, Select, Space, Table, Tag, Tree } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiComment, BiFolder, BiFolderDetail, BiKind, BiPopular, BiRole, BiStale, BiUsage, Dashboard, SavedQuery, Workbook } from '../api/types';
 import { Muted } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const KIND_NAME: Record<BiKind, string> = { query: 'saved query', workbook: 'workbook', dashboard: 'dashboard' };
 const PAGE: Record<BiKind, string> = { query: '/sql', workbook: '/sql/workbooks', dashboard: '/dashboards' };
 const when = (ms: number) => new Date(ms).toLocaleString();
 const short = (urn: string) => urn.replace(/^urn:li:corpuser:/, '');
-const fail = (e: unknown) => message.error((e as Error).message);
+const fail = (e: unknown) => notifyError(e);
 
 /** Where an asset opens: dashboards open themselves, the others their page. */
 export const assetLink = (kind: BiKind, id: string) => (kind === 'dashboard' ? `/dashboards?open=${encodeURIComponent(id)}` : PAGE[kind]);
@@ -134,7 +135,7 @@ export function CommentsDrawer({ kind, id, name, role, open, onClose, tiles }: {
                 )}
                 <Button type="primary" disabled={!text.trim()} onClick={() => post(text.trim())}>Comment</Button>
             </Space>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {!q.loading && roots.length === 0 && <Empty description="No comments yet" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
             {roots.map((c) => one(c, 0))}
         </Drawer>
@@ -149,7 +150,7 @@ export function UsageDialog({ kind, id, name, open, onClose }: { kind: BiKind; i
     const top = Math.max(1, ...(q.data?.days ?? []).map((d) => d.views));
     return (
         <Modal title={`Usage of “${name}”`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-            {q.error && <Alert type="error" message={q.error.message} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {q.data && (
                 <>
                     <p data-testid="usage-total">
@@ -243,7 +244,7 @@ export function BiFolders() {
                     <Button type="primary" onClick={() => setMaking({ name: '', shared: false, parent: null })}>New folder</Button>
                     {mine && <Button onClick={() => setMaking({ name: '', shared: false, parent: sel })}>New folder inside</Button>}
                 </Space>
-                {list.error && <Alert type="error" message={list.error.message} />}
+                {list.error && <ErrorNotice error={list.error} />}
                 {folders.length === 0 && !list.loading ? <Empty description="No folders yet" image={Empty.PRESENTED_IMAGE_SIMPLE} /> : (
                     <Tree aria-label="Folders" treeData={tree as never} selectedKeys={sel ? [sel] : []} defaultExpandAll
                         onSelect={(k) => setSel((k[0] as string) ?? null)} />
@@ -280,7 +281,7 @@ export function BiFolders() {
                                 }}>Add</Button>
                             </Space.Compact>
                         )}
-                        {detail.error && <Alert type="error" message={detail.error.message} />}
+                        {detail.error && <ErrorNotice error={detail.error} />}
                         <List size="small" loading={detail.loading} locale={{ emptyText: 'Nothing here that you may open' }}
                             dataSource={[...(detail.data?.folders ?? []).map((f) => ({ folder: f })),
                                 ...(detail.data?.items ?? []).map((i) => ({ item: i }))]}
@@ -329,7 +330,7 @@ export function BiUsageOverview() {
     return (
         <div data-testid="bi-usage">
             <h3>Most viewed in the last 30 days</h3>
-            {popular.error && <Alert type="error" message={popular.error.message} />}
+            {popular.error && <ErrorNotice error={popular.error} />}
             <Table size="small" rowKey={(r) => `${r.kind}:${r.id}`} pagination={false} loading={popular.loading} dataSource={popular.data ?? []}
                 locale={{ emptyText: 'Nothing viewed yet' }} scroll={{ x: true }}
                 columns={[
@@ -340,7 +341,7 @@ export function BiUsageOverview() {
                 ]} />
             <h3 style={{ marginTop: 24 }}>Yours, unopened for 30 days</h3>
             <Muted>Candidates to tidy away.</Muted>
-            {stale.error && <Alert type="error" message={stale.error.message} />}
+            {stale.error && <ErrorNotice error={stale.error} />}
             <Table size="small" rowKey={(r) => `${r.kind}:${r.id}`} pagination={{ pageSize: 10, hideOnSinglePage: true }} loading={stale.loading}
                 dataSource={stale.data ?? []} locale={{ emptyText: 'Everything of yours has been opened lately' }} scroll={{ x: true }}
                 columns={[

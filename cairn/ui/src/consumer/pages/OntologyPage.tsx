@@ -36,25 +36,9 @@ import {
 import { OntologyCanvas } from '../ontology/OntologyCanvas';
 import { ReviewQueue } from '../ontology/ReviewQueue';
 import { StatusTag, TermDetailView } from '../ontology/TermDetail';
-
-const Head = styled.header`
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-    gap: 16px;
-    flex-wrap: wrap;
-    margin-bottom: 12px;
-    h1 {
-        margin: 0;
-        font-size: 26px;
-        font-weight: 700;
-    }
-    p {
-        margin: 4px 0 0;
-        color: ${tokens.color.textMuted};
-        max-width: 760px;
-    }
-`;
+import { describeError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const Bar = styled.div`
     display: flex;
@@ -269,7 +253,7 @@ export function OntologyPage() {
             setData(await api.explorer());
             setError(null);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     }, [api]);
     useEffect(() => {
@@ -283,7 +267,7 @@ export function OntologyPage() {
             const [name, type] = EXT[format];
             download(name, type, typeof out === 'string' ? out : JSON.stringify(out, null, 2));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setExporting(null);
         }
@@ -294,22 +278,25 @@ export function OntologyPage() {
         : 0;
     return (
         <Page>
-            <Head>
-                <div>
-                    <h1>Ontology</h1>
-                    <p>
+            <PageHeader
+                title="Ontology"
+                help={pageHelp('/ontology')}
+                description={
+                    <>
                         The business terms, relationships, metrics and bridge tables Cairn Ontology compiled from the catalog and the query log
                         {data?.version ? ` (version ${data.version})` : ''}. Only datasets you may see are shown.{' '}
                         <Link to="/semantic?tab=ontology-terms">Semantic models</Link>
-                    </p>
-                </div>
-                <Space wrap>
-                    <Muted>Download</Muted>
-                    <Button size="small" loading={exporting === 'jsonld'} onClick={() => void exportAs('jsonld')}>JSON-LD</Button>
-                    <Button size="small" loading={exporting === 'turtle'} onClick={() => void exportAs('turtle')}>Turtle (RDF)</Button>
-                    <Button size="small" loading={exporting === 'csv'} onClick={() => void exportAs('csv')}>CSV</Button>
-                </Space>
-            </Head>
+                    </>
+                }
+                actions={
+                    <Space wrap>
+                        <Muted>Download</Muted>
+                        <Button size="small" loading={exporting === 'jsonld'} onClick={() => void exportAs('jsonld')}>JSON-LD</Button>
+                        <Button size="small" loading={exporting === 'turtle'} onClick={() => void exportAs('turtle')}>Turtle (RDF)</Button>
+                        <Button size="small" loading={exporting === 'csv'} onClick={() => void exportAs('csv')}>CSV</Button>
+                    </Space>
+                }
+            />
             {error && <Alert style={{ marginBottom: 8 }} type="warning" showIcon message="The ontology is not available" description={error} />}
             <Tabs
                 activeKey={tab}

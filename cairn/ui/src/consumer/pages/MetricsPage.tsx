@@ -6,6 +6,7 @@ import type { DataResult, Metric, MetricQuery } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { describeError, notifyError } from '../components/ErrorNotice';
 
 const GRAINS: NonNullable<MetricQuery['grain']>[] = ['day', 'week', 'month', 'quarter', 'year'];
 
@@ -46,7 +47,7 @@ export function MetricsPage() {
         try {
             setResult(await client.queryMetrics({ metrics: picked, dimensions: dims, grain: canGrain ? grain : undefined }));
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
             setResult(null);
         } finally {
             setRunning(false);
@@ -71,7 +72,7 @@ export function MetricsPage() {
             setEditing(null);
             setTick((t) => t + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const act = async (fn: () => Promise<unknown>) => {
@@ -79,7 +80,7 @@ export function MetricsPage() {
             await fn();
             setTick((t) => t + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const set = (patch: Partial<Draft>) => editing && setEditing({ ...editing, draft: { ...editing.draft, ...patch } });

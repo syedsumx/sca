@@ -1,10 +1,11 @@
-import { message } from 'antd';
+import {  } from 'antd';
 import React, { useCallback } from 'react';
 import styled from 'styled-components';
 
 import { useConsumerClient, useDheQuery, useOptimistic } from '../api/hooks';
 import type { Bookmark, Follow } from '../api/types';
 import { focusRing, tokens } from './tokens';
+import { notifyError } from './ErrorNotice';
 
 export const BOOKMARKS_KEY = '/collab/bookmarks';
 export const FOLLOWS_KEY = '/collab/follows';
@@ -52,7 +53,7 @@ export function useBookmarkToggle() {
                 );
                 return next;
             } catch (e) {
-                message.error(`Could not ${next ? 'bookmark' : 'remove bookmark'}: ${(e as Error).message}`);
+                notifyError(e, { action: next ? 'Bookmark' : 'Remove bookmark' });
                 return currentlyBookmarked;
             }
         },
@@ -99,7 +100,7 @@ export function FollowButton({ urn }: { urn: string }) {
                 () => (active ? client.unfollow(urn) : client.follow(urn)),
             );
         } catch (e) {
-            message.error(`Could not update follow: ${(e as Error).message}`);
+            notifyError(e, { action: 'Follow' });
         }
     };
     return (

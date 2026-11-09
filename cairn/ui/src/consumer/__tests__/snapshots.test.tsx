@@ -72,5 +72,7 @@ it('shows why a restore was refused', async () => {
     const dialog = await screen.findByRole('dialog', { name: 'Restore sales.orders' });
     fireEvent.change(within(dialog).getByLabelText('Reason'), { target: { value: 'try' } });
     fireEvent.click(within(dialog).getByRole('button', { name: 'Restore' }));
-    expect(await within(dialog).findByText(/Access Denied/)).toBeTruthy();
+    expect(await within(dialog).findByText('You don’t have permission for “Restore”')).toBeTruthy();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Details' }));
+    expect(within(dialog).getByText(/Access Denied/)).toBeTruthy();
 });

@@ -72,7 +72,8 @@ it('every form field has a label, a known type, and pickers name what they searc
     };
     for (const [k, form] of Object.entries(FORMS)) walk(k, form.fields);
     // what the brief asks of the widgets, present in the real forms
-    const all = Object.values(FORMS).flatMap((f) => f.fields);
+    const flat = (fields: FormSchema['fields']): FormSchema['fields'] => fields.flatMap((f) => [f, ...flat(f.fields ?? [])]);
+    const all = Object.values(FORMS).flatMap((f) => flat(f.fields));
     const pickers = new Set(all.filter((f) => f.type === 'picker').map((f) => f.picker));
     for (const p of ['table', 'dataset', 'connection', 'warehouse', 'principal', 'group', 'secret_ref', 'agent', 'ref']) {
         expect(pickers.has(p as never), p).toBe(true);
@@ -382,7 +383,7 @@ it('creates from the form, maps a 422 onto its field, and sends the typed body',
     fireEvent.change(within(dialog).getByLabelText(/^Name/), { target: { value: 'AI spend' } });
     fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: '-5' } });
     fireEvent.blur(within(dialog).getByLabelText(/^Amount/));
-    fireEvent.change(within(dialog).getByLabelText(/^Scope/), { target: { value: '{"ai": true}' } });
+    fireEvent.click(within(dialog).getByLabelText(/^AI/));                   // the scope: one of, here AI spend
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
     expect(await within(dialog).findByText('Input should be greater than 0')).toBeTruthy();
     expect(within(dialog).getByText('Some values need fixing')).toBeTruthy();
@@ -392,6 +393,27 @@ it('creates from the form, maps a 422 onto its field, and sends the typed body',
     fireEvent.blur(within(dialog).getByLabelText(/^Amount/));
     fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(calls.filter((c) => c.method === 'POST')).toHaveLength(2));
+});
+
+it('a one-of group (a budget’s scope) takes exactly one, and a switch left off is not sent', async () => {
+    const spec = RESOURCE_SPECS['budgets'];
+    const calls: MockCall[] = [];
+    wrap(<ResourceView spec={spec} />, { 'GET /v1/budgets': [], 'POST /v1/budgets': { id: 'b2', name: 'Lake' } }, calls);
+    fireEvent.click(await screen.findByRole('button', { name: 'Create' }));
+    const dialog = await lastDialog();
+    fireEvent.change(within(dialog).getByLabelText(/^Name/), { target: { value: 'Lake' } });
+    fireEvent.change(within(dialog).getByLabelText(/^Amount/), { target: { value: '100' } });
+    fireEvent.blur(within(dialog).getByLabelText(/^Amount/));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+    expect(await within(dialog).findByText('Scope is required.')).toBeTruthy();
+    fireEvent.click(within(dialog).getByLabelText(/^All/));
+    fireEvent.click(within(dialog).getByLabelText(/^AI/));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+    expect(await within(dialog).findByText('Choose only one for Scope.')).toBeTruthy();
+    expect(calls.some((c) => c.method === 'POST')).toBe(false);
+    fireEvent.click(within(dialog).getByLabelText(/^AI/));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Create' }));
+    await waitFor(() => expect(calls.find((c) => c.method === 'POST')?.body).toMatchObject({ scope: { all: true } }));
 });
 
 it('an edit starts from the row and a PATCH sends only what changed', async () => {

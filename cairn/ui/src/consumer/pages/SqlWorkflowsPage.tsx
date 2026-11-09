@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DerivedTable, SavedQuery, SqlWorkflow, SqlWorkflowRun, SqlWorkflowStep } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 
 const OPS = ['>', '>=', '<', '<=', '==', '!='];
 const STATUS_COLOR: Record<string, string> = { ok: 'green', failed: 'red', error: 'red', skipped: 'default' };
@@ -148,7 +149,7 @@ function StepEditor({
 
 function Runs({ id, tick }: { id: string; tick: number }) {
     const runs = useDheQuery<SqlWorkflowRun[]>(`/v1/sql-workflows/${id}/runs#${tick}`, (c, signal) => c.sqlWorkflowRuns(id, { signal }));
-    if (runs.error) return <Alert type="error" message={runs.error.message} />;
+    if (runs.error) return <ErrorNotice error={runs.error} />;
     return (
         <Table<SqlWorkflowRun>
             rowKey="id"
@@ -202,7 +203,7 @@ export function SqlWorkflowsPage() {
             setTick((t) => t + 1);
             message.success('Workflow saved');
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         }
     };
 
@@ -213,7 +214,7 @@ export function SqlWorkflowsPage() {
             if (r.status === 'ok') message.success('The run succeeded');
             else message.error('The run failed: see its steps');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setRunning(null);
             setSelected(id);
@@ -227,7 +228,7 @@ export function SqlWorkflowsPage() {
             if (selected === id) setSelected(null);
             setTick((t) => t + 1);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -253,7 +254,7 @@ export function SqlWorkflowsPage() {
                         New workflow
                     </Button>
                 </Space>
-                {list.error && <Alert type="error" message={list.error.message} />}
+                {list.error && <ErrorNotice error={list.error} />}
                 <Table<SqlWorkflow>
                     rowKey="id"
                     size="small"

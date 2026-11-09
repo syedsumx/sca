@@ -7,6 +7,7 @@ import type { WorkspaceAsset, WorkspaceRef, WorkspaceSummary } from '../api/type
 import { serializeSearchState } from '../utils/urlState';
 import { assetPath } from './Assets';
 import { Muted, SectionTitle, Surface } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const ROLE_LABEL: Record<string, string> = { admin: 'admin', member: 'member', global_admin: 'global admin' };
 const short = (urn: string) => urn.replace(/^urn:li:[A-Za-z]+:/, '');
@@ -40,7 +41,7 @@ function NewWorkspace({ onCreated }: { onCreated: (id: string) => void }) {
                     form.resetFields();
                     onCreated(id);
                 } catch (e) {
-                    message.error((e as Error).message);
+                    notifyError(e);
                 }
             }}
         >
@@ -73,7 +74,7 @@ function WorkspaceDetail({ id, isAdmin, onRemoved }: { id: string; isAdmin: bool
     const [members, setMembers] = useState<string[] | null>(null);
     const [admins, setAdmins] = useState<string[] | null>(null);
     const w: WorkspaceSummary | undefined = ws.data;
-    if (ws.error) return <Alert type="error" showIcon message={ws.error.message} />;
+    if (ws.error) return <ErrorNotice error={ws.error} />;
     if (!w) return <Muted>Loading…</Muted>;
     const canManage = isAdmin || w.role === 'admin';
     const save = async () => {
@@ -84,7 +85,7 @@ function WorkspaceDetail({ id, isAdmin, onRemoved }: { id: string; isAdmin: bool
             setAdmins(null);
             ws.refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     const counts = Object.entries(w.assets);

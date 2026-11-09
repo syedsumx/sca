@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { SnapshotRows, TableSnapshot } from '../api/types';
 import { Muted } from './tokens';
+import { ErrorNotice, describeError } from './ErrorNotice';
 
 /** A lakehouse table's snapshots: look at the table as it was, and restore an earlier snapshot (L59).
  * Everything runs on Trino as the person: they see their own masks and row filters, and a restore needs
@@ -17,14 +18,14 @@ export function TableSnapshots({ table }: { table: string }) {
     const [restoring, setRestoring] = useState<TableSnapshot | null>(null);
     const [reason, setReason] = useState('');
     const [busy, setBusy] = useState(false);
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<unknown>(null);
 
     const view = async (snap: TableSnapshot) => {
         setViewing({ snap });
         try {
             setViewing({ snap, rows: await client.snapshotRows(table, snap.id) });
         } catch (e) {
-            setViewing({ snap, error: (e as Error).message });
+            setViewing({ snap, error: describeError(e) });
         }
     };
     const restore = async () => {
@@ -38,13 +39,13 @@ export function TableSnapshots({ table }: { table: string }) {
             setReason('');
             await q.refresh();
         } catch (e) {
-            setError((e as Error).message);
+            setError(e);
         } finally {
             setBusy(false);
         }
     };
 
-    if (q.error) return <Alert type="error" showIcon message="Could not list the table's snapshots" description={q.error.message} />;
+    if (q.error) return <ErrorNotice error={q.error} area="Snapshots" />;
     const snaps = [...(q.data ?? [])].reverse();          // newest first
     if (!q.loading && !snaps.length) return <Empty description="No snapshots yet" />;
     return (
@@ -126,7 +127,7 @@ export function TableSnapshots({ table }: { table: string }) {
                     maxLength={500}
                     onChange={(e) => setReason(e.target.value)}
                 />
-                {error && <Alert style={{ marginTop: 12 }} type="error" showIcon message={error} />}
+                {error ? <ErrorNotice error={error} action="Restore" style={{ marginTop: 12 }} /> : null}
             </Modal>
         </>
     );

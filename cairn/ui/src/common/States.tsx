@@ -1,8 +1,8 @@
 import React from 'react';
-import { Alert, Button, Empty, Spin } from 'antd';
+import { Button, Empty, Spin } from 'antd';
 import styled from 'styled-components';
 
-import { CairnApiError } from '../api/client';
+import { ErrorNotice } from '../consumer/components/ErrorNotice';
 
 const Center = styled.div`
     display: flex;
@@ -19,27 +19,17 @@ export function LoadingState({ label = 'Loading…' }: { label?: string }) {
     );
 }
 
+/** A failed read in the shared presenter's words, with Retry. */
 export function ErrorState({ error, onRetry }: { error: Error; onRetry?: () => void }) {
-    let message = 'Something went wrong';
-    if (error instanceof CairnApiError) {
-        if (error.isUnauthorized) message = 'You are not signed in to Cairn';
-        else if (error.isForbidden) message = 'You do not have permission to view this';
-        else if (error.isNotFound) message = 'Not found';
-    }
     return (
-        <Alert
-            type="error"
-            showIcon
-            message={message}
-            description={error.message}
-            action={
-                onRetry ? (
-                    <Button size="small" onClick={onRetry}>
-                        Retry
-                    </Button>
-                ) : undefined
-            }
-        />
+        <div>
+            <ErrorNotice error={error} />
+            {onRetry && (
+                <Button size="small" style={{ marginTop: 8 }} onClick={onRetry}>
+                    Retry
+                </Button>
+            )}
+        </div>
     );
 }
 

@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { InputColumnType, InputTable } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
+import { ErrorNotice, describeError } from '../components/ErrorNotice';
 
 const TYPES: InputColumnType[] = ['text', 'number', 'integer', 'boolean', 'date', 'timestamp'];
 const SYSTEM = ['_row_id', '_updated_by', '_updated_at'];
@@ -80,7 +81,7 @@ export function InputTablesPage() {
             message.success(done);
             reload();
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -122,7 +123,7 @@ export function InputTablesPage() {
             setSelected(t.id);
             setTick((x) => x + 1);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -151,7 +152,7 @@ export function InputTablesPage() {
                 {table && (
                     <>
                         {table.description && <p><Muted>{table.description}</Muted></p>}
-                        {rows.error && <Alert type="error" showIcon message={rows.error.message} style={{ marginBottom: 12 }} />}
+                        {rows.error && <ErrorNotice error={rows.error} style={{ marginBottom: 12 }} />}
                         <Table<Row> rowKey="_row_id" size="small" pagination={{ pageSize: 50 }} dataSource={data} columns={columns}
                             loading={rows.loading} scroll={{ x: true }}
                             rowSelection={{ selectedRowKeys: checked, onChange: (keys) => setChecked(keys as string[]),

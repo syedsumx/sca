@@ -45,7 +45,7 @@ function JsonField({ label, value, onChange, fid, readOnly }: { label: string; v
                         onChange(JSON.parse(e.target.value || '{}'));
                         setBad(null);
                     } catch (err) {
-                        setBad((err as Error).message);
+                        setBad((err as Error).message); // presenter-exempt: the JSON the person typed
                     }
                 }}
             />

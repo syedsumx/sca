@@ -113,7 +113,7 @@ it('shows the server refusal', async () => {
         target: { value: 'a,b\n' },
     });
     fireEvent.click(screen.getByRole('button', { name: 'Preview changes' }));
-    expect(await screen.findByText('the first row must be a header with a urn column')).toBeTruthy();
+    expect(await screen.findByText(/the first row must be a header with a urn column/)).toBeTruthy();
 });
 
 it('exports the search as CSV', async () => {

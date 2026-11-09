@@ -5,6 +5,7 @@ import { useLocation } from 'react-router-dom';
 import { useConsumerApi } from '../api/hooks';
 import type { DeviceCodeInfo } from '../api/types';
 import { Muted, Page, Surface, tokens } from '../components/tokens';
+import { describeError } from '../components/ErrorNotice';
 
 /** The code as people type it: letters only, upper case, shown as XXXX-XXXX. */
 export function formatCode(raw: string): string {
@@ -33,7 +34,7 @@ export function DevicePage() {
             setInfo(await client.deviceCode(value));
         } catch (e) {
             setInfo(null);
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -50,7 +51,7 @@ export function DevicePage() {
             await client.decideDeviceCode(code, decision);
             setDone(decision === 'approve' ? 'approved' : 'denied');
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }

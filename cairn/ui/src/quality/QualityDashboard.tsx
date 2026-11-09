@@ -7,6 +7,7 @@ import { datasetNameFromUrn, formatRelative, statusColor } from '../common/forma
 import { EmptyState, ErrorState, LoadingState, PageContainer, PageHeader } from '../common/States';
 import { MonitorDetail } from './MonitorDetail';
 import { MONITOR_TYPE_LABELS, MonitorEditor } from './MonitorEditor';
+import { notifyError } from '../consumer/components/ErrorNotice';
 
 export interface QualityDashboardProps {
     /** Restrict the dashboard to monitors of one dataset (used by QualityTab). */
@@ -68,7 +69,7 @@ export function QualityDashboard({ datasetUrn, pollIntervalMs = 30000, embedded 
             setRefreshKeys((k) => ({ ...k, [m.id]: (k[m.id] ?? 0) + 1 }));
             message.info(`${m.name}: ${ev.status}${ev.message ? ` — ${ev.message}` : ''}`);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setRunningId(null);
         }
@@ -80,7 +81,7 @@ export function QualityDashboard({ datasetUrn, pollIntervalMs = 30000, embedded 
             setData((prev) => (prev ?? []).filter((x) => x.id !== m.id));
             message.success(`Deleted ${m.name}`);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
@@ -98,7 +99,7 @@ export function QualityDashboard({ datasetUrn, pollIntervalMs = 30000, embedded 
             });
             setData((prev) => (prev ?? []).map((x) => (x.id === m.id ? updated : x)));
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 

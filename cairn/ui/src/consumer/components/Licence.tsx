@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { LicenceState } from '../api/types';
+import { describeError } from './ErrorNotice';
 
 const KEY = '/admin/licence';
 
@@ -70,7 +71,7 @@ export function LicenceSettings() {
             message.success(done);
             q.refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }

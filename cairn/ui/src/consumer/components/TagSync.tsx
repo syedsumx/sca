@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { TagSyncOperation, TagSyncResult, TagSyncTarget } from '../api/types';
 import { datasetName } from './BulkEdit';
 import { Muted } from './tokens';
+import { ErrorNotice, notifyError } from './ErrorNotice';
 
 const short = (urn: string) => urn.replace(/^urn:li:(tag|glossaryTerm):/, '');
 
@@ -55,7 +56,7 @@ function TargetCard({ target, onDone }: { target: TagSyncTarget; onDone: () => v
                 onDone();
             }
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -122,7 +123,7 @@ function TargetCard({ target, onDone }: { target: TagSyncTarget; onDone: () => v
 export function TagSyncAdmin() {
     const { cache } = useConsumerApi();
     const targets = useDheQuery<TagSyncTarget[]>('/governance/tag-sync', (c, signal) => c.tagSyncTargets({ signal }));
-    if (targets.error) return <Alert type="error" message={targets.error.message} />;
+    if (targets.error) return <ErrorNotice error={targets.error} />;
     if (!targets.data) return null;
     if (!targets.data.length)
         return (

@@ -8,6 +8,7 @@ import type { AccessRequest, AccessStatus, ProductCard as ProductCardData } from
 import { actorName, plural, relativeTime } from '../utils/format';
 import { focusRing, tokens } from './tokens';
 import { TrustBadges } from './TrustBadges';
+import { describeError } from './ErrorNotice';
 
 export function productPath(urn: string): string {
     return `/marketplace/${encodeURIComponent(urn)}`;
@@ -141,7 +142,7 @@ export function RequestAccessDrawer({ product, open, onClose, onSubmitted, myPer
             cache.invalidate('/marketplace');
             onSubmitted?.(created);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }

@@ -27,6 +27,7 @@ import type {
 } from '../api/types';
 import { datasetName, describeChange } from './BulkEdit';
 import { Muted } from './tokens';
+import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
 
 const ACTIONS: { value: AutomationActionType; label: string; placeholder: string }[] = [
     { value: 'set_domain', label: 'Set domain', placeholder: 'finance' },
@@ -140,7 +141,7 @@ function Builder({ open, onClose, onCreated }: { open: boolean; onClose: () => v
         try {
             await fn(s);
         } catch (e) {
-            setError((e as Error).message);
+            setError(describeError(e));
         } finally {
             setBusy(false);
         }
@@ -313,7 +314,7 @@ function RunsDrawer({ automation, onClose }: { automation: Automation | null; on
             if (key) cache.invalidate(key);
             cache.invalidate('/governance/automations');
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     return (
@@ -379,7 +380,7 @@ export function AutomationsAdmin() {
             message.success(ok);
             refresh();
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
     return (
@@ -392,7 +393,7 @@ export function AutomationsAdmin() {
                     Selected datasets get the domain, owners, tags or terms you choose: now, and as new ones appear.
                 </Muted>
             </Space>
-            {list.error && <Alert type="error" message={list.error.message} />}
+            {list.error && <ErrorNotice error={list.error} />}
             {list.data && !list.data.length && <Empty description="No automations yet" />}
             {list.data && list.data.length > 0 && (
                 <Table<Automation>

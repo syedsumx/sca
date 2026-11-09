@@ -1,8 +1,15 @@
-import { Alert, Button, Space } from 'antd';
+import { Alert, Button, Space, message } from 'antd';
 import React, { useState } from 'react';
 
 import { useT } from '../i18n';
-import { ErrorContext, presentError } from '../utils/errors';
+import { ErrorContext, describeError, presentError } from '../utils/errors';
+
+export { describeError } from '../utils/errors';
+
+/** A failed action as a toast in the presenter's words (what happened and what to do). */
+export function notifyError(error: unknown, ctx: ErrorContext = {}): void {
+    void message.error(describeError(error, ctx));
+}
 
 /** Any error from Cairn as a sentence, what to do about it, and the technical detail under "Details" with a copy button. */
 export function ErrorNotice({ error, style, ...ctx }: ErrorContext & { error: unknown; style?: React.CSSProperties }) {

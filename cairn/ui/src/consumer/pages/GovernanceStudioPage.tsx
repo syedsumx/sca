@@ -23,6 +23,8 @@ import type {
 } from '../api/types';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { actorName } from '../utils/format';
+import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { errorStatus } from '../utils/errors';
 
 const Split = styled.div`
     display: grid;
@@ -130,7 +132,7 @@ function GeneratedPolicies({ prefix }: { prefix: string }) {
         (c, signal) => c.compiledPolicies({ signal }),
     );
     const policies = (compiled.data?.compiled ?? []).filter((p) => p.id.startsWith(prefix) || p.source?.startsWith(prefix));
-    if (compiled.error) return <Alert type="warning" message={`Generated policies unavailable: ${compiled.error.message}`} />;
+    if (compiled.error) return <ErrorNotice error={compiled.error} area="Generated policies" />;
     return (
         <pre style={{ background: tokens.color.surfaceAlt, padding: 12, borderRadius: 8, maxHeight: 320, overflow: 'auto', fontSize: 12 }}>
             {policies.length ? JSON.stringify(policies, null, 2) : 'Save to see the generated ABAC policies.'}
@@ -171,7 +173,7 @@ function PersonaEditor({ persona, bundles, onSaved, onDeleted }: { persona: Pers
             setDraft(saved);
             setPreview(await client.previewPersona(saved.id).catch(() => null));
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -268,12 +270,12 @@ function PersonaEditor({ persona, bundles, onSaved, onDeleted }: { persona: Pers
                 </Button>
                 {draft.id && (
                     <>
-                        <Button onClick={() => client.previewPersona(draft.id as string).then(setPreview, (e: Error) => message.error(e.message))}>
+                        <Button onClick={() => client.previewPersona(draft.id as string).then(setPreview, (e: unknown) => notifyError(e))}>
                             Preview members & assets
                         </Button>
                         <Popconfirm
                             title="Delete this persona? Members lose its permissions immediately."
-                            onConfirm={() => client.deletePersona(draft.id as string).then(onDeleted, (e: Error) => message.error(e.message))}
+                            onConfirm={() => client.deletePersona(draft.id as string).then(onDeleted, (e: unknown) => notifyError(e))}
                         >
                             <Button danger>Delete</Button>
                         </Popconfirm>
@@ -308,7 +310,7 @@ function PurposeEditor({ purpose, bundles, personas, onSaved, onDeleted }: { pur
             onSaved(saved);
             setDraft(saved);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         } finally {
             setBusy(false);
         }
@@ -397,7 +399,7 @@ function PurposeEditor({ purpose, bundles, personas, onSaved, onDeleted }: { pur
                     Save purpose
                 </Button>
                 {draft.id && (
-                    <Popconfirm title="Delete this purpose?" onConfirm={() => client.deletePurpose(draft.id as string).then(onDeleted, (e: Error) => message.error(e.message))}>
+                    <Popconfirm title="Delete this purpose?" onConfirm={() => client.deletePurpose(draft.id as string).then(onDeleted, (e: unknown) => notifyError(e))}>
                         <Button danger>Delete</Button>
                     </Popconfirm>
                 )}
@@ -421,7 +423,7 @@ export function GovernanceStudioPage() {
         cache.invalidate('/governance');
     };
 
-    const forbidden = [personas.error, purposes.error].find((e) => e && /403|forbidden|denied/i.test(e.message));
+    const forbidden = [personas.error, purposes.error].find((e) => e && errorStatus(e) === 403);
     if (forbidden) return <Page><Alert type="warning" message="You need governance permissions (MANAGE_POLICIES) to edit personas and purposes." /></Page>;
 
     return (

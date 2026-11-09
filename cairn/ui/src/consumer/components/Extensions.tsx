@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ExtensionInstallResult, ExtensionSection, InstalledExtension } from '../api/types';
 import { Page, SectionTitle } from './tokens';
+import { describeError } from './ErrorNotice';
 
 const SECTIONS = '/extensions/ui';
 
@@ -76,7 +77,7 @@ export function ExtensionsAdmin() {
             setManifest('');
             q.refresh();
         } catch (e) {
-            setError(e instanceof Error ? e.message : String(e));
+            setError(describeError(e));
         }
     };
 

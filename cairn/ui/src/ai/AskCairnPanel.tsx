@@ -5,6 +5,7 @@ import styled from 'styled-components';
 import { useDheClient } from '../api/hooks';
 import type { AskResponse, SearchPlan } from '../api/types';
 import { PageContainer, PageHeader } from '../common/States';
+import { describeError } from '../consumer/components/ErrorNotice';
 
 interface Turn {
     id: number;
@@ -82,7 +83,7 @@ export function AskCairnPanel({ onOpenEntity, embedded = false }: AskCairnPanelP
             setTurns((t) => t.map((x) => (x.id === id ? { ...x, response, pending: false } : x)));
         } catch (e) {
             if (controller.signal.aborted) return;
-            setTurns((t) => t.map((x) => (x.id === id ? { ...x, error: (e as Error).message, pending: false } : x)));
+            setTurns((t) => t.map((x) => (x.id === id ? { ...x, error: describeError(e), pending: false } : x)));
         } finally {
             controllers.current = controllers.current.filter((c) => c !== controller);
         }

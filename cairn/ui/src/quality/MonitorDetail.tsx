@@ -6,6 +6,7 @@ import type { Evaluation, EvaluationFeedback, Monitor } from '../api/types';
 import { formatNumber, formatTimestamp, statusColor } from '../common/format';
 import { ErrorState, LoadingState } from '../common/States';
 import { EvaluationChart } from './EvaluationChart';
+import { notifyError } from '../consumer/components/ErrorNotice';
 
 export interface MonitorDetailProps {
     monitor: Monitor;
@@ -35,7 +36,7 @@ export function MonitorDetail({ monitor, limit = 200, refreshKey = 0 }: MonitorD
             setData((prev) => (prev ?? []).map((e) => (e.id === ev.id ? { ...e, ...updated } : e)));
             message.success(FEEDBACK_DONE[feedback]);
         } catch (e) {
-            message.error((e as Error).message);
+            notifyError(e);
         }
     };
 
