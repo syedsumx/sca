@@ -3129,9 +3129,9 @@ dashboards:
     assert [(c.kind, c.action) for c in upd] == [("dashboards", "update")]
     boards = {d["name"]: d for d in httpx.get(f"{url}/sql/dashboards", headers=admin, timeout=60).json()}
     assert boards["Sales (prod)"]["tiles"][0]["title"] == "Revenue (EUR)" and boards["Sales (staging)"]["tiles"][0]["title"] == "Revenue"
-    # An input table is created by a bundle but never rewritten by one.
+    # An input table's columns are never rewritten by a bundle (people's rows are in it): the plan refuses.
     (tmp_path / "bi.yaml").write_text(yaml_text.replace("type: number}]", "type: integer}]"))
-    with pytest.raises(BundleError, match="never rewrites"):
+    with pytest.raises(BundleError, match="delete it to change the columns"):
         plan(client, load(str(tmp_path / "bi.yaml"), {"env": "prod"}))
     # Prune: the workbook and the metric leave the file, and Cairn.
     trimmed = yaml_text.split("metrics:")[0] + "dashboards:" + yaml_text.split("dashboards:")[1].replace(
