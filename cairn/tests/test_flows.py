@@ -307,6 +307,49 @@ def test_the_scheduler_starts_each_run_once_with_two_engines_on_one_database(env
     assert all(r["status"] == "succeeded" for r in env.runs(ANA, "tick"))
 
 
+def test_the_scheduler_and_leases_on_postgres():
+    """The same single start, admission and approval on PostgreSQL (row locks, not SQLite's single writer)."""
+    import os
+
+    url = os.environ.get("CAIRN_TEST_PG_URL")
+    if not url:
+        pytest.skip("CAIRN_TEST_PG_URL (a PostgreSQL to use) not set")
+    engine = create_engine(url)
+    with engine.begin() as c:
+        c.execute(text("DROP SCHEMA public CASCADE; CREATE SCHEMA public"))
+    init_db(engine)
+    told: list = []
+    make = lambda i: Flows(engine, Backends(notify=lambda *a: told.append(a)), None, lambda *a: told.append(a),  # noqa: E731
+                           instance=i)
+    one, two = make("one"), make("two")
+    one.create(ANA, {"name": "pg", "concurrency": {"policy": "allow", "max_active": 2},
+                     "triggers": [{"type": "schedule", "cron": "*/5 * * * *", "timezone": "UTC"}],
+                     "steps": [{"name": "ask", "type": "approval", "approvers": [BOB]},
+                               {"name": "n", "type": "notify", "after": ["ask"], "message": "{{ steps.ask.by }}"}]},
+               publish=True)
+    with engine.begin() as c:
+        c.execute(update(flows_table).values(next_run_ms=int(time.time() * 1000) - 1000))
+    barrier, counts = threading.Barrier(2), []
+
+    def tick(f):
+        barrier.wait()
+        counts.append(f.run_due())
+    ts = [threading.Thread(target=tick, args=(f,)) for f in (one, two)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert sorted(counts) == [0, 1]
+    runs = [one.run(ANA, "pg") for _ in range(2)]
+    rid = one.runs(ANA, "pg")[-1]["id"]
+    wait_until(lambda: one._run_public(rid)["status"] == "waiting")
+    assert [one._run_public(r["id"])["status"] for r in runs].count("queued") == 1    # max_active 2
+    two.decide(BOB, rid, "ask", "approve")
+    assert two.wait_for(rid, 30)["status"] == "succeeded"
+    for r in one.runs(ANA, "pg"):
+        if r["status"] in ("queued", "running", "waiting"):
+            one.cancel(ANA, r["id"])
+    engine.dispose()
+
+
 def test_a_run_whose_driver_died_is_taken_over(env):
     env.create(ANA, {"name": "lost", "steps": [{"name": "a", "type": "notify", "message": "a", "retries": 1, "retry_delay_s": 0},
                                                 {"name": "b", "type": "notify", "after": ["a"], "message": "b"}]}, publish=True)

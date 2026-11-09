@@ -394,6 +394,7 @@ Cairn Core aspects, so nothing breaks if Cairn is removed:
 | `GET /agents`, `GET /agents/runs` | Fleet and run status |
 | `POST /ai/ask`, `POST /ai/search/semantic`, `POST /ai/docs/generate`, `POST /ai/index/rebuild` | AI features |
 | `GET /v1/ontology/{terms,relationships,metrics,search,graph,proposals}`, `POST /v1/ontology/{sync,runs,validate-sql}` | Cairn Ontology (compiled ontology, visibility-filtered) |
+| `GET/POST /v1/flows`, `GET/PUT/DELETE /v1/flows/{name}`, `POST /v1/flows/{validate,…}`, `/v1/flows/{name}/{publish,runs,backfill,versions,diff}`, `/v1/flows/runs/{id}/{cancel,rerun,steps/…}` | Cairn Flows: DAGs of any step run as their owner (`cairn.flows`: the definition and its checks, the step executors, an engine whose runs are driven under a database lease and parked while they wait, so several replicas share them and the scheduler starts each run once) |
 
 ### 1.8 Deployment topology
 
