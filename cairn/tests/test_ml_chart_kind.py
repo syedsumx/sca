@@ -168,8 +168,11 @@ def test_the_charts_spark_training_and_model_server_run_on_kubernetes(kind, mlfl
     assert s.ml.owner("spend-spark") == "urn:li:corpuser:carol"
     props = s.graph.get_aspect("urn:li:mlModel:(urn:li:dataPlatform:mlflow,spend-spark.v1,PROD)", "mlModelProperties")
     (training,) = props["trainingJobs"]
-    assert s.graph.get_aspect(training, "dataJobInputOutput")["inputDatasets"] == \
-        ["urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.customers,PROD)"]
+    # Named as the rest of the catalog names the table: through the lakehouse (Trino's name) when there is one.
+    lake = getattr(s, "lakehouse", None)
+    want = lake.urn(["sales"], "customers") if lake is not None else \
+        "urn:li:dataset:(urn:li:dataPlatform:iceberg,sales.customers,PROD)"
+    assert s.graph.get_aspect(training, "dataJobInputOutput")["inputDatasets"] == [want]
 
     # ---- the model server: the chart's Deployment of the registered version, reached only by Cairn's API
     values = json.loads(json.dumps(base))
