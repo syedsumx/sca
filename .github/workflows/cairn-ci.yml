@@ -403,9 +403,9 @@ jobs:
       - name: Kind cluster and the platform image
         working-directory: cairn
         run: |
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind" \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind" \
             https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind.sha256" \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind.sha256" \
             https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
           (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
           sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
@@ -521,7 +521,7 @@ jobs:
         run: |
           set -o pipefail
           sudo apt-get update -q && sudo apt-get install -y -q xvfb dbus gnome-keyring >/dev/null
-          (cd desktop && npm ci --no-audit --no-fund)
+          (cd desktop && npm ci --no-audit --no-fund && for i in 1 2 3 4 5 6; do node node_modules/electron/install.js && break; echo "Electron download failed; retrying"; sleep 30; done && node -e "require('electron')")
           python -m venv "$RUNNER_TEMP/desktop-cli"
           "$RUNNER_TEMP/desktop-cli/bin/pip" install -q ./cli "pyinstaller==6.22.3"
           "$RUNNER_TEMP/desktop-cli/bin/pyinstaller" --clean --noconfirm --distpath "$RUNNER_TEMP/desktop-cli-dist" \
@@ -567,14 +567,14 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/k8s" && cd "$RUNNER_TEMP/k8s"
           for b in kube-apiserver kube-controller-manager kubectl; do
-            curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
-            echo "$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
+            curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$b" "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b"
+            echo "$(curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 "https://dl.k8s.io/release/v1.31.2/bin/linux/amd64/$b.sha256")  $b" | sha256sum -c -
           done
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/etcd-io/etcd/releases/download/v3.5.15/etcd-v3.5.15-linux-amd64.tar.gz \
             | tar -xz --strip-components 1 etcd-v3.5.15-linux-amd64/etcd
           chmod +x kube-apiserver kube-controller-manager kubectl etcd
           # The Spark Operator's SparkApplication CRD, pinned (what SparkApplications are validated against).
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o sparkapplications.yaml \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o sparkapplications.yaml \
             https://raw.githubusercontent.com/kubeflow/spark-operator/v2.2.1/charts/spark-operator-chart/crds/sparkoperator.k8s.io_sparkapplications.yaml
           echo "50d3eeb2d5a58e162ed06e9a6d849227ed3522b0887a51b705dc1af8a0d53371  sparkapplications.yaml" | sha256sum -c -
       - uses: azure/setup-helm@v4
@@ -647,9 +647,9 @@ jobs:
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
         run: |
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind" \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind" \
             https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o "$RUNNER_TEMP/kind.sha256" \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/kind.sha256" \
             https://github.com/kubernetes-sigs/kind/releases/download/v0.29.0/kind-linux-amd64.sha256sum
           (cd "$RUNNER_TEMP" && echo "$(cut -d' ' -f1 kind.sha256)  kind" | sha256sum -c -)
           sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
@@ -740,7 +740,7 @@ jobs:
         run: npm test && node build.mjs --cairn-url https://cairn.example.com
       - name: Cairn Desktop (main process against a stand-in, then the real Electron app under xvfb)
         working-directory: cairn/desktop
-        run: npm test && npm ci --no-audit --no-fund && xvfb-run -a npm test
+        run: npm test && npm ci --no-audit --no-fund && { for i in 1 2 3 4 5 6; do node node_modules/electron/install.js && break; echo "Electron download failed; retrying"; sleep 30; done; } && xvfb-run -a npm test
       - name: Spreadsheet add-ins (unit; the live tests run in the python job, tests/test_spreadsheet_addins.py)
         working-directory: cairn/addins
         run: npm test && node build.mjs --cairn-url https://cairn.example.com --addin-url https://addins.example.com
@@ -815,7 +815,7 @@ jobs:
           version: v3.16.4
       - name: Install kubeconform
         run: |
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
             | tar -xz -C /usr/local/bin kubeconform
       - name: Lint and validate every values profile
         run: |
@@ -856,7 +856,7 @@ jobs:
           ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
               --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1
           # Airflow with the official Apache Airflow chart and Cairn's values (deploy/airflow/values-cairn.yaml).
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o /tmp/airflow-chart.tgz https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
           tar xzf /tmp/airflow-chart.tgz -C /tmp
           helm template airflow /tmp/airflow -f deploy/airflow/values-cairn.yaml \
             | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
@@ -1031,7 +1031,7 @@ jobs:
           REGISTRY: ghcr.io/${{ github.repository_owner }}
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o /usr/local/bin/cosign https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64
           chmod +x /usr/local/bin/cosign
           for img in platform consumer-ui remote-agent agent-runtime store catalog authorizer core web setup executor; do
             ref="${REGISTRY,,}/${img}:${CAIRN_VERSION}"

@@ -59,7 +59,15 @@ deploy/hetzner/cluster.sh "$work/cluster.env" render-audit-policy >"$work/audit-
 sudo mkdir -p /etc/rancher/k3s
 sudo cp "$work/k3s.yaml" /etc/rancher/k3s/config.yaml && sudo chmod 600 /etc/rancher/k3s/config.yaml
 sudo cp "$work/audit-policy.yaml" /etc/rancher/k3s/audit-policy.yaml
-curl -sfL https://get.k3s.io | sudo INSTALL_K3S_VERSION="$(grep K3S_VERSION "$work/cluster.env" | cut -d= -f2)" sh -s - >/dev/null
+# GitHub release downloads (k3s itself) can fail for a few minutes: try the install a few times.
+k3s_version="$(grep K3S_VERSION "$work/cluster.env" | cut -d= -f2)"
+for attempt in 1 2 3 4 5; do
+  curl -sfL --retry 5 --retry-all-errors --retry-delay 10 https://get.k3s.io \
+    | sudo INSTALL_K3S_VERSION="$k3s_version" sh -s - >/dev/null && break
+  [ "$attempt" = 5 ] && { echo "k3s did not install" >&2; exit 1; }
+  echo "k3s install failed (attempt $attempt); retrying in 30 s" >&2
+  sleep 30
+done
 mkdir -p "$work/state"
 # shellcheck disable=SC2024  # root reads the file, the runner user owns the copy
 sudo cat /etc/rancher/k3s/k3s.yaml >"$work/state/kubeconfig"; chmod 600 "$work/state/kubeconfig"
