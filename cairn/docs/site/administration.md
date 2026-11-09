@@ -786,6 +786,33 @@ and the response naming the model that answered; candidates the caller may not u
 provider and none left refused; the cost ceiling, cheapest first, tools, input size and the latency budget; the
 built-in `cairn-auto`; the operator API.
 
+### Live-model checks
+
+Cairn's AI features are also checked against the real model provider, not only stand-ins: `tests/test_live_model.py`,
+CI job `live-model`. Each check drives the feature through this gateway (the provider key read from
+`CAIRN_AI_GATEWAY_ANTHROPIC_KEY_FILE`, every call as the person, with a Cairn key of theirs) to the provider, with
+real Trino, Cairn Store and Cairn Catalog where it needs data, and asserts outcomes, not wording: a structured-output
+call that validates against its schema with adaptive thinking accepted (the LLM layer); a question that becomes a
+saved dashboard whose tiles run as the person, row filters included (the BI AI builder); a custom agent that uses its
+one tool and is refused outside its scope; the pipeline agent shipping a derived table and fixing a broken one, both
+running green; a CoWork scheduled task whose report waits in the outbox until approved (Slack is a local stand-in);
+and Ask an agent proposing a saved query and a flow that plan cleanly. A failing check runs once more, then fails
+with the transcript of its model calls (request and response bodies; never the key).
+
+- **The secret.** The job runs only with the repository secret `ANTHROPIC_API_KEY` (GitHub: Settings, Secrets and
+  variables, Actions, New repository secret). Without it the job passes with "skipped: no ANTHROPIC_API_KEY secret".
+  The key is written to a file only the job reads (mode 0600), masked in the log, passed as `ANTHROPIC_API_KEY_FILE`,
+  and deleted when the job ends.
+- **When.** On pushes to the working branch and on demand (`workflow_dispatch`), within 30 minutes.
+- **Cost.** The model is the repository variable `CAIRN_LIVE_MODEL_NAME`, or a lower-cost one Cairn lists (only
+  models with a price in `cairn.ai.usage` are accepted); effort `medium`, at most 8,000 output tokens a call and 8
+  tool-loop turns. Tokens and estimated cost per check are in the job summary and the `live-model-usage` artifact
+  (`usage.json`, with `live-model-transcripts/` for failures).
+- **Locally.** `CAIRN_LIVE_MODEL=1 ANTHROPIC_API_KEY_FILE=… pytest tests/test_live_model.py` (with `CAIRN_STORE_BIN`,
+  `CAIRN_CATALOG_BIN` and docker for the Trino checks). `CAIRN_LIVE_PROVIDER_URL` points the gateway elsewhere: at
+  `tests/live_model_standin.py`, a scripted stand-in, the suite checks its own wiring without a model (that proves
+  the plumbing, not a model's answers).
+
 ## Code-first agents: `cairn agents init`, `dev`, `deploy`
 
 From an empty directory to a deployed agent, with the runtime, model access, sessions and governance already in place:
