@@ -1,14 +1,15 @@
 """Tables on the customer's own storage (L132) under storage credentials and external locations (L133), end to end.
 
 Real Azurite (Microsoft's Azure Storage emulator, over HTTPS on port 443 with production-style host names, as Trino's
-Azure file system requires), a real Cairn Store standing in for the customer's S3 (its STS stands in for AWS STS), real
+Azure file system requires; on a Docker network and address of its own, so whatever holds the machine's port 443 does
+not matter), a real Cairn Store standing in for the customer's S3 (its STS stands in for AWS STS), real
 Cairn Catalog asking a real Cairn API, and real Trino 484 acting for each person (``iceberg.rest-catalog.session=USER``:
 the catalog gives Trino a token per person, and every table, creation and vend is decided by Cairn for that person).
 
 Azurite serves the blob API only (no hierarchical namespace, no DFS endpoint), so the Azure location is a whole
 container and its SAS tokens are container SAS: per-table narrowing within a container (directory SAS, ``sr=d``)
 needs ADLS Gen2 and is checked here only by its signature (catalog unit tests). Needs docker and the store and catalog
-binaries; skipped when port 443 is taken."""
+binaries."""
 
 import base64
 import datetime
@@ -46,18 +47,38 @@ if _ready():
     from test_trino_e2e import cairn  # noqa: F401  (fixture)
 
 
-def _free(p: int) -> bool:
-    with socket.socket() as s:
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)    # a closed connection's TIME_WAIT is not a listener
+# Azurite's own address: a container on a Docker network of its own, which the host (the catalog, this test) and
+# Trino (on the host's network) reach directly. Port 443 on the machine itself may be anyone's.
+AZ_IP = ""
+
+
+def _azure_network(name: str) -> str:
+    """Makes the Docker network and returns the address Azurite takes in it (the first free /24 of a few)."""
+    global AZ_IP
+    last = ""
+    for third in (243, 241, 239, 237, 235):
+        r = subprocess.run(["docker", "network", "create", "--subnet", f"172.31.{third}.0/24", name],
+                           capture_output=True, text=True, timeout=60)
+        if r.returncode == 0:
+            AZ_IP = f"172.31.{third}.10"
+            return AZ_IP
+        last = r.stderr
+    raise AssertionError(f"no Docker network for Azurite: {last}")
+
+
+def _wait_tcp(host: str, p: int, seconds: float = 60) -> None:
+    end = time.time() + seconds
+    while True:
         try:
-            s.bind(("127.0.0.1", p))
-            return True
+            with socket.create_connection((host, p), timeout=2):
+                return
         except OSError:
-            return False
+            assert time.time() < end, f"nothing on {host}:{p}"
+            time.sleep(0.5)
 
 
 def _tls(d: str) -> None:
-    """A CA (ca.pem) and Azurite's certificate for 127.0.0.1 and *.blob/*.dfs.azurite.test."""
+    """A CA (ca.pem) and Azurite's certificate for its address and *.blob/*.dfs.azurite.test."""
     from cryptography import x509
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import ec
@@ -77,7 +98,7 @@ def _tls(d: str) -> None:
           .sign(ca_key, hashes.SHA256()))
     key = ec.generate_private_key(ec.SECP256R1())
     sans = [x509.DNSName(f"*.blob.{SUFFIX}"), x509.DNSName(f"*.dfs.{SUFFIX}"), x509.DNSName("localhost"),
-            x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]
+            x509.IPAddress(ipaddress.ip_address(AZ_IP))]
     cert = (x509.CertificateBuilder().subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "azurite")]))
             .issuer_name(ca_name).public_key(key.public_key()).serial_number(x509.random_serial_number())
             .not_valid_before(now - datetime.timedelta(minutes=5)).not_valid_after(now + datetime.timedelta(days=1))
@@ -97,7 +118,7 @@ class Azure:
     """Azurite over its path-style address, with an account SAS (the administrator's own access)."""
 
     def __init__(self, key: bytes, ca: str):
-        self.key, self.base = key, f"https://127.0.0.1:443/{ACCOUNT}"
+        self.key, self.base = key, f"https://{AZ_IP}:443/{ACCOUNT}"
         import ssl
 
         self.http = httpx.Client(verify=ssl.create_default_context(cafile=ca), timeout=30)
@@ -130,30 +151,32 @@ class Azure:
 
 @pytest.fixture(scope="module")
 def world(cairn, people):  # noqa: F811
-    if not _free(443):
-        pytest.skip("port 443 is taken (Trino's Azure file system reaches storage on 443 only)")
     import boto3
     from cairn.governance.abac import Policy, PolicyBundle, Target
 
     url, s = cairn
     d = tempfile.mkdtemp(prefix="ext-loc-")
     os.chmod(d, 0o755)
+    names = {"azurite": f"pt-azurite-{os.getpid()}", "trino": f"pt-trino-ext-{os.getpid()}"}
+    net = f"pt-azure-net-{os.getpid()}"
+    for n in names.values():
+        subprocess.run(["docker", "rm", "-f", n], capture_output=True, timeout=60)
+    subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=60)
+    _azure_network(net)
     _tls(d)
     account_key = os.urandom(64)
     keyfile = f"{d}/azure-account-key"                     # the storage credential's secret: a file the catalog reads
     open(keyfile, "w").write(base64.b64encode(account_key).decode())
     with open(f"{d}/azurite.env", "w") as fh:              # the emulator's account, never on a command line
         fh.write(f"AZURITE_ACCOUNTS={ACCOUNT}:{base64.b64encode(account_key).decode()}\n")
-    names = {"azurite": f"pt-azurite-{os.getpid()}", "trino": f"pt-trino-ext-{os.getpid()}"}
-    for n in names.values():
-        subprocess.run(["docker", "rm", "-f", n], capture_output=True, timeout=60)
-    subprocess.run(["docker", "run", "-d", "--rm", "--name", names["azurite"], "--network", "host", "--env-file", f"{d}/azurite.env",
-                    "-v", f"{d}:/certs:ro", AZURITE, "azurite-blob", "--blobHost", "127.0.0.1", "--blobPort", "443",
+    subprocess.run(["docker", "run", "-d", "--rm", "--name", names["azurite"], "--network", net, "--ip", AZ_IP,
+                    "--env-file", f"{d}/azurite.env",
+                    "-v", f"{d}:/certs:ro", AZURITE, "azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "443",
                     "--cert", "/certs/azurite.pem", "--key", "/certs/azurite-key.pem", "--inMemoryPersistence",
                     "--skipApiVersionCheck", "--loose", "--oauth", "basic"], check=True, capture_output=True, timeout=300)
     procs: list = []
     try:
-        wait(443, 60)
+        _wait_tcp(AZ_IP, 443, 60)
         az = Azure(account_key, f"{d}/ca.pem")
         for c in ("lake", "other", "spn"):
             az.make_container(c)
@@ -200,7 +223,7 @@ def world(cairn, people):  # noqa: F811
             assert r.status_code in ok, (path, r.status_code, r.text)
             return r.json() if r.content else None
         api("POST", "/v1/storage/credentials", {"name": "lake-azure", "provider": "azure", "secret_ref": f"file:{keyfile}",
-                                                "config": {"account": ACCOUNT, "endpoint": f"https://127.0.0.1:443/{ACCOUNT}",
+                                                "config": {"account": ACCOUNT, "endpoint": f"https://{AZ_IP}:443/{ACCOUNT}",
                                                            "hierarchical_namespace": False}})
         api("POST", "/v1/storage/credentials", {"name": "customer-s3", "provider": "s3", "secret_ref": f"file:{s3_secret}",
                                                 "config": {"role_arn": role_arn, "endpoint": store, "sts_endpoint": store,
@@ -213,7 +236,7 @@ def world(cairn, people):  # noqa: F811
         sp_secret = f"{d}/entra-client-secret"
         open(sp_secret, "w").write(entra.secret)
         api("POST", "/v1/storage/credentials", {"name": "lake-azure-sp", "provider": "azure", "secret_ref": f"file:{sp_secret}",
-                                                "config": {"account": ACCOUNT, "endpoint": f"https://127.0.0.1:443/{ACCOUNT}",
+                                                "config": {"account": ACCOUNT, "endpoint": f"https://{AZ_IP}:443/{ACCOUNT}",
                                                            "hierarchical_namespace": False, "auth": "service_principal",
                                                            "tenant_id": entra.tenant, "client_id": "cairn-catalog",
                                                            "authority_host": f"http://127.0.0.1:{entra.port}"}})
@@ -236,7 +259,7 @@ def world(cairn, people):  # noqa: F811
                    condition={"attr": "subject.urn", "op": "eq", "value": "urn:li:corpuser:bob"})]))
         # The catalog loads the registrations (every second here).
         from pyiceberg.catalog.rest import RestCatalog
-        cat = RestCatalog("admin", uri=catalog, token=CATALOG_TOKEN, **{"adls.blob-storage-authority": "127.0.0.1:443"})
+        cat = RestCatalog("admin", uri=catalog, token=CATALOG_TOKEN, **{"adls.blob-storage-authority": f"{AZ_IP}:443"})
         end = time.time() + 30
         while True:
             try:
@@ -258,6 +281,7 @@ def world(cairn, people):  # noqa: F811
             p.wait(15)
         for n in names.values():
             subprocess.run(["docker", "rm", "-f", n], capture_output=True, timeout=60)
+        subprocess.run(["docker", "network", "rm", net], capture_output=True, timeout=60)
         shutil.rmtree(d, ignore_errors=True)
 
 
@@ -322,7 +346,7 @@ def _start_trino(d: str, catalog: str, store: str, name: str):
         AZURE_ON, "azure.auth-type=DEFAULT", f"azure.endpoint={SUFFIX}",
         S3_ON, f"s3.endpoint={store}", "s3.region=us-east-1", "s3.path-style-access=true", ""]))
     subprocess.run(["docker", "run", "-d", "--rm", "--name", name, "--network", "host",
-                    "--add-host", f"{ACCOUNT}.blob.{SUFFIX}:127.0.0.1", "--add-host", f"{ACCOUNT}.dfs.{SUFFIX}:127.0.0.1",
+                    "--add-host", f"{ACCOUNT}.blob.{SUFFIX}:{AZ_IP}", "--add-host", f"{ACCOUNT}.dfs.{SUFFIX}:{AZ_IP}",
                     "-v", f"{d}/trino/catalog:/etc/trino/catalog:ro", "-v", f"{d}/trino/config.properties:/etc/trino/config.properties:ro",
                     "-v", f"{d}/trino/jvm.config:/etc/trino/jvm.config:ro", "-v", f"{d}/trino/truststore.p12:/etc/trino/truststore.p12:ro",
                     TRINO], check=True, capture_output=True, timeout=600)
