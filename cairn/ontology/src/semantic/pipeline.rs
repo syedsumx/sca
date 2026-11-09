@@ -612,15 +612,22 @@ impl Engine {
                     let mut slot = Slot::new(queue, position);
                     let t = &index.tables[position];
                     if let Some(done) = committed.get(&t.id) {
-                        // Resuming: this table committed before the run stopped; its names are claimed again in turn.
+                        // Resuming: this table committed before the run stopped. Its names are given again in turn,
+                        // from what the model proposed: a table before it that the stop skipped may own a name this
+                        // one took then, and the names must not depend on where a run was interrupted.
                         slot.enter().await;
-                        let mut n = names.lock().await;
-                        for term in &done.terms {
-                            n.allocate(&term.name, t);
-                        }
+                        let r = {
+                            let mut n = names.lock().await;
+                            rename(done.clone(), &mut n, t)
+                        };
+                        let stored = if r.terms.iter().map(|x| &x.name).ne(done.terms.iter().map(|x| &x.name)) {
+                            repo::put_table_result(&me.store, &run_id, position as i64, &r).await.map_err(|e| e.to_string())
+                        } else {
+                            Ok(())
+                        };
                         counters[2].fetch_add(1, Ordering::Relaxed);
                         slot.exit();
-                        return Ok::<(), String>(());
+                        return stored;
                     }
                     let _permit = workers.acquire().await.map_err(|e| e.to_string())?;
                     // Checked here, not before queueing: this is what turns a cancelled backlog into no-ops.
@@ -1020,5 +1027,39 @@ mod tests {
         let o = repo::published(&e.store).await.unwrap().unwrap();
         assert!(!o.terms.iter().any(|t| t.table_id == "D"));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn a_resumed_run_names_colliding_terms_as_an_uninterrupted_run_would() {
+        use crate::model::Column;
+        let dir = std::env::temp_dir().join(format!("onto-resume-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = engine(&dir);
+        let table = |id: &str, schema: &str| Table {
+            id: id.into(),
+            schema: schema.into(),
+            name: "orders".into(),
+            columns: vec![Column { name: "id".into(), data_type: "bigint".into(), ..Default::default() }],
+            ..Default::default()
+        };
+        // Only b exists at first: its Term is "Orders".
+        repo::put_tables(&e.store, &[table("B", "b")], &[]).await.unwrap();
+        let first = e.start("full", "tester", None).await.unwrap();
+        assert_eq!(finish(&e, &first.id).await.state, "completed");
+        let b_alone = repo::table_results(&e.store, &first.id).await.unwrap().remove("B").unwrap();
+        assert_eq!(b_alone.terms[0].name, "Orders");
+        // a comes first in commit order. A run stopped after committing b alone (a was skipped) left b with "Orders".
+        repo::put_tables(&e.store, &[table("A", "a")], &[]).await.unwrap();
+        let stopped = repo::create_run(&e.store, &crate::model::new_id("run"), "full", "tester").await.unwrap();
+        repo::put_table_result(&e.store, &stopped.id, 1, &b_alone).await.unwrap();
+        repo::set_run_state(&e.store, &stopped.id, "cancelled", &json!({}), None).await.unwrap();
+        // Resumed, a takes the plain name, as in a run that was never stopped, and b is qualified.
+        e.start("full", "tester", Some(&stopped.id)).await.unwrap();
+        let done = finish(&e, &stopped.id).await;
+        assert_eq!(done.state, "completed", "{:?}", done);
+        let o = repo::published(&e.store).await.unwrap().unwrap();
+        let name = |id: &str| o.terms.iter().find(|t| t.table_id == id).map(|t| t.name.clone()).unwrap();
+        assert_eq!(name("A"), "Orders");
+        assert_eq!(name("B"), "Orders (b.orders)");
     }
 }
