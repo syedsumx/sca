@@ -157,3 +157,54 @@ def test_the_main_pages_pass_axe(cairn):
             browser.close()
     assert not errors, errors
     assert not found, "axe found serious or critical problems:\n" + json.dumps(found, indent=1)
+
+
+def test_the_guided_experience_passes_axe(cairn):
+    """L128: the first-run role question, "Get started", the command palette open with results, the help panel open
+    and the keyboard shortcuts, each checked by axe as people see them."""
+    from playwright.sync_api import expect, sync_playwright
+
+    found: dict[str, list[dict]] = {}
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": ANA}, viewport={"width": 1440, "height": 900})
+        page = ctx.new_page()
+        errors: list[str] = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+
+        def check(name):
+            page.wait_for_load_state("networkidle")
+            bad = audit(page)
+            if bad:
+                found[name] = bad
+        try:
+            page.goto(f"{cairn}/host#/discover", wait_until="networkidle")
+            role = page.get_by_role("dialog", name="Welcome to Cairn. What do you mostly do here?")
+            expect(role).to_be_visible(timeout=20_000)
+            check("role question")
+            role.get_by_role("radio", name=re.compile("^Analyst")).check()
+            role.get_by_role("button", name="Continue").click()
+            page.goto(f"{cairn}/host#/get-started", wait_until="networkidle")
+            expect(page.get_by_text(re.compile(r"\d of 5 done"))).to_be_visible(timeout=20_000)
+            check("get started")
+            page.keyboard.press("Control+k")
+            box = page.get_by_role("combobox", name="Type a page, an action or a dataset…")
+            box.fill("sql")
+            expect(page.get_by_role("option").first).to_be_visible()
+            box.press("ArrowDown")
+            check("command palette")
+            box.press("Escape")
+            page.goto(f"{cairn}/host#/trust?tab=secret-scopes", wait_until="networkidle")
+            page.get_by_role("button", name="Help for this page").first.click()
+            expect(page.locator(".ant-drawer-content").last.get_by_role("heading", name="Secret scopes")).to_be_visible(
+                timeout=10_000)
+            check("help panel")
+            page.keyboard.press("Escape")
+            page.locator("main").click(position={"x": 5, "y": 5})
+            page.keyboard.press("?")
+            expect(page.get_by_role("dialog", name="Keyboard shortcuts")).to_be_visible()
+            check("keyboard shortcuts")
+        finally:
+            browser.close()
+    assert not errors, errors
+    assert not found, "axe found serious or critical problems:\n" + json.dumps(found, indent=1)

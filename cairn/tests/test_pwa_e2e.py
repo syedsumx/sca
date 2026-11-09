@@ -212,6 +212,9 @@ def test_phone_width_layouts_and_profile_accessibility(cairn):
                 wide[path] = _overflow(page)
         # The sidebar is a drawer: hidden until the menu button opens it.
         page.goto(f"{url}/cairn-ui/app.html#/discover")
+        # A first visit to the home page asks the person's role (L128); "Not now" is an answer.
+        page.get_by_role("dialog", name="Welcome to Cairn. What do you mostly do here?").get_by_role(
+            "button", name="Not now").click()
         menu = page.get_by_role("button", name="Menu")
         assert menu.is_visible()
         side = page.locator("aside").first

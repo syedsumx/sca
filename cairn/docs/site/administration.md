@@ -1169,6 +1169,60 @@ script against an HTTPS mirror (`tests/test_cli_install_script.py`). Not tested 
 Windows and Linux arm64 (the release workflow builds and smoke-tests them on GitHub's runners), signing (off until its
 secrets exist), and the OS keychains themselves (macOS Keychain, Windows Credential Manager, Secret Service).
 
+## The guided experience: onboarding, capabilities and help
+
+New people are asked their role the first time they open the home page (Analyst, Data engineer, Data steward, Admin,
+or Just exploring; the profile's own role suggests one), and get a **Get started** checklist for it, a sidebar for
+that role, the command palette (⌘K / Ctrl+K) and a help panel on every page. The person's side is described in
+[Getting started](getting-started.html) (“A guided start”); this is the operator's side.
+
+**Where it is kept.** A person's onboarding progress (`role`, the steps `done`, `dismissed`, `asked`) and sidebar
+choices (`pinned`, `hidden`, `show_all`) are the `ui` field of their profile (`GET`/`PUT /v1/me/profile`, column
+`cairn_profiles.ui`, migration 0137), so they follow the person to every browser, Cairn Desktop and their phone. A
+`PUT` with `{"ui": {"onboarding": {...}}}` changes only the parts it names. Step ids are lowercase words (at most 60),
+sidebar entries app paths (at most 80); anything else is refused with 422. Like the rest of the profile it is a
+person's own: agents and services cannot read or write it.
+
+**Steps tick themselves** by what the API shows the person, asked as them: a saved query or dashboard they own, a
+query in their SQL history, a flow they own (with a schedule), a quality monitor, an accepted or dismissed ontology
+proposal, an access request they decided, an AI gateway route, a budget. Visiting a dataset's page and getting an
+answer from the assistant tick their steps in the browser. Steps with nothing to detect (single sign-on, groups,
+policies, a glossary term, an owner) are ticked by hand. A check the person may not make counts as not done.
+
+**Turning it off.** `PUT /v1/ui/settings` with `{"onboarding": false}` (or **Settings → Guided start**, for
+admins) stops the role question and hides **Get started** for everyone; `{"onboarding": true}` turns them back on.
+Changing it needs `MANAGE_GLOBAL_SETTINGS` (decided by the policy engine; when it can't decide, the change is
+refused). `GET /v1/ui/settings` answers anyone signed in, and `GET /ui/config` carries the setting as
+`features.onboarding`. Each change is audited (`ui.settings.updated`, category `identity`). The settings are kept in
+`cairn_ui_settings`; people's progress is kept, so turning it on again picks up where they were.
+
+**Capabilities.** `GET /v1/me/capabilities` tells the signed-in person which platform privileges they hold, decided
+by the policy engine for them at that moment: `MANAGE_POLICIES` (also `is_admin`), `MANAGE_GLOBAL_SETTINGS`,
+`MANAGE_SYSTEM_OPERATIONS`, `MANAGE_INGESTION`, `MANAGE_GLOSSARIES`, `MANAGE_DATABASE`, `MANAGE_ML_MODEL`,
+`MANAGE_FINETUNE`, `MANAGE_DATA_APP`, `MANAGE_VOLUMES`, `USE_AI_GATEWAY`, `USE_AGENT` and `RUN_JOBS`, with
+`features.onboarding`. It fails closed: a privilege the engine can't decide (an error, a timeout) is reported as not
+held. People only (agents and service tokens get 403). The UI uses it to leave out what a person can't use at all:
+the Governance studio without `MANAGE_POLICIES`; hub tabs whose list the API refuses without a privilege (data
+residency, tokenisation, SIEM export and storage without `MANAGE_POLICIES`; sample datasets, security posture,
+limits, all AI usage, chargeback, the AI gateway's models and table maintenance without `MANAGE_SYSTEM_OPERATIONS`;
+notification routes without `MANAGE_GLOBAL_SETTINGS`); a hub with no usable tab leaves the sidebar. While the answer
+is not known, those entries are left out. **Hiding is never the control**: every endpoint still decides each request,
+and a person who types an address they may not use is refused by the API. Everyone keeps **Cost & usage → Your
+usage** (their own AI calls, tokens and cost, `GET /ai/usage?mine=true`).
+
+**Help** is the section of these docs about the page or hub tab on screen (each platform area's `docs` anchor, and a
+topic per purpose-built page in `ui/src/consumer/guide/help-topics.json`). The sections are bundled into the app when
+it is built (`node scripts/build-help.mjs`, checked by `npm test`), so help opens with no server, in the offline demo
+too. **Open full docs** opens `/docs/…`; **Ask the assistant about this page** starts a question naming the page.
+
+Tested: the profile's `ui` (round trip, partial updates, validation, people only), capabilities (an admin, a person,
+a policy engine that fails, agents and services refused) and the workspace switch (403 without the privilege, 422
+for bad values, `/ui/config` and capabilities follow, audited) through a real Cairn over HTTP
+(`tests/test_profiles.py`); in Chromium against a real Cairn (`tests/test_tasks_ui_e2e.py`): the role question, the
+checklist ticking steps from the API, the palette, help, shortcuts, the sidebar customised and undone, Bob's
+sidebar without the operators' areas, and the fifteen common tasks; axe on the role question, **Get started**, the
+open palette, the help panel and the shortcuts (`tests/test_accessibility_e2e.py`).
+
 ## Excel and Google Sheets
 
 Cairn for Excel (an Office add-in) and Cairn for Google Sheets (an Apps Script add-on) put governed answers in
