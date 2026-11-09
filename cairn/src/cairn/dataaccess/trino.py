@@ -283,6 +283,17 @@ class TrinoAccess:
         # external_catalog(catalog): a registered external Iceberg catalog -> {platform, database, writable};
         # None: not one (cairn.dataaccess.external_catalogs). It raises when it cannot tell (refused).
         self.external_catalog: Optional[Callable[[str], Optional[dict]]] = None
+        # system_tables: Cairn's system tables (cairn.dataaccess.system_tables): read-only, a person's own rows unless an
+        # operator, statement text masked without VIEW_QUERY_TEXT; None: not in use.
+        self.system_tables: Optional[Any] = None
+
+    def _system_spec(self, catalog: str, schema: str, table: str):
+        """The system table (its spec) a Trino table is, or None."""
+        st = self.system_tables
+        return None if st is None else st.spec_of(str(catalog or ""), str(schema or ""), str(table or ""))
+
+    def _in_system_catalog(self, catalog: str) -> bool:
+        return self.system_tables is not None and str(catalog or "") == self.system_tables.trino_catalog
 
     def _decided_on(self, t: dict, need: str) -> str:
         """The urn a read or view of ``t`` is decided on: a published metric view's source table, else ``t``."""
@@ -510,6 +521,8 @@ class TrinoAccess:
         if op in ("ViewQueryOwnedBy", "KillQueryOwnedBy"):
             return (res.get("user") or {}).get("user") == user or self.allowed(actor, groups, SYSTEM, None)
         if op in SCHEMA_OPS:
+            if self._in_system_catalog(str((res.get("schema") or {}).get("catalogName") or "")):
+                return False                           # the system catalog is Cairn's to change
             try:
                 if self._read_only(str((res.get("schema") or {}).get("catalogName") or "")):
                     return False
@@ -528,6 +541,9 @@ class TrinoAccess:
             if (t.get("schemaName") == "information_schema" or t.get("catalogName") == "system") and TABLE_OPS[op] in (VIEW, READ):
                 return True
             name = str(t.get("tableName") or "")
+            if TABLE_OPS[op] not in (VIEW, READ) and self._in_system_catalog(str(t.get("catalogName") or "")):
+                logger.info("%s on %s refused: system tables are read-only", op, self._tkey(t))
+                return False
             if TABLE_OPS[op] not in (VIEW, READ):
                 try:
                     if self._read_only(str(t.get("catalogName") or "")):
@@ -665,6 +681,9 @@ class TrinoAccess:
             if not expr:
                 return [{"expression": "false"}]  # a filter without an expression: nothing passes
             out.append({"expression": expr.replace("{user}", quote(user))})
+        spec = self._system_spec(t.get("catalogName", ""), t.get("schemaName", ""), t.get("tableName", ""))
+        if spec is not None and spec.owner_filtered and not self.allowed(actor, groups, SYSTEM, None):
+            out.append({"expression": f"user_name = {quote(user)}"})   # a person's own rows (fails closed: theirs)
         consent = getattr(self, "consent", None)  # (actor, urn, dialect, groups) -> filters (cairn.governance.consent)
         if consent is not None:
             try:
@@ -677,11 +696,18 @@ class TrinoAccess:
     def column_mask(self, inp: dict) -> Optional[dict]:
         if self._room_tables(self.who(inp.get("context"))[0].removeprefix("urn:li:corpuser:")) is not None:
             return None
-        actor, _ = self.who(inp.get("context"))
+        actor, groups = self.who(inp.get("context"))
         col = ((inp.get("action") or {}).get("resource") or {}).get("column") or {}
         if not col or "$" in str(col.get("tableName") or ""):
             return None                               # metadata tables: no row values (or managers only)
         urn = self.urn(col.get("catalogName", ""), col.get("schemaName", ""), col.get("tableName", ""))
+        spec = self._system_spec(col.get("catalogName", ""), col.get("schemaName", ""), col.get("tableName", ""))
+        if spec is not None and col.get("columnName", "") in spec.sensitive:
+            from cairn.dataaccess.system_tables import TEXT_PRIVILEGE
+
+            if not self.allowed(actor, groups, TEXT_PRIVILEGE, urn):   # fails closed: masked
+                return {"expression": mask_expression(col.get("columnName", ""), col.get("columnType", "varchar"),
+                                                      "redact")}
         try:
             plan = self.plan_for(actor, urn)
         except Exception as e:  # fail closed

@@ -56,6 +56,35 @@ it('browses, runs as the caller, keeps history, saves and shares', async () => {
     expect(saved).toMatchObject({ shared: true, name: 'Orders by region' });
 });
 
+it('lists the system tables when they are set up, and inserts one on double-click', async () => {
+    const { client } = makeClient({
+        'GET /ui/config': UI_CONFIG,
+        'GET /data/sources': [{ connection: 'trino', platform: 'trino', database: null }],
+        'GET /sql/schema': [],
+        'GET /sql/history': [],
+        'GET /sql/saved': [],
+        'GET /v1/system-tables': {
+            catalog: 'cairn_system', interval_seconds: 60, freshness_seconds: 120,
+            tables: [{ name: 'cairn_system.query.history', schema: 'query', table: 'history', retention_days: 90,
+                       description: 'Queries Trino ran.', row_filtered: true, masked_columns: ['statement'],
+                       columns: [{ name: 'user_name', type: 'string', description: 'The person.' },
+                                 { name: 'statement', type: 'string', description: 'The SQL.' }] }],
+        },
+    });
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <SqlWorkspacePage />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
+    const name = await screen.findByText('cairn_system.query.history');
+    expect(screen.getByText('System tables')).toBeTruthy();
+    expect(screen.getByText(/fresh within 2 min/)).toBeTruthy();
+    fireEvent.doubleClick(name);
+    expect((screen.getByLabelText('SQL') as HTMLTextAreaElement).value).toBe('cairn_system.query.history');
+});
+
 it('writes CSV with quoting', () => {
     expect(toCsv(['a', 'b'], [['x,y', 'he said "hi"'], [null, 2]])).toBe('a,b\r\n"x,y","he said ""hi"""\r\n,2');
 });

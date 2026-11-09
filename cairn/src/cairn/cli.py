@@ -203,6 +203,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.ml_monitoring.run_due)     # model monitors: drift and accuracy checks, retention
     if getattr(s, "budgets", None) is not None:
         sch.extra.append(s.budgets.run_due)           # cost budgets: thresholds and forecasts, hourly
+    if getattr(s, "system_tables", None) is not None:
+        sch.extra.append(s.system_tables.run_due)     # system tables: synced every CAIRN_SYSTEM_TABLES_INTERVAL_SECONDS
     sch.run_forever()
 
 

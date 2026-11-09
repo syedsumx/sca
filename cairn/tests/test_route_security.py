@@ -44,7 +44,8 @@ def app(tmp_path, monkeypatch, graph):
     for k, v in {"CAIRN_PIPES_STORE": json.dumps({"endpoint": "http://127.0.0.1:1"}),
                  "CAIRN_PIPES_CATALOG": json.dumps({"uri": "http://127.0.0.1:1"}),
                  "CAIRN_STREAMS_ENABLED": "true", "CAIRN_MAINTENANCE_CONNECTION": "lakehouse",
-                 "CAIRN_TRINO_ACCESS_KEY": "k" * 32, "CAIRN_TRINO_CATALOGS": '{"lakehouse": {"platform": "iceberg"}}'}.items():
+                 "CAIRN_TRINO_ACCESS_KEY": "k" * 32, "CAIRN_TRINO_CATALOGS": '{"lakehouse": {"platform": "iceberg"}}',
+                 "CAIRN_SYSTEM_TABLES_CATALOG": json.dumps({"uri": "http://127.0.0.1:1"})}.items():
         monkeypatch.setenv(k, v)
     # Production settings: no trusted actor header.
     s = build_services(Settings(database_url=f"sqlite:///{tmp_path}/c.db", service_token="svc-secret",

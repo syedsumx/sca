@@ -3,7 +3,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { BiAssetButtons } from '../components/BiAdmin';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
-import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun } from '../api/types';
+import type { ChartSpec, DataResult, SavedQuery, SchemaTable, SqlRun, SystemTablesInfo } from '../api/types';
 import { ResultChart, toCsv } from '../components/ResultChart';
 import { CHART_TYPES } from '../api/types';
 import { SqlEditor } from '../components/SqlEditor';
@@ -36,6 +36,10 @@ export function SqlWorkspacePage() {
 
     const schema = useDheQuery<SchemaTable[]>(`/sql/schema?${connection ?? ''}`, (c, signal) =>
         connection ? c.sqlSchema(connection, { signal }) : Promise.resolve([]),
+    );
+    // Cairn's system tables (cairn_system.*): listed when they are set up; read like any table.
+    const system = useDheQuery<SystemTablesInfo | null>('/v1/system-tables', (c, signal) =>
+        c.systemTables({ signal }).catch(() => null),
     );
     const history = useDheQuery<SqlRun[]>(`/sql/history#${tick}`, (c, signal) => c.sqlHistory({ signal }));
     const saved = useDheQuery<SavedQuery[]>(`/sql/saved#${tick}`, (c, signal) => c.savedQueries({ signal }));
@@ -128,6 +132,41 @@ export function SqlWorkspacePage() {
                             </Collapse.Panel>
                         ))}
                     </Collapse>
+                    {system.data && system.data.tables.length > 0 && (
+                        <div style={{ marginTop: 12 }} data-testid="system-tables">
+                            <strong>System tables</strong>
+                            <Muted style={{ display: 'block', fontSize: 12 }}>
+                                Cairn&apos;s own data, fresh within {Math.round(system.data.freshness_seconds / 60)} min.
+                                Run on a Trino connection.
+                            </Muted>
+                            <Collapse>
+                                {system.data.tables.map((t) => (
+                                    <Collapse.Panel
+                                        key={t.name}
+                                        header={
+                                            <span
+                                                onDoubleClick={() => setSql((s) => `${s}${s && !s.endsWith(' ') ? ' ' : ''}${t.name}`)}
+                                                title={`${t.description} Double-click to insert.`}>
+                                                {t.name}
+                                            </span>
+                                        }>
+                                        <Muted style={{ display: 'block', marginBottom: 4 }}>
+                                            {t.description}
+                                            {t.row_filtered ? ' You see your own rows unless you are an operator.' : ''}
+                                        </Muted>
+                                        <ul style={{ margin: 0, paddingLeft: 16 }}>
+                                            {t.columns.map((c) => (
+                                                <li key={c.name} title={c.description}>
+                                                    {c.name} <Muted>{c.type}</Muted>
+                                                    {t.masked_columns.includes(c.name) && <Tag style={{ marginLeft: 4 }}>masked</Tag>}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                    </Collapse.Panel>
+                                ))}
+                            </Collapse>
+                        </div>
+                    )}
                 </Surface>
                 <div>
                     <Surface>

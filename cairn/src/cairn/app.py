@@ -275,6 +275,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
             from cairn.dataaccess.external_catalogs import build_external_catalogs_router
 
             app.include_router(build_external_catalogs_router(services.external_catalogs, cp, authz))
+        if getattr(services, "system_tables", None) is not None:   # Cairn's operational data as SQL tables
+            from cairn.dataaccess.system_tables import build_router as build_system_tables_router
+
+            app.include_router(build_system_tables_router(services.system_tables, cp, authz))
         if services.query_history is not None:
             from cairn.dataaccess.query_history import build_queries_router
 

@@ -2084,6 +2084,70 @@ Every finished Trino query, on the shared coordinator and on team warehouses, is
   - a git folder was linked and pulled, then a change made in Cairn was pushed to a new branch, never to `main`;
   - query insight showed only the person's own queries, slowest first, with the queue, `SELECT *` and unbounded-sort hints.
 
+## System tables
+
+Cairn's operational data is queryable in Trino as the catalog `cairn_system` (the user guide: [System tables](system-tables.html)).
+
+**How it works.** Cairn materialises the data into Iceberg tables of a Cairn Catalog of their own, on Cairn Store, and Trino reads them like any Iceberg catalog. The scheduler's leader (`cairn scheduler`) syncs them.
+
+- **Why not a view over Cairn's database.** Trino never gets credentials to Cairn's database, and nothing reads it at query time. Lineage (kept in the metadata graph) and team costs (computed) are included. The tables keep history longer than the sources (query history keeps 30 days). Every sync is an Iceberg snapshot, so the tables carry a change feed.
+- **Appended tables** (`audit.events`, `access.decisions`, `query.history`) take new rows by key, from a watermark kept on each snapshot. **Recomputed tables** (the others) are rebuilt over the retention window and replaced only when their content changed. Every row has `synced_at`. A table that fails to sync is retried next time; the others go on.
+- **Freshness.** A sync runs every `CAIRN_SYSTEM_TABLES_INTERVAL_SECONDS` (60). A change is in its table within that interval plus 60 seconds: two minutes by default.
+- **Retention.** `CAIRN_SYSTEM_TABLES_RETENTION_DAYS` (90) for new tables. Per table, `PUT /v1/system-tables/<schema>/<table>/retention` with `{"days": n}` (1 to 3650; `MANAGE_SYSTEM_OPERATIONS`; audited) sets it on the table (`system-table.retention-days`) and deletes older rows at once. Snapshots older than a day are expired hourly.
+- **Status and control.** `GET /v1/system-tables` lists the tables with their columns, governance, retention and last sync. `POST /v1/system-tables/sync` (operators) syncs now.
+
+**Setting it up.** The chart does not deploy it yet. By hand:
+
+1. Run a second Cairn Catalog (the same image as `cairn.catalog`) with its own state, on the same store, for example `CAIRN_CATALOG_WAREHOUSE=s3://lakehouse/cairn-system`. Give it two tokens: one for Cairn (`CAIRN_CATALOG_TOKEN`), and a read-only one for Trino (`CAIRN_CATALOG_TOKENS_FILE`: `[{"token": "...", "name": "trino", "namespaces": [], "read_only": true}]`). Keep both in Kubernetes Secrets.
+2. On the API and the scheduler, set `CAIRN_SYSTEM_TABLES_CATALOG` to a file (from a Secret) with the catalog's pyiceberg properties: `{"uri": "http://cairn-system-catalog:8181", "token": "...", "s3.endpoint": "...", "s3.access-key-id": "...", "s3.secret-access-key": "...", "s3.region": "us-east-1", "s3.path-style-access": "true"}`. Trino must also be set up for Cairn (`CAIRN_TRINO_ACCESS_KEY`).
+3. Give Trino a catalog file `cairn_system.properties`: `connector.name=iceberg`, `iceberg.catalog.type=rest`, `iceberg.rest-catalog.uri=<the second catalog>`, `iceberg.rest-catalog.security=OAUTH2`, `iceberg.rest-catalog.oauth2.token=${ENV:CAIRN_SYSTEM_CATALOG_TOKEN}` (the read-only token), and the store settings of the lakehouse catalog.
+4. Grant the tables (below).
+
+`CAIRN_SYSTEM_TABLES_TRINO_CATALOG` renames the catalog (default `cairn_system`). Its tables are the datasets `urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.<schema>.<table>,PROD)`; Cairn adds that mapping to `CAIRN_TRINO_CATALOGS` itself and refuses to start if you map the name otherwise. Each table is published to the catalog with its description and column descriptions (also as Iceberg comments, which Trino shows in `SHOW COLUMNS`).
+
+**Governance.** The system tables are governed like any table, plus built-in rules that hold whatever the policies say:
+
+- **Access.** Seeing and reading a table needs `VIEW_ENTITY_PAGE` and `VIEW_DATASET_PROFILE` on it. Without a grant, the tables are hidden and reads are refused. For example, to let everyone in `analysts` read them:
+
+  ```yaml
+  - id: system-tables-readers
+    effect: allow
+    actions: [VIEW_ENTITY_PAGE, VIEW_DATASET_PROFILE]
+    target: {resource_urns: ["urn:li:dataset:(urn:li:dataPlatform:iceberg,cairn_system.*"]}
+    condition: {attr: subject.groups, op: contains, value: "urn:li:corpGroup:analysts"}
+  ```
+
+  Grant `lineage.*` only to people who may see the whole lineage graph: it names every table.
+- **A person's own rows.** In tables with a `user_name` column (`audit.events`, `access.decisions`, `query.history`, `billing.usage`, `jobs.runs`), a person sees only rows with their own name. With `MANAGE_SYSTEM_OPERATIONS` they see all. Rows without a person (table, team and run costs) are for operators only.
+- **SQL text.** `statement` and `error` in `query.history` are redacted (`••••`) unless the reader holds `VIEW_QUERY_TEXT` on the table, even for their own queries. A filter on a masked column sees the mask. `statement_hash` and `fingerprint` stay readable.
+- **Read-only.** Inserts, updates, deletes, drops, table procedures and schema changes in `cairn_system` are refused for everyone, operators included. Only Cairn writes them, with its own catalog token.
+- **Fail closed.** When a decision cannot be had, the row filter applies and the columns stay masked. Other policies (masks, row filters) apply too.
+
+**Schemas.** Times are UTC (`timestamp(6) with time zone`), `strings` is `array(varchar)`, and every table ends with `synced_at` (when Cairn wrote the row).
+
+| Table | Columns |
+|---|---|
+| `audit.events` | `seq` bigint (position in the chain), `event_id`, `ts`, `category`, `action`, `actor` (URN), `user_name`, `subject`, `details` (JSON), `prev_hash`, `hash` |
+| `access.decisions` | `seq`, `ts`, `actor`, `user_name`, `privilege`, `resource_urn`, `decision` (`DENY`), `policies` (strings). Only refusals by an explicit deny policy are recorded (allowed decisions are not) |
+| `query.history` | `query_id`, `user_name`, `source`, `state`, `error_code`, `error` (masked), `statement` (masked), `statement_hash` (sha256), `fingerprint`, `tables` (strings: dataset URNs), `created_at`, `ended_at`, `wall_ms`, `cpu_ms`, `queued_ms`, `input_bytes`, `input_rows`, `output_rows`, `peak_memory_bytes`, `warehouse`, `cost_usd` (at `CAIRN_COST_TRINO_USD_PER_CPU_HOUR` and `_PER_TB_SCANNED`; null when not priced) |
+| `billing.usage` | `day` (date), `kind` (`query`: a person's queries on a warehouse; `table`: storage and compute of a dataset; `team`: `/reports/costs/teams`; `run`: an engine run or a warehouse report; `ai`: AI usage), `user_name`, `team`, `warehouse`, `table_urn`, `job`, `model`, `queries`, `cpu_ms`, `scanned_bytes`, `storage_bytes`, `input_tokens`, `output_tokens`, `cost_usd`. Kinds overlap (a team row adds up its people's queries): sum one kind at a time |
+| `lineage.table_lineage` | `downstream_urn`, `upstream_urn`, `lineage_type` (`JOB` when recorded from a job or a Trino query), `job_urn` |
+| `lineage.column_lineage` | `downstream_urn`, `downstream_column`, `upstream_urn`, `upstream_column`, `transform`, `job_urn` |
+| `compute.warehouse_events` | `event_time`, `warehouse`, `event` (`usage`: a report from the warehouse proxy; `started`: started by hand), `period_start`, `period_end`, `nodes` (the period's average), `node_seconds`, `cost_usd` (at `CAIRN_COST_WAREHOUSE_USD_PER_NODE_HOUR`), `actor`. The proxy scales workers with the load and reports node-seconds; it does not report each scaling step |
+| `jobs.runs` | `run_id`, `kind` (`flow`, `job`, `sql_workflow`), `name`, `user_name` (who started it, else its owner), `run_as`, `trigger`, `status`, `created_at`, `started_at`, `finished_at`, `duration_ms`, `error` |
+
+**Tested** with a real Trino 484, Cairn Store and two Cairn Catalogs (`tests/test_system_tables_e2e.py`, the `trino` CI job). The test generated queries, a refused read, a flow run, posted costs, AI usage, a warehouse report and a `CREATE TABLE AS` (lineage), then queried every table through Trino:
+
+- the rows were there within the documented bound;
+- an operator saw everyone's rows and the SQL, the hash chain, each cost kind, the warehouse report, the flow run, and table and column lineage;
+- a person saw only their own rows, with the SQL masked, and a filter on it found nothing; the user guide's examples ran as written;
+- someone without a grant was refused, and the tables were hidden from them;
+- writes, deletes, drops and schema creation were refused for an operator and a person;
+- the descriptions were in Trino and in the catalog;
+- retention deleted a ten-day-old row at once, and later syncs appended nothing twice.
+
+`tests/test_system_tables.py` covers the decisions, including failing closed.
+
 ## Warehouses: a Trino per team, stopped when idle
 
 A warehouse is a Trino of a team's own: its own size, its own queue, its own bill. The same catalogs and Cairn's policies apply. The warehouse proxy (`cairn warehouses`) sits in front, with one port per warehouse.

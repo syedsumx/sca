@@ -107,6 +107,7 @@ import type {
     DashboardAction,
     ReportSchedule,
     SchemaTable,
+    SystemTablesInfo,
     SqlAlert,
     SqlRun,
     AgentCall,
@@ -1190,6 +1191,11 @@ export class ConsumerClient extends CairnClient {
 
     sqlSchema(connection: string, opts?: RequestOptions) {
         return this.request<SchemaTable[]>('GET', '/sql/schema', undefined, { ...opts, query: { connection } });
+    }
+
+    /** Cairn's system tables in Trino (404 when they are not set up). */
+    systemTables(opts?: RequestOptions) {
+        return this.request<SystemTablesInfo>('GET', '/v1/system-tables', undefined, opts);
     }
 
     savedQueries(opts?: RequestOptions) {

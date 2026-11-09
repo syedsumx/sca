@@ -754,6 +754,24 @@ export interface SchemaTable {
     columns: { name: string; type: string }[];
 }
 
+/** Cairn's operational data as Trino tables (GET /v1/system-tables): audit, decisions, queries, costs, lineage,
+ * warehouse usage and runs, read like any table (row filters and masks apply). */
+export interface SystemTablesInfo {
+    catalog: string;
+    interval_seconds: number;
+    freshness_seconds: number;
+    tables: {
+        name: string;
+        schema: string;
+        table: string;
+        description: string;
+        row_filtered: boolean;
+        masked_columns: string[];
+        retention_days: number;
+        columns: { name: string; type: string; description: string }[];
+    }[];
+}
+
 /** A dashboard: saved queries shown with their charts (GET /sql/dashboards). */
 export interface Dashboard {
     id: string;

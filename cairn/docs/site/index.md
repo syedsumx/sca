@@ -12,6 +12,7 @@ access governance, a data marketplace, context agents and an AI assistant on top
 |---|---|
 | Find data, follow assets and discuss them | [Getting started](getting-started.html) |
 | Watch data for freshness, volume and drift | [Data quality](data-quality.html) |
+| Query Cairn's own data: queries, costs, audit, lineage, runs | [System tables](system-tables.html) |
 | Control who sees what, mask PII, certify assets | [Governance](governance.html) |
 | Publish data products and grant access without tickets | [Marketplace](marketplace.html) |
 | Let agents document data and answer questions | [Context and AI](context-and-ai.html) |

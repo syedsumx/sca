@@ -155,6 +155,7 @@ class Services:
     ml: Optional[Any] = None
     notebooks: Optional[Any] = None
     query_history: Optional[Any] = None
+    system_tables: Optional[Any] = None
     trino_functions: Optional[Any] = None
     change_feed: Optional[Any] = None
     vectors: Optional[Any] = None
@@ -1842,7 +1843,22 @@ def _build_data_access(s: Services) -> None:
 
         ai_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_AI_CATALOGS", "llm").split(",") if c.strip()}
         routine_catalogs = {c.strip() for c in os.environ.get("CAIRN_TRINO_ROUTINE_CATALOGS", "routines").split(",") if c.strip()}
+        # System tables (cairn.dataaccess.system_tables): Cairn's operational data as Trino tables, governed here.
+        from cairn.dataaccess.system_tables import SystemTables
+
+        s.system_tables = SystemTables.from_env(s.engine, s.graph,
+                                                lambda u: [str(g) for g in (s.attributes.subject(u).get("groups") or [])],
+                                                audit=s.audit)
+        if s.system_tables is not None:
+            from cairn.dataaccess.trino import CatalogMapping
+
+            name = s.system_tables.trino_catalog
+            want = CatalogMapping(platform="iceberg", database=name)
+            if name in catalogs and (catalogs[name].platform, catalogs[name].database) != ("iceberg", name):
+                raise ValueError(f"CAIRN_TRINO_CATALOGS[{name}] is the system tables' catalog: leave it out")
+            catalogs[name] = want
         s.trino_access = TrinoAccess(decide, masking.plan, catalogs, ai_catalogs, routine_catalogs)
+        s.trino_access.system_tables = s.system_tables
         s.trino_access.checked = s.checked_queries.lookup
         s.trino_key = trino_key
         # Query history, profiles and tuning hints, from the same events as usage statistics.
