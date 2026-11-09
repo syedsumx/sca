@@ -67,6 +67,41 @@ variable "secrets" {
   sensitive   = true
 }
 
+variable "licence" {
+  description = <<-EOT
+    Cairn's licence key (the text of the licence file), installed from a Kubernetes Secret the chart reads
+    (cairn.licence.existingSecret) when Cairn starts and whenever it changes. Sensitive: give it from TF_VAR_licence,
+    a secrets manager's data source or licence_file, never in a .tf file. It lands in Terraform's state: keep the
+    state encrypted and access-controlled. Null (and licence_file null): Cairn runs without one (evaluation mode,
+    or read-only when licence_required).
+  EOT
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
+variable "licence_file" {
+  description = "A file holding the licence key, instead of licence (a path on the machine running Terraform)."
+  type        = string
+  default     = null
+  validation {
+    condition     = var.licence_file == null || can(file(var.licence_file))
+    error_message = "licence_file: a readable file."
+  }
+}
+
+variable "licence_required" {
+  description = "Cairn is read-only until a valid licence is installed (hosted tenants); false: evaluation mode without one."
+  type        = bool
+  default     = false
+}
+
+variable "licence_tenant_id" {
+  description = "The tenant the licence must be bound to (a licence bound to another tenant is refused); empty: any."
+  type        = string
+  default     = ""
+}
+
 variable "tenants" {
   description = <<-EOT
     Hosted tenants, by id: each a release of the chart in namespace cairn-<id> with the tenant profile
@@ -91,6 +126,16 @@ variable "tenants" {
 variable "tenant_secrets" {
   description = "Each tenant's Secrets, by tenant id then Secret name (the licence, cairn-secrets, ...). Sensitive."
   type        = map(map(map(string)))
+  default     = {}
+  sensitive   = true
+}
+
+variable "tenant_licences" {
+  description = <<-EOT
+    Each hosted tenant's licence key, by tenant id (a key of tenants): the Secret cairn-licence in the tenant's
+    namespace, required by its release and bound to the tenant id. Sensitive, like licence.
+  EOT
+  type        = map(string)
   default     = {}
   sensitive   = true
 }

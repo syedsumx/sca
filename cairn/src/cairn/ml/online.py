@@ -264,6 +264,20 @@ class OnlineFeatures:
             raise FeatureError(f"{name} is not served online", 404)
         return self._public(c)
 
+    def list(self, p) -> list[dict]:
+        """The feature tables served online whose source the caller may see (``GET /v1/ml/online-feature-tables``)."""
+        with self.engine.connect() as conn:
+            rows = [dict(r._mapping) for r in conn.execute(select(online_feature_tables)
+                                                           .order_by(online_feature_tables.c.name))]
+        out = []
+        for c in rows:
+            try:
+                self.features.get(p, c["name"])
+            except FeatureError:
+                continue
+            out.append({"feature_table": c["name"], **self._public(c)})
+        return out
+
     def _public(self, c: dict) -> dict:
         return {"name": c["name"], "timestamp_column": c["timestamp_column"], "ttl_seconds": c["ttl_seconds"],
                 "enabled": c["enabled"], "created_by": c["created_by"], "synced_ms": c["synced_ms"],
@@ -461,7 +475,7 @@ def build_online_router(store: OnlineFeatures, current_principal) -> Any:
     from fastapi import APIRouter, Body, Depends, HTTPException
     from starlette.concurrency import run_in_threadpool
 
-    router = APIRouter(prefix="/v1/ml/feature-tables", tags=["ml"])
+    router = APIRouter(prefix="/v1/ml", tags=["ml"])
 
     async def call(fn):
         try:
@@ -474,23 +488,27 @@ def build_online_router(store: OnlineFeatures, current_principal) -> Any:
             raise HTTPException(403, "features are looked up as a person or a pipeline user")
         return p
 
-    @router.get("/{name}/online")
+    @router.get("/online-feature-tables")
+    async def list_(p=Depends(current_principal)):
+        return {"online": await call(lambda: store.list(p))}
+
+    @router.get("/feature-tables/{name}/online")
     async def status(name: str, p=Depends(current_principal)):
         return await call(lambda: store.status(p, name))
 
-    @router.put("/{name}/online")
+    @router.put("/feature-tables/{name}/online")
     async def enable(name: str, body: dict = Body(default_factory=dict), p=Depends(current_principal)):
         return await call(lambda: store.enable(person(p), name, body))
 
-    @router.delete("/{name}/online", status_code=204)
+    @router.delete("/feature-tables/{name}/online", status_code=204)
     async def disable(name: str, p=Depends(current_principal)):
         await call(lambda: store.disable(person(p), name))
 
-    @router.post("/{name}/online/sync")
+    @router.post("/feature-tables/{name}/online/sync")
     async def sync(name: str, p=Depends(current_principal)):
         return await call(lambda: store.sync_now(person(p), name))
 
-    @router.post("/{name}/online/lookup")
+    @router.post("/feature-tables/{name}/online/lookup")
     async def lookup(name: str, body: dict = Body(...), p=Depends(current_principal)):
         return await call(lambda: store.lookup(person(p), name, body.get("entities"), body.get("features")))
 

@@ -119,8 +119,11 @@ class InputTables:
 
     def list(self) -> list[dict]:
         with self.engine.connect() as conn:
-            return [{**dict(r._mapping), "table": r.table_name, "columns": json.loads(r.columns)}
-                    for r in conn.execute(select(input_tables).order_by(input_tables.c.table_name))]
+            out = [{**dict(r._mapping), "table": r.table_name, "columns": json.loads(r.columns)}
+                   for r in conn.execute(select(input_tables).order_by(input_tables.c.table_name))]
+        for t in out:                     # who reviews changes before they land (as code: cairn_input_table)
+            t["reviewers"] = self.approvals.reviewers(t["id"]) if self.approvals is not None else []
+        return out
 
     def create(self, actor: str, body: dict) -> dict:
         connection, table = str(body.get("connection") or ""), str(body.get("table") or "").lower()
@@ -137,6 +140,12 @@ class InputTables:
             if kind not in TYPES:
                 raise InputTableError(f"column {name}: type is one of {', '.join(TYPES)}")
             seen.add(name)
+        reviewers = body.get("reviewers") or []
+        if reviewers and self.approvals is None:
+            raise InputTableError("input-table approvals are not configured: reviewers cannot be set", 503)
+        if not isinstance(reviewers, list) or len(reviewers) > 50 or not all(
+                isinstance(r, str) and r.startswith(("urn:li:corpuser:", "urn:li:corpGroup:")) for r in reviewers):
+            raise InputTableError("reviewers: up to 50 of urn:li:corpuser:… or urn:li:corpGroup:…")
         with self.engine.connect() as conn:
             if conn.execute(select(input_tables.c.id).where(input_tables.c.table_name == table)).first():
                 raise InputTableError(f"{table} is already an input table", 409)
@@ -154,6 +163,8 @@ class InputTables:
                 columns=json.dumps([{"name": c["name"], "type": c["type"]} for c in cols]),
                 description=description))
         self._audit(actor, "input.created", table, {"columns": [c["name"] for c in cols]})
+        if reviewers:
+            self.approvals.set(actor, tid, reviewers)
         return self._get(tid)
 
     def rows(self, actor: str, tid: str, limit: int = 1000) -> dict:

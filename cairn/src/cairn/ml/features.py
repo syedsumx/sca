@@ -51,6 +51,7 @@ class FeatureTables:
     def __init__(self, graph, dataset_urn: Callable[[list[str], str], str], may: Callable[[Any, str, str], bool], audit=None):
         """``dataset_urn(namespace, table)``: the lakehouse table's dataset; ``may(principal, privilege, urn)``."""
         self.graph, self.dataset_urn, self.may, self.audit = graph, dataset_urn, may, audit
+        self.on_remove: Optional[Callable[[str], None]] = None   # (name): what else goes with it (its online store)
 
     def register(self, p, body: dict) -> dict:
         from cairn.common.proposals import make_mcp
@@ -97,15 +98,38 @@ class FeatureTables:
                               {"table": table, "keys": keys, "features": features})
         return self.get(p, name)
 
+    def _props(self, name: str) -> Optional[dict]:
+        """The declaration, unless it was removed."""
+        if (self.graph.get_aspect(table_urn(name), "status") or {}).get("removed"):
+            return None
+        return self.graph.get_aspect(table_urn(name), "mlFeatureTableProperties") or None
+
     def definition(self, name: str) -> Optional[dict]:
         """The feature table as declared, for Cairn's own use (no caller's access is checked)."""
-        props = self.graph.get_aspect(table_urn(name), "mlFeatureTableProperties")
+        props = self._props(name)
         if not props:
             return None
         return self._shape(name, props)
 
+    def remove(self, p, name: str) -> None:
+        """``DELETE /v1/ml/feature-tables/<name>``: the declaration, its features and keys leave the catalog (soft
+        removal, as the catalog removes assets) and its online store stops serving; the table itself stays."""
+        from cairn.common.proposals import make_mcp
+
+        d = self.get(p, name)
+        if not self.may(p, "MANAGE_DATASET", d["source"]):
+            raise FeatureError(f"removing features of {d['table']} needs MANAGE_DATASET on it", 403)
+        if self.on_remove is not None:
+            self.on_remove(name)
+        gone = {"removed": True}
+        self.graph.emit([make_mcp(table_urn(name), "status", gone)]
+                        + [make_mcp(feature_urn(name, c), "status", gone) for c in d["features"]]
+                        + [make_mcp(key_urn(name, c), "status", gone) for c in d["keys"]])
+        if self.audit is not None:
+            self.audit.record("ml", "ml.feature_table_removed", p.urn, table_urn(name), {"table": d["table"]})
+
     def get(self, p, name: str) -> dict:
-        props = self.graph.get_aspect(table_urn(name), "mlFeatureTableProperties")
+        props = self._props(name)
         if not props:
             raise FeatureError("no such feature table", 404)
         source = (props.get("customProperties") or {}).get("source")
@@ -154,5 +178,9 @@ def build_features_router(ft: FeatureTables, current_principal) -> Any:
     @router.get("/{name}")
     def get(name: str, p=Depends(current_principal)):
         return wrap(lambda: ft.get(p, name))
+
+    @router.delete("/{name}", status_code=204)
+    def remove(name: str, p=Depends(current_principal)):
+        wrap(lambda: ft.remove(p, name))
 
     return router

@@ -59,15 +59,9 @@ module "cairn" {
   namespace        = "cairn-platform"
   profile          = "ha-tenant"
   # Each tenant's database credentials come from deploy/hosting/tenant.sh create (cairn-secrets in its namespace);
-  # here, its release and its licence.
-  tenants = {
-    for id in nonsensitive(keys(var.tenant_licences)) : id => {
-      values = { cairn = { licence = { required = true, tenantId = id, existingSecret = "cairn-licence" } } }
-    }
-  }
-  tenant_secrets = {
-    for id, licence in var.tenant_licences : id => { "cairn-licence" = { "licence" = licence } }
-  }
+  # here, its release and its licence (the module makes the Secret and requires it, bound to the tenant).
+  tenants         = { for id in nonsensitive(keys(var.tenant_licences)) : id => {} }
+  tenant_licences = var.tenant_licences
 }
 
 output "lb_ipv4" {

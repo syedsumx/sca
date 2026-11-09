@@ -54,6 +54,14 @@ def build_router(store: StoreAdmin, current_principal, is_admin, audit=None) -> 
         _admin(p)
         return _call(store.buckets)
 
+    @router.get("/v1/quotas")
+    def quotas(p: Principal = Depends(current_principal)):
+        """The buckets that have a quota, with it (what ``cairn export`` and Terraform's cairn_bucket_quota read)."""
+        _admin(p)
+        return {"quotas": [{"bucket": b.get("name"), "max_bytes": (b.get("quota") or {}).get("max_bytes"),
+                            "max_objects": (b.get("quota") or {}).get("max_objects")}
+                           for b in _call(store.buckets) if b.get("quota")]}
+
     @router.put("/v1/buckets/{bucket}/quota")
     def set_quota(bucket: str, body: QuotaIn, p: Principal = Depends(current_principal)):
         _admin(p)

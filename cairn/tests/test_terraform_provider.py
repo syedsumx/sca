@@ -510,7 +510,8 @@ def test_terraform_manages_every_family_from_the_registry(iac):
         tfx(w, "import", addr, tf_id(k, rec), env=later)
 
     for name in ("personas", "secret_scope_acls", "medallion_layers", "budgets", "procedures", "jobs",
-                 "custom_agents", "agent_abuse_settings", "data_apps"):
+                 "custom_agents", "agent_abuse_settings", "data_apps", "model_monitors", "extensions",
+                 "data_contracts", "product_request_policies", "agent_pools", "playbooks", "api_limits"):
         reimport(name)
     tfx(w, "plan", "-detailed-exitcode", env=later)
     # An imported secret's value is unknown to Terraform: with a version declared, it is sent once more.
@@ -519,11 +520,83 @@ def test_terraform_manages_every_family_from_the_registry(iac):
     assert "Plan: 0 to add, 1 to change, 0 to destroy." in out and "+ value_version = 2" in out, out[-2000:]
     tfx(w, "apply", "-auto-approve", env=later)
     tfx(w, "plan", "-detailed-exitcode", env=later)
-    # Destroyed: everything Terraform made goes (settings only leave the state).
+    # Destroyed: everything Terraform made goes (settings only leave the state, and so does what is only forgotten:
+    # a tokenisation domain, whose key every token made in it needs).
     tfx(w, "destroy", "-auto-approve", env=later)
     for k in kinds:
-        if not k.singleton:
+        if not k.singleton and k.delete is not None:
             assert not mine(e, k, k.example), k.name
+    assert mine(e, registry.kind("token_domains"), {"name": "customer_ids"})
+    assert "incident_triage" not in s.playbooks.enabled_for("quality.incident.raised")      # switched off again
+
+
+REFS_CONFIG = """
+terraform {
+  required_providers {
+    cairn = { source = "cairn/cairn" }
+  }
+}
+provider "cairn" {}
+
+resource "cairn_persona" "fin" {
+  name    = "Finance team"
+  members = jsonencode({ groups = ["urn:li:corpGroup:finance"] })
+}
+
+resource "cairn_persona_grant" "ana" {
+  persona = cairn_persona.fin.id
+  actor   = "urn:li:corpuser:ana"
+}
+
+resource "cairn_saved_query" "q" {
+  name            = "shared-q"
+  connection_name = "lakehouse"
+  sql             = "SELECT 1 AS n"
+}
+
+resource "cairn_sql_share" "analysts" {
+  kind      = "query"
+  item      = cairn_saved_query.q.id
+  principal = "urn:li:corpGroup:analysts"
+  role      = "ROLE"
+}
+"""
+
+
+def test_terraform_manages_what_names_another_resource_by_id(iac):
+    """The kinds whose parent is another resource's id (a persona's grants, a query's shares) by real Terraform:
+    created through references, no drift, changed in place, imported by their ids, destroyed."""
+    from cairn.iac import export, registry
+    from cairn.iac.engine import Engine, tf_id
+
+    w, s = iac, iac["s"]
+    for f in [*w["work"].glob("*.tf"), *w["work"].glob("terraform.tfstate*")]:
+        f.unlink()
+    main = w["work"] / "main.tf"
+    main.write_text(REFS_CONFIG.replace("ROLE", "VIEWER"))
+    tfx(w, "apply", "-auto-approve")
+    pid = next(p.id for p in s.personas.list_personas() if p.name == "Finance team")
+    grants = s.personas.list_grants(pid)
+    assert [(g["actor"], g["source"]) for g in grants] == [("urn:li:corpuser:ana", "manual")]
+    shares = s.bi_sharing.mine(w["admin"])
+    assert [(x["kind"], x["principal"], x["role"]) for x in shares] == [("query", "urn:li:corpGroup:analysts", "VIEWER")]
+    tfx(w, "plan", "-detailed-exitcode")
+    main.write_text(REFS_CONFIG.replace("ROLE", "EDITOR"))
+    out = tfx(w, "apply", "-auto-approve").stdout
+    assert "0 added, 1 changed, 0 destroyed" in out, out[-2000:]
+    assert s.bi_sharing.mine(w["admin"])[0]["role"] == "EDITOR"
+    e = Engine(w["client"].call)
+    for name, addr in (("persona_grants", "cairn_persona_grant.ana"), ("sql_shares", "cairn_sql_share.analysts")):
+        k = registry.kind(name)
+        rec = e.all(k, registry.by_name())[0]
+        tfx(w, "state", "rm", addr)
+        tfx(w, "import", addr, tf_id(k, rec))
+    tfx(w, "plan", "-detailed-exitcode")
+    text = export.export(w["client"].call, "terraform", ["persona_grants", "sql_shares"])
+    assert "cairn_persona_grant" in text and "cairn_sql_share" in text
+    tfx(w, "destroy", "-auto-approve")
+    assert s.personas.list_grants(pid) == []
+    assert s.bi_sharing.mine(w["admin"]) == []
 
 
 def test_an_exported_workspace_imports_without_changes(iac, tmp_path):

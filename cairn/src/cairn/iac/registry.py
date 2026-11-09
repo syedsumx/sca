@@ -301,13 +301,16 @@ CORE: list[Kind] = [
          example={"name": "articles", "source": "support.articles", "key": "id", "text": "body", "every_minutes": 60},
          example_update={"every_minutes": 30}),
     Kind("input_tables", "input_table", "bi",
-         "A lakehouse table people type into, written on Trino as the person writing. Created once: any change "
-         "replaces it in Terraform's plan, and destroying it unregisters it (the table and its rows stay).",
+         "A lakehouse table people type into, written on Trino as the person writing. Its reviewers (changes wait "
+         "for one of them) change in place; any other change replaces it in Terraform's plan, and destroying it "
+         "unregisters it (the table and its rows stay).",
          (R("table", force_new=True, description="schema.table, lowercase"),
           R("connection", force_new=True, tf="connection_name", description="a Trino connection that runs as the user"),
           R("columns", "json", force_new=True, description='[{"name": "region", "type": "text"}]'),
-          F("description", default="", force_new=True)),
-         read="/sql/input-tables", create=op("POST /sql/input-tables"), update=None,
+          F("description", default="", force_new=True),
+          F("reviewers", "list", default=[], description="people and groups who approve changes before they land")),
+         read="/sql/input-tables", create=op("POST /sql/input-tables"),
+         update=op("PUT /sql/input-tables/{id}/approval", only=("reviewers",)),
          delete=op("DELETE /sql/input-tables/{id}", no_body=True), key=("table",), mine=True, owner_field="created_by",
          never_replace=True, order=80, service="input_tables"),
     Kind("queries", "saved_query", "bi", "A saved SQL query (read-only), with its chart; the token user's own.",
@@ -336,11 +339,21 @@ CORE: list[Kind] = [
          example={"name": "orders", "connection": "wh", "spec": {"elements": [
              {"source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}]}},
          example_update={"description": "Orders by region"}),
-    Kind("dashboards", "dashboard", "bi", "Saved queries shown together, each run as its viewer.",
+    Kind("dashboards", "dashboard", "bi",
+         "Saved queries, metrics and workbook elements shown together, each run as its viewer; with its controls "
+         "and its actions (forms and buttons that change things, run as the person clicking).",
          (R("name"), F("description", default=""), F("shared", "bool", default=False),
           R("tiles", "json", description='[{"query": "<saved query id>", "title": "...", "width": 1}]'),
-          F("controls", "json", default=[], only_set=True)),
-         **crud("/sql/dashboards"), mine=True, order=120, service="sql_boards"),
+          F("controls", "json", default=[], only_set=True),
+          F("actions", "json", default=[], only_set=True,
+            description='[{"name": "approve", "kind": "input_update", "input_table": "<id>", "set": {...}}]: '
+                        "input_row, input_update, workflow or webhook; matched by name")),
+         **crud("/sql/dashboards"), mine=True, order=120, service="sql_boards",
+         example={"name": "sales", "tiles": [{"connection": "wh", "title": "Orders by region", "element": {
+             "source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}}],
+             "actions": [{"name": "flag", "kind": "webhook", "label": "Flag a problem",
+                          "url": "https://hooks.example.com/cairn/flag", "fields": [{"name": "note", "type": "text"}]}]},
+         example_update={"description": "Sales, by region"}),
     Kind("alerts", "sql_alert", "bi",
          "A saved query checked on a schedule as its owner; its owner and recipients are told when the condition "
          "starts and stops holding.",

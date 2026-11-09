@@ -34,7 +34,7 @@ import time
 import uuid
 from typing import Any, Callable, Optional
 
-from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, insert, select
+from sqlalchemy import BigInteger, Column, Integer, String, Table, Text, delete, insert, select, update
 
 from cairn.common.db import metadata
 from cairn.sqlworkspace.input_tables import TYPES, InputTableError, typed_literal
@@ -199,6 +199,66 @@ class Actions:
             if not conn.execute(delete(bi_actions).where((bi_actions.c.id == aid) & (bi_actions.c.dashboard == did))).rowcount:
                 raise ActionError("no such action", 404)
         self._audit(actor, "bi.action_removed", did, {"action": aid})
+
+    # ---- as part of the dashboard (everything as code) ------------------------------------------
+    # A dashboard's ``actions`` (bundles, Terraform's cairn_dashboard, ``cairn export``) are the same actions: a
+    # save that carries them makes the dashboard's actions exactly those, matched by name, so an action that did
+    # not change keeps its id and its runs.
+    INTERNAL = ("table", "workflow_owner")
+
+    def declared(self, actor: str, did: str) -> list[dict]:
+        """The dashboard's actions as they are declared (where a webhook goes: only for operators)."""
+        operator = self.is_operator(actor)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(bi_actions).where(bi_actions.c.dashboard == did)
+                                .order_by(bi_actions.c.created_ms, bi_actions.c.name)).all()
+        out = []
+        for r in rows:
+            config = json.loads(r.config)
+            out.append({"name": r.name, "kind": r.kind, "label": r.label,
+                        **{k: v for k, v in config.items() if k not in self.INTERNAL and (k != "url" or operator)}})
+        return out
+
+    def prepare(self, actor: str, specs: Any) -> list[dict]:
+        """Checks a dashboard's declared actions (before anything is saved): the rows to write, in order."""
+        if not isinstance(specs, list) or len(specs) > MAX_ACTIONS:
+            raise ActionError(f"actions: a list of up to {MAX_ACTIONS}")
+        out, seen = [], set()
+        for body in specs:
+            if not isinstance(body, dict):
+                raise ActionError("an action is an object")
+            name, kind = str(body.get("name") or ""), str(body.get("kind") or "")
+            if not NAME.match(name):
+                raise ActionError("name: lowercase letters, digits and _")
+            if name in seen:
+                raise ActionError(f"two actions are named {name}")
+            seen.add(name)
+            config = self._config(actor, kind, body)
+            config["confirm"] = str(body.get("confirm") or "")[:200]
+            out.append({"name": name, "kind": kind, "label": str(body.get("label") or name)[:200], "config": config})
+        return out
+
+    def replace(self, actor: str, did: str, prepared: list[dict]) -> None:
+        """Makes the dashboard's actions exactly ``prepared`` (from :meth:`prepare`)."""
+        with self.engine.begin() as conn:
+            have = {r.name: r for r in conn.execute(select(bi_actions).where(bi_actions.c.dashboard == did)).all()}
+            want = {a["name"] for a in prepared}
+            for name, r in have.items():
+                if name not in want:
+                    conn.execute(delete(bi_actions).where(bi_actions.c.id == r.id))
+            for i, a in enumerate(prepared):
+                values = {"kind": a["kind"], "label": a["label"], "config": json.dumps(a["config"])}
+                r = have.get(a["name"])
+                if r is None:
+                    conn.execute(insert(bi_actions).values(id=uuid.uuid4().hex, dashboard=did, name=a["name"],
+                                                           owner=actor, created_ms=_now() + i, **values))
+                elif (r.kind, r.label, json.loads(r.config)) != (a["kind"], a["label"], a["config"]):
+                    conn.execute(update(bi_actions).where(bi_actions.c.id == r.id).values(**values))
+        self._audit(actor, "bi.actions_set", did, {"actions": sorted(want)})
+
+    def forget_board(self, did: str, conn) -> None:
+        """A deleted dashboard's actions go with it (in the dashboard's own transaction)."""
+        conn.execute(delete(bi_actions).where(bi_actions.c.dashboard == did))
 
     def runs(self, actor: str, did: str, aid: str, limit: int = 50) -> list[dict]:
         board = self.boards.dashboard(actor, did)

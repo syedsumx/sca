@@ -3143,6 +3143,41 @@ dashboards:
     assert "Orders (staging)" in [w["name"] for w in httpx.get(f"{url}/sql/workbooks", headers=admin, timeout=60).json()]
 
 
+def test_an_input_table_s_reviewers_are_code(trino, cairn, tmp_path):
+    """Everything as code (L137): an input table declared with its reviewers is created on real Trino with them, its
+    reviewers change in place (the same table, nothing replaced), a bundle exported from it plans with no changes, and
+    destroying it unregisters it (its rows stay in the lakehouse)."""
+    import httpx
+    import yaml
+
+    from cairn.iac import bundle as b
+    from cairn.iac import export, registry
+    from cairn.iac.engine import Engine
+    from cairn.quality.collectors import ConnectionRegistry
+
+    url, s = cairn
+    s.data_access.registry = ConnectionRegistry({"lakehouse": {
+        "url": f"trino://cairn@127.0.0.1:{trino.tls}/lake?protocol=https&verify={trino.dir}/ca.pem", "run_as_user": True,
+        "catalog": {"platform": "iceberg", "database": ""}}})
+    c = b.Client(url, "", http=httpx.Client(headers={"X-Cairn-Actor": "urn:li:corpuser:admin"}, timeout=120))
+    e, k = Engine(c.call), registry.kind("input_tables")
+    rec = e.create(k, {"table": "sales.code_targets", "connection": "lakehouse",
+                       "columns": [{"name": "region", "type": "text"}], "reviewers": ["urn:li:corpuser:carol"]})
+    assert rec["reviewers"] == ["urn:li:corpuser:carol"] and s.input_tables.approvals.reviewers(rec["id"]) == rec["reviewers"]
+    assert trino("SELECT count(*) AS n FROM lake.sales.code_targets")[0]["n"] == 0          # made on Trino
+    after = e.update(k, rec, {"reviewers": ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]})
+    assert after["id"] == rec["id"] and after["reviewers"] == ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]
+    text = export.export(c.call, "yaml", ["input_tables"], bundle="inputs")
+    mine = [x for x in yaml.safe_load(text)["input_tables"] if x["table"] == "sales.code_targets"]
+    assert mine and mine[0]["reviewers"] == ["urn:li:corpGroup:finance", "urn:li:corpuser:carol"]
+    (tmp_path / "cairn.yaml").write_text(yaml.safe_dump({"bundle": "inputs", "input_tables": mine}))
+    changes, _ = b.plan(c, b.load(str(tmp_path / "cairn.yaml")))
+    assert [x.line() for x in changes if x.action != "keep"] == []
+    e.delete(k, after)
+    assert not [x for x in s.input_tables.list() if x["id"] == rec["id"]]
+    assert trino("SELECT count(*) AS n FROM lake.sales.code_targets")[0]["n"] == 0          # the table stays
+
+
 def test_input_table_changes_wait_for_a_reviewer_and_land_as_their_author(trino, cairn):
     """Input-table approvals on real Trino: with reviewers set, a change waits (nothing is written); nobody approves
     their own; an approved change is written as its author; a rejected one never is; a change that no longer

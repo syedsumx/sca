@@ -5,32 +5,37 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-61 resources, each also a data source:
+78 resources, each also a data source:
 
 **Identity and access**
 
 | Resource | Bundle section | What it is |
 |---|---|---|
+| `cairn_api_limits` | `api_limits` | The API's request limits and network allowlist: requests a minute for the tenant, for each person and for named people, and the networks (and trusted proxies) the API answers |
 | `cairn_policy` | `policies` | One of Cairn's own access policies (source cairn), set and deleted on its own: the rest of the policy bundle stays as it is |
 | `cairn_workspace` | `workspaces` | A workspace: domains run by their own admins, with members and the permissions each role has there |
 | `cairn_persona` | `personas` | A persona: who is in it (people, groups, attribute rules), what it reaches (domains, platforms, tags...) and with which permission bundles; Cairn compiles it into policies |
 | `cairn_purpose` | `purposes` | A purpose: data with these tags or classifications is used only by who is allowed, and masked for others |
+| `cairn_persona_grant` | `persona_grants` | A persona given to a person or group by hand (grants from approved access requests are the requests' own and are not managed here) |
 | `cairn_consent_purpose` | `consent_purposes` | A consent purpose: rows of people who did not consent (opt-in) or who withdrew (opt-out) are filtered out for its members |
 | `cairn_agent_identity` | `agent_identities` | A service principal: an agent identity with a key, acting as its owner within its scopes |
 | `cairn_workload_binding` | `workload_bindings` | A workload identity binding: tokens from an issuer with this subject (and claims) act as a Cairn user |
 | `cairn_secret_scope` | `secret_scopes` | A secret scope: secrets that notebooks, jobs and connectors read as the person running them |
 | `cairn_secret_scope_acl` | `secret_scope_acls` | Who may use a secret scope: READ, WRITE or MANAGE for a person or a group |
 | `cairn_secret` | `secrets` | One secret in a scope |
+| `cairn_token_domain` | `token_domains` | A tokenisation domain: values tokenised in it share one key, kept by Cairn under its master key |
 
 **Data and pipelines**
 
 | Resource | Bundle section | What it is |
 |---|---|---|
+| `cairn_agent_pool` | `agent_pools` | A pool of remote ingestion agents (Cairn's agent gateway): which platforms its agents may run, which aspects they may write, and how many tasks each runs at once |
 | `cairn_connection` | `connections` | An ingestion source: a connector, its form values (secret fields name a Cairn secret, never its value), where it runs and when |
 | `cairn_maintenance_policy` | `maintenance` | Table maintenance (compaction, snapshot expiry, orphan cleanup) for *, a schema or schema.table |
 | `cairn_pipe` | `pipes` | Files landing in a Cairn Store prefix, loaded into a lakehouse table once each |
 | `cairn_stream` | `streams` | A Kafka topic (Debezium change events included) written into a lakehouse table, exactly once |
 | `cairn_medallion_layer` | `medallion_layers` | A table's medallion layer (bronze, silver or gold), shown in the catalog and used by quality and lineage |
+| `cairn_bucket_quota` | `bucket_quotas` | A Cairn Store bucket's quota: the most bytes and objects it holds (writes past it are refused) |
 | `cairn_parquet_table` | `parquet_tables` | Parquet files in a store prefix registered as a lakehouse table in place (no copy), refreshed as files land |
 | `cairn_mirror` | `mirrors` | A database table mirrored into the lakehouse from its change log (PostgreSQL, MySQL, SQL Server, MongoDB) |
 | `cairn_serving_table` | `serving_tables` | A lakehouse table kept in PostgreSQL for key lookups in milliseconds, under the table's policies |
@@ -45,6 +50,7 @@ permissions and audit apply:
 | `cairn_storage_credential` | `storage_credentials` | How Cairn Catalog reaches the customer's own storage: an Azure storage account, an S3 bucket through an IAM role, or a GCS bucket |
 | `cairn_external_location` | `external_locations` | A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it |
 | `cairn_external_location_grant` | `external_location_grants` | CREATE_TABLE, READ_FILES and WRITE_FILES on an external location for a person or a group (policies in the decision point's storage layer) |
+| `cairn_system_table_retention` | `system_table_retention` | How many days one of Cairn's system tables keeps (older rows are deleted) |
 
 **SQL and BI**
 
@@ -56,7 +62,8 @@ permissions and audit apply:
 | `cairn_metric` | `metrics` | A business measure defined once (a workbook aggregate over one table), the same number in every query, workbook and dashboard; run as the person asking |
 | `cairn_procedure` | `procedures` | A stored procedure: SQL statements with typed parameters, called by people allowed to (CALL_PROCEDURE) |
 | `cairn_workbook` | `workbooks` | A spreadsheet workbook: elements compiled to SQL and run as the person looking |
-| `cairn_dashboard` | `dashboards` | Saved queries shown together, each run as its viewer |
+| `cairn_dashboard` | `dashboards` | Saved queries, metrics and workbook elements shown together, each run as its viewer; with its controls and its actions (forms and buttons that change things, run as the person clicking) |
+| `cairn_sql_share` | `sql_shares` | One of the token user's saved queries, workbooks or dashboards shared with a person or group, as a viewer or an editor |
 | `cairn_sql_alert` | `alerts` | A saved query checked on a schedule as its owner; its owner and recipients are told when the condition starts and stops holding |
 | `cairn_metric_alert` | `metric_alerts` | An alert on a metric: a change, a range or a threshold, checked on a schedule as its owner |
 | `cairn_report_schedule` | `report_schedules` | A dashboard or workbook sent as CSV or PDF on a schedule to its owner and recipients |
@@ -68,11 +75,13 @@ permissions and audit apply:
 |---|---|---|
 | `cairn_quality_monitor` | `quality_monitors` | A data quality monitor on a dataset (freshness, volume, field metrics, schema or SQL), on a schedule |
 | `cairn_slo` | `slos` | A data product's service level objective: the share of its monitors' evaluations that must pass |
+| `cairn_data_contract` | `data_contracts` | A data contract: what a dataset promises (schema, freshness, volume, quality rules), versioned; a change of terms is a new version |
 | `cairn_retention_policy` | `retention_policies` | How long data with a label (tag, term or classification) is kept; with enforce, older rows are deleted |
 | `cairn_automation` | `automations` | A governance automation: assets that match a condition get actions (tags, owners, domains, ...), on a schedule or on events |
 | `cairn_form` | `forms` | A governance form: questions asked of the owners of the assets that match a condition |
 | `cairn_budget` | `budgets` | A cost budget for a scope (all, a domain, an owner, a platform, tables, a warehouse or AI), with alerts at thresholds and on the forecast |
 | `cairn_cost_centre` | `cost_centres` | A chargeback cost centre: the teams (groups) whose use it pays for |
+| `cairn_product_request_policy` | `product_request_policies` | How access to a data product is requested and granted: approvers, purposes, how long, automatic approval and what an approval provisions |
 | `cairn_notification_route` | `notification_routes` | A notification route: events of these types (in these domains) to Slack, Teams, a webhook, a ticketing system, Kafka, EventBridge or Pub/Sub |
 | `cairn_marketplace_listing` | `marketplace_listings` | An agent or skill listed in the marketplace, with who approves access requests and for which purposes |
 
@@ -90,11 +99,16 @@ permissions and audit apply:
 | Resource | Bundle section | What it is |
 |---|---|---|
 | `cairn_vector_index` | `vectors` | Vector search over a lakehouse table's text, kept in step with the table and searched under Cairn's policies |
+| `cairn_feature_table` | `feature_tables` | A lakehouse table declared as ML features: its entity keys and feature columns, in the catalog with their lineage |
+| `cairn_online_feature_table` | `online_feature_tables` | A feature table served online (latest values by entity key, kept in step with the lakehouse table) |
 | `cairn_custom_agent` | `custom_agents` | An agent built in Cairn: instructions, tools and scopes, run as the person asking (or deployed) |
 | `cairn_ai_gateway_route` | `ai_gateway_routes` | A virtual model on the AI gateway: candidates in order (or by cost or latency), with fallbacks |
 | `cairn_model_deployment` | `model_deployments` | A registered model's version served behind Cairn, scaled between min and max replicas |
 | `cairn_agent_abuse_settings` | `agent_abuse_settings` | Agentic abuse detection: whether it blocks, at which severity, and when it pauses an agent |
+| `cairn_model_monitor` | `model_monitors` | Monitoring of a served model: the baseline its inputs are compared with, how drift is measured and who is told |
 | `cairn_agent_intent_settings` | `agent_intent_settings` | Intent-based security for agents: whether every agent request must declare an intent |
+| `cairn_agent_trace_settings` | `agent_trace_settings` | How agent traces are analysed: what counts as a loop, a slow call, an outlier, and the error rates that warn and alert |
+| `cairn_playbook` | `playbooks` | A built-in playbook switched on (incident triage, schema change impact, ...): declared, it runs on its trigger; destroyed, it is switched off |
 
 **Workspace**
 
@@ -102,6 +116,9 @@ permissions and audit apply:
 |---|---|---|
 | `cairn_git_folder` | `git_folders` | A git folder: a repository's branch and path in the token user's workspace (its notebooks and queries) |
 | `cairn_data_app` | `data_apps` | A data app: one Cairn starts (a command, from git or on Kubernetes) or one running elsewhere (a URL), reached only through Cairn |
+| `cairn_desktop_policy` | `desktop_policy` | What Cairn Desktop may do with this Cairn: its offline cache, how it updates (and from where) and the origins it signs in from |
+| `cairn_ui_settings` | `ui_settings` | The web UI's settings for everyone: whether people are offered the first-run question and the Get started checklist |
+| `cairn_extension` | `extensions` | An installed extension: its manifest (version, publisher, the privileges it is granted, its scope, the events it hears and the UI it adds) |
 
 <!-- END GENERATED RESOURCES -->
 

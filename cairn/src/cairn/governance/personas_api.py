@@ -72,6 +72,14 @@ def build_router(personas: PersonaEngine, current_principal, authorize, graph=No
         except KeyError:
             raise HTTPException(404, "persona not found")
 
+    @router.get("/personas/{pid}/grants")
+    def list_grants(pid: str, _p: Principal = Depends(admin)):
+        """The persona's grants in force: given by hand (source manual: what Terraform's cairn_persona_grant
+        manages) and by approved access requests."""
+        if personas.get_persona(pid) is None:
+            raise HTTPException(404, "persona not found")
+        return personas.list_grants(pid)
+
     @router.post("/personas/{pid}/grants", status_code=201)
     def grant(pid: str, req: GrantRequest, p: Principal = Depends(admin)):
         if personas.get_persona(pid) is None:

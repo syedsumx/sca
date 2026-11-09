@@ -32,6 +32,17 @@ def build_router(svc: MarketplaceService, current_principal, can_view, subject_o
                  p: Principal = Depends(current_principal)):
         return svc.list_products(p.urn, q, domain, certified, access, sort, can_view=can_view(p))
 
+    @router.get("/policies")
+    def policies(p: Principal = Depends(current_principal)):
+        """The request policies that were set, on products the caller may see (Terraform's
+        cairn_product_request_policy, ``cairn export``)."""
+        check = can_view(p)
+        return {"policies": [x for x in svc.list_policies() if check(x["product"])]}
+
+    @router.delete("/products/{urn:path}/policy", status_code=204)
+    def delete_policy(urn: str, p: Principal = Depends(current_principal)):
+        _wrap(lambda: svc.delete_policy(urn, p.urn))
+
     @router.get("/products/{urn:path}/policy", response_model=RequestPolicy)
     def get_policy(urn: str, p: Principal = Depends(current_principal)):
         return svc.get_policy(urn)

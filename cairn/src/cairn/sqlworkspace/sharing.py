@@ -101,6 +101,20 @@ class Sharing:
                 "shares": [{"principal": r.principal, "role": r.role, "granted_by": r.granted_by,
                             "granted_ms": r.granted_ms} for r in rows]}
 
+    def mine(self, actor: str) -> list[dict]:
+        """Every share of the actor's own queries, workbooks and dashboards, one record each (``GET /sql/shares``:
+        what Terraform's cairn_sql_share and ``cairn export`` read)."""
+        out = []
+        with self.engine.connect() as conn:
+            for kind in KINDS:
+                t = _table(kind)
+                rows = conn.execute(select(bi_shares).join(t, and_(bi_shares.c.kind == kind, bi_shares.c.asset_id == t.c.id))
+                                    .where(t.c.owner == actor).order_by(bi_shares.c.asset_id, bi_shares.c.principal)).all()
+                out += [{"id": f"{kind}:{r.asset_id}:{r.principal}", "kind": kind, "item": r.asset_id,
+                         "principal": r.principal, "role": r.role, "owner": actor, "granted_ms": r.granted_ms}
+                        for r in rows]
+        return out
+
     def set(self, actor: str, kind: str, asset_id: str, principal: str, role: Optional[str]) -> dict:
         owner = self._owner(kind, asset_id)
         if owner != actor:
@@ -178,6 +192,10 @@ def build_sharing_router(sharing: Sharing, current_principal) -> Any:
             return fn()
         except ShareError as e:
             raise HTTPException(e.status, str(e))
+
+    @router.get("")
+    def mine(p=Depends(current_principal)):
+        return {"shares": sharing.mine(p.urn)}
 
     @router.get("/{kind}/{asset_id}")
     def get(kind: str, asset_id: str, p=Depends(current_principal)):

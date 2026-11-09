@@ -413,6 +413,17 @@ class PersonaEngine:
         self._invalidate(actor)
         return gid
 
+    def list_grants(self, persona_id: str) -> list[dict]:
+        """A persona's grants that are in force (not revoked, not expired), oldest first."""
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(grants_table).where(and_(
+                grants_table.c.persona_id == persona_id, grants_table.c.revoked.is_(False)))
+                .order_by(grants_table.c.created_at_ms, grants_table.c.id)).fetchall()
+        return [{"id": r.id, "persona": r.persona_id, "actor": r.actor, "source": r.source,
+                 "expires_at_ms": r.expires_at_ms, "created_at_ms": r.created_at_ms}
+                for r in rows if r.expires_at_ms is None or r.expires_at_ms > now]
+
     def revoke_grant(self, grant_id: str, revoked_by: str) -> bool:
         with self.engine.begin() as conn:
             row = conn.execute(select(grants_table).where(grants_table.c.id == grant_id)).first()

@@ -124,6 +124,7 @@ class Boards:
         self.sharing = None          # cairn.sqlworkspace.sharing.Sharing (people and groups)
         self.on_change = None        # (kind, id, actor) after a save or delete
         self.on_view = None          # (kind, id, actor) when someone looks at a dashboard
+        self.actions = None          # cairn.sqlworkspace.actions.Actions: a dashboard's forms and buttons
 
     # ---- dashboards ---------------------------------------------------------------------
     def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
@@ -146,6 +147,18 @@ class Boards:
         keep = {t.get("query") for t in json.loads(current.tiles)} - {None} if current is not None else set()
         clean = [self._tile(actor, t, keep) for t in tiles[:24]]
         controls = self._controls(body.get("controls") or [], len(clean))
+        actions = None                   # declared with the dashboard (as code): its actions are exactly these
+        if body.get("actions") is not None:
+            if self.actions is None:
+                raise WorkspaceError("dashboard actions are not available here")
+            if current is not None and current.owner != actor:
+                raise WorkspaceError("only the dashboard's owner changes its actions", 403)
+            from cairn.sqlworkspace.actions import ActionError
+
+            try:
+                actions = self.actions.prepare(actor, body["actions"])
+            except ActionError as e:
+                raise WorkspaceError(str(e), e.status)
         values = {"name": name[:256], "description": str(body.get("description") or "")[:2000],
                   "shared": bool(body.get("shared")), "tiles": json.dumps(clean), "controls": json.dumps(controls),
                   "updated_ms": _now()}
@@ -158,6 +171,8 @@ class Boards:
                     values["shared"] = bool(current.shared)     # who sees it is the owner's to decide
                 if not conn.execute(update(dashboards).where(dashboards.c.id == did).values(**values)).rowcount:
                     raise WorkspaceError("no such dashboard", 404)
+        if actions is not None:
+            self.actions.replace(actor, did, actions)
         if self.on_change is not None:
             self.on_change("dashboard", did, actor)
         return self.dashboard(actor, did)
@@ -170,7 +185,12 @@ class Boards:
             visible.append(dashboards.c.id.in_(self.sharing.ids(actor, "dashboard")))
         with self.engine.connect() as conn:
             rows = conn.execute(select(dashboards).where(or_(*visible)).order_by(dashboards.c.updated_ms.desc())).all()
-        return [_board(r, access(self.sharing, actor, "dashboard", r)) for r in rows]
+        return [self._with_actions(actor, _board(r, access(self.sharing, actor, "dashboard", r))) for r in rows]
+
+    def _with_actions(self, actor: str, board: dict) -> dict:
+        if self.actions is not None:
+            board["actions"] = self.actions.declared(actor, board["id"])
+        return board
 
     def dashboard(self, actor: str, did: str) -> dict:
         from cairn.sqlworkspace.sharing import access
@@ -180,7 +200,7 @@ class Boards:
         level = access(self.sharing, actor, "dashboard", r)
         if not level:
             raise WorkspaceError("no such dashboard", 404)
-        return _board(r, level)
+        return self._with_actions(actor, _board(r, level))
 
     def delete_dashboard(self, actor: str, did: str) -> None:
         with self.engine.begin() as conn:
@@ -188,6 +208,8 @@ class Boards:
                 raise WorkspaceError("no such dashboard of yours", 404)
             if self.sharing is not None:
                 self.sharing.drop("dashboard", did, conn)
+            if self.actions is not None:
+                self.actions.forget_board(did, conn)
         if self.on_change is not None:
             self.on_change("dashboard", did, actor)
 

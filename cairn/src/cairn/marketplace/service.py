@@ -175,6 +175,22 @@ class MarketplaceService:
         found = {u: RequestPolicy.model_validate(doc) for u, doc in rows}
         return {u: found.get(u) or RequestPolicy() for u in product_urns}
 
+    def list_policies(self) -> list[dict]:
+        """Every product's request policy that was set (the rest have the default)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(product_policies.c.product_urn, product_policies.c.doc)
+                                .order_by(product_policies.c.product_urn)).all()
+        return [{"product": u, **RequestPolicy.model_validate(doc).model_dump(mode="json")} for u, doc in rows]
+
+    def delete_policy(self, product_urn: str, actor: str) -> None:
+        """Back to the default policy."""
+        self._require_owner_or_admin(actor, product_urn)
+        with self.engine.begin() as conn:
+            if not conn.execute(delete(product_policies).where(product_policies.c.product_urn == product_urn)).rowcount:
+                raise MarketplaceError("this product has the default request policy", 404)
+        if self.audit:
+            self.audit.record("marketplace", "policy.reset", actor, product_urn, {})
+
     def put_policy(self, product_urn: str, policy: RequestPolicy, actor: str) -> RequestPolicy:
         self._require_owner_or_admin(actor, product_urn)
         if policy.provision:

@@ -1471,6 +1471,7 @@ def _build_active_metadata(s: Services) -> None:
         s.bi_actions = Actions(s.engine, s.sql_boards, s.input_tables, s.sql_workflows, s.audit,
                                lambda actor: s.authorize(Principal(actor, "token"), "MANAGE_SYSTEM_OPERATIONS", None,
                                                          raise_on_deny=False))
+        s.sql_boards.actions = s.bi_actions          # a dashboard's actions are saved with it (as code)
         # Scheduled exports: dashboards and workbooks sent as CSV or PDF, each recipient rendered as themselves.
         from cairn.sqlworkspace.reports import Reports
 
@@ -2114,6 +2115,7 @@ def _build_data_access(s: Services) -> None:
             s.online_features = OnlineFeatures(
                 s.engine, s.feature_tables, online_catalog_client, online_policy,
                 lambda p, privilege, urn: s.authorize(p, privilege, urn, raise_on_deny=False), s.audit, store_engine)
+            s.feature_tables.on_remove = s.online_features._drop     # a removed feature table is not served
 
     # Data apps (Streamlit and other web apps) behind Cairn sign-in, each viewer governed as themselves.
     apps_secret = os.environ.get("CAIRN_APPS_SECRET") or getattr(s.settings, "service_token", "") or ""

@@ -93,7 +93,7 @@ def test_every_kind_round_trips_through_export_and_a_bundle(world, tmp_path):
             got = b.declared(k, rec)
             for f, v in k.example_update.items():
                 assert b._same(v, got.get(f)), (k.name, f, v, got.get(f))
-    assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}
+    assert [x.line() for x in b.plan(c, spec)[0] if x.action != "keep"] == []
 
     # A secret's value is sent again only when its version rises; Cairn holds the new one.
     doc["secrets"][0]["value_version"] = 2
@@ -105,7 +105,8 @@ def test_every_kind_round_trips_through_export_and_a_bundle(world, tmp_path):
     assert s.secret_scopes.read(ADMIN, "finance-db", "password") == "rotated"
     assert {x.action for x in b.plan(c, spec)[0]} == {"keep"}
 
-    # Dropped from git and pruned: what the examples made goes (settings stay: they always exist).
+    # Dropped from git and pruned: what the examples made goes (settings stay: they always exist; so does what is
+    # only forgotten, such as a tokenisation domain, whose key every token made in it needs).
     keep = {"secret_scopes", "policies"}
     doc2 = {"bundle": "everything", **{k: v for k, v in doc.items() if k in keep},
             "secret_scope_acls": [x for x in doc["secret_scope_acls"] if x["principal"] == ADMIN]}   # its last manager
@@ -115,7 +116,7 @@ def test_every_kind_round_trips_through_export_and_a_bundle(world, tmp_path):
     assert gone >= {k.name for k in kinds if k.name not in keep}, gone
     b.apply(c, b.load(str(path)), changes, state, log=lambda _: None)
     for k in kinds:
-        if k.name not in keep and not k.singleton:
+        if k.name not in keep and not k.singleton and k.delete is not None:
             left = e.records(k, {p: k.example[p] for p in k.parents} if k.parents else None)
             assert [b.key_of(k, {**k.defaults, **b.declared(k, r)}) for r in left] == (
                 ["finance-db/" + ADMIN] if k.name == "secret_scope_acls" else []), k.name
@@ -136,7 +137,7 @@ def test_one_resource_as_terraform_or_yaml_and_the_inventory(world):
     assert http.get("/v1/iac/export", params={"kind": "nope"}).status_code == 404
     inv = http.get("/v1/iac/inventory").json()["kinds"]
     assert inv["pipes"] >= 1 and set(inv) == {x.name for x in registry.kinds()}
-    assert inv["model_deployments"] is None                       # switched off here
+    assert inv["system_table_retention"] is None                  # switched off here (no system tables catalog)
     # The schema is for anyone signed in; export is as the caller, so another person sees only what they may.
     ana = TestClient(http.app, headers={"Authorization": f"Bearer {ANA_TOKEN}"})
     schema = ana.get("/v1/iac/schema")
@@ -158,3 +159,38 @@ def test_a_write_only_value_never_leaves_cairn(world, tmp_path):
     tf = export.export(c.call, "terraform", ["secrets"])
     assert 'variable "secret_finance_db_token_value"' in tf and "sensitive   = true" in tf
     assert "value = var.secret_finance_db_token_value" in tf
+
+
+def test_what_names_another_resource_by_id_round_trips(world, tmp_path):
+    """A persona's grants and a query's shares (their parent is another resource's id): made, exported as a bundle,
+    planned with no changes, changed in place, and pruned."""
+    s, c, _ = world
+    e = Engine(c.call)
+    persona = ensure(e, registry.kind("personas"), {"name": "Grant holders", "members": {"groups": ["urn:li:corpGroup:x"]}})
+    query = ensure(e, registry.kind("queries"), {"name": "to-share", "connection": "lakehouse", "sql": "SELECT 2 AS n"})
+    grant = e.create(registry.kind("persona_grants"), {"persona": persona["id"], "actor": "urn:li:corpuser:ana"})
+    assert grant["source"] == "manual"
+    share = e.create(registry.kind("sql_shares"), {"kind": "query", "item": query["id"],
+                                                   "principal": "urn:li:corpGroup:analysts", "role": "VIEWER"})
+    assert share["owner"] == ADMIN
+    names = ["personas", "persona_grants", "queries", "sql_shares"]
+    text = export.export(c.call, "yaml", names, bundle="refs")
+    doc = yaml.safe_load(text)
+    assert {"persona": persona["id"], "actor": "urn:li:corpuser:ana"} in doc["persona_grants"]
+    path = tmp_path / "cairn.yaml"
+    path.write_text(text)
+    changes, state = b.plan(c, b.load(str(path)))
+    assert [x.line() for x in changes if x.action != "keep"] == []
+    next(x for x in doc["sql_shares"] if x["item"] == query["id"])["role"] = "EDITOR"
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    changes, state = b.plan(c, b.load(str(path)))
+    assert [(x.kind, x.action) for x in changes if x.action != "keep"] == [("sql_shares", "update")]
+    b.apply(c, b.load(str(path)), changes, state, log=lambda _: None)
+    assert s.bi_sharing.mine(ADMIN)[0]["role"] == "EDITOR"
+    doc = {"bundle": "refs", "personas": doc["personas"], "queries": doc["queries"]}
+    path.write_text(yaml.safe_dump(doc, sort_keys=False))
+    changes, state = b.plan(c, b.load(str(path)), prune=True)
+    assert {(x.kind, x.action) for x in changes if x.action != "keep"} == {("persona_grants", "delete"),
+                                                                            ("sql_shares", "delete")}
+    b.apply(c, b.load(str(path)), changes, state, log=lambda _: None)
+    assert s.personas.list_grants(persona["id"]) == [] and s.bi_sharing.mine(ADMIN) == []

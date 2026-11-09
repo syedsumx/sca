@@ -25,6 +25,9 @@ ENV = {
     "CAIRN_AI_GATEWAY_OPENAI_URL": "http://127.0.0.1:1",
     "CAIRN_AI_GATEWAY_MODELS": "test-model",
     "CAIRN_DOC_SOURCES_STORE": json.dumps({"endpoint": "http://127.0.0.1:1"}),
+    # Model monitors are kept by Cairn (a period baseline reads only Cairn's own call log); MLflow is not called.
+    "CAIRN_MLFLOW_URL": "http://127.0.0.1:1",
+    "CAIRN_TOKENS_KEY": base64.b64encode(b"t" * 32).decode(),          # tokenisation domains
 }
 
 
@@ -66,6 +69,8 @@ def build(tmp, with_ai: bool = False):
             raise NoSuchTableError(ident)
 
     s.vectors._catalog = NoCatalog
+    # Where a dashboard's webhook action may post (CAIRN_ACTION_WEBHOOK_ORIGINS, read when an action is saved).
+    s.bi_actions._origins = lambda: ["https://hooks.example.com"]
     return s
 
 

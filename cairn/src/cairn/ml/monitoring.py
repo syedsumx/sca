@@ -304,6 +304,19 @@ class ModelMonitoring:
         m["last_check"] = self._run(last) if last else None
         return m
 
+    def list(self, p) -> list[dict]:
+        """The monitors of the models the caller may see (``GET /v1/ml/monitors``: what ``cairn export`` reads)."""
+        with self.engine.connect() as conn:
+            names = [r[0] for r in conn.execute(select(ml_monitors.c.model).order_by(ml_monitors.c.model))]
+        out = []
+        for name in names:
+            if self.may_view(p, name):
+                m = self.monitor(name)
+                if m is not None:
+                    m.pop("profile", None)
+                    out.append(m)
+        return out
+
     def remove(self, p, model: str) -> None:
         if not self.may_manage(p, model):
             raise MonitorError(f"monitoring {model} needs MANAGE_ML_MODEL on it, or owning it", 403)
@@ -512,7 +525,7 @@ def build_monitoring_router(mon: ModelMonitoring, current_principal) -> Any:
     from fastapi import APIRouter, Body, Depends, HTTPException
     from starlette.concurrency import run_in_threadpool
 
-    router = APIRouter(prefix="/v1/ml/models", tags=["ml"])
+    router = APIRouter(prefix="/v1/ml", tags=["ml"])
 
     async def call(fn):
         try:
@@ -520,31 +533,35 @@ def build_monitoring_router(mon: ModelMonitoring, current_principal) -> Any:
         except MonitorError as e:
             raise HTTPException(e.status, str(e))
 
-    @router.put("/{model}/monitor")
+    @router.get("/monitors")
+    async def list_(p=Depends(current_principal)):
+        return {"monitors": await call(lambda: mon.list(p))}
+
+    @router.put("/models/{model}/monitor")
     async def configure(model: str, body: dict = Body(...), p=Depends(current_principal)):
         return await call(lambda: mon.configure(p, model, body))
 
-    @router.get("/{model}/monitor")
+    @router.get("/models/{model}/monitor")
     async def get(model: str, p=Depends(current_principal)):
         return await call(lambda: mon.get(p, model))
 
-    @router.delete("/{model}/monitor", status_code=204)
+    @router.delete("/models/{model}/monitor", status_code=204)
     async def remove(model: str, p=Depends(current_principal)):
         await call(lambda: mon.remove(p, model))
 
-    @router.post("/{model}/monitor/run")
+    @router.post("/models/{model}/monitor/run")
     async def run(model: str, p=Depends(current_principal)):
         return await call(lambda: mon.run_now(p, model))
 
-    @router.get("/{model}/monitor/checks")
+    @router.get("/models/{model}/monitor/checks")
     async def checks(model: str, limit: int = 50, p=Depends(current_principal)):
         return await call(lambda: mon.checks(p, model, limit))
 
-    @router.get("/{model}/monitor/inferences")
+    @router.get("/models/{model}/monitor/inferences")
     async def inferences(model: str, limit: int = 100, p=Depends(current_principal)):
         return await call(lambda: mon.inferences(p, model, limit))
 
-    @router.post("/{model}/feedback")
+    @router.post("/models/{model}/feedback")
     async def feedback(model: str, body: dict = Body(...), p=Depends(current_principal)):
         return await call(lambda: mon.feedback(p, model, body))
 

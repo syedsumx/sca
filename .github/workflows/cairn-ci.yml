@@ -585,7 +585,9 @@ jobs:
         run: |
           set -o pipefail
           pip install -e ".[server,test,streams,trino,postgres]"
-          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_iac_outside_e2e.py | tee "$RUNNER_TEMP/tf-outside.log"
+          # tests/test_iac_lake_e2e.py (L137): bucket quotas, online feature tables and system table retention.
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_iac_outside_e2e.py tests/test_iac_lake_e2e.py \
+            | tee "$RUNNER_TEMP/tf-outside.log"
           ! grep -q "skipped" "$RUNNER_TEMP/tf-outside.log"
 
   terraform-modules:
@@ -615,6 +617,8 @@ jobs:
               [ "$i" = 3 ] && exit 1; sleep 15; done
             (cd "$d" && terraform validate)
           done
+          # The licence as code (L137): modules/cairn planned with mocked providers, its Secret and values checked.
+          (cd modules/cairn && terraform test)
       - name: Kind cluster and the platform image
         working-directory: cairn
         run: |

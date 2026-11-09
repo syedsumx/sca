@@ -92,6 +92,16 @@ def build_router(service: GatewayService, current_principal=None, authorize=None
             authorize(p, "MANAGE_INGESTION", None)
             return _wrap(lambda: service.create_pool(spec, p.urn))
 
+        @router.put("/pools/{pool}")
+        def update_pool(pool: str, spec: PoolSpec, p: Principal = Depends(current_principal)):
+            authorize(p, "MANAGE_INGESTION", None)
+            return _wrap(lambda: service.update_pool(pool, spec, p.urn))
+
+        @router.delete("/pools/{pool}", status_code=204)
+        def delete_pool(pool: str, p: Principal = Depends(current_principal)):
+            authorize(p, "MANAGE_INGESTION", None)
+            _wrap(lambda: service.delete_pool(pool, p.urn))
+
         @router.post("/pools/{pool}/enrollment-tokens", status_code=201)
         def create_token(pool: str, ttl_seconds: int = 3600, p: Principal = Depends(current_principal)):
             authorize(p, "MANAGE_INGESTION", None)

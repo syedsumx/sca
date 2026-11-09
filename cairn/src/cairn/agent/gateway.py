@@ -270,6 +270,30 @@ class GatewayService:
         self._audit("pool.created", actor, spec.name, spec.model_dump())
         return self.get_pool(spec.name)
 
+    def update_pool(self, name: str, spec: PoolSpec, actor: str) -> dict:
+        if spec.name != name:
+            raise GatewayError("a pool's name does not change", 400)
+        self.get_pool(name)
+        with self.engine.begin() as conn:
+            conn.execute(pools.update().where(pools.c.name == name).values(
+                description=spec.description, allowed_platforms=spec.allowed_platforms,
+                allowed_aspects=spec.allowed_aspects, max_concurrency=spec.max_concurrency,
+                allow_profiling=spec.allow_profiling))
+        self._audit("pool.updated", actor, name, spec.model_dump())
+        return self.get_pool(name)
+
+    def delete_pool(self, name: str, actor: str) -> None:
+        """Only an empty pool goes: its agents are revoked first (they run ingestion people rely on)."""
+        self.get_pool(name)
+        with self.engine.begin() as conn:
+            enrolled = conn.execute(select(func.count()).select_from(agents).where(and_(
+                agents.c.pool == name, agents.c.status != "REVOKED"))).scalar()
+            if enrolled:
+                raise GatewayError(f"pool {name} has {enrolled} agent(s): revoke them first", 409)
+            conn.execute(enrollment_tokens.delete().where(enrollment_tokens.c.pool == name))
+            conn.execute(pools.delete().where(pools.c.name == name))
+        self._audit("pool.deleted", actor, name, {})
+
     def get_pool(self, name: str) -> dict:
         with self.engine.connect() as conn:
             row = conn.execute(select(pools).where(pools.c.name == name)).first()
