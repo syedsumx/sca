@@ -155,8 +155,10 @@ class DockerRunner:
             cmd = [self.docker, "run", "--rm", "--name", name, "--env-file", env_file,
                    "--user", f"{self.uid}:{self.uid}", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                    "--memory", self.memory, "--cpus", self.cpus, "--pids-limit", "512",
-                   "--read-only", "--tmpfs", "/tmp:rw,size=512m",
-                   "--tmpfs", f"/home/job:rw,size=256m,uid={self.uid},gid={self.uid},mode=0700",
+                   # /tmp may hold programs (exec): the JVM's native libraries (Spark's zstd, snappy) load from it,
+                   # and Docker's default (noexec) fails them. No boundary is lost: the job runs code it chose already.
+                   "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m",
+                   "--tmpfs", f"/home/job:rw,nosuid,nodev,size=256m,uid={self.uid},gid={self.uid},mode=0700",
                    "-v", f"{work}:/work:ro", *(["--network", self.network] if self.network else []),
                    "--entrypoint", "sh", self.image, "-c", script(kind, timeout_s)]
             try:
