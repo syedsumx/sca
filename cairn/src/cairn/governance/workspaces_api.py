@@ -23,7 +23,10 @@ def build_router(svc: WorkspaceService, current_principal, is_admin) -> APIRoute
             raise HTTPException(404, "no such workspace")
 
     @router.get("")
-    def list_workspaces(p: Principal = Depends(current_principal)):
+    def list_workspaces(full: bool = False, p: Principal = Depends(current_principal)):
+        """The workspaces the caller sees; ``?full=true`` (global admins): each as it is declared (``cairn export``)."""
+        if full and is_admin(p.urn):
+            return [w.model_dump(mode="json") for w in svc.list()]
         if is_admin(p.urn):
             roles = svc.roles(p.urn)
             return [{"id": w.id, "name": w.name, "domains": w.domains, "role": roles.get(w.id, "global_admin")}

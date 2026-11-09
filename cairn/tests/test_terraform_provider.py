@@ -386,3 +386,175 @@ def test_terraform_manages_policies_and_connections(world):
     tf(w, "destroy", "-auto-approve")
     assert [x.id for x in s.pdp.bundle.policies] == ["admin"] and core.sources == {}
 
+
+# ---- every family: the registry's examples, by Terraform; and an exported workspace imported ------------------
+@pytest.fixture(scope="module")
+def iac(tmp_path_factory, world):
+    """A Cairn with as many services as run here (tests/iac_world.py), on HTTP, for Terraform."""
+    import sys
+
+    import httpx
+    import uvicorn
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import iac_world
+
+    from cairn.app import create_api_app
+    from cairn.iac.bundle import Client
+    from cairn.iac.engine import Engine
+
+    d = tmp_path_factory.mktemp("tf-iac")
+    s = iac_world.build(d)
+    p = port()
+    server = uvicorn.Server(uvicorn.Config(create_api_app(s), host="127.0.0.1", port=p, timeout_keep_alive=75,
+                                           log_level="warning"))
+    threading.Thread(target=server.run, daemon=True).start()
+    wait(p)
+    url = f"http://127.0.0.1:{p}"
+    client = Client(url, "", http=httpx.Client(headers={"Authorization": f"Bearer {iac_world.TOKEN}"}, timeout=60))
+    iac_world.prerequisites(Engine(client.call))
+    work = d / "work"
+    work.mkdir()
+    (work / "tf.rc").write_text('provider_installation {\n  dev_overrides { "cairn/cairn" = "/prov" }\n  direct {}\n}\n')
+    yield {"s": s, "work": work, "prov": world["prov"], "url": url, "client": client, "token": iac_world.TOKEN,
+           "admin": iac_world.ADMIN}
+    server.should_exit = True
+
+
+def tfx(w, *args, ok=(0,), env=None):
+    """Terraform against the IaC world. Secrets (TF_VAR_...) and the token reach it through the environment only,
+    never on a command line."""
+    names = []
+    for k in sorted(env or {}):
+        names += ["-e", k]
+    r = subprocess.run(["docker", "run", "--rm", "--network", "host", "-v", f"{w['work']}:/work",
+                        "-v", f"{w['prov']}:/prov:ro", "-w", "/work", "-e", "TF_CLI_CONFIG_FILE=/work/tf.rc",
+                        "-e", "TF_IN_AUTOMATION=1", "-e", f"CAIRN_URL={w['url']}", "-e", "CAIRN_TOKEN", *names,
+                        TERRAFORM, *args, "-no-color"],
+                       capture_output=True, text=True, timeout=900,
+                       env={**os.environ, "CAIRN_TOKEN": w["token"], **(env or {})})
+    changes = [x for x in r.stdout.splitlines() if "~" in x or "->" in x or "will be" in x or "must be" in x]
+    assert r.returncode in ok, (r.returncode, changes[:80], r.stdout[-3000:], r.stderr[-6000:])
+    return r
+
+
+def runnable(s):
+    from cairn.iac import registry
+
+    return [k for k in registry.kinds() if k.example and getattr(s, k.service, None) is not None]
+
+
+def mine(e, k, spec):
+    """The example's resource in Cairn (a setting: the one there is)."""
+    from cairn.iac import bundle
+
+    rows = e.records(k, {p: spec[p] for p in k.parents} if k.parents else None)
+    return [r for r in rows if k.singleton or bundle._rec_key(k, r) == bundle.key_of(k, spec)]
+
+
+SECRETS = {"TF_VAR_secret_finance_db_password_value": "pw-1",
+           "TF_VAR_notification_route_finance_incidents_target": "#finance-data"}
+
+
+def test_terraform_manages_every_family_from_the_registry(iac):
+    """Create, no drift, change in place, import and destroy, for every kind that runs here (all six families)."""
+    from cairn.iac import export, registry
+    from cairn.iac.engine import Engine, tf_id
+
+    w, s = iac, iac["s"]
+    for f in w["work"].glob("*.tf"):
+        f.unlink()
+    kinds = [k for k in runnable(s) if k.name != "secret_scopes"]       # the scope the others name is there already
+    assert {k.family for k in kinds} == set(registry.FAMILIES) and len(kinds) >= 35, [k.name for k in kinds]
+
+    def config(update: bool):
+        items = [(k, {**k.example, **((k.example_update or {}) if update else {})}) for k in kinds]
+        (w["work"] / "main.tf").write_text(export.to_terraform(items, declared_values=True))
+
+    config(False)
+    tfx(w, "apply", "-auto-approve", env=SECRETS)
+    e = Engine(w["client"].call)
+    for k in kinds:
+        assert mine(e, k, k.example), k.name
+    assert s.secret_scopes.read(w["admin"], "finance-db", "password") == "pw-1"
+    tfx(w, "plan", "-detailed-exitcode", env=SECRETS)                  # no drift
+    assert "pw-1" not in tfx(w, "show", "-json").stdout                # write-only: never in the state
+    # Changed in place: one change per kind with an example change, nothing replaced.
+    config(True)
+    later = {**SECRETS, "TF_VAR_notification_route_finance_incidents_target": "#finance-alerts"}   # its change
+    out = tfx(w, "apply", "-auto-approve", env=later).stdout
+    n = sum(1 for k in kinds if k.example_update)
+    assert f"0 added, {n} changed, 0 destroyed" in out, out[-3000:]
+    tfx(w, "plan", "-detailed-exitcode", env=later)
+    for k in kinds:
+        if k.example_update and not k.singleton:
+            got = registry.kind(k.name)
+            rec = mine(e, got, k.example)[0]
+            from cairn.iac.engine import declared
+
+            for f, v in k.example_update.items():
+                assert declared(k, rec).get(f) == v or float(declared(k, rec).get(f)) == v, (k.name, f)
+    # A secret rotated by raising its version.
+    main = w["work"] / "main.tf"
+    main.write_text(main.read_text().replace("value = var.secret_finance_db_password_value",
+                                             "value = var.secret_finance_db_password_value\n  value_version = 2"))
+    later["TF_VAR_secret_finance_db_password_value"] = "pw-2"
+    tfx(w, "apply", "-auto-approve", env=later)
+    assert s.secret_scopes.read(w["admin"], "finance-db", "password") == "pw-2"
+    # One of each family forgotten and imported again by its id: no change.
+    def reimport(name):
+        k = registry.kind(name)
+        rec = mine(e, k, k.example)[0]
+        addr = f"cairn_{k.tf}.{export.label(k, export.as_record(k, k.example), set())}"
+        tfx(w, "state", "rm", addr)
+        tfx(w, "import", addr, tf_id(k, rec), env=later)
+
+    for name in ("personas", "secret_scope_acls", "medallion_layers", "budgets", "procedures", "jobs",
+                 "custom_agents", "agent_abuse_settings", "data_apps"):
+        reimport(name)
+    tfx(w, "plan", "-detailed-exitcode", env=later)
+    # An imported secret's value is unknown to Terraform: with a version declared, it is sent once more.
+    reimport("secrets")
+    out = tfx(w, "plan", "-detailed-exitcode", ok=(2,), env=later).stdout
+    assert "Plan: 0 to add, 1 to change, 0 to destroy." in out and "+ value_version = 2" in out, out[-2000:]
+    tfx(w, "apply", "-auto-approve", env=later)
+    tfx(w, "plan", "-detailed-exitcode", env=later)
+    # Destroyed: everything Terraform made goes (settings only leave the state).
+    tfx(w, "destroy", "-auto-approve", env=later)
+    for k in kinds:
+        if not k.singleton:
+            assert not mine(e, k, k.example), k.name
+
+
+def test_an_exported_workspace_imports_without_changes(iac, tmp_path):
+    """cairn export --format terraform, then terraform plan: only imports; applied: no changes. The same workspace
+    exported as a bundle plans with no changes too."""
+    import re
+
+    from cairn.iac import bundle, export
+    from cairn.iac.engine import Engine
+
+    w, s = iac, iac["s"]
+    for f in [*w["work"].glob("*.tf"), *w["work"].glob("terraform.tfstate*")]:
+        f.unlink()
+    e = Engine(w["client"].call)
+    kinds = runnable(s)
+    for k in kinds:
+        if not mine(e, k, k.example):
+            e.create(k, dict(k.example))
+    text = export.export(w["client"].call, "terraform")
+    (w["work"] / "main.tf").write_text(text)
+    env = {f"TF_VAR_{v}": SECRETS.get(f"TF_VAR_{v}", "x") for v in re.findall(r'variable "([a-z0-9_]+)"', text)}
+    out = tfx(w, "plan", env=env).stdout
+    n = text.count("\nimport {")
+    assert n >= len(kinds) and f"Plan: {n} to import, 0 to add, 0 to change, 0 to destroy." in out, \
+        [x for x in out.splitlines() if "~" in x or "->" in x or "updated" in x]
+    tfx(w, "apply", "-auto-approve", env=env)
+    tfx(w, "plan", "-detailed-exitcode", env=env)
+    y = export.export(w["client"].call, "yaml", bundle="exported")
+    (tmp_path / "cairn.yaml").write_text(y)
+    names = {v: SECRETS.get("TF_VAR_" + v.lower(), "x") for v in re.findall(r"\$\{([A-Z0-9_]+)\}", y)}
+    changes, _ = bundle.plan(w["client"], bundle.load(str(tmp_path / "cairn.yaml"), names))
+    assert [c.line() for c in changes if c.action != "keep"] == []
+    assert {c.kind for c in changes} >= {k.name for k in kinds}
+

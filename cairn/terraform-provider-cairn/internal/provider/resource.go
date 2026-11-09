@@ -553,8 +553,8 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 			if prior != nil {
 				var was types.String
 				prior(ctx, p, &was)
-				if f.onlySet && (was.IsNull() || was.IsUnknown()) && !imported {
-					// not declared: Cairn's own value is not drift (an import takes what is there)
+				if f.onlySet && (was.IsNull() || was.IsUnknown()) && (!imported || empty(v)) {
+					// not declared: Cairn's own value is not drift (an import takes what is there, unless empty)
 					diags.Append(set(ctx, p, types.StringNull())...)
 					continue
 				}
@@ -581,6 +581,17 @@ func (r *kindResource) store(ctx context.Context, obj map[string]any, set setter
 		}
 	}
 	return diags
+}
+
+// empty: an empty JSON list or object (what Cairn holds for a document nobody declared).
+func empty(v any) bool {
+	switch x := v.(type) {
+	case []any:
+		return len(x) == 0
+	case map[string]any:
+		return len(x) == 0
+	}
+	return v == nil
 }
 
 // subsetOfState plans the state's JSON when it holds everything the configuration declares: Cairn's own

@@ -58,6 +58,7 @@ class Field:
     read: str = ""                  # the field's name in Cairn's records, when it differs from the request's
     only_set: bool = False          # a JSON document Cairn always returns: compared only when declared
     once: bool = False              # only the create call returns it (a key): kept as created, never compared
+    ref: str = ""                   # "kind.field": the value names that resource (exported as a reference)
 
     @property
     def tf_name(self) -> str:
@@ -78,6 +79,8 @@ class Field:
             out["read_as"] = self.read
         if self.once:
             out["once"] = True
+        if self.ref:
+            out["ref"] = self.ref
         return out
 
 
@@ -340,7 +343,7 @@ CORE: list[Kind] = [
     Kind("alerts", "sql_alert", "bi",
          "A saved query checked on a schedule as its owner; its owner and recipients are told when the condition "
          "starts and stops holding.",
-         (R("name"), R("query", description="the saved query's id (a bundle names it)"),
+         (R("name"), R("query", ref="queries.id", description="the saved query's id (a bundle names it)"),
           F("measure", default="rows", description="rows, or a column of the first row"),
           R("op", description="> >= < <= == !="), R("value", "float"), F("every_minutes", "int", default=60),
           F("recipients", "list", default=[]), F("enabled", "bool", default=True)),
@@ -385,6 +388,10 @@ def check(kinds: list[Kind]) -> None:
             assert f.type in TYPES, (k.name, f.name)
             assert f.tf_name not in TF_RESERVED, (k.name, f.name, "give it tf=")
             assert not (f.required and f.default is not UNSET), (k.name, f.name)
+            if f.ref:
+                other, attr = f.ref.split(".")
+                assert other in {x.name for x in kinds} and attr in {x.name for x in kind(other, kinds).fields} | {"id"}, \
+                    (k.name, f.name, f.ref)
         for p in k.parents:
             assert p in names and k.field(p).force_new and k.field(p).required, (k.name, p)
         for key in k.key:
@@ -416,8 +423,8 @@ def kinds() -> list[Kind]:
     return _KINDS
 
 
-def kind(name: str) -> Kind:
-    for k in kinds():
+def kind(name: str, among: Optional[list[Kind]] = None) -> Kind:
+    for k in among if among is not None else kinds():
         if k.name == name or k.tf == name:
             return k
     raise KeyError(name)

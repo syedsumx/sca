@@ -152,8 +152,10 @@ def label(k: Kind, rec: dict, seen: set) -> str:
     return out
 
 
-def resource_block(k: Kind, rec: dict, name: str, variables: dict, values: Optional[dict] = None) -> str:
-    """One resource block, from Cairn's record (or from declared ``values``: a configuration to create from)."""
+def resource_block(k: Kind, rec: dict, name: str, variables: dict, values: Optional[dict] = None,
+                   refs: Optional[dict] = None) -> str:
+    """One resource block, from Cairn's record (or from declared ``values``: a configuration to create from).
+    ``refs``: (kind, field, value) -> the address of the resource it names, written as a reference."""
     d = declared(k, rec) if values is None else values
     if values is not None:
         rec = as_record(k, values)
@@ -171,7 +173,9 @@ def resource_block(k: Kind, rec: dict, name: str, variables: dict, values: Optio
         v = d[f.name]
         if v is None or (not f.required and f.default is not UNSET and v == f.default) or (f.only_set and v in ([], {})):
             continue
-        if f.type == "json":
+        if f.ref and refs and (f.ref, str(v)) in refs and not refs[(f.ref, str(v))].startswith(f"cairn_{k.tf}.{name}."):
+            lines.append(f"  {f.tf_name} = {refs[(f.ref, str(v))]}")
+        elif f.type == "json":
             lines.append(f"  {f.tf_name} = jsonencode({hcl_value(v, 1)})")
         elif f.type == "list":
             lines.append(f"  {f.tf_name} = {hcl_value([str(x) for x in v], 1)}")
@@ -181,14 +185,25 @@ def resource_block(k: Kind, rec: dict, name: str, variables: dict, values: Optio
     return "\n".join(lines)
 
 
-def to_terraform(items: list[tuple[Kind, dict]]) -> str:
-    """The resources as Terraform: a resource block and an import block each; secrets as sensitive variables."""
+def to_terraform(items: list[tuple[Kind, dict]], declared_values: bool = False) -> str:
+    """The resources as Terraform: a resource block and an import block each; secrets as sensitive variables.
+    With ``declared_values``, ``items`` are (kind, declared values) to create: resource blocks alone."""
     seen: set = set()
     variables: dict[str, tuple] = {}
     blocks = []
-    for k, rec in items:
-        name = label(k, rec, seen)
-        blocks.append(resource_block(k, rec, name, variables))
+    named = [(k, rec, label(k, as_record(k, rec) if declared_values else rec, seen)) for k, rec in items]
+    refs: dict = {}                       # what other resources name, as references (so Terraform orders them)
+    for k, rec, name in named:
+        vals = rec if declared_values else {**declared(k, rec), "id": rec.get(k.id)}
+        for f in [*k.fields, registry.Field("id")]:
+            tf = "id" if f.name == "id" and f not in k.fields else f.tf_name
+            if vals.get(f.name) is not None:
+                refs.setdefault((f"{k.name}.{f.name}", str(vals[f.name])), f"cairn_{k.tf}.{name}.{tf}")
+    for k, rec, name in named:
+        if declared_values:
+            blocks.append(resource_block(k, {}, name, variables, values=rec, refs=refs))
+            continue
+        blocks.append(resource_block(k, rec, name, variables, refs=refs))
         blocks.append(f'import {{\n  to = cairn_{k.tf}.{name}\n  id = {hcl_string(tf_id(k, rec))}\n}}')
     head = ['# Exported from Cairn by `cairn export --format terraform`. `terraform plan` shows the imports and no',
             '# changes. Secrets are sensitive variables: give them in TF_VAR_<name> or a variables file kept out of git.',
@@ -196,7 +211,7 @@ def to_terraform(items: list[tuple[Kind, dict]]) -> str:
             '  required_providers {', '    cairn = { source = "cairn/cairn" }', '  }', '}', '',
             'provider "cairn" {}   # CAIRN_URL and CAIRN_TOKEN (or CAIRN_TOKEN_FILE)', '']
     for var, (f, typ) in sorted(variables.items()):
-        head.append(f'variable "{var}" {{\n  type      = {typ}\n  sensitive = true\n'
+        head.append(f'variable "{var}" {{\n  type        = {typ}\n  sensitive   = true\n'
                     f'  description = {hcl_string(f.description or f.name)}\n}}\n')
     return "\n".join(head) + "\n" + "\n\n".join(blocks) + "\n"
 

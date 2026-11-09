@@ -5,13 +5,14 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-53 resources, each also a data source:
+54 resources, each also a data source:
 
 **Identity and access**
 
 | Resource | Bundle section | What it is |
 |---|---|---|
 | `cairn_policy` | `policies` | One of Cairn's own access policies (source cairn), set and deleted on its own: the rest of the policy bundle stays as it is |
+| `cairn_workspace` | `workspaces` | A workspace: domains run by their own admins, with members and the permissions each role has there |
 | `cairn_persona` | `personas` | A persona: who is in it (people, groups, attribute rules), what it reaches (domains, platforms, tags...) and with which permission bundles; Cairn compiles it into policies |
 | `cairn_purpose` | `purposes` | A purpose: data with these tags or classifications is used only by who is allowed, and masked for others |
 | `cairn_consent_purpose` | `consent_purposes` | A consent purpose: rows of people who did not consent (opt-in) or who withdrew (opt-out) are filtered out for its members |

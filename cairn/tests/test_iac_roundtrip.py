@@ -148,5 +148,5 @@ def test_a_write_only_value_never_leaves_cairn(world, tmp_path):
         text = export.export(c.call, fmt, ["secrets"])
         assert "s3cr3t-value" not in text
     tf = export.export(c.call, "terraform", ["secrets"])
-    assert 'variable "secret_finance_db_token_value"' in tf and "sensitive = true" in tf
+    assert 'variable "secret_finance_db_token_value"' in tf and "sensitive   = true" in tf
     assert "value = var.secret_finance_db_token_value" in tf
