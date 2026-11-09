@@ -1947,7 +1947,7 @@ for (const [route, sample] of Object.entries(ACTION_SAMPLES)) {   // before the 
 }
 /** Actions on the platform areas: accepted in the demo (nothing runs), answered with what the API would act on. */
 for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
-    for (const prefix of ['/v1', '/ai', '/admin', '/agents', '/governance', '/quality', '/marketplace', '/maintenance', '/sql/semantic-models', '/storage', '/workspaces']) {
+    for (const prefix of ['/v1', '/ai', '/admin', '/agents', '/governance', '/quality', '/marketplace', '/maintenance', '/sql/semantic-models', '/storage', '/workspaces', '/notify/routes']) {
         on(method, `${prefix}/:rest`, (b, _q, [rest]) => ({ ok: true, demo: true, method, path: `${prefix}/${rest}`, received: b ?? null,
             note: 'The demo accepts this action without running it; on a Cairn deployment it runs as you, under your policies.' }));
     }

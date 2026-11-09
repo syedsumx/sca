@@ -36,7 +36,7 @@ export const HUBS: Hub[] = [
         "route": "/lakehouse",
         "title": "Lakehouse",
         "icon": "database",
-        "description": "Tables kept by Cairn: derived tables and materialized views, Parquet registered in place, vector indexes, volumes, storage buckets, maintenance and stored procedures.",
+        "description": "Tables kept by Cairn: derived tables and materialized views, Parquet registered in place, vector indexes, volumes, storage buckets, maintenance, stored procedures and quality monitors.",
         "tabs": [
             "derived",
             "external-catalogs",
@@ -47,16 +47,18 @@ export const HUBS: Hub[] = [
             "storage",
             "maintenance",
             "maintenance-runs",
-            "procedures"
+            "procedures",
+            "quality-monitors"
         ]
     },
     {
         "route": "/compute",
         "title": "Compute & jobs",
         "icon": "server",
-        "description": "Where work runs: SQL warehouses that start on demand, Postgres databases and branches, serving tables for lookups by key, scheduled jobs, data apps and Spark applications.",
+        "description": "Where work runs: SQL warehouses that start on demand, saved queries, Postgres databases and branches, serving tables for lookups by key, scheduled jobs, data apps and Spark applications.",
         "tabs": [
             "warehouses",
+            "saved-queries",
             "databases",
             "serving-tables",
             "jobs",
@@ -103,7 +105,7 @@ export const HUBS: Hub[] = [
         "route": "/trust",
         "title": "Trust & security",
         "icon": "lock",
-        "description": "Controls that keep data safe and auditable: access reviews, data residency, tokenisation, security posture, consent, data contracts, passkeys, secrets, SIEM export and limits.",
+        "description": "Controls that keep data safe and auditable: access reviews, data residency, tokenisation, security posture, consent, data contracts, passkeys, secrets, SIEM export, where notifications go, and limits.",
         "tabs": [
             "access-reviews",
             "residency",
@@ -114,6 +116,7 @@ export const HUBS: Hub[] = [
             "passkeys",
             "secret-scopes",
             "siem",
+            "notification-routes",
             "limits",
             "workspaces"
         ]

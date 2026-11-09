@@ -5,8 +5,14 @@ export interface ResourceAction {
     method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
     /** `{field}` is filled from the row; paths without one are page-level actions (create, run all). */
     path: string;
-    /** An example request body, editable before sending; null for none. */
+    /** An example request body: the form's starting values and placeholders (and Raw JSON's); null for none. */
     body?: unknown;
+    /** The body is sent as it is: the action is a confirmation, not a form (Pause, Hide, Require intents…). */
+    fixed?: boolean;
+    /** The form to draw (a key of forms.generated.json); default: the action's own `METHOD path`. */
+    form?: string;
+    /** A page-level action whose path names what the form creates (`PUT /workspaces/{id}`), not a row's. */
+    scope?: 'page' | 'row';
 }
 
 export interface ResourceSpec {
@@ -17,6 +23,8 @@ export interface ResourceSpec {
     /** Where the items sit in the answer (null: the answer is the array itself). */
     listKey: string | null;
     description: string;
+    /** The area's section of the in-product docs (`administration.html#secret-scopes`), linked as "Learn more". */
+    docs?: string;
     /** Fields shown as table columns, in order (the rest are in the row's details). */
     columns: string[];
     actions?: ResourceAction[];
