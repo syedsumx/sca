@@ -1,7 +1,7 @@
 """Guided experience: a person's onboarding progress and sidebar choices (profile ``ui``), and workspace UI settings
 
-Revision ID: 0137
-Revises: 0136
+Revision ID: 0134
+Revises: 0133
 Create Date: 2026-11-09 20:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0137'
-down_revision = '0136'
+revision = '0134'
+down_revision = '0133'
 branch_labels = None
 depends_on = None
 

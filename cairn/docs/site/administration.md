@@ -1178,7 +1178,7 @@ that role, the command palette (⌘K / Ctrl+K) and a help panel on every page. T
 
 **Where it is kept.** A person's onboarding progress (`role`, the steps `done`, `dismissed`, `asked`) and sidebar
 choices (`pinned`, `hidden`, `show_all`) are the `ui` field of their profile (`GET`/`PUT /v1/me/profile`, column
-`cairn_profiles.ui`, migration 0137), so they follow the person to every browser, Cairn Desktop and their phone. A
+`cairn_profiles.ui`, migration 0134), so they follow the person to every browser, Cairn Desktop and their phone. A
 `PUT` with `{"ui": {"onboarding": {...}}}` changes only the parts it names. Step ids are lowercase words (at most 60),
 sidebar entries app paths (at most 80); anything else is refused with 422. Like the rest of the profile it is a
 person's own: agents and services cannot read or write it.
