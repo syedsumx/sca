@@ -708,6 +708,15 @@ def test_a_failed_jobs_log_leads_with_its_exception_lines():
     assert said[0] == ("the job failed with:\norg.apache.iceberg.exceptions.ForbiddenException: Cairn's policies do not let "
                        "bob read analytics.x\nCaused by: java.io.IOException: refused")
     assert said[1].startswith("the job's last output:\n") and len(said[1]) < 8100
+    # Py4J (pyspark) puts the JVM's exception under its own, after ": ".
+    said.clear()
+    py4j = "\n".join(["py4j.protocol.Py4JJavaError: An error occurred while calling o41.sql.",
+                      ": org.apache.iceberg.exceptions.ForbiddenException: Forbidden: bob may not read analytics.x",
+                      *["\tat org.apache.Some.frame(Some.java:1)"] * 600])
+    with pytest.raises(StepFailed):
+        _job_result(Ctx(), "failed", None, py4j, None)
+    assert said[0] == ("the job failed with:\npy4j.protocol.Py4JJavaError: An error occurred while calling o41.sql.\n"
+                       ": org.apache.iceberg.exceptions.ForbiddenException: Forbidden: bob may not read analytics.x")
     # A short output is shown whole, once.
     said.clear()
     with pytest.raises(StepFailed):

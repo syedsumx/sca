@@ -243,7 +243,8 @@ def _stream(b: Backends, ctx: Ctx) -> Any:
 
 
 # ---- compute ------------------------------------------------------------------------------------------
-_CAUSE = re.compile(r"^(?:Caused by: )?[\w.$]+(?:Exception|Error)\b.*")
+# "x.y.SomeException: why", "Caused by: …", and Py4J's ": x.y.SomeException: why" under its Py4JJavaError line.
+_CAUSE = re.compile(r"^(?:Caused by: |: )?[\w.$]+(?:Exception|Error)\b.*")
 
 
 def _failure_lines(text: str, limit: int = 12) -> list[str]:
