@@ -891,7 +891,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     flows_parser(sub)
 
-    ex = sub.add_parser("export", help="write a live Cairn as code: Terraform with import blocks, or a bundle")
+    # One `export` command: on its own it writes a live Cairn as code; `export metadata` writes the catalog's
+    # metadata to the customer's storage. A subcommand's options and handler take precedence over these.
+    ex = sub.add_parser("export", help="write a live Cairn as code (Terraform with import blocks, or a bundle); "
+                        "`export metadata`: catalog metadata to the customer's storage")
     ex.add_argument("--format", choices=["terraform", "yaml"], default="terraform")
     ex.add_argument("--kind", action="append", help="only this resource type (a bundle section or Terraform type); "
                     "repeat for more")
@@ -899,6 +902,14 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--out", help="the file to write (default: standard output)")
     ex.add_argument("--url", help="Cairn's API (default CAIRN_URL)")
     ex.set_defaults(fn=cmd_export, token=None)
+    ex_sub = ex.add_subparsers(dest="export_command", required=False)
+    em = ex_sub.add_parser("metadata", help="assets, columns, owners, labels, lineage, monitors, grants")
+    em.add_argument("--to", help="parquet: a path, or an s3://, gs:// or abfs:// URI")
+    em.add_argument("--format", choices=("parquet", "iceberg"), default="parquet")
+    em.add_argument("--keep-days", type=int, help="parquet: delete daily partitions older than this")
+    em.add_argument("--catalog", default="default", help="iceberg: catalog name in the pyiceberg configuration")
+    em.add_argument("--namespace", default="cairn", help="iceberg: namespace of the tables")
+    em.set_defaults(fn=cmd_export_metadata)
 
     dr = sub.add_parser("dr", help="disaster recovery: after failing over, make every lakehouse table readable")
     dr_sub = dr.add_subparsers(dest="dr_cmd", required=True)
@@ -1029,16 +1040,6 @@ def build_parser() -> argparse.ArgumentParser:
     for name, help_ in (("upgrade", "migrate to the latest revision"), ("current", "show the schema revision"),
                         ("check", "fail if the schema differs from the models or is not at head")):
         db_sub.add_parser(name, help=help_).set_defaults(fn=cmd_db)
-
-    ex = sub.add_parser("export", help="export catalog metadata to the customer's storage")
-    ex_sub = ex.add_subparsers(dest="export_command", required=True)
-    em = ex_sub.add_parser("metadata", help="assets, columns, owners, labels, lineage, monitors, grants")
-    em.add_argument("--to", help="parquet: a path, or an s3://, gs:// or abfs:// URI")
-    em.add_argument("--format", choices=("parquet", "iceberg"), default="parquet")
-    em.add_argument("--keep-days", type=int, help="parquet: delete daily partitions older than this")
-    em.add_argument("--catalog", default="default", help="iceberg: catalog name in the pyiceberg configuration")
-    em.add_argument("--namespace", default="cairn", help="iceberg: namespace of the tables")
-    em.set_defaults(fn=cmd_export_metadata)
 
     xt = sub.add_parser("extension", help="extensions: validate a manifest, install, list, rotate, remove")
     xt_sub = xt.add_subparsers(dest="extension_command", required=True)
