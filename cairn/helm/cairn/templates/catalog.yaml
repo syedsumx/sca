@@ -99,6 +99,21 @@ spec:
               valueFrom:
                 secretKeyRef: { name: {{ $.Values.cairn.secrets.name }}, key: {{ $.Values.cairn.secrets.serviceTokenKey }} }
             {{- end }}
+            {{- if $u.externalLocations.enabled }}
+            {{- if not $u.identity.enabled }}{{ fail "cairn.catalog.externalLocations needs cairn.catalog.identity (Cairn decides and audits every hand-out)" }}{{ end }}
+            - name: CAIRN_CATALOG_LOCATIONS
+              value: cairn
+            - name: CAIRN_CATALOG_SECRETS_DIR
+              value: /var/run/cairn/storage-secrets
+            {{- with $u.externalLocations.storeUrls }}
+            - name: CAIRN_CATALOG_STORE_URLS
+              value: {{ join "," . | quote }}
+            {{- end }}
+            {{- if $u.externalLocations.caSecret }}
+            - name: CAIRN_CATALOG_STORAGE_CA_FILE
+              value: /etc/cairn-storage-ca/ca.crt
+            {{- end }}
+            {{- end }}
             - name: CAIRN_CATALOG_S3_ACCESS_KEY
               valueFrom:
                 secretKeyRef: { name: {{ $st.secret.name }}, key: {{ $st.secret.accessKeyKey }} }
@@ -144,7 +159,19 @@ spec:
               mountPath: /etc/cairn-residency
               readOnly: true
             {{- end }}
-      {{- if or $u.extraTokensSecret $pg (include "cairn.residencyConfigMap" $) }}
+            {{- if $u.externalLocations.enabled }}
+            {{- range $u.externalLocations.secrets }}
+            - name: storage-{{ . }}
+              mountPath: /var/run/cairn/storage-secrets/{{ . }}
+              readOnly: true
+            {{- end }}
+            {{- if $u.externalLocations.caSecret }}
+            - name: storage-ca
+              mountPath: /etc/cairn-storage-ca
+              readOnly: true
+            {{- end }}
+            {{- end }}
+      {{- if or $u.extraTokensSecret $pg (include "cairn.residencyConfigMap" $) $u.externalLocations.enabled }}
       volumes:
         {{- if $pg }}
         - name: data
@@ -159,6 +186,18 @@ spec:
         - name: residency
           configMap:
             name: {{ include "cairn.residencyConfigMap" $ }}
+        {{- end }}
+        {{- if $u.externalLocations.enabled }}
+        {{- range $u.externalLocations.secrets }}
+        - name: storage-{{ . }}
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- if $u.externalLocations.caSecret }}
+        - name: storage-ca
+          secret:
+            secretName: {{ $u.externalLocations.caSecret }}
+        {{- end }}
         {{- end }}
       {{- end }}
       {{- include "cairn.spread" (merge (dict "replicas" $u.replicas) $ctx) | nindent 6 }}

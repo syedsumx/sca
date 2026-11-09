@@ -39,6 +39,14 @@ pub struct Principal {
     /// A Cairn user signed in with a Cairn-issued token: every table is decided by Cairn for them.
     #[serde(skip)]
     pub user: Option<String>,
+    /// An engine that acts for the people who sign in to it and applies Cairn's policies itself (Trino with
+    /// Cairn's access control): it may exchange its token for one per person (`POST /v1/oauth/tokens`, RFC 8693).
+    #[serde(default)]
+    pub delegate: bool,
+    /// Signed in through such an engine: the person's tables are decided by Cairn, and the engine applies masks
+    /// and row filters, so reading a restricted table is not refused here.
+    #[serde(skip)]
+    pub delegated: bool,
 }
 
 impl Principal {
@@ -61,6 +69,42 @@ pub struct Config {
     pub identity: Option<std::sync::Arc<crate::identity::Identity>>,
     /// Namespaces pinned to a region: where their tables may live (data residency).
     pub residency: crate::residency::Residency,
+    /// Tables on the customer's own storage: registered storage credentials and external locations.
+    pub external: Arc<crate::external::External>,
+}
+
+/// Where a location lives: in Cairn Store, or in a registered external location (with its credential).
+#[allow(clippy::large_enum_variant)] // one per request, never stored
+enum Place {
+    Store,
+    External(crate::external::Location, crate::external::Credential),
+}
+
+/// Tokens the catalog gives an engine for one person (`cdt.<claims>.<mac>`), checked with the engine's own token.
+const DELEGATED: &str = "cdt.";
+fn delegated_seconds() -> i64 {
+    std::env::var("CAIRN_CATALOG_DELEGATED_TOKEN_SECONDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|s| (60..=86400).contains(s))
+        .unwrap_or(3600)
+}
+
+fn mac_hex(key: &[u8], msg: &str) -> String {
+    use hmac::Mac;
+    let mut m = <hmac::Hmac<sha2::Sha256>>::new_from_slice(key).expect("hmac accepts any key");
+    m.update(b"cairn-catalog-delegation\n");
+    m.update(msg.as_bytes());
+    hex::encode(m.finalize().into_bytes())
+}
+
+/// The user an unsigned JWT names (what Trino sends for the person a query runs as).
+fn jwt_subject(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let claims = token.split('.').nth(1)?;
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims.trim_end_matches('=')).ok()?;
+    let v: Value = serde_json::from_slice(&raw).ok()?;
+    v["sub"].as_str().filter(|s| !s.is_empty() && s.len() <= 256 && !s.chars().any(|c| c.is_control())).map(str::to_string)
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -443,6 +487,9 @@ impl Catalog {
         if let Some(p) = self.cfg.principals.iter().find(|p| bool::from(p.token.as_bytes().ct_eq(token.as_bytes()))) {
             return Ok(p.clone());
         }
+        if token.starts_with(DELEGATED) {
+            return self.delegated(token);
+        }
         match &self.cfg.identity {
             Some(id) if token.matches('.').count() == 2 => match id.verify(token).await {
                 Ok(user) if crate::identity::is_share(&user) => {
@@ -469,6 +516,8 @@ impl Catalog {
                         namespaces: scope,
                         read_only: true,
                         user: Some(user),
+                        delegate: false,
+                        delegated: false,
                     })
                 }
                 Ok(user) => Ok(Principal {
@@ -477,6 +526,8 @@ impl Catalog {
                     namespaces: vec![],
                     read_only: false,
                     user: Some(user),
+                    delegate: false,
+                    delegated: false,
                 }),
                 Err(why) => {
                     tracing::info!(error = %why, "a Cairn token was refused");
@@ -511,7 +562,7 @@ impl Catalog {
             tracing::info!(user = %user, table = %table, need = verb, "refused by Cairn's policies");
             return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("Cairn's policies do not let {user} {verb} {table}")));
         }
-        if need == Need::Read && d.restricted {
+        if need == Need::Read && d.restricted && !p.delegated {
             tracing::info!(user = %user, table = %table, "restricted: refused to engines reading files");
             return Err(err(
                 StatusCode::FORBIDDEN,
@@ -607,8 +658,35 @@ impl Catalog {
             (Method::GET, ["v1", "config"]) => {
                 Ok(json_resp(StatusCode::OK, &json!({"defaults": {}, "overrides": {}, "endpoints": ENDPOINTS})))
             }
-            (Method::POST, ["v1", "oauth", "tokens"]) => {
-                Err(bad_request("This catalog takes bearer tokens; the OAuth token endpoint is not supported"))
+            (Method::POST, ["v1", "oauth", "tokens"]) => self.exchange(&principal, &body),
+            (Method::GET, ["v1", "locations", "credentials"]) => {
+                // Files under a registered location, by path (not a table): READ_FILES or WRITE_FILES on it.
+                let url = query.get("url").cloned().unwrap_or_default();
+                let write = match query.get("access").map(String::as_str).unwrap_or("read") {
+                    "read" => false,
+                    "write" => true,
+                    _ => return Err(bad_request("access: read or write")),
+                };
+                if write && principal.read_only {
+                    return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "This token may only read"));
+                }
+                let Place::External(l, c) = self.place(&url)? else {
+                    return Err(err(
+                        StatusCode::FORBIDDEN,
+                        "ForbiddenException",
+                        format!("{url} is not in a registered external location"),
+                    ));
+                };
+                if write && l.read_only {
+                    return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("External location {} is read-only", l.name)));
+                }
+                let privilege = if write { "WRITE_FILES" } else { "READ_FILES" };
+                self.location_event(&principal, &l, Some(privilege), "vend", &url, None, write).await?;
+                let v = self.cfg.external.vend(&c, &url, write).await.map_err(unavailable)?;
+                Ok(json_resp(
+                    StatusCode::OK,
+                    &json!({"location": l.name, "prefix": url, "config": v.config, "expires-at-ms": v.expires_ms}),
+                ))
             }
             (Method::GET, ["v1", "namespaces"]) => {
                 let parent = query.get("parent").map(|p| ns_param(p)).unwrap_or_default();
@@ -625,6 +703,7 @@ impl Catalog {
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.properties.get("location") {
                     self.resident(&req.namespace, l, std::iter::empty())?;
+                    self.placement(Some(&principal), &req.namespace, l, std::iter::empty(), true, None).await?;
                 }
                 self.db.create_namespace(&req.namespace, req.properties.clone())?;
                 Ok(json_resp(StatusCode::OK, &json!({"namespace": req.namespace, "properties": req.properties})))
@@ -673,6 +752,7 @@ impl Catalog {
                 self.need_schemas(&principal).await?;
                 if let Some(l) = req.updates.get("location") {
                     self.resident(&levels, l, std::iter::empty())?;
+                    self.placement(Some(&principal), &levels, l, std::iter::empty(), true, None).await?;
                 }
                 let (updated, removed, missing) = self.db.update_namespace(&levels, &req.removals, &req.updates)?;
                 Ok(json_resp(StatusCode::OK, &json!({"updated": updated, "removed": removed, "missing": missing})))
@@ -689,14 +769,14 @@ impl Catalog {
                 scope(&levels)?;
                 let req: CreateTable = parse(&body)?;
                 self.need(&principal, &levels, &req.name, Need::Manage).await?;
-                self.create_table(&levels, req).await
+                self.create_table(&principal, &levels, req).await
             }
             (Method::POST, ["v1", "namespaces", ns, "register"]) => {
                 let levels = ns_param(ns);
                 scope(&levels)?;
                 let req: Register = parse(&body)?;
                 self.need(&principal, &levels, &req.name, Need::Manage).await?;
-                self.register(&levels, req).await
+                self.register(Some(&principal), &levels, req).await
             }
             (Method::POST, ["v1", "namespaces", ns, "tables", t, "metrics"]) => {
                 scope(&ns_param(ns))?;
@@ -711,10 +791,12 @@ impl Catalog {
                 let row = self.db.table(&levels, &name)?;
                 let metadata: Value = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
                 let location = metadata["location"].as_str().unwrap_or("").to_string();
-                if !matches!(self.cfg.vend, Vend::Scoped { .. }) {
+                let external = matches!(self.place(&location)?, Place::External(..));
+                if !external && !matches!(self.cfg.vend, Vend::Scoped { .. }) {
                     return Err(err(StatusCode::NOT_FOUND, "NotFoundException", "This catalog vends no renewable credentials"));
                 }
-                let config = self.client_config(&location, principal.read_only || !d.write).await?;
+                let (config, _) =
+                    self.client_config(&principal, &location, principal.read_only || !d.write, Some((&levels, &name))).await?;
                 tracing::info!(principal = %principal.name, table = %format!("{}.{}", levels.join("."), name), "storage credentials renewed");
                 Ok(json_resp(StatusCode::OK, &json!({"storage-credentials": [{"prefix": location, "config": config}]})))
             }
@@ -726,13 +808,13 @@ impl Catalog {
                 scope(&target)?;
                 self.need(&principal, &levels, &name, Need::Read).await?;
                 self.need(&principal, &target, &req.name, Need::Manage).await?;
-                self.clone_table(&levels, &name, &target, &req.name).await
+                self.clone_table(&principal, &levels, &name, &target, &req.name).await
             }
             (Method::POST, ["v1", "namespaces", ns, "tables", t, "undrop"]) => {
                 let (levels, name) = (ns_param(ns), decode(t));
                 scope(&levels)?;
                 self.need(&principal, &levels, &name, Need::Manage).await?;
-                self.undrop(&levels, &name).await
+                self.undrop(&principal, &levels, &name).await
             }
             (Method::GET, ["v1", "namespaces", ns, "dropped"]) => {
                 let levels = ns_param(ns);
@@ -764,6 +846,7 @@ impl Catalog {
                         let d = self.need(&principal, &levels, &name, Need::Read).await?;
                         let row = table_in(&self.db, &levels, &name)?;
                         self.load_result(
+                            &principal,
                             &row.metadata_location,
                             serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?,
                             principal.read_only || !d.write,
@@ -785,7 +868,7 @@ impl Catalog {
                                 return Err(bad_request("The identifier in the body differs from the path"));
                             }
                         }
-                        let p = self.prepare(&levels, &name, req.requirements, req.updates, true).await?;
+                        let p = self.prepare(&levels, &name, req.requirements, req.updates, Some(&principal)).await?;
                         let location = p.change.new.metadata_location.clone();
                         self.apply(vec![p.change]).await?;
                         Ok(json_resp(StatusCode::OK, &json!({"metadata-location": location, "metadata": p.metadata})))
@@ -802,7 +885,7 @@ impl Catalog {
                         self.forget_clone(&levels, &name, &row).await;
                         if purge {
                             // Data files are left for the store's lifecycle tooling; the current metadata goes now.
-                            let _ = self.store.delete(&row.metadata_location).await;
+                            let _ = self.delete_file(&row.metadata_location).await;
                         }
                         Ok(empty(StatusCode::NO_CONTENT))
                     }
@@ -889,7 +972,7 @@ impl Catalog {
                     scope(&id.namespace)?;
                     let need = if data_only(&c.updates) { Need::Write } else { Need::Manage };
                     self.need(&principal, &id.namespace, &id.name, need).await?;
-                    prepared.push(self.prepare(&id.namespace, &id.name, c.requirements, c.updates, true).await?);
+                    prepared.push(self.prepare(&id.namespace, &id.name, c.requirements, c.updates, Some(&principal)).await?);
                 }
                 self.apply(prepared.into_iter().map(|p| p.change).collect()).await?;
                 Ok(empty(StatusCode::NO_CONTENT))
@@ -899,31 +982,55 @@ impl Catalog {
         }
     }
 
-    async fn load_result(&self, location: &str, metadata: Value, read_only: bool, ident: (&[String], &str)) -> Result<Resp, ApiError> {
+    async fn load_result(
+        &self,
+        who: &Principal,
+        location: &str,
+        metadata: Value,
+        read_only: bool,
+        ident: (&[String], &str),
+    ) -> Result<Resp, ApiError> {
         let table_location = metadata["location"].as_str().unwrap_or("").to_string();
-        let mut config = self.client_config(&table_location, read_only).await?;
-        let mut out = json!({"metadata-location": location, "metadata": metadata});
-        if matches!(self.cfg.vend, Vend::Scoped { .. }) {
-            // Where clients renew the keys (relative to the catalog's URI), before they expire. Both in the
-            // table's config and in its storage credential: Iceberg builds a storage client per credential.
-            let ns: Vec<String> = ident.0.iter().map(|l| encode(l)).collect();
-            config.insert(
-                "client.refresh-credentials-endpoint".into(),
-                format!("v1/namespaces/{}/tables/{}/credentials", ns.join("%1F"), encode(ident.1)),
-            );
-            config.insert("client.refresh-credentials-enabled".into(), "true".into());
-            out["storage-credentials"] = json!([{"prefix": table_location, "config": config}]);
+        let (config, creds) = self.client_config(who, &table_location, read_only, Some(ident)).await?;
+        let mut out = json!({"metadata-location": location, "metadata": metadata, "config": config});
+        if let Some(c) = creds {
+            out["storage-credentials"] = c;
         }
-        out["config"] = json!(config);
         Ok(json_resp(StatusCode::OK, &out))
     }
 
-    /// Storage settings for clients: the object store endpoint and, if vending is on, credentials
-    /// (scoped: temporary keys for this table's location only).
-    async fn client_config(&self, table_location: &str, read_only: bool) -> Result<BTreeMap<String, String>, ApiError> {
+    /// Storage settings for clients: the object store endpoint and, if vending is on, credentials (scoped:
+    /// temporary keys for this table's location only), with the storage credential to send them as when they are
+    /// renewable. A table in an external location always gets access for its location alone, after Cairn has
+    /// recorded the vend.
+    async fn client_config(
+        &self,
+        who: &Principal,
+        table_location: &str,
+        read_only: bool,
+        ident: Option<(&[String], &str)>,
+    ) -> Result<(BTreeMap<String, String>, Option<Value>), ApiError> {
         let mut c = BTreeMap::new();
+        if let Place::External(l, cred) = self.place(table_location)? {
+            let write = !read_only && !l.read_only;
+            let table = ident.map(|(ns, n)| format!("{}.{n}", ns.join(".")));
+            self.location_event(who, &l, None, "vend", table_location, table, write).await?;
+            let v = self.cfg.external.vend(&cred, table_location, write).await.map_err(unavailable)?;
+            c.extend(v.config);
+            if let Some(ident) = ident {
+                self.refresh_endpoint(&mut c, ident);
+                for k in ["adls", "gcs.oauth2"] {
+                    let ep = c["client.refresh-credentials-endpoint"].clone();
+                    c.insert(format!("{k}.refresh-credentials-endpoint"), ep);
+                    c.insert(format!("{k}.refresh-credentials-enabled"), "true".into());
+                }
+            }
+            tracing::info!(principal = %who.name, location = %l.name, write, "external storage credentials vended");
+            let creds = json!([{"prefix": table_location, "config": c}]);
+            return Ok((c, Some(creds)));
+        }
         let (ak, sk, token) = match &self.cfg.vend {
-            Vend::Off => return Ok(c),
+            Vend::Off => return Ok((c, None)),
             Vend::Static => (self.cfg.s3.access_key.clone(), self.cfg.s3.secret_key.clone(), None),
             Vend::Scoped { role_arn, seconds, revalidate } => {
                 let t = self.scoped(role_arn, *seconds, table_location, read_only).await?;
@@ -943,7 +1050,228 @@ impl Catalog {
         if let Some(t) = token {
             c.insert("s3.session-token".into(), t);
         }
-        Ok(c)
+        if let (Vend::Scoped { .. }, Some(ident)) = (&self.cfg.vend, ident) {
+            // Where clients renew the keys (relative to the catalog's URI), before they expire. Both in the
+            // table's config and in its storage credential: Iceberg builds a storage client per credential.
+            self.refresh_endpoint(&mut c, ident);
+            let creds = json!([{"prefix": table_location, "config": c}]);
+            return Ok((c, Some(creds)));
+        }
+        Ok((c, None))
+    }
+
+    fn refresh_endpoint(&self, c: &mut BTreeMap<String, String>, ident: (&[String], &str)) {
+        let ns: Vec<String> = ident.0.iter().map(|l| encode(l)).collect();
+        c.insert(
+            "client.refresh-credentials-endpoint".into(),
+            format!("v1/namespaces/{}/tables/{}/credentials", ns.join("%1F"), encode(ident.1)),
+        );
+        c.insert("client.refresh-credentials-enabled".into(), "true".into());
+    }
+
+    // ---- external locations ---------------------------------------------------------------------------
+
+    /// Where `url` lives. Without external locations, every `s3://` location is Cairn Store's (as before). With them,
+    /// Cairn Store keeps only its own places (the warehouse, the regions' locations, CAIRN_CATALOG_STORE_URLS), and
+    /// everything else must be in a registered external location: a location that is removed, or cannot be loaded
+    /// from Cairn, is refused, never taken for Cairn Store (fail closed).
+    fn place(&self, url: &str) -> Result<Place, ApiError> {
+        let u = crate::external::parse(url).map_err(bad_request)?;
+        let ext = &self.cfg.external;
+        let outside = || {
+            err(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                format!("{url} is not in a registered external location (an administrator registers one in Cairn)"),
+            )
+        };
+        if !ext.active() {
+            return if u.kind == crate::external::Kind::S3 { Ok(Place::Store) } else { Err(outside()) };
+        }
+        if u.kind == crate::external::Kind::S3 && ext.reserved_covers(&u) {
+            return Ok(Place::Store);
+        }
+        let snap = ext.snapshot().map_err(|e| {
+            tracing::warn!(error = %e, "external locations unavailable: refused");
+            err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", e)
+        })?;
+        match snap.find(&u) {
+            Some((l, c)) => Ok(Place::External(l.clone(), c.clone())),
+            None => Err(outside()),
+        }
+    }
+
+    /// May the table (or namespace) live at `location`, with these path properties? Outside Cairn Store only in a
+    /// registered external location, and when it is created or moved there, with CREATE_TABLE on it.
+    async fn placement<'a>(
+        &self,
+        who: Option<&Principal>,
+        levels: &[String],
+        location: &str,
+        props: impl IntoIterator<Item = (&'a String, &'a String)>,
+        create: bool,
+        table: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let mut paths = vec![location.to_string()];
+        paths.extend(props.into_iter().filter(|(k, _)| crate::residency::PATH_PROPERTIES.contains(&k.as_str())).map(|(_, v)| v.clone()));
+        for url in paths {
+            let Place::External(l, _) = self.place(&url)? else { continue };
+            if !create {
+                continue;
+            }
+            if l.read_only {
+                return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", format!("External location {} is read-only", l.name)));
+            }
+            if let Some(who) = who {
+                let t = table.map(|t| format!("{}.{t}", levels.join(".")));
+                self.location_event(who, &l, Some("CREATE_TABLE"), "create_table", &url, t, true).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Asks Cairn about one use of a location (a creation, a vend), which it decides and records.
+    #[allow(clippy::too_many_arguments)]
+    async fn location_event(
+        &self,
+        who: &Principal,
+        l: &crate::external::Location,
+        privilege: Option<&str>,
+        action: &str,
+        url: &str,
+        table: Option<String>,
+        write: bool,
+    ) -> Result<(), ApiError> {
+        let event = json!({"principal": who.name, "user": who.user, "location": l.name, "privilege": privilege,
+                           "action": action, "url": url, "table": table, "access": if write { "write" } else { "read" }});
+        match self.cfg.external.decide(&event).await {
+            crate::external::Asked::Allowed => Ok(()),
+            crate::external::Asked::Refused(why) => {
+                tracing::info!(principal = %who.name, location = %l.name, action, "refused by Cairn");
+                Err(err(StatusCode::FORBIDDEN, "ForbiddenException", why))
+            }
+            crate::external::Asked::Unavailable(why) => {
+                tracing::warn!(error = %why, location = %l.name, "a storage decision could not be made: refused");
+                Err(err(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "ServiceUnavailableException",
+                    "Cairn could not decide access to this location now",
+                ))
+            }
+        }
+    }
+
+    /// The catalog's own metadata files, wherever their table lives.
+    async fn put_file(&self, url: &str, body: Vec<u8>) -> Result<(), ApiError> {
+        match self.place(url)? {
+            Place::Store => Ok(self.store.put_new(url, body, "application/json").await?),
+            Place::External(_, c) => Ok(self.cfg.external.put_new(&c, url, body).await?),
+        }
+    }
+
+    async fn get_file(&self, url: &str) -> Result<Vec<u8>, ApiError> {
+        match self.place(url)? {
+            Place::Store => Ok(self.store.get(url).await?),
+            Place::External(_, c) => Ok(self.cfg.external.get(&c, url).await?),
+        }
+    }
+
+    async fn delete_file(&self, url: &str) -> Result<(), ApiError> {
+        match self.place(url)? {
+            Place::Store => Ok(self.store.delete(url).await?),
+            Place::External(_, c) => Ok(self.cfg.external.delete(&c, url).await?),
+        }
+    }
+
+    // ---- engines acting for people (token exchange) --------------------------------------------------------
+
+    /// RFC 8693 token exchange: an engine allowed to act for people (`delegate`) exchanges its own token and a
+    /// subject token naming the person (Trino's, with `iceberg.rest-catalog.session=USER`) for a token of the
+    /// person's own, with which every table is decided by Cairn for them. A token given earlier is renewed the same way.
+    fn exchange(&self, p: &Principal, body: &[u8]) -> Result<Resp, ApiError> {
+        let form: BTreeMap<String, String> = String::from_utf8_lossy(body)
+            .split('&')
+            .filter(|x| !x.is_empty())
+            .map(|x| {
+                let (k, v) = x.split_once('=').unwrap_or((x, ""));
+                (decode(&k.replace('+', " ")), decode(&v.replace('+', " ")))
+            })
+            .collect();
+        let oauth = |code: &str, text: &str| json_resp(StatusCode::BAD_REQUEST, &json!({"error": code, "error_description": text}));
+        if form.get("grant_type").map(String::as_str) != Some("urn:ietf:params:oauth:grant-type:token-exchange") {
+            return Ok(oauth("unsupported_grant_type", "only token exchange (RFC 8693) by an engine that acts for people"));
+        }
+        let engine = if p.delegated {
+            // Renewing a person's token: the engine it was given to is named in it.
+            self.cfg.principals.iter().find(|x| p.name.ends_with(&format!(" via {}", x.name)) && x.delegate).cloned()
+        } else if p.delegate {
+            Some(p.clone())
+        } else {
+            None
+        };
+        let Some(engine) = engine else {
+            return Err(err(StatusCode::FORBIDDEN, "ForbiddenException", "This token may not act for people"));
+        };
+        if self.cfg.identity.is_none() {
+            return Err(err(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                "Acting for people needs Cairn's decisions (CAIRN_CATALOG_JWKS_URL)",
+            ));
+        }
+        let subject = form.get("subject_token").map(String::as_str).unwrap_or("");
+        let user = if subject.starts_with(DELEGATED) {
+            match self.delegated(subject) {
+                Ok(d) if d.name.ends_with(&format!(" via {}", engine.name)) => d.user,
+                _ => None,
+            }
+        } else {
+            jwt_subject(subject)
+        };
+        let Some(user) = user.filter(|u| !crate::identity::is_share(u)) else {
+            return Ok(oauth("invalid_request", "subject_token must name a person"));
+        };
+        let exp = time::OffsetDateTime::now_utc().unix_timestamp() + delegated_seconds();
+        use base64::Engine as _;
+        let claims =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(json!({"sub": user, "by": engine.name, "exp": exp}).to_string());
+        let token = format!("{DELEGATED}{claims}.{}", mac_hex(engine.token.as_bytes(), &claims));
+        tracing::info!(engine = %engine.name, user = %user, "a token for a person was given to an engine");
+        let mut r = json_resp(
+            StatusCode::OK,
+            &json!({"access_token": token, "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                    "token_type": "Bearer", "expires_in": delegated_seconds()}),
+        );
+        r.headers_mut().insert("cache-control", "no-store".parse().unwrap());
+        Ok(r)
+    }
+
+    /// A person's token given to an engine: checked with the engine's own token, which must still be configured.
+    fn delegated(&self, token: &str) -> Result<Principal, ApiError> {
+        use base64::Engine as _;
+        let bad = || err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "The token is not valid");
+        let rest = token.strip_prefix(DELEGATED).ok_or_else(bad)?;
+        let (claims, mac) = rest.split_once('.').ok_or_else(bad)?;
+        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(claims).map_err(|_| bad())?;
+        let v: Value = serde_json::from_slice(&raw).map_err(|_| bad())?;
+        let by = v["by"].as_str().ok_or_else(bad)?;
+        let engine = self.cfg.principals.iter().find(|p| p.name == by && p.delegate).ok_or_else(bad)?;
+        if !bool::from(mac_hex(engine.token.as_bytes(), claims).as_bytes().ct_eq(mac.as_bytes())) {
+            return Err(bad());
+        }
+        if v["exp"].as_i64().is_none_or(|e| e < time::OffsetDateTime::now_utc().unix_timestamp()) {
+            return Err(err(StatusCode::UNAUTHORIZED, "NotAuthorizedException", "The token has expired"));
+        }
+        let user = v["sub"].as_str().ok_or_else(bad)?.to_string();
+        Ok(Principal {
+            token: String::new(),
+            name: format!("user:{user} via {}", engine.name),
+            namespaces: engine.namespaces.clone(),
+            read_only: engine.read_only,
+            user: Some(user),
+            delegate: false,
+            delegated: true,
+        })
     }
 
     async fn scoped(&self, role_arn: &str, seconds: i64, location: &str, read_only: bool) -> Result<s3::TempCreds, ApiError> {
@@ -1014,7 +1342,7 @@ impl Catalog {
         self.cfg.residency.check_move(from, to).map_err(|m| err(StatusCode::FORBIDDEN, "ForbiddenException", m))
     }
 
-    async fn create_table(&self, levels: &[String], req: CreateTable) -> Result<Resp, ApiError> {
+    async fn create_table(&self, who: &Principal, levels: &[String], req: CreateTable) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid table name"));
         }
@@ -1023,8 +1351,8 @@ impl Catalog {
             return Err(db::Error::TableExists.into());
         }
         let location = req.location.clone().unwrap_or_else(|| self.default_location(levels, &req.name));
-        s3::parse_location(&location)?;
         self.resident(levels, &location, &req.properties)?;
+        self.placement(Some(who), levels, &location, &req.properties, true, Some(&req.name)).await?;
         let mut properties = req.properties.clone();
         let format_version = match properties.remove("format-version").as_deref() {
             None | Some("2") => iceberg::spec::FormatVersion::V2,
@@ -1045,14 +1373,15 @@ impl Catalog {
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         if req.stage_create {
             self.db.stage(levels, &req.name, &json)?;
-            return Ok(json_resp(
-                StatusCode::OK,
-                &json!({"metadata-location": null, "metadata": serde_json::from_str::<Value>(&json).unwrap(),
-                        "config": self.client_config(&location, false).await?}),
-            ));
+            let (config, creds) = self.client_config(who, &location, false, Some((levels, &req.name))).await?;
+            let mut out = json!({"metadata-location": null, "metadata": serde_json::from_str::<Value>(&json).unwrap(), "config": config});
+            if let Some(c) = creds {
+                out["storage-credentials"] = c;
+            }
+            return Ok(json_resp(StatusCode::OK, &out));
         }
         let loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
-        self.store.put_new(&loc, json.as_bytes().to_vec(), "application/json").await?;
+        self.put_file(&loc, json.as_bytes().to_vec()).await?;
         let change = Change {
             namespace: db::ns_key(levels),
             name: req.name.clone(),
@@ -1060,7 +1389,7 @@ impl Catalog {
             new: TableRow { metadata_location: loc.clone(), metadata: json.clone() },
         };
         self.apply(vec![change]).await?;
-        self.load_result(&loc, serde_json::from_str(&json).unwrap(), false, (levels, &req.name)).await
+        self.load_result(who, &loc, serde_json::from_str(&json).unwrap(), false, (levels, &req.name)).await
     }
 
     /// Writes a view's metadata file under its location and returns the file's location.
@@ -1068,7 +1397,7 @@ impl Catalog {
         let json = serde_json::to_string(metadata).map_err(|e| bad_request(e.to_string()))?;
         let n = metadata.history().len();
         let loc = format!("{}/metadata/{n:05}-{}.metadata.json", metadata.location().trim_end_matches('/'), uuid::Uuid::new_v4());
-        self.store.put_new(&loc, json.as_bytes().to_vec(), "application/json").await?;
+        self.put_file(&loc, json.as_bytes().to_vec()).await?;
         Ok((loc, json))
     }
 
@@ -1091,7 +1420,7 @@ impl Catalog {
         let (loc, json) = self.write_view_metadata(&metadata).await?;
         let row = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
         if let Err(e) = self.db.commit_view(levels, &req.name, None, &row) {
-            let _ = self.store.delete(&loc).await;
+            let _ = self.delete_file(&loc).await;
             return Err(e.into());
         }
         Ok(json_resp(
@@ -1126,7 +1455,7 @@ impl Catalog {
         let (loc, json) = self.write_view_metadata(&metadata).await?;
         let new = TableRow { metadata_location: loc.clone(), metadata: json.clone() };
         if let Err(e) = self.db.commit_view(levels, name, Some(&row.metadata_location), &new) {
-            let _ = self.store.delete(&loc).await;
+            let _ = self.delete_file(&loc).await;
             return Err(e.into());
         }
         Ok(json_resp(
@@ -1137,7 +1466,14 @@ impl Catalog {
 
     /// A new table on the same data files (no data is copied): its own location for new writes, and the
     /// source's snapshots, which both tables then keep until the clone is dropped.
-    async fn clone_table(&self, levels: &[String], name: &str, target: &[String], new_name: &str) -> Result<Resp, ApiError> {
+    async fn clone_table(
+        &self,
+        who: &Principal,
+        levels: &[String],
+        name: &str,
+        target: &[String],
+        new_name: &str,
+    ) -> Result<Resp, ApiError> {
         if !valid_name(new_name) {
             return Err(bad_request("Invalid table name"));
         }
@@ -1151,6 +1487,7 @@ impl Catalog {
         let ids: Vec<i64> = md.snapshots().map(|s| s.snapshot_id()).collect();
         let location = self.default_location(target, new_name);
         self.resident(target, &location, md.properties())?;
+        self.placement(Some(who), target, &location, md.properties(), true, Some(new_name)).await?;
         let mut props = HashMap::new();
         props.insert(CLONE_SOURCE.to_string(), format!("{}.{}", levels.join("."), name));
         props.insert(CLONE_INHERITED.to_string(), ids.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(","));
@@ -1168,17 +1505,17 @@ impl Catalog {
             .metadata;
         let clone_loc = MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?.to_string();
         let clone_json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
-        self.store.put_new(&clone_loc, clone_json.as_bytes().to_vec(), "application/json").await?;
+        self.put_file(&clone_loc, clone_json.as_bytes().to_vec()).await?;
         // The source records what the clone shares, in the same commit.
         let mut clones: serde_json::Map<String, Value> =
             md.properties().get(CLONES).and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
         clones.insert(format!("{}.{}", target.join("."), new_name), json!(ids));
         let mut upd = HashMap::new();
         upd.insert(CLONES.to_string(), Value::Object(clones).to_string());
-        let src_change = match self.prepare(levels, name, vec![], vec![TableUpdate::SetProperties { updates: upd }], false).await {
+        let src_change = match self.prepare(levels, name, vec![], vec![TableUpdate::SetProperties { updates: upd }], None).await {
             Ok(p) => p.change,
             Err(e) => {
-                let _ = self.store.delete(&clone_loc).await;
+                let _ = self.delete_file(&clone_loc).await;
                 return Err(e);
             }
         };
@@ -1190,7 +1527,7 @@ impl Catalog {
         };
         self.apply(vec![src_change, clone_change]).await?;
         tracing::info!(source = %format!("{}.{}", levels.join("."), name), clone = %format!("{}.{}", target.join("."), new_name), "table cloned");
-        self.load_result(&clone_loc, serde_json::from_str(&clone_json).unwrap(), false, (target, new_name)).await
+        self.load_result(who, &clone_loc, serde_json::from_str(&clone_json).unwrap(), false, (target, new_name)).await
     }
 
     fn remember_drop(&self, levels: &[String], name: &str, metadata_location: &str, by: &str) -> Result<(), ApiError> {
@@ -1233,7 +1570,7 @@ impl Catalog {
             m.insert(CLONES.to_string(), Value::Object(clones).to_string());
             TableUpdate::SetProperties { updates: m }
         };
-        match self.prepare(&slevels, sname, vec![], vec![update], false).await {
+        match self.prepare(&slevels, sname, vec![], vec![update], None).await {
             Ok(p) => {
                 if let Err(e) = self.apply(vec![p.change]).await {
                     tracing::warn!(source = %source, error = %e.message, "a dropped clone's source kept its record");
@@ -1244,7 +1581,7 @@ impl Catalog {
     }
 
     /// Brings a dropped table back (within the retention), as it was when dropped.
-    async fn undrop(&self, levels: &[String], name: &str) -> Result<Resp, ApiError> {
+    async fn undrop(&self, who: &Principal, levels: &[String], name: &str) -> Result<Resp, ApiError> {
         let props = self.db.namespace(levels)?;
         let key = format!("{DROPPED}{name}");
         let rec: Value = props
@@ -1258,7 +1595,7 @@ impl Catalog {
             return Err(db::Error::TableExists.into());
         }
         let location = rec["metadata-location"].as_str().unwrap_or("").to_string();
-        let bytes = self.store.get(&location).await?;
+        let bytes = self.get_file(&location).await?;
         let md: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
         // A clone comes back only if its source still holds every snapshot they share: once the source has
         // expired one, the data files the clone reads may be gone.
@@ -1284,27 +1621,30 @@ impl Catalog {
             clones.insert(format!("{}.{}", levels.join("."), name), json!(ids));
             let mut m = HashMap::new();
             m.insert(CLONES.to_string(), Value::Object(clones).to_string());
-            hold = Some(self.prepare(&slevels, sname, vec![], vec![TableUpdate::SetProperties { updates: m }], false).await?);
+            hold = Some(self.prepare(&slevels, sname, vec![], vec![TableUpdate::SetProperties { updates: m }], None).await?);
         }
         // The source holds the shared snapshots again before the clone is back.
         if let Some(p) = hold {
             self.apply(vec![p.change]).await?;
         }
-        let resp = self.register(levels, Register { name: name.to_string(), metadata_location: location }).await?;
+        let resp = self.register(Some(who), levels, Register { name: name.to_string(), metadata_location: location }).await?;
         self.db.update_namespace(levels, &[key], &BTreeMap::new())?;
         tracing::info!(table = %format!("{}.{}", levels.join("."), name), "table undropped");
         Ok(resp)
     }
 
-    async fn register(&self, levels: &[String], req: Register) -> Result<Resp, ApiError> {
+    async fn register(&self, who: Option<&Principal>, levels: &[String], req: Register) -> Result<Resp, ApiError> {
         if !valid_name(&req.name) {
             return Err(bad_request("Invalid table name"));
         }
         self.db.namespace(levels)?;
-        let bytes = self.store.get(&req.metadata_location).await?;
+        // Where the metadata file is must be a place the catalog may use before it is read.
+        self.placement(who, levels, &req.metadata_location, std::iter::empty(), true, Some(&req.name)).await?;
+        let bytes = self.get_file(&req.metadata_location).await?;
         let metadata: TableMetadata = serde_json::from_slice(&bytes).map_err(|e| bad_request(format!("Not table metadata: {e}")))?;
         self.resident(levels, metadata.location(), metadata.properties())?;
         self.resident(levels, &req.metadata_location, std::iter::empty())?;
+        self.placement(who, levels, metadata.location(), metadata.properties(), true, Some(&req.name)).await?;
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
         let change = Change {
             namespace: db::ns_key(levels),
@@ -1315,7 +1655,8 @@ impl Catalog {
         self.db.commit(std::slice::from_ref(&change))?;
         self.changed(std::slice::from_ref(&change));
         let name = req.name.clone();
-        self.load_result(&req.metadata_location, serde_json::from_str(&json).unwrap(), false, (levels, &name)).await
+        let who = who.cloned().unwrap_or_else(|| self.cfg.principals[0].clone());
+        self.load_result(&who, &req.metadata_location, serde_json::from_str(&json).unwrap(), false, (levels, &name)).await
     }
 
     /// Checks requirements against the current metadata, applies the updates and writes the new
@@ -1326,16 +1667,19 @@ impl Catalog {
         name: &str,
         requirements: Vec<TableRequirement>,
         updates: Vec<TableUpdate>,
-        client: bool,
+        who: Option<&Principal>,
     ) -> Result<Prepared, ApiError> {
+        let client = who.is_some();
         let current = match self.db.table(levels, name) {
             Ok(row) => Some(row),
             Err(db::Error::NoSuchTable) => None,
             Err(e) => return Err(e.into()),
         };
+        let mut before: Option<(String, Vec<Option<String>>)> = None;
         let (builder, base_location) = match &current {
             Some(row) => {
                 let md: TableMetadata = serde_json::from_str(&row.metadata).map_err(|e| bad_request(e.to_string()))?;
+                before = Some(paths_of(&md));
                 for r in &requirements {
                     r.check(Some(&md)).map_err(iceberg_err)?;
                 }
@@ -1363,13 +1707,16 @@ impl Catalog {
         }
         let metadata = builder.build().map_err(iceberg_err)?.metadata;
         self.resident(levels, metadata.location(), metadata.properties())?;
+        // Moving a table, or where it writes, needs the same as creating it there.
+        let moved = before.as_ref() != Some(&paths_of(&metadata));
+        self.placement(who, levels, metadata.location(), metadata.properties(), moved, Some(name)).await?;
         let location = match base_location.as_deref().map(MetadataLocation::from_str) {
             Some(Ok(cur)) => cur.with_next_version().try_with_new_metadata(&metadata).map_err(iceberg_err)?,
             _ => MetadataLocation::try_new_with_metadata(&metadata).map_err(iceberg_err)?,
         }
         .to_string();
         let json = serde_json::to_string(&metadata).map_err(|e| bad_request(e.to_string()))?;
-        self.store.put_new(&location, json.as_bytes().to_vec(), "application/json").await?;
+        self.put_file(&location, json.as_bytes().to_vec()).await?;
         Ok(Prepared {
             change: Change {
                 namespace: db::ns_key(levels),
@@ -1398,12 +1745,22 @@ impl Catalog {
             }
             Err(e) => {
                 for c in &changes {
-                    let _ = self.store.delete(&c.new.metadata_location).await;
+                    let _ = self.delete_file(&c.new.metadata_location).await;
                 }
                 Err(e.into())
             }
         }
     }
+}
+
+/// A table's location and the path properties that move where it writes.
+fn paths_of(md: &TableMetadata) -> (String, Vec<Option<String>>) {
+    (md.location().to_string(), crate::residency::PATH_PROPERTIES.iter().map(|k| md.properties().get(*k).cloned()).collect())
+}
+
+fn unavailable(e: String) -> ApiError {
+    tracing::warn!(error = %e, "external storage");
+    err(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailableException", format!("External storage: {e}"))
 }
 
 /// A table looked up for loading: a missing namespace is reported as a missing table, as Iceberg's own catalogs do.

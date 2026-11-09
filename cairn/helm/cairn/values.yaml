@@ -763,6 +763,14 @@ cairn:
       # longest a session may last before its user signs in again (3600 s to 30 days).
       tokenTtlSeconds: 3600
       maxSessionSeconds: 604800
+    # Tables on the organisation's own storage (external locations registered in Cairn, /v1/storage). Needs
+    # identity. secrets: Kubernetes Secrets mounted for k8s:<secret>/<key> references; storeUrls: other places
+    # on Cairn Store tables may live besides the warehouse; caSecret: a Secret with ca.crt for the storage.
+    externalLocations:
+      enabled: false
+      secrets: []
+      storeUrls: []
+      caSecret: ""
       # Sharing tables with recipients outside the organisation (Iceberg REST, /v1/shares): the catalog and
       # Cairn's token endpoint as recipients reach them (both public), how long a recipient's token lasts
       # (60-3600 s) and the longest a share may last.

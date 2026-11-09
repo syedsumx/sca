@@ -69,6 +69,11 @@ pub fn under(location: &str, prefix: &str) -> bool {
 }
 
 impl Residency {
+    /// The regions' locations (Cairn's own storage, which no external location may overlap).
+    pub fn locations(&self) -> Vec<String> {
+        self.regions.values().cloned().collect()
+    }
+
     pub fn parse(text: &str) -> Result<Residency, String> {
         // An object with known keys only: a misspelt key would otherwise leave namespaces unpinned.
         let value: serde_json::Value = serde_json::from_str(text).map_err(|e| format!("not JSON: {e}"))?;

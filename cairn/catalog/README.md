@@ -7,6 +7,7 @@ library), which validates requirements and applies metadata updates exactly as t
 src/api.rs        the REST API (namespaces, tables, commits, transactions, rename, register), tokens
 src/db.rs         catalog state in redb: one compare-and-set transaction per commit
 src/s3.rs         SigV4 client that writes metadata files to Cairn Store (or any S3)
+src/external.rs   tables on the customer's storage: external locations, Azure SAS, S3 STS, GCS downscoped tokens
 src/main.rs       serve | healthcheck | version
 conformance/      pyiceberg's RestCatalog against the real catalog and Cairn Store
 ```

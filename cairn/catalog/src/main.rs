@@ -28,10 +28,19 @@
 //! CAIRN_CATALOG_JWT_ISSUER / _AUDIENCE  the tokens' issuer (cairn) and audience (lakehouse)
 //! CAIRN_CATALOG_FSYNC             false skips fsync: commits survive the process dying, not the machine (tests only)
 //! CAIRN_CATALOG_LOG_LEVEL         debug, info, warn, error
+//! CAIRN_CATALOG_LOCATIONS         cairn: tables on the customer's storage in external locations registered in Cairn
+//! CAIRN_CATALOG_LOCATIONS_FILE    ... or registered in a file (no Cairn-issued tokens then)
+//! CAIRN_CATALOG_STORE_URLS        with external locations: other places on Cairn Store besides the warehouse
+//! CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS  how often they are loaded from Cairn (30)
+//! CAIRN_CATALOG_STORAGE_CA_FILE   extra CA certificates for external storage, STS and token endpoints
+//! CAIRN_CATALOG_SECRETS_DIR       where Kubernetes Secrets named by k8s: references are mounted
+//! CAIRN_CATALOG_VAULT_ADDR / CAIRN_CATALOG_VAULT_TOKEN_FILE  HashiCorp Vault for vault: references
+//! CAIRN_CATALOG_DELEGATED_TOKEN_SECONDS  how long a token an engine got for a person lasts (3600)
 //! ```
 
 mod api;
 mod db;
+mod external;
 mod identity;
 mod pg;
 mod residency;
@@ -76,7 +85,15 @@ fn principals() -> Vec<api::Principal> {
     let mut out = vec![];
     let token = secret("CAIRN_CATALOG_TOKEN");
     if !token.is_empty() {
-        out.push(api::Principal { token, name: "admin".into(), namespaces: vec![], read_only: false, user: None });
+        out.push(api::Principal {
+            token,
+            name: "admin".into(),
+            namespaces: vec![],
+            read_only: false,
+            user: None,
+            delegate: false,
+            delegated: false,
+        });
     }
     if let Ok(f) = std::env::var("CAIRN_CATALOG_TOKENS_FILE") {
         let text = std::fs::read_to_string(&f).unwrap_or_else(|e| fail(&f, e));
@@ -257,6 +274,40 @@ async fn ensure_vend_role(store: &s3::Client, role: &str, warehouse: &str, extra
     Ok(arn)
 }
 
+/// External locations: registered in Cairn (CAIRN_CATALOG_LOCATIONS=cairn, its API and service token as for
+/// Cairn-issued tokens), in a file (CAIRN_CATALOG_LOCATIONS_FILE), or none.
+fn external_config(warehouse: &str, residency: &residency::Residency) -> external::External {
+    let mut reserved = vec![external::parse(warehouse).unwrap_or_else(|e| fail("CAIRN_CATALOG_WAREHOUSE", e))];
+    for l in residency.locations() {
+        reserved.push(external::parse(&l).unwrap_or_else(|e| fail("CAIRN_CATALOG_RESIDENCY_FILE", e)));
+    }
+    // Other places on Cairn Store tables may live (with external locations on, nothing else is Cairn Store's).
+    for l in env("CAIRN_CATALOG_STORE_URLS", "").split(',').map(str::trim).filter(|l| !l.is_empty()) {
+        reserved.push(external::parse(l).unwrap_or_else(|e| fail("CAIRN_CATALOG_STORE_URLS", e)));
+    }
+    let source = match (env("CAIRN_CATALOG_LOCATIONS", "").as_str(), env("CAIRN_CATALOG_LOCATIONS_FILE", "")) {
+        ("cairn", f) if f.is_empty() => {
+            let url = env("CAIRN_CATALOG_CAIRN_URL", "");
+            let token = secret("CAIRN_CATALOG_CAIRN_TOKEN");
+            if url.is_empty() || token.len() < 16 {
+                fail("CAIRN_CATALOG_LOCATIONS", "cairn needs CAIRN_CATALOG_CAIRN_URL and CAIRN_CATALOG_CAIRN_TOKEN");
+            }
+            external::Source::Cairn { url, token }
+        }
+        ("" | "file", f) if !f.is_empty() => external::Source::File(f),
+        ("" | "off", f) if f.is_empty() => external::Source::Off,
+        (m, _) => fail("CAIRN_CATALOG_LOCATIONS", format!("{m:?}: cairn, or CAIRN_CATALOG_LOCATIONS_FILE (not both)")),
+    };
+    let refresh: u64 = env("CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS", "30")
+        .parse()
+        .ok()
+        .filter(|s| (1..=3600).contains(s))
+        .unwrap_or_else(|| fail("CAIRN_CATALOG_LOCATIONS_REFRESH_SECONDS", "1 to 3600"));
+    let ca = std::env::var("CAIRN_CATALOG_STORAGE_CA_FILE").ok().filter(|f| !f.is_empty());
+    external::External::new(source, reserved, ca, Duration::from_secs(refresh))
+        .unwrap_or_else(|e| fail("external locations (CAIRN_CATALOG_LOCATIONS_FILE)", e))
+}
+
 /// People and pipeline users signing in with Cairn-issued tokens (CAIRN_CATALOG_JWKS_URL), decided by Cairn.
 fn identity_config() -> Option<std::sync::Arc<identity::Identity>> {
     let jwks = env("CAIRN_CATALOG_JWKS_URL", "");
@@ -299,6 +350,7 @@ async fn serve(addr: String) {
     s3::parse_location(&format!("{}/x", warehouse.trim_end_matches('/'))).unwrap_or_else(|e| fail("warehouse", e));
     let residency = residency::Residency::from_env().unwrap_or_else(|e| fail("CAIRN_CATALOG_RESIDENCY_FILE", e));
     let extra_buckets = residency.buckets();
+    let external = Arc::new(external_config(&warehouse, &residency));
     let cfg = api::Config {
         warehouse: warehouse.clone(),
         principals: principals(),
@@ -307,7 +359,21 @@ async fn serve(addr: String) {
         client_endpoint: env("CAIRN_CATALOG_CLIENT_S3_ENDPOINT", &s3cfg_endpoint),
         identity: identity_config(),
         residency,
+        external: external.clone(),
     };
+    if matches!(env("CAIRN_CATALOG_LOCATIONS", "").as_str(), "cairn") {
+        // Loaded now and then every refresh; until the first load nothing external is placed or handed out.
+        let ext = external.clone();
+        tokio::spawn(async move {
+            loop {
+                match ext.refresh_from_cairn().await {
+                    Ok(n) => tracing::debug!(locations = n, "external locations loaded from Cairn"),
+                    Err(e) => tracing::warn!(error = %e, "external locations could not be loaded from Cairn"),
+                }
+                tokio::time::sleep(ext.refresh_every()).await;
+            }
+        });
+    }
     if cfg.identity.is_some() && !matches!(cfg.vend, api::Vend::Scoped { .. }) {
         // A person's token must never carry the catalog's own store key, nor nothing at all.
         fail("CAIRN_CATALOG_JWKS_URL", "Cairn-issued tokens need scoped credentials: set CAIRN_CATALOG_VEND_ROLE (the store's STS on)");

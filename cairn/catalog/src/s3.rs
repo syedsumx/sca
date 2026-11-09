@@ -28,7 +28,7 @@ impl std::fmt::Display for Error {
         match self {
             Error::Exists => write!(f, "object already exists"),
             Error::NotFound => write!(f, "object not found"),
-            Error::BadLocation(l) => write!(f, "not an s3:// location: {l}"),
+            Error::BadLocation(l) => write!(f, "not a storage location: {l}"),
             Error::Http(e) => write!(f, "object store: {e}"),
         }
     }
@@ -38,6 +38,8 @@ impl std::fmt::Display for Error {
 pub struct Client {
     cfg: S3Config,
     http: reqwest::Client,
+    /// Temporary credentials' session token (sent as x-amz-security-token).
+    token: Option<String>,
 }
 
 /// Splits `s3://bucket/key` (or `s3a://`, `s3n://`) into bucket and key.
@@ -70,7 +72,18 @@ fn uri_encode(s: &str, keep_slash: bool) -> String {
 impl Client {
     pub fn new(cfg: S3Config) -> Client {
         let http = reqwest::Client::builder().timeout(std::time::Duration::from_secs(60)).build().expect("http client");
-        Client { cfg, http }
+        Client { cfg, http, token: None }
+    }
+
+    /// A client on an existing HTTP client (its CA certificates and timeouts).
+    pub fn with_http(cfg: S3Config, http: reqwest::Client) -> Client {
+        Client { cfg, http, token: None }
+    }
+
+    /// Signs with temporary credentials: their session token goes with every request.
+    pub fn session_token(mut self, token: &str) -> Client {
+        self.token = Some(token.to_string());
+        self
     }
 
     fn request(&self, method: &str, bucket: &str, key: &str, body: &[u8], extra: &[(&str, &str)]) -> reqwest::RequestBuilder {
@@ -90,6 +103,9 @@ impl Client {
         let mut headers: Vec<(String, String)> =
             vec![("host".into(), host), ("x-amz-content-sha256".into(), payload.clone()), ("x-amz-date".into(), amz_date.clone())];
         headers.extend(extra.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.to_string())));
+        if let Some(t) = &self.token {
+            headers.push(("x-amz-security-token".into(), t.clone()));
+        }
         headers.sort();
         let signed: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
         let canonical_headers: String = headers.iter().map(|(k, v)| format!("{k}:{}\n", v.trim())).collect();
@@ -161,33 +177,52 @@ impl Client {
 
     /// AssumeRole: temporary credentials for `role_arn`, narrowed by `policy`.
     pub async fn assume_role(&self, role_arn: &str, session: &str, policy: &str, seconds: i64) -> Result<TempCreds, Error> {
+        self.assume_role_ext(role_arn, session, policy, seconds, None).await
+    }
+
+    /// AssumeRole with an external id (a customer's role that asks for one).
+    pub async fn assume_role_ext(
+        &self,
+        role_arn: &str,
+        session: &str,
+        policy: &str,
+        seconds: i64,
+        external_id: Option<&str>,
+    ) -> Result<TempCreds, Error> {
         let secs = seconds.to_string();
-        let (status, xml) = self
-            .query_api(
-                "sts",
-                &[
-                    ("Action", "AssumeRole"),
-                    ("Version", "2011-06-15"),
-                    ("RoleArn", role_arn),
-                    ("RoleSessionName", session),
-                    ("Policy", policy),
-                    ("DurationSeconds", &secs),
-                ],
-            )
-            .await?;
+        let mut params = vec![
+            ("Action", "AssumeRole"),
+            ("Version", "2011-06-15"),
+            ("RoleArn", role_arn),
+            ("RoleSessionName", session),
+            ("Policy", policy),
+            ("DurationSeconds", &secs),
+        ];
+        if let Some(x) = external_id {
+            params.push(("ExternalId", x));
+        }
+        let (status, xml) = self.query_api("sts", &params).await?;
         if status != 200 {
             return Err(Error::Http(format!("AssumeRole {role_arn}: HTTP {status}: {}", xml_text(&xml, "Message").unwrap_or(&xml))));
         }
-        let get = |t: &str| xml_text(&xml, t).map(str::to_string).ok_or_else(|| Error::Http(format!("AssumeRole: no {t} in the answer")));
-        let expires = time::OffsetDateTime::parse(&get("Expiration")?, &time::format_description::well_known::Rfc3339)
-            .map_err(|e| Error::Http(format!("AssumeRole: Expiration: {e}")))?;
-        Ok(TempCreds {
-            access_key: get("AccessKeyId")?,
-            secret_key: get("SecretAccessKey")?,
-            token: get("SessionToken")?,
-            expires_unix: expires.unix_timestamp(),
-        })
+        temp_creds(&xml)
     }
+}
+
+/// The credentials in an STS answer (AssumeRole, AssumeRoleWithWebIdentity).
+pub fn temp_creds(xml: &str) -> Result<TempCreds, Error> {
+    if xml_text(xml, "AccessKeyId").is_none() {
+        return Err(Error::Http(format!("STS: {}", xml_text(xml, "Message").unwrap_or("no credentials in the answer"))));
+    }
+    let get = |t: &str| xml_text(xml, t).map(str::to_string).ok_or_else(|| Error::Http(format!("STS: no {t} in the answer")));
+    let expires = time::OffsetDateTime::parse(&get("Expiration")?, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| Error::Http(format!("STS: Expiration: {e}")))?;
+    Ok(TempCreds {
+        access_key: get("AccessKeyId")?,
+        secret_key: get("SecretAccessKey")?,
+        token: get("SessionToken")?,
+        expires_unix: expires.unix_timestamp(),
+    })
 }
 
 #[cfg(test)]
