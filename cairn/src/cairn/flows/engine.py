@@ -195,7 +195,9 @@ class Flows:
         # runner: airflow (cairn.flows.airflow_interop): where the DAGs go, how often Airflow is asked, how long a new
         # version may take to appear there, how long Airflow may be unreachable before a run fails.
         self.dag_folder = None
-        self.airflow_poll_ms = _int_env("CAIRN_FLOWS_AIRFLOW_POLL_SECONDS", 10, 2, 600) * 1000
+        # Called with (run, flow name, top-level step rows) when a run ends (pipeline observability, L145).
+        self.observers: list = []
+        self.airflow_poll_ms =_int_env("CAIRN_FLOWS_AIRFLOW_POLL_SECONDS", 10, 2, 600) * 1000
         self.airflow_deploy_ms = _int_env("CAIRN_FLOWS_AIRFLOW_DEPLOY_TIMEOUT_SECONDS", 300, 10, 7200) * 1000
         self.airflow_unreachable_ms = _int_env("CAIRN_FLOWS_AIRFLOW_UNREACHABLE_MINUTES", 30, 1, 1440) * 60_000
         self._lock = threading.Lock()
@@ -1182,6 +1184,12 @@ class Flows:
                  for r in sorted(rows, key=lambda r: r["started_ms"] or 0)]
         if status in ("failed", "succeeded"):
             self._tell(row, defn, rid, status, "\n".join(lines))
+        for fn in list(self.observers):
+            try:
+                fn({**run, "status": status, "finished_ms": run.get("finished_ms") or now}, defn.get("name") or row["name"],
+                   rows)
+            except Exception:  # noqa: BLE001 - observing a run never changes it
+                logger.exception("flow run %s: an observer failed", rid)
         self._after(row, status)
         self._admit(row["id"])
 

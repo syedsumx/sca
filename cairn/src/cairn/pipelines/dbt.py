@@ -27,6 +27,7 @@ Datasets are named the way Trino's access control, lineage and the catalog crawl
 
 import gzip
 import json
+import logging
 import time
 from typing import Any, Callable, Optional
 
@@ -35,7 +36,8 @@ from sqlalchemy import BigInteger, Column, Integer, LargeBinary, String, Table, 
 from cairn.common.db import metadata
 from cairn.common.proposals import make_mcp
 
-BUILT = ("model", "seed", "snapshot")
+logger = logging.getLogger(__name__)
+BUILT =("model", "seed", "snapshot")
 SUCCESS = ("success", "pass")
 RUN_COMMANDS = ("run", "build", "seed", "snapshot")
 
@@ -110,6 +112,9 @@ class DbtRuns:
         self.changes = None  # DatasetChanges: the datasets each run built
         self.engine = None   # runs, state and docs are kept when set
         self.semantic = None  # SemanticService: metrics to the Context inbox
+        # Called with (invocation, project, ok, started_ms, finished_ms, results, built, actor) for each run kept
+        # (pipeline observability, L145).
+        self.observers: list = []
 
     def _urn(self, adapter: str, node: dict) -> str:
         table = node.get("alias") or node.get("identifier") or node.get("name")
@@ -168,7 +173,14 @@ class DbtRuns:
         metrics = self._metrics(manifest, project, actor)
         summary = {"project": project, "adapter": adapter, "models": models, "lineage_edges": edges,
                    "exposures": exposures, "metrics": metrics, "tests": tests, "invocation_id": meta.get("invocation_id")}
-        self._remember(body, manifest, run_results, project, actor)
+        kept = self._remember(body, manifest, run_results, project, actor)
+        if kept:
+            for fn in list(self.observers):
+                try:
+                    fn(kept["invocation"], project, kept["ok"], body.get("started_ms"), kept["finished_ms"],
+                       (run_results or {}).get("results") or [], built, actor)
+                except Exception:  # noqa: BLE001 - observing a run never rejects it
+                    logger.exception("a dbt run observer failed")
         if self.audit is not None:
             self.audit.record("pipelines", "dbt.run_recorded", actor, None,
                               {k: v for k, v in summary.items() if k != "tests"} |
@@ -302,7 +314,8 @@ class DbtRuns:
         except Exception as e:  # noqa: BLE001 - the run is recorded; metrics that cannot be read are reported
             return {"error": str(e)[:300]}
 
-    def _remember(self, body: dict, manifest: dict, run_results: Optional[dict], project: str, actor: str) -> None:
+    def _remember(self, body: dict, manifest: dict, run_results: Optional[dict], project: str,
+                  actor: str) -> Optional[dict]:
         """The run, and for a successful run of the project the manifest as the environment's state."""
         if self.engine is None:
             return
@@ -336,6 +349,7 @@ class DbtRuns:
                     conn.execute(dbt_state.update().where(q).values(**values))
                 else:
                     conn.execute(dbt_state.insert().values(project=project[:256], environment=env, **values))
+        return {"invocation": inv, "ok": ok, "finished_ms": now}
 
     def runs(self, project: Optional[str] = None, limit: int = 50) -> list[dict]:
         q = select(dbt_runs).order_by(dbt_runs.c.finished_ms.desc()).limit(max(1, min(limit, 500)))

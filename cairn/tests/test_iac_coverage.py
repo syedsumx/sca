@@ -72,6 +72,12 @@ ACTIONS: dict[str, str] = {
     "POST /v1/serving/{}/sync": _RUN, "POST /v1/lakehouse/parquet-tables/{}/refresh": _RUN, "POST /maintenance/run": _RUN,
     "POST /v1/flows/{}/runs": _RUN, "POST /v1/flows/{}/backfill": _RUN, "POST /v1/flows/{}/airflow-runs": _RUN,
     "POST /v1/flows/runs/{}/cancel": _RUN, "POST /v1/flows/runs/{}/rerun": _RUN,
+    # pipeline observability (L145): what is observed is the kinds observability_data_products, _pipeline_slas,
+    # _exporters; these act now
+    "POST /v1/observability/pipelines/sync": _SYNC,                    # reads the configured Airflows' runs now
+    "POST /v1/observability/pipelines/{}/runs/{}/rerun": _RUN,         # clears a failed run's failed tasks
+    "POST /v1/observability/exporters/apply": "writes the exporters (observability_exporters) where the Collector "
+                                              "reads them, with their header values read from their scopes now",
     "POST /v1/flows/runs/{}/steps/{}/execute": _RUN, "POST /v1/custom-agents/{}/run": _RUN,
     "POST /v1/ontology/runs": _RUN, "POST /v1/ontology/runs/{}/cancel": _RUN, "POST /v1/ontology/runs/{}/resume": _RUN,
     "POST /v1/ontology/runs/{}/import": _RUN, "POST /pipelines/dbt/runs": _RUN, "POST /pipelines/dbt/docs": _RUN,

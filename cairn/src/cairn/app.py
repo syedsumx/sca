@@ -256,7 +256,11 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.observability.api import build_router as observability_router
 
         app.include_router(observability_router(services.observability, cp, authz))
-    if getattr(services, "sre", None) is not None:             # the SRE agent: investigations, proposals, postmortems
+    if getattr(services, "pipeline_obs", None) is not None:   # pipelines, data products, SLAs, OTLP exporters (L145)
+        from cairn.observability.pipelines_api import build_router as pipelines_router
+
+        app.include_router(pipelines_router(services.pipeline_obs, cp, authz, getattr(services, "secret_scopes", None)))
+    if getattr(services, "sre", None) is not None:            # the SRE agent: investigations, proposals, postmortems
         from cairn.sre.api import build_router as sre_router
 
         app.include_router(sre_router(services.sre, cp, authz))

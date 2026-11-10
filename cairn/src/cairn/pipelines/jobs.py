@@ -295,6 +295,8 @@ class Jobs:
         self.mint_token, self.trino_url, self.notify, self.audit = mint_token, trino_url, notify, audit
         self.trino_ca = open(trino_ca_file).read() if trino_ca_file else ""   # Trino's CA, for a private certificate
         self.egress = None            # cairn.network.egress.Egress: the owner's workspace's egress rules, when enforced
+        # Called with (job, run id, status, started_ms, finished_ms, error) when a run ends (L145).
+        self.observers: list = []
         self.max_output = int(os.environ.get("CAIRN_JOBS_MAX_OUTPUT_BYTES", str(2 << 20)))
         self.keep_days = int(os.environ.get("CAIRN_JOBS_KEEP_DAYS", "30"))
         # Runs happen beside the scheduler's tick and the API's request, a few at a time.
@@ -515,6 +517,14 @@ class Jobs:
         from cairn.common import metrics
 
         metrics.RUNS.labels("job", status).inc()
+        if self.observers:
+            with self.engine.connect() as conn:
+                t = conn.execute(select(job_runs.c.started_ms, job_runs.c.finished_ms).where(job_runs.c.id == rid)).first()
+            for fn in list(self.observers):
+                try:
+                    fn(j, rid, status, t.started_ms if t else None, t.finished_ms if t else None, error)
+                except Exception:  # noqa: BLE001 - observing a run never changes it
+                    logger.exception("job run %s: an observer failed", rid)
         if status == "failed" or j["notify"] == "always":
             who = [owner, *[r for r in j["recipients"] if r != owner]]
             kind = "job.failed" if status == "failed" else "job.finished"

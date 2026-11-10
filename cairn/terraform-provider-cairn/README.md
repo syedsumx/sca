@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-90 resources, each also a data source:
+93 resources, each also a data source:
 
 **Identity and access**
 
@@ -136,6 +136,9 @@ permissions and audit apply:
 | `cairn_observability_silence` | `observability_silences` | A silence: alerts whose labels match are not sent and open no incident, between two times (maintenance) |
 | `cairn_sre_runbook` | `sre_runbooks` | A runbook for the SRE agent: the alerts it is for (label matchers), the diagnostic steps it runs first (PromQL, LogQL, logs, traces, health, Postgres status, metrics, slow statements, backups, diagnosis) and the runbook actions it may propose (restart_instance, switchover_instance, backup_instance, silence_alert, rerun_flow), which a person approves |
 | `cairn_sre_agent_settings` | `sre_agent_settings` | The SRE agent's settings: whether it works, which incidents it joins by itself (severities) and whom it acts for then, the model it asks through the AI gateway, and its budget (steps and tokens a run, runs a day) |
+| `cairn_observability_data_product` | `observability_data_products` | A data product for pipeline observability: a named set of tables (dataset URNs or catalog.schema.table, and a catalog data product's assets) and the pipelines that build them (airflow:<dag>, flow:<name>, dbt:<project>, job:<name>, spark:<app>), whose health, freshness and SLAs are watched together |
+| `cairn_observability_pipeline_sla` | `observability_pipeline_slas` | An SLA on a pipeline or a data product: alert when a run fails, when no run succeeded by a daily deadline (HH:MM in a time zone), when a run takes longer than a maximum, when its tables are older than a freshness limit, or when a run is anomalously slow; its alerts go to notification routes and open incidents |
+| `cairn_observability_exporter` | `observability_exporters` | An OTLP destination the bundled OpenTelemetry Collector exports to after its redaction (a Collector, Grafana Cloud, Datadog, Honeycomb, New Relic): gRPC or HTTP, the endpoint, headers whose values come from secret scopes, TLS, which signals and a trace sampling ratio |
 
 <!-- END GENERATED RESOURCES -->
 
