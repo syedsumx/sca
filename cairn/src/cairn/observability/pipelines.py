@@ -551,9 +551,11 @@ class PipelineObservability:
             if run["source"] == "airflow":
                 root_attrs["airflow.dag_id"] = run["pipeline"].split(":", 1)[1].split("@")[0]
                 root_attrs["airflow.dag_run.run_id"] = run["run_id"]
+            from opentelemetry.context import Context
+
             token = _next_trace.set(int(run["trace_id"], 16))
-            try:
-                root = tracer.start_span(f"pipeline {run['pipeline']}", kind=SpanKind.INTERNAL,
+            try:                       # a root of its own (not under the request or cycle that recorded it)
+                root = tracer.start_span(f"pipeline {run['pipeline']}", context=Context(), kind=SpanKind.INTERNAL,
                                          start_time=start_ms * 1_000_000, attributes=root_attrs)
             finally:
                 _next_trace.reset(token)

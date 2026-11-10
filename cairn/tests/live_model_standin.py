@@ -142,6 +142,9 @@ def sre_turn(body: dict) -> list[dict]:
             return [{"type": "text", "text": f"I could not check: {u['name']} failed ({u['text'][:200]})."}]
         health = (u["data"] or {}).get("health") if isinstance(u["data"], dict) else None
         return [{"type": "text", "text": f"{instance or 'The component'} is {health or 'as the logs show'} [{u['evidence']}]."}]
+    pipe = re.search(r'"pipeline": "([a-z][a-z0-9_-]*:[A-Za-z0-9_.@-]+)"', user)
+    if pipe and not instance:
+        return pipeline_turn(used, names, pipe.group(1), re.search(r'"run": "([^"]+)"', user))
     if not used:
         calls = [{"type": "tool_use", "id": "tu_ctx", "name": "incident_context", "input": {}}]
         if instance:
@@ -182,6 +185,42 @@ def sre_turn(body: dict) -> list[dict]:
         return [{"type": "text", "text": f"Most likely cause found on {instance}; I proposed a remediation "
                                          f"({proposed[-1]['data'].get('proposal')}) that waits for a person's approval."}]
     return [{"type": "text", "text": "I wrote what I found; I proposed nothing."}]
+
+
+def pipeline_turn(used: list[dict], names: set, pipeline: str, run: Any) -> list[dict]:
+    """A failed pipeline's incident: read the context and the run's diagnosis, write what failed and why citing it,
+    rank its causes, propose the remediation it suggests (a rerun), then summarise."""
+    run_id = run.group(1) if run else ""
+    if not used:
+        return [{"type": "tool_use", "id": "tu_ctx", "name": "incident_context", "input": {}},
+                {"type": "tool_use", "id": "tu_pdiag", "name": "pipeline_diagnose",
+                 "input": {"pipeline": pipeline, "run_id": run_id}}]
+    if "write_note" not in names:
+        diag = next((u for u in used if u["name"] == "pipeline_diagnose" and u["ok"]), None)
+        if not diag or not isinstance(diag["data"], dict):
+            return [{"type": "tool_use", "id": "tu_note", "name": "write_note", "input": {
+                "kind": "finding", "text": f"I could not diagnose {pipeline}: the diagnosis failed.", "evidence": []}}]
+        d = diag["data"]
+        failed = ", ".join(t["task"] for t in d.get("failed_tasks") or []) or "a task"
+        causes = d.get("causes") or []
+        top = causes[0]["text"] if causes else "unknown"
+        calls = [{"type": "tool_use", "id": "tu_note", "name": "write_note", "input": {
+            "kind": "finding", "text": f"{pipeline} run {run_id} failed in {failed}: {top}.",
+            "evidence": [diag["evidence"]]}}]
+        if causes:
+            calls.append({"type": "tool_use", "id": "tu_rank", "name": "rank_causes", "input": {"causes": [
+                {"cause": f"{c['kind']}: {c['text']}", "likelihood": c["likelihood"], "evidence": [diag["evidence"]]}
+                for c in causes[:3]]}})
+        s = next((x for x in d.get("suggestions") or [] if x.get("kind") == "runbook_action"), None)
+        if s:
+            calls.append({"type": "tool_use", "id": "tu_prop", "name": "propose_action", "input": {
+                "action": s["action"], "params": s["params"], "rationale": s["rationale"],
+                "evidence": [diag["evidence"]]}})
+        return calls
+    proposed = [u for u in used if u["name"] == "propose_action"]
+    if proposed and proposed[-1]["ok"]:
+        return [{"type": "text", "text": f"{pipeline} failed; I proposed a rerun that waits for a person's approval."}]
+    return [{"type": "text", "text": f"I wrote why {pipeline} failed; I proposed nothing."}]
 
 
 def postmortem_text(user: str) -> str:

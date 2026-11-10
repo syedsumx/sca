@@ -57,6 +57,7 @@ processors:
       - 'replace_pattern(spanevent.attributes["exception.message"], "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
       - 'replace_pattern(spanevent.attributes["exception.stacktrace"], "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
       - 'replace_pattern(span.status.message, "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@")'
+      - 'replace_pattern(span.status.message, "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
     log_statements:
       - 'replace_pattern(log.body, "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@") where IsString(log.body)'
       - 'replace_pattern(log.body, "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]") where IsString(log.body)'
