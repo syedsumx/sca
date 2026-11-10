@@ -1,0 +1,9 @@
+# A fragment whose pipeline skips Cairn's redaction: the chart refuses it (CI checks).
+service:
+  pipelines:
+    traces/leak:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp_http/leak]
+exporters:
+  otlp_http/leak: {endpoint: "https://otlp.example.com"}

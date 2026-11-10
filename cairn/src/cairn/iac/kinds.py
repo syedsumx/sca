@@ -858,6 +858,61 @@ KINDS: list[Kind] = [
                   "comment": "storage maintenance"},
          example_update={"comment": "storage maintenance, extended"}),
 
+    # ---- pipeline observability and OpenTelemetry export (L145) ---------------------------------------------
+    Kind("observability_data_products", "observability_data_product", "operations",
+         "A data product for pipeline observability: a named set of tables (dataset URNs or catalog.schema.table, and "
+         "a catalog data product's assets) and the pipelines that build them (airflow:<dag>, flow:<name>, "
+         "dbt:<project>, job:<name>, spark:<app>), whose health, freshness and SLAs are watched together.",
+         (R("id", force_new=True, tf="product_id", description="lowercase letters, digits and -"), R("name"),
+          F("description", default=""), F("owners", "list", default=[], description="people or groups (URNs)"),
+          F("tables", "list", default=[], description="dataset URNs or catalog.schema.table"),
+          F("pipelines", "list", default=[], description="pipeline keys, e.g. airflow:daily_sales"),
+          F("catalog_urn", default="", description="urn:li:dataProduct:... whose assets are its tables too"),
+          F("labels", "json", default={})),
+         **crud("/v1/observability/data-products"), list_key="items", key=("id",), order=164,
+         service="pipeline_obs", docs="data-products-and-slas",
+         example={"id": "daily-sales", "name": "Daily sales", "tables": ["lakehouse.sales.daily_revenue"],
+                  "pipelines": ["airflow:daily_sales"]},
+         example_update={"description": "Revenue per day and region, for finance"}),
+    Kind("observability_pipeline_slas", "observability_pipeline_sla", "operations",
+         "An SLA on a pipeline or a data product: alert when a run fails, when no run succeeded by a daily deadline "
+         "(HH:MM in a time zone), when a run takes longer than a maximum, when its tables are older than a freshness "
+         "limit, or when a run is anomalously slow; its alerts go to notification routes and open incidents.",
+         (R("id", force_new=True, tf="sla_id", description="lowercase letters, digits and -"), R("name"),
+          F("description", default=""), F("pipeline", default="", description="a pipeline key (or data_product)"),
+          F("data_product", default="", ref="observability_data_products.id",
+            description="a data product's id (or pipeline)"),
+          F("on_failure", "bool", default=True), F("deadline", default="", description="HH:MM, e.g. 06:00"),
+          F("timezone", default="UTC"), F("days", "json", default=[0, 1, 2, 3, 4, 5, 6],
+                                         description="0 Monday ... 6 Sunday"),
+          F("max_duration", default="", description="e.g. 45m"), F("freshness", default="", description="e.g. 6h"),
+          F("anomalies", "bool", default=False), F("severity", default="warning", description="critical, warning or info"),
+          F("routes", "list", default=[], description="notification route ids"), F("recipients", "list", default=[]),
+          F("labels", "json", default={}), F("runbook_url", default=""), F("open_incident", "bool", default=True),
+          F("enabled", "bool", default=True)),
+         **crud("/v1/observability/pipeline-slas"), list_key="items", key=("id",), order=165,
+         service="pipeline_obs", docs="data-products-and-slas",
+         example={"id": "daily-sales-by-six", "name": "Daily sales by 06:00", "data_product": "daily-sales",
+                  "deadline": "06:00", "timezone": "Europe/Berlin", "freshness": "26h", "severity": "critical"},
+         example_update={"deadline": "06:30"}),
+    Kind("observability_exporters", "observability_exporter", "operations",
+         "An OTLP destination the bundled OpenTelemetry Collector exports to after its redaction (a Collector, "
+         "Grafana Cloud, Datadog, Honeycomb, New Relic): gRPC or HTTP, the endpoint, headers whose values come from "
+         "secret scopes, TLS, which signals and a trace sampling ratio.",
+         (R("id", force_new=True, tf="exporter_id", description="lowercase letters, digits and -"),
+          F("name", default=""), F("protocol", default="http", description="grpc or http"), R("endpoint"),
+          F("headers", "json", default=[],
+            description='[{"name": "authorization", "scope": "<secret scope>", "key": "<secret>", "prefix": "Bearer "}]'),
+          F("signals", "list", default=["traces", "metrics", "logs"]),
+          F("sampling_ratio", "float", default=1.0, description="the share of traces sent"),
+          F("tls", "json", default={"insecure": False, "ca_file": "", "server_name": ""}),
+          F("enabled", "bool", default=True)),
+         **crud("/v1/observability/exporters"), list_key="items", key=("id",), order=166,
+         service="pipeline_obs", docs="opentelemetry-export",
+         example={"id": "customer-collector", "name": "Our Collector", "protocol": "grpc",
+                  "endpoint": "otel.example.com:4317", "signals": ["traces", "metrics", "logs"]},
+         example_update={"sampling_ratio": 0.5}),
+
     # ---- the SRE agent (L142) --------------------------------------------------------------------------------
     Kind("sre_runbooks", "sre_runbook", "operations",
          "A runbook for the SRE agent: the alerts it is for (label matchers), the diagnostic steps it runs first "

@@ -204,6 +204,7 @@ class Services:
     people: Optional[Any] = None            # People & roles (cairn.identity.people)
     observability: Optional[Any] = None     # Observability: health map, journeys, logs, SLOs, alerts, incidents
     sre: Optional[Any] = None               # the SRE agent (cairn.sre): investigates, proposes; people approve
+    pipeline_obs: Optional[Any] = None      # pipeline observability, data products, SLAs (L145)
     ops_tiles: Optional[Any] = None         # ops dashboards: PromQL, LogQL, TraceQL, SLO, alert, PostgreSQL tiles
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
@@ -647,6 +648,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_split_compute(services)
     _build_people(services)
     _build_observability(services)
+    _build_pipeline_observability(services)
     _build_ops_dashboards(services)
     _build_iac_changes(services)
     _build_sre(services)
@@ -742,6 +744,37 @@ def _build_observability(s: Services) -> None:
     hub = getattr(s, "notify", None)
     s.observability = ObservabilityService(s.engine, Backends(), hub, s.audit,
                                            public_url=getattr(hub, "public_url", "") or "", version=__version__)
+
+
+def _build_pipeline_observability(s: Services) -> None:
+    """Pipeline observability (L145, cairn.observability.pipelines): runs of Airflow DAGs (OpenLineage and Airflow's
+    API), flows, dbt and jobs; data products, SLAs, impact, quality; each run as OpenTelemetry. Built after
+    observability, flows, dbt, jobs, OpenLineage and the BI catalog."""
+    if getattr(s, "observability", None) is None:
+        return
+    from cairn.flows.steps import airflow_from_env
+    from cairn.observability.pipelines import PipelineObservability
+
+    lk = getattr(s, "lakehouse", None)
+
+    def resolve(name: str) -> str:
+        ns, _, t = name.rpartition(".")
+        if lk is not None and ns:
+            return lk.urn(ns.split("."), t)
+        return f"urn:li:dataset:(urn:li:dataPlatform:iceberg,{name},PROD)"
+
+    flows = getattr(s, "flows", None)
+    airflow = getattr(getattr(flows, "b", None), "airflow", None) or airflow_from_env()
+    s.pipeline_obs = PipelineObservability(s.engine, s.observability, s.graph, s.audit, getattr(s, "bi_catalog", None),
+                                           flows, airflow, resolve)
+    if flows is not None:
+        flows.observers.append(s.pipeline_obs.on_flow_run)
+    if getattr(s, "dbt_runs", None) is not None:
+        s.dbt_runs.observers.append(s.pipeline_obs.on_dbt_run)
+    if getattr(s, "jobs", None) is not None:
+        s.jobs.observers.append(s.pipeline_obs.on_job_run)
+    if getattr(s, "openlineage", None) is not None:
+        s.openlineage.observers.append(s.pipeline_obs.on_openlineage)
 
 
 def _build_ops_dashboards(s: Services) -> None:

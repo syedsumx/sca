@@ -3914,6 +3914,193 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 "body": null
             }
         ]
+    },
+    "observability-data-products": {
+        "key": "observability-data-products",
+        "iac": {
+            "kind": "observability_data_products",
+            "id": "id"
+        },
+        "title": "Data products",
+        "path": "/v1/observability/data-products",
+        "listKey": "items",
+        "description": "A named set of tables and the pipelines that build them, watched together: their runs, their tables' freshness, their SLAs.",
+        "docs": "administration.html#data-products-and-slas",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "tables",
+            "pipelines"
+        ],
+        "actions": [
+            {
+                "label": "New data product",
+                "method": "POST",
+                "path": "/v1/observability/data-products",
+                "body": {
+                    "id": "daily-sales",
+                    "name": "Daily sales",
+                    "description": "",
+                    "tables": [
+                        "lakehouse.sales.daily_revenue"
+                    ],
+                    "pipelines": [
+                        "airflow:daily_sales"
+                    ],
+                    "owners": []
+                }
+            },
+            {
+                "label": "Edit data product",
+                "method": "PUT",
+                "path": "/v1/observability/data-products/{id}",
+                "body": {
+                    "name": "Daily sales",
+                    "description": "Revenue per day and region",
+                    "tables": [
+                        "lakehouse.sales.daily_revenue"
+                    ],
+                    "pipelines": [
+                        "airflow:daily_sales"
+                    ],
+                    "owners": []
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/data-products/{id}",
+                "body": null
+            }
+        ]
+    },
+    "observability-pipeline-slas": {
+        "key": "observability-pipeline-slas",
+        "iac": {
+            "kind": "observability_pipeline_slas",
+            "id": "id"
+        },
+        "title": "Pipeline SLAs",
+        "path": "/v1/observability/pipeline-slas",
+        "listKey": "items",
+        "description": "An SLA on a pipeline or a data product: alert when a run fails, when nothing succeeded by a daily deadline, when a run takes too long, when its tables are stale, or when a run is anomalously slow.",
+        "docs": "administration.html#data-products-and-slas",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "pipeline",
+            "data_product",
+            "deadline",
+            "severity"
+        ],
+        "actions": [
+            {
+                "label": "New SLA",
+                "method": "POST",
+                "path": "/v1/observability/pipeline-slas",
+                "body": {
+                    "id": "daily-sales-by-six",
+                    "name": "Daily sales by 06:00",
+                    "pipeline": "",
+                    "data_product": "daily-sales",
+                    "on_failure": true,
+                    "deadline": "06:00",
+                    "timezone": "UTC",
+                    "max_duration": "",
+                    "freshness": "26h",
+                    "anomalies": false,
+                    "severity": "critical",
+                    "routes": []
+                }
+            },
+            {
+                "label": "Edit SLA",
+                "method": "PUT",
+                "path": "/v1/observability/pipeline-slas/{id}",
+                "body": {
+                    "name": "Daily sales by 06:30",
+                    "pipeline": "",
+                    "data_product": "daily-sales",
+                    "on_failure": true,
+                    "deadline": "06:30",
+                    "timezone": "UTC",
+                    "max_duration": "",
+                    "freshness": "26h",
+                    "anomalies": false,
+                    "severity": "critical",
+                    "routes": []
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/pipeline-slas/{id}",
+                "body": null
+            }
+        ]
+    },
+    "observability-exporters": {
+        "key": "observability-exporters",
+        "iac": {
+            "kind": "observability_exporters",
+            "id": "id"
+        },
+        "title": "OpenTelemetry export",
+        "path": "/v1/observability/exporters",
+        "listKey": "items",
+        "description": "OTLP destinations the bundled Collector sends traces, metrics and logs to, after its redaction: your own Collector or a vendor, with headers from secret scopes.",
+        "docs": "administration.html#opentelemetry-export",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "protocol",
+            "endpoint",
+            "signals",
+            "enabled"
+        ],
+        "actions": [
+            {
+                "label": "New destination",
+                "method": "POST",
+                "path": "/v1/observability/exporters",
+                "body": {
+                    "id": "customer-collector",
+                    "name": "Our Collector",
+                    "protocol": "grpc",
+                    "endpoint": "otel.example.com:4317",
+                    "headers": [],
+                    "signals": [
+                        "traces",
+                        "metrics",
+                        "logs"
+                    ],
+                    "sampling_ratio": 1
+                }
+            },
+            {
+                "label": "Edit destination",
+                "method": "PUT",
+                "path": "/v1/observability/exporters/{id}",
+                "body": {
+                    "name": "Our Collector",
+                    "protocol": "grpc",
+                    "endpoint": "otel.example.com:4317",
+                    "headers": [],
+                    "signals": [
+                        "traces",
+                        "metrics",
+                        "logs"
+                    ],
+                    "sampling_ratio": 0.5
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/exporters/{id}",
+                "body": null
+            }
+        ]
     }
 };
 

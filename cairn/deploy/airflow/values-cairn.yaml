@@ -58,6 +58,32 @@ env:
     value: analytics
   - name: AIRFLOW__API__BASE_URL
     value: https://airflow.example.com
+  # Airflow's own OpenTelemetry (a DAG run is a trace with a span per task; scheduler, DAG processing, task and pool
+  # metrics) to Cairn's bundled Collector, which redacts them (cairn.observability.enabled in Cairn's chart):
+  # exactly cairn.observability.airflow_otel_env({"CAIRN_OBS_AIRFLOW_OTLP_ENDPOINT":
+  # "http://cairn-otel-collector.cairn.svc:4318"}) (a test keeps them equal); change the host to your release.
+  - name: AIRFLOW__TRACES__OTEL_ON
+    value: "True"
+  - name: AIRFLOW__METRICS__OTEL_ON
+    value: "True"
+  - name: AIRFLOW__METRICS__OTEL_PREFIX
+    value: airflow
+  - name: OTEL_EXPORTER_OTLP_ENDPOINT
+    value: http://cairn-otel-collector.cairn.svc:4318
+  - name: OTEL_EXPORTER_OTLP_PROTOCOL
+    value: http/protobuf
+  - name: OTEL_TRACES_EXPORTER
+    value: otlp_proto_http
+  - name: OTEL_SERVICE_NAME
+    value: airflow
+  - name: OTEL_RESOURCE_ATTRIBUTES
+    value: service.namespace=cairn,cairn.component=airflow
+  - name: OTEL_TRACES_SAMPLER
+    value: parentbased_traceidratio
+  - name: OTEL_TRACES_SAMPLER_ARG
+    value: "1.0"
+  - name: OTEL_METRIC_EXPORT_INTERVAL
+    value: "15000"
 
 secret:
   - envName: CAIRN_AIRFLOW_OAUTH_SECRET

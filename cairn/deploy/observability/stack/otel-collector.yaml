@@ -7,8 +7,13 @@
 # Where they are: CAIRN_OTEL_TEMPO (host:port of Tempo's OTLP gRPC) and CAIRN_OTEL_LOKI (Loki's base URL).
 #
 # Cairn's processes clean what they send (cairn.observability.redact). This removes credentials once more, for
-# whatever else sends here: header attributes other than a few, attributes whose names say they hold a secret,
-# and values that look like bearer tokens, JWTs or keys.
+# whatever else sends here (Airflow, Trino, the Java agent): header attributes other than a few, attributes whose
+# names say they hold a secret, values that look like bearer tokens, JWTs, keys or URLs with a password, in spans,
+# span events (an exception's message), logs and metrics.
+#
+# OTLP destinations configured in Cairn (kind observability_exporters) are a second file loaded next to this one
+# (--config twice): each of their pipelines runs these same redaction processors before its exporter, and Cairn
+# refuses any pipeline that does not (cairn.observability.exporters.check_redaction; this file passes it too).
 receivers:
   otlp:
     protocols:
@@ -29,21 +34,41 @@ processors:
       - 'eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*'
       - '(AKIA|ASIA)[A-Z0-9]{16}'
       - '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+      - '[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@'
     summary: silent
   # URLs other components record (Trino's calls to Cairn's access control carry Trino's key in the path; any URL
   # may carry one in its query): the key becomes {key}, query strings go.
   transform/urls:
     error_mode: ignore
     trace_statements:
-      - 'replace_pattern(span.attributes["url.full"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
-      - 'replace_pattern(span.attributes["http.url"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
-      - 'replace_pattern(span.attributes["url.path"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
-      - 'replace_pattern(span.attributes["http.target"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
-      - 'replace_pattern(span.name, "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
-      - 'replace_pattern(span.attributes["url.full"], "\\?.*$", "")'
-      - 'replace_pattern(span.attributes["http.url"], "\\?.*$", "")'
-      - 'replace_pattern(span.attributes["http.target"], "\\?.*$", "")'
-      - 'delete_key(span.attributes, "url.query")'
+      # One group per context: a group's statements run on every span (or every span event); in one group the
+      # Collector would run them all in the narrowest context (span events) and skip spans without events.
+      - context: span
+        statements:
+          - 'replace_pattern(span.attributes["url.full"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+          - 'replace_pattern(span.attributes["http.url"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+          - 'replace_pattern(span.attributes["url.path"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+          - 'replace_pattern(span.attributes["http.target"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+          - 'replace_pattern(span.name, "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+          - 'replace_pattern(span.attributes["url.full"], "\\?.*$", "")'
+          - 'replace_pattern(span.attributes["http.url"], "\\?.*$", "")'
+          - 'replace_pattern(span.attributes["http.target"], "\\?.*$", "")'
+          - 'delete_key(span.attributes, "url.query")'
+          - 'replace_pattern(span.status.message, "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@")'
+          - 'replace_pattern(span.status.message, "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
+      # An exception recorded on a span keeps its type, never a password in its message or stack: URLs lose their
+      # user:password@, key=value secrets their value.
+      - context: spanevent
+        statements:
+          - 'replace_pattern(spanevent.attributes["exception.message"], "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@")'
+          - 'replace_pattern(spanevent.attributes["exception.stacktrace"], "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@")'
+          - 'replace_pattern(spanevent.attributes["exception.message"], "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
+          - 'replace_pattern(spanevent.attributes["exception.stacktrace"], "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]")'
+    log_statements:
+      - context: log
+        statements:
+          - 'replace_pattern(log.body, "://[^/\\s:@]+:[^/\\s@]+@", "://[redacted]@") where IsString(log.body)'
+          - 'replace_pattern(log.body, "(?i)((password|passwd|secret|token|api[_-]?key)[a-z_]*\\s*[=:]\\s*)[^\\s,;&]+", "$$1[redacted]") where IsString(log.body)'
 
 connectors:
   span_metrics:
@@ -77,9 +102,9 @@ service:
       exporters: [otlp_grpc/tempo, span_metrics, service_graph]
     metrics:
       receivers: [otlp, span_metrics, service_graph]
-      processors: [memory_limiter, batch]
+      processors: [memory_limiter, attributes/credentials, redaction/values, batch]
       exporters: [prometheus]
     logs:
       receivers: [otlp]
-      processors: [memory_limiter, attributes/credentials, redaction/values, batch]
+      processors: [memory_limiter, attributes/credentials, transform/urls, redaction/values, batch]
       exporters: [otlp_http/loki]

@@ -109,3 +109,7 @@ cairn/config/*/e2e-*.yaml
 # Cairn backups (deploy/ops/backup.sh)
 cairn/backups/
 cairn/evidence/
+
+# The OTLP destinations' header values Cairn writes for the Collector (cairn/deploy/observability/exporters)
+cairn/deploy/observability/exporters/exporters.env
+cairn/deploy/observability/exporters/*.tmp

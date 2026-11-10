@@ -111,6 +111,8 @@ class OpenLineageReceiver:
         self.on_run = None
         # Called with (event, job_urn, outputs, start_ms, end_ms) when a run finishes (run costs).
         self.on_finished = None
+        # Called with (event, job_urn, inputs, outputs) for every run event (pipeline observability, L145).
+        self.observers: list = []
 
     def _datasets(self, items: list[dict], mcps: list[dict]) -> list[str]:
         urns = []
@@ -218,6 +220,11 @@ class OpenLineageReceiver:
                 self.on_run(job_urn, state, outputs, run.get("runId"), str(err)[:500])
             except Exception:  # noqa: BLE001 - lineage is recorded; health tracking must not reject it
                 logger.exception("pipeline health for %s failed", job_urn)
+        for fn in list(self.observers):
+            try:
+                fn(event, job_urn, inputs, outputs)
+            except Exception:  # noqa: BLE001 - lineage is recorded; observing it must not reject it
+                logger.exception("a run observer failed for %s", job_urn)
         if self.on_finished is not None and state in ("COMPLETE", "FAIL", "ABORT") and run_urn:
             try:
                 self.on_finished(event, job_urn, outputs, start_ms, when)

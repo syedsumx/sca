@@ -324,6 +324,10 @@ class ObservabilityService:
         self.version = version
         # Called with ("opened" | "resolved", the incident) after an incident opens or is resolved (the SRE agent).
         self.listeners: list = []
+        # More evaluation (pipeline SLAs, L145): called with the time on each evaluate(); an error is counted.
+        self.evaluators: list = []
+        # More context for an incident (the pipeline runs its alerts are about): called with the incident.
+        self.incident_extras: list = []
 
     def _emit(self, event: str, iid: str) -> None:
         if not self.listeners:
@@ -375,7 +379,7 @@ class ObservabilityService:
         if kind == "slo":            # the indicator as declared (what a bundle or Terraform compares with)
             doc["indicator"] = {k: v for k, v in m.indicator.model_dump(mode="json", exclude_none=True).items()
                                 if not (k == "selector" and v == "")}
-        if kind in ("slo", "alert_rule"):
+        if kind in ("slo", "alert_rule", "pipeline_sla"):
             self._check_routes(doc.get("routes") or [])
         return doc
 
@@ -414,8 +418,8 @@ class ObservabilityService:
             n = c.execute(delete(obs_config).where(and_(obs_config.c.kind == kind, obs_config.c.id == oid))).rowcount
         if not n:
             raise ObservabilityError(f"no {kind.replace('_', ' ')} {oid}", 404)
-        if kind in ("slo", "alert_rule"):          # its alerts end with it
-            prefix = ("slo:" if kind == "slo" else "rule:") + oid
+        if kind in ("slo", "alert_rule", "pipeline_sla"):          # its alerts end with it
+            prefix = {"slo": "slo:", "alert_rule": "rule:", "pipeline_sla": "sla:"}[kind] + oid
             for a in self._open_alerts_like(prefix):
                 self._resolve(a, _now(), "its definition was deleted")
         self._audit(actor, f"observability.{kind}_deleted", oid, {})
@@ -772,6 +776,16 @@ class ObservabilityService:
             self._set_status("slo", slo["id"], {"at": _iso(now), "burning": burning,
                                                 "sli": None if ratios.get(slo["burn_alerts"][0]["long"]) is None
                                                 else 1 - ratios[slo["burn_alerts"][0]["long"]]})
+        for fn in list(self.evaluators):
+            try:
+                more = fn(now) or {}
+                sla = more.get("slas") or {}
+                out["fired"] += int(sla.get("fired") or 0)
+                out["resolved"] += int(sla.get("resolved") or 0)
+                out["errors"] += int(sla.get("errors") or 0)
+            except Exception:  # noqa: BLE001 - one evaluator failing never stops the others
+                out["errors"] += 1
+                logger.exception("an observability evaluator failed")
         return out
 
     def _advance(self, source: str, spec: dict, active: dict, now: int, why_resolved: str = "") -> dict:
@@ -867,7 +881,7 @@ class ObservabilityService:
     def _spec_of(self, source: str) -> Optional[dict]:
         kind, _, rest = source.partition(":")
         oid = rest.split(":")[0]
-        for d in self._docs("alert_rule" if kind == "rule" else "slo"):
+        for d in self._docs({"rule": "alert_rule", "sla": "pipeline_sla"}.get(kind, "slo")):
             if d["id"] == oid:
                 return d
         return None
@@ -1127,6 +1141,11 @@ class ObservabilityService:
         except ObservabilityError as e:
             out["error_logs"] = {"error": str(e)}
         out["slos"] = [s for s in self.list("slo") if not services or s["service"] in services]
+        for fn in list(self.incident_extras):
+            try:
+                out.update(fn(inc) or {})
+            except Exception as e:  # noqa: BLE001 - said in the answer, like every other part
+                out.setdefault("errors", []).append(str(e)[:300])
         return out
 
     # ---- deploys ------------------------------------------------------------------------------------------------

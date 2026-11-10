@@ -19,18 +19,30 @@ x-java-agent: &java-agent
   OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
   OTEL_TRACES_SAMPLER: parentbased_traceidratio
   OTEL_TRACES_SAMPLER_ARG: ${CAIRN_OTEL_SAMPLE_RATIO:-1.0}
+# Airflow 3.3's own traces (a DAG run is a trace with a span per task) and metrics, to the Collector, which redacts
+# them: exactly cairn.observability.airflow_otel_env({"OTEL_EXPORTER_OTLP_ENDPOINT": "http://cairn-otel-collector:4318"})
+# (tests/test_pipeline_observability.py keeps them equal).
 x-airflow-otel: &airflow-otel
   AIRFLOW__TRACES__OTEL_ON: "True"
-  AIRFLOW__TRACES__OTEL_HOST: cairn-otel-collector
-  AIRFLOW__TRACES__OTEL_PORT: "4318"
-  AIRFLOW__TRACES__OTEL_SERVICE: airflow
   AIRFLOW__METRICS__OTEL_ON: "True"
-  AIRFLOW__METRICS__OTEL_HOST: cairn-otel-collector
-  AIRFLOW__METRICS__OTEL_PORT: "4318"
+  AIRFLOW__METRICS__OTEL_PREFIX: airflow
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://cairn-otel-collector:4318
+  OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+  OTEL_TRACES_EXPORTER: otlp_proto_http
+  OTEL_SERVICE_NAME: airflow
+  OTEL_RESOURCE_ATTRIBUTES: service.namespace=cairn,cairn.component=airflow
+  OTEL_TRACES_SAMPLER: parentbased_traceidratio
+  OTEL_TRACES_SAMPLER_ARG: "1.0"
+  OTEL_METRIC_EXPORT_INTERVAL: "15000"
+# Where Cairn writes the OTLP destinations configured in it (Observability -> Export, kind observability_exporters)
+# for the Collector: POST /v1/observability/exporters/apply, then `... up -d cairn-otel-collector`.
+x-exporters: &exporters
+  CAIRN_OBS_EXPORTERS_DIR: /var/lib/cairn/otel-exporters
 
 services:
   cairn-api:
-    environment: {<<: [*otel, *otel-read], OTEL_SERVICE_NAME: cairn-api}
+    environment: {<<: [*otel, *otel-read, *exporters], OTEL_SERVICE_NAME: cairn-api}
+    volumes: [./deploy/observability/exporters:/var/lib/cairn/otel-exporters]
   cairn-pdp:
     environment: {<<: *otel, OTEL_SERVICE_NAME: cairn-pdp}
   cairn-gateway:
@@ -59,6 +71,8 @@ services:
     environment: {<<: *airflow-otel}
   airflow-dag-processor:
     environment: {<<: *airflow-otel}
+  airflow-triggerer:
+    environment: {<<: *airflow-otel}
 
   # The OpenTelemetry Java agent (pinned), copied into a volume Cairn Core and its web application load it from.
   cairn-otel-java-agent:
@@ -71,9 +85,14 @@ services:
     image: otel/opentelemetry-collector-contrib:0.163.2
     hostname: cairn-otel-collector
     restart: unless-stopped
-    command: ["--config=/etc/otelcol/config.yaml"]
+    # The bundled pipelines, then the OTLP destinations Cairn rendered (exporters.yaml, "{}" until applied) with
+    # their header values in exporters.env (written 0600 by Cairn; never in the YAML).
+    command: ["--config=/etc/otelcol/config.yaml", "--config=/etc/otelcol/exporters/exporters.yaml"]
+    env_file:
+      - {path: ./deploy/observability/exporters/exporters.env, required: false}
     volumes:
       - ./deploy/observability/stack/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+      - ./deploy/observability/exporters:/etc/otelcol/exporters:ro
     depends_on: [cairn-tempo, cairn-loki]
     networks: [catalog]
 

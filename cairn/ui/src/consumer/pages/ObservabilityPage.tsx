@@ -4,6 +4,7 @@ import { Link, useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { ExportTab, PipelinesTab } from '../components/PipelinesObs';
 import { EvidenceList, SreIncidentPanel } from '../components/SreAgent';
 import type { Evidence } from '../components/SreAgent';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
@@ -79,7 +80,7 @@ interface Incident {
 interface TimelineEvent { at: string; kind: string; actor: string; by_agent: boolean; text: string; detail?: { evidence?: Evidence[] } }
 interface IncidentDetail extends Incident { alerts: AlertRow[]; timeline: TimelineEvent[] }
 
-const TABS = ['health', 'journey', 'logs', 'slos', 'alerts', 'incidents'] as const;
+const TABS = ['health', 'journey', 'logs', 'pipelines', 'slos', 'alerts', 'incidents', 'export'] as const;
 const STATE_COLOR: Record<string, string> = { up: 'green', degraded: 'orange', down: 'red', unknown: 'default' };
 const SEVERITY_COLOR: Record<string, string> = { critical: 'red', warning: 'orange', info: 'blue' };
 const SPEC = (k: string) => RESOURCE_SPECS[k] as ResourceSpec;
@@ -643,6 +644,8 @@ export function ObservabilityPage() {
     const [service] = useSearchParam('service');
     const [incident, setIncident] = useSearchParam('incident');
     const [isNew, setNew] = useSearchParam('new');
+    const [pipeline] = useSearchParam('pipeline');
+    const [pipeRun] = useSearchParam('run');
     const active = (TABS as readonly string[]).includes(tab) ? tab : 'health';
     const ov = useDheQuery<Overview>('/v1/observability/overview', (c, signal) =>
         c.request('GET', '/v1/observability/overview', undefined, { signal }), { pollMs: 30_000 });
@@ -674,6 +677,10 @@ export function ObservabilityPage() {
                         children: active === 'journey' ? <JourneyTab key={trace} initial={trace} service={service}
                             showLogs={(id) => setTab('logs', { trace: id })} /> : null },
                     { key: 'logs', label: t('obs.tab.logs'), children: active === 'logs' ? <LogsTab traceId={trace} service={service} /> : null },
+                    { key: 'pipelines', label: t('obs.tab.pipelines'),
+                        children: active === 'pipelines' ? <PipelinesTab pipeline={pipeline} run={pipeRun}
+                            select={(p, r) => setTab('pipelines', { pipeline: p, run: r ?? null })}
+                            openTrace={(id) => setTab('journey', { trace: id, pipeline: null, run: null })} /> : null },
                     { key: 'slos', label: t('obs.tab.slos'),
                         children: active === 'slos' ? <SlosTab startNew={isNew === 'slo'} onNewClosed={() => setNew(null)} /> : null },
                     { key: 'alerts', label: t('obs.tab.alerts'),
@@ -681,6 +688,7 @@ export function ObservabilityPage() {
                             openIncident={(id) => setIncident(id)} /> : null },
                     { key: 'incidents', label: t('obs.tab.incidents'),
                         children: active === 'incidents' ? <IncidentsTab open={(id) => setIncident(id)} /> : null },
+                    { key: 'export', label: t('obs.tab.export'), children: active === 'export' ? <ExportTab /> : null },
                 ]}
             />
             {incident && <IncidentDrawer id={incident} onClose={() => setIncident(null)} />}

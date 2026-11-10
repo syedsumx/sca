@@ -1404,6 +1404,16 @@ cairn:
     javaAgent:
       enabled: true
       image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0
+    # OTLP destinations configured in Cairn (Observability -> Export; kind observability_exporters), exported by the
+    # bundled Collector after its redaction: exportersConfig is the fragment GET /v1/observability/exporters/
+    # collector-config gives (helm upgrade --set-file cairn.observability.exportersConfig=exporters.yaml), and
+    # exportersSecret a Secret holding the variables it names (CAIRN_EXPORTER_<ID>_<N>: the header values). A
+    # pipeline in it without Cairn's redaction processors is refused.
+    exportersConfig: ""
+    exportersSecret: ""
+    # With networkPolicy on, namespaces whose pods may send OTLP to the Collector (Airflow's, managed Airflow
+    # deployments'); this release's own pods always may.
+    collectorFromNamespaces: []
     collector:
       image: otel/opentelemetry-collector-contrib:0.163.2
       resources:
