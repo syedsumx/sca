@@ -71,7 +71,9 @@ const { chromium } = require('playwright');
     const picker = dialog.getByLabel(/^Dataset URN/);
     await picker.click();
     await picker.fill(DS_NAME);
-    const option = page.locator('.ant-select-dropdown:visible .ant-select-item-option', { hasText: DS_NAME }).first();
+    // Core's search result, not the free-text "Use “…”" option the picker offers at once while the search runs.
+    const option = page.locator('.ant-select-dropdown:visible .ant-select-item-option', { hasText: DS_NAME })
+      .filter({ hasNotText: /^Use “/ }).first();
     await option.waitFor({ timeout: 30000 });
     const label = (await option.innerText()).trim();
     await option.click();
