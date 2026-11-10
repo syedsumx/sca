@@ -1,7 +1,7 @@
 """Managed Postgres: instances run by Cairn, their backups, and the instance each database lives on
 
-Revision ID: 0139
-Revises: 0138
+Revision ID: 0140
+Revises: 0139
 Create Date: 2026-11-10 18:00:00.000000
 """
 
@@ -10,8 +10,8 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0139'
-down_revision = '0138'
+revision = '0140'
+down_revision = '0139'
 branch_labels = None
 depends_on = None
 
