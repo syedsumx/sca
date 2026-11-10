@@ -34,7 +34,9 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
          # Observability (L141): without backends here (they say so); the forms and an incident are below and in
          # tests/test_observability_ui_e2e.py.
          "/observability", "/observability?tab=journey", "/observability?tab=logs", "/observability?tab=slos",
-         "/observability?tab=alerts", "/observability?tab=incidents"]
+         "/observability?tab=alerts", "/observability?tab=incidents",
+         # The platform design (L146): the platform map and the Airflow environments tab; the home page is above.
+         "/capabilities", "/compute?tab=airflow-deployments", "/observability?tab=pipelines"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
 FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
          ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person"),

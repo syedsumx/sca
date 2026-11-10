@@ -919,6 +919,22 @@ jobs:
             tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Managed Airflow's tab in the built UI (environment cards scoping deploys, promotions and health; axe; phone width; Chromium against real deployments)
+        working-directory: cairn
+        env:
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_AIRFLOW_IMAGE: cairn/airflow:ci
+        run: |
+          set -o pipefail
+          (cd ui && npm ci --silent && npm run build:mfe)
+          pip install -q "playwright>=1.50"
+          python -m playwright install --with-deps chromium
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_airflow_deployments_ui_e2e.py | tee "$RUNNER_TEMP/airflowui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/airflowui.log"
       - name: Spark training (pyspark.ml in the cairn/spark image) tracked in MLflow through Cairn
         working-directory: cairn
         env:
