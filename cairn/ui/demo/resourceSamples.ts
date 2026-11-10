@@ -1339,6 +1339,21 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    }
   ]
  },
+ "/v1/databases/instances": {
+  "runtime": "kubernetes",
+  "backups": true,
+  "parameters": ["max_connections", "shared_buffers", "statement_timeout", "work_mem"],
+  "instances": [
+   {"name": "default", "runtime": "external", "state": "ready", "host": "pg.northwind.internal", "port": 5432,
+    "version": null, "replicas": null, "pooler": null, "maintenance_window": null, "pending": [], "parameters": [],
+    "backup_schedules": [], "note": "the server given to Cairn (CAIRN_DATABASES_ADMIN_URL): run outside Cairn"},
+   {"name": "loyalty-pg", "runtime": "kubernetes", "state": "ready", "version": "16", "cpu": 2, "memory_mb": 4096,
+    "storage_gb": 100, "replicas": 1, "pooler": {"mode": "transaction", "instances": 2},
+    "maintenance_window": {"day": "sun", "start": "02:00", "hours": 2}, "host": "cairn-pg-loyalty-pg-pooler.cairn-postgres.svc",
+    "port": 5432, "pending": [], "parameters": [{"name": "work_mem", "value": "16MB"}],
+    "backup_schedules": [{"name": "daily", "every_hours": 24, "retention_days": 14, "verify": true}]}
+  ]
+ },
  "/v1/databases": {
   "databases": [
    {

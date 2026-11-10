@@ -1356,6 +1356,40 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "postgres-instances": {
+        "key": "postgres-instances",
+        "iac": {"kind": "postgres_instances", "id": "name"},
+        "title": "Postgres instances",
+        "path": "/v1/databases/instances",
+        "listKey": "instances",
+        "description": "Managed PostgreSQL instances: a cluster per team or workload with standbys and failover, pooling, continuous backups to Cairn Store, point-in-time restore, health, metrics and slow queries. The server Cairn was given is the instance default.",
+        "docs": "administration.html#managed-postgres",
+        "columns": [
+            "name",
+            "state",
+            "runtime",
+            "version",
+            "replicas",
+            "host",
+            "port"
+        ],
+        "view": "postgres-instances",
+        "actions": [
+            {
+                "label": "New instance",
+                "method": "POST",
+                "path": "/v1/databases/instances",
+                "body": {
+                    "name": "orders-pg",
+                    "version": "16",
+                    "cpu": 1,
+                    "memory_mb": 1024,
+                    "storage_gb": 10,
+                    "replicas": 1
+                }
+            }
+        ]
+    },
     "databases": {
         "key": "databases",
         "title": "Databases",
@@ -1365,6 +1399,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
         "docs": "administration.html#operational-databases",
         "columns": [
             "name",
+            "instance",
             "branch_of",
             "created_by",
             "host",
@@ -1387,6 +1422,15 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 "path": "/v1/databases/{name}/branches",
                 "body": {
                     "name": "loyalty_app_test"
+                }
+            },
+            {
+                "label": "Branch from a point in time",
+                "method": "POST",
+                "path": "/v1/databases/{name}/branches",
+                "body": {
+                    "name": "loyalty_app_monday",
+                    "at": "2026-11-09T09:00:00Z"
                 }
             },
             {

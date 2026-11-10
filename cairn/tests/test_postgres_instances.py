@@ -383,3 +383,78 @@ def test_the_server_given_before_is_the_default_instance(cairn):
                  lambda: ana.delete("/v1/databases/instances/default")):
         assert call().status_code == 409
     assert ana.delete("/v1/databases/legacy_app").status_code == 204
+
+
+UI_BUNDLE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "ui", "dist", "mfe")
+HOST_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Cairn</title></head>
+<body><div id="root"></div><script src="/ui/remoteEntry.js"></script><script>
+(async () => {
+  await cairnConsumer.init({});
+  const mount = (await cairnConsumer.get('./mount'))().mount;
+  mount(document.getElementById('root'), { apiBaseUrl: window.location.origin, catalogUrl: null });
+})();
+</script></body></html>"""
+
+
+def test_the_instances_page_in_a_browser(cairn):
+    """Chromium on the built UI and the real API: the palette's "New instance" form makes a real instance, whose
+    status, backups and metrics the page then shows."""
+    try:
+        from playwright.sync_api import expect, sync_playwright
+    except ImportError:
+        pytest.skip("needs Playwright")
+    if not os.path.exists(os.path.join(UI_BUNDLE, "remoteEntry.js")):
+        pytest.skip("needs the built UI bundle (npm run build:mfe)")
+    import re
+    import threading
+
+    import uvicorn
+    from fastapi.responses import HTMLResponse
+    from fastapi.staticfiles import StaticFiles
+
+    from cairn.app import create_api_app
+
+    app = create_api_app(cairn["s"])
+    app.mount("/ui", StaticFiles(directory=UI_BUNDLE), name="ui")
+    app.add_api_route("/host", lambda: HTMLResponse(HOST_PAGE), methods=["GET"])
+    p = free_port("127.0.0.1")
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=p, log_level="warning"))
+    threading.Thread(target=server.run, daemon=True).start()
+    end = time.time() + 30
+    while True:
+        try:
+            socket.create_connection(("127.0.0.1", p), 0.3).close()
+            break
+        except OSError:
+            assert time.time() < end
+            time.sleep(0.1)
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch()
+            ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": ANA}, viewport={"width": 1440, "height": 900})
+            page = ctx.new_page()
+            errors: list[str] = []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.goto(f"http://127.0.0.1:{p}/host#/compute?tab=postgres-instances&action=New%20instance",
+                      wait_until="domcontentloaded")
+            dialog = page.get_by_role("dialog", name="New PostgreSQL instance")
+            expect(dialog).to_be_visible(timeout=30_000)
+            dialog.get_by_label("Name").fill("ui-pg")
+            dialog.get_by_role("button", name="Create").click()
+            cairn["made"].append("ui-pg")
+            row = page.get_by_role("row", name=re.compile(r"ui-pg"))
+            expect(row).to_be_visible(timeout=180_000)
+            expect(row).to_contain_text("ready")
+            row.get_by_text("ui-pg").click()
+            expect(page.get_by_text("healthy").first).to_be_visible(timeout=60_000)
+            page.get_by_role("tab", name="Backups & restore").click()
+            page.get_by_role("button", name="Back up now").click()
+            expect(page.get_by_role("cell", name="completed").first).to_be_visible(timeout=180_000)
+            page.get_by_role("tab", name="Metrics").click()
+            expect(page.get_by_role("cell", name="postgres", exact=True).first).to_be_visible(timeout=60_000)
+            page.screenshot(path=os.path.join(tempfile.gettempdir(), "cairn-postgres-instances.png"), full_page=True)
+            assert not errors, errors
+            browser.close()
+    finally:
+        server.should_exit = True
+    assert cairn["s"].pg_instances.backups(ANA, "ui-pg")[0]["state"] == "completed"

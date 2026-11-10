@@ -419,6 +419,10 @@ def iac(tmp_path_factory, world):
     yield {"s": s, "work": work, "prov": world["prov"], "url": url, "client": client, "token": iac_world.TOKEN,
            "admin": iac_world.ADMIN}
     server.should_exit = True
+    if getattr(s, "pg_instances", None) is not None:     # the PostgreSQL containers the examples made
+        for inst in s.pg_instances.list(iac_world.ADMIN):
+            if inst["runtime"] != "external":
+                s.pg_instances.delete(iac_world.ADMIN, inst["name"])
 
 
 def tfx(w, *args, ok=(0,), env=None):

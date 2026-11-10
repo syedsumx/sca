@@ -57,11 +57,12 @@ export const HUBS: Hub[] = [
         "route": "/compute",
         "title": "Compute & jobs",
         "icon": "server",
-        "description": "Where work runs: SQL warehouses that start on demand, saved queries, Postgres databases and branches, serving tables for lookups by key, scheduled jobs, data apps and Spark applications.",
+        "description": "Where work runs: SQL warehouses that start on demand, saved queries, Postgres databases and branches, managed Postgres instances (backups, point-in-time restore, failover), serving tables for lookups by key, scheduled jobs, data apps and Spark applications.",
         "tabs": [
             "warehouses",
             "saved-queries",
             "databases",
+            "postgres-instances",
             "serving-tables",
             "jobs",
             "apps",

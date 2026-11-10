@@ -10,6 +10,7 @@ import { hubTab, rememberHubTab } from '../guide/help';
 import { Breadcrumbs, PageHeader } from '../guide/PageHeader';
 import { RESOURCE_SPECS } from './catalog';
 import { OntologyGraphView } from './OntologyGraph';
+import { PostgresInstancesView } from './PostgresInstances';
 import { ResourceView } from './ResourceView';
 import type { Hub, ResourceSpec } from './types';
 
@@ -25,6 +26,7 @@ export const HubIcon = styled.span`
 `;
 
 function AreaView({ spec }: { spec: ResourceSpec }) {
+    if (spec.view === 'postgres-instances') return <PostgresInstancesView />;
     return spec.view === 'ontology-graph' && spec.path ? <OntologyGraphView path={spec.path} /> : <ResourceView spec={spec} />;
 }
 

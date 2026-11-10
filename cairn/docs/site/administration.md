@@ -1735,6 +1735,171 @@ Tested on a real PostgreSQL 16 (`tests/test_databases.py`):
 - dropping removed everything;
 - no password reached the audit log.
 
+## Managed Postgres
+
+A PostgreSQL *instance* (a cluster) per team or workload, run by Cairn: sized, highly available, pooled, backed up
+continuously to Cairn Store and restorable to any second. The databases above live on instances: the server given
+to Cairn with `CAIRN_DATABASES_ADMIN_URL` is the instance `default` (Cairn reads its health and metrics; its
+lifecycle and backups stay with whoever runs it), and `POST /v1/databases {"name", "instance"}` puts a database on
+a managed one.
+
+Two runtimes:
+
+- **Kubernetes** (`CAIRN_PG_RUNTIME=kubernetes`): Cairn drives the CloudNativePG operator, pinned at **1.27.0**
+  (Apache-2.0). Each instance is a `Cluster` with a primary and `replicas` streaming standbys spread over nodes;
+  when the primary is lost the operator promotes a standby and the instance's services follow it. Pooling is a
+  CloudNativePG `Pooler` (PgBouncer). Backups are the operator's Barman Cloud: WAL archived continuously and base
+  backups to the store.
+- **Docker** (`CAIRN_PG_RUNTIME=docker`), for small and development deployments: a PostgreSQL container and a
+  backup sidecar per instance, on a network of their own. No standbys and no pooler (they need Kubernetes).
+
+### Installing
+
+On Kubernetes, install the operator once per cluster, then turn the runtime on in the chart:
+
+```sh
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.27/releases/cnpg-1.27.0.yaml
+kubectl -n cnpg-system rollout status deployment/cnpg-controller-manager
+kubectl create namespace cairn-postgres
+# The key the instances' superuser passwords are derived from (Cairn never stores or shows them).
+kubectl -n cairn create secret generic cairn-pg-instances --from-file=key=./instance.key
+# The store's keys: the operator's copy (in the instances' namespace) and Cairn's (in Cairn's).
+kubectl -n cairn-postgres create secret generic cairn-pg-backups \
+  --from-file=access-key=./store.access --from-file=secret-key=./store.secret
+kubectl -n cairn create secret generic cairn-pg-backups \
+  --from-file=access-key=./store.access --from-file=secret-key=./store.secret
+```
+
+```yaml
+cairn:
+  databases:
+    instances:
+      runtime: kubernetes
+      keySecret: { name: cairn-pg-instances, key: key }
+      kubernetes:
+        namespace: cairn-postgres
+        images: { "16": ghcr.io/cloudnative-pg/postgresql:16.6, "17": ghcr.io/cloudnative-pg/postgresql:17.2 }
+        backupSecret: cairn-pg-backups
+      backups:
+        enabled: true
+        bucket: cairn-pg-backups
+        # endpoint: Cairn's view of the store (default: this release's Cairn Store); endpointForInstances: the pods'.
+```
+
+The chart gives Cairn's account a Role in `cairn-postgres` for CloudNativePG's clusters, poolers, backups and
+scheduled backups, Secrets, Services and pods there, and nothing else. The API and the scheduler get the same
+settings: `CAIRN_PG_RUNTIME`, `CAIRN_PG_INSTANCE_KEY` (or `_FILE`), `CAIRN_PG_K8S_NAMESPACE`, `CAIRN_PG_K8S_ACCESS`
+(`cluster-ip`, or `node-port` with `CAIRN_PG_K8S_NODE_ADDRESS` when Cairn runs outside the cluster),
+`CAIRN_PG_K8S_IMAGES`, `CAIRN_PG_K8S_STORAGE_CLASS`, `CAIRN_PG_K8S_BACKUP_SECRET`, `CAIRN_PG_BACKUP_STORE`
+(`{"endpoint", "bucket", "region", "endpoint_for_instances"}`), `CAIRN_PG_BACKUP_ACCESS_KEY` and
+`CAIRN_PG_BACKUP_SECRET_KEY` (or `_FILE`). Without the key, or with a half-given store, managed instances stay off and
+the reason is logged: nothing runs unprotected.
+
+On Docker, Cairn needs the Engine's socket (`CAIRN_PG_DOCKER_SOCKET`) and: `CAIRN_PG_DOCKER_IMAGES`
+(`{"16": "postgres:16-alpine"}`), `CAIRN_PG_DOCKER_AGENT_IMAGE` (a plain Python image for the sidecar, default
+`python:3.12-slim`), `CAIRN_PG_DOCKER_BIND` (the address ports are published on, default `127.0.0.1`),
+`CAIRN_PG_DOCKER_HOST` (where clients reach them), `CAIRN_PG_DOCKER_PORTS` (default `15432-15999`: an instance keeps
+its port across restarts), and `CAIRN_PG_DOCKER_NETWORK` when the sidecar reaches the store by a network's name. Each
+instance gets the volumes `cairn-pg-<name>-data` and `-spool`, the containers `cairn-pg-<name>` and `-agent`, and
+the network `cairn-pg-<name>-net`. The superuser's password goes in as a file, read once by initdb; the store's keys
+are a file in the sidecar only. Instances answer over TLS (a certificate Cairn makes for each; clients use
+`sslmode=require`), with data checksums and `pg_stat_statements`.
+
+### Instances
+
+- `POST /v1/databases/instances` (`CREATE_DATABASE_INSTANCE`): `{"name", "version": "14"-"17", "cpu": 0.25-64,
+  "memory_mb": 256-524288, "storage_gb": 1-16384, "replicas": 0-5, "pooler": {"mode": "transaction" | "session",
+  "instances": 1-4, "pool_size", "max_client_connections"}, "maintenance_window": {"day": "sun" | "daily",
+  "start": "02:00", "hours": 1-8}, "image"}`. Names are lowercase letters, digits and `-` (up to 24).
+- Everything else on `urn:li:pgInstance:<name>` needs `MANAGE_DATABASE_INSTANCE`; status and metrics need
+  `VIEW_DATABASE_INSTANCE` (or MANAGE); putting databases on it needs `USE_DATABASE_INSTANCE` (or MANAGE) besides
+  `CREATE_DATABASE`. One change at a time: a second one while an instance is changing answers 409.
+- `PATCH /v1/databases/instances/<name>` resizes (CPU and memory live on Docker; a rolling update on Kubernetes),
+  adds or removes standbys, turns pooling on or off, and moves the maintenance window. Storage can grow on
+  Kubernetes where the storage class allows it.
+- **Parameters** are their own resources: `PUT .../parameters/<name> {"value"}`, `DELETE` resets one. Only an
+  allow-list is accepted (memory, work_mem, connections, timeouts, logging, autovacuum, planner costs, parallelism,
+  `pg_stat_statements.*`; `GET /v1/databases/instances` lists it), and each value is checked. Archiving, replication
+  and TLS settings are Cairn's and cannot be changed. A parameter that needs a restart is applied now when there is
+  no maintenance window, otherwise in the window (`pending`).
+- `DELETE /v1/databases/instances/<name>` removes the instance (409 while Cairn databases are on it). Its backups
+  stay in the store, under the instance's own prefix, until their retention ends.
+
+### Backups and restore
+
+- WAL is archived continuously. On Docker, `archive_command` asks the sidecar to store the file and succeeds only
+  once it is in the store, so PostgreSQL keeps a WAL file until it is safe; on Kubernetes, the operator's Barman
+  Cloud does the same.
+- **Schedules**: `PUT .../backup-schedules/<name> {"every_hours": 1-24 (or whole days up to 168),
+  "retention_days", "verify"}` takes a base backup on that schedule (Docker: Cairn's scheduler; Kubernetes: a
+  `ScheduledBackup`). Base backups older than their schedule's retention are deleted, never the newest, and then the
+  WAL older than the oldest backup kept (Kubernetes: the cluster's retention policy, the longest schedule's).
+  `POST .../backups` takes one now; `GET .../backups` lists them; `DELETE .../backups/<id>` deletes one.
+- **Restore checks**: `POST .../backups/<id>/verify` (and every scheduled backup with `"verify": true`) restores the
+  backup into a throwaway instance (not published, archiving off), opens every database, and records `passed` or
+  `failed`. A check cut off by a restart is cleaned up by the scheduler.
+- **Point-in-time restore**: `POST .../restore {"name", "target_time": "2026-11-10T12:00:00Z" | "backup": "<id>",
+  "databases": {"<old>": "<new>"}}` (`MANAGE_DATABASE_INSTANCE` on the source, `CREATE_DATABASE_INSTANCE`) makes a
+  new instance from the latest base backup before the time and the archived WAL up to it (`backup`: as of that
+  backup; neither: as late as the archive goes). Before replaying, Cairn closes the source's current WAL file so
+  everything up to now is in the archive. In the new instance, the Cairn databases named in `databases` are renamed
+  and registered (their roles too); the others are dropped; no login of the source survives, and the superuser has
+  the new instance's own password. It then takes its own first base backup (a new timeline).
+- **A branch of a database from a point in time**: `POST /v1/databases/<name>/branches {"name", "at": "<time>"}` (or
+  `"backup"`) is such a restore holding only that database, in a new instance (`"instance"`, default the branch's
+  name with `-` for `_`).
+
+### Upgrades, failover and maintenance
+
+- **Minor versions**: set `image` (a newer patch release of the same major version). Without a maintenance window it
+  is applied now; with one, it waits for it (`pending`; `POST .../apply-pending` applies it now). Docker stops the
+  container and starts the new image on the same data and port; Kubernetes rolls the standbys first, then switches
+  over (`primaryUpdateMethod: switchover`).
+- **Major versions** are not changed in place (a `version` change answers 400). Restore or import into a new
+  instance of the newer version: on Kubernetes, a new `Cluster` with `bootstrap.initdb.import` from the old one
+  (CloudNativePG's logical import); on Docker, `pg_dump` from the old instance into a database on the new one
+  (`pg_dump -Fc | pg_restore` with an owner login of each). Move the applications, then delete the old instance.
+- **Failover** (Kubernetes) is automatic: the operator promotes a standby when the primary's pod or node is lost, and
+  `<cluster>-rw` (and the pooler) follow the new primary. `POST .../switchover {"target"?}` promotes a standby on
+  purpose (as `kubectl cnpg promote` does), for node maintenance. `POST .../restart` restarts (rolling on
+  Kubernetes).
+- The scheduler applies what is pending only inside the instance's window, and on Docker re-creates a backup sidecar
+  that stopped answering.
+
+### Health, metrics and slow queries
+
+- `GET .../status`: `health` (`healthy`, `degraded` with `problems`, `down`), the runtime's view (pods and their roles,
+  the current primary; container state), connections against `max_connections`, storage against `storage_gb`,
+  replication lag per standby, WAL archiving (last archived, failures), the last backup, and pending changes. It is
+  degraded when archiving fails, storage is over 85%, connections over 90%, a standby is over 256 MB behind, a pod is
+  not ready, the last backup failed, or no backup was taken within twice its schedule.
+- `GET .../metrics`: per database (commits, rollbacks, cache hit ratio, rows, temporary files, deadlocks, size),
+  connections, replication, WAL position, checkpoints, waiting locks, the longest transaction; on Kubernetes also the
+  operator's exporter (`cnpg_collector_*`, replication and archiver series) from each pod. These are the numbers the
+  SRE agent and dashboards read.
+- `GET .../slow-queries?limit=20&order=total|mean|calls|rows` (`MANAGE_DATABASE_INSTANCE`: statement text):
+  `pg_stat_statements`, normalised (constants replaced).
+
+The web UI has a **Postgres instances** tab under Compute & jobs: create with a form, status, backups and schedules,
+restore to a point in time, parameters, metrics and the slowest statements.
+
+Tested:
+
+- Docker, on real PostgreSQL 16 containers and a real Cairn Store binary (`tests/test_postgres_instances.py`): an
+  instance made only with `CREATE_DATABASE_INSTANCE`, over TLS, with its limits and no secret in its container's
+  configuration; a database and logins on it; parameters (one restarting the instance, one outside the list
+  refused); a base backup in the store and its restore check; a point-in-time restore holding the rows written
+  before the time and not those after, its database renamed, the source's logins and superuser password refused; a
+  branch of a database from a backup; metrics and slow queries; resize and a new image keeping the data and port;
+  retention deleting an expired base backup and keeping the newest; the default instance read-only.
+- Kubernetes, on kind with CloudNativePG 1.27.0 (`tests/test_postgres_cnpg_kind.py`, CI job `spark-kind`): an
+  instance with a standby and a pooler made with the chart's Role, a backup to a Cairn Store in the cluster, writes
+  continuing after the primary pod is deleted (a new primary), and a restore into a new instance with the data and
+  none of the logins.
+- Everything as code: `postgres_instances`, `postgres_parameters` and `postgres_backup_schedules` (bundles,
+  `cairn export`, the Terraform provider; the first two in the every-family Terraform test).
+
 ## Serving tables: lookups in milliseconds on governed tables
 
 A serving table keeps a lakehouse table (or a derived table) as a row store in PostgreSQL, so applications and
