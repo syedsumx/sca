@@ -234,7 +234,9 @@ def test_saved_queries_dashboards_alerts_workflows_and_vector_indexes(api, tmp_p
         ("workflows", "nightly"), ("alerts", "revenue-drop"), ("dashboards", "sales"), ("queries", "big-orders")]
     b.apply(c, b.load(write(tmp_path, v5, "v5.yaml")), changes, state, log=lambda _: None)
     assert [x["name"] for x in s.sql_workspace.saved(ADMIN) if x["owner"] == ADMIN] == ["revenue-by-region"]
-    assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
+    builtin = "urn:li:corpuser:cairn-observability"           # the built-in ops dashboards (L143) are not the bundle's
+    assert not [d for d in s.sql_boards.dashboards(ADMIN) if d["owner"] != builtin]
+    assert not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
     assert [x["name"] for x in s.sql_workspace.saved(ANA) if x["owner"] == ANA] == ["revenue-by-region"]   # ana's stays
 
 

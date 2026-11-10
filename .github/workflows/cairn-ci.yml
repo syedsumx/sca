@@ -375,6 +375,9 @@ jobs:
         working-directory: cairn
         # Its own pytest (telemetry is per process): the stack above, a managed PostgreSQL instance on Docker, the store,
         # and the AI gateway in front of the deterministic stand-in model (tests/live_model_standin.py).
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
         run: |
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_agent_e2e.py | tee "$RUNNER_TEMP/sre.log"
@@ -383,6 +386,9 @@ jobs:
       - name: Ops dashboards on the bundled stack (L143) - every tile source with real data, privileges, limits, built-ins, Grafana in and out (a real Grafana)
         working-directory: cairn
         # Its own pytest too (OpenTelemetry once per process); the stack's images are pulled by the step above.
+        env:
+          CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
+          CAIRN_CATALOG_BIN: ${{ github.workspace }}/cairn/catalog/target/release/cairn-catalog
         run: |
           set -o pipefail
           for t in 1 2 3; do docker pull -q grafana/grafana:12.2.1 && break; sleep 15; done
@@ -975,7 +981,7 @@ jobs:
           CAIRN_SPARK_IMAGE: cairn/spark:ci
         run: |
           set -o pipefail
-          pip install -e ".[server,ai,test,trino,streams]" pyyaml
+          pip install -e ".[server,ai,test,trino,streams,postgres]" pyyaml   # postgres: managed instances (CNPG test)
           export CAIRN_KIND_KUBECONFIG="$HOME/.kube/config"
           # Pods reach this host at the kind network's gateway.
           export CAIRN_KIND_HOST_IP="$(docker network inspect kind -f '{{range .IPAM.Config}}{{if .Gateway}}{{.Gateway}} {{end}}{{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+$' | head -1)"

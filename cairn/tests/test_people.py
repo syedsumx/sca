@@ -303,13 +303,13 @@ def test_service_accounts_and_agents_are_listed_with_owner_and_scopes(world):
                                                     conditions="{}", user="urn:li:corpuser:svc-dbt", created_by=ADMIN,
                                                     created_ms=1))
     rows = admin.get("/v1/people/principals").json()
-    agent = next(r for r in rows if r["type"] == "agent")
+    agent = next(r for r in rows if r["type"] == "agent" and r["name"] == "nightly-sync")   # beside the built-in SRE agent
     assert (agent["name"], agent["owner"], agent["scopes"]) == ("nightly-sync", BOB, ["read", "write"])
     wl = next(r for r in rows if r["type"] == "workload")
     assert wl["acts_as"] == "urn:li:corpuser:svc-dbt" and wl["created_by"] == ADMIN
     svc = next(r for r in rows if r["type"] == "service")
     assert svc["id"] == "svc-dbt" and "workload identity" in svc["purpose"]
-    assert [r["type"] for r in admin.get("/v1/people/principals?type=agent").json()] == ["agent"]
+    assert {r["type"] for r in admin.get("/v1/people/principals?type=agent").json()} == {"agent"}   # nightly-sync, SRE agent
     assert admin.get("/v1/people/users?type=person").json()["total"] == 2         # admin, bob: not the pipeline
 
 
