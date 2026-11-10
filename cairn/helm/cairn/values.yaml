@@ -542,6 +542,30 @@ cairn:
     host: ""
     port: 5432
     sslmode: require
+    # Managed Postgres (L140): PostgreSQL instances Cairn runs (POST /v1/databases/instances), with standbys,
+    # pooling, backups to the store and point-in-time restore. runtime: "" (off), kubernetes (CloudNativePG, installed
+    # first: see the operator manual, "Managed Postgres") or docker (small deployments). The instances' superuser
+    # passwords are derived from a key in a Secret you create:
+    #   kubectl create secret generic cairn-pg-instances --from-literal=key=$(openssl rand -hex 32)
+    instances:
+      runtime: ""
+      keySecret: { name: cairn-pg-instances, key: key }
+      kubernetes:
+        namespace: cairn-postgres         # where the clusters run; the chart gives Cairn a Role there for them only
+        access: cluster-ip                # node-port: Cairn reaches the primaries at nodeAddress (Cairn outside)
+        nodeAddress: ""
+        storageClass: ""
+        images: {}                        # {"16": "ghcr.io/cloudnative-pg/postgresql:16.6"}: pinned per major version
+        # The store's keys for the operator's Barman Cloud, in `namespace` (keys access-key and secret-key).
+        backupSecret: cairn-pg-backups
+      backups:
+        enabled: false
+        endpoint: ""                      # how Cairn reaches the store (default: this release's Cairn Store)
+        endpointForInstances: ""          # how the instances reach it (default: endpoint)
+        bucket: cairn-pg-backups
+        region: us-east-1
+        # Cairn's copy of the store's keys, in this release's namespace (retention and listing backups).
+        secret: { name: cairn-pg-backups, accessKeyKey: access-key, secretKeyKey: secret-key }
   store:
     enabled: false
     port: 8333

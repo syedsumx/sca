@@ -945,3 +945,29 @@ volumeMounts:
   - { name: otel-agent, mountPath: /otel-agent, readOnly: true }
 {{- end }}
 {{- end -}}
+
+{{/* Managed Postgres (L140): the environment of the processes that run instances (API and scheduler), as JSON. */}}
+{{- define "cairn.pgInstancesEnv" -}}
+{{- $env := list }}
+{{- with .Values.cairn.databases.instances }}{{ if .runtime }}
+{{- $env = append $env (dict "name" "CAIRN_PG_RUNTIME" "value" .runtime) }}
+{{- $env = append $env (dict "name" "CAIRN_PG_INSTANCE_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.databases.instances.keySecret.name" .keySecret.name) "key" (.keySecret.key | default "key")))) }}
+{{- if eq .runtime "kubernetes" }}
+{{- $env = append $env (dict "name" "CAIRN_PG_K8S_NAMESPACE" "value" .kubernetes.namespace) }}
+{{- $env = append $env (dict "name" "CAIRN_PG_K8S_ACCESS" "value" .kubernetes.access) }}
+{{- with .kubernetes.nodeAddress }}{{ $env = append $env (dict "name" "CAIRN_PG_K8S_NODE_ADDRESS" "value" .) }}{{ end }}
+{{- with .kubernetes.storageClass }}{{ $env = append $env (dict "name" "CAIRN_PG_K8S_STORAGE_CLASS" "value" .) }}{{ end }}
+{{- with .kubernetes.images }}{{ $env = append $env (dict "name" "CAIRN_PG_K8S_IMAGES" "value" (toJson .)) }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_PG_K8S_BACKUP_SECRET" "value" .kubernetes.backupSecret) }}
+{{- end }}
+{{- if .backups.enabled }}
+{{- $endpoint := .backups.endpoint | default (printf "http%s://%s-store:%v" (ternary "s" "" (not (empty $.Values.cairn.store.tlsSecret))) (include "cairn.fullname" $) $.Values.cairn.store.port) }}
+{{- $store := dict "endpoint" $endpoint "bucket" .backups.bucket "region" .backups.region }}
+{{- with .backups.endpointForInstances }}{{ $_ := set $store "endpoint_for_instances" . }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_PG_BACKUP_STORE" "value" (toJson $store)) }}
+{{- $env = append $env (dict "name" "CAIRN_PG_BACKUP_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .backups.secret.name "key" .backups.secret.accessKeyKey))) }}
+{{- $env = append $env (dict "name" "CAIRN_PG_BACKUP_SECRET_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .backups.secret.name "key" .backups.secret.secretKeyKey))) }}
+{{- end }}
+{{- end }}{{ end }}
+{{- toJson $env }}
+{{- end }}

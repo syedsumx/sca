@@ -356,7 +356,7 @@ jobs:
           docker pull -q mongo:7.0                     # MongoDB mirrors (change streams)
           docker pull -q mysql:8.4                     # MySQL mirrors (binlog)
           docker pull -q mcr.microsoft.com/azure-storage/azurite:3.35.0   # tables on the customer's Azure storage
-          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_system_tables_e2e.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_delta_sharing_e2e.py tests/test_residency_e2e.py tests/test_workload_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_saas_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_tasks_ui_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_external_locations_e2e.py \
+          pytest -q -p no:cacheprovider -o addopts="" -rs --log-file="$RUNNER_TEMP/cairn-trino.log" --log-file-level=WARNING tests/test_trino_e2e.py tests/test_trino_helm.py tests/test_trino_access.py tests/test_system_tables_e2e.py tests/test_pipes_e2e.py tests/test_streams_e2e.py tests/test_mirror_e2e.py tests/test_mirror_mysql_e2e.py tests/test_mirror_mssql_e2e.py tests/test_mirror_mongo_e2e.py tests/test_iceberg_v3_writes.py tests/test_warehouses_e2e.py tests/test_warehouses_scaling_e2e.py tests/test_warehouses_adaptive_e2e.py tests/test_ingest_http_e2e.py tests/test_shares_e2e.py tests/test_delta_sharing_e2e.py tests/test_residency_e2e.py tests/test_workload_e2e.py tests/test_vectors_e2e.py tests/test_online_features_e2e.py tests/test_serving_tables_e2e.py tests/test_model_monitoring_e2e.py tests/test_siem_e2e.py tests/test_signup_e2e.py tests/test_cowork.py tests/test_metering_e2e.py tests/test_status_page_e2e.py tests/test_dr_drill.py tests/test_saml_e2e.py tests/test_jobs.py tests/test_volumes.py tests/test_postgres_instances.py tests/test_saas_e2e.py tests/test_doc_sources_e2e.py tests/test_reverse_etl_e2e.py tests/test_tenant_services_ha.py tests/test_vectors_answer_e2e.py tests/test_stream_transform_e2e.py tests/test_scd2_medallion_e2e.py tests/test_external_catalogs_e2e.py tests/test_share_usage_e2e.py tests/test_sandboxes_e2e.py tests/test_share_packages_e2e.py tests/test_ai_search_e2e.py tests/test_document_parse_e2e.py tests/test_parquet_tables_e2e.py tests/test_ontology_e2e.py tests/test_ontology_ui_e2e.py tests/test_tasks_ui_e2e.py tests/test_flows_e2e.py tests/test_cli_e2e.py tests/test_external_locations_e2e.py \
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
@@ -906,6 +906,7 @@ jobs:
           docker build -q -f docker/jobs.Dockerfile -t cairn/jobs:ci .
           docker build -q -f docker/agent-runtime.Dockerfile -t cairn/agent-runtime:ci .
           docker build -q -f docker/dataplane.Dockerfile -t cairn/dataplane-connector:ci .
+          docker build -q -f docker/store.Dockerfile -t cairn/store:ci .   # managed Postgres backs up to it in the cluster
       - name: Kind cluster
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
@@ -931,7 +932,7 @@ jobs:
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
           # Model serving (test_ml_serving_k8s.py): MLflow's model server.
           echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
-          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci --name cairn
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci cairn/store:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -986,6 +987,11 @@ jobs:
           CAIRN_MLFLOW_PYTHON="$RUNNER_TEMP/mlflow/bin/python" CAIRN_ML_SERVING_TEST_IMAGE=cairn-test/mlflow:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ml_chart_kind.py | tee "$RUNNER_TEMP/ml-chart.log"
           ! grep -q "skipped" "$RUNNER_TEMP/ml-chart.log"
+          # Managed Postgres (L140) on CloudNativePG (pinned): an instance with a standby made with only the chart's Role,
+          # backed up to a Cairn Store in the cluster, failing over when its primary pod is deleted, restored.
+          CAIRN_PG_TEST_STORE_IMAGE=cairn/store:ci \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_postgres_cnpg_kind.py | tee "$RUNNER_TEMP/postgres.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/postgres.log"
       - name: Cluster state on failure
         if: failure()
         run: |
@@ -1000,6 +1006,9 @@ jobs:
           kubectl -n cairn-agents get events --sort-by=.lastTimestamp || true
           for p in $(kubectl -n cairn-agents get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-agents logs "$p" --tail=100 || true; done
           kubectl -n cairn-models get events --sort-by=.lastTimestamp || true
+          kubectl -n cairn-postgres get clusters,poolers,backups,pods -o wide || true
+          kubectl -n cairn-postgres get events --sort-by=.lastTimestamp || true
+          kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
           for p in $(kubectl -n cairn-models get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-models logs "$p" --tail=100 || true; done
 
   ui:

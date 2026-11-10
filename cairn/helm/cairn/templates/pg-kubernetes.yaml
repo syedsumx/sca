@@ -1,0 +1,43 @@
+{{- with .Values.cairn.databases.instances }}
+{{- if eq .runtime "kubernetes" }}
+{{- /* Managed Postgres on CloudNativePG: Cairn's account may manage the instances' objects in their namespace, and
+       nothing else there (cairn.databases.cnpg). The operator itself is installed separately (pinned: 1.27.0). */}}
+{{- $ctx := dict "root" $ "component" "postgres" "cfg" $.Values.cairn.api }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .kubernetes.namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters", "poolers", "backups", "scheduledbackups"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters/status"]
+    verbs: ["get", "patch"]
+  - apiGroups: [""]
+    resources: ["secrets", "services"]
+    verbs: ["get", "create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "cairn.componentName" $ctx }}
+  namespace: {{ .kubernetes.namespace }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "cairn.componentName" $ctx }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

@@ -34,15 +34,14 @@ BIN = os.environ.get("CAIRN_STORE_BIN", "")
 DOCKER = shutil.which("docker")
 
 
-def _images_present() -> bool:
-    if not DOCKER:
-        return False
-    r = subprocess.run(["docker", "image", "inspect", "postgres:16-alpine", "python:3.12-slim"], capture_output=True)
-    return r.returncode == 0
+pytestmark = pytest.mark.skipif(not (BIN and DOCKER), reason="needs CAIRN_STORE_BIN and Docker")
 
 
-pytestmark = pytest.mark.skipif(not (BIN and _images_present()),
-                                reason="needs CAIRN_STORE_BIN and Docker with postgres:16-alpine and python:3.12-slim")
+@pytest.fixture(scope="module", autouse=True)
+def images():
+    for image in ("postgres:16-alpine", "python:3.12-slim"):
+        if subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode != 0:
+            subprocess.run(["docker", "pull", "-q", image], check=True, capture_output=True)
 ANA, BOB, CAL = "urn:li:corpuser:ana", "urn:li:corpuser:bob", "urn:li:corpuser:cal"
 KEY = ("cairn-pg-backups", "pg-backups-secret-" + "b" * 24)
 
