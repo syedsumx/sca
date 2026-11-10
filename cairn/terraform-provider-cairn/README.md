@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-84 resources, each also a data source:
+87 resources, each also a data source:
 
 **Identity and access**
 
