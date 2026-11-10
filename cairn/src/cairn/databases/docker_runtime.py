@@ -139,7 +139,8 @@ class DockerRuntime:
 
         return httpx.Client(transport=httpx.HTTPTransport(uds=self.socket), base_url="http://docker", timeout=timeout)
 
-    def _call(self, method: str, path: str, ok=(200, 201, 204, 304), timeout: float = 60, **kw) -> Any:
+    def _call(self, method: str, path: str, ok=(200, 201, 204, 304), timeout: float = 60, raw: bool = False,
+              **kw) -> Any:
         import httpx
 
         try:
@@ -150,6 +151,8 @@ class DockerRuntime:
         if r.status_code not in ok:
             raise RuntimeError_(f"docker: {method} {path}: {r.status_code} {r.text[:300]}",
                                 404 if r.status_code == 404 else 409 if r.status_code == 409 else 502)
+        if raw:
+            return r.content
         if r.content and r.headers.get("content-type", "").startswith("application/json"):
             return r.json()
         return r.content
@@ -206,7 +209,21 @@ class DockerRuntime:
             if e.status != 404:
                 raise
             repo, _, tag = image.partition(":")
-            self._call("POST", "/images/create", params={"fromImage": repo, "tag": tag or "latest"}, timeout=900)
+            # Docker answers a pull with progress, one JSON object per line, and says a failure on a line of its
+            # own (with status 200): every line is read, and an error fails the pull.
+            out = self._call("POST", "/images/create", params={"fromImage": repo, "tag": tag or "latest"},
+                             timeout=900, raw=True)
+            for line in (out or b"").decode("utf-8", "replace").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(msg, dict) and (msg.get("error") or msg.get("errorDetail")):
+                    detail = msg.get("error") or (msg.get("errorDetail") or {}).get("message")
+                    raise RuntimeError_(f"docker: pulling {image}: {str(detail)[:300]}", 502)
 
     def _run_once(self, name: str, image: str, cmd: list[str], mounts: list[dict], user: str = "",
                   files: Optional[dict] = None, network: str = "", timeout: float = 900, entrypoint=None) -> str:
