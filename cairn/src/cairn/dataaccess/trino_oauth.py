@@ -84,6 +84,8 @@ class TrinoOAuth:
     def __init__(self, engine, tokens, client_secret: str, redirect_prefixes: list[str], ttl: int = 3600):
         self.engine, self.tokens, self.ttl = engine, tokens, ttl
         self.clients: dict[str, Client] = {}
+        # Clients that come and go (a managed Airflow deployment's own, ``airflow-<name>``): looked up when asked.
+        self.client_source = None
         if client_secret:
             self.clients[CLIENT_ID] = _client("trino", client_secret, redirect_prefixes, "trino")
 
@@ -105,13 +107,23 @@ class TrinoOAuth:
     def secret(self) -> str:
         return self.clients[CLIENT_ID].secret
 
+    def client(self, client_id: str) -> "Client | None":
+        c = self.clients.get(client_id)
+        if c is None and self.client_source is not None and client_id:
+            try:
+                c = self.client_source(client_id)
+            except Exception:  # noqa: BLE001 - fail closed: an unknown client
+                c = None
+        return c
+
     def redirect_ok(self, uri: str, client_id: str | None = None) -> bool:
-        clients = [self.clients[client_id]] if client_id in self.clients else ([] if client_id else list(self.clients.values()))
+        one = self.client(client_id) if client_id else None
+        clients = [one] if one is not None else ([] if client_id else list(self.clients.values()))
         return any(uri == p or uri.startswith(p.rstrip("/") + "/") or uri.startswith(p + "?")
                    for c in clients for p in c.prefixes)
 
     def check(self, client_id: str, redirect_uri: str, response_type: str, method: str) -> None:
-        if client_id not in self.clients:
+        if self.client(client_id) is None:
             raise OAuthError("unauthorized_client", "unknown client")
         if not self.redirect_ok(redirect_uri, client_id):
             raise OAuthError("invalid_request", "this redirect address is not allowed")
@@ -132,7 +144,7 @@ class TrinoOAuth:
         return code
 
     def exchange(self, code: str, redirect_uri: str, client_id: str, client_secret: str, verifier: str) -> dict:
-        client = self.clients.get(client_id)
+        client = self.client(client_id)
         if client is None or not hmac.compare_digest(client_secret.encode(), client.secret.encode()):
             raise OAuthError("invalid_client", "wrong client credentials", 401)
         t = trino_oauth_codes

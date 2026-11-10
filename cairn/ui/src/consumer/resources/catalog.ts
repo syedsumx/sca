@@ -1390,6 +1390,50 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "airflow-deployments": {
+        "key": "airflow-deployments",
+        "iac": {"kind": "airflow_deployments", "id": "name"},
+        "title": "Airflow deployments",
+        "path": "/v1/airflow/deployments",
+        "listKey": "deployments",
+        "description": "Managed Airflow: deployments per team and environment that Cairn runs, with sign-in through Cairn, tasks as the deployment's pipeline user, DAG-only and image deploys, rollback, promotion from dev to prod, hibernation, upgrades with a parse check, health and logs.",
+        "docs": "administration.html#managed-airflow",
+        "columns": [
+            "name",
+            "environment",
+            "state",
+            "airflow_version",
+            "team",
+            "url"
+        ],
+        "view": "airflow-deployments",
+        "actions": [
+            {
+                "label": "New deployment",
+                "method": "POST",
+                "path": "/v1/airflow/deployments",
+                "body": {
+                    "name": "finance-dev",
+                    "environment": "dev",
+                    "team": "finance",
+                    "promotes_to": "finance-stage",
+                    "env": {"REPORT_REGION": "EU"},
+                    "secrets": [{"variable": "warehouse_password", "scope": "finance", "key": "warehouse_password"}]
+                }
+            },
+            {
+                "label": "Edit",
+                "method": "PATCH",
+                "path": "/v1/airflow/deployments/{name}",
+                "body": {"env": {"REPORT_REGION": "US"}}
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/airflow/deployments/{name}"
+            }
+        ]
+    },
     "databases": {
         "key": "databases",
         "title": "Databases",

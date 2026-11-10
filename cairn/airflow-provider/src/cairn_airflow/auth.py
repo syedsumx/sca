@@ -24,6 +24,9 @@ Environment:
                                  access_control={"team:finance": {"DAGs": {"can_read", "can_edit"}}}), and the
                                  role CairnMember (Viewer, without every DAG): people see the DAGs of their teams
     CAIRN_TOKEN_ISSUER           the tokens' issuer (cairn)
+    CAIRN_AIRFLOW_CLIENT_ID      the OAuth client (airflow; a deployment Cairn runs has its own, airflow-<name>)
+    CAIRN_AIRFLOW_AUDIENCE       the tokens' audience (airflow; a managed deployment's is its client id), so a
+                                 token for one Airflow is refused by every other
     CAIRN_CA_FILE                a CA for Cairn's certificate (default: the system's)
 """
 
@@ -39,6 +42,14 @@ import jwt
 AUDIENCE = "airflow"
 
 
+def _audience() -> str:
+    return os.environ.get("CAIRN_AIRFLOW_AUDIENCE") or AUDIENCE
+
+
+def _client_id() -> str:
+    return os.environ.get("CAIRN_AIRFLOW_CLIENT_ID") or "airflow"
+
+
 def _jwks_key(url: str, kid: str, verify) -> Any:
     keys = httpx.get(f"{url}/v1/trino/jwks.json", timeout=10, verify=verify).json().get("keys") or []
     for k in keys:
@@ -52,7 +63,7 @@ def user_info(access_token: str) -> dict:
     url = os.environ["CAIRN_URL"].rstrip("/")
     verify = os.environ.get("CAIRN_CA_FILE") or True
     kid = jwt.get_unverified_header(access_token).get("kid", "")
-    claims = jwt.decode(access_token, _jwks_key(url, kid, verify), algorithms=["RS256"], audience=AUDIENCE,
+    claims = jwt.decode(access_token, _jwks_key(url, kid, verify), algorithms=["RS256"], audience=_audience(),
                         issuer=os.environ.get("CAIRN_TOKEN_ISSUER", "cairn"), options={"require": ["exp", "sub"]})
     user = claims["sub"]
     return {"username": user, "email": user if "@" in user else f"{user}@cairn.invalid", "first_name": user,
@@ -154,12 +165,12 @@ def configure(conf: dict) -> None:
         OAUTH_PROVIDERS=[{
             "name": "cairn", "icon": "fa-sign-in", "token_key": "access_token",
             "remote_app": {
-                "client_id": "airflow", "client_secret": secret, "api_base_url": url,
+                "client_id": _client_id(), "client_secret": secret, "api_base_url": url,
                 "access_token_url": f"{url}/v1/trino/oauth/token",
                 "authorize_url": f"{public}/cairn/api/v1/trino/oauth/authorize",
-                "client_kwargs": {"scope": AUDIENCE, "code_challenge_method": "S256",
+                "client_kwargs": {"scope": _audience(), "code_challenge_method": "S256",
                                   "verify": os.environ.get("CAIRN_CA_FILE") or True},
-                "access_token_params": {"client_id": "airflow"},
+                "access_token_params": {"client_id": _client_id()},
             },
         }],
     )

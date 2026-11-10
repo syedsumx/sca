@@ -95,6 +95,7 @@ class Backends:
         self.public_url: str = kw.get("public_url", "")
         # Platform steps (cairn.flows.platforms): credentials from secret scopes, read as the owner; egress rules.
         self.secrets = kw.get("secrets")                    # SecretScopes
+        self.airflow_deployments = kw.get("airflow_deployments")   # managed Airflow (cairn.airflow_deploy)
         self.egress = kw.get("egress")                      # cairn.network.egress.Egress (set once it is built)
 
 
@@ -425,6 +426,8 @@ class Airflow:
         import httpx
 
         c = self.cfg
+        if c.get("token"):                                  # a managed deployment: a short-lived token from Cairn
+            return {"Authorization": "Bearer " + c["token"]}
         if c.get("token_file"):
             return {"Authorization": "Bearer " + open(c["token_file"]).read().strip()}
         if c.get("username") and c.get("password_file"):
@@ -465,8 +468,16 @@ class Airflow:
 def _airflow(b: Backends, ctx: Ctx) -> Any:
     from urllib.parse import quote
 
-    af = Airflow(b.airflow or {})
     s = ctx.step
+    if s.get("deployment"):                         # a managed deployment, woken if it hibernates
+        from cairn.airflow_deploy.deployments import DeploymentError
+
+        try:
+            af = Airflow(need(b.airflow_deployments, "managed Airflow").flow_airflow(ctx.owner, s["deployment"]))
+        except DeploymentError as e:
+            raise StepFailed(str(e))
+    else:
+        af = Airflow(b.airflow or {})
     dag = quote(s["dag_id"], safe="")
     run_id = ctx.state.get("dag_run_id")
     if run_id is None:

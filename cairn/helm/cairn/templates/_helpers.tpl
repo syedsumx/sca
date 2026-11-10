@@ -971,3 +971,35 @@ volumeMounts:
 {{- end }}{{ end }}
 {{- toJson $env }}
 {{- end }}
+
+{{/* Managed Airflow (L144): the environment of the processes that run deployments (API and scheduler), as JSON. */}}
+{{- define "cairn.airflowDeploymentsEnv" -}}
+{{- $env := list }}
+{{- with .Values.cairn.airflowDeployments }}{{ if .runtime }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_RUNTIME" "value" .runtime) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_DEPLOY_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" (required "cairn.airflowDeployments.keySecret.name" .keySecret.name) "key" (.keySecret.key | default "key")))) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_CAIRN_URL" "value" (.cairnUrl | default (printf "http://%s-api.%s.svc:%v" (include "cairn.fullname" $) $.Release.Namespace $.Values.cairn.api.port))) }}
+{{- with .publicUrl }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_PUBLIC_URL" "value" .) }}{{ end }}
+{{- with .trino }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_TRINO" "value" (toJson .)) }}{{ end }}
+{{- with .otelCollector }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_OTEL_COLLECTOR" "value" .) }}{{ end }}
+{{- if .selfApprove }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_SELF_APPROVE" "value" "true") }}{{ end }}
+{{- $endpoint := .bundles.endpoint | default (printf "http%s://%s-store:%v" (ternary "s" "" (not (empty $.Values.cairn.store.tlsSecret))) (include "cairn.fullname" $) $.Values.cairn.store.port) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_BUNDLE_STORE" "value" (toJson (dict "endpoint" $endpoint "bucket" .bundles.bucket "region" .bundles.region))) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_BUNDLE_ACCESS_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .bundles.secret.name "key" .bundles.secret.accessKeyKey))) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_BUNDLE_SECRET_KEY" "valueFrom" (dict "secretKeyRef" (dict "name" .bundles.secret.name "key" .bundles.secret.secretKeyKey))) }}
+{{- if eq .runtime "kubernetes" }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_NAMESPACE_PREFIX" "value" .kubernetes.namespacePrefix) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_URL_TEMPLATE" "value" .kubernetes.urlTemplate) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_INGRESS_NAMESPACE" "value" .kubernetes.ingressNamespace) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_CAIRN_NAMESPACE" "value" $.Release.Namespace) }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_WORKLOAD_ISSUER" "value" .kubernetes.workloadIssuer) }}
+{{- with .kubernetes.ingressClass }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_INGRESS_CLASS" "value" .) }}{{ end }}
+{{- with .kubernetes.images }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_IMAGES" "value" (toJson .)) }}{{ end }}
+{{- with .kubernetes.storageClass }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_STORAGE_CLASS" "value" .) }}{{ end }}
+{{- with .kubernetes.dbImage }}{{ $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_DB_IMAGE" "value" .) }}{{ end }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_HELM" "value" "/usr/local/bin/helm") }}
+{{- $env = append $env (dict "name" "CAIRN_AIRFLOW_K8S_CHART" "value" "/usr/share/cairn/airflow-chart.tgz") }}
+{{- end }}
+{{- end }}{{ end }}
+{{- toJson $env }}
+{{- end }}

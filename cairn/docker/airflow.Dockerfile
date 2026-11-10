@@ -2,7 +2,7 @@
 # Airflow 3 for the Cairn lakehouse: the official Apache Airflow image plus
 #   * cairn-airflow-provider: the `cairn` connection, CairnTrinoOperator, CairnDbtOperator and sign-in
 #     through Cairn (FAB auth manager),
-#   * the FAB and OpenLineage providers (lineage and run history go to Cairn),
+#   * the FAB and OpenLineage providers (lineage and run history go to Cairn), and pytest (`cairn airflow dev pytest`),
 #   * `cairn dbt` with dbt-core and dbt-trino in their own virtualenv (/opt/cairn-dbt), so dbt's
 #     dependencies never meet Airflow's.
 # Provider versions are pinned by Airflow's own constraints file for this Airflow and Python.
@@ -30,7 +30,7 @@ RUN --mount=type=secret,id=extra_ca,required=false,uid=50000 \
  && constraints="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt" \
  && pip install --constraint "${constraints}" "apache-airflow==${AIRFLOW_VERSION}" \
       apache-airflow-providers-fab apache-airflow-providers-openlineage apache-airflow-providers-cncf-kubernetes \
-      apache-airflow-providers-trino apache-airflow-providers-common-sql trino \
+      apache-airflow-providers-trino apache-airflow-providers-common-sql trino pytest \
  && pip install --no-deps "${src}/airflow-provider" "${src}/spark" \
  && python -m venv /opt/cairn-dbt \
  && /opt/cairn-dbt/bin/pip install "${src}" "dbt-core==${DBT_VERSION}" "dbt-trino==${DBT_TRINO_VERSION}" \

@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-93 resources, each also a data source:
+94 resources, each also a data source:
 
 **Identity and access**
 
@@ -96,6 +96,7 @@ permissions and audit apply:
 
 | Resource | Bundle section | What it is |
 |---|---|---|
+| `cairn_airflow_deployment` | `airflow_deployments` | A managed Airflow deployment (Managed Airflow): its environment, Airflow version, executor, resources, variables, secrets (references to secret scopes, read as its pipeline user), role mapping, hibernation and where its deploys are promoted |
 | `cairn_job` | `jobs` | A scheduled job: a notebook or a Python script, run as its owner on a cron schedule (or on demand) |
 | `cairn_dataplane` | `dataplanes` | A data plane: compute in a customer's cluster (Trino, Spark, jobs) that Cairn reaches only through its connector's outbound tunnel |
 | `cairn_workspace_compute` | `workspace_compute` | Where a workspace's queries and jobs run: on its data plane (customer) or on Cairn's managed pool (managed) |

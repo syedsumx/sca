@@ -566,6 +566,34 @@ cairn:
         region: us-east-1
         # Cairn's copy of the store's keys, in this release's namespace (retention and listing backups).
         secret: { name: cairn-pg-backups, accessKeyKey: access-key, secretKeyKey: secret-key }
+  # Managed Airflow (L144): Airflow deployments Cairn runs for teams (POST /v1/airflow/deployments), per environment,
+  # with DAG-only and image deploys, promotion, rollback, hibernation and upgrades. runtime: "" (off), kubernetes (the
+  # official Apache Airflow chart, pinned 1.20.0, shipped in Cairn's image) or docker (single hosts). Deployments'
+  # keys (database password, Fernet, JWT, OAuth client secret) are derived from a key in a Secret you create:
+  #   kubectl create secret generic cairn-airflow-deployments --from-literal=key=$(openssl rand -hex 32)
+  # Needs Trino's sign-in (CAIRN_TRINO_ACCESS_KEY): people sign in, and tasks get their identity, through it.
+  airflowDeployments:
+    runtime: ""
+    keySecret: { name: cairn-airflow-deployments, key: key }
+    cairnUrl: ""                      # Cairn's API as the deployments reach it (default: this release's API Service)
+    publicUrl: ""                     # Cairn as people's browsers reach it (default: the consumer UI's public URL)
+    trino: {}                         # {"host": "cairn-trino.cairn.svc", "port": 8443, "catalog": "lakehouse"}
+    otelCollector: ""                 # host:port of the Collector's OTLP/HTTP receiver: Airflow's metrics and traces
+    selfApprove: false                # a promotion's requester may approve it themselves
+    bundles:                          # DAG bundles (DAG-only deploys) in Cairn Store
+      endpoint: ""                    # default: this release's Cairn Store
+      bucket: cairn-airflow-deploys
+      region: us-east-1
+      secret: { name: cairn-airflow-bundles, accessKeyKey: access-key, secretKeyKey: secret-key }
+    kubernetes:
+      namespacePrefix: cairn-af-      # each deployment in <prefix><name>; an admission policy keeps Cairn there
+      urlTemplate: "https://{name}.airflow.example.com"
+      ingressClass: ""
+      ingressNamespace: ingress-nginx
+      workloadIssuer: k8s             # the cluster's issuer in the workload identity issuers
+      images: {}                      # {"3.3.2": "registry.example.com/cairn/airflow:0.1.0"}
+      storageClass: ""
+      dbImage: ""                     # the metadata database's PostgreSQL image (CloudNativePG's default)
   store:
     enabled: false
     port: 8333

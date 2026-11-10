@@ -89,9 +89,10 @@ STEP_TYPES: dict[str, dict[str, Any]] = {
     "dbt": {"group": "Compute", "label": "dbt", "timeout": 4 * 3600, "fields": {
         "command": F(("enum", "build", False, ("run", "build", "test", "seed", "snapshot"))),
         "select": F(("text", "", False)), "project_dir": F(("str", "/dbt", False))}},
+    # deployment: a managed Airflow deployment (cairn.airflow_deploy), woken if it hibernates; else CAIRN_AIRFLOW_URL.
     "airflow": {"group": "Compute", "label": "Airflow DAG", "timeout": 6 * 3600, "fields": {
         "dag_id": F(("str", None, True)), "conf": F(("dict", {}, False)), "wait": F(("bool", True, False)),
-        "poll_s": F(("int", 30, False, 5, 600))}},
+        "poll_s": F(("int", 30, False, 5, 600)), "deployment": F(("str", None, False))}},
     # Other platforms (cairn.flows.platforms): credentials only from a secret scope, read as the owner when the step
     # runs; TLS always verified; egress rules apply. airflow_conn_id names the Airflow connection an exported DAG uses.
     "http": {"group": "Platforms", "label": "HTTP request", "timeout": 3600, "fields": {

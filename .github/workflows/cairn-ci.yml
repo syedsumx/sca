@@ -889,6 +889,10 @@ jobs:
           curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o sparkapplications.yaml \
             https://raw.githubusercontent.com/kubeflow/spark-operator/v2.2.1/charts/spark-operator-chart/crds/sparkoperator.k8s.io_sparkapplications.yaml
           echo "50d3eeb2d5a58e162ed06e9a6d849227ed3522b0887a51b705dc1af8a0d53371  sparkapplications.yaml" | sha256sum -c -
+          # Managed Airflow (L144): the official Apache Airflow chart the Kubernetes runtime renders, pinned.
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o airflow-1.20.0.tgz \
+            https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          echo "29740c59c42960f14ac710069686a70220c011e210b6ca7d7f4d0f748da0917a  airflow-1.20.0.tgz" | sha256sum -c -
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4
@@ -903,6 +907,7 @@ jobs:
           CAIRN_AIRFLOW2_IMAGE: apache/airflow:slim-2.10.5-python3.12
           CAIRN_K8S_BIN_DIR: ${{ runner.temp }}/k8s
           CAIRN_SPARK_OPERATOR_CRD: ${{ runner.temp }}/k8s/sparkapplications.yaml
+          CAIRN_AIRFLOW_CHART: ${{ runner.temp }}/k8s/airflow-1.20.0.tgz
         run: |
           set -o pipefail   # pytest's failures must fail the step, not tee's success
           pip install -e ".[server,test,trino,export,streams]" "dbt-core==1.12.6" "dbt-trino==1.11.0" "duckdb>=1.1"
@@ -910,7 +915,8 @@ jobs:
             tests/test_flows_engines_e2e.py tests/test_flows_spark_e2e.py tests/test_flows_airflow2_e2e.py \
             tests/test_flows_platforms.py tests/test_flows_http_e2e.py tests/test_flows_bigquery_e2e.py tests/test_flows_airflow_platforms_e2e.py \
             tests/test_spark_e2e.py tests/test_spark_k8s_e2e.py tests/test_lakehouse_access.py tests/test_lakehouse_client_e2e.py \
-            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py | tee "$RUNNER_TEMP/pipelines.log"
+            tests/test_workload_identity_e2e.py tests/test_spark_teams_k8s.py tests/test_warehouses_k8s.py \
+            tests/test_airflow_deployments_e2e.py tests/test_airflow_deployments_k8s.py tests/test_airflow_dev_cli.py | tee "$RUNNER_TEMP/pipelines.log"
           # Skipped is not passed: every pipeline test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/pipelines.log"
       - name: Spark training (pyspark.ml in the cairn/spark image) tracked in MLflow through Cairn
@@ -960,6 +966,18 @@ jobs:
           docker build -q -f docker/agent-runtime.Dockerfile -t cairn/agent-runtime:ci .
           docker build -q -f docker/dataplane.Dockerfile -t cairn/dataplane-connector:ci .
           docker build -q -f docker/store.Dockerfile -t cairn/store:ci .   # managed Postgres backs up to it in the cluster
+          # Managed Airflow on kind (L144): the slim Airflow 3.3.2 with what cairn/airflow adds for a deployment (FAB
+          # sign-in, PostgreSQL, OpenLineage, the provider), smaller than the full image the pipelines job builds.
+          docker build -q -t cairn-test/airflow:ci -f - . <<'EOF'
+          FROM apache/airflow:slim-3.3.2-python3.12
+          RUN pip install --no-cache-dir --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.3.2/constraints-3.12.txt \
+                apache-airflow==3.3.2 apache-airflow-providers-fab apache-airflow-providers-openlineage \
+                apache-airflow-providers-postgres apache-airflow-providers-cncf-kubernetes psycopg2-binary trino authlib
+          COPY --chown=airflow:0 airflow-provider/src/cairn_airflow /home/airflow/.local/lib/python3.12/site-packages/cairn_airflow
+          EOF
+          curl -fsSL --retry 10 --retry-all-errors --retry-delay 20 --retry-max-time 300 -o "$RUNNER_TEMP/airflow-1.20.0.tgz" \
+            https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz
+          echo "29740c59c42960f14ac710069686a70220c011e210b6ca7d7f4d0f748da0917a  $RUNNER_TEMP/airflow-1.20.0.tgz" | sha256sum -c -
       - name: Kind cluster
         # Installed here rather than by helm/kind-action, whose download is not retried: one bad fetch from
         # GitHub (an empty checksum, run 269) failed the job before any test ran.
@@ -985,7 +1003,7 @@ jobs:
           echo "FROM alpine/git:v2.49.1" | docker build -q -t cairn-test/git:ci -
           # Model serving (test_ml_serving_k8s.py): MLflow's model server.
           echo "FROM ghcr.io/mlflow/mlflow:v3.5.0" | docker build -q -t cairn-test/mlflow:ci -
-          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci cairn/store:ci --name cairn
+          kind load docker-image cairn/spark:ci cairn/jobs:ci cairn/agent-runtime:ci cairn/dataplane-connector:ci cairn-test/python:ci cairn-test/git:ci cairn-test/mlflow:ci cairn/store:ci cairn-test/airflow:ci --name cairn
       - uses: azure/setup-helm@v4
         with:
           version: v3.16.4         # as the other jobs: Helm 4 installs server-side and conflicts with the CRDs applied first
@@ -1045,6 +1063,11 @@ jobs:
           CAIRN_PG_TEST_STORE_IMAGE=cairn/store:ci \
             pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_postgres_cnpg_kind.py | tee "$RUNNER_TEMP/postgres.log"
           ! grep -q "skipped" "$RUNNER_TEMP/postgres.log"
+          # Managed Airflow (L144): the official chart rendered and applied with only the chart's ClusterRole, the pods up
+          # with a CloudNativePG metadata database, a DAG-only deploy through the sync sidecars, hibernation and waking.
+          CAIRN_AIRFLOW_KIND_IMAGE=cairn-test/airflow:ci CAIRN_AIRFLOW_CHART="$RUNNER_TEMP/airflow-1.20.0.tgz" \
+            pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_airflow_deployments_kind.py | tee "$RUNNER_TEMP/airflow.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/airflow.log"
       - name: Cluster state on failure
         if: failure()
         run: |
@@ -1062,6 +1085,8 @@ jobs:
           kubectl -n cairn-postgres get clusters,poolers,backups,pods -o wide || true
           kubectl -n cairn-postgres get events --sort-by=.lastTimestamp || true
           kubectl -n cnpg-system logs deploy/cnpg-controller-manager --tail=200 || true
+          kubectl -n cairn-af-kindaf get pods,clusters,jobs,events -o wide || true
+          for p in $(kubectl -n cairn-af-kindaf get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-af-kindaf logs "$p" --all-containers --tail=100 || true; done
           for p in $(kubectl -n cairn-models get pods -o name 2>/dev/null); do echo "== $p"; kubectl -n cairn-models logs "$p" --tail=100 || true; done
 
   ui:

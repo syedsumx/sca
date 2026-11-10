@@ -1904,6 +1904,248 @@ Tested:
 - Everything as code: `postgres_instances`, `postgres_parameters` and `postgres_backup_schedules` (bundles,
   `cairn export`, the Terraform provider; the first two in the every-family Terraform test).
 
+## Managed Airflow
+
+Airflow *deployments* that Cairn runs for teams, one per team and environment (dev, stage, prod, or a name of your
+own), the way Managed Postgres runs PostgreSQL. A deployment is an Airflow 3 (API server, scheduler, DAG processor,
+triggerer and its metadata database). Cairn wires it into the platform when it makes it:
+
+- **Sign-in through Cairn.** Each deployment has an OAuth client of its own (`airflow-<name>`, audience
+  `airflow-<name>`, secret derived by Cairn), so a token issued for one deployment is refused by every other. Cairn
+  groups map to Airflow roles (`roles`; a `team` gets `User`). There is no local admin: the only account Cairn makes
+  is `cairn-ops` (Op, with a random password nobody knows), which Cairn uses through short-lived API tokens for
+  status, task logs and the DAG runs flows start.
+- **Tasks are the deployment's pipeline user** (`svc-af-<name>`), by workload identity. On Kubernetes, the pods'
+  projected service-account token (audience `cairn`) is bound to it. On Docker, Cairn is the workload issuer
+  (`cairn-airflow`): it writes a one-hour token into the containers and renews it every 20 minutes. Either is
+  exchanged at `/v1/auth/workload-token` like any pipeline's. Grant the pipeline user what its DAGs read and write,
+  as for any user. The `cairn` connection (`cairn_default`) and the Cairn secrets backend (`trino_lakehouse`, a fresh
+  Trino token per use) are set up, and so is OpenLineage to Cairn.
+- **Secrets are references.** `secrets` lists `{"connection" | "variable" | "env": ..., "scope": ..., "key": ...}`.
+  The values are read from the secret scope *as the pipeline user* every time the deployment starts. A deployment
+  whose secrets (or identity) cannot be had does not start: it is not made, it stays hibernating, or the change is
+  refused. A spec holding anything that looks like a credential (a variable named like a password or token, a key, a
+  URL with a password) is refused. Values go into a file only Airflow's user reads (Docker) or a Secret read through
+  `envFrom` (Kubernetes). They never go into a pod spec, a container's environment or a command line.
+- **Observability.** With observability on (`CAIRN_AIRFLOW_OTEL_COLLECTOR`, the Collector's OTLP/HTTP `host:port`),
+  Airflow's own OpenTelemetry metrics and traces go to the Collector, with the deployment as the service name.
+
+### Runtimes
+
+- **Kubernetes** (`CAIRN_AIRFLOW_RUNTIME=kubernetes`): the official Apache Airflow chart, pinned at **1.20.0**
+  (Apache-2.0) and shipped in Cairn's image with helm 3.19.0. Cairn renders it with `helm template`, starting from
+  `deploy/airflow/values-cairn.yaml`, and applies what it renders through the Kubernetes API (server-side, field
+  manager `cairn`, pruning what a new render drops). Helm only renders, so Cairn is the one owner of the objects and
+  no helm release state drifts from Cairn's. Each deployment gets a namespace of its own (`<namespacePrefix><name>`),
+  with:
+  - the chart's API server, scheduler, DAG processor and triggerer, running as the account `airflow-cairn`, and
+    KubernetesExecutor by default (Celery and Local are possible);
+  - its metadata database, a CloudNativePG `Cluster` (`cairn-af-db`). Install the operator as for Managed Postgres;
+  - a DAG sync sidecar (and an init container in each task pod) that fetches the live DAG release from Cairn as the
+    pipeline user;
+  - the chart's NetworkPolicies, plus one that admits traffic only from the namespace itself, the ingress
+    controller's namespace and Cairn's;
+  - an Ingress at `urlTemplate` (`https://{name}.airflow.example.com`).
+
+  The chart gives Cairn's account a ClusterRole for those kinds. A `ValidatingAdmissionPolicy` (Kubernetes 1.30+)
+  refuses any change by that account outside namespaces with the prefix. Cairn writes Secrets and never reads or
+  lists them.
+- **Docker** (`CAIRN_AIRFLOW_RUNTIME=docker`), for development and single hosts. Per deployment there is a network of
+  its own, a PostgreSQL container for the metadata database, and the API server (published on
+  `CAIRN_AIRFLOW_DOCKER_BIND`, a port from `CAIRN_AIRFLOW_DOCKER_PORTS`), scheduler, DAG processor and triggerer
+  containers. LocalExecutor only. Volumes hold the DAG releases and the task logs.
+
+### Setting up
+
+```sh
+kubectl -n cairn create secret generic cairn-airflow-deployments --from-file=key=./airflow-deploy.key
+kubectl -n cairn create secret generic cairn-airflow-bundles \
+  --from-file=access-key=./store.access --from-file=secret-key=./store.secret
+```
+
+```yaml
+cairn:
+  airflowDeployments:
+    runtime: kubernetes
+    keySecret: { name: cairn-airflow-deployments, key: key }
+    trino: { host: cairn-trino.cairn.svc, port: 8443, catalog: lakehouse }
+    otelCollector: otel-collector.observability.svc:4318
+    bundles: { bucket: cairn-airflow-deploys, secret: { name: cairn-airflow-bundles } }
+    kubernetes:
+      namespacePrefix: cairn-af-
+      urlTemplate: "https://{name}.airflow.example.com"
+      ingressClass: nginx
+      workloadIssuer: k8s
+      images: { "3.3.2": registry.example.com/cairn/airflow:0.1.0 }
+```
+
+| Setting | What it does |
+|---|---|
+| `CAIRN_AIRFLOW_RUNTIME` | `kubernetes` or `docker`; empty turns managed Airflow off |
+| `CAIRN_AIRFLOW_DEPLOY_KEY(_FILE)` | 16+ bytes. Each deployment's database password, Fernet key, JWT and session secrets, OAuth client secret and (Docker) workload issuer key are derived from it and never stored |
+| `CAIRN_AIRFLOW_CAIRN_URL` | Cairn's API as the deployments reach it (required) |
+| `CAIRN_AIRFLOW_PUBLIC_URL` | Cairn as people's browsers reach it (sign-in); default: the UI's public URL. Plain HTTP only for loopback (development) |
+| `CAIRN_AIRFLOW_TRINO` | `{"host", "port", "catalog"}` of Trino as the deployments reach it (the `cairn` connection) |
+| `CAIRN_AIRFLOW_CA_FILE` | a CA for Cairn's and Trino's certificates, copied into each deployment |
+| `CAIRN_AIRFLOW_BUNDLE_STORE` | `{"endpoint", "bucket", "region"}` of Cairn Store for DAG bundles, with `CAIRN_AIRFLOW_BUNDLE_ACCESS_KEY(_FILE)` and `_SECRET_KEY(_FILE)` |
+| `CAIRN_AIRFLOW_OTEL_COLLECTOR` | the Collector's OTLP/HTTP `host:port`: Airflow's metrics and traces (`CAIRN_AIRFLOW_OTEL_SSL=true` for TLS) |
+| `CAIRN_AIRFLOW_SELF_APPROVE` | `true` lets whoever asked for a promotion approve it |
+| `CAIRN_AIRFLOW_DOCKER_SOCKET`, `_BIND`, `_HOST`, `_PORTS` (18080-18999), `_IMAGES` (`{"3.3.2": "cairn/airflow:0.1.0"}`), `_DB_IMAGE` (`postgres:16-alpine`), `_EXTRA_HOSTS` | the Docker runtime |
+| `CAIRN_AIRFLOW_K8S_NAMESPACE_PREFIX`, `_URL_TEMPLATE`, `_INGRESS_CLASS`, `_INGRESS_NAMESPACE`, `_CAIRN_NAMESPACE`, `_WORKLOAD_ISSUER`, `_IMAGES`, `_STORAGE_CLASS`, `_DB_IMAGE`, `_HELM`, `_CHART`, `_API`, `_TOKEN_FILE`, `_CA_FILE` | the Kubernetes runtime (the chart sets them) |
+
+The Airflow versions a deployment may run are those Cairn is tested with: `deploy/versions/pins.json`
+(`airflow.deployments`; now 3.3.2), offered where the runtime has an image for them.
+
+### Deployments
+
+`POST /v1/airflow/deployments` needs `CREATE_AIRFLOW_DEPLOYMENT`. Everything else on
+`urn:li:airflowDeployment:<name>` needs one of these: `VIEW_AIRFLOW_DEPLOYMENT` (status, deploys, logs),
+`DEPLOY_AIRFLOW` (deploys, rollbacks, promotions *into* it), `MANAGE_AIRFLOW_DEPLOYMENT` (settings, upgrades,
+hibernation, deletion) or `APPROVE_AIRFLOW_PROMOTION`. The spec:
+
+| Field | What it is |
+|---|---|
+| `name` | lowercase letters, digits and `-` (up to 24) |
+| `environment` | `dev`, `stage`, `prod` or a name of your own; fixed once made |
+| `workspace`, `team` | where it belongs; the team's Cairn group gets `User` unless `roles` says otherwise |
+| `airflow_version` | one of the tested versions; a change is an upgrade (below) |
+| `executor` | `KubernetesExecutor`, `CeleryExecutor` or `LocalExecutor` (the runtime's default when empty) |
+| `resources` | `{scheduler, api_server, dag_processor, triggerer, worker: {cpu, memory_mb, replicas}}` (`worker`: the task pods' defaults, or Celery workers) |
+| `dag_source` | `{"type": "bundle"}` (deploys) or `{"type": "git", "folder": "<git folder id>", "path": "dags"}` |
+| `env` | Airflow settings and variables; not secrets, not what Cairn sets itself |
+| `secrets` | references to secret scopes, read as the pipeline user |
+| `roles` | `{"<Cairn group>": "Admin" \| "Op" \| "User" \| "Viewer"}` |
+| `hibernation` | `{"awake": [{"days": "mon-fri", "from": "08:00", "to": "19:00"}], "timezone": "Europe/Berlin", "wake_minutes": 60}` (not prod) |
+| `promotes_to` | the deployment its deploys go to next |
+| `approval` | `{"required": true}`: promotions into it wait for an approver (the default for prod) |
+
+A change to `env`, `secrets`, `roles`, `resources` or `executor` starts the components again. A change to
+`hibernation` or `promotes_to` restarts nothing. `GET .../status` gives the components, the scheduler's heartbeat,
+the DAG processor's import errors and the queued and running tasks. `GET .../logs?component=` gives a component's
+log, and `GET .../task-logs?dag_id=&run_id=&task_id=` a task's log through Airflow's API. Each deployment's health
+also shows on the operator pages (Compute & jobs → Airflow deployments).
+
+### Deploys, rollback and promotion
+
+- **DAG-only deploys** (`POST .../deploys` with the bundle as `application/gzip`, or `cairn airflow deploy <name>
+  --dags-only` from a project): the `dags/` folder as a versioned bundle (files and folders only, at most 50 MB).
+  First it is parsed on the deployment's Airflow (`DagBag`); a DAG that does not import refuses the deploy (422,
+  naming the files; `force` overrides). Then it is kept in Cairn Store and synced in without a restart: on Docker
+  it is unpacked beside the others and the `current` link is swapped in one rename; on Kubernetes the sync sidecars
+  fetch it within 15 seconds. A hibernating deployment gets it when it wakes. With a git source, `{"from": "git"}`
+  deploys the folder's branch tip as the deployer, who must own the git folder.
+- **Image deploys** (`{"image": "registry/team/airflow:7"}`, or `cairn airflow deploy <name> --image ...`): a team
+  image built `FROM cairn/airflow` with its requirements. Its Airflow must be the deployment's version, and the live
+  DAGs must parse on it. Then the components are made again from it (database migrations first).
+- **Recorded.** Every deploy records who, when and what: the bundle's digest and files, or the image, the git commit
+  (`git_sha`, the project's HEAD by default) and a note. A refused deploy is recorded too, with why.
+- **Rollback** (`POST .../deploys/<id>/rollback`): an earlier deploy is deployed again as a new deploy, its source
+  the old one, and checked like any other.
+- **Promotion** (`POST .../promote {"to", "deploy"}`; default: the live DAGs, to `promotes_to`): the deploy is
+  deployed to the next environment, which must be another environment. When the target requires approval, the
+  promotion waits. Someone with `APPROVE_AIRFLOW_PROMOTION` on the target, who did not ask for it, approves it
+  (`POST /v1/airflow/promotions/<id>/approve`), and it is deployed as them, or rejects it. Every step is audited
+  (`airflow_deployment.*`).
+
+### Hibernation and upgrades
+
+- **Hibernation** (non-prod): outside its `awake` hours the scheduler stops everything (on Docker, every container;
+  on Kubernetes, every Deployment and StatefulSet scaled to zero and the database hibernated). It wakes at its hours,
+  on `POST .../wake` (then it stays up `wake_minutes`, or `minutes`), or when a flow needs it. A flow's `airflow` step
+  with `deployment: <name>` wakes the deployment and starts its DAG there; the flow's owner needs `DEPLOY_AIRFLOW` on
+  it. Waking reads the secrets again: if they cannot be read it stays asleep and says why.
+- **Upgrades** (`PATCH {"airflow_version"}`, or `cairn airflow upgrade <name> <version>`): the live DAGs are parsed on
+  the new version's image first, and an import error refuses the upgrade (409, the files named). The deployment
+  stays on its version. Otherwise the database is migrated and the components are made again from the new image. A
+  deployment on a team image is upgraded by deploying an image built on the new version.
+
+### Local development
+
+`cairn airflow dev` works like `astro dev`, with Docker:
+
+- `init [DIR]` makes a project: `dags/`, `requirements.txt`, a `Dockerfile` `FROM cairn/airflow:0.1.0`, and
+  `tests/test_dag_integrity.py`.
+- `parse` imports every DAG in the project's image and exits 1 on an import error.
+- `pytest [args]` runs the project's tests in its image.
+- `start [--port 8080]` runs a local Airflow, all components in one container (`airflow standalone`), with `dags/`
+  mounted. Its `cairn` connection and secrets backend sign in to Cairn as *you*: your token goes in
+  `.cairn/dev.env`, a file only you can read, never a command line.
+- `logs` shows its log, and `stop` stops it and removes that file.
+
+### CI
+
+GitHub Actions: a CI job's OIDC token is a workload identity as well. Bind it to a deployer user so that no Cairn
+token is stored. Alternatively, keep a token in the repository's secrets.
+
+```yaml
+name: airflow
+on: { push: { branches: [main] } }
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions: { id-token: write, contents: read }
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install cairn-platform
+      - run: cairn airflow dev parse && cairn airflow dev pytest
+      - name: Deploy the DAGs to dev, then promote to stage
+        env:
+          CAIRN_URL: https://cairn.example.com/cairn/api
+          CAIRN_TOKEN: ${{ secrets.CAIRN_DEPLOY_TOKEN }}
+        run: |
+          cairn airflow deploy finance-dev --dags-only --note "${{ github.event.head_commit.message }}"
+          cairn airflow promote finance-dev --to finance-stage
+```
+
+GitLab CI:
+
+```yaml
+deploy-dags:
+  image: python:3.12
+  rules: [{ if: '$CI_COMMIT_BRANCH == "main"' }]
+  script:
+    - pip install cairn-platform
+    - cairn airflow deploy finance-dev --dags-only --git-sha "$CI_COMMIT_SHA" --note "$CI_COMMIT_TITLE"
+    - cairn airflow promote finance-dev --to finance-prod   # waits for an approver in Cairn
+  variables: { CAIRN_URL: "https://cairn.example.com/cairn/api" }   # CAIRN_TOKEN: a masked CI variable
+```
+
+For an image deploy, build and push the image (`docker build -t registry.example.com/finance/airflow:$SHA .`) and
+then run `cairn airflow deploy finance-dev --image registry.example.com/finance/airflow:$SHA`.
+
+### Tested
+
+- **Docker**, with the real Airflow 3.3.2 image, Cairn's API, Cairn Store, Cairn Catalog and Trino
+  (`tests/test_airflow_deployments_e2e.py`):
+  - A deployment whose secret scope cannot be read is refused before anything is made. A credential in the spec is
+    refused.
+  - A dev deployment comes up healthy with no secret in its containers' configuration.
+  - Sign-in goes through Cairn with the deployment's own client: a person's group maps to User, nobody is Admin, and
+    another client cannot redeem the code.
+  - A DAG-only deploy lands without restarting anything, and its DAG runs. One task calls Cairn and reads a variable
+    from the scope, the other counts a table on Trino, both as `svc-af-<name>` by workload identity. Their logs come
+    through Airflow's API.
+  - A DAG that does not import is refused. A second deploy and a rollback to the first work.
+  - A promotion to a stage deployment that requires approval cannot be approved by its requester; an approver
+    approves it and it lands there.
+  - Hibernation outside its hours stops everything, and waking brings it back. A scope it can no longer read keeps
+    it asleep.
+  - An upgrade whose new version cannot import a DAG is refused, then goes through once the DAG is fixed.
+  - A team image on another Airflow version is refused; one on the deployment's version is deployed.
+  - Deletion removes the containers, volumes and binding.
+- **Kubernetes rendering and applying**, against a real kube-apiserver and etcd (no pods run there) with the pinned
+  chart and the chart's ClusterRole and admission policy (`tests/test_airflow_deployments_k8s.py`):
+  - The namespace, account, components (with the sync sidecar and `envFrom`, no secret value in a pod spec), Secrets,
+    database `Cluster`, NetworkPolicies, Ingress and migration job are made, with no user job.
+  - The account's projected token is exchanged for the pipeline user.
+  - A change is applied, hibernation scales to zero and waking applies again.
+  - Cairn is refused outside its namespaces and cannot read Secrets.
+  - A secret it can no longer read refuses a change. Deletion is checked too.
+- **Local development** (`tests/test_airflow_dev_cli.py`): `init`, `parse` and `pytest` pass and then fail on a broken
+  DAG. A local Airflow's task calls Cairn as the developer.
+- **On kind** (CI job `spark-kind`, `tests/test_airflow_deployments_kind.py`): a deployment's pods come up with
+  CloudNativePG, a DAG-only deploy reaches them through the sync sidecars, and hibernation and waking work.
+
 ## Serving tables: lookups in milliseconds on governed tables
 
 A serving table keeps a lakehouse table (or a derived table) as a row store in PostgreSQL, so applications and
@@ -4890,6 +5132,7 @@ Clones, undrop and write-audit-publish with pyiceberg are tested in `catalog/con
   - **Team access.** A person in `finance` got `team:finance` and `CairnMember` and could read the finance DAG but not HR's.
   - **Lineage.** It reached Cairn through the token provider, with the task's tables.
 - **Compose:** `docker compose -f docker-compose.cairn.yml --profile trino --profile airflow up -d` starts Airflow's API server (`http://localhost:8090`), scheduler, DAG processor and triggerer. It uses LocalExecutor and an `airflow` database in Cairn's PostgreSQL, created by `airflow-init`. Tasks run with the token in `CAIRN_AIRFLOW_TOKEN`, on the DAGs in `CAIRN_AIRFLOW_DAGS` (default `examples/airflow/dags`) and the dbt projects in `examples/dbt`.
+- **Managed by Cairn:** Cairn can also run Airflow for teams, per environment, with deploys, promotion and hibernation: see [Managed Airflow](#managed-airflow).
 - **Kubernetes:** use the official Apache Airflow chart (1.20+) with `deploy/airflow/values-cairn.yaml`. It sets the `cairn/airflow` image, KubernetesExecutor (each task in its own pod), external PostgreSQL, secrets for the Cairn connection, OpenLineage and the OAuth secret, sign-in through Cairn with no local admin account, and DAGs from git. The file lists the Secrets to create. CI renders the chart with it.
 - **Tested** (`tests/test_airflow_e2e.py`, in CI against the `cairn/airflow` image as built) with Airflow 3.3.2, Trino 476, Cairn Catalog and Cairn Store:
   - **A DAG.** It ran SQL on Trino and a dbt build as `svc-airflow`. Both tables were built, the dbt run was recorded, the DAG and both tasks reached Cairn through OpenLineage, and Trino's lineage named the source table.

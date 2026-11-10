@@ -49,6 +49,15 @@ COPY docker/healthcheck.py /usr/local/bin/cairn-healthcheck
 COPY deploy/licence/licence-keys.json /usr/share/cairn/licence-keys.json
 # Service-account bootstrap / token keeper and the token wrapper (used by Helm; compose mounts the same files).
 COPY deploy/bootstrap/mint_core_token.py deploy/bootstrap/with-token.sh /opt/cairn/bootstrap/
+# Managed Airflow on Kubernetes (cairn.airflow_deploy.k8s_runtime): helm renders the official Apache Airflow chart,
+# pinned and checked, from Cairn's base values; the versions deployments may run are pins.json's.
+COPY --from=alpine/helm:3.19.0 /usr/bin/helm /usr/local/bin/helm
+ADD --chmod=0644 --checksum=sha256:29740c59c42960f14ac710069686a70220c011e210b6ca7d7f4d0f748da0917a \
+    https://github.com/apache/airflow/releases/download/helm-chart/1.20.0/airflow-1.20.0.tgz /usr/share/cairn/airflow-chart.tgz
+COPY deploy/airflow/values-cairn.yaml /usr/share/cairn/airflow-values-cairn.yaml
+COPY deploy/versions/pins.json /usr/share/cairn/pins.json
+ENV CAIRN_AIRFLOW_K8S_BASE_VALUES=/usr/share/cairn/airflow-values-cairn.yaml \
+    CAIRN_VERSION_PINS=/usr/share/cairn/pins.json
 ENV PATH="/opt/cairn/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
