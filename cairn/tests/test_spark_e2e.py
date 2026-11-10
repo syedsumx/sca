@@ -334,7 +334,10 @@ def start_long_job(tmp_path, cairn_url, catalog_uri, token, rounds, pause):
 
 
 def rounds_of(output):
-    return [json.loads(ln.split("CAIRN-ROUND ", 1)[1]) for ln in output.splitlines() if "CAIRN-ROUND " in ln]
+    """Each round's JSON object; Spark's own log can land on the same line (stdout and stderr share the pipe), so the
+    object is decoded where it starts and whatever follows it is ignored."""
+    dec = json.JSONDecoder()
+    return [dec.raw_decode(ln.split("CAIRN-ROUND ", 1)[1])[0] for ln in output.splitlines() if "CAIRN-ROUND " in ln]
 
 
 def test_a_long_job_outlives_its_token_and_its_storage_keys(cairn, lake, renewing_catalog, tmp_path):  # noqa: F811

@@ -343,9 +343,11 @@ class ObservabilityService:
                 logger.exception("an incident listener failed on %s", iid)
 
     # ---- configuration (SLOs, alert rules, silences) -------------------------------------------------------------
-    def _audit(self, actor: str, action: str, subject: Optional[str], details: dict) -> None:
+    def _audit(self, actor: str, action: str, subject: Optional[str], details: dict, conn=None) -> None:
+        """With ``conn``, inside the change's own transaction: the change and its audit entry commit together, so
+        nobody can see a definition whose making is not yet (or never) recorded."""
         if self.audit is not None:
-            self.audit.record("observability", action, actor, subject, details)
+            self.audit.record("observability", action, actor, subject, details, conn=conn)
 
     def list(self, kind: str) -> list[dict]:
         with self.engine.connect() as c:
@@ -400,7 +402,7 @@ class ObservabilityService:
                 raise ObservabilityError(f"{kind.replace('_', ' ')} {doc['id']} exists", 409)
             c.execute(insert(obs_config).values(kind=kind, id=doc["id"], doc=doc, status=None, created_by=actor,
                                                 created_ms=now, updated_by=actor, updated_ms=now))
-        self._audit(actor, f"observability.{kind}_created", doc["id"], {"doc": doc})
+            self._audit(actor, f"observability.{kind}_created", doc["id"], {"doc": doc}, conn=c)
         return self.get(kind, doc["id"])
 
     def replace(self, kind: str, actor: str, oid: str, body: dict) -> dict:
@@ -408,21 +410,23 @@ class ObservabilityService:
         with self.engine.begin() as c:
             n = c.execute(update(obs_config).where(and_(obs_config.c.kind == kind, obs_config.c.id == oid))
                           .values(doc=doc, updated_by=actor, updated_ms=_now())).rowcount
+            if n:
+                self._audit(actor, f"observability.{kind}_updated", oid, {"doc": doc}, conn=c)
         if not n:
             raise ObservabilityError(f"no {kind.replace('_', ' ')} {oid}", 404)
-        self._audit(actor, f"observability.{kind}_updated", oid, {"doc": doc})
         return self.get(kind, oid)
 
     def remove(self, kind: str, actor: str, oid: str) -> None:
         with self.engine.begin() as c:
             n = c.execute(delete(obs_config).where(and_(obs_config.c.kind == kind, obs_config.c.id == oid))).rowcount
+            if n:
+                self._audit(actor, f"observability.{kind}_deleted", oid, {}, conn=c)
         if not n:
             raise ObservabilityError(f"no {kind.replace('_', ' ')} {oid}", 404)
         if kind in ("slo", "alert_rule", "pipeline_sla"):          # its alerts end with it
             prefix = {"slo": "slo:", "alert_rule": "rule:", "pipeline_sla": "sla:"}[kind] + oid
             for a in self._open_alerts_like(prefix):
                 self._resolve(a, _now(), "its definition was deleted")
-        self._audit(actor, f"observability.{kind}_deleted", oid, {})
 
     def _set_status(self, kind: str, oid: str, status: dict) -> None:
         with self.engine.begin() as c:

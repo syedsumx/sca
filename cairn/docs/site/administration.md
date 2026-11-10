@@ -1933,7 +1933,7 @@ triggerer and its metadata database). Cairn wires it into the platform when it m
 ### Runtimes
 
 - **Kubernetes** (`CAIRN_AIRFLOW_RUNTIME=kubernetes`): the official Apache Airflow chart, pinned at **1.20.0**
-  (Apache-2.0) and shipped in Cairn's image with helm 3.19.0. Cairn renders it with `helm template`, starting from
+  (Apache-2.0) and shipped in Cairn's image with helm 3.21.1. Cairn renders it with `helm template`, starting from
   `deploy/airflow/values-cairn.yaml`, and applies what it renders through the Kubernetes API (server-side, field
   manager `cairn`, pruning what a new render drops). Helm only renders, so Cairn is the one owner of the objects and
   no helm release state drifts from Cairn's. Each deployment gets a namespace of its own (`<namespacePrefix><name>`),

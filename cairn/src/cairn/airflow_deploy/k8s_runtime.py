@@ -477,9 +477,19 @@ class KubernetesRuntime:
                 "spec": {"restartPolicy": "Never", "serviceAccountName": ACCOUNT, "automountServiceAccountToken": False,
                          "containers": [{"name": "check", "image": image, "command": ["bash", "-c", script],
                                          "envFrom": [{"secretRef": {"name": "cairn-af-env"}}],
-                                         "volumeMounts": [{"name": "in", "mountPath": "/opt/cairn/in"}],
+                                         # The image's user cannot write under /opt/cairn: the unpacked DAGs
+                                         # and the parse's SQLite file live in the pod's own scratch space.
+                                         "volumeMounts": [{"name": "in", "mountPath": "/opt/cairn/in"},
+                                                          {"name": "work", "mountPath": "/opt/cairn/check"},
+                                                          {"name": "tmp", "mountPath": "/tmp"}],
+                                         "securityContext": {"allowPrivilegeEscalation": False,
+                                                             "capabilities": {"drop": ["ALL"]}},
                                          "resources": {"limits": {"memory": "1Gi"}}}],
-                         "volumes": [{"name": "in", "configMap": {"name": pod}}]}})
+                         "securityContext": {"runAsNonRoot": True, "runAsUser": 50000, "runAsGroup": 0,   # the official image's user
+                                      "seccompProfile": {"type": "RuntimeDefault"}},
+                         "volumes": [{"name": "in", "configMap": {"name": pod}},
+                                     {"name": "work", "emptyDir": {"sizeLimit": "512Mi"}},
+                                     {"name": "tmp", "emptyDir": {"sizeLimit": "256Mi"}}]}})
             end = time.time() + timeout
             while time.time() < end:
                 p = self._call("GET", f"/api/v1/namespaces/{ns}/pods/{pod}") or {}
