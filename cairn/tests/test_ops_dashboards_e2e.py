@@ -444,10 +444,10 @@ def test_grafana_export_import_and_the_shipped_dashboards(cairn, board, stack):
         out = render(cairn, got["dashboard"]["id"])
         assert not [t for t in out["tiles"] if t.get("error")], [t.get("error") for t in out["tiles"]]
     if _has(GRAFANA):
-        _into_real_grafana(doc, stack)
+        _into_real_grafana(doc, stack, cairn)
 
 
-def _into_real_grafana(doc: dict, stack: dict) -> None:
+def _into_real_grafana(doc: dict, stack: dict, cairn) -> None:
     """The export loaded into a real Grafana (pinned image), its data sources the same Prometheus and Loki: every
     exported PromQL and LogQL panel's query answers there."""
     name = f"cairn-opsd-grafana-{os.getpid()}"
@@ -474,6 +474,15 @@ def _into_real_grafana(doc: dict, stack: dict) -> None:
         assert r.status_code == 200, r.text
         stored = httpx.get(f"{g}/api/dashboards/uid/{doc['uid']}", timeout=30).json()["dashboard"]
         assert [p["title"] for p in stored["panels"]] == [p["title"] for p in doc["panels"]]
+        # Fresh requests to Cairn's API, and Prometheus holding their span metrics, before the panels are asked:
+        # the Collector drops idle series (metrics expiration), so the window may otherwise hold none.
+        def fresh_rate() -> bool:
+            for _ in range(5):
+                api(cairn, "GET", "/v1/observability/health")
+            r = httpx.get("http://127.0.0.1:%d/api/v1/query" % stack["prometheus"], timeout=10, params={
+                "query": 'sum(rate(traces_span_metrics_calls_total{service_name="cairn-api"}[1m]))'})
+            return bool(r.json()["data"]["result"])
+        until(fresh_rate, 120, 5, "cairn-api's request rate in Prometheus")
         now = int(time.time() * 1000)
         checked = []
         for p in stored["panels"]:

@@ -44,6 +44,25 @@ def container(docs: list[dict], name: str) -> dict:
     return sts["spec"]["template"]["spec"]["containers"][0]
 
 
+_PULLED: set = set()
+
+
+def _pulled(image: str) -> None:
+    """The image pulled before the first container starts, so a registry hiccup (Docker Hub's limits, a reset
+    connection) is retried with back-off and said, instead of surfacing as `docker run`'s exit 125."""
+    if image in _PULLED:
+        return
+    err = ""
+    for delay in (0, 5, 15, 30):
+        time.sleep(delay)
+        r = subprocess.run(["docker", "pull", "-q", image], capture_output=True, text=True, timeout=900)
+        if r.returncode == 0:
+            _PULLED.add(image)
+            return
+        err = r.stderr.strip()[-1000:]
+    raise AssertionError(f"could not pull {image}: {err}")
+
+
 class Cluster:
     """Three containers of one StatefulSet's pod template, on a network of their own, named as the pods are."""
 
@@ -66,7 +85,10 @@ class Cluster:
             args += ["--entrypoint", self.spec["command"][0]]
         args.append(self.spec["image"])
         args += self.spec.get("command", [])[1:]
-        self.ids[i] = subprocess.run(args, check=True, capture_output=True, text=True).stdout.strip()
+        _pulled(self.spec["image"])
+        run = subprocess.run(args, capture_output=True, text=True)
+        assert run.returncode == 0, f"docker run {pod}: exit {run.returncode}: {run.stderr.strip()[-2000:]}"
+        self.ids[i] = run.stdout.strip()
 
     def stop(self, i: int) -> None:
         subprocess.run(["docker", "kill", f"{self.net}-{self.name}-{i}"], capture_output=True)
