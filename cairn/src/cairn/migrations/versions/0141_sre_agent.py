@@ -1,6 +1,6 @@
 """The SRE agent: its runbooks and settings, runs, proposed remediations and postmortems
 
-Revision ID: 0142
+Revision ID: 0141
 Revises: 0140
 Create Date: 2026-11-10 20:00:00.000000
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0142'
+revision = '0141'
 down_revision = '0140'
 branch_labels = None
 depends_on = None
