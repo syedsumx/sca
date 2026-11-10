@@ -199,6 +199,7 @@ class Services:
     privacy: Optional[Any] = None
     slos: Optional[Any] = None
     workspaces: Optional[Any] = None
+    people: Optional[Any] = None            # People & roles (cairn.identity.people)
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -639,6 +640,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_medallion(services)
     _build_flows(services)
     _build_split_compute(services)
+    _build_people(services)
     _build_iac_changes(services)
     return services
 
@@ -696,6 +698,30 @@ def _build_device_logins(s: Services) -> None:
         f"{s.settings.active.public_url.rstrip('/')}/cairn/device"
     s.device_logins = DeviceLogins(s.engine, s.audit, verify, why_not)
     s.identity.cli_lookup = s.device_logins.resolve
+
+
+def provisioning_graph(s: Services):
+    """Cairn Core as cairn-provisioner: what writes people and groups (SCIM, People & roles), never the control-plane
+    account (which must not be able to change group membership, and so its own access). Its token sits next to the
+    control plane's."""
+    core = s.settings.core
+    path = os.environ.get("CAIRN_SCIM_CORE_TOKEN_FILE") or (
+        os.path.join(os.path.dirname(core.token_file), "provisioner_token") if core.token_file else None)
+    if not path or not core.url:
+        return s.graph                   # tests and single-process demos
+    return CoreClient(core.url, None, core.timeout_seconds, token_file=path)
+
+
+def _build_people(s: Services) -> None:
+    """People & roles (cairn.identity.people): built after everything it reports on (personas, workspaces, agents,
+    access reviews, command-line sessions)."""
+    from cairn.identity.people import PeopleDirectory
+
+    devices = getattr(s, "device_logins", None)
+    s.people = PeopleDirectory(
+        s.engine, s.graph, provisioning_graph(s) if s.graph is not None else None, s.graph, s.audit, s.attributes,
+        s.pdp, s.personas, s.workspaces, s.agents, getattr(s, "access_reviews", None),
+        on_deactivate=(lambda urn: devices.end_all(urn, "people")) if devices is not None else None)
 
 
 def _build_iac_changes(s: Services) -> None:

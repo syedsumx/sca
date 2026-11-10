@@ -113,6 +113,13 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             boost: boost.has('/flows') ? 40 : 0 },
         { id: 'act:run-flow', kind: 'action', label: t('palette.runFlow'), keywords: 'start trigger', to: '/flows' },
         { id: 'act:ask', kind: 'action', label: t('palette.askAssistant'), keywords: 'question chat ai', to: '/assistant' },
+        // People & roles' actions, only where the page is offered (administrators).
+        ...(nav.some((n) => n.to === '/people') ? [
+            { id: 'act:new-person', kind: 'action' as const, label: t('palette.newPerson'), detail: t('nav.people'),
+                keywords: 'create add user member account directory', to: '/people?tab=people&new=1' },
+            { id: 'act:check-access', kind: 'action' as const, label: t('palette.checkAccess'), detail: t('nav.people'),
+                keywords: 'why permission can allowed denied effective access user role', to: '/people?tab=access' },
+        ] : []),
         { id: 'act:shortcuts', kind: 'action', label: t('palette.shortcuts'), keywords: 'keys keyboard help', shortcut: '?',
             run: openShortcuts },
     );

@@ -149,7 +149,7 @@ class Engine:
         """The kind whose records the last parent field names (its read path is this kind's read path's prefix)."""
         prefix = k.read.split("{" + k.parents[-1] + "}")[0].rstrip("/")
         for other in kinds.values():
-            if other is not k and other.read.rstrip("/") == prefix:
+            if other is not k and other.read.split("?")[0].rstrip("/") == prefix:     # its list may be filtered
                 return other
         raise EngineError(f"{k.name}: no kind lists its parents ({prefix})")
 

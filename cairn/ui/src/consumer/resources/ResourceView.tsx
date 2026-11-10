@@ -116,7 +116,7 @@ function secretsOf(spec: ResourceSpec): string[] {
     return [...out];
 }
 
-function ActionDialog({ spec, action, row, onDone, onClose }: {
+export function ActionDialog({ spec, action, row, onDone, onClose }: {
     spec: ResourceSpec; action: ResourceAction; row: Row | null; onDone: () => void; onClose: () => void;
 }) {
     const t = useT();

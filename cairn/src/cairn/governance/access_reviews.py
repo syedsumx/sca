@@ -173,6 +173,16 @@ class AccessReviews:
         return [{"id": r.id, "name": r.name, "state": r.state, "due_ms": r.due_ms} for r in rows
                 if admin or r.id in mine]
 
+    def open_items_for(self, person: str) -> list[dict]:
+        """The undecided items about ``person``'s access in open campaigns (People & roles' person page)."""
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(review_items, reviews.c.name, reviews.c.due_ms).join(
+                reviews, reviews.c.id == review_items.c.review_id).where(and_(
+                    review_items.c.actor == person, review_items.c.decision.is_(None), reviews.c.state == "open"))
+                .order_by(reviews.c.due_ms)).fetchall()
+        return [{"review": r.review_id, "review_name": r.name, "due_ms": r.due_ms, "item": r.id,
+                 "persona": r.persona_id, "grant_id": r.grant_id, "reviewers": list(r.reviewers or [])} for r in rows]
+
     # ---- decisions ---------------------------------------------------------------------------------
     def decide(self, actor: str, rid: str, item_id: str, body: DecisionIn) -> dict:
         r = self._row(rid)

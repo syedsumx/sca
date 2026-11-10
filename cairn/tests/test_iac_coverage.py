@@ -43,6 +43,7 @@ COVERED_BY: dict[str, str] = {
     "POST /v1/flows/{}/publish": "flows",                  # a flow declared as code is published as it is saved
     "POST /v1/streams/{}/enabled": "streams",
     "POST /governance/automations/{}/enabled": "automations",
+    "POST /v1/people/users/{}/activate": "people",          # a destroyed (deactivated) person, declared again
 }
 
 # ---- actions: they do something now, and keep no configuration ---------------------------------------------------
@@ -134,7 +135,7 @@ ACTIONS: dict[str, str] = {
     "POST /marketplace/access-requests/preview": _CHECK, "POST /marketplace/products/{}/publish/{}/plan": _CHECK,
     "POST /quality/contracts/check": _CHECK, "POST /sources/test": _CHECK, "POST /v1/network/egress-rules/check": _CHECK,
     "POST /v1/flows/validate": _CHECK, "POST /v1/ontology/validate-sql": _CHECK, "POST /integrations/git/{}/impact": _CHECK,
-    "POST /v1/iac/changes/plan": _CHECK,
+    "POST /v1/iac/changes/plan": _CHECK, "POST /v1/people/access-check": _CHECK,
     # protocols between components
     "POST /v1/trino/{}/allow": _PROTOCOL, "POST /v1/trino/{}/batch": _PROTOCOL, "POST /v1/trino/{}/column-mask": _PROTOCOL,
     "POST /v1/trino/{}/row-filters": _PROTOCOL, "POST /v1/trino/{}/lineage": _PROTOCOL, "POST /v1/trino/{}/queries": _PROTOCOL,

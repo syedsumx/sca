@@ -248,6 +248,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.governance.workspaces_api import build_router as workspaces_router
 
         app.include_router(workspaces_router(services.workspaces, cp, services.is_admin))
+    if getattr(services, "people", None) is not None:          # People & roles: the directory, who holds what and why
+        from cairn.identity.people import build_router as people_router
+
+        app.include_router(people_router(services.people, cp, authz))
     if services.privacy is not None:
         from cairn.governance.privacy_api import build_router as privacy_router
 
@@ -617,14 +621,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
 def _provisioning_graph(services: Services):
     """SCIM writes people and groups as cairn-provisioner, never as the control-plane account (which
     must not be able to change group membership). Its token sits next to the control plane's."""
-    core = services.settings.core
-    path = os.environ.get("CAIRN_SCIM_CORE_TOKEN_FILE") or (
-        os.path.join(os.path.dirname(core.token_file), "provisioner_token") if core.token_file else None)
-    if not path or not core.url:
-        return services.graph            # tests and single-process demos
-    from cairn.common.core import CoreClient
+    from cairn.services import provisioning_graph
 
-    return CoreClient(core.url, None, core.timeout_seconds, token_file=path)
+    return provisioning_graph(services)
 
 
 def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp, authz) -> None:

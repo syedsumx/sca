@@ -226,7 +226,9 @@ class PolicyDecisionPoint:
                            self.resolver.version(req.resource.urn if req.resource else None)])
         return hashlib.sha256(req.model_dump_json(exclude={"environment"}).encode() + b"|" + tail.encode()).hexdigest()
 
-    def decide(self, req: AuthorizeRequest, explain: bool = False) -> Decision:
+    def decide(self, req: AuthorizeRequest, explain: bool = False, record: bool = True) -> Decision:
+        """``record=False``: an administrator asking what *would* be decided (People & roles' access check), so a deny
+        is not written to the audit trail as the person's own."""
         if req.actor in SYSTEM_ACTORS or req.actor in self.root_users:
             return Decision(decision="ALLOW", reason="system or break-glass root user", policy_ids=["builtin:root"],
                             ttl_seconds=self.cache_ttl)
@@ -249,7 +251,7 @@ class PolicyDecisionPoint:
                 self._cache[key] = (time.monotonic() + self.cache_ttl, decision)
                 if len(self._cache) > 50_000:
                     self._cache.clear()
-        if self.audit and self.audit_denies and decision.decision == "DENY" and decision.policy_ids:
+        if record and self.audit and self.audit_denies and decision.decision == "DENY" and decision.policy_ids:
             batch = _deny_batch.get()
             if batch is not None and hasattr(self.audit, "engine"):
                 batch.append((self.audit, ("authz", "deny", req.actor, req.resource.urn if req.resource else None,

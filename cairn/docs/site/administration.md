@@ -426,6 +426,68 @@ Purposes that need consent, and each person's consent, are kept by Cairn (`cairn
   `filter_state: over_limit` and the API logs a warning.
 - **Freshness.** A new record applies to queries within 5 seconds on each API node.
 
+## People and roles
+
+**People & roles** (sidebar, under Govern; `/people`) is one place for who is in Cairn, what they hold and why. It is
+for administrators: every page and every call (`/v1/people/...`) needs `MANAGE_POLICIES`, agent credentials never
+reach it (not even to read), and when the policy engine cannot say yes the answer is no.
+
+People and groups live in Cairn Core and arrive three ways; the **source** column says which:
+
+* **SCIM**: your identity provider pushes them ([User provisioning (SCIM)](#user-provisioning-scim)). Cairn never
+  changes them by hand: editing, deactivating or changing the membership of a SCIM person or group is refused (409,
+  "managed by your identity provider").
+* **Made in Cairn** (manual): for deployments without SCIM. **New person** sets the user name (it must match what
+  single sign-on provides), name, email, title, department, country (ISO code), employment type, manager and any more
+  attributes your policies read. **New group** makes a native group: its members are kept on each person
+  (`nativeGroupMembership`), so single sign-on's own group claims never overwrite them.
+* **Single sign-on**: everyone else, made in Cairn Core when they first signed in. Creating a person here with the same
+  user name adopts them (from then on they are managed here); a group that comes from sign-in is refused (manage it in
+  the identity provider).
+
+What a person's attributes are for: the policy engine reads title, department, country and email from their profile,
+and employment type and every other attribute as `subject.attributes.<name>`. Cairn keeps those as structured
+properties `io.cairn.<name>` on the person, declaring each property the first time it is used (by the control plane;
+the person is written by the provisioning account, as SCIM writes).
+
+**A person's page** (click a name) shows their profile and attributes; their groups and where each comes from; each
+role (persona) they hold and **why**: named in the persona, through a group, by an attribute rule, or granted (by hand
+or by an approved access request, with its expiry); what they can see, persona by persona (the scope each reaches and
+the purposes that restrict them); their workspaces; the agents and workload identities they own; the last sign-in Cairn
+saw (SAML, `cairn login`, Trino, workload and notebook tokens: sign-ins Cairn Core handles alone are not seen); their
+open access reviews; and recent audit entries by or about them.
+
+**Deactivate** suspends the person in Cairn Core and ends every session and token Cairn issued them (the command line,
+OAuth agents), exactly as SCIM deprovisioning does; their ownership and history stay. It works for people made here and
+for single sign-on people (offboarding without SCIM); **Activate** undoes it. Nobody deactivates themselves or Cairn's
+own accounts.
+
+**Access check** answers "Can *person* *do* *resource*?": yes or no, the policies that decided it with the persona or
+purpose behind each, and the personas and purposes that could have applied but did not, with the reason. It is the
+policy engine's own decision (`POST /v1/people/access-check`, `{"person", "privilege", "resource"}`), taken with the
+person's groups and attributes as Cairn Core has them now. `NOT_APPLICABLE` means no Cairn policy decides it: Cairn's
+APIs refuse it, and in the catalog's own pages Cairn Core's policies decide (additive mode). Asking is audited as your
+question (`people` `access.checked`); it never writes a deny into the person's own record.
+
+**Groups**, **Roles** (the personas, edited in the Persona & Purpose Studio) and **Service accounts & agents** (agent
+identities with their owner and scopes, workload identities and the account each acts as, and Cairn's own accounts)
+complete the section. Every change is audited (category `people`).
+
+People, groups and memberships made here are configuration: resource types `people` (`cairn_person`), `people_groups`
+(`cairn_group`) and `people_group_members` (`cairn_group_member`) in bundles, Terraform and export. Destroying a
+`cairn_person` deactivates them; declaring them again activates them.
+
+| Endpoint | What it does |
+|---|---|
+| `GET /v1/people/users` | people, with `q`, `status` (active, deactivated), `source` (scim, manual, sso), `group`, `type` (person, service), `offset`, `limit` |
+| `GET /v1/people/users/{id}` | a person's page; `.../access`: what they can see, by persona |
+| `POST /v1/people/users`, `PUT .../{id}` | make or change a person (refused for SCIM people) |
+| `DELETE /v1/people/users/{id}`, `POST .../{id}/activate` | deactivate, activate |
+| `GET, POST /v1/people/groups`, `GET, PUT, DELETE .../{id}` | groups |
+| `GET, POST /v1/people/groups/{id}/members`, `DELETE .../members/{person}` | a group's members |
+| `GET /v1/people/principals?type=agent\|workload\|service` | service accounts and agents |
+| `POST /v1/people/access-check` | can this person do this, and why |
+
 ## User provisioning (SCIM)
 
 With SCIM 2.0 the identity provider creates, updates and deactivates people and groups ahead of

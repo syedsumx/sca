@@ -36,6 +36,15 @@ aspects and lists, and `/openapi/v2` timeseries).
 Manage both in **Workspace → Governance studio**. Grants can be time-boxed; holders are warned before they
 expire.
 
+## People and roles
+
+Administrators see everyone in **People & roles**: each person's groups and attributes, the roles (personas) they hold
+and why (named directly, through a group, by an attribute rule or by a grant), what they can see, and where they come
+from (your identity provider through SCIM or single sign-on, or made in Cairn). **Access check** answers "can this
+person do this to this asset?" with yes or no and the policies, personas and purposes behind the answer. Without SCIM,
+administrators make people and groups there; people from SCIM are changed only in the identity provider. See
+[People and roles](administration.md#people-and-roles) for the details.
+
 ## PII and masking
 
 Columns are classified (email, phone, national IDs and more) and classifications **propagate along

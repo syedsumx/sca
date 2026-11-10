@@ -3044,6 +3044,126 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "people": {
+        "key": "people",
+        "iac": {"kind": "people", "id": "id"},
+        "title": "People",
+        "path": "/v1/people/users",
+        "listKey": "items",
+        "description": "Everyone in Cairn Core, where each comes from (SCIM, made in Cairn, single sign-on), their attributes and groups. People made here are configuration; people from SCIM are your identity provider's.",
+        "docs": "administration.html#people-and-roles",
+        "rowKey": "id",
+        "columns": [
+            "display_name",
+            "id",
+            "email",
+            "department",
+            "source",
+            "status"
+        ],
+        "actions": [
+            {
+                "label": "New person",
+                "method": "POST",
+                "path": "/v1/people/users",
+                "body": {
+                    "id": "dana.lee",
+                    "display_name": "Dana Lee",
+                    "email": "dana.lee@example.com",
+                    "department": "Finance",
+                    "country": "DE",
+                    "employment_type": "contractor"
+                }
+            },
+            {
+                "label": "Edit person",
+                "method": "PUT",
+                "path": "/v1/people/users/{id}",
+                "body": {
+                    "display_name": "Dana Lee",
+                    "title": "Senior analyst"
+                }
+            },
+            {
+                "label": "Deactivate",
+                "method": "DELETE",
+                "path": "/v1/people/users/{id}",
+                "body": null
+            },
+            {
+                "label": "Activate",
+                "method": "POST",
+                "path": "/v1/people/users/{id}/activate",
+                "body": null,
+                "fixed": true
+            }
+        ]
+    },
+    "people-groups": {
+        "key": "people-groups",
+        "iac": {"kind": "people_groups", "id": "id"},
+        "title": "Groups",
+        "path": "/v1/people/groups",
+        "listKey": "items",
+        "description": "Groups in Cairn Core and where each comes from. Groups made here (native: single sign-on never overwrites their members) are configuration.",
+        "docs": "administration.html#people-and-roles",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "id",
+            "source",
+            "members"
+        ],
+        "actions": [
+            {
+                "label": "New group",
+                "method": "POST",
+                "path": "/v1/people/groups",
+                "body": {
+                    "id": "finance-analysts",
+                    "name": "Finance analysts"
+                }
+            },
+            {
+                "label": "Edit group",
+                "method": "PUT",
+                "path": "/v1/people/groups/{id}",
+                "body": {
+                    "name": "Finance analysts",
+                    "description": "Analysts of the finance domain"
+                }
+            },
+            {
+                "label": "Add member",
+                "method": "POST",
+                "path": "/v1/people/groups/{group}/members",
+                "body": {
+                    "person": "dana.lee"
+                }
+            },
+            {
+                "label": "Delete group",
+                "method": "DELETE",
+                "path": "/v1/people/groups/{id}",
+                "body": null
+            }
+        ]
+    },
+    "people-principals": {
+        "key": "people-principals",
+        "title": "Service accounts & agents",
+        "path": "/v1/people/principals",
+        "listKey": null,
+        "description": "Who acts without a person at the keyboard: agent identities (with their owner and scopes), pipelines' workload identities and the accounts they act as, and Cairn's own accounts.",
+        "docs": "administration.html#people-and-roles",
+        "columns": [
+            "name",
+            "type",
+            "owner",
+            "scopes",
+            "enabled"
+        ]
+    },
     "share-packages": {
         "key": "share-packages",
         "title": "Data packages",

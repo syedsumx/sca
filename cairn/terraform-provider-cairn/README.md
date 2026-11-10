@@ -5,12 +5,15 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-78 resources, each also a data source:
+81 resources, each also a data source:
 
 **Identity and access**
 
 | Resource | Bundle section | What it is |
 |---|---|---|
+| `cairn_person` | `people` | A person made in Cairn, for deployments without SCIM: their profile and the attributes access policies read (title, department, country, employment type, more) |
+| `cairn_group` | `people_groups` | A group made in Cairn, for deployments without SCIM (a native group: single sign-on never overwrites its members) |
+| `cairn_group_member` | `people_group_members` | A person in a group made in Cairn (people_groups) |
 | `cairn_api_limits` | `api_limits` | The API's request limits and network allowlist: requests a minute for the tenant, for each person and for named people, and the networks (and trusted proxies) the API answers |
 | `cairn_policy` | `policies` | One of Cairn's own access policies (source cairn), set and deleted on its own: the rest of the policy bundle stays as it is |
 | `cairn_workspace` | `workspaces` | A workspace: domains run by their own admins, with members and the permissions each role has there |

@@ -33,6 +33,7 @@ export const TAB_REQUIRES: Record<string, string[]> = {
 /** Purpose-built pages that are for Cairn's operators only. */
 export const PAGE_REQUIRES: Record<string, string[]> = {
     '/governance': ['MANAGE_POLICIES'],
+    '/people': ['MANAGE_POLICIES'],
 };
 
 export type CapabilityState = { caps: Capabilities | undefined; loading: boolean; error: boolean };

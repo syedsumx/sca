@@ -27,10 +27,13 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
          "/sql/metrics", "/sql/git", "/queries", "/dashboards", "/profile", "/settings", "/extensions", "/flows",
          "/flows?flow=a11y-flow", "/usage?tab=budgets", "/compute?tab=jobs", "/device?code=BCDF-GHJK",
          # Without a compiler here; tests/test_ontology_ui_e2e.py runs axe on the same pages with a compiled ontology.
-         "/ontology", "/ontology?tab=review", "/ontology?tab=compile"]
+         "/ontology", "/ontology?tab=review", "/ontology?tab=compile",
+         # People & roles (L139): the directory, a person's page open, groups, roles, service accounts, the access check.
+         "/people", "/people?person=ana", "/people?tab=groups", "/people?tab=roles", "/people?tab=principals",
+         "/people?tab=access&check=ana"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
 FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
-         ("/trust?tab=secret-scopes", "Create scope")]
+         ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person")]
 BLOCKING = {"serious", "critical"}
 
 
@@ -82,6 +85,7 @@ def cairn(settings, graph, tmp_path, monkeypatch):
     graph.aspects[(DS, "schemaMetadata")] = {"fields": [{"fieldPath": c, "nativeDataType": "TEXT"}
                                                         for c in ("id", "region", "amount")]}
     graph.aspects[(DS, "datasetProperties")] = {"name": "orders", "description": "One row per order."}
+    graph.aspects[(ANA, "corpUserInfo")] = {"active": True, "displayName": "Ana Lima", "departmentName": "Sales"}
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
     s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
     s.sql_workspace.save(ANA, {"name": "Revenue by region", "connection": "wh",

@@ -80,6 +80,7 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
         label: 'nav.group.govern',
         items: [
             { to: '/governance', label: 'nav.governance', icon: 'shield', feature: 'governance' },
+            { to: '/people', label: 'nav.people', icon: 'user' },
             { to: '/trust', label: 'nav.trust', icon: 'lock' },
             { to: '/sharing', label: 'nav.sharing', icon: 'share' },
             { to: '/reports', label: 'nav.reports', icon: 'report', feature: 'governance' },

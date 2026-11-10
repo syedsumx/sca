@@ -8,6 +8,7 @@
     "/assistant": "context-and-ai.html#assistant",
     "/context": "context-and-ai.html#context-agents",
     "/governance": "governance.html#policy-decisions",
+    "/people": "administration.html#people-and-roles",
     "/reports": "administration.html#reports",
     "/pipelines": "integrations.html#git-and-dbt",
     "/sql": "administration.html#sql-workspace",

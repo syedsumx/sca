@@ -114,6 +114,30 @@ class AuditLog:
         with self.engine.connect() as conn:
             return [dict(r._mapping) for r in conn.execute(stmt)]
 
+    def about(self, urn: str, limit: int = 20) -> list[dict]:
+        """The newest entries made by ``urn`` or about it (People & roles' person page)."""
+        from sqlalchemy import or_
+
+        stmt = select(audit_log).where(or_(audit_log.c.actor == urn, audit_log.c.subject == urn)) \
+            .order_by(audit_log.c.seq.desc()).limit(limit)
+        with self.engine.connect() as conn:
+            return [{k: v for k, v in r._mapping.items() if k not in ("prev_hash", "hash")} for r in conn.execute(stmt)]
+
+    SIGN_IN_ACTIONS = ("sso.saml_signed_in", "device.signed_in", "workload.token_issued", "notebook.token_issued")
+
+    def last_sign_in(self, urn: str) -> Optional[dict]:
+        """The newest sign-in Cairn recorded for ``urn`` (SAML, the command line, Trino's OAuth, workload and notebook
+        token exchanges); sign-ins Cairn Core handles on its own (OIDC through the catalog) are not seen here."""
+        from sqlalchemy import or_
+
+        stmt = select(audit_log.c.ts, audit_log.c.action, audit_log.c.category).where(
+            audit_log.c.actor == urn,
+            or_(audit_log.c.action.in_(self.SIGN_IN_ACTIONS), audit_log.c.action.like("%.sign_in"))) \
+            .order_by(audit_log.c.seq.desc()).limit(1)
+        with self.engine.connect() as conn:
+            r = conn.execute(stmt).first()
+        return {"ts": r.ts, "action": r.action, "category": r.category} if r else None
+
     def verify_chain(self) -> dict:
         prev = GENESIS
         count = 0

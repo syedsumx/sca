@@ -703,7 +703,8 @@ QUERY_DATA_PATHS = ("/data/preview", "/data/query", "/data/ask", "/context/metri
 # Exactly these create something that waits for a person (deciding on it is a write).
 PROPOSE_ROUTES = {"/ai/docs/generate", "/governance/workflows", "/marketplace/access-requests", "/collab/threads",
                   "/collab/threads/{thread_id}/comments", "/ai/steward/run"}
-NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me", "/v1/me/agent-memories")   # not even to read (the person's own)
+NEVER_PATHS = ("/admin", "/oauth", "/me/agents", "/v1/me", "/v1/me/agent-memories",   # not even to read (the person's own)
+               "/v1/people")                                    # the directory: who holds what is for administrators
 MODEL_PATHS = ("/v1/ai/gateway",)                              # the AI gateway: scope "model", reads included
 MEMORY_PATHS = ("/v1/agent-memory",)                           # agent memory (cairn.ai.agent_memory): scope "memory"
 READ_ONLY_PATHS = ("/governance/policies", "/governance/ai-systems", "/governance/personas", "/governance/purposes")

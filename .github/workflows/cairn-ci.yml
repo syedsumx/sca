@@ -737,6 +737,11 @@ jobs:
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_tasks_ui_e2e.py | tee "$RUNNER_TEMP/tasksui.log"
           # Only the ontology task may skip here (it needs the compiler's stack: the trino job runs it).
           grep -q "3 passed" "$RUNNER_TEMP/tasksui.log"
+      - name: People & roles (people, a person's roles and why, the access check, a person made and deactivated; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_people_ui_e2e.py | tee "$RUNNER_TEMP/peopleui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/peopleui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail

@@ -21,6 +21,7 @@ const PAGES: [string, string, string[]][] = [
     ['OntologyPage.tsx', '/ontology', ['/ontology']],
     ['ProfilePage.tsx', '/profile', ['/profile']],
     ['SettingsPage.tsx', '/settings', ['/settings']],
+    ['PeoplePage.tsx', '/people', ['/people']],
 ];
 
 describe('the shared page header on the purpose-built pages', () => {
@@ -33,7 +34,7 @@ describe('the shared page header on the purpose-built pages', () => {
 
     it('every page’s help names a docs section that the bundled help has', () => {
         const help = HELP as Record<string, unknown>;
-        for (const r of ['/discover', '/asset', '/marketplace', '/requests', '/flows', '/ontology', '/profile', '/settings']) {
+        for (const r of ['/discover', '/asset', '/marketplace', '/requests', '/flows', '/ontology', '/profile', '/settings', '/people']) {
             const anchor = pageHelp(r);
             expect(anchor, r).toMatch(/^[\w-]+\.html#[\w-]+$/);
             expect(help[anchor as string], `${r}: ${anchor}`).toBeTruthy();

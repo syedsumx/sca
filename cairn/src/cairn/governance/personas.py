@@ -334,6 +334,49 @@ class PersonaEngine:
     def enrich_subject(self, subject: dict, now_ms: int) -> dict:
         return {"personas": self.memberships(subject, now_ms)}
 
+    def explain_memberships(self, subject: dict, now_ms: int) -> list[dict]:
+        """Why the subject holds each persona it holds (the same rules as :meth:`memberships`): named directly, through
+        a group, by an attribute rule (every rule matched), or by a grant in force. Disabled personas are left out."""
+        urn = subject.get("urn") or ""
+        groups = set(subject.get("groups") or [])
+        ctx = {"subject": subject}
+        with self._lock:
+            personas = dict(self._personas)
+        reasons: dict[str, list[dict]] = {}
+        for p in personas.values():
+            if not p.enabled:
+                continue
+            m = p.members
+            why: list[dict] = []
+            if urn in m.users:
+                why.append({"kind": "direct"})
+            why += [{"kind": "group", "group": g} for g in sorted(groups & set(m.groups))]
+            if not why and m.attribute_rules and all(
+                    evaluate_leaf({"attr": f"subject.attributes.{r.attr}", "op": r.op, "value": r.value}, ctx)
+                    for r in m.attribute_rules):
+                why.append({"kind": "attribute_rule",
+                            "rules": [r.model_dump(mode="json") for r in m.attribute_rules]})
+            if why:
+                reasons[p.id] = why
+        for g in self.grants_of(urn):
+            if g["persona"] in personas and personas[g["persona"]].enabled \
+                    and (g["expires_at_ms"] is None or g["expires_at_ms"] > now_ms):
+                reasons.setdefault(g["persona"], []).append(
+                    {"kind": "grant", "grant_id": g["id"], "source": g["source"], "expires_at_ms": g["expires_at_ms"]})
+        return [{"id": pid, "name": personas[pid].name, "permissions": list(personas[pid].permissions),
+                 "reasons": why} for pid, why in sorted(reasons.items())]
+
+    def grants_of(self, actor: str) -> list[dict]:
+        """An actor's grants in force (not revoked, not expired), oldest first."""
+        now = int(datetime.now(timezone.utc).timestamp() * 1000)
+        with self.engine.connect() as conn:
+            rows = conn.execute(select(grants_table).where(and_(
+                grants_table.c.actor == actor, grants_table.c.revoked.is_(False)))
+                .order_by(grants_table.c.created_at_ms, grants_table.c.id)).fetchall()
+        return [{"id": r.id, "persona": r.persona_id, "actor": r.actor, "source": r.source,
+                 "expires_at_ms": r.expires_at_ms, "created_at_ms": r.created_at_ms}
+                for r in rows if r.expires_at_ms is None or r.expires_at_ms > now]
+
     # ---- CRUD ----------------------------------------------------------------------
     def list_personas(self) -> list[Persona]:
         return sorted(self._personas.values(), key=lambda p: p.name.lower())

@@ -1,4 +1,5 @@
 import { GUIDE_DE, GUIDE_EN, GUIDE_ES, GUIDE_FR, GUIDE_JA } from './guide';
+import { PEOPLE_DE, PEOPLE_EN, PEOPLE_ES, PEOPLE_FR, PEOPLE_JA } from './people';
 
 /**
  * UI message catalogs. English is the source; other locales may leave keys out, and `t()` falls back
@@ -293,6 +294,7 @@ const en = {
     'unit.day': 'day',
     'form.requiredSr': 'required',
     ...GUIDE_EN,
+    ...PEOPLE_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -579,6 +581,7 @@ const de: Catalog = {
     'unit.day': 'Tag',
     'form.requiredSr': 'Pflichtfeld',
     ...GUIDE_DE,
+    ...PEOPLE_DE,
 };
 
 const fr: Catalog = {
@@ -794,6 +797,7 @@ const fr: Catalog = {
     'unit.days': 'jours',
     'form.requiredSr': 'obligatoire',
     ...GUIDE_FR,
+    ...PEOPLE_FR,
 };
 
 const es: Catalog = {
@@ -1009,6 +1013,7 @@ const es: Catalog = {
     'unit.days': 'días',
     'form.requiredSr': 'obligatorio',
     ...GUIDE_ES,
+    ...PEOPLE_ES,
 };
 
 const ja: Catalog = {
@@ -1223,6 +1228,7 @@ const ja: Catalog = {
     'unit.days': '日',
     'form.requiredSr': '必須',
     ...GUIDE_JA,
+    ...PEOPLE_JA,
 };
 
 export const CATALOGS: Record<Locale, Catalog> = { en, de, fr, es, ja };
