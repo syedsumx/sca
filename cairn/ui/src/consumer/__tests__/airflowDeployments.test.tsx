@@ -65,18 +65,37 @@ it('shows a deployment\'s health, rolls back a deploy and approves a promotion',
         'POST /v1/airflow/promotions/p1/approve': { id: 'p1', state: 'applied' },
         'POST /v1/airflow/deployments/finance-dev/hibernate': { name: 'finance-dev', state: 'hibernating' },
     }, calls, '/compute?tab=airflow-deployments');
-    fireEvent.click(await screen.findByText('finance-dev'));
-    expect(await screen.findByText('degraded')).toBeTruthy();
-    expect(screen.getByText('broken.py')).toBeTruthy();
-    expect(screen.getByText('2 running, 1 queued')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Hibernate' }));
+    // The environments are cards in promotion order (dev before prod); the first is picked and scopes what follows.
+    const dev = await screen.findByRole('button', { name: 'finance-dev' });
+    const prod = screen.getByRole('button', { name: 'finance-prod' });
+    expect(dev.compareDocumentPosition(prod) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'finance: dev → prod' })).toBeTruthy();
+    fireEvent.click(dev);
+    expect(dev.getAttribute('aria-pressed')).toBe('true');
+    expect(prod.getAttribute('aria-pressed')).toBe('false');
+    const card = screen.getByRole('article', { name: 'finance-dev' });
+    expect(within(card).getByText('mon–fri 07:00–20:00 Europe/Berlin')).toBeTruthy();
+    expect(within(card).getByText('Ready').closest('[data-tone]')?.getAttribute('data-tone')).toBe('ok');
+    const health = await screen.findByRole('region', { name: 'finance-dev health' });
+    expect(await within(health).findByText('Degraded')).toBeTruthy();
+    expect(within(health).getByText('broken.py')).toBeTruthy();
+    expect(within(health).getByText('2 running, 1 queued')).toBeTruthy();
+    fireEvent.click(within(card).getByRole('button', { name: 'Hibernate' }));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path.endsWith('/finance-dev/hibernate'))).toBe(true));
-    fireEvent.click(screen.getByRole('tab', { name: 'Deploys & promotion' }));
-    expect(await screen.findByText('deployed (git abc1234)')).toBeTruthy();
-    fireEvent.click(screen.getByRole('button', { name: 'Roll back' }));
+    const deploys = screen.getByRole('region', { name: 'Deploys to finance-dev' });
+    expect(await within(deploys).findByText('deployed (git abc1234)')).toBeTruthy();
+    expect(within(deploys).getByText('Replaced')).toBeTruthy();
+    fireEvent.click(within(deploys).getByRole('button', { name: 'Roll back' }));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path.endsWith('/deploys/d1/rollback'))).toBe(true));
-    fireEvent.click(await screen.findByRole('button', { name: 'Approve' }));
+    const waiting = screen.getByRole('region', { name: 'Promotions waiting' });
+    fireEvent.click(await within(waiting).findByRole('button', { name: 'Approve' }));
     await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/v1/airflow/promotions/p1/approve')).toBe(true));
+    // Picking another environment scopes the deploys, promotions and health to it.
+    fireEvent.click(prod);
+    expect(prod.getAttribute('aria-pressed')).toBe('true');
+    expect(await screen.findByRole('region', { name: 'Deploys to finance-prod' })).toBeTruthy();
+    expect(screen.getByRole('region', { name: 'finance-prod health' })).toBeTruthy();
+    expect(screen.queryByRole('region', { name: 'Deploys to finance-dev' })).toBeNull();
 });
 
 it('the command palette\'s action opens the generated create form, which posts the deployment', async () => {

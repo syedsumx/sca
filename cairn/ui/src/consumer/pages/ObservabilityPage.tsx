@@ -5,6 +5,7 @@ import { Link, useHistory, useLocation } from 'react-router-dom';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { ExportTab, PipelinesTab } from '../components/PipelinesObs';
+import { StatusBadge, StatusTone } from '../components/StatusBadge';
 import { EvidenceList, SreIncidentPanel } from '../components/SreAgent';
 import type { Evidence } from '../components/SreAgent';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
@@ -81,7 +82,7 @@ interface TimelineEvent { at: string; kind: string; actor: string; by_agent: boo
 interface IncidentDetail extends Incident { alerts: AlertRow[]; timeline: TimelineEvent[] }
 
 const TABS = ['health', 'journey', 'logs', 'pipelines', 'slos', 'alerts', 'incidents', 'export'] as const;
-const STATE_COLOR: Record<string, string> = { up: 'green', degraded: 'orange', down: 'red', unknown: 'default' };
+const STATE_TONE: Record<string, StatusTone> = { up: 'ok', degraded: 'warn', down: 'error', unknown: 'waiting' };
 const SEVERITY_COLOR: Record<string, string> = { critical: 'red', warning: 'orange', info: 'blue' };
 const SPEC = (k: string) => RESOURCE_SPECS[k] as ResourceSpec;
 const action = (k: string, label: string) => SPEC(k).actions!.find((a) => a.label === label) as ResourceAction;
@@ -148,7 +149,7 @@ function HealthTab({ openTraces }: { openTraces: (service: string) => void }) {
                         <Surface key={c.name} role="group" aria-label={`${c.name}: ${t(`obs.state.${c.state}` as MessageKey)}`}>
                             <Space style={{ justifyContent: 'space-between', width: '100%' }}>
                                 <strong>{c.name}</strong>
-                                <Tag color={STATE_COLOR[c.state]}>{t(`obs.state.${c.state}` as MessageKey)}</Tag>
+                                <StatusBadge tone={STATE_TONE[c.state] ?? 'waiting'} label={t(`obs.state.${c.state}` as MessageKey)} />
                             </Space>
                             <Muted style={{ display: 'block' }}>
                                 {c.rate !== null && t('obs.health.rate', { n: fmt(c.rate) })}

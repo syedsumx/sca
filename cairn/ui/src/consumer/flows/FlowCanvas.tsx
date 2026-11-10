@@ -1,6 +1,8 @@
 import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
 
 import { Icon } from '../components/Icons';
+import { useStatusLabel } from '../components/StatusBadge';
+import { useT } from '../i18n';
 import { GRID, NODE_H, NODE_W, Pos, bounds, edgePath, snap } from './layout';
 import { FlowStep, GROUP_BY, Problem, TYPE_BY } from './model';
 
@@ -41,6 +43,20 @@ type Drag =
     | { kind: 'nodes'; sx: number; sy: number; dx: number; dy: number; moved: boolean }
     | { kind: 'connect'; from: string; x: number; y: number };
 
+/** A step's state in words, with its mark: ok reads "Done", pending "Pending", and so on. */
+const STEP_WORD: Record<string, string> = { ok: 'done' };
+const LEGEND = ['ok', 'running', 'waiting', 'pending', 'failed', 'skipped'];
+
+export function StepStatus({ status }: { status: string }) {
+    const words = useStatusLabel();
+    return (
+        <span className={`fl-status ${status}`} data-status={status}>
+            <span className="fl-dot" aria-hidden="true" />
+            {words(STEP_WORD[status] ?? status)}
+        </span>
+    );
+}
+
 const MINI_W = 180;
 const MINI_H = 116;
 
@@ -57,6 +73,7 @@ function subtitle(s: FlowStep): string {
 
 export const FlowCanvas = forwardRef<CanvasHandle, Props>(function FlowCanvas(props, ref) {
     const { steps, pos, selected, selectedEdge, problems, statuses, readOnly, snapOn, onSelect, onMove, onConnect, onDropType } = props;
+    const t = useT();
     const box = useRef<HTMLDivElement>(null);
     const [view, setView] = useState<View>({ x: 40, y: 40, k: 1 });
     const [drag, setDrag] = useState<Drag | null>(null);
@@ -296,7 +313,7 @@ export const FlowCanvas = forwardRef<CanvasHandle, Props>(function FlowCanvas(pr
                                 <div className="fl-name">{s.name}</div>
                                 <div className="fl-sub">{subtitle(s)}</div>
                             </span>
-                            {st && <span className="fl-status">{st}</span>}
+                            {st && <StepStatus status={st} />}
                             {!st && errs.length > 0 && <span className="fl-status" style={{ color: 'var(--fl-bad)', borderColor: 'var(--fl-bad)' }}>{errs.length} issue{errs.length > 1 ? 's' : ''}</span>}
                             {!readOnly && (
                                 <span
@@ -325,6 +342,12 @@ export const FlowCanvas = forwardRef<CanvasHandle, Props>(function FlowCanvas(pr
                     />
                 )}
             </div>
+            {statuses && Object.keys(statuses).length > 0 && (
+                <ul className="fl-legend" aria-label={t('flows.legend')} onPointerDown={(e) => e.stopPropagation()}>
+                    {LEGEND.filter((s) => s === 'ok' || s === 'running' || s === 'pending' || Object.values(statuses).includes(s))
+                        .map((s) => <li key={s}><StepStatus status={s} /></li>)}
+                </ul>
+            )}
             {drag?.kind === 'connect' && <div className="fl-hint">Drop on a step to make it come after {drag.from}</div>}
             {!steps.length && <div className="fl-hint">Drag a step here from the palette, or press Enter on one</div>}
             <div className="fl-controls" onPointerDown={(e) => e.stopPropagation()}>

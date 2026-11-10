@@ -45,6 +45,8 @@ export interface FlowDef {
     kind?: 'flow';
     name: string;
     description?: string;
+    /** Who runs the steps' order: Cairn (the default), or Airflow from the DAG Cairn deploys on each publish. */
+    runner?: 'cairn' | 'airflow';
     params?: FlowParam[];
     triggers?: FlowTrigger[];
     concurrency?: { policy?: string; max_active?: number };
@@ -496,8 +498,9 @@ export function diff(old: FlowDef | null | undefined, next: FlowDef) {
         const keys = Array.from(new Set([...Object.keys(o), ...Object.keys(s)])).filter((k) => !same(o[k] ?? defaultOf(o.type, k), s[k] ?? defaultOf(s.type, k)));
         if (keys.length) changed.push({ name: n, fields: keys.sort() });
     }
-    const settings = ['description', 'params', 'triggers', 'concurrency', 'sla_minutes', 'notify'].filter(
-        (k) => !same((old as unknown as Record<string, unknown>)?.[k] ?? null, (next as unknown as Record<string, unknown>)[k] ?? null),
+    const settings = ['description', 'runner', 'params', 'triggers', 'concurrency', 'sla_minutes', 'notify'].filter(
+        (k) => !same((old as unknown as Record<string, unknown>)?.[k] ?? (k === 'runner' ? 'cairn' : null),
+            (next as unknown as Record<string, unknown>)[k] ?? (k === 'runner' ? 'cairn' : null)),
     );
     return { added: Array.from(b.keys()).filter((n) => !a.has(n)), removed: Array.from(a.keys()).filter((n) => !b.has(n)), changed, settings };
 }
@@ -525,6 +528,7 @@ function sortKeys(v: unknown): unknown {
 export function compact(d: FlowDef): FlowDef {
     const out: FlowDef = { kind: 'flow', name: d.name, steps: [] };
     if (d.description) out.description = d.description;
+    if (d.runner && d.runner !== 'cairn') out.runner = d.runner;
     if (d.params?.length) out.params = d.params.map((p) => {
         const q: FlowParam = { name: p.name };
         if (p.type && p.type !== 'string') q.type = p.type;

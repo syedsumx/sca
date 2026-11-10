@@ -8,8 +8,8 @@ import { tokens } from '../components/tokens';
  */
 const light = `
     --fl-bg: ${tokens.color.surfaceAlt};
-    --fl-canvas: #fbfbfe;
-    --fl-dot: #d9dcea;
+    --fl-canvas: ${tokens.color.surfaceAlt};
+    --fl-dot: ${tokens.color.borderStrong};
     --fl-surface: ${tokens.color.surface};
     --fl-border: ${tokens.color.border};
     --fl-text: ${tokens.color.text};
@@ -19,26 +19,34 @@ const light = `
     --fl-good: ${tokens.color.good};
     --fl-warn: ${tokens.color.warn};
     --fl-bad: ${tokens.color.bad};
-    --fl-edge: #9aa3b8;
-    --fl-shadow: 0 1px 2px rgba(15,23,42,.06), 0 4px 14px rgba(15,23,42,.06);
+    --fl-run: ${tokens.status.running.mark};
+    --fl-ok-mark: ${tokens.status.ok.mark};
+    --fl-waiting: ${tokens.color.textMuted};
+    --fl-waiting-mark: ${tokens.color.waiting};
+    --fl-edge: ${tokens.color.waiting};
+    --fl-shadow: 0 1px 2px rgba(15,23,42,.06);
     --fl-focus: ${tokens.color.focus};
 `;
 const dark = `
-    --fl-bg: #0b0e1a;
-    --fl-canvas: #0f1324;
-    --fl-dot: #262c45;
-    --fl-surface: #161b30;
-    --fl-border: #2a3150;
-    --fl-text: #e7e9f3;
-    --fl-muted: #a3aac4;
-    --fl-primary: #8f87ff;
-    --fl-primary-soft: #23264a;
-    --fl-good: #4ade80;
-    --fl-warn: #fbbf24;
-    --fl-bad: #f87171;
-    --fl-edge: #5b6482;
+    --fl-bg: #0B1120;
+    --fl-canvas: #0F172A;
+    --fl-dot: #263244;
+    --fl-surface: #111827;
+    --fl-border: #263244;
+    --fl-text: #F1F5F9;
+    --fl-muted: #A8B3C4;
+    --fl-primary: #93B4FF;
+    --fl-primary-soft: #172554;
+    --fl-good: #4ADE80;
+    --fl-warn: #FBBF24;
+    --fl-bad: #F87171;
+    --fl-run: #60A5FA;
+    --fl-ok-mark: #4ADE80;
+    --fl-waiting: #A8B3C4;
+    --fl-waiting-mark: #94A3B8;
+    --fl-edge: #64748B;
     --fl-shadow: 0 1px 2px rgba(0,0,0,.4), 0 6px 18px rgba(0,0,0,.35);
-    --fl-focus: #a5a0ff;
+    --fl-focus: #93B4FF;
 `;
 
 export const FlowsRoot = styled.div`
@@ -280,9 +288,10 @@ export const FlowsRoot = styled.div`
         user-select: none;
         color: var(--fl-text);
     }
+    /* Selection is an outline outside the card, so it never reads as a state (states colour the border). */
     .fl-node.selected {
-        border-color: var(--fl-primary);
-        box-shadow: 0 0 0 3px var(--fl-primary-soft), var(--fl-shadow);
+        outline: 3px solid var(--fl-primary);
+        outline-offset: 3px;
     }
     .fl-node.has-error {
         border-color: var(--fl-bad);
@@ -301,54 +310,150 @@ export const FlowsRoot = styled.div`
         overflow: hidden;
         text-overflow: ellipsis;
     }
+    /* A step's state: a mark with its own shape and the word (Done, Running, Waiting…), never colour alone. */
+    .fl-status {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 1.4;
+        white-space: nowrap;
+        color: var(--fl-waiting);
+    }
     .fl-node .fl-status {
         position: absolute;
-        top: -9px;
+        top: -10px;
         right: 10px;
-        font-size: 10px;
-        font-weight: 700;
-        padding: 1px 7px;
+        padding: 1px 8px;
         border-radius: 999px;
         background: var(--fl-surface);
         border: 1px solid var(--fl-border);
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
+    }
+    .fl-status .fl-dot {
+        flex: none;
+        width: 8px;
+        height: 8px;
+        box-sizing: border-box;
+        border-radius: 50%;
+        border: 2px solid var(--fl-waiting-mark);
+        background: transparent;
+    }
+    .fl-status.ok,
+    .fl-status.succeeded {
+        color: var(--fl-good);
+    }
+    .fl-status.ok .fl-dot,
+    .fl-status.succeeded .fl-dot {
+        border-color: var(--fl-ok-mark);
+        background: var(--fl-ok-mark);
+    }
+    .fl-status.failed,
+    .fl-status.cancelled {
+        color: var(--fl-bad);
+    }
+    .fl-status.failed .fl-dot,
+    .fl-status.cancelled .fl-dot {
+        border-radius: 1px;
+        border-color: var(--fl-bad);
+        background: var(--fl-bad);
+    }
+    .fl-status.running,
+    .fl-status.retrying,
+    .fl-status.queued {
+        color: var(--fl-primary);
+    }
+    .fl-status.running .fl-dot,
+    .fl-status.retrying .fl-dot,
+    .fl-status.queued .fl-dot {
+        border-width: 3px;
+        border-color: var(--fl-run);
+    }
+    .fl-status.waiting {
+        color: var(--fl-warn);
+    }
+    .fl-status.waiting .fl-dot {
+        border: 0;
+        border-radius: 0;
+        width: 9px;
+        background: var(--fl-warn);
+        clip-path: polygon(50% 0, 100% 100%, 0 100%);
+    }
+    .fl-status.skipped .fl-dot {
+        border-style: dashed;
     }
     .fl-node.st-ok {
-        border-color: var(--fl-good);
+        border-color: var(--fl-ok-mark);
     }
-    .fl-node.st-ok .fl-status {
-        color: var(--fl-good);
-        border-color: var(--fl-good);
-    }
-    .fl-node.st-failed {
-        border-color: var(--fl-bad);
-    }
-    .fl-node.st-failed .fl-status,
-    .fl-node.st-cancelled .fl-status {
-        color: var(--fl-bad);
+    .fl-node.st-failed,
+    .fl-node.st-cancelled {
         border-color: var(--fl-bad);
     }
     .fl-node.st-running,
     .fl-node.st-retrying {
-        border-color: var(--fl-primary);
+        border: 2px solid var(--fl-run);
         animation: fl-pulse 1.4s ease-in-out infinite;
-    }
-    .fl-node.st-running .fl-status,
-    .fl-node.st-retrying .fl-status {
-        color: var(--fl-primary);
-        border-color: var(--fl-primary);
     }
     .fl-node.st-waiting {
         border-color: var(--fl-warn);
     }
-    .fl-node.st-waiting .fl-status {
-        color: var(--fl-warn);
-        border-color: var(--fl-warn);
-    }
     .fl-node.st-skipped,
     .fl-node.st-pending {
-        opacity: 0.6;
+        border-style: dashed;
+        border-color: var(--fl-waiting-mark);
+    }
+    .fl-legend {
+        position: absolute;
+        top: 10px;
+        left: 12px;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px 14px;
+        margin: 0;
+        padding: 6px 10px;
+        list-style: none;
+        background: var(--fl-surface);
+        border: 1px solid var(--fl-border);
+        border-radius: 10px;
+        box-shadow: var(--fl-shadow);
+    }
+    .fl-runner {
+        display: grid;
+        gap: 8px;
+        border: 0;
+        margin: 0 0 14px;
+        padding: 0;
+    }
+    .fl-runner legend {
+        font-size: 14px;
+        font-weight: 600;
+        margin-bottom: 6px;
+        color: var(--fl-text);
+    }
+    .fl-runner label {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        min-height: 44px;
+        padding: 10px 12px;
+        border: 1px solid var(--fl-border);
+        border-radius: 10px;
+        font-size: 13px;
+        cursor: pointer;
+        color: var(--fl-text);
+    }
+    .fl-runner label.on {
+        border: 2px solid var(--fl-primary);
+        background: var(--fl-primary-soft);
+    }
+    .fl-runner input {
+        margin-top: 3px;
+        accent-color: var(--fl-primary);
+    }
+    .fl-runner span span {
+        display: block;
+        color: var(--fl-muted);
+        font-size: 12px;
     }
     @keyframes fl-pulse {
         50% {
@@ -527,31 +632,66 @@ export const FlowsRoot = styled.div`
         background: var(--fl-primary-soft);
     }
     .fl-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
         font-size: 11px;
         font-weight: 650;
         border-radius: 999px;
         padding: 1px 8px;
         border: 1px solid var(--fl-border);
         white-space: nowrap;
+        color: var(--fl-waiting);
+    }
+    .fl-badge::before {
+        content: '';
+        flex: none;
+        width: 8px;
+        height: 8px;
+        box-sizing: border-box;
+        border-radius: 50%;
+        border: 2px solid var(--fl-waiting-mark);
     }
     .fl-badge.ok,
     .fl-badge.succeeded {
         color: var(--fl-good);
         border-color: var(--fl-good);
     }
+    .fl-badge.ok::before,
+    .fl-badge.succeeded::before {
+        border-color: var(--fl-ok-mark);
+        background: var(--fl-ok-mark);
+    }
     .fl-badge.failed,
     .fl-badge.cancelled {
         color: var(--fl-bad);
         border-color: var(--fl-bad);
+    }
+    .fl-badge.failed::before,
+    .fl-badge.cancelled::before {
+        border-radius: 1px;
+        border-color: var(--fl-bad);
+        background: var(--fl-bad);
     }
     .fl-badge.running,
     .fl-badge.queued {
         color: var(--fl-primary);
         border-color: var(--fl-primary);
     }
+    .fl-badge.running::before,
+    .fl-badge.queued::before {
+        border-width: 3px;
+        border-color: var(--fl-run);
+    }
     .fl-badge.waiting {
         color: var(--fl-warn);
         border-color: var(--fl-warn);
+    }
+    .fl-badge.waiting::before {
+        border: 0;
+        border-radius: 0;
+        background: var(--fl-warn);
+        clip-path: polygon(50% 0, 100% 100%, 0 100%);
     }
     .fl-table {
         width: 100%;

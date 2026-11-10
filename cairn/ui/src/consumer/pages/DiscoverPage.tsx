@@ -16,6 +16,8 @@ import { actorName, relativeTime, shortUrn } from '../utils/format';
 import { serializeSearchState } from '../utils/urlState';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
+import { Card, GetStartedCard, PipelinesCard } from '../components/HomeCards';
+import { useT } from '../i18n';
 
 const Hero = styled.section`
     padding: 28px 0 8px;
@@ -46,6 +48,37 @@ const Panel = styled(Surface)`
         justify-content: space-between;
         gap: 8px;
         font-size: 13px;
+    }
+`;
+
+const RecentList = styled.ul`
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    a {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 12px;
+        min-height: ${tokens.control}px;
+        padding: 0 4px;
+        border-bottom: 1px solid #F1F5F9;
+        color: ${tokens.color.text};
+        font-size: 14px;
+        font-weight: 500;
+        text-decoration: none;
+    }
+    li:last-child a {
+        border-bottom: 0;
+    }
+    a:hover span:first-child {
+        color: ${tokens.color.primary};
+        text-decoration: underline;
+    }
+    a > span:last-child {
+        font-size: 12px;
+        font-weight: 400;
+        flex: none;
     }
 `;
 
@@ -96,6 +129,7 @@ export function DiscoverPage() {
     );
     const activity = useDheQuery<ActivityItem[]>('/collab/activity', (c, signal) => c.activity(8, { signal }));
     const name = session.config?.user.display_name?.split(' ')[0];
+    const t = useT();
 
     return (
         <Page>
@@ -134,6 +168,28 @@ export function DiscoverPage() {
                 </div>
             </Hero>
 
+            <div style={{ display: 'grid', gap: 16, marginTop: 20 }}>
+                <GetStartedCard />
+                <Columns style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', marginTop: 0 }}>
+                    <Card aria-labelledby="home-recent">
+                        <header><h2 id="home-recent">{t('home.recent')}</h2></header>
+                        {recent.loading && <Skeleton h={60} />}
+                        {recent.data?.length === 0 && <Muted>Assets you open will appear here.</Muted>}
+                        <RecentList>
+                            {(recent.data ?? []).map((r) => (
+                                <li key={r.urn}>
+                                    <Link to={assetPath(r.urn)}>
+                                        <span>{shortUrn(r.urn)}</span>
+                                        <Muted>{relativeTime(r.last_viewed_at)}</Muted>
+                                    </Link>
+                                </li>
+                            ))}
+                        </RecentList>
+                    </Card>
+                    <PipelinesCard />
+                </Columns>
+            </div>
+
             <SectionTitle>
                 <span>Trending{persona ? ` for ${persona.name}` : ''}</span>
                 <Link to="/search">See all →</Link>
@@ -168,19 +224,6 @@ export function DiscoverPage() {
                             <li key={b.urn}>
                                 <Link to={assetPath(b.urn)}>{shortUrn(b.urn)}</Link>
                                 <Muted>{relativeTime(b.created_at)}</Muted>
-                            </li>
-                        ))}
-                    </ul>
-                </Panel>
-                <Panel aria-label="Recently viewed">
-                    <h3>Recently viewed</h3>
-                    {recent.loading && <Skeleton h={60} />}
-                    {recent.data?.length === 0 && <Muted>Assets you open will appear here.</Muted>}
-                    <ul>
-                        {(recent.data ?? []).map((r) => (
-                            <li key={r.urn}>
-                                <Link to={assetPath(r.urn)}>{shortUrn(r.urn)}</Link>
-                                <Muted>{relativeTime(r.last_viewed_at)}</Muted>
                             </li>
                         ))}
                     </ul>

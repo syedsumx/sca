@@ -7,6 +7,7 @@ import { RESOURCE_SPECS } from '../resources/catalog';
 import { ActionDialog } from '../resources/ResourceView';
 import type { ResourceAction, ResourceSpec } from '../resources/types';
 import { ErrorNotice, notifyError } from './ErrorNotice';
+import { StatusBadge, StatusTone, useStatusLabel } from './StatusBadge';
 import { Muted, SectionTitle, Surface, tokens } from './tokens';
 
 // ---- what the API answers (cairn.observability.pipelines) ---------------------------------------------------------
@@ -83,8 +84,8 @@ interface Sla {
 interface Exporter { id: string; name: string; protocol: string; endpoint: string; signals: string[]; enabled: boolean;
     headers: { name: string; scope: string; key: string }[] }
 
-const HEALTH_COLOR: Record<string, string> = { healthy: 'green', failing: 'red', sla_missed: 'orange', anomalous: 'gold', unknown: 'default' };
-const STATE_COLOR: Record<string, string> = { success: '#1a7f37', failed: '#cf222e', running: '#2f6feb', queued: '#8c959f', skipped: '#bf8700' };
+const HEALTH_TONE: Record<string, StatusTone> = { healthy: 'ok', failing: 'error', sla_missed: 'warn', anomalous: 'warn', unknown: 'waiting' };
+const STATE_COLOR: Record<string, string> = { success: '#16A34A', failed: '#DC2626', running: '#2563EB', queued: '#64748B', skipped: '#64748B' };
 const SPEC = (k: string) => RESOURCE_SPECS[k] as ResourceSpec;
 const action = (k: string, label: string) => SPEC(k).actions!.find((a) => a.label === label) as ResourceAction;
 const enc = encodeURIComponent;
@@ -122,24 +123,70 @@ function Sparkline({ p }: { p: PipelineSummary }) {
     );
 }
 
+/** A task's bar: the state's colour, and a pattern for failed (stripes) and skipped (hollow), so it reads without colour. */
+function barStyle(state: string): React.CSSProperties {
+    const color = STATE_COLOR[state] ?? tokens.color.waiting;
+    if (state === 'failed') {
+        return { background: `repeating-linear-gradient(135deg, ${color} 0 6px, #B91C1C 6px 9px)` };
+    }
+    if (state === 'skipped' || state === 'upstream_failed') {
+        return { background: 'transparent', border: `2px dashed ${tokens.color.waiting}`, boxSizing: 'border-box' };
+    }
+    return { background: color };
+}
+
 function Gantt({ run }: { run: PipelineRun }) {
     const t = useT();
+    const words = useStatusLabel();
     return (
-        <ol aria-label={t('pipe.gantt', { id: run.run_id })} style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {gantt(run).map((x) => (
-                <li key={x.task} style={{ display: 'flex', alignItems: 'center', padding: '2px 0', borderBottom: `1px solid ${tokens.color.border}` }}
-                    aria-label={t('pipe.task', { task: x.task, state: x.state, ms: duration(x.duration_ms) })}>
-                    <span style={{ width: '32%', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {x.state === 'failed' && <Tag color="red">failed</Tag>}{x.task}{(x.try ?? 0) > 1 && <Muted> · try {x.try}</Muted>}
-                    </span>
-                    <span style={{ position: 'relative', flex: 1, height: 14 }} aria-hidden>
-                        <span style={{ position: 'absolute', left: `${x.left}%`, width: `${x.width}%`, top: 2, bottom: 2,
-                            background: STATE_COLOR[x.state] ?? '#8c959f', borderRadius: 2 }} />
-                    </span>
-                    <span style={{ width: 90, textAlign: 'right' }}>{duration(x.duration_ms)}</span>
-                </li>
-            ))}
+        <ol aria-label={t('pipe.gantt', { id: run.run_id })} style={{ listStyle: 'none', padding: 0, margin: 0, display: 'grid', gap: 6 }}>
+            {gantt(run).map((x) => {
+                const marked = x.state !== 'success';
+                return (
+                    <li key={x.task} style={{ display: 'grid', gridTemplateColumns: 'minmax(120px, 30%) minmax(0, 1fr) minmax(96px, auto)',
+                        gap: 12, alignItems: 'center', fontSize: 13 }}
+                        aria-label={t('pipe.task', { task: x.task, state: x.state, ms: duration(x.duration_ms) })}>
+                        <span style={{ fontFamily: tokens.fontMono, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {x.task}{(x.try ?? 0) > 1 && <Muted> · try {x.try}</Muted>}
+                        </span>
+                        <span style={{ position: 'relative', height: 18, background: '#F1F5F9', borderRadius: 4 }} aria-hidden>
+                            <span style={{ position: 'absolute', left: `${x.left}%`, width: `${x.width}%`, top: 0, bottom: 0,
+                                borderRadius: 4, ...barStyle(x.state) }} />
+                        </span>
+                        <span style={{ textAlign: 'right', color: tokens.color.textMuted, whiteSpace: 'nowrap' }}>
+                            {marked ? <StatusBadge state={x.state} plain label={x.duration_ms
+                                ? `${words(x.state)} · ${duration(x.duration_ms)}` : words(x.state)} /> : duration(x.duration_ms)}
+                        </span>
+                    </li>
+                );
+            })}
         </ol>
+    );
+}
+
+/** A failed run's most likely cause, above its timeline: what the diagnosis found first, and what it suggests. */
+function LikelyCause({ diag }: { diag: Diagnosis | null }) {
+    const t = useT();
+    if (!diag) return null;
+    const [first, ...rest] = diag.causes;
+    const hint = diag.suggestions[0];
+    return (
+        <section aria-labelledby="pipe-likely" style={{ background: tokens.color.primarySoft, border: '1px solid #BFDBFE',
+            borderRadius: tokens.radius.lg, padding: 16, display: 'grid', gap: 8 }}>
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', gap: 8, alignItems: 'center' }}>
+                <h3 id="pipe-likely" style={{ margin: 0, fontSize: 16 }}>{t('pipe.likelyCause')}</h3>
+                <span style={{ fontSize: 12, fontWeight: 600, color: tokens.color.primaryHover }}>{t('pipe.likelyCauseFrom')}</span>
+            </div>
+            {first ? (
+                <p style={{ margin: 0, fontSize: 15, lineHeight: 1.5 }}>
+                    <Tag>{first.kind.replace(/_/g, ' ')}</Tag>{first.text}
+                    {rest.length > 0 && <Muted> · {rest.map((c) => c.text).join(' · ')}</Muted>}
+                </p>
+            ) : <p style={{ margin: 0 }}>{t('pipe.likelyCauseNone')}</p>}
+            {hint && (hint.text ?? hint.rationale) && (
+                <p style={{ margin: 0, fontSize: 13, color: tokens.color.textSubtle }}>→ {hint.text ?? hint.rationale}</p>
+            )}
+        </section>
     );
 }
 
@@ -164,13 +211,19 @@ function RunView({ pipeline, runId, openTrace }: { pipeline: string; runId: stri
         c.request('GET', `/v1/observability/pipelines/${enc(pipeline)}/runs/${enc(runId)}`, undefined, { signal }));
     const [log, setLog] = useState<string | null>(null);
     const [diag, setDiag] = useState<Diagnosis | null>(null);
+    const failed = q.data?.state === 'failed';
+    // A failed run says its likely cause first, without a click (the button below shows the evidence and the log).
+    const auto = useDheQuery<Diagnosis | null>(`diagnose:${pipeline}:${runId}:${failed ? 1 : 0}`, (c, signal) => (failed
+        ? c.request<Diagnosis>('GET', `/v1/observability/pipelines/${enc(pipeline)}/runs/${enc(runId)}/diagnose`, undefined, { signal })
+        : Promise.resolve(null)));
     if (q.error) return <ErrorNotice error={q.error} area={t('pipe.run', { id: runId })} />;
     const r = q.data;
     if (!r) return null;
     const failedTask = r.tasks.find((x) => x.state === 'failed');
     const diagnose = async () => {
-        try { setDiag(await client.request<Diagnosis>('GET', `/v1/observability/pipelines/${enc(pipeline)}/runs/${enc(runId)}/diagnose`)); }
-        catch (e) { notifyError(e); }
+        try {
+            setDiag(await client.request<Diagnosis>('GET', `/v1/observability/pipelines/${enc(pipeline)}/runs/${enc(runId)}/diagnose`));
+        } catch (e) { notifyError(e); }
     };
     const rerun = async () => {
         try { await client.request('POST', `/v1/observability/pipelines/${enc(pipeline)}/runs/${enc(runId)}/rerun`); message.success(t('pipe.rerunDone')); q.refresh(); }
@@ -179,7 +232,7 @@ function RunView({ pipeline, runId, openTrace }: { pipeline: string; runId: stri
     return (
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
             <Descriptions size="small" column={3} bordered>
-                <Descriptions.Item label={t('pipe.run.state')}><Tag color={r.state === 'failed' ? 'red' : r.state === 'success' ? 'green' : 'blue'}>{r.state}</Tag></Descriptions.Item>
+                <Descriptions.Item label={t('pipe.run.state')}><StatusBadge state={r.state} /></Descriptions.Item>
                 <Descriptions.Item label={t('pipe.run.started')}>{r.start ? new Date(r.start).toLocaleString() : '–'}</Descriptions.Item>
                 <Descriptions.Item label={t('pipe.run.duration')}>{duration(r.duration_ms)}</Descriptions.Item>
             </Descriptions>
@@ -193,6 +246,7 @@ function RunView({ pipeline, runId, openTrace }: { pipeline: string; runId: stri
                     <Popconfirm title={t('pipe.rerunConfirm')} onConfirm={rerun}><Button danger>{t('pipe.rerun')}</Button></Popconfirm>
                 )}
             </Space>
+            {failed && <LikelyCause diag={diag ?? auto.data ?? null} />}
             <Gantt run={r} />
             <Space wrap>
                 {r.tasks.map((x) => (
@@ -232,7 +286,7 @@ function RunView({ pipeline, runId, openTrace }: { pipeline: string; runId: stri
                 <SectionTitle>{t('pipe.quality')}</SectionTitle>
                 {r.quality.length === 0 ? <Muted>{t('pipe.quality.none')}</Muted> : (
                     <List size="small" bordered dataSource={r.quality} renderItem={(x) => (
-                        <List.Item><Tag color={x.status === 'PASS' || x.status === 'OK' ? 'green' : 'red'}>{x.status}</Tag>{x.name}
+                        <List.Item><StatusBadge state={x.status} label={x.status} style={{ marginRight: 8 }} />{x.name}
                             <Muted> · {x.table.replace(/^urn:li:dataset:\([^,]+,([^,]+),.*$/, '$1')}{x.message ? ` · ${x.message}` : ''}</Muted></List.Item>
                     )} />
                 )}
@@ -259,7 +313,7 @@ function PipelineView({ pipeline, run, setRun, openTrace }: { pipeline: string; 
                         { title: t('pipe.run', { id: '' }).trim(), dataIndex: 'run_id',
                             render: (v: string) => <Button type="link" size="small" onClick={() => setRun(v)}>{v}</Button> },
                         { title: t('pipe.run.state'), dataIndex: 'state', render: (v: string, r) => (
-                            <Space size={4}><Tag color={v === 'failed' ? 'red' : v === 'success' ? 'green' : 'blue'}>{v}</Tag>
+                            <Space size={4}><StatusBadge state={v} />
                                 {r.anomaly && <Tag color="gold">{t('pipe.health.anomalous')}</Tag>}</Space>) },
                         { title: t('pipe.run.started'), dataIndex: 'start', render: (v: string | null) => (v ? new Date(v).toLocaleString() : '–') },
                         { title: t('pipe.run.duration'), dataIndex: 'duration_ms', render: (v: number | null) => duration(v) },
@@ -280,10 +334,10 @@ function ProductStatusView({ id, name }: { id: string; name: string }) {
     if (!s) return null;
     return (
         <section aria-label={t('pipe.product.status', { name })}>
-            <Tag color={HEALTH_COLOR[s.health] ?? 'default'}>{t(`pipe.health.${s.health}` as MessageKey)}</Tag>
+            <StatusBadge tone={HEALTH_TONE[s.health] ?? 'waiting'} label={t(`pipe.health.${s.health}` as MessageKey)} />
             <List size="small" dataSource={s.table_status} renderItem={(x) => (
                 <List.Item>{x.name}{' '}
-                    {x.fresh !== null && <Tag color={x.fresh ? 'green' : 'red'}>{t(x.fresh ? 'pipe.product.fresh' : 'pipe.product.stale')}</Tag>}
+                    {x.fresh !== null && <StatusBadge tone={x.fresh ? 'ok' : 'error'} label={t(x.fresh ? 'pipe.product.fresh' : 'pipe.product.stale')} />}
                     <Muted>{x.last_update ? new Date(x.last_update).toLocaleString() : '–'}</Muted></List.Item>
             )} />
         </section>
@@ -386,14 +440,14 @@ export function PipelinesTab({ pipeline, run, select, openTrace }: { pipeline: s
                                 <Button type="link" size="small" onClick={() => select(v, null)} aria-label={`Open ${v}`}>
                                     <Tag>{p.source}</Tag>{p.name}</Button>) },
                             { title: t('pipe.col.health'), dataIndex: 'health',
-                                render: (v: string) => <Tag color={HEALTH_COLOR[v]}>{t(`pipe.health.${v}` as MessageKey)}</Tag> },
+                                render: (v: string) => <StatusBadge tone={HEALTH_TONE[v] ?? 'waiting'} label={t(`pipe.health.${v}` as MessageKey)} /> },
                             { title: t('pipe.col.success'), dataIndex: 'success_rate',
                                 render: (v: number | null) => (v === null ? '–' : `${Number((v * 100).toFixed(1))}%`) },
                             { title: t('pipe.col.p50'), dataIndex: 'p50_ms', render: (v: number | null) => duration(v) },
                             { title: t('pipe.col.p95'), dataIndex: 'p95_ms', render: (v: number | null) => duration(v) },
                             { title: t('pipe.col.trend'), key: 'trend', render: (_: unknown, p) => <Sparkline p={p} /> },
                             { title: t('pipe.col.last'), key: 'last', render: (_: unknown, p) => (p.last_run
-                                ? <span>{p.last_run.state} <Muted>{p.last_run.start ? new Date(p.last_run.start).toLocaleString() : ''}</Muted></span> : '–') },
+                                ? <span><StatusBadge state={p.last_run.state} plain /> <Muted>{p.last_run.start ? new Date(p.last_run.start).toLocaleString() : ''}</Muted></span> : '–') },
                             { title: t('pipe.col.slas'), dataIndex: 'slas', render: (v: string[]) => v.map((s) => <Tag key={s}>{s}</Tag>) },
                         ]} />
                 )}

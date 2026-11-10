@@ -7,6 +7,7 @@ import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { pageHelp } from '../guide/help';
 import { PageHeader } from '../guide/PageHeader';
+import { StatusBadge } from '../components/StatusBadge';
 import { MessageKey, useT } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { ActionDialog } from '../resources/ResourceView';
@@ -143,7 +144,8 @@ function SourceTag({ source }: { source: string }) {
 
 function StatusTag({ status }: { status: string }) {
     const t = useT();
-    return status === 'active' ? <Tag color="green">{t('people.status.active')}</Tag> : <Tag color="red">{t('people.status.deactivated')}</Tag>;
+    return status === 'active' ? <StatusBadge tone="ok" label={t('people.status.active')} />
+        : <StatusBadge tone="error" label={t('people.status.deactivated')} />;
 }
 
 // ---- People --------------------------------------------------------------------------------------------------------
@@ -553,7 +555,7 @@ function AccessCheckTab({ person: initialPerson }: { person: string }) {
     };
     return (
         <>
-            <Surface style={{ marginBottom: 12 }}>
+            <Surface style={{ marginBottom: 12, padding: 16 }}>
                 <Space wrap align="end">
                     <label>
                         <div>{t('people.access.person')}</div>
@@ -581,13 +583,16 @@ function AccessCheckTab({ person: initialPerson }: { person: string }) {
 export function CheckResult({ answer }: { answer: CheckAnswer }) {
     const t = useT();
     return (
-        <Surface role="status" aria-live="polite" aria-label="Access check answer">
-            <Space align="baseline">
-                <Tag color={answer.allowed ? 'green' : 'red'} style={{ fontSize: 16, padding: '2px 10px' }}>
-                    {answer.allowed ? t('people.access.yes') : t('people.access.no')}
-                </Tag>
-                <span>{answer.summary}</span>
-            </Space>
+        <Surface role="status" aria-live="polite" aria-label="Access check answer" style={{ padding: 18 }}>
+            <div style={{ borderRadius: tokens.radius.md, padding: '12px 14px', display: 'flex', gap: 10, alignItems: 'baseline',
+                flexWrap: 'wrap', background: answer.allowed ? '#F0FDF4' : '#FEF2F2',
+                border: `1px solid ${answer.allowed ? '#BBF7D0' : '#FECACA'}` }}>
+                <StatusBadge tone={answer.allowed ? 'ok' : 'error'} style={{ fontSize: 14 }}
+                    label={answer.allowed ? t('people.access.yes') : t('people.access.no')} />
+                <span style={{ fontSize: 14, fontWeight: 500, color: answer.allowed ? tokens.status.ok.fg : tokens.status.error.fg }}>
+                    {answer.summary}
+                </span>
+            </div>
             {answer.because.length > 0 && (
                 <>
                     <SectionTitle style={{ marginTop: 12 }}>{t('people.why')}</SectionTitle>

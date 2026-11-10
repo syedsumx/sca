@@ -17,6 +17,7 @@ import { SendDocsToDbt } from '../components/GitDocs';
 import { KnowledgeDocs } from '../components/Knowledge';
 import { LineageGraphView } from '../components/LineageGraph';
 import { DataPreview } from '../components/DataPreview';
+import { WhyPanel } from '../components/WhyPanel';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TableSnapshots } from '../components/Snapshots';
 import { TrustBadges } from '../components/TrustBadges';
@@ -280,7 +281,14 @@ export function AssetPage() {
                     {
                         key: 'data',
                         label: t('asset.data'),
-                        children: <DataPreview urn={urn} tableName={tableNameOf(urn)} />,
+                        children: (
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 20, alignItems: 'flex-start' }}>
+                                <div style={{ flex: '999 1 560px', minWidth: 0 }}>
+                                    <DataPreview urn={urn} tableName={tableNameOf(urn)} />
+                                </div>
+                                <WhyPanel urn={urn} />
+                            </div>
+                        ),
                     },
                     {
                         key: 'contract',

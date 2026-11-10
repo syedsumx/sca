@@ -12,6 +12,7 @@ import { StepForm } from './StepForm';
 import { parse as parseYaml, stringify } from './yaml';
 import { describeError } from '../components/ErrorNotice';
 import { Picker } from '../resources/pickers';
+import { useT } from '../i18n';
 
 // ---- the definition, with undo and redo ------------------------------------------------------------------------
 interface History {
@@ -548,7 +549,8 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
                                 }}
                             />
                         ) : (
-                            <StepList def={shown} problems={allProblems} run={run} onPick={(n) => setSelected([n])} edge={edge} onDeleteEdge={deleteSelection} readOnly={readOnly} />
+                            <StepList def={shown} problems={allProblems} run={run} onPick={(n) => setSelected([n])} edge={edge} onDeleteEdge={deleteSelection} readOnly={readOnly}
+                                onChange={(d) => set({ ...def, runner: d.runner })} />
                         )}
                     </aside>
                 </div>
@@ -666,8 +668,28 @@ function ProblemList({ problems }: { problems: Problem[] }) {
     );
 }
 
-function StepList({ def, problems, run, onPick, edge, onDeleteEdge, readOnly }: {
+/** Where the flow runs: in Cairn, or in Airflow from the DAG Cairn deploys (`runner` in the definition). */
+function Runner({ def, readOnly, onChange }: { def: FlowDef; readOnly: boolean; onChange: (d: FlowDef) => void }) {
+    const t = useT();
+    const current = def.runner ?? 'cairn';
+    return (
+        <fieldset className="fl-runner">
+            <legend>{t('flows.runsOn')}</legend>
+            {(['cairn', 'airflow'] as const).map((r) => (
+                <label key={r} className={current === r ? 'on' : undefined}>
+                    <input type="radio" name="fl-runner" value={r} checked={current === r} disabled={readOnly}
+                        onChange={() => onChange({ ...def, runner: r === 'cairn' ? undefined : r })} />
+                    <span><strong>{t(r === 'cairn' ? 'flows.runner.cairn' : 'flows.runner.airflow')}</strong>
+                        <span>{t(r === 'cairn' ? 'flows.runner.cairnHint' : 'flows.runner.airflowHint')}</span></span>
+                </label>
+            ))}
+        </fieldset>
+    );
+}
+
+function StepList({ def, problems, run, onPick, edge, onDeleteEdge, readOnly, onChange }: {
     def: FlowDef; problems: Problem[]; run: FlowRun | null; onPick: (n: string) => void; edge: Edge | null; onDeleteEdge: () => void; readOnly: boolean;
+    onChange: (d: FlowDef) => void;
 }) {
     const st = run ? Object.fromEntries(run.steps.map((s) => [s.key, s.status])) : {};
     return (
@@ -678,6 +700,7 @@ function StepList({ def, problems, run, onPick, edge, onDeleteEdge, readOnly }: 
                     {!readOnly && <button type="button" className="fl-btn danger" style={{ marginTop: 8 }} onClick={onDeleteEdge}>Remove this link</button>}
                 </div>
             )}
+            <Runner def={def} readOnly={readOnly} onChange={onChange} />
             <h3 style={{ fontSize: 14, margin: '0 0 6px' }}>Steps</h3>
             <ul className="fl-list" aria-label="Steps in the flow">
                 {def.steps.map((s) => (
