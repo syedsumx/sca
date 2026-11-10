@@ -72,9 +72,15 @@ def cluster(tmp_path_factory):
     kubectl("apply", "--server-side", "-f", str(manifest))
     kubectl("-n", "cnpg-system", "rollout", "status", "deployment/cnpg-controller-manager", "--timeout=300s")
     kubectl("delete", "namespace", NS, "--ignore-not-found", "--wait=true")
+    # Earlier tests in the job delete "cairn" without waiting: nothing can be made in a namespace being deleted.
+    end = time.time() + 300
+    while kubectl("get", "namespace", "cairn", "-o", "jsonpath={.status.phase}", check=False) == "Terminating":
+        assert time.time() < end, "namespace cairn is still being deleted"
+        time.sleep(3)
     for ns in (NS, "cairn"):
         kubectl("create", "namespace", ns, check=False)
     kubectl("-n", "cairn", "create", "serviceaccount", "t-cairn", check=False)
+    kubectl("-n", "cairn", "get", "serviceaccount", "t-cairn")          # it is there (made now, or before)
     out = subprocess.run([HELM, "template", "t", "helm/cairn", "--namespace", "cairn", "-s", "templates/pg-kubernetes.yaml",
                           "--set", "cairn.databases.instances.runtime=kubernetes",
                           "--set", f"cairn.databases.instances.kubernetes.namespace={NS}"],

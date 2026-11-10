@@ -450,7 +450,9 @@ def tfx(w, *args, ok=(0,), env=None):
 def runnable(s):
     from cairn.iac import registry
 
-    return [k for k in registry.kinds() if k.example and getattr(s, k.service, None) is not None]
+    # postgres_indexes needs a table in a database first (the SRE agent's e2e covers it through a change request).
+    return [k for k in registry.kinds() if k.example and getattr(s, k.service, None) is not None
+            and k.name != "postgres_indexes"]
 
 
 def mine(e, k, spec):

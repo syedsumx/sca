@@ -331,7 +331,9 @@ def test_the_common_tasks_end_to_end(workspace):
             d.get_by_label("Dashboard name").click()                     # the list closes (Escape would close the form)
             d.get_by_role("button", name="Create").click()
             boards = until(lambda: api.get("/sql/dashboards").json())
-            assert [(b["name"], b["owner"]) for b in boards] == [("Sales", ANA)]
+            # Ana's own (an operator also sees the built-in ops dashboards Cairn owns, L143).
+            assert [(b["name"], b["owner"]) for b in boards if b["owner"] != "urn:li:corpuser:cairn-observability"] == \
+                [("Sales", ANA)]
             expect(page.get_by_text("16.5").first).to_be_visible(timeout=20_000)
 
             # ---- The checklist ticked itself: a dataset page seen, a query run, saved, a dashboard built -------------
