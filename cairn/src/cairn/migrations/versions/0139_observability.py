@@ -1,6 +1,6 @@
 """Observability: SLOs, alert rules and silences, alerts, incidents and their timelines, deploys
 
-Revision ID: 0140
+Revision ID: 0139
 Revises: 0138
 Create Date: 2026-11-10 18:00:00.000000
 """
@@ -10,7 +10,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0140'
+revision = '0139'
 down_revision = '0138'
 branch_labels = None
 depends_on = None
