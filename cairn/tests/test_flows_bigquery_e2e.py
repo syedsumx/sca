@@ -132,10 +132,10 @@ def test_a_query_job_on_the_emulator(env, emulator):
     job = httpx.get(f"{emulator}/bigquery/v2/projects/proj/jobs/{out['job_id']}", trust_env=False, timeout=10).json()
     assert job["status"]["state"] == "DONE" and job["configuration"]["query"]["query"].startswith("SELECT region")
     assert any(r["path"] == "/token" for r in env.tokens.requests)          # the key's token, from its token_uri
-    # A query BigQuery refuses fails the step with BigQuery's reason (the emulator answers a missing table with no
-    # rows, so the refusal here is an unknown function, which its SQL analyser rejects).
-    env.create(ANA, {"name": "bq-bad", "steps": [{"name": "q", **bq, "query": "SELECT no_such_function(1) AS x"}]},
-               publish=True)
+    # A job BigQuery refuses fails the step with BigQuery's answer: here a project the emulator does not serve (it is
+    # lenient about SQL errors; refused SQL and refused results are covered in tests/test_flows_platforms.py).
+    env.create(ANA, {"name": "bq-bad", "steps": [{"name": "q", **{**bq, "project": "no-such-project"},
+                                                  "query": "SELECT 1 AS x"}]}, publish=True)
     done = env.wait_for(env.run(ANA, "bq-bad")["id"], 120)
     err = steps_of(done)["q"]["error"] or ""
-    assert done["status"] == "failed" and "no_such_function" in err.lower(), (done["status"], err)
+    assert done["status"] == "failed" and "BigQuery answered 4" in err, (done["status"], err)

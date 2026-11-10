@@ -782,8 +782,11 @@ def _bq_look(r: Remote, ctx: Ctx, st: dict) -> Any:
         fields = [f.get("name") for f in (doc.get("schema") or {}).get("fields") or []]
         rows = [[c.get("v") for c in (row.get("f") or [])] for row in doc.get("rows") or []]
         out.update(rows=int(doc.get("totalRows") or len(rows)), columns=fields, preview=rows[:20])
+    elif res.status_code in (429, 500, 502, 503, 504) and st.get("result_tries", 0) < 5:
+        st["result_tries"] = st.get("result_tries", 0) + 1
+        return _later(ctx, st, f"BigQuery answered {res.status_code} for the job's results; looking again")
     else:
-        ctx.log(f"BigQuery: the job's results could not be read ({res.status_code})")
+        raise _bq_failed(r, res)           # the results cannot be read (or the query was refused): never "0 rows"
     ctx.log(f"BigQuery job {st['job_id']} done: {out.get('rows', 0)} rows, {out['bytes_processed']} bytes processed")
     return Done(out)
 

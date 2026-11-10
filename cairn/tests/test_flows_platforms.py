@@ -214,6 +214,11 @@ def test_bigquery_jobs_with_a_service_account(env):
                                                        "query": "SELECT * FROM ds.missing"}]})
     err = steps_of(done)["q"]["error"]
     assert "notFound" in err and "ds.missing" in err, err
+    # Done, but its results are refused (BigQuery's own error on reading them): the step fails, never "0 rows".
+    done = run_flow(env, {"name": "bq-results", "steps": [{"name": "q", **BQ, "api_url": sp.url,
+                                                           "query": "SELECT BADRESULT(1)"}]})
+    err = steps_of(done)["q"]["error"]
+    assert done["status"] == "failed" and "INVALID_ARGUMENT" in err and "Function not found" in err, (done["status"], err)
     env.create(ANA, {"name": "bq-long", "steps": [{"name": "q", **BQ, "api_url": sp.url, "query": "SELECT SLEEP"}]},
                publish=True)
     run = env.run(ANA, "bq-long")

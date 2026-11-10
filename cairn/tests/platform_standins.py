@@ -351,6 +351,9 @@ class Platforms:
                                  "statistics": {"query": {"totalBytesProcessed": "1024"}}})
         if parts[5] == "queries":
             assert q.get("maxResults") == "20", "maxResults"
+            if "BADRESULT" in query:               # the job is DONE, the query fails when its results are read
+                return h._send(400, {"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                               "message": "Function not found: badresult at [1:8]"}})
             return h._send(200, {"kind": "bigquery#getQueryResultsResponse", "jobReference": ref, "jobComplete": True,
                                  "totalRows": "2", "schema": {"fields": [{"name": "region", "type": "STRING"},
                                                                          {"name": "n", "type": "INTEGER"}]},
