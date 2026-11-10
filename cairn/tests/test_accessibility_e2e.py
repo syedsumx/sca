@@ -30,10 +30,15 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
          "/ontology", "/ontology?tab=review", "/ontology?tab=compile",
          # People & roles (L139): the directory, a person's page open, groups, roles, service accounts, the access check.
          "/people", "/people?person=ana", "/people?tab=groups", "/people?tab=roles", "/people?tab=principals",
-         "/people?tab=access&check=ana"]
+         "/people?tab=access&check=ana",
+         # Observability (L141): without backends here (they say so); the forms and an incident are below and in
+         # tests/test_observability_ui_e2e.py.
+         "/observability", "/observability?tab=journey", "/observability?tab=logs", "/observability?tab=slos",
+         "/observability?tab=alerts", "/observability?tab=incidents"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
 FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
-         ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person")]
+         ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person"),
+         ("/observability?tab=slos", "New SLO"), ("/observability?tab=alerts", "New alert rule")]
 BLOCKING = {"serious", "critical"}
 
 

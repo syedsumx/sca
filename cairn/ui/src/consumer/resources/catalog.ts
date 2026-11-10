@@ -3685,6 +3685,191 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 "body": null
             }
         ]
+    },
+    "observability-slos": {
+        "key": "observability-slos",
+        "iac": {
+            "kind": "observability_slos",
+            "id": "id"
+        },
+        "title": "SLOs",
+        "path": "/v1/observability/slos",
+        "listKey": "items",
+        "description": "Service level objectives: the share of a component's requests that must be good over a window, with error-budget burn alerts (two windows each) sent to notification routes; a burning SLO opens an incident.",
+        "docs": "administration.html#observability",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "service",
+            "objective",
+            "window",
+            "enabled"
+        ],
+        "actions": [
+            {
+                "label": "New SLO",
+                "method": "POST",
+                "path": "/v1/observability/slos",
+                "body": {
+                    "id": "api-availability",
+                    "name": "API availability",
+                    "service": "cairn-api",
+                    "objective": 99.9,
+                    "window": "30d",
+                    "indicator": {
+                        "type": "ratio",
+                        "errors": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-api\",span_kind=\"SPAN_KIND_SERVER\",status_code=\"STATUS_CODE_ERROR\"}[$window]))",
+                        "total": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-api\",span_kind=\"SPAN_KIND_SERVER\"}[$window]))"
+                    },
+                    "routes": []
+                }
+            },
+            {
+                "label": "Edit SLO",
+                "method": "PUT",
+                "path": "/v1/observability/slos/{id}",
+                "body": {
+                    "name": "API availability",
+                    "service": "cairn-api",
+                    "objective": 99.5,
+                    "window": "30d",
+                    "indicator": {
+                        "type": "ratio",
+                        "errors": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-api\",span_kind=\"SPAN_KIND_SERVER\",status_code=\"STATUS_CODE_ERROR\"}[$window]))",
+                        "total": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-api\",span_kind=\"SPAN_KIND_SERVER\"}[$window]))"
+                    }
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/slos/{id}",
+                "body": null
+            }
+        ]
+    },
+    "observability-alert-rules": {
+        "key": "observability-alert-rules",
+        "iac": {
+            "kind": "observability_alert_rules",
+            "id": "id"
+        },
+        "title": "Alert rules",
+        "path": "/v1/observability/alert-rules",
+        "listKey": "items",
+        "description": "Conditions on metrics (PromQL) or logs (LogQL): every series a condition returns is an alert, firing after it has held for a while, sent to notification routes and people; critical ones open incidents.",
+        "docs": "administration.html#observability",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "language",
+            "severity",
+            "pending_for",
+            "enabled"
+        ],
+        "actions": [
+            {
+                "label": "New alert rule",
+                "method": "POST",
+                "path": "/v1/observability/alert-rules",
+                "body": {
+                    "id": "store-errors",
+                    "name": "Store answers errors",
+                    "language": "promql",
+                    "severity": "critical",
+                    "expr": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-store\",status_code=\"STATUS_CODE_ERROR\"}[5m])) > 1",
+                    "pending_for": "5m",
+                    "summary": "{{ $value }} errors a second",
+                    "routes": []
+                }
+            },
+            {
+                "label": "Edit alert rule",
+                "method": "PUT",
+                "path": "/v1/observability/alert-rules/{id}",
+                "body": {
+                    "name": "Store answers errors",
+                    "language": "promql",
+                    "severity": "critical",
+                    "expr": "sum(rate(traces_span_metrics_calls_total{service_name=\"cairn-store\",status_code=\"STATUS_CODE_ERROR\"}[5m])) > 1",
+                    "pending_for": "10m"
+                }
+            },
+            {
+                "label": "Test a condition",
+                "method": "POST",
+                "path": "/v1/observability/alert-rules/test",
+                "body": {
+                    "language": "promql",
+                    "expr": "up == 0"
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/alert-rules/{id}",
+                "body": null
+            }
+        ]
+    },
+    "observability-silences": {
+        "key": "observability-silences",
+        "iac": {
+            "kind": "observability_silences",
+            "id": "id"
+        },
+        "title": "Silences",
+        "path": "/v1/observability/silences",
+        "listKey": "items",
+        "description": "Alerts whose labels match are not sent and open no incident between two times (maintenance windows).",
+        "docs": "administration.html#observability",
+        "rowKey": "id",
+        "columns": [
+            "id",
+            "comment",
+            "starts_at",
+            "ends_at",
+            "active"
+        ],
+        "actions": [
+            {
+                "label": "New silence",
+                "method": "POST",
+                "path": "/v1/observability/silences",
+                "body": {
+                    "id": "store-maintenance",
+                    "matchers": [
+                        {
+                            "name": "service",
+                            "value": "cairn-store"
+                        }
+                    ],
+                    "ends_at": "2026-12-01T06:00:00Z",
+                    "comment": "storage maintenance"
+                }
+            },
+            {
+                "label": "Edit silence",
+                "method": "PUT",
+                "path": "/v1/observability/silences/{id}",
+                "body": {
+                    "matchers": [
+                        {
+                            "name": "service",
+                            "value": "cairn-store"
+                        }
+                    ],
+                    "ends_at": "2026-12-01T08:00:00Z",
+                    "comment": "storage maintenance, extended"
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/v1/observability/silences/{id}",
+                "body": null
+            }
+        ]
     }
 };
 

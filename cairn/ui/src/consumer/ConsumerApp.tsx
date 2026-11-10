@@ -48,6 +48,9 @@ const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
 const PeoplePage = React.lazy(() => import('./pages/PeoplePage').then((m) => ({ default: m.PeoplePage })));
+const ObservabilityPage = React.lazy(() =>
+    import('./pages/ObservabilityPage').then((m) => ({ default: m.ObservabilityPage })),
+);
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const ProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const DevicePage = React.lazy(() => import('./pages/DevicePage').then((m) => ({ default: m.DevicePage })));
@@ -69,6 +72,7 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/context', component: ContextInboxPage, exact: true },
     { path: '/governance', component: GovernanceStudioPage, exact: true },
     { path: '/people', component: PeoplePage, exact: true },
+    { path: '/observability', component: ObservabilityPage, exact: true },
     { path: '/reports', component: ReportsPage, exact: true },
     { path: '/pipelines', component: PipelinesPage, exact: true },
     { path: '/sql', component: SqlWorkspacePage, exact: true },

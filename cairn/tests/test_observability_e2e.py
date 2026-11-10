@@ -43,12 +43,14 @@ H = {"X-Cairn-Actor": ADMIN}
 
 
 def _ready():
-    if not shutil.which("docker"):
+    """Docker with the stack's images (and Trino's) pulled: CI's trino job pulls them and runs this file on its own."""
+    if not shutil.which("docker") or subprocess.run(["docker", "info"], capture_output=True, timeout=30).returncode:
         return False
-    return subprocess.run(["docker", "info"], capture_output=True, timeout=30).returncode == 0
+    return all(subprocess.run(["docker", "image", "inspect", i], capture_output=True, timeout=30).returncode == 0
+               for i in [*IMAGES.values(), TRINO])
 
 
-pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker")
+pytestmark = pytest.mark.skipif(not _ready(), reason="needs docker and the stack's images (" + ", ".join(IMAGES.values()) + ")")
 
 
 def port():

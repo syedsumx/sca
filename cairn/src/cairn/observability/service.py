@@ -19,7 +19,7 @@ multi-window burn-rate alerts, alert rules, silences, and incidents.
   never resolves an alert it cannot see) and says why.
 * **Silences** match alerts by labels (``alertname``, ``severity``, ``source`` and the series' own) between two
   times; a silenced alert notifies no one and opens no incident.
-* **Incidents.** A firing alert (``critical``, or any severity with ``open_incident``) opens an incident, or joins
+* **Incidents.** A firing alert (an SLO's, a rule's ``critical`` one, or any with ``open_incident``) opens an incident, or joins
   the open one of its rule or SLO. Its timeline holds its alerts, notes, status changes, and, read when asked,
   what changed around it: the audit log's changes, infrastructure-as-code change requests applied, and deploys.
   :meth:`ObservabilityService.incident_context` is everything an agent working on one needs, in one answer.
@@ -254,7 +254,7 @@ class AlertRule(BaseModel):
     runbook_url: str = Field("", max_length=1000)
     routes: list[str] = Field(default_factory=list, description="notification routes that receive its alerts")
     recipients: list[str] = Field(default_factory=list, description="people told in Cairn")
-    open_incident: Optional[bool] = Field(None, description="default: only critical alerts open incidents")
+    open_incident: bool = Field(False, description="warning and info alerts open incidents too (critical ones always do)")
     repeat_interval: str = Field("4h", description="a firing alert nobody acknowledged is sent again this often")
     enabled: bool = True
 
@@ -295,6 +295,13 @@ class Silence(BaseModel):
 
 
 MODELS = {"slo": Slo, "alert_rule": AlertRule, "silence": Silence}
+
+
+def _opens_incident(spec: dict) -> bool:
+    """An SLO's alerts open incidents unless it says not to; a rule's critical alerts always do, others when it says."""
+    if "slo_incidents" in spec:
+        return bool(spec["slo_incidents"])
+    return bool(spec.get("open_incident")) or spec.get("severity") == "critical"
 
 
 def _fingerprint(source: str, labels: dict) -> str:
@@ -742,7 +749,7 @@ class ObservabilityService:
                         "summary": (f"{slo['service']} burns its {slo['objective']}% / {slo['window']} error budget "
                                     f"{{{{ $value }}}}x too fast over {b['long']} and {b['short']} (alert at {b['factor']}x)"),
                         "routes": slo.get("routes", []), "recipients": slo.get("recipients", []),
-                        "open_incident": slo.get("open_incident", True), "pending_for": "0s",
+                        "slo_incidents": slo.get("open_incident", True), "pending_for": "0s",
                         "repeat_interval": "4h", "group": f"slo:{slo['id']}"}
                 n = self._advance(src, spec, active, now)
                 out["fired"] += n["fired"]
@@ -799,10 +806,7 @@ class ObservabilityService:
         values: dict = {"state": "firing", "firing_ms": now, "silenced_by": silence}
         incident = None
         if not silence:
-            opens = spec.get("open_incident")
-            if opens is None:
-                opens = spec["severity"] == "critical"
-            if opens:
+            if _opens_incident(spec):
                 incident = self._open_or_join(a, spec, now)
                 values["incident_id"] = incident
             values["notified_ms"] = now
@@ -826,8 +830,7 @@ class ObservabilityService:
         if a["notified_ms"] is None or now - a["notified_ms"] >= repeat:
             values: dict = {"notified_ms": now}
             if a["notified_ms"] is None and a["incident_id"] is None:      # a silence ended while it fired
-                opens = spec.get("open_incident")
-                if opens if opens is not None else spec["severity"] == "critical":
+                if _opens_incident(spec):
                     values["incident_id"] = self._open_or_join(a, spec, now)
             with self.engine.begin() as c:
                 c.execute(update(obs_alerts).where(obs_alerts.c.id == a["id"]).values(**values))

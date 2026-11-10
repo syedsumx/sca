@@ -753,6 +753,11 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_people_ui_e2e.py | tee "$RUNNER_TEMP/peopleui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/peopleui.log"
+      - name: Observability (SLOs and alert rules made with the forms, an incident's timeline worked and resolved, a journey linked out; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_ui_e2e.py | tee "$RUNNER_TEMP/obsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/obsui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail

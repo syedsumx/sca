@@ -3562,7 +3562,75 @@ Every Cairn service exposes Prometheus metrics at `/metrics`. Workers without an
 - **Compose:** `docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d` adds Prometheus (`localhost:9090`) and Grafana (`localhost:3300`, with `GRAFANA_ADMIN_PASSWORD` in `.env`), pre-loaded with both.
 - **Helm:** `cairn.serviceMonitor.enabled` scrapes the services and the workers (a ServiceMonitor and a PodMonitor), and the store at `/-/metrics`. `cairn.prometheusRule.enabled` installs the rules, and `cairn.grafanaDashboard.enabled` installs the dashboard as a ConfigMap for the Grafana sidecar.
 
-**Tracing** is optional OpenTelemetry. Install the `otel` extra and set `CAIRN_OTEL_ENDPOINT` to an OTLP/HTTP collector. Requests, outgoing calls and database queries are then traced, sampled at `CAIRN_OTEL_SAMPLE_RATIO` (default 10%). Health and metrics endpoints are not traced.
+**Tracing** is part of [Observability](#observability): OpenTelemetry traces, metrics and logs from every component.
+
+## Observability
+
+One view that follows a request across components and ties metrics, logs, traces and alerts together: **Observability** in the sidebar (`/observability`, for operators: `MANAGE_SYSTEM_OPERATIONS`) and `/v1/observability` in the API.
+
+### Telemetry from every component
+
+Every Cairn process (the API, the policy service, the gateway, the core proxy, the notifier, the scheduler and the other workers) sends **traces, metrics and logs** over OTLP/HTTP when it is told where to, with the standard OpenTelemetry settings:
+
+| Setting | What it does |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | where to send (port 4318 of a Collector, or a vendor's OTLP endpoint). Unset: telemetry is off. `CAIRN_OTEL_ENDPOINT` still works. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | the backend's credentials (`x-honeycomb-team=…`, `Authorization=Basic …`), from a Secret, never on a command line; or `CAIRN_OTEL_HEADERS_FILE`, a mounted file of `name=value` pairs |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | who sends; the chart sets `cairn-<component>` |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | sampling; without them, parent-based at `CAIRN_OTEL_SAMPLE_RATIO` (10%). A request that arrives already sampled is always followed. |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` = `none` | turn one signal off; `OTEL_SDK_DISABLED=true` turns all off |
+
+The image includes the `otel` extra. What is traced: HTTP requests (not `/health` and `/metrics`), outgoing HTTP calls (with the W3C `traceparent` header, so the services Cairn calls join the trace), database statements, the core proxy, flow steps and background cycles. Every answer carries `x-trace-id`: the request's journey is at `/observability?tab=journey&trace=<id>`.
+
+**Across components:**
+
+- **Trino**: queries Cairn runs carry the `traceparent` header and a client tag `cairn_trace=<trace id>` (Trino's query history leads back to the trace). With `tracing.enabled=true` and `tracing.exporter.endpoint` (gRPC, port 4317), Trino's own spans join, and so do the access checks Trino asks Cairn for. Trino's calls to Cairn's access control carry Trino's key in their URL: send Trino's spans only through a Collector that removes it, as the bundled one does (`transform/urls`). In Compose, add those two lines to `deploy/trino/config.properties`.
+- **Flows**: each step attempt is a span of its own, linked to the request that started the run (the run keeps its `traceparent`).
+- **Jobs and Spark**: a job run gets `TRACEPARENT`; `cairn-spark` sets `spark.cairn.traceparent` from it, and when the job's OpenLineage events reach Cairn, a span linked to that trace records the Spark run by its run id.
+- **Cairn Core** and its web application: the OpenTelemetry Java agent (pinned, `ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0`), loaded through `JAVA_TOOL_OPTIONS`; it sanitizes SQL statements itself, and the Collector removes query strings.
+- **Airflow**: its own OpenTelemetry support (`AIRFLOW__TRACES__OTEL_ON`, `AIRFLOW__METRICS__OTEL_ON`, host and port of the Collector); the Compose overlay sets them.
+- **Cairn Store, Catalog and Ontology** (Rust): they accept requests that carry `traceparent` (nothing is dropped) and the caller's client span shows each call in the journey; they do not send spans of their own yet.
+
+**What telemetry never carries.** Every span, span event and log record is cleaned before it leaves the process (`cairn.observability.redact`); one that cannot be cleaned is dropped and counted in `cairn_telemetry_dropped_total{signal}`:
+
+- request and response headers other than `content-type`, `content-length`, `user-agent`, `accept`, `x-request-id`, `traceparent`;
+- attributes whose names say they hold a credential (`authorization`, `cookie`, `password`, `secret`, `token`, `api_key`, `credential`, `session`, `signature`);
+- query parameter values and user info in URLs; the path of a request becomes its route template (`/v1/trino/{given}/allow`, never the key), and path segments of outgoing calls other than plain words become `{}` (a webhook's secret path, an object key);
+- the literals of SQL statements (`WHERE email = ?`): the values a query compares with may be the values a mask hides;
+- in messages and errors: bearer and basic credentials, JWTs, Cairn's key formats, lakehouse session credentials, AWS access keys, private keys, `password=…`-style pairs, SQLAlchemy's `[parameters: …]`, and quoted values.
+
+The bundled Collector cleans once more, for everything else that sends to it.
+
+### The bundled stack, or your own backend
+
+**Bundled** (open source, off by default): an OpenTelemetry Collector (`otel/opentelemetry-collector-contrib:0.163.2`, Apache-2.0), Prometheus (`prom/prometheus:v3.15.1`, Apache-2.0), Loki (`grafana/loki:3.6.18`, AGPL-3.0) and Tempo (`grafana/tempo:2.9.5`, AGPL-3.0); Loki and Tempo run unmodified as separate services. Their configurations are in `deploy/observability/stack/`. The Collector derives span metrics and the service graph from the traces (what the health map and SLOs read), sends traces to Tempo and logs to Loki's OTLP endpoint, and exposes metrics for Prometheus.
+
+- **Helm:** `cairn.observability.enabled=true` installs the four (one replica each; data on `emptyDir`, or `persistence.enabled` per backend), points every component at the Collector, turns on Trino's tracing (`cairn.observability.trino`) and the Java agent for Cairn Core (`cairn.observability.javaAgent`), and has Cairn read the three back. Prometheus discovers this release's pods annotated `prometheus.io/scrape` (a Role to list pods in the namespace). With `cairn.networkPolicy.enabled`, only this release's pods reach them.
+- **Compose:** `docker compose -f docker-compose.cairn.yml -f docker-compose.observability.yml up -d` (Grafana too, with Loki and Tempo as data sources).
+
+**Your own backend:** set `cairn.observability.otlp.endpoint` (and `otlp.headersSecret`, a Secret whose `headers` key holds `OTEL_EXPORTER_OTLP_HEADERS`). Then tell Cairn where to read back:
+
+| Backend | Send (OTLP) | Read back in Cairn |
+|---|---|---|
+| Grafana Cloud | its OTLP gateway, `Authorization=Basic <instance:token>` | `read.prometheusUrl`, `read.lokiUrl`, `read.tempoUrl` with `read.credentialsSecret` (keys `prometheus-basic-auth`, `loki-basic-auth`, `tempo-basic-auth`: `user:token`) |
+| Any Prometheus, Loki or Tempo API (Mimir, VictoriaMetrics, Thanos) | your Collector | the same, with `*-token` keys for bearer tokens |
+| Honeycomb, Datadog, New Relic | their OTLP endpoint and key header | `read.traceUrl` / `read.logsUrl` link templates (`{trace_id}`, `{service}`, `{start_ms}`, `{end_ms}`): journeys and logs link out; health, SLOs and alert rules need a PromQL API |
+
+Outside Helm, the same settings are `CAIRN_OBS_PROMETHEUS_URL`, `CAIRN_OBS_LOKI_URL`, `CAIRN_OBS_TEMPO_URL`, `CAIRN_OBS_<NAME>_TOKEN_FILE`, `CAIRN_OBS_<NAME>_BASIC_AUTH_FILE`, `CAIRN_OBS_<NAME>_HEADERS_FILE`, `CAIRN_OBS_LOKI_TENANT` / `CAIRN_OBS_TEMPO_TENANT` (`X-Scope-OrgID`), `CAIRN_OBS_TRACE_URL`, `CAIRN_OBS_LOGS_URL` and `CAIRN_OBS_VENDOR`.
+
+### In Cairn
+
+- **Health:** each component (from the span metrics: requests per second, error ratio, p95 latency; from Prometheus' scrape targets: up or down) as up, degraded (errors above 5%, or an alert firing about it), down or unknown, and the calls between components with their error ratios. `GET /v1/observability/health?window=5m`.
+- **Request journey:** one trace across processes as a waterfall (`GET /v1/observability/journey/<trace id>`), from Tempo, cleaned once more on the way out; recent traces by component or with errors (`GET /v1/observability/traces`). With a vendor backend, a link to the trace there.
+- **Logs** of a trace or a component, with text and level filters (`GET /v1/observability/logs?trace_id=…` or `?service=…`), from Loki.
+- **SLOs** (`/v1/observability/slos`): a component, an indicator, an objective (percent) and a window. The indicator is a `ratio` (PromQL for bad and for all events, with `[$window]` where the window goes) or a `latency` (a histogram, label matchers and a threshold that is one of its buckets). Alerts burn the error budget the SRE workbook's way: for each pair of windows, the alert fires while both burn faster than the factor (by default 1h and 5m at 14.4x and 6h and 30m at 6x, critical; 1d and 2h at 3x and 3d and 6h at 1x, warning). Status (`/status`: good events, budget left, each pair's burn) and the last day's burn (`/history`).
+- **Alert rules** (`/v1/observability/alert-rules`): a PromQL or LogQL condition (each series it returns is an alert), `pending_for` before it fires, a severity, labels, a summary (`{{ $value }}`, `{{ $labels.<name> }}`), a runbook link, notification routes and people. `POST /alert-rules/test` shows what a condition matches now.
+- **Alerts** (`/v1/observability/alerts`): pending, firing, resolved. A firing alert is sent to the routes its rule or SLO names (Administration → Notifications: Slack, Teams, a webhook, a ticketing system, Kafka, EventBridge, Pub/Sub; they receive it whatever their own event filters) and to the people named, in Cairn; it is sent again every `repeat_interval` (4h) until someone acknowledges it. Event types `observability.alert_firing`, `observability.alert_resolved`, `observability.incident_opened`, `observability.incident_resolved`.
+- **Silences** (`/v1/observability/silences`): label matchers (`alertname`, `severity`, `source`, `service` and the series' own; exact or regular expression) between two times, at most 90 days; a silenced alert notifies no one and opens no incident.
+- **Incidents** (`/v1/observability/incidents`): a firing critical alert (or any with `open_incident`) opens one, or joins the open one of its rule or SLO. Its timeline holds its alerts, notes (`note`, `finding`, `hypothesis`, `action`, marked when an agent wrote them), status changes, and what changed from two hours before it opened: the audit log's changes, infrastructure-as-code change requests applied, and deploys. Acknowledge, assign, resolve with a summary, reopen. `GET /incidents/<id>/context` is everything an agent working on it needs in one answer: the incident, its alerts and timeline, the health of the components involved and the calls between them, their recent error traces and error logs, and the SLOs about them.
+- **Deploys:** Cairn records its own version when it changes; CI/CD records others with `POST /v1/observability/deploys` (`component`, `version`, `description`, `url`).
+
+The notifier evaluates every enabled rule and SLO every `CAIRN_OBS_EVALUATE_SECONDS` (30); `POST /v1/observability/evaluate` does it now. A rule or SLO whose backend cannot be read keeps its alerts as they were (it never resolves what it cannot see) and shows the error on the rule. SLOs, alert rules and silences are resource types (`observability_slos`, `observability_alert_rules`, `observability_silences`; Terraform `cairn_observability_slo`, `cairn_observability_alert_rule`, `cairn_observability_silence`), audited in category `observability`.
 
 ## Limits
 

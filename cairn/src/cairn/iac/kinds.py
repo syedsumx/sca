@@ -774,7 +774,8 @@ KINDS: list[Kind] = [
           F("summary", default="", description="{{ $value }} and {{ $labels.<name> }} are filled in"),
           F("runbook_url", default=""), F("routes", "list", default=[], description="notification route ids"),
           F("recipients", "list", default=[]),
-          F("open_incident", "bool", default=None, description="empty: only critical alerts open incidents"),
+          F("open_incident", "bool", default=False, description="warning and info alerts open incidents too (critical "
+                                                                 "ones always do)"),
           F("repeat_interval", default="4h"), F("enabled", "bool", default=True)),
          **crud("/v1/observability/alert-rules"), list_key="items", key=("id",), order=160, service="observability",
          docs="observability",

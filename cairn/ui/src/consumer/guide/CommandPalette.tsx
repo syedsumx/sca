@@ -120,6 +120,15 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             { id: 'act:check-access', kind: 'action' as const, label: t('palette.checkAccess'), detail: t('nav.people'),
                 keywords: 'why permission can allowed denied effective access user role', to: '/people?tab=access' },
         ] : []),
+        // Observability's actions, only where the page is offered (operators).
+        ...(nav.some((n) => n.to === '/observability') ? [
+            { id: 'act:new-slo', kind: 'action' as const, label: t('palette.newSlo'), detail: t('nav.observability'),
+                keywords: 'service level objective error budget availability latency reliability', to: '/observability?tab=slos&new=slo' },
+            { id: 'act:new-alert-rule', kind: 'action' as const, label: t('palette.newAlertRule'), detail: t('nav.observability'),
+                keywords: 'alert alarm promql logql monitor page on-call', to: '/observability?tab=alerts&new=rule' },
+            { id: 'act:find-trace', kind: 'action' as const, label: t('palette.findTrace'), detail: t('nav.observability'),
+                keywords: 'trace span request id latency slow error opentelemetry', to: '/observability?tab=journey' },
+        ] : []),
         { id: 'act:shortcuts', kind: 'action', label: t('palette.shortcuts'), keywords: 'keys keyboard help', shortcut: '?',
             run: openShortcuts },
     );

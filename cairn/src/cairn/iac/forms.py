@@ -61,6 +61,27 @@ def _hint(**kw) -> dict:
     return kw
 
 
+# Observability (cairn.observability): severities and languages to choose from, conditions as text.
+_SEVERITY = _hint(type="select", enum=["critical", "warning", "info"])
+# An SLO's indicator: a ratio of bad to all events (PromQL over [$window]), or a latency threshold on a histogram.
+_OBS_INDICATOR = _hint(type="group", description="what a good event is", fields=[
+    {"name": "type", "type": "select", "enum": ["ratio", "latency"], "required": True,
+     "description": "ratio: bad events over all events; latency: requests slower than a threshold"},
+    {"name": "errors", "type": "textarea", "description": "ratio: PromQL for bad events, with [$window]"},
+    {"name": "total", "type": "textarea", "description": "ratio: PromQL for all events, with [$window]"},
+    {"name": "metric", "type": "text", "description": "latency: the histogram, without _bucket"},
+    {"name": "selector", "type": "text", "description": 'latency: label matchers, e.g. service_name="cairn-api"'},
+    {"name": "threshold", "type": "number", "description": "latency: the bucket bound (le) a good request is under"},
+])
+_OBS_SLO = {"indicator": _OBS_INDICATOR,
+            "routes": _hint(type="list", description="notification route ids (Administration -> Notifications)"),
+            "recipients": _hint(picker="principal", type="list"), "window": _hint(pattern=r"^(\d+[smhdw])+$")}
+_OBS_RULE = {"severity": _SEVERITY, "language": _hint(type="select", enum=["promql", "logql"]),
+             "expr": _hint(type="textarea"), "summary": _hint(type="textarea"),
+             "routes": _hint(type="list", description="notification route ids (Administration -> Notifications)"),
+             "recipients": _hint(picker="principal", type="list"),
+             "pending_for": _hint(pattern=r"^(\d+[smhdw])+$"), "repeat_interval": _hint(pattern=r"^(\d+[smhdw])+$")}
+
 # A budget covers one thing (cairn.reports.budgets.SCOPES): a group of which exactly one is filled in.
 BUDGET_SCOPE = _hint(type="group", one_of=True, description="what the budget covers: fill in one", fields=[
     {"name": "all", "type": "boolean", "description": "everything on the platform"},
@@ -119,6 +140,10 @@ HINTS: dict[str, dict[str, dict]] = {
     "POST /v1/people/groups/{group}/members": {"person": _hint(picker="user")},
     "POST /governance/access-reviews": {"personas": _hint(type="list")},
     "POST /v1/chargeback/statements": {"month": _hint(type="month")},
+    "POST /v1/observability/slos": _OBS_SLO, "PUT /v1/observability/slos/{id}": _OBS_SLO,
+    "POST /v1/observability/alert-rules": _OBS_RULE, "PUT /v1/observability/alert-rules/{id}": _OBS_RULE,
+    "POST /v1/observability/alert-rules/test": {"language": _hint(type="select", enum=["promql", "logql"]),
+                                                "expr": _hint(type="textarea")},
     "PUT /notify/routes/{id}": {"channel": _hint(type="select",
                                                  enum=["slack", "teams", "webhook", "ticket", "kafka", "eventbridge",
                                                        "pubsub"])},

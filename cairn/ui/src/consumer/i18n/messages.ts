@@ -1,4 +1,5 @@
 import { GUIDE_DE, GUIDE_EN, GUIDE_ES, GUIDE_FR, GUIDE_JA } from './guide';
+import { OBSERVABILITY_DE, OBSERVABILITY_EN } from './observability';
 import { PEOPLE_DE, PEOPLE_EN, PEOPLE_ES, PEOPLE_FR, PEOPLE_JA } from './people';
 
 /**
@@ -295,6 +296,7 @@ const en = {
     'form.requiredSr': 'required',
     ...GUIDE_EN,
     ...PEOPLE_EN,
+    ...OBSERVABILITY_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -582,6 +584,7 @@ const de: Catalog = {
     'form.requiredSr': 'Pflichtfeld',
     ...GUIDE_DE,
     ...PEOPLE_DE,
+    ...OBSERVABILITY_DE,
 };
 
 const fr: Catalog = {

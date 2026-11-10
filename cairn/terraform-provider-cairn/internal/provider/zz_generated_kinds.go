@@ -838,7 +838,7 @@ var kinds = []kind{
 			{name: "runbook_url", typ: "string", def: ""},
 			{name: "routes", typ: "list", def: []string{}, desc: "notification route ids"},
 			{name: "recipients", typ: "list", def: []string{}},
-			{name: "open_incident", typ: "bool", desc: "empty: only critical alerts open incidents"},
+			{name: "open_incident", typ: "bool", def: false, desc: "warning and info alerts open incidents too (critical ones always do)"},
 			{name: "repeat_interval", typ: "string", def: "4h"},
 			{name: "enabled", typ: "bool", def: true},
 		}},

@@ -9,6 +9,7 @@
     "/context": "context-and-ai.html#context-agents",
     "/governance": "governance.html#policy-decisions",
     "/people": "administration.html#people-and-roles",
+    "/observability": "administration.html#observability",
     "/reports": "administration.html#reports",
     "/pipelines": "integrations.html#git-and-dbt",
     "/sql": "administration.html#sql-workspace",

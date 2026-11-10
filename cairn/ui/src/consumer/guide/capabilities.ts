@@ -34,6 +34,7 @@ export const TAB_REQUIRES: Record<string, string[]> = {
 export const PAGE_REQUIRES: Record<string, string[]> = {
     '/governance': ['MANAGE_POLICIES'],
     '/people': ['MANAGE_POLICIES'],
+    '/observability': ['MANAGE_SYSTEM_OPERATIONS'],
 };
 
 export type CapabilityState = { caps: Capabilities | undefined; loading: boolean; error: boolean };
