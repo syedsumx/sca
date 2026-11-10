@@ -152,8 +152,9 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
             d.get_by_role("button", name=re.compile(r"(^|loading )New SLO$")).last.click()
             slo = until(lambda: next((x for x in s.observability.list("slo") if x["id"] == "store-availability"), None))
             assert slo and slo["service"] == "cairn-store" and slo["indicator"]["type"] == "ratio"
+            # The evaluator's own entries (alerts firing, built-ins) share the category: look past them.
             assert any(e["action"] == "observability.slo_created" and e["actor"] == OPS
-                       for e in s.audit.entries("observability", 20))
+                       and e["subject"] == "store-availability" for e in s.audit.entries("observability", 1000))
             page.keyboard.press("Escape")
             expect(page.get_by_role("cell", name="Store availability")).to_be_visible(timeout=20_000)
 

@@ -64,7 +64,8 @@ def test_the_access_check_decides_with_what_core_holds(root):
         check = lambda: root.post("/v1/people/access-check", json={"person": UID, "privilege": "VIEW_ENTITY_PAGE",  # noqa: E731
                                                                    "resource": DS}).json()
         answer = eventually(lambda: (lambda a: a if a.get("allowed") else None)(check()), timeout=60)
-        assert answer and [b["kind"] for b in answer["because"]] == ["persona"]
+        # The persona grants it (Core's default native view policy may allow it as well: both are listed).
+        assert answer and "persona" in [b["kind"] for b in answer["because"]]
         page = root.get(f"/v1/people/users/{UID}").json()
         why = {p["id"]: [r["kind"] for r in p["reasons"]] for p in page["personas"]}
         assert why[pid] == ["group"]

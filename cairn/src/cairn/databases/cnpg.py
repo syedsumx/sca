@@ -260,6 +260,9 @@ class CnpgRuntime:
         pods = (self._call("GET", self._p("pods"), params={"labelSelector": f"cnpg.io/cluster={name}"}) or {}).get("items") or []
         members = []
         for p in pods:
+            labels = (p.get("metadata") or {}).get("labels") or {}
+            if labels.get("cnpg.io/podRole", "instance") != "instance" or "cnpg.io/poolerName" in labels:
+                continue        # the pooler's PgBouncer pods carry the cluster label too: they are not PostgreSQL
             ready = all(cs.get("ready") for cs in (p.get("status") or {}).get("containerStatuses") or [])
             members.append({"name": p["metadata"]["name"], "role": "primary" if p["metadata"]["name"] == st.get("currentPrimary")
                             else "replica", "ready": ready, "node": (p.get("spec") or {}).get("nodeName"),
