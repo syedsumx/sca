@@ -575,7 +575,7 @@ jobs:
       - name: Terraform against Cairn
         run: |
           set -o pipefail
-          pip install -e ".[server,test,streams]"   # vector indexes (their tables) need pyiceberg
+          pip install -e ".[server,test,streams,postgres]"   # vector indexes (their tables) need pyiceberg; managed PostgreSQL, psycopg
           docker pull -q hashicorp/terraform:1.13.4
           python -m cairn.iac.terraform --check     # the provider's resources are the registry's
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_terraform_provider.py tests/test_iac_roundtrip.py \

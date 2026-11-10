@@ -1919,6 +1919,11 @@ def _build_pg_instances(s: Services, admin: str):
     runtime_kind = os.environ.get("CAIRN_PG_RUNTIME", "").strip()
     if not runtime_kind and not admin:
         return None
+    try:
+        import psycopg  # noqa: F401 - instances are reached (parameters, health, statements) with psycopg
+    except ImportError:
+        logger.error("managed PostgreSQL instances need psycopg (pip install 'cairn-platform[postgres]'): they are off")
+        return None
     import json
 
     from cairn.databases.instances import BackupStore, InstanceError, Instances
