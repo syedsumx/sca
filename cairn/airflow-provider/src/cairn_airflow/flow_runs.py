@@ -93,6 +93,7 @@ class CairnFlowRunTrigger(BaseTrigger):
 
     async def run(self) -> AsyncIterator[TriggerEvent]:
         errors = 0
+        self.log.info("Cairn: following the run %s in the triggerer", self.run_id)
         while True:
             try:
                 run = await asyncio.to_thread(self._get)

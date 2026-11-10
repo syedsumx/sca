@@ -232,16 +232,25 @@ def test_killing_the_task_cancels_the_flow_run(airflow, dag_id):
     run_id = trigger(af, dag_id)
     want = "deferred" if dag_id == "drive_cairn_kill" else "running"
     until(lambda: tis(af, dag_id, run_id)["run"]["state"] == want, 300, f"{dag_id} {want}")
-    def why() -> str:      # what Airflow said, for a failure: the task's log and the triggerer's/scheduler's tail
-        logs = subprocess.run(["docker", "logs", "--tail", "60", af["name"]], capture_output=True, text=True)
+    def why() -> str:      # what Airflow said, for a failure: the task's log and the triggerer's and scheduler's lines
+        logs = subprocess.run(["docker", "logs", "--tail", "3000", af["name"]], capture_output=True, text=True)
+        mine = [ln for ln in (logs.stdout + logs.stderr).splitlines()
+                if ("trigger" in ln.lower() or "scheduler" in ln.lower()) and "dag-processor" not in ln]
         return (f"; runs: {runs_of(af, 'af-long')}; task log: {task_log(af, dag_id, run_id, 'run')[-2000:]}; "
-                f"airflow: {(logs.stdout + logs.stderr)[-3000:]}")
+                f"airflow (triggerer, scheduler): {chr(10).join(mine[-60:])[-4000:]}")
     # A shared CI runner is slow: the waits are generous, and a timeout says what Airflow and Cairn were doing.
     try:
         new = until(lambda: [r for r in runs_of(af, "af-long") if r["id"] not in before and r["status"] == "waiting"],
                     300, "the flow run waiting")
     except AssertionError as e:
         raise AssertionError(str(e) + why()) from None
+    if want == "deferred":
+        # Killed once the triggerer follows the run (a task killed before its trigger is picked up has no trigger to
+        # tell; Airflow then just drops it): the trigger says so in the task's log.
+        try:
+            until(lambda: "following the run" in task_log(af, dag_id, run_id, "run"), 300, "the trigger following the run")
+        except AssertionError as e:
+            raise AssertionError(str(e) + why()) from None
     af["client"].call("PATCH", f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/run", {"new_state": "failed"})
     try:
         gone = until(lambda: (lambda r: r if r["status"] in ("cancelled", "failed", "succeeded") else None)(
