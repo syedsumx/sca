@@ -341,6 +341,37 @@ KINDS: list[Kind] = [
          order=77, service="databases", docs="sre-agent",
          example={"database": "shop", "name": "orders_customer_id_idx", "table": "public.orders",
                   "columns": ["customer_id"]}),
+    Kind("airflow_deployments", "airflow_deployment", "compute",
+         "A managed Airflow deployment (Managed Airflow): its environment, Airflow version, executor, resources, "
+         "variables, secrets (references to secret scopes, read as its pipeline user), role mapping, hibernation and "
+         "where its deploys are promoted. People sign in through Cairn; its tasks are its pipeline user. A new version "
+         "is an upgrade, refused when its DAGs do not parse on it. Destroyed: its containers or namespace go; its DAG "
+         "bundles are deleted.",
+         (R("name", force_new=True, description="lowercase letters, digits and '-' (up to 24)"),
+          F("environment", default="dev", force_new=True, description="dev, stage, prod or a name of your own"),
+          F("workspace", default=None), F("team", default=None, description="a Cairn group (its people get User)"),
+          F("airflow_version", default="3.3.2", description="one of the tested versions (an upgrade when changed)"),
+          F("executor", default=None, description="KubernetesExecutor, CeleryExecutor or LocalExecutor (null: the "
+                                                  "runtime's default)"),
+          F("resources", "json", computed=True,
+            description='{"scheduler": {"cpu": 1, "memory_mb": 2048, "replicas": 1}, "api_server": ..., "worker": ...}'),
+          F("dag_source", "json", computed=True, description='{"type": "bundle"} or {"type": "git", "folder": "<id>"}'),
+          F("env", "json", default={}, description="variables (no secrets: those are references)"),
+          F("secrets", "json", default=[],
+            description='[{"connection" | "variable" | "env": "...", "scope": "<secret scope>", "key": "..."}]'),
+          F("roles", "json", computed=True, description='{"<Cairn group>": "Admin" | "Op" | "User" | "Viewer"}'),
+          F("hibernation", "json", default=None,
+            description='{"awake": [{"days": "mon-fri", "from": "08:00", "to": "19:00"}], "timezone": "UTC"} (not prod)'),
+          F("promotes_to", default=None, description="the deployment its deploys are promoted to"),
+          F("approval", "json", computed=True, description='{"required": true}: promotions into it wait for an approver')),
+         read="/v1/airflow/deployments", list_key="deployments", id="name",
+         create=op("POST /v1/airflow/deployments"),
+         update=op("PATCH /v1/airflow/deployments/{id}", omit=("name", "environment")),
+         delete=op("DELETE /v1/airflow/deployments/{id}", no_body=True),
+         order=78, service="airflow_deployments", docs="managed-airflow",
+         example={"name": "finance-dev", "environment": "dev", "team": "finance", "promotes_to": "finance-stage",
+                  "env": {"REPORT_REGION": "EU"}},
+         example_update={"env": {"REPORT_REGION": "US"}}),
     Kind("flows", "flow", "data",
          "A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, "
          "Airflow DAGs, approvals, branches, for-each, notifications) run as its owner. Saved and published together; "

@@ -9,6 +9,7 @@ import { useGuide } from '../guide/GuideProvider';
 import { hubTab, rememberHubTab } from '../guide/help';
 import { Breadcrumbs, PageHeader } from '../guide/PageHeader';
 import { RESOURCE_SPECS } from './catalog';
+import { AirflowDeploymentsView } from './AirflowDeployments';
 import { OntologyGraphView } from './OntologyGraph';
 import { PostgresInstancesView } from './PostgresInstances';
 import { ResourceView } from './ResourceView';
@@ -27,6 +28,7 @@ export const HubIcon = styled.span`
 
 function AreaView({ spec }: { spec: ResourceSpec }) {
     if (spec.view === 'postgres-instances') return <PostgresInstancesView />;
+    if (spec.view === 'airflow-deployments') return <AirflowDeploymentsView />;
     return spec.view === 'ontology-graph' && spec.path ? <OntologyGraphView path={spec.path} /> : <ResourceView spec={spec} />;
 }
 

@@ -1,0 +1,109 @@
+{{- with .Values.cairn.airflowDeployments }}
+{{- if eq .runtime "kubernetes" }}
+{{- /* Managed Airflow on Kubernetes (cairn.airflow_deploy.k8s_runtime): Cairn makes a namespace per deployment
+       (<namespacePrefix><name>) and applies the official Airflow chart's render there. Its account may manage those
+       kinds; an admission policy refuses any change it asks for outside namespaces with the prefix. Secrets are
+       written, never read or listed. */}}
+{{- $ctx := dict "root" $ "component" "airflow-deployments" "cfg" $.Values.cairn.api }}
+{{- $name := include "cairn.componentName" $ctx }}
+{{- $sa := printf "system:serviceaccount:%s:%s" $.Release.Namespace (include "cairn.serviceAccountName" $) }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "patch", "update", "delete"]
+  - apiGroups: [""]
+    resources: ["configmaps", "serviceaccounts", "services", "persistentvolumeclaims"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  # What the chart's own Roles give the scheduler (it launches task pods): Cairn holds it to grant it.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete", "deletecollection"]
+  - apiGroups: [""]
+    resources: ["pods/log", "events"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "statefulsets"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale", "statefulsets/scale"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+  - apiGroups: ["postgresql.cnpg.io"]
+    resources: ["clusters"]
+    verbs: ["get", "list", "create", "patch", "update", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "cairn.serviceAccountName" $ }}
+    namespace: {{ $.Release.Namespace }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["", "apps", "batch", "rbac.authorization.k8s.io", "networking.k8s.io", "policy", "autoscaling",
+                    "postgresql.cnpg.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE", "CONNECT"]
+        resources: ["*/*"]
+  matchConditions:
+    - name: cairn
+      expression: request.userInfo.username == {{ $sa | quote }}
+  validations:
+    - expression: >-
+        (request.resource.resource == 'namespaces' ? request.name : request.namespace).startsWith({{ .kubernetes.namespacePrefix | quote }})
+      message: {{ printf "Cairn manages Airflow deployments only in namespaces named %s<name>" .kubernetes.namespacePrefix | quote }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "cairn.componentLabels" $ctx | nindent 4 }}
+spec:
+  policyName: {{ $name }}
+  validationActions: ["Deny"]
+{{- end }}
+{{- end }}

@@ -169,6 +169,26 @@ cairn ontology compile --wait
 `cairn ontology` is the operator's in-process command (it needs Cairn's database); in `cairn-cli` and the binaries it
 calls the API.
 
+### airflow
+
+Managed Airflow deployments and local development, in the server package (`pip install cairn-platform`):
+
+```bash
+cairn airflow dev init finance-dags          # dags/, requirements.txt, Dockerfile FROM cairn/airflow, tests/
+cairn airflow dev parse                      # every DAG imports, in the project's image
+cairn airflow dev pytest
+cairn airflow dev start                      # a local Airflow at http://localhost:8080; its tasks are you in Cairn
+cairn airflow deploy finance-dev --dags-only # the DAGs as a new release, parsed first, live without a restart
+cairn airflow deploys finance-dev
+cairn airflow rollback finance-dev <deploy id>
+cairn airflow promote finance-dev            # to its next environment; prod waits for an approver
+cairn airflow status finance-dev
+cairn airflow logs finance-dev --task lake_report/manual__2026-11-10/count_orders
+```
+
+A deploy records the project's git commit. `dev start` keeps your token in `.cairn/dev.env` (only you can read it),
+and `dev stop` removes it. See *Managed Airflow* in the operator manual.
+
 ## Shell completion
 
 ```bash

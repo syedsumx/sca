@@ -1339,6 +1339,31 @@ export const RESOURCE_SAMPLES: Record<string, any> = {
    }
   ]
  },
+ "/v1/airflow/deployments": {
+  "runtime": "kubernetes",
+  "versions": ["3.3.2"],
+  "executors": ["KubernetesExecutor", "CeleryExecutor", "LocalExecutor"],
+  "deployments": [
+   {"name": "finance-dev", "urn": "urn:li:airflowDeployment:finance-dev", "runtime": "kubernetes", "state": "ready",
+    "url": "https://finance-dev.airflow.example.com", "image": "registry.example.com/cairn/airflow:0.1.0", "custom_image": null,
+    "dags_release": "d2", "pipeline_user": "urn:li:corpuser:svc-af-finance-dev", "oauth_client": "airflow-finance-dev",
+    "error": null, "created_by": "urn:li:corpuser:raj", "created_ms": 1794000000000, "updated_ms": 1794200000000,
+    "awake_until_ms": null, "workspace": "finance", "team": "finance", "environment": "dev", "airflow_version": "3.3.2",
+    "executor": null, "resources": null, "dag_source": {"type": "bundle"}, "env": {"REPORT_REGION": "EU"},
+    "secrets": [{"variable": "warehouse_password", "scope": "finance", "key": "warehouse_password"}],
+    "hibernation": {"awake": [{"days": ["mon", "tue", "wed", "thu", "fri"], "from": "07:00", "to": "20:00"}],
+                    "timezone": "Europe/Berlin", "wake_minutes": 60},
+    "roles": {"finance": "User"}, "promotes_to": "finance-prod", "approval": {"required": false}},
+   {"name": "finance-prod", "urn": "urn:li:airflowDeployment:finance-prod", "runtime": "kubernetes", "state": "ready",
+    "url": "https://finance-prod.airflow.example.com", "image": "registry.example.com/cairn/airflow:0.1.0", "custom_image": null,
+    "dags_release": "p7", "pipeline_user": "urn:li:corpuser:svc-af-finance-prod", "oauth_client": "airflow-finance-prod",
+    "error": null, "created_by": "urn:li:corpuser:raj", "created_ms": 1794000000000, "updated_ms": 1794200000000,
+    "awake_until_ms": null, "workspace": "finance", "team": "finance", "environment": "prod", "airflow_version": "3.3.2",
+    "executor": null, "resources": null, "dag_source": {"type": "bundle"}, "env": {"REPORT_REGION": "EU"}, "secrets": [],
+    "hibernation": null, "roles": {"finance": "Viewer", "data-platform": "Op"}, "promotes_to": null,
+    "approval": {"required": true}}
+  ]
+ },
  "/v1/databases/instances": {
   "runtime": "kubernetes",
   "backups": true,

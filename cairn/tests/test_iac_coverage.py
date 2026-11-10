@@ -61,6 +61,11 @@ ACTIONS: dict[str, str] = {
     "POST /v1/databases/instances/{}/restart": "restarts the instance now (a rolling restart on Kubernetes)",
     "POST /v1/databases/instances/{}/apply-pending": "applies changes waiting for the maintenance window, now",
     "POST /v1/databases/instances/{}/backups/{}/verify": _CHECK,
+    # managed Airflow: operated now; what a deployment is (settings, version, hibernation) is airflow_deployments
+    "POST /v1/airflow/deployments/{}/hibernate": "stops the deployment now (its schedule is airflow_deployments)",
+    "POST /v1/airflow/deployments/{}/wake": "starts a hibernating deployment now",
+    "POST /v1/airflow/promotions/{}/approve": "approves a promotion waiting for approval, which deploys it",
+    "POST /v1/airflow/promotions/{}/reject": "rejects a promotion waiting for approval",
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
     "POST /v1/derived/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,
@@ -212,6 +217,10 @@ EXCLUDED: dict[str, str] = {
     "DELETE /v1/databases/instances/{}/backups/{}": "runtime state: a base backup deleted before its retention ends",
     "POST /v1/databases/instances/{}/restore": "runtime state: a new instance restored from backups on demand (it is "
                                                "then a postgres_instances resource like any other)",
+    "POST /v1/airflow/deployments/{}/deploys": "runtime state: a deploy (a DAG bundle or a team image, versioned and "
+                                               "recorded), made from a project or CI, like a release",
+    "POST /v1/airflow/deployments/{}/deploys/{}/rollback": "runtime state: an earlier deploy deployed again",
+    "POST /v1/airflow/deployments/{}/promote": "runtime state: a deploy promoted to the next environment (a release)",
     "/v1/ml/finetunes": "runtime state: a fine-tuning run", "/v1/ml/finetunes/{}": "runtime state: a fine-tuning run",
     "/v1/tables/{}/refs": "runtime state: branches and tags of a table's data, like git refs",
     "/v1/tables/{}/refs/{}": "runtime state: branches and tags of a table's data, like git refs",

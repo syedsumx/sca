@@ -186,7 +186,9 @@ def write_tls(d):
             .serial_number(x509.random_serial_number()).not_valid_before(now - datetime.timedelta(minutes=5))
             .not_valid_after(now + datetime.timedelta(days=1))
             .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
-                                                        x509.DNSName("localhost")]), critical=False)
+                                                        x509.DNSName("localhost"),
+                                                        # containers reach the host by this name (managed Airflow)
+                                                        x509.DNSName("host.docker.internal")]), critical=False)
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
             .sign(key, hashes.SHA256()))
     pem = cert.public_bytes(serialization.Encoding.PEM)

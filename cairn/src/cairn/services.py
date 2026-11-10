@@ -205,6 +205,7 @@ class Services:
     observability: Optional[Any] = None     # Observability: health map, journeys, logs, SLOs, alerts, incidents
     sre: Optional[Any] = None               # the SRE agent (cairn.sre): investigates, proposes; people approve
     ops_tiles: Optional[Any] = None         # ops dashboards: PromQL, LogQL, TraceQL, SLO, alert, PostgreSQL tiles
+    airflow_deployments: Optional[Any] = None   # managed Airflow (cairn.airflow_deploy): deployments Cairn runs
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -650,7 +651,98 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_ops_dashboards(services)
     _build_iac_changes(services)
     _build_sre(services)
+    _build_airflow_deployments(services)
     return services
+
+
+def _build_airflow_deployments(s: Services) -> None:
+    """Managed Airflow (L144, cairn.airflow_deploy): deployments on Docker or Kubernetes (CAIRN_AIRFLOW_RUNTIME), their
+    DAG bundles in Cairn Store (CAIRN_AIRFLOW_BUNDLE_STORE), sign-in and workload identity through Cairn. Built after
+    Trino's sign-in (its OAuth server and tokens), secret scopes and git folders. A misconfiguration turns it off,
+    loudly; a deployment never starts without sign-in, its identity and its secrets."""
+    kind = os.environ.get("CAIRN_AIRFLOW_RUNTIME", "").strip()
+    if not kind:
+        return
+    import json
+
+    from cairn.airflow_deploy.deployments import AirflowDeployments, DeployStore
+    from cairn.airflow_deploy.identity import ISSUER_NAME, Keys
+
+    def allowed(actor: str, privilege: str, urn: Optional[str]) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+
+    try:
+        keys = Keys(_secret_env("CAIRN_AIRFLOW_DEPLOY_KEY").encode())
+        cairn_url = os.environ.get("CAIRN_AIRFLOW_CAIRN_URL", "").strip()
+        if not cairn_url:
+            raise ValueError("CAIRN_AIRFLOW_CAIRN_URL: Cairn's API as the deployments reach it")
+        store = None
+        raw = os.environ.get("CAIRN_AIRFLOW_BUNDLE_STORE", "")
+        if raw:
+            cfg = json.loads(raw)
+            ak, sk = _secret_env("CAIRN_AIRFLOW_BUNDLE_ACCESS_KEY"), _secret_env("CAIRN_AIRFLOW_BUNDLE_SECRET_KEY")
+            if not (cfg.get("endpoint") and cfg.get("bucket") and ak and sk):
+                raise ValueError("CAIRN_AIRFLOW_BUNDLE_STORE needs endpoint and bucket, and "
+                                 "CAIRN_AIRFLOW_BUNDLE_ACCESS_KEY(_FILE) and CAIRN_AIRFLOW_BUNDLE_SECRET_KEY(_FILE)")
+            store = DeployStore(cfg["endpoint"], cfg["bucket"], ak, sk, cfg.get("region") or "us-east-1")
+        if kind == "docker":
+            from cairn.airflow_deploy.docker_runtime import DockerRuntime
+
+            images = os.environ.get("CAIRN_AIRFLOW_DOCKER_IMAGES", "")
+            hosts = os.environ.get("CAIRN_AIRFLOW_DOCKER_EXTRA_HOSTS", "")
+            lo, _, hi = os.environ.get("CAIRN_AIRFLOW_DOCKER_PORTS", "18080-18999").partition("-")
+            runtime = DockerRuntime(os.environ.get("CAIRN_AIRFLOW_DOCKER_SOCKET", "/var/run/docker.sock"),
+                                    os.environ.get("CAIRN_AIRFLOW_DOCKER_BIND", "127.0.0.1"),
+                                    os.environ.get("CAIRN_AIRFLOW_DOCKER_HOST", "127.0.0.1"),
+                                    json.loads(images) if images else None,
+                                    os.environ.get("CAIRN_AIRFLOW_DOCKER_DB_IMAGE", "postgres:16-alpine"),
+                                    (int(lo), int(hi or lo)),
+                                    extra_hosts=json.loads(hosts) if hosts else None)
+        elif kind == "kubernetes":
+            from cairn.airflow_deploy.k8s_runtime import KubernetesRuntime
+
+            runtime = KubernetesRuntime.from_env()
+        else:
+            raise ValueError(f"CAIRN_AIRFLOW_RUNTIME is docker or kubernetes, not {kind!r}")
+        trino = json.loads(os.environ.get("CAIRN_AIRFLOW_TRINO", "") or "{}")
+        ca_file = os.environ.get("CAIRN_AIRFLOW_CA_FILE", "")
+        ca_pem = open(ca_file, "rb").read() if ca_file else b""
+    except Exception as e:  # noqa: BLE001 - a misconfiguration: managed Airflow is off, said loudly
+        logger.error("managed Airflow is off: %s", e)
+        return
+    oauth = getattr(s, "trino_oauth", None)
+    tokens = getattr(s, "trino_tokens", None)
+    if oauth is None and tokens is not None:
+        from cairn.dataaccess.trino_oauth import TrinoOAuth
+
+        oauth = s.trino_oauth = TrinoOAuth(s.engine, tokens, "", [],
+                                           int(os.environ.get("CAIRN_TRINO_TOKEN_TTL", "3600")))
+    workload = getattr(s, "workload", None)
+    if tokens is not None:
+        if workload is None:
+            from cairn.identity.workload import WorkloadIdentity
+
+            g = s.graph
+            workload = s.workload = WorkloadIdentity(
+                {}, s.engine, tokens, s.audit,
+                (lambda urn: (g.get_aspect(urn, "corpUserStatus") or {}).get("status", "ACTIVE")) if g is not None else None)
+            if s.identity is not None:
+                s.identity.workload_lookup = workload.principal_of
+        if kind == "docker":
+            workload.issuers[ISSUER_NAME] = keys.issuer()
+    else:
+        logger.warning("managed Airflow: Trino sign-in is off (CAIRN_TRINO_ACCESS_KEY), so no deployment can be made "
+                       "(people sign in, and tasks get their identity, through it)")
+    s.airflow_deployments = AirflowDeployments(
+        s.engine, allowed, s.audit, keys, runtime, store, cairn_url,
+        os.environ.get("CAIRN_AIRFLOW_PUBLIC_URL", "") or s.settings.active.public_url, trino, ca_pem,
+        getattr(s, "secret_scopes", None), oauth, workload, os.environ.get("CAIRN_AIRFLOW_K8S_WORKLOAD_ISSUER", ""),
+        getattr(s, "git_folders", None), os.environ.get("CAIRN_AIRFLOW_SELF_APPROVE", "").lower() == "true")
+    if getattr(s, "flows", None) is not None:      # a flow's airflow step may name a managed deployment
+        s.flows.b.airflow_deployments = s.airflow_deployments
+    pobs = getattr(s, "pipeline_obs", None)         # pipeline observability (L145) reads each deployment's Airflow
+    if pobs is not None and hasattr(pobs, "airflow_sources"):
+        pobs.airflow_sources.append(s.airflow_deployments.observability_sources)
 
 
 def _build_split_compute(s: Services) -> None:
