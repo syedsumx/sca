@@ -130,6 +130,12 @@ def test_a_jobs_pod_reaches_only_what_its_rules_allow(cluster, tmp_path):
     jobs = Jobs(engine, KubeRunner(JOBS, IMAGE, cluster["server"], cluster["token"], cluster["ca"], poll=1.0),
                 lambda a: True, lambda a: False)
     jobs.egress = egress
+    # The workspace's NetworkPolicy exists before the run, as it does once a workspace has run anything: kindnet
+    # applies a new policy asynchronously (seconds), and a pod started in that window is not yet held by it.
+    runner = KubeRunner(JOBS, IMAGE, cluster["server"], cluster["token"], cluster["ca"], poll=1.0)
+    egress.contain(runner, egress.workspace_of(OWNER))
+    kubectl("-n", JOBS, "get", "networkpolicy", egress.policy_name(egress.workspace_of(OWNER)))
+    time.sleep(15)
     status, output, log, error = jobs.contained(OWNER, "python", CODE, cluster["ips"], 180, "egress", "kindrun1")
     assert status == "succeeded", (error, log)
     res = json.loads(output.strip().splitlines()[-1])
