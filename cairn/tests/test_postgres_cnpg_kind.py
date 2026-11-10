@@ -185,20 +185,32 @@ def test_an_instance_with_a_standby_fails_over_backs_up_and_restores(cluster, se
     assert r.status_code == 201 and r.json()["state"] == "completed", r.text
     assert s.pg_instances.store.list("ha/"), "nothing in the store"           # base backup and WAL (Barman Cloud)
 
-    # The primary is lost: the operator promotes the standby, and the service keeps answering.
-    first = st["runtime_state"]["primary"]
+    # The primary is lost: the operator promotes the standby, and the service keeps answering. "Ready" allows a
+    # degraded instance, so first wait for a standby that is ready too (else there is nothing to promote).
+    def runtime():
+        return ana.get("/v1/databases/instances/ha/status").json().get("runtime_state") or {}
+
+    def both_ready():
+        rs = runtime()
+        ok = rs.get("ready_instances") == 2 and len(rs.get("instances") or []) == 2 \
+            and all(m["ready"] for m in rs["instances"])
+        return rs if ok else None
+    try:
+        first = wait_for("a ready standby", both_ready, timeout=600)["primary"]
+    except AssertionError:
+        print(kubectl("-n", NS, "get", "clusters,pods", "-o", "wide", check=False))
+        raise
     kubectl("-n", NS, "delete", "pod", first, "--wait=false")
     started = time.time()
+    now = wait_for("a new primary", lambda: (lambda p: p if p and p != first else None)(runtime().get("primary")),
+                   timeout=300)
 
     def writes():
         with connect(w) as c:
             c.execute("INSERT INTO t VALUES (1000 + (extract(epoch FROM now())::int % 100000)) ON CONFLICT DO NOTHING")
             return c.execute("SELECT count(*) FROM t WHERE id <= 100").fetchone()[0] == 100
     wait_for("writes after the primary was lost", writes, timeout=300, every=2)
-    print(f"\nwrites again {time.time() - started:.0f} s after the primary was deleted")
-    now = wait_for("a new primary", lambda: (ana.get("/v1/databases/instances/ha/status").json()
-                                             .get("runtime_state") or {}).get("primary"), timeout=120)
-    assert now and now != first, (first, now)
+    print(f"\nwrites again on {now} {time.time() - started:.0f} s after {first} was deleted")
     ready("ha")                                                    # the old primary comes back as a standby
 
     # Metrics for dashboards and the SRE agent, with the operator's exporter.

@@ -101,6 +101,22 @@ def airflow2(cairn, airflow_user, tmp_path_factory):  # noqa: F811
             logs = subprocess.run(["docker", "logs", "--tail", "80", name], capture_output=True, text=True)
             raise AssertionError(logs.stdout[-4000:] + logs.stderr[-4000:])
         time.sleep(3)
+    # The image's entrypoint makes Cairn's user but ignores a failure: check the login, and if Airflow refuses it,
+    # make the user again (the password on stdin, never a command line) and say why if it still refuses.
+    def signs_in():
+        return httpx.get(f"{base}/api/v1/dags?limit=1", auth=("cairn", password), timeout=10).status_code == 200
+    end = time.time() + 60
+    while not signs_in() and time.time() < end:
+        time.sleep(3)
+    if not signs_in():
+        made = subprocess.run(["docker", "exec", "-i", name, "airflow", "users", "create", "--username", "cairn",
+                               "--role", "Admin", "--firstname", "Cairn", "--lastname", "Flows",
+                               "--email", "cairn@example.invalid"], input=f"{password}\n{password}\n",
+                              capture_output=True, text=True, timeout=180)
+        if not signs_in():
+            logs = subprocess.run(["docker", "logs", "--tail", "120", name], capture_output=True, text=True)
+            raise AssertionError("Airflow 2 refuses Cairn's user:\n" + made.stdout[-2000:] + made.stderr[-2000:]
+                                 + logs.stdout[-4000:] + logs.stderr[-4000:])
     saved = (dict(s.flows.b.airflow), s.flows.dag_folder, s.flows.airflow_poll_ms)
     s.flows.b.airflow.update(url=base, api="v1", username="cairn", password_file=str(work / "cairn-password"),
                              token_file="")
@@ -146,8 +162,9 @@ def has(af, dag_id, timeout=240):
             return client.call("GET", f"/dags/{dag_id}")
         except Exception:  # noqa: BLE001 - not parsed yet
             time.sleep(2)
-    errors = client.call("GET", "/importErrors")
     logs = subprocess.run(["docker", "logs", "--tail", "60", af["name"]], capture_output=True, text=True)
+    print(logs.stdout[-3000:], logs.stderr[-3000:])
+    errors = client.call("GET", "/importErrors")
     raise AssertionError(f"Airflow 2 never loaded {dag_id}: {errors}\n" + logs.stdout[-3000:] + logs.stderr[-3000:])
 
 
