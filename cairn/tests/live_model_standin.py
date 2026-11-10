@@ -96,8 +96,107 @@ def structured(system: str, user: str, schema: dict) -> dict:
     return example(schema)
 
 
+def _used(body: dict) -> list[dict]:
+    """The tool calls made so far in this conversation, with their results: [{name, input, ok, evidence, data}]."""
+    by_id = {b["tool_use_id"]: b for b in _results(body)}
+    out = []
+    for m in body["messages"]:
+        if m["role"] != "assistant" or not isinstance(m["content"], list):
+            continue
+        for b in m["content"]:
+            if b.get("type") != "tool_use":
+                continue
+            r = by_id.get(b["id"]) or {}
+            text = r.get("content") if isinstance(r.get("content"), str) else json.dumps(r.get("content"))
+            ev = re.match(r'^\{"evidence_id": "(e\d+)"\}\n', text or "")
+            data = None
+            if ev:
+                try:
+                    data = json.loads(text[ev.end():])
+                except ValueError:
+                    data = None
+            out.append({"name": b["name"], "input": b.get("input") or {}, "ok": not r.get("is_error"),
+                        "evidence": ev.group(1) if ev else None, "data": data, "text": text or ""})
+    return out
+
+
+def sre_turn(body: dict) -> list[dict]:
+    """Cairn's SRE agent: read the incident (and the instance it points at), write a finding citing the evidence,
+    rank the causes, propose the remediation the diagnosis suggests, then summarise. An ask: check, then answer."""
+    used = _used(body)
+    names = {u["name"] for u in used}
+    user = _user_text(body)
+    inst = re.search(r'"pg_instance": "([a-z0-9-]+)"', user) or re.search(r"Instance ([a-z0-9-]+)\.", user)
+    services = re.search(r'"services": \[([^\]]*)\]', user)
+    if not inst and services:
+        inst = re.search(r'"([a-z0-9-]+-pg)"', services.group(1))
+    instance = inst.group(1) if inst else None
+    asking = "The on-call person asks:" in user or "The person asks:" in user
+    if asking:
+        if not used:
+            calls = [{"type": "tool_use", "id": "tu_s1", "name": "pg_status" if instance else "logs",
+                      "input": {"instance": instance} if instance else {"service": "cairn-api", "level": "ERROR"}}]
+            return calls
+        u = used[-1]
+        if not u["ok"]:
+            return [{"type": "text", "text": f"I could not check: {u['name']} failed ({u['text'][:200]})."}]
+        health = (u["data"] or {}).get("health") if isinstance(u["data"], dict) else None
+        return [{"type": "text", "text": f"{instance or 'The component'} is {health or 'as the logs show'} [{u['evidence']}]."}]
+    if not used:
+        calls = [{"type": "tool_use", "id": "tu_ctx", "name": "incident_context", "input": {}}]
+        if instance:
+            calls.append({"type": "tool_use", "id": "tu_diag", "name": "pg_diagnose", "input": {"instance": instance}})
+        else:
+            calls.append({"type": "tool_use", "id": "tu_logs", "name": "logs",
+                          "input": {"service": "cairn-api", "level": "ERROR", "since_minutes": 30}})
+        return calls
+    if "write_note" not in names:
+        diag = next((u for u in used if u["name"] == "pg_diagnose" and u["ok"]), None)
+        failed = [u for u in used if not u["ok"]]
+        evidence = [u["evidence"] for u in used if u["ok"] and u["evidence"]]
+        if diag and isinstance(diag["data"], dict):
+            d = diag["data"]
+            facts = [f["text"] for f in d.get("findings") or []] or [f"{instance} is {d.get('verdict')}"]
+            calls = [{"type": "tool_use", "id": "tu_note", "name": "write_note", "input": {
+                "kind": "finding", "text": f"{instance}: " + " ".join(facts[:3]), "evidence": [diag["evidence"]]}}]
+            causes = [{"cause": facts[0], "likelihood": 0.8, "evidence": [diag["evidence"]]}]
+            if len(facts) > 1:
+                causes.append({"cause": facts[1], "likelihood": 0.3, "evidence": [diag["evidence"]]})
+            calls.append({"type": "tool_use", "id": "tu_rank", "name": "rank_causes", "input": {"causes": causes}})
+            s = next(iter(d.get("suggestions") or []), None)
+            if s and s["kind"] == "change_request":
+                calls.append({"type": "tool_use", "id": "tu_prop", "name": "propose_change", "input": {
+                    "title": s["title"], "intent": s["rationale"], "bundle_yaml": s["bundle_yaml"],
+                    "evidence": [diag["evidence"]]}})
+            elif s and s["kind"] == "runbook_action":
+                calls.append({"type": "tool_use", "id": "tu_prop", "name": "propose_action", "input": {
+                    "action": s["action"], "params": s["params"], "rationale": s["rationale"],
+                    "evidence": [diag["evidence"]]}})
+            return calls
+        text = ("I could not read everything: " + "; ".join(f"{u['name']} failed" for u in failed)) if failed else \
+            "The incident's context shows no component at fault yet."
+        return [{"type": "tool_use", "id": "tu_note", "name": "write_note",
+                 "input": {"kind": "finding", "text": text, "evidence": evidence[:3]}}]
+    proposed = [u for u in used if u["name"] in ("propose_change", "propose_action")]
+    if proposed and proposed[-1]["ok"]:
+        return [{"type": "text", "text": f"Most likely cause found on {instance}; I proposed a remediation "
+                                         f"({proposed[-1]['data'].get('proposal')}) that waits for a person's approval."}]
+    return [{"type": "text", "text": "I wrote what I found; I proposed nothing."}]
+
+
+def postmortem_text(user: str) -> str:
+    change = re.search(r"Proposed change request: ([^(\\\n]+)", user)
+    action = re.search(r"Proposed: ([^.\\\n]+)", user)
+    fix = (change or action).group(1).strip() if (change or action) else "unknown"
+    return (f"## Cause\n\nThe agent's ranked causes point at the database: {fix}.\n\n## What fixed it\n\n"
+            f"{fix}, approved by a person and applied.\n\n## Follow-ups\n\n- Add an alert on slow statements (owner: "
+            "database team)\n- Review the runbook (owner: on-call)\n")
+
+
 def tool_turn(body: dict) -> list[dict]:
     names = [t["name"] for t in body.get("tools") or []]
+    if "rank_causes" in names or ("pg_diagnose" in names and "Cairn's SRE agent" in _system(body)):
+        return sre_turn(body)
     done = _results(body)
     user = _user_text(body)
     urns = re.findall(r"urn:li:dataset:\([^)]*\)", user)
@@ -129,6 +228,8 @@ def reply(body: dict) -> list[dict]:
         return [{"type": "text", "text": json.dumps(structured(system, _user_text(body), fmt["schema"]))}]
     if body.get("tools"):
         return tool_turn(body)
+    if "blameless postmortem" in system:
+        return [{"type": "text", "text": postmortem_text(_user_text(body))}]
     if "You plan research" in system:
         return [{"type": "text", "text": '{"steps": ["Which tables hold orders?"]}'}]
     if "Write the research report" in system:

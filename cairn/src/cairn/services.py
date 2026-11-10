@@ -203,6 +203,7 @@ class Services:
     workspaces: Optional[Any] = None
     people: Optional[Any] = None            # People & roles (cairn.identity.people)
     observability: Optional[Any] = None     # Observability: health map, journeys, logs, SLOs, alerts, incidents
+    sre: Optional[Any] = None               # the SRE agent (cairn.sre): investigates, proposes; people approve
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -646,6 +647,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_people(services)
     _build_observability(services)
     _build_iac_changes(services)
+    _build_sre(services)
     return services
 
 
@@ -768,6 +770,27 @@ def _build_iac_changes(s: Services) -> None:
 
     s.iac_changes = ChangeRequests(s.engine, s.audit, authz, s.is_admin, tell, getattr(s, "git_folders", None), app)
     s.iac_assistant = IacAssistant(s.iac_changes, lambda: getattr(s, "ai_gateway", None) is not None)
+
+
+def _build_sre(s: Services) -> None:
+    """The SRE agent (cairn.sre): acts through Cairn's own API with its agent credential, proposes change requests
+    and runbook actions; built after observability, the agent hub, databases and change requests."""
+    if getattr(s, "observability", None) is None or getattr(s, "agents", None) is None:
+        return
+    from cairn.sre.agent import SreAgent
+
+    def authz(principal, privilege, urn):
+        return s.authorize(principal, privilege, urn, raise_on_deny=False)
+
+    def app():
+        if getattr(s, "api_app", None) is None:
+            from cairn.app import create_api_app
+
+            create_api_app(s)
+        return s.api_app
+
+    s.sre = SreAgent(s.engine, s.observability, s.agents, s.audit, authz, app, getattr(s, "databases", None),
+                     lambda: getattr(s, "ai_gateway", None) is not None)
 
 
 def _build_medallion(s: Services) -> None:

@@ -26,14 +26,15 @@ def world(tmp_path_factory):
 
 def runnable(s) -> list[registry.Kind]:
     """The kinds with an example whose service runs here (deleting a vector index drops its Iceberg table: that needs
-    pyiceberg, the streams extra; the terraform job has it)."""
+    pyiceberg, the streams extra; the terraform job has it). An index needs a database with a table in it: that kind
+    round-trips in tests/test_sre_agent_e2e.py, on a managed instance's database, through a change request."""
     try:
         import pyiceberg.exceptions  # noqa: F401
         lake = True
     except ImportError:
         lake = False
     return [k for k in registry.kinds() if k.example and getattr(s, k.service, None) is not None
-            and (lake or k.name != "vectors")]
+            and (lake or k.name != "vectors") and k.name != "postgres_indexes"]
 
 
 def ensure(e: Engine, k: registry.Kind, spec: dict) -> dict:

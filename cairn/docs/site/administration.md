@@ -1879,7 +1879,9 @@ are a file in the sidecar only. Instances answer over TLS (a certificate Cairn m
   operator's exporter (`cnpg_collector_*`, replication and archiver series) from each pod. These are the numbers the
   SRE agent and dashboards read.
 - `GET .../slow-queries?limit=20&order=total|mean|calls|rows` (`MANAGE_DATABASE_INSTANCE`: statement text):
-  `pg_stat_statements`, normalised (constants replaced).
+  `pg_stat_statements`, normalised (constants replaced). Utility statements keep their text as it ran, so Cairn does
+  not let the statements that set a login's or the superuser's password be recorded, and masks any `PASSWORD '…'` in
+  the text it returns. **Diagnose** (the [SRE agent](#sre-agent)) explains what these numbers mean for an instance.
 
 The web UI has a **Postgres instances** tab under Compute & jobs: create with a form, status, backups and schedules,
 restore to a point in time, parameters, metrics and the slowest statements.
@@ -3796,6 +3798,36 @@ Outside Helm, the same settings are `CAIRN_OBS_PROMETHEUS_URL`, `CAIRN_OBS_LOKI_
 - **Deploys:** Cairn records its own version when it changes; CI/CD records others with `POST /v1/observability/deploys` (`component`, `version`, `description`, `url`).
 
 The notifier evaluates every enabled rule and SLO every `CAIRN_OBS_EVALUATE_SECONDS` (30); `POST /v1/observability/evaluate` does it now. A rule or SLO whose backend cannot be read keeps its alerts as they were (it never resolves what it cannot see) and shows the error on the rule. SLOs, alert rules and silences are resource types (`observability_slos`, `observability_alert_rules`, `observability_silences`; Terraform `cairn_observability_slo`, `cairn_observability_alert_rule`, `cairn_observability_silence`), audited in category `observability`.
+
+### SRE agent
+
+The SRE agent investigates incidents and managed PostgreSQL instances, writes what it finds into the incident with the evidence, ranks the likely causes and proposes remediations. **It never applies anything:** every remediation waits for a person, and runs as that person.
+
+**Who it is.** A built-in agent identity (`agt_sre_agent`, *SRE agent* in Administration → Agents: the pause switch and its quotas apply) with the scopes `read`, `model` and `iac:propose`. Each run gets a credential for 15 minutes, for the person it acts for, revoked when the run ends: that person's permissions narrowed to those scopes. It acts for whoever asks it; when it joins an incident by itself, for the settings' `run_as` (without one it joins only when asked). Every tool call goes through Cairn's own API with that credential, so what it reads is what that person may read, through the policy decision point, and the audit log names the agent. Its credential cannot approve or apply a change request, run an instance operation (restart, backup, switchover), or write configuration.
+
+**What it does.** When an incident opens with a severity in `auto_join` (or when someone presses **Investigate** on the incident, or asks it a question there), it:
+
+1. runs the diagnostic steps of the runbooks whose matchers fit the incident's alerts (labels, `alertname`, `severity`; incidents without alerts: their components);
+2. reads the incident's context (alerts, timeline with the changes, change requests and deploys around it, the health of its components, error traces and logs, SLOs), and queries PromQL and LogQL (once, nothing kept), logs, traces, journeys, the health map, SLO status and deploys;
+3. for a managed instance (an alert label `pg_instance`, a component named like one, or asked), reads its status, metrics, slow statements and backups, and **diagnoses** it: each slow statement is planned with `EXPLAIN (GENERIC_PLAN)` on a **short-lived read login** of its database (L88: `VIEW_DATABASE`, a read-only session, dropped as soon as the diagnosis ends); a sequential scan that filters a large table (10,000 rows or more) down to a few percent on columns no index leads with is an index suggestion, with the plan as its evidence. It also reports dead tuples and when autovacuum last ran, connection saturation and sessions idle in a transaction, replication lag, WAL archiving, the cache hit ratio and backup freshness. SQL it writes itself runs only as one read-only statement (`SELECT`, `WITH`, `EXPLAIN` without `ANALYZE`, `SHOW`) in a read-only transaction with a 5-second timeout, at most 50 rows, on such a login;
+4. writes **findings** and **hypotheses** as incident notes (marked as the agent's), each citing the tool calls that show it: the note keeps each call's tool, input and result, shown under **Evidence** in the timeline; then the **likely causes, ranked**;
+5. proposes at most three remediations: a **change request** (L126: bundle YAML, e.g. `postgres_indexes`, `postgres_parameters`, `postgres_instances` for a size, a warehouse, a configuration rolled back), or a **runbook action** from the allow-list: `restart_instance`, `switchover_instance`, `backup_instance`, `silence_alert` (an alert's name and service, 1 to 1,440 minutes), `rerun_flow`.
+
+**Approving.** The incident page lists the proposals with **Approve** and **Reject**. Approve runs it now, as you, through Cairn's API with your own credentials: an instance operation needs `MANAGE_DATABASE_INSTANCE` on the instance, a silence `MANAGE_SYSTEM_OPERATIONS`, a flow run what that flow needs; a change request is approved and applied through `/v1/iac/changes` with its own rules (`APPROVE_IAC_CHANGE` on its resource types, the plan made again as you, and separation of duties: the person the agent acted for is its sponsor and does not approve it unless `CAIRN_IAC_SELF_APPROVE`). A refusal leaves the proposal pending. The timeline records who approved or rejected what. `POST /v1/sre/actions/<id>/approve` and `/reject`; `GET /v1/sre/actions?status=pending`.
+
+**Ask the SRE agent** (the incident page's chat; `POST /v1/sre/incidents/<id>/ask` `{"question"}`): the same tools, for the person asking, answers citing evidence ids. **Diagnose** on a managed instance's page (`POST /v1/sre/instances/<name>/diagnose` `{"question"}`): the Postgres report for whoever may see the instance (the slow statements need `MANAGE_DATABASE_INSTANCE`, the plans `VIEW_DATABASE`), with each suggestion ready to propose as a change request; it needs no model, a question does.
+
+**Postmortems.** When an incident is resolved (with `postmortems` on), the agent drafts its postmortem for the person who resolved it: summary, impact from the SLOs' error budgets, the timeline, the actions taken and their outcome, then the cause, what fixed it and follow-ups (those three written by the model; without one, marked for a person to write). A person edits and approves it on the incident page (`GET|PUT /v1/sre/incidents/<id>/postmortem`, `POST .../postmortem/approve`, `POST .../postmortem/draft` to draft it again).
+
+**Runbooks** (`/v1/sre/runbooks`; kind `sre_runbooks`, Terraform `cairn_sre_runbook`): `match` (label matchers, all must fit; `regex` for a pattern), `steps` (`promql`, `logql`, `logs`, `traces`, `health`, `pg_status`, `pg_metrics`, `pg_slow_queries`, `pg_backups`, `pg_diagnose`; `{{ labels.<name> }}` is filled from the alert) and `actions` from the allow-list.
+
+**Settings** (`GET|PUT /v1/sre/settings`; kind `sre_agent_settings`): `enabled`, `auto_join` (severities, default `critical`), `run_as`, `model` (a model the AI gateway serves; default `CAIRN_SRE_AGENT_MODEL`), `max_steps` (12), `max_tokens_per_run` (200,000), `daily_runs` (100), `postmortems`. `GET /v1/sre/status` says whether it can work now and why not.
+
+**Fail closed.** Without a model, without the AI gateway, while agents are paused or over its daily budget, it writes that into the incident and does nothing. A model call that fails (a model the gateway does not serve, a person not allowed to use it) stops the run, said in the incident. A tool that fails (a backend down, a refusal) is said in the incident ("Some of the SRE agent's tools failed …"), and the agent does not guess what it would have shown. Nothing it writes holds a credential: the read logins' passwords never leave the agent, its own credential is revoked, and everything is cleaned of anything that looks like a secret before it is kept.
+
+Model calls go only through Cairn's AI gateway, as the person the agent acts for (`USE_AI_GATEWAY` on the model, their metering). Runs, proposals and decisions are audited in category `observability` (`sre.run_*`, `sre.action_proposed`, `sre.action_refused`, `sre.action_executed`, `sre.action_rejected`, `sre.postmortem_*`, `sre.settings_changed`, `sre.runbook_*`).
+
+**Indexes as resources.** An index the agent suggests reaches a database as a `postgres_indexes` resource (Terraform `cairn_postgres_index`): `GET /v1/databases/<name>/indexes`, `PUT /v1/databases/<name>/indexes/<index>` `{"table", "columns", "method", "unique"}` (built with `CREATE INDEX CONCURRENTLY`; `MANAGE_DATABASE`; audited `database.index_created`), `DELETE` drops one concurrently. Indexes behind constraints or with expressions are the schema's, not resources.
 
 ## Limits
 

@@ -4,6 +4,8 @@ import { useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { EvidenceList, SreIncidentPanel } from '../components/SreAgent';
+import type { Evidence } from '../components/SreAgent';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { pageHelp } from '../guide/help';
 import { PageHeader } from '../guide/PageHeader';
@@ -74,7 +76,7 @@ interface Incident {
     id: string; title: string; severity: string; status: 'open' | 'acknowledged' | 'resolved'; services: string[];
     summary: string | null; assignee: string | null; opened_at: string; resolved_at: string | null;
 }
-interface TimelineEvent { at: string; kind: string; actor: string; by_agent: boolean; text: string }
+interface TimelineEvent { at: string; kind: string; actor: string; by_agent: boolean; text: string; detail?: { evidence?: Evidence[] } }
 interface IncidentDetail extends Incident { alerts: AlertRow[]; timeline: TimelineEvent[] }
 
 const TABS = ['health', 'journey', 'logs', 'slos', 'alerts', 'incidents'] as const;
@@ -523,7 +525,7 @@ function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
     };
     const inc = q.data;
     return (
-        <Drawer open width={720} onClose={onClose} title={inc ? t('obs.incidents.drawer', { title: inc.title }) : id}>
+        <Drawer open width={780} onClose={onClose} title={inc ? t('obs.incidents.drawer', { title: inc.title }) : id}>
             {q.error && <ErrorNotice error={q.error} />}
             {inc && (
                 <section aria-label={t('obs.incidents.drawer', { title: inc.title })}>
@@ -545,6 +547,7 @@ function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
                         )}
                         {inc.status === 'resolved' && <Button onClick={() => act('reopen')}>{t('obs.incidents.reopen')}</Button>}
                     </Space>
+                    <SreIncidentPanel id={id} resolved={inc.status === 'resolved'} onChange={() => void q.refresh()} />
                     <SectionTitle>{t('obs.incidents.timeline')}</SectionTitle>
                     <section aria-label={t('obs.incidents.timeline')}>
                     <List size="small" dataSource={inc.timeline}
@@ -553,8 +556,10 @@ function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
                                 <Space align="start">
                                     <Muted style={{ minWidth: 150 }}>{new Date(e.at).toLocaleString()}</Muted>
                                     <Tag>{e.kind}</Tag>
-                                    <span>{e.text}{e.by_agent && <Tag color="purple" style={{ marginLeft: 6 }}>{t('obs.incidents.agent')}</Tag>}
-                                        <Muted> · {actorName(e.actor)}</Muted></span>
+                                    <span><span style={{ whiteSpace: 'pre-wrap' }}>{e.text}</span>
+                                        {e.by_agent && <Tag color="purple" style={{ marginLeft: 6 }}>{t('obs.incidents.agent')}</Tag>}
+                                        <Muted> · {actorName(e.actor)}</Muted>
+                                        {e.detail?.evidence?.length ? <EvidenceList items={e.detail.evidence} /> : null}</span>
                                 </Space>
                             </List.Item>
                         )} />

@@ -256,6 +256,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.observability.api import build_router as observability_router
 
         app.include_router(observability_router(services.observability, cp, authz))
+    if getattr(services, "sre", None) is not None:             # the SRE agent: investigations, proposals, postmortems
+        from cairn.sre.api import build_router as sre_router
+
+        app.include_router(sre_router(services.sre, cp, authz))
     if getattr(services, "people", None) is not None:          # People & roles: the directory, who holds what and why
         from cairn.identity.people import build_router as people_router
 
@@ -418,6 +422,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.dataaccess.databases import build_databases_router
 
         app.include_router(build_databases_router(services.databases, cp))
+        from cairn.databases.indexes import Indexes, build_indexes_router
+
+        app.include_router(build_indexes_router(Indexes(services.databases), cp))
     if getattr(services, "profiles", None) is not None:      # /v1/me/profile and web push subscriptions
         from cairn.identity.capabilities import capabilities as _capabilities
         from cairn.identity.profiles import build_router as profiles_router, build_ui_settings_router

@@ -80,6 +80,15 @@ def urn(name: str) -> str:
     return f"urn:li:pgDatabase:{name}"
 
 
+def quiet_statement_stats(conn) -> None:
+    """Keeps the next statements (they carry a password) out of pg_stat_statements, which records utility statements'
+    text as it is: without this the slow-statement list would show the password."""
+    try:
+        conn.execute("SET pg_stat_statements.track_utility = off")
+    except Exception:  # noqa: BLE001 - pg_stat_statements is not there: nothing records the text
+        pass
+
+
 class Databases:
     """Databases on one PostgreSQL server Cairn administers. ``allowed(actor, privilege, urn_or_None)`` is the PDP."""
 
@@ -404,6 +413,7 @@ class Databases:
         until = time.strftime("%Y-%m-%d %H:%M:%S+00", time.gmtime(expires / 1000))
         with self._admin(instance=row.instance) as conn:
             conn.execute("SET log_statement = 'none'")       # the statement carries the password
+            quiet_statement_stats(conn)
             conn.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} VALID UNTIL {} IN ROLE {} CONNECTION LIMIT 20").format(
                 sql.Identifier(role), sql.Literal(password), sql.Literal(until),
                 sql.Identifier(owner if access == "write" else reader)))

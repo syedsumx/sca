@@ -14,7 +14,8 @@ metered under them, and sent on with the provider key the gateway reads from its
 * L94, the pipeline agent: a goal becomes a derived table that ships and checks green; a broken one is fixed and runs;
 * L95, CoWork: a scheduled task runs as its owner and waits in the outbox until approved (Slack is a local stand-in:
   there is no Slack workspace in CI);
-* L126, Ask an agent: plain words become a proposed change (a saved query and a flow) that plans cleanly.
+* L126, Ask an agent: plain words become a proposed change (a saved query and a flow) that plans cleanly;
+* L142, the SRE agent: an incident investigated through Cairn's API, notes citing its tool calls, nothing applied.
 
 A model's answers vary: each check runs once more on failure, then fails with the transcript of its model calls.
 Tokens and estimated cost per check go to a JSON report (``CAIRN_LIVE_USAGE_FILE``).
@@ -523,3 +524,44 @@ def test_l126_ask_an_agent_drafts_a_query_and_a_flow_that_plan_cleanly(live):
         kinds = {(c["action"], c["kind"]) for c in p.json()["changes"]}
         assert {("create", "queries"), ("create", "flows")} <= kinds, kinds
     twice(live, "L126", check)
+
+
+def test_l142_the_sre_agent_investigates_cites_evidence_and_applies_nothing(live):
+    """The SRE agent with the real model: an incident (a deploy just before it), investigated through Cairn's API as
+    the person asking; it writes notes citing its tool calls' evidence, proposes nothing outside the allow-list, and
+    nothing it proposes is applied. This Cairn has no metrics or logs backend: the agent must say what it could not
+    read rather than guess."""
+    s, url = live.s, live.url
+    admin = {"X-Cairn-Actor": ADMIN}
+    s.sre.env_model = MODEL
+    steps_before = s.sre.settings()["max_steps"]
+    assert httpx.put(f"{url}/v1/sre/settings", json={"max_steps": MAX_TURNS}, headers=admin, timeout=30).status_code == 200
+
+    def check(attempt):
+        httpx.post(f"{url}/v1/observability/deploys", json={"component": "orders-api", "version": f"4.2.{attempt}",
+                                                             "description": "new connection pool settings"},
+                   headers=admin, timeout=30)
+        inc = httpx.post(f"{url}/v1/observability/incidents", headers=admin, timeout=30, json={
+            "title": "orders-api answers 503 since the last deploy", "severity": "warning", "services": ["orders-api"],
+            "summary": "Half of the orders-api requests fail with 503 since about five minutes after a deploy"}).json()
+        r = httpx.post(f"{url}/v1/sre/incidents/{inc['id']}/investigate", params={"wait": "true"}, headers=admin,
+                       timeout=900)
+        assert r.status_code == 202, r.text
+        run = r.json()
+        assert run["status"] == "done", run
+        assert any(x["tool"] == "incident_context" and x["ok"] for x in run["steps"]), run["steps"]
+        timeline = httpx.get(f"{url}/v1/observability/incidents/{inc['id']}", headers=admin, timeout=30).json()["timeline"]
+        notes = [e for e in timeline if e.get("by_agent") and e["kind"] in ("finding", "hypothesis")]
+        assert notes, [e["text"] for e in timeline if e.get("by_agent")]
+        ids = {x["id"] for x in run["steps"] if x["ok"]}
+        assert any((e.get("detail") or {}).get("evidence") for e in notes), notes        # it cites what it read
+        for e in notes:
+            assert {ev["id"] for ev in (e.get("detail") or {}).get("evidence") or []} <= ids
+        view = httpx.get(f"{url}/v1/sre/incidents/{inc['id']}", headers=admin, timeout=30).json()
+        assert all(a["status"] == "pending" for a in view["actions"]), view["actions"]   # nothing applied by itself
+        written = json.dumps(timeline) + json.dumps(view)
+        assert "cat_" not in written and "Bearer " not in written
+    try:
+        twice(live, "L142", check)
+    finally:
+        httpx.put(f"{url}/v1/sre/settings", json={"max_steps": steps_before}, headers=admin, timeout=30)

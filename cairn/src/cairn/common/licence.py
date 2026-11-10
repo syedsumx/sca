@@ -71,6 +71,7 @@ READ_POSTS = {
     "/data/sheets/query", "/data/sheets/metric", "/data/sheets/ask",
     "/marketplace/access-requests/preview", "/sources/test",
     "/quality/contracts/check", "/notify/inbox/read", "/governance/automations/preview", "/v1/ontology/validate-sql",
+    "/v1/observability/alert-rules/test",          # runs a PromQL or LogQL condition once; keeps nothing
 }
 ALWAYS = ("/admin/licence", "/me", "/scim/")
 WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}

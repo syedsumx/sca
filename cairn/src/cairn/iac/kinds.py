@@ -324,6 +324,23 @@ KINDS: list[Kind] = [
          order=76, service="pg_backups", docs="managed-postgres",
          example={"instance": "orders-pg", "name": "daily", "every_hours": 24, "retention_days": 7},
          example_update={"retention_days": 14}),
+    Kind("postgres_indexes", "postgres_index", "data",
+         "An index of an operational database's table, built with CREATE INDEX CONCURRENTLY (writes go on). What the "
+         "SRE agent suggests for a slow statement arrives as one, in a change request. Any change replaces it; indexes "
+         "behind constraints or with expressions are the schema's, not resources.",
+         (R("database", force_new=True, description="the Cairn database (urn:li:pgDatabase:<name>)"),
+          R("name", force_new=True, description="the index"),
+          R("table", force_new=True, description="<table> or <schema>.<table> (read back as <schema>.<table>)"),
+          R("columns", "list", force_new=True, description="1 to 8 columns, in order"),
+          F("method", default="btree", force_new=True, description="btree, hash, gin, gist or brin"),
+          F("unique", "bool", default=False, force_new=True)),
+         read="/v1/databases/{database}/indexes", list_key="indexes", id="name", key=("database", "name"),
+         match=(("managed", True),),
+         create=op("PUT /v1/databases/{database}/indexes/{name}", only=("table", "columns", "method", "unique")),
+         update=None, delete=op("DELETE /v1/databases/{database}/indexes/{name}", no_body=True),
+         order=77, service="databases", docs="sre-agent",
+         example={"database": "shop", "name": "orders_customer_id_idx", "table": "public.orders",
+                  "columns": ["customer_id"]}),
     Kind("flows", "flow", "data",
          "A flow (Cairn Flows): a DAG of any steps (SQL, derived tables, checks, notebooks, Python, Spark, dbt, agents, "
          "Airflow DAGs, approvals, branches, for-each, notifications) run as its owner. Saved and published together; "
@@ -840,4 +857,40 @@ KINDS: list[Kind] = [
                   "starts_at": "2099-01-01T00:00:00Z", "ends_at": "2099-01-01T06:00:00Z",
                   "comment": "storage maintenance"},
          example_update={"comment": "storage maintenance, extended"}),
+
+    # ---- the SRE agent (L142) --------------------------------------------------------------------------------
+    Kind("sre_runbooks", "sre_runbook", "operations",
+         "A runbook for the SRE agent: the alerts it is for (label matchers), the diagnostic steps it runs first "
+         "(PromQL, LogQL, logs, traces, health, Postgres status, metrics, slow statements, backups, diagnosis) and the "
+         "runbook actions it may propose (restart_instance, switchover_instance, backup_instance, silence_alert, "
+         "rerun_flow), which a person approves.",
+         (R("id", force_new=True, tf="runbook_id", description="lowercase letters, digits and -"), R("name"),
+          F("description", default=""),
+          R("match", "json", description='[{"name": "alertname", "value": "...", "regex": false}] (all must match)'),
+          F("steps", "json", default=[],
+            description='[{"type": "promql|logql|logs|traces|health|pg_status|pg_metrics|pg_slow_queries|pg_backups|'
+                        'pg_diagnose", "title": "...", "query": "...", "instance": "{{ labels.pg_instance }}"}]'),
+          F("actions", "json", default=[], description='[{"action": "restart_instance", "params": {}, "why": "..."}]'),
+          F("enabled", "bool", default=True)),
+         **crud("/v1/sre/runbooks"), list_key="items", key=("id",), order=162, service="sre", docs="sre-agent",
+         example={"id": "postgres-latency", "name": "Postgres latency",
+                  "match": [{"name": "pg_instance", "value": ".+", "regex": True}],
+                  "steps": [{"type": "pg_status", "instance": "{{ labels.pg_instance }}"},
+                            {"type": "pg_slow_queries", "instance": "{{ labels.pg_instance }}"}],
+                  "actions": [{"action": "restart_instance", "why": "sessions idle in a transaction fill the slots"}]},
+         example_update={"description": "Slow statements and connection saturation on a managed instance"}),
+    Kind("sre_agent_settings", "sre_agent_settings", "operations",
+         "The SRE agent's settings: whether it works, which incidents it joins by itself (severities) and whom it acts "
+         "for then, the model it asks through the AI gateway, and its budget (steps and tokens a run, runs a day).",
+         (F("enabled", "bool", default=True),
+          F("auto_join", "list", default=["critical"], description="severities of incidents it joins by itself"),
+          F("run_as", default=None, description="the person it acts for when it joins by itself (" + PERSON + "); "
+                                                "null: it joins only when asked"),
+          F("model", default=None, description="a model the AI gateway serves; null: CAIRN_SRE_AGENT_MODEL"),
+          F("max_steps", "int", default=12), F("max_tokens_per_run", "int", default=200000),
+          F("daily_runs", "int", default=100), F("postmortems", "bool", default=True,
+                                                   description="draft a postmortem when an incident is resolved")),
+         read="/v1/sre/settings", list_key=".", key=(), create=op("PUT /v1/sre/settings"),
+         update=op("PUT /v1/sre/settings"), delete=None, order=163, service="sre", docs="sre-agent",
+         example={"auto_join": ["critical", "warning"]}, example_update={"max_steps": 16}),
 ]

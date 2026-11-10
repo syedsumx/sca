@@ -143,6 +143,12 @@ ACTIONS: dict[str, str] = {
     "POST /v1/iac/changes/plan": _CHECK, "POST /v1/people/access-check": _CHECK,
     "POST /v1/observability/alert-rules/test": _CHECK,
     "POST /v1/observability/evaluate": _RUN,              # evaluates the declared alert rules and SLOs now
+    # the SRE agent (L142): it works now; what it is configured with is sre_agent_settings and sre_runbooks
+    "POST /v1/sre/incidents/{}/investigate": "the SRE agent investigates an incident now (its settings and runbooks "
+                                             "are sre_agent_settings and sre_runbooks)",
+    "POST /v1/sre/incidents/{}/ask": _QUERY, "POST /v1/sre/instances/{}/diagnose": _QUERY,
+    "POST /v1/sre/actions/{}/approve": "runs a proposal now as the approving person (an instance operation, a silence "
+                                       "or a change request applied through /v1/iac/changes)",
     # protocols between components
     "POST /v1/trino/{}/allow": _PROTOCOL, "POST /v1/trino/{}/batch": _PROTOCOL, "POST /v1/trino/{}/column-mask": _PROTOCOL,
     "POST /v1/trino/{}/row-filters": _PROTOCOL, "POST /v1/trino/{}/lineage": _PROTOCOL, "POST /v1/trino/{}/queries": _PROTOCOL,
@@ -215,6 +221,10 @@ EXCLUDED: dict[str, str] = {
     "POST /v1/observability/incidents/{}/assign": _OBS_INCIDENT,
     "POST /v1/observability/alerts/{}/acknowledge": "runtime state: who acknowledged a firing alert",
     "POST /v1/observability/deploys": "release: a deploy, recorded for incident timelines (by CI/CD as it ships)",
+    "POST /v1/sre/actions/{}/reject": "workflow: a person's decision on the SRE agent's proposal",
+    "POST /v1/sre/incidents/{}/postmortem/draft": "runtime state: an incident's postmortem, drafted by the SRE agent",
+    "PUT /v1/sre/incidents/{}/postmortem": "runtime state: an incident's postmortem, edited by a person",
+    "POST /v1/sre/incidents/{}/postmortem/approve": "workflow: a person approves an incident's postmortem",
     "POST /v1/chargeback/statements": "runtime state: a chargeback statement, computed for a period",
     "POST /v1/signup": "runtime state: a self-service sign-up (the tenant it makes is the hosting control plane's)",
     "POST /quality/evaluations/{}/feedback": "runtime state: a person's verdict on an evaluation",

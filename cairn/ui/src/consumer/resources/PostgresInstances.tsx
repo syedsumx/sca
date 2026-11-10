@@ -5,6 +5,7 @@ import { useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
+import { DiagnoseButton } from '../components/SreAgent';
 import { Muted } from '../components/tokens';
 
 /** A managed PostgreSQL instance as `GET /v1/databases/instances` lists it. */
@@ -163,6 +164,7 @@ function Status({ name }: { name: string }) {
                 {s.pending?.length ? <Button onClick={() => act('apply-pending')}>Apply pending changes now</Button> : null}
                 {s.runtime !== 'external' && <Button onClick={() => act('restart')}>Restart</Button>}
                 {s.runtime === 'kubernetes' && <Button onClick={() => act('switchover')}>Switch over to a standby</Button>}
+                <DiagnoseButton instance={name} />
             </Space>
             {(s.problems ?? []).map((p: string) => <Alert key={p} type="warning" showIcon message={p} style={{ marginBottom: 8 }} />)}
             <Descriptions size="small" bordered column={1}>

@@ -371,6 +371,14 @@ jobs:
           done
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_e2e.py | tee "$RUNNER_TEMP/observability.log"
           ! grep -q "skipped" "$RUNNER_TEMP/observability.log"
+      - name: The SRE agent (L142) - a slow statement's alert, incident, diagnosis, change request approved; filled connections, a restart approved; fail closed
+        working-directory: cairn
+        # Its own pytest (telemetry is per process): the stack above, a managed PostgreSQL instance on Docker, the store,
+        # and the AI gateway in front of the deterministic stand-in model (tests/live_model_standin.py).
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_agent_e2e.py | tee "$RUNNER_TEMP/sre.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sre.log"
       - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
         working-directory: cairn
         run: |
@@ -446,7 +454,7 @@ jobs:
             live=true
           elif [ -z "$BEFORE" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
             live=true
-          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qE '^cairn/(src/cairn/(ai|agentkit|flows)/|src/cairn/sqlworkspace/(builder|autopilot)[.]py|src/cairn/iac/changes[.]py|src/cairn/pipelines/(parse|enrich)[.]py|tests/test_live_model[.]py|tests/live_model_standin[.]py)'; then
+          elif git diff --name-only "$BEFORE" "$GITHUB_SHA" | grep -qE '^cairn/(src/cairn/(ai|agentkit|flows|sre)/|src/cairn/sqlworkspace/(builder|autopilot)[.]py|src/cairn/iac/changes[.]py|src/cairn/pipelines/(parse|enrich)[.]py|tests/test_live_model[.]py|tests/live_model_standin[.]py)'; then
             live=true
           fi
           echo "LIVE=$live" >> "$GITHUB_ENV"
@@ -758,6 +766,11 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_ui_e2e.py | tee "$RUNNER_TEMP/obsui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/obsui.log"
+      - name: The SRE agent in the incident page (a proposal approved and run as the approver, refused to someone without the privilege; Diagnose; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_ui_e2e.py | tee "$RUNNER_TEMP/sreui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/sreui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail

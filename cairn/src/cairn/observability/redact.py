@@ -46,6 +46,7 @@ _SECRETS = [
                 r"access[_-]?key|session[_-]?key)[a-z0-9_.-]*)(\s*[=:]\s*)(\"[^\"]*\"|'[^']*'|[^\s&,;\"']+)"),
      r"\1\2" + REDACTED),
     (re.compile(r"(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+:[^/\s@]+@"), r"\1" + REDACTED + "@"),         # user:password@
+    (re.compile(r"(?i)\b(PASSWORD\s+)(E?'(?:[^']|'')*')"), r"\1'" + REDACTED + "'"),                  # SQL: PASSWORD '...'
 ]
 _SQL_STRING = re.compile(r"(?s)(?:\b[EeNnUuXxBb]&?)?'(?:[^']|'')*'")
 _SQL_DOLLAR = re.compile(r"(?s)\$([A-Za-z_]*)\$.*?\$\1\$")
@@ -63,6 +64,24 @@ def scrub_text(value: str) -> str:
     for pattern, replacement in _SECRETS:
         value = pattern.sub(replacement, value)
     return value[:MAX_VALUE]
+
+
+def scrub_all(value: str) -> str:
+    """:func:`scrub_text` without its length limit, for a document whose size the caller limits itself."""
+    for pattern, replacement in _SECRETS:
+        value = pattern.sub(replacement, value)
+    return value
+
+
+def scrub_doc(value):
+    """Secrets out of every string of a JSON document (its shape kept: a document is never cut mid-string)."""
+    if isinstance(value, str):
+        return scrub_all(value)
+    if isinstance(value, list):
+        return [scrub_doc(v) for v in value]
+    if isinstance(value, dict):
+        return {k: scrub_doc(v) for k, v in value.items()}
+    return value
 
 
 _SQLA_PARAMS = re.compile(r"(?s)\[parameters: .*?\](?=\s*(\(Background on this error|$|\n))")

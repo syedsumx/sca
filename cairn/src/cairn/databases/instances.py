@@ -88,6 +88,10 @@ STUCK_MS = 6 * 3600 * 1000            # a backup "running" this long was cut off
 SEGMENT = 16 * 1024 * 1024
 
 
+# A utility statement's text is recorded as it ran (no constants replaced): a role's password must not be shown.
+_PASSWORD = re.compile(r"(?i)\b(PASSWORD\s+)(E?'(?:[^']|'')*'|\$[A-Za-z_]*\$.*?\$[A-Za-z_]*\$)", re.S)
+
+
 class InstanceError(Exception):
     def __init__(self, message: str, status: int = 400):
         super().__init__(message)
@@ -861,6 +865,9 @@ class Instances:
             conn = conn_as(theirs)
         with conn:
             conn.execute("SET log_statement = 'none'")
+            from cairn.dataaccess.databases import quiet_statement_stats
+
+            quiet_statement_stats(conn)
             conn.execute(sql.SQL("ALTER ROLE postgres PASSWORD {}").format(sql.Literal(mine)))
         dbs = self.databases
         source_dbs = dbs.on_instance(origin["instance"], include_dropped=True) if dbs is not None else []
@@ -1064,7 +1071,8 @@ class Instances:
         return {"name": name, "order": order, "queries": [
             {"queryid": r[0], "database": r[1], "role": r[2], "calls": r[3], "total_ms": round(r[4], 3),
              "mean_ms": round(r[5], 3), "max_ms": round(r[6], 3), "rows": r[7], "shared_blocks_hit": r[8],
-             "shared_blocks_read": r[9], "temp_blocks_written": r[10], "query": r[11]} for r in rows]}
+             "shared_blocks_read": r[9], "temp_blocks_written": r[10], "query": _PASSWORD.sub(r"\1'[redacted]'", r[11] or "")}
+            for r in rows]}
 
     # ---- the scheduler ---------------------------------------------------------------------------------------
     def run_due(self) -> int:

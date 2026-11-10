@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-87 resources, each also a data source:
+90 resources, each also a data source:
 
 **Identity and access**
 
@@ -57,6 +57,7 @@ permissions and audit apply:
 | `cairn_postgres_instance` | `postgres_instances` | A managed PostgreSQL instance (Managed Postgres): its major version, size, standbys (Kubernetes), PgBouncer pooling (Kubernetes) and maintenance window |
 | `cairn_postgres_parameter` | `postgres_parameters` | One allow-listed PostgreSQL parameter of a managed instance (work_mem, max_connections, ...) |
 | `cairn_postgres_backup_schedule` | `postgres_backup_schedules` | A backup schedule of a managed instance: a base backup every few hours (WAL is archived continuously), kept for retention_days (the newest always), each optionally checked by a restore |
+| `cairn_postgres_index` | `postgres_indexes` | An index of an operational database's table, built with CREATE INDEX CONCURRENTLY (writes go on) |
 
 **SQL and BI**
 
@@ -133,6 +134,8 @@ permissions and audit apply:
 | `cairn_observability_slo` | `observability_slos` | A service level objective: the share of a component's events that must be good (a PromQL ratio of bad to all events, or a latency threshold on a histogram) over a window, with multi-window burn-rate alerts sent to notification routes; a firing one opens an incident |
 | `cairn_observability_alert_rule` | `observability_alert_rules` | An alert rule: a PromQL or LogQL condition (each series it returns is an alert), how long it holds before it fires, a severity, the notification routes and people told, and whether it opens an incident |
 | `cairn_observability_silence` | `observability_silences` | A silence: alerts whose labels match are not sent and open no incident, between two times (maintenance) |
+| `cairn_sre_runbook` | `sre_runbooks` | A runbook for the SRE agent: the alerts it is for (label matchers), the diagnostic steps it runs first (PromQL, LogQL, logs, traces, health, Postgres status, metrics, slow statements, backups, diagnosis) and the runbook actions it may propose (restart_instance, switchover_instance, backup_instance, silence_alert, rerun_flow), which a person approves |
+| `cairn_sre_agent_settings` | `sre_agent_settings` | The SRE agent's settings: whether it works, which incidents it joins by itself (severities) and whom it acts for then, the model it asks through the AI gateway, and its budget (steps and tokens a run, runs a day) |
 
 <!-- END GENERATED RESOURCES -->
 

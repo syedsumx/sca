@@ -322,6 +322,21 @@ class ObservabilityService:
         self.audit = audit
         self.public_url = public_url.rstrip("/")
         self.version = version
+        # Called with ("opened" | "resolved", the incident) after an incident opens or is resolved (the SRE agent).
+        self.listeners: list = []
+
+    def _emit(self, event: str, iid: str) -> None:
+        if not self.listeners:
+            return
+        try:
+            inc = self._incident_public(self._incident_row(iid))
+        except ObservabilityError:
+            return
+        for fn in list(self.listeners):
+            try:
+                fn(event, inc)
+            except Exception:  # noqa: BLE001 - a listener never stops the incident's own work
+                logger.exception("an incident listener failed on %s", iid)
 
     # ---- configuration (SLOs, alert rules, silences) -------------------------------------------------------------
     def _audit(self, actor: str, action: str, subject: Optional[str], details: dict) -> None:
@@ -894,6 +909,8 @@ class ObservabilityService:
                     services=services, summary=a["summary"][:4000], assignee=None, opened_by=ACTOR, opened_ms=now,
                     acknowledged_by=None, acknowledged_ms=None, resolved_by=None, resolved_ms=None, updated_ms=now))
                 created = True
+            # The alert belongs to it before anyone hears of it (the SRE agent reads the incident's alerts at once).
+            c.execute(update(obs_alerts).where(obs_alerts.c.id == a["id"]).values(incident_id=iid))
         self._event(iid, "alert_firing", ACTOR, f"{a['name']} fired: {a['summary']}",
                     {"alert": a["id"], "severity": a["severity"], "labels": a["labels"]}, now)
         if created:
@@ -909,6 +926,7 @@ class ObservabilityService:
                         payload={"incident": iid, "severity": a["severity"]}, routes=list(spec.get("routes") or [])))
                 except Exception:  # noqa: BLE001
                     logger.exception("could not publish the incident %s", iid)
+            self._emit("opened", iid)
         return iid
 
     def _event(self, iid: str, kind: str, actor: str, text: str, doc: Optional[dict] = None,
@@ -961,6 +979,7 @@ class ObservabilityService:
                 resolved_ms=None, updated_ms=now))
         self._event(iid, "status", actor, f"opened by {actor}", {"status": "open"}, now, by_agent)
         self._audit(actor, "observability.incident_opened", iid, {"title": title})
+        self._emit("opened", iid)
         return self.incident(iid)
 
     def incident(self, iid: str) -> dict:
@@ -1032,8 +1051,7 @@ class ObservabilityService:
             raise ObservabilityError("a note needs text (up to 8,000 characters)", 422)
         self._incident_row(iid)
         detail = body.get("detail") if isinstance(body.get("detail"), dict) else {}
-        self._event(iid, kind, actor, text, json.loads(redact.scrub_text(json.dumps(detail)))
-                    if detail else {}, by_agent=by_agent)
+        self._event(iid, kind, actor, text, redact.scrub_doc(detail) if detail else {}, by_agent=by_agent)
         return self.incident(iid)
 
     def set_incident(self, actor: str, iid: str, action: str, body: dict, by_agent: bool = False) -> dict:
@@ -1077,6 +1095,8 @@ class ObservabilityService:
                                        body=text[:3000], actor=actor, payload={"incident": iid}))
             except Exception:  # noqa: BLE001
                 logger.exception("could not publish the resolution of %s", iid)
+        if action == "resolve":
+            self._emit("resolved", iid)
         return self.incident(iid)
 
     def incident_context(self, iid: str) -> dict:
