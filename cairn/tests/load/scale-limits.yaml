@@ -12,8 +12,9 @@
 #   cached, 1,000/s offered for 60 s here: 1,000/s answered, p50 2.6 ms, p99 204 ms.
 pdp:
   cached: {min_fraction: 0.95, max_p99_ms: 2000}
-  # Uncached decisions top out near 190/s on 4 vCPUs (each reads ~15 aspects from Core): gated at 150/s offered.
-  uncached: {rate: 150, min_fraction: 0.95, max_p99_ms: 5000}
+  # Uncached decisions top out near 190/s here and near 140/s on the CI runner (each reads ~15 aspects from Core;
+  # run 350: 150/s offered, 137.5/s answered): gated at 100/s offered.
+  uncached: {rate: 100, min_fraction: 0.95, max_p99_ms: 5000}
 gateway:
   min_mib_per_second: 3
   max_batch_p99_ms: 30000

@@ -3526,7 +3526,7 @@ replicas driven open-loop for 60 seconds, latency counted from each request's sc
 the decision cache holds and once with every question new; and `cairn gateway` with 100
 real agents (in pools of 50) uploading 1 GiB of sealed metadata in one run. Cairn Core is a stand-in that answers at
 once, so the numbers are Cairn's own work. CI's 4-vCPU runner holds the driver and the replicas, so it offers what
-that machine sustains (1,000/s cached, 150/s uncached; past that the p99 measures the backlog, not Cairn) and fails on
+that machine sustains (1,000/s cached, 100/s uncached; past that the p99 measures the backlog, not Cairn) and fails on
 a regression below those rates (`tests/load/scale-limits.yaml`); the 2,000/s targets are for a deployment's own
 machines, measured with the commands below. To drive your own deployment:
 
