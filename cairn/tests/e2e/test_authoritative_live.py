@@ -121,7 +121,19 @@ def test_authoritative_with_the_pdp_down_core_fails_closed(bob):
     eventually(lambda: views(bob), timeout=120, interval=5)                  # viewing is granted (native, imported)
     compose("stop", "cairn-pdp")
     try:
-        eventually(lambda: not views(bob), timeout=120, interval=5)          # past Core's decision cache: refused
+        try:
+            eventually(lambda: not views(bob), timeout=120, interval=5)      # past Core's decision cache: refused
+        except AssertionError as e:
+            # Which part let the view through: what bob got, and what Core's authorizer and the proxy said.
+            body = frontend_gql(bob, VIEW, {"u": DS}).text[:1500]
+            core = [ln for ln in compose("logs", "--no-color", "--tail", "3000", "cairn-core").splitlines()
+                    if any(k in ln for k in ("Cairn PDP call failed", "fail-closed", "fail-open", "circuit",
+                                             "CairnAuthorizer", "Authoriz"))]
+            proxy = [ln for ln in compose("logs", "--no-color", "--tail", "2000", "cairn-core-proxy").splitlines()
+                     if "decision" in ln or "authoritative" in ln]
+            ps = compose("ps", "--all", "cairn-pdp")
+            raise AssertionError(f"{e}\nbob got: {body}\npdp: {ps}\ncore authorizer:\n" + "\n".join(core[-40:])
+                                 + "\nproxy:\n" + "\n".join(proxy[-20:])) from None
         assert views(TOKEN)                                                  # the break-glass admin still gets in
     finally:
         compose("up", "-d", "--no-build", "--wait", "cairn-pdp", timeout=600)
