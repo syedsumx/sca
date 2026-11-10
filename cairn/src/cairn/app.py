@@ -125,6 +125,7 @@ class _AgentAttribution:
 
 def _base_app(name: str, services: Services) -> FastAPI:
     from cairn.common.tracing import setup_tracing
+    from cairn.common.tracing import trace_id as _trace_id
 
     app = FastAPI(title=f"Cairn — {name}", version=__version__)
     app.state.services = services
@@ -146,6 +147,9 @@ def _base_app(name: str, services: Services) -> FastAPI:
         # Whatever is in front (the Compose edge, an ingress) or not: API answers are not sniffed, not
         # cached by browsers or proxies, and send no referrer. Framing is left to the edge (embeds are framed).
         h = response.headers
+        tid = _trace_id()
+        if tid:                                 # the request's journey: GET /v1/observability/journey/<trace id>
+            h.setdefault("x-trace-id", tid)
         h.setdefault("x-content-type-options", "nosniff")
         h.setdefault("referrer-policy", "no-referrer")
         if not request.url.path.startswith("/embed/v1/sdk"):
@@ -248,6 +252,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.governance.workspaces_api import build_router as workspaces_router
 
         app.include_router(workspaces_router(services.workspaces, cp, services.is_admin))
+    if getattr(services, "observability", None) is not None:   # Observability: health, journeys, logs, SLOs, incidents
+        from cairn.observability.api import build_router as observability_router
+
+        app.include_router(observability_router(services.observability, cp, authz))
     if getattr(services, "people", None) is not None:          # People & roles: the directory, who holds what and why
         from cairn.identity.people import build_router as people_router
 

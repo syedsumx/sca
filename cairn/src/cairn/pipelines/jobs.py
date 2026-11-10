@@ -458,6 +458,10 @@ class Jobs:
             raise JobError(f"{owner} may no longer run jobs (RUN_JOBS)", 403)
         env = {"CAIRN_USER": owner.removeprefix("urn:li:corpuser:"), "CAIRN_JOB": label, "CAIRN_JOB_RUN": rid,
                "CAIRN_JOB_PARAMS": json.dumps(params or {}), **(extra_env or {})}
+        from cairn.observability.telemetry import current_traceparent
+
+        if current_traceparent():                          # the run (and a Spark job it submits) joins this trace
+            env["TRACEPARENT"] = current_traceparent()
         token = self.mint_token(owner, timeout_s + 300) if self.mint_token is not None else None
         if token:                                          # Trino configured: the run reads as its owner
             env["CAIRN_TRINO_TOKEN"] = token

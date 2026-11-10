@@ -180,6 +180,7 @@ def load_models() -> MetaData:
     from cairn.flows import engine as _flows  # noqa: F401
     from cairn.identity import workload as _workload  # noqa: F401
     from cairn.identity import people as _people  # noqa: F401
+    from cairn.observability import service as _observability  # noqa: F401
     from cairn.identity import profiles as _profiles  # noqa: F401
     from cairn.pipelines import changes as _changes  # noqa: F401
     from cairn.pipelines import dbt as _dbt  # noqa: F401

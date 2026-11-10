@@ -41,7 +41,7 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: cairn/pyproject.toml
-      - run: pip install -e ".[server,ai,test,postgres,export]" ruff   # export: pyarrow and pyiceberg (system tables)
+      - run: pip install -e ".[server,ai,test,postgres,export,otel]" ruff   # export: system tables; otel: telemetry's redaction
       - uses: actions/setup-node@v4     # the JavaScript client's tests (tests/test_sdk_clients.py)
         with:
           node-version: "22"
@@ -360,6 +360,17 @@ jobs:
             | tee "$RUNNER_TEMP/trino.log"
           # Skipped is not passed: every Trino test must have run.
           ! grep -q "skipped" "$RUNNER_TEMP/trino.log"
+      - name: Observability on the bundled stack (L141) - Collector, Prometheus, Loki and Tempo with a real Trino
+        working-directory: cairn
+        # Its own pytest: OpenTelemetry is set up once per process (the API in this test exports to the Collector).
+        run: |
+          set -o pipefail
+          pip install -q -e ".[otel]"
+          for i in otel/opentelemetry-collector-contrib:0.163.2 prom/prometheus:v3.15.1 grafana/loki:3.6.18 grafana/tempo:2.9.5; do
+            for t in 1 2 3; do docker pull -q "$i" && break; sleep 15; done
+          done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_observability_e2e.py | tee "$RUNNER_TEMP/observability.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/observability.log"
       - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
         working-directory: cairn
         run: |
@@ -1117,7 +1128,9 @@ jobs:
               "--set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.dbt.jobs[0].name=shop --set cairn.dbt.jobs[0].image=registry.example.com/shop-dbt:1.0 --set cairn.dbt.jobs[0].schedule=@daily --set cairn.dbt.jobs[0].tokenSecret.name=svc-dbt --set cairn.dbt.jobs[0].caSecret.name=cairn-trino-tls" \
               "--set cairn.jobs.runtime=kubernetes --set cairn.jobs.trinoUrl=https://cairn-trino:8443 --set cairn.jobs.trinoCa.configMap=cairn-trino-ca" \
               "-f helm/cairn/ci/ml-workloads-values.yaml --set cairn.networkPolicy.enabled=true" \
-              "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys"; do
+              "--set cairn.gateway.keys.kms.secretName=cairn-gateway-kms --set cairn.gateway.keys.existingSecret=cairn-gateway-keys" \
+              "--set cairn.observability.enabled=true --set cairn.observability.prometheus.persistence.enabled=true --set cairn.store.enabled=true --set cairn.catalog.enabled=true --set cairn.trino.enabled=true --set cairn.trino.tls.secretName=cairn-trino-tls --set cairn.networkPolicy.enabled=true" \
+              "--set cairn.observability.otlp.endpoint=https://otlp.example.com --set cairn.observability.otlp.headersSecret=otlp-auth --set cairn.observability.read.prometheusUrl=https://prometheus.example.com --set cairn.observability.read.traceUrl=https://ui.example.com/trace/{trace_id} --set cairn.observability.read.credentialsSecret=observability-read"; do
             # shellcheck disable=SC2086
             helm template cairn helm/cairn $values \
               | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0

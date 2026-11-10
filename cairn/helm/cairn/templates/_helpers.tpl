@@ -161,6 +161,7 @@ app.kubernetes.io/component: {{ .component }}
 {{/* ------------------------------------------------------------------ shared env */}}
 {{- define "cairn.env" -}}
 {{- $s := .Values.cairn.secrets -}}
+{{- include "cairn.observabilityReadEnv" . }}
 - name: CAIRN_CORE_URL
   value: {{ include "cairn.coreUrl" . | quote }}
 - name: CAIRN_FRONTEND_URL
@@ -468,6 +469,7 @@ spec:
             {{- toYaml .args | nindent 12 }}
           env:
             {{- include "cairn.env" $root | nindent 12 }}
+            {{- include "cairn.otelEnv" (dict "root" $root "service" (printf "cairn-%s" .component)) | nindent 12 }}
             {{- with .extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -524,6 +526,11 @@ spec:
             - name: core-token
               mountPath: /run/cairn
               readOnly: true
+            {{- if $root.Values.cairn.observability.read.credentialsSecret }}
+            - name: observability-credentials
+              mountPath: /run/cairn-observability
+              readOnly: true
+            {{- end }}
             {{- if include "cairn.policiesConfigMap" $root }}
             - name: policies
               mountPath: /etc/cairn/config/policies
@@ -560,6 +567,12 @@ spec:
           secret:
             secretName: {{ include "cairn.coreTokenSecret" $root }}
             optional: true
+        {{- with $root.Values.cairn.observability.read.credentialsSecret }}
+        - name: observability-credentials
+          secret:
+            secretName: {{ . }}
+            optional: true
+        {{- end }}
         {{- if include "cairn.policiesConfigMap" $root }}
         - name: policies
           configMap:
@@ -745,6 +758,10 @@ spec:
       {{- end }}
       securityContext:
         {{- include "cairn.corePodSecurity" . | nindent 8 }}
+      {{- with .initContainers }}
+      initContainers:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .component }}
           image: {{ include "cairn.namedImage" (dict "root" $root "name" .image) }}
@@ -814,4 +831,117 @@ spec:
 {{- $out = append $out (printf "/disks/%s:%s" .name .type) -}}
 {{- end -}}
 {{- join "," $out -}}
+{{- end -}}
+
+
+{{/* ------------------------------------------------------------------ observability (L141)
+Where Cairn's components send OTLP/HTTP: cairn.observability.otlp.endpoint (your own Collector or backend), else the
+bundled Collector when cairn.observability.enabled, else nowhere (telemetry off). */}}
+{{- define "cairn.otelEndpoint" -}}
+{{- $o := .Values.cairn.observability -}}
+{{- if $o.otlp.endpoint -}}
+{{- $o.otlp.endpoint -}}
+{{- else if $o.enabled -}}
+http://{{ include "cairn.fullname" . }}-otel-collector:4318
+{{- end -}}
+{{- end -}}
+
+{{/* OpenTelemetry settings of one component (dict root, service). Nothing when telemetry is off. */}}
+{{- define "cairn.otelEnv" -}}
+{{- $root := .root -}}
+{{- $o := $root.Values.cairn.observability -}}
+{{- $ep := include "cairn.otelEndpoint" $root -}}
+{{- if $ep }}
+- name: OTEL_EXPORTER_OTLP_ENDPOINT
+  value: {{ $ep | quote }}
+- name: OTEL_EXPORTER_OTLP_PROTOCOL
+  value: http/protobuf
+- name: OTEL_SERVICE_NAME
+  value: {{ .service | quote }}
+- name: OTEL_RESOURCE_ATTRIBUTES
+  value: {{ printf "service.namespace=cairn,k8s.namespace.name=%s,deployment.environment=%s" $root.Release.Namespace $o.environment | quote }}
+- name: OTEL_TRACES_SAMPLER
+  value: {{ $o.sampling.sampler | quote }}
+- name: OTEL_TRACES_SAMPLER_ARG
+  value: {{ $o.sampling.ratio | quote }}
+{{- if $o.otlp.headersSecret }}
+- name: OTEL_EXPORTER_OTLP_HEADERS
+  valueFrom:
+    secretKeyRef: { name: {{ $o.otlp.headersSecret }}, key: {{ $o.otlp.headersKey }} }
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* Where Cairn reads telemetry back (the health map, journeys, logs, SLOs and alerts). */}}
+{{- define "cairn.observabilityReadEnv" -}}
+{{- $o := .Values.cairn.observability -}}
+{{- $r := $o.read -}}
+{{- $base := include "cairn.fullname" . -}}
+{{- $prom := $r.prometheusUrl | default (ternary (printf "http://%s-prometheus:9090" $base) "" $o.enabled) -}}
+{{- $loki := $r.lokiUrl | default (ternary (printf "http://%s-loki:3100" $base) "" $o.enabled) -}}
+{{- $tempo := $r.tempoUrl | default (ternary (printf "http://%s-tempo:3200" $base) "" $o.enabled) -}}
+{{- range $k, $v := dict "CAIRN_OBS_PROMETHEUS_URL" $prom "CAIRN_OBS_LOKI_URL" $loki "CAIRN_OBS_TEMPO_URL" $tempo "CAIRN_OBS_TRACE_URL" $r.traceUrl "CAIRN_OBS_LOGS_URL" $r.logsUrl "CAIRN_OBS_VENDOR" $r.vendor }}
+{{- if $v }}
+- name: {{ $k }}
+  value: {{ $v | quote }}
+{{- end }}
+{{- end }}
+{{- if $r.credentialsSecret }}
+{{- range $name := list "prometheus" "loki" "tempo" }}
+{{- range $kind := list "token" "basic_auth" }}
+- name: {{ printf "CAIRN_OBS_%s_%s_FILE" (upper $name) (upper $kind) }}
+  value: {{ printf "/run/cairn-observability/%s-%s" $name (replace "_" "-" $kind) | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+
+{{/* Trino's tracing (config.properties): its spans to the Collector's OTLP gRPC port. */}}
+{{- define "cairn.trinoTracing" -}}
+{{- $o := .Values.cairn.observability -}}
+{{- $ep := $o.trino.endpoint | default (ternary (printf "http://%s-otel-collector:4317" (include "cairn.fullname" .)) "" $o.enabled) -}}
+{{- if and $o.trino.enabled $ep }}
+tracing.enabled=true
+tracing.exporter.endpoint={{ $ep }}
+{{- end }}
+{{- end -}}
+
+
+{{/* The OpenTelemetry Java agent for a Cairn Core component (dict root, service), as YAML: env (a string of env
+entries to append), initContainers, volumes, volumeMounts. Empty when telemetry or the agent is off. */}}
+{{- define "cairn.javaAgent" -}}
+{{- $root := .root -}}
+{{- $o := $root.Values.cairn.observability -}}
+{{- if and $o.javaAgent.enabled (include "cairn.otelEndpoint" $root) }}
+env: |
+{{- include "cairn.otelEnv" (dict "root" $root "service" .service) | indent 2 }}
+  - name: JAVA_TOOL_OPTIONS
+    value: "-javaagent:/otel-agent/javaagent.jar"
+  - name: OTEL_INSTRUMENTATION_COMMON_DB_STATEMENT_SANITIZER_ENABLED
+    value: "true"
+  - name: OTEL_INSTRUMENTATION_HTTP_SERVER_CAPTURE_REQUEST_HEADERS
+    value: ""
+  - name: OTEL_LOGS_EXPORTER
+    value: otlp
+initContainers:
+  - name: otel-java-agent
+    image: {{ $o.javaAgent.image }}
+    command: ["cp", "/javaagent.jar", "/otel-agent/javaagent.jar"]
+    securityContext:
+      allowPrivilegeEscalation: false
+      readOnlyRootFilesystem: true
+      runAsNonRoot: true
+      capabilities: { drop: ["ALL"] }
+    resources:
+      requests: { cpu: 10m, memory: 32Mi }
+      limits: { memory: 64Mi }
+    volumeMounts:
+      - { name: otel-agent, mountPath: /otel-agent }
+volumes:
+  - name: otel-agent
+    emptyDir: { sizeLimit: 64Mi }
+volumeMounts:
+  - { name: otel-agent, mountPath: /otel-agent, readOnly: true }
+{{- end }}
 {{- end -}}

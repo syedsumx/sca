@@ -227,6 +227,9 @@ class ConnectionRegistry:
                 session = requests.Session()
                 session.trust_env = False
                 session.verify = verify
+            from cairn.observability.telemetry import outgoing_headers
+
+            headers.update(outgoing_headers())
             return trino.dbapi.connect(host=u.hostname, port=u.port or (443 if scheme == "https" else 8080), user=user,
                                        catalog=path[0] if path else None, schema=path[1] if len(path) > 1 else None,
                                        http_scheme=scheme, auth=auth, http_headers=headers or None, verify=verify,

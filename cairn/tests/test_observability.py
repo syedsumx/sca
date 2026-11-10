@@ -45,6 +45,9 @@ def test_alerts_and_dashboard_only_use_real_metrics():
 def test_helm_copies_match():
     for f in ("cairn-alerts.yaml", "cairn-overview.json"):
         assert open(os.path.join(OBS, f)).read() == open(os.path.join(ROOT, "helm", "cairn", "files", f)).read(), f
+    for f in ("otel-collector.yaml", "tempo.yaml", "loki.yaml"):          # the bundled stack (L141)
+        assert open(os.path.join(OBS, "stack", f)).read() == \
+            open(os.path.join(ROOT, "helm", "cairn", "files", "observability", f)).read(), f
 
 
 def test_domain_metrics_move(engine):
@@ -69,9 +72,13 @@ def test_domain_metrics_move(engine):
 def test_tracing_is_off_unless_configured(monkeypatch, caplog):
     from cairn.common import tracing
 
-    monkeypatch.delenv("CAIRN_OTEL_ENDPOINT", raising=False)
+    for k in ("CAIRN_OTEL_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"):
+        monkeypatch.delenv(k, raising=False)
     assert tracing.setup_tracing() is False
-    monkeypatch.setenv("CAIRN_OTEL_ENDPOINT", "http://collector:4318")
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.setenv("OTEL_SDK_DISABLED", "true")                 # the standard switch wins
+    assert tracing.setup_tracing() is False
+    monkeypatch.delenv("OTEL_SDK_DISABLED")
     try:
         import opentelemetry.sdk  # noqa: F401
     except ImportError:

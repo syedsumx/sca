@@ -653,6 +653,11 @@ class Flows:
             why = f"Cairn cannot check {row['owner']} now ({type(e).__name__})"
         if why:
             status, error = "failed", f"not run: {why}"
+        from cairn.observability.telemetry import current_traceparent
+
+        started_by = current_traceparent()             # the request that started it: its steps' spans link to it
+        if started_by:
+            detail = {**(detail or {}), "traceparent": started_by}
         with self.engine.begin() as conn:
             conn.execute(update(flows).where(flows.c.id == row["id"]).values(updated_ms=flows.c.updated_ms))  # per-flow lock
             if status == "queued" and defn["concurrency"]["policy"] == "skip" and not force_queue:
@@ -1013,7 +1018,18 @@ class Flows:
         if not resume:
             values_now.update(attempt=attempt, started_ms=now, finished_ms=None, error=None)
         self._set_step(rid, s["name"], **values_now)
-        return self.pool.submit(self._execute, ctx), ctx
+        return self.pool.submit(self._traced, ctx, (run.get("detail") or {}).get("traceparent")), ctx
+
+    def _traced(self, ctx: stepmod.Ctx, started_by: Optional[str]) -> Any:
+        """A step in a span of its own (a new trace per step attempt, linked to the request that started the run),
+        so what the step calls (Trino, jobs, agent apps) is traced under it."""
+        from cairn.observability.telemetry import span
+
+        with span(f"flow.step {ctx.step.get('type')}", {"cairn.flow": ctx.flow, "cairn.flow.run_id": ctx.run_id,
+                                                         "cairn.flow.step": ctx.step.get("name"),
+                                                         "cairn.flow.attempt": ctx.attempt},
+                  links_to=[started_by] if started_by else None, root=True):
+            return self._execute(ctx)
 
     def _execute(self, ctx: stepmod.Ctx) -> Any:
         s = ctx.step

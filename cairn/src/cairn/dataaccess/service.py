@@ -307,10 +307,14 @@ class DataAccessService:
             session.trust_env = False
             session.verify = verify
         path = [p for p in url.path.split("/") if p]
+        from cairn.observability.telemetry import outgoing_headers, trino_client_tags
+
+        headers.update(outgoing_headers())          # Trino joins this request's trace; its history names the trace
         conn = trino.dbapi.connect(host=url.hostname, port=url.port or (443 if scheme == "https" else 8080), user=user,
                                    catalog=path[0] if path else None, schema=path[1] if len(path) > 1 else None,
                                    http_scheme=scheme, auth=auth, http_headers=headers or None, verify=verify,
-                                   http_session=session, source="cairn", request_timeout=max(5.0, self.timeout_ms / 1000))
+                                   http_session=session, source="cairn", client_tags=trino_client_tags() or None,
+                                   request_timeout=max(5.0, self.timeout_ms / 1000))
         try:
             cur = conn.cursor()
             cur.execute(sql)

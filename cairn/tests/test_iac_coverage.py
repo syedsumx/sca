@@ -136,6 +136,8 @@ ACTIONS: dict[str, str] = {
     "POST /quality/contracts/check": _CHECK, "POST /sources/test": _CHECK, "POST /v1/network/egress-rules/check": _CHECK,
     "POST /v1/flows/validate": _CHECK, "POST /v1/ontology/validate-sql": _CHECK, "POST /integrations/git/{}/impact": _CHECK,
     "POST /v1/iac/changes/plan": _CHECK, "POST /v1/people/access-check": _CHECK,
+    "POST /v1/observability/alert-rules/test": _CHECK,
+    "POST /v1/observability/evaluate": _RUN,              # evaluates the declared alert rules and SLOs now
     # protocols between components
     "POST /v1/trino/{}/allow": _PROTOCOL, "POST /v1/trino/{}/batch": _PROTOCOL, "POST /v1/trino/{}/column-mask": _PROTOCOL,
     "POST /v1/trino/{}/row-filters": _PROTOCOL, "POST /v1/trino/{}/lineage": _PROTOCOL, "POST /v1/trino/{}/queries": _PROTOCOL,
@@ -161,6 +163,7 @@ ACTIONS: dict[str, str] = {
 }
 
 # ---- not configuration, and why --------------------------------------------------------------------------------
+_OBS_INCIDENT = "runtime state: an incident and its timeline, opened by alerts and worked by people and agents"
 _MINE = "runtime state: a person's own {}, made by using Cairn (not the workspace's configuration)"
 EXCLUDED: dict[str, str] = {
     # runtime state: what people make by using Cairn, records and results
@@ -196,6 +199,12 @@ EXCLUDED: dict[str, str] = {
     "PUT /v1/bundles/{}": "runtime state: cairn bundle's own state (what a bundle made), kept for its next plan",
     "/v1/status/incidents": "runtime state: incidents on the status page, posted as they happen",
     "/v1/status/incidents/{}/updates": "runtime state: incidents on the status page, posted as they happen",
+    "POST /v1/observability/incidents": _OBS_INCIDENT, "POST /v1/observability/incidents/{}/notes": _OBS_INCIDENT,
+    "POST /v1/observability/incidents/{}/acknowledge": _OBS_INCIDENT,
+    "POST /v1/observability/incidents/{}/resolve": _OBS_INCIDENT, "POST /v1/observability/incidents/{}/reopen": _OBS_INCIDENT,
+    "POST /v1/observability/incidents/{}/assign": _OBS_INCIDENT,
+    "POST /v1/observability/alerts/{}/acknowledge": "runtime state: who acknowledged a firing alert",
+    "POST /v1/observability/deploys": "release: a deploy, recorded for incident timelines (by CI/CD as it ships)",
     "POST /v1/chargeback/statements": "runtime state: a chargeback statement, computed for a period",
     "POST /v1/signup": "runtime state: a self-service sign-up (the tenant it makes is the hosting control plane's)",
     "POST /quality/evaluations/{}/feedback": "runtime state: a person's verdict on an evaluation",

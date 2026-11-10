@@ -233,7 +233,25 @@ class OpenLineageReceiver:
         if self.rewrite is not None:
             events = [self.rewrite(e) for e in events]
         results = [self.handle(e, actor) for e in events]
+        for e in events:
+            _link_run(e)
         if self.audit is not None:
             self.audit.record("lineage", "openlineage.received", actor, None, {
                 "events": len(results), "jobs": sorted({r["job"] for r in results if r.get("job")})[:20]})
         return {"accepted": len(results), "results": results}
+
+
+def _link_run(event: Any) -> None:
+    """A Spark (or other) run started with ``spark.cairn.traceparent`` (cairn-spark sets it from the trace that
+    submitted it) joins that trace's journey as a linked span, by its OpenLineage run id."""
+    if not isinstance(event, dict) or event.get("eventType") not in ("START", "COMPLETE", "FAIL"):
+        return
+    run = event.get("run") or {}
+    props = ((run.get("facets") or {}).get("spark_properties") or {}).get("properties") or {}
+    traceparent = props.get("spark.cairn.traceparent") if isinstance(props, dict) else None
+    if not isinstance(traceparent, str) or not run.get("runId"):
+        return
+    from cairn.observability.telemetry import record_linked_run
+
+    record_linked_run("spark", str(run["runId"]), traceparent, {
+        "cairn.job": str((event.get("job") or {}).get("name", ""))[:200], "cairn.run_state": event["eventType"]})

@@ -1,0 +1,85 @@
+# The OpenTelemetry Collector of Cairn's bundled observability stack (docker-compose.observability.yml, and the
+# Helm chart with cairn.observability.enabled; the chart's copy is helm/cairn/files/observability/, kept identical).
+#
+# In:  OTLP over HTTP (4318) and gRPC (4317) from Cairn's processes, Trino, Cairn Core's Java agent, Airflow.
+# Out: traces to Tempo, logs to Loki (its OTLP endpoint), metrics (the processes' own, and span metrics and the
+#      service graph derived from the traces) for Prometheus to scrape on 8889.
+# Where they are: CAIRN_OTEL_TEMPO (host:port of Tempo's OTLP gRPC) and CAIRN_OTEL_LOKI (Loki's base URL).
+#
+# Cairn's processes clean what they send (cairn.observability.redact). This removes credentials once more, for
+# whatever else sends here: header attributes other than a few, attributes whose names say they hold a secret,
+# and values that look like bearer tokens, JWTs or keys.
+receivers:
+  otlp:
+    protocols:
+      http: {endpoint: "0.0.0.0:4318"}
+      grpc: {endpoint: "0.0.0.0:4317"}
+
+processors:
+  memory_limiter: {check_interval: 1s, limit_percentage: 80, spike_limit_percentage: 20}
+  batch: {timeout: 2s}
+  attributes/credentials:
+    actions:
+      - {action: delete, pattern: '(?i)^http\.(request|response)\.header\.(authorization|cookie|set[-_]cookie|proxy[-_]authorization|x[-_]api[-_]key|x[-_]trino[-_]extra[-_]credential).*'}
+      - {action: delete, pattern: '(?i).*(password|passwd|secret|api[-_.]?key|private[-_.]?key|credential).*'}
+  redaction/values:
+    allow_all_keys: true
+    blocked_values:
+      - '(?i)bearer\s+[A-Za-z0-9._~+/=-]{8,}'
+      - 'eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*'
+      - '(AKIA|ASIA)[A-Z0-9]{16}'
+      - '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    summary: silent
+  # URLs other components record (Trino's calls to Cairn's access control carry Trino's key in the path; any URL
+  # may carry one in its query): the key becomes {key}, query strings go.
+  transform/urls:
+    error_mode: ignore
+    trace_statements:
+      - 'replace_pattern(span.attributes["url.full"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+      - 'replace_pattern(span.attributes["http.url"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+      - 'replace_pattern(span.attributes["url.path"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+      - 'replace_pattern(span.attributes["http.target"], "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+      - 'replace_pattern(span.name, "/v1/trino/[^/?]+/", "/v1/trino/{key}/")'
+      - 'replace_pattern(span.attributes["url.full"], "\\?.*$", "")'
+      - 'replace_pattern(span.attributes["http.url"], "\\?.*$", "")'
+      - 'replace_pattern(span.attributes["http.target"], "\\?.*$", "")'
+      - 'delete_key(span.attributes, "url.query")'
+
+connectors:
+  span_metrics:
+    histogram:
+      explicit: {buckets: [5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2500ms, 5s, 10s, 30s]}
+    metrics_flush_interval: 15s
+  service_graph:
+    latency_histogram_buckets: [10ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s]
+    store: {ttl: 10s, max_items: 5000}
+
+exporters:
+  otlp_grpc/tempo:
+    endpoint: "${env:CAIRN_OTEL_TEMPO:-cairn-tempo:4317}"
+    tls: {insecure: true}
+  otlp_http/loki:
+    endpoint: "${env:CAIRN_OTEL_LOKI:-http://cairn-loki:3100}/otlp"
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+
+extensions:
+  health_check: {endpoint: "0.0.0.0:13133"}
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs: {level: warn}
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/credentials, transform/urls, redaction/values, batch]
+      exporters: [otlp_grpc/tempo, span_metrics, service_graph]
+    metrics:
+      receivers: [otlp, span_metrics, service_graph]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, attributes/credentials, redaction/values, batch]
+      exporters: [otlp_http/loki]

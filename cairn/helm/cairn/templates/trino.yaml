@@ -76,6 +76,7 @@ data:
     {{- else }}
     http-server.authentication.allow-insecure-over-http=true
     {{- end }}
+    {{- include "cairn.trinoTracing" $ | nindent 4 }}
   worker.properties: |
     coordinator=false
     http-server.http.port={{ $u.port }}
@@ -95,6 +96,7 @@ data:
     {{- if $u.externalCatalogs.enabled }}
     catalog.management=dynamic
     {{- end }}
+    {{- include "cairn.trinoTracing" $ | nindent 4 }}
     {{- if $u.cache.enabled }}
     # Trino 484 keeps the file system cache in a cache manager of its own (the catalog turns it on).
     cache-manager.config-files=/etc/trino/cache-manager.properties

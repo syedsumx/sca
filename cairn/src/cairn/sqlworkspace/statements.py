@@ -26,6 +26,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import time
 from typing import Any, Optional
@@ -33,6 +34,8 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 CURSOR_TTL_S = 3600
 SOURCE = "cairn-cli"
+
+logger = logging.getLogger(__name__)
 
 
 class StatementError(Exception):
@@ -184,6 +187,11 @@ class Statements:
             h["X-Trino-Schema"] = session["schema"]
         if self.max_run_time:
             h["X-Trino-Session"] = f"query_max_run_time={self.max_run_time}"
+        from cairn.observability.telemetry import outgoing_headers, trino_client_tags
+
+        if trino_client_tags():                         # the query in Trino's history leads back to its trace
+            h["X-Trino-Client-Tags"] = ",".join(trino_client_tags())
+        h.update(outgoing_headers())                    # Trino joins the trace (also through httpx's instrumentation)
         return h
 
     def start(self, actor: str, sql: str, connection: Optional[str] = None, warehouse: Optional[str] = None,
@@ -208,15 +216,21 @@ class Statements:
         dialect = prepared.source.dialect
         text = capped(prepared.tree, limit, dialect) if limit else prepared.tree.sql(dialect=dialect)
         sources = [sorted(s) if s is not None else None for s in output_sources(prepared.tree)]
-        with self._client(verify, connection, actor) as http:
-            r = http.post(f"{base}/v1/statement", content=text.encode(), headers=self._headers(prepared.run_as, session))
-            doc = self._answer(r)
+        import httpx
+
+        try:
+            with self._client(verify, connection, actor) as http:
+                r = http.post(f"{base}/v1/statement", content=text.encode(), headers=self._headers(prepared.run_as, session))
+                doc = self._answer(r)
+        except httpx.TransportError as e:
+            raise StatementError(f"Trino of {connection} cannot be reached ({type(e).__name__})", 502)
         self.data._audit(actor, "data.queried", connection, {"sql": mask_sql(sql), "tables": prepared.urns,
                                                            "streamed": True, "query_id": doc.get("id"),
                                                            **({"warehouse": warehouse} if warehouse else {}),
                                                            **({"query_policies": sorted(prepared.policies)}
                                                               if prepared.policies else {})})
         self.data._read(actor, prepared.urns)
+        logger.info("statement %s started on %s for %s (%d tables)", doc.get("id"), connection, actor, len(prepared.urns))
         state = {"a": actor, "r": prepared.run_as, "b": base, "w": warehouse, "c": connection, "s": session,
                  "u": prepared.urns, "src": sources, "id": doc.get("id")}
         return self._page(state, doc, verify)

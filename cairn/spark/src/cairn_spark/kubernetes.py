@@ -44,7 +44,7 @@ def driver_env(cairn_url: str, catalog_uri: str, extra: Optional[dict] = None) -
     """What the driver needs to sign in by itself. Nothing secret."""
     env = {"CAIRN_URL": cairn_url.rstrip("/"), "CAIRN_CATALOG_URI": catalog_uri.rstrip("/"),
            "CAIRN_WORKLOAD_TOKEN_FILE": TOKEN_FILE}
-    for k in ("CAIRN_SPARK_NAMESPACE", "CAIRN_SPARK_TOKEN_TTL", "CAIRN_SPARK_EVENT_LOG_DIR"):
+    for k in ("CAIRN_SPARK_NAMESPACE", "CAIRN_SPARK_TOKEN_TTL", "CAIRN_SPARK_EVENT_LOG_DIR", "TRACEPARENT"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     return {**env, **(extra or {})}

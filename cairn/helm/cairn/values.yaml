@@ -1339,6 +1339,72 @@ cairn:
     # Spread replicas of every component over nodes and zones (when it runs more than one).
     # PodDisruptionBudgets are per component (<component>.pdb); values-ha.yaml turns them all on.
     spreadReplicas: true
+  # Observability (docs: Administration -> Observability): OpenTelemetry traces, metrics and logs from every component
+  # (Cairn's processes, Trino, Cairn Core through the OpenTelemetry Java agent), cleaned of credentials and values,
+  # and Cairn's own view of them (/v1/observability: health map, request journeys, logs, SLOs, alerts, incidents).
+  observability:
+    # The bundled open-source stack: an OpenTelemetry Collector, Prometheus, Loki and Tempo (single replicas; their
+    # data on emptyDir unless persistence is on). Off: send to your own backend with otlp.endpoint instead.
+    enabled: false
+    environment: production
+    otlp:
+      # Your own OTLP/HTTP endpoint (a Collector, Grafana Cloud, Honeycomb, Datadog, New Relic). Empty: the bundled
+      # Collector when enabled, else telemetry is off. Its credentials: a Secret whose key holds
+      # OTEL_EXPORTER_OTLP_HEADERS (name=value,name2=value2), e.g. x-honeycomb-team=<key>.
+      endpoint: ""
+      headersSecret: ""
+      headersKey: headers
+    sampling:
+      # Parent-based: a request that arrives sampled (from Trino, a browser, another service) is always followed.
+      sampler: parentbased_traceidratio
+      ratio: "0.1"
+    # Where Cairn reads telemetry back. Empty with enabled: the bundled Prometheus, Loki and Tempo. Vendors without
+    # these APIs: traceUrl / logsUrl templates ({trace_id}, {service}, {start_ms}, {end_ms}) that Cairn links to.
+    # credentialsSecret: keys prometheus-token, prometheus-basic-auth (user:password), loki-..., tempo-...
+    read:
+      prometheusUrl: ""
+      lokiUrl: ""
+      tempoUrl: ""
+      traceUrl: ""
+      logsUrl: ""
+      vendor: ""
+      credentialsSecret: ""
+    # Trino's own spans (its planning, its calls to Cairn's access control) to the Collector's OTLP gRPC port. They
+    # carry Trino's key in the access-control URLs: send them only through a Collector that removes it (the bundled
+    # one does: deploy/observability/stack/otel-collector.yaml, processor transform/urls).
+    trino:
+      enabled: true
+      endpoint: ""          # empty: the bundled Collector (grpc, 4317)
+    # Cairn Core and its web application through the OpenTelemetry Java agent (JAVA_TOOL_OPTIONS), copied in from
+    # this image by an init container. SQL statements are sanitized by the agent; query strings go at the Collector.
+    javaAgent:
+      enabled: true
+      image: ghcr.io/open-telemetry/opentelemetry-operator/autoinstrumentation-java:2.32.0
+    collector:
+      image: otel/opentelemetry-collector-contrib:0.163.2
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 1Gi }
+    prometheus:
+      image: prom/prometheus:v3.15.1
+      retention: 15d
+      persistence: { enabled: false, size: 20Gi, storageClass: "" }
+      resources:
+        requests: { cpu: 100m, memory: 512Mi }
+        limits: { memory: 2Gi }
+    loki:
+      image: grafana/loki:3.6.18
+      persistence: { enabled: false, size: 20Gi, storageClass: "" }
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 1Gi }
+    tempo:
+      image: grafana/tempo:2.9.5
+      persistence: { enabled: false, size: 20Gi, storageClass: "" }
+      resources:
+        requests: { cpu: 100m, memory: 256Mi }
+        limits: { memory: 2Gi }
+
   serviceMonitor:
     # ServiceMonitor for the HTTP services and a PodMonitor for the workers (metrics on port 9108).
     enabled: false

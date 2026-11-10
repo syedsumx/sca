@@ -200,6 +200,7 @@ class Services:
     slos: Optional[Any] = None
     workspaces: Optional[Any] = None
     people: Optional[Any] = None            # People & roles (cairn.identity.people)
+    observability: Optional[Any] = None     # Observability: health map, journeys, logs, SLOs, alerts, incidents
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -641,6 +642,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_flows(services)
     _build_split_compute(services)
     _build_people(services)
+    _build_observability(services)
     _build_iac_changes(services)
     return services
 
@@ -722,6 +724,18 @@ def _build_people(s: Services) -> None:
         s.engine, s.graph, provisioning_graph(s) if s.graph is not None else None, s.graph, s.audit, s.attributes,
         s.pdp, s.personas, s.workspaces, s.agents, getattr(s, "access_reviews", None),
         on_deactivate=(lambda urn: devices.end_all(urn, "people")) if devices is not None else None)
+
+
+def _build_observability(s: Services) -> None:
+    """Observability (cairn.observability): reads Prometheus, Loki and Tempo (CAIRN_OBS_*), keeps SLOs, alert rules,
+    silences, alerts and incidents, and tells the notification routes. Built after notifications."""
+    from cairn import __version__
+    from cairn.observability.backends import Backends
+    from cairn.observability.service import ObservabilityService
+
+    hub = getattr(s, "notify", None)
+    s.observability = ObservabilityService(s.engine, Backends(), hub, s.audit,
+                                           public_url=getattr(hub, "public_url", "") or "", version=__version__)
 
 
 def _build_iac_changes(s: Services) -> None:

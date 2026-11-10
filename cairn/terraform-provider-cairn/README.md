@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-81 resources, each also a data source:
+84 resources, each also a data source:
 
 **Identity and access**
 
@@ -122,6 +122,14 @@ permissions and audit apply:
 | `cairn_desktop_policy` | `desktop_policy` | What Cairn Desktop may do with this Cairn: its offline cache, how it updates (and from where) and the origins it signs in from |
 | `cairn_ui_settings` | `ui_settings` | The web UI's settings for everyone: whether people are offered the first-run question and the Get started checklist |
 | `cairn_extension` | `extensions` | An installed extension: its manifest (version, publisher, the privileges it is granted, its scope, the events it hears and the UI it adds) |
+
+**Operations and observability**
+
+| Resource | Bundle section | What it is |
+|---|---|---|
+| `cairn_observability_slo` | `observability_slos` | A service level objective: the share of a component's events that must be good (a PromQL ratio of bad to all events, or a latency threshold on a histogram) over a window, with multi-window burn-rate alerts sent to notification routes; a firing one opens an incident |
+| `cairn_observability_alert_rule` | `observability_alert_rules` | An alert rule: a PromQL or LogQL condition (each series it returns is an alert), how long it holds before it fires, a severity, the notification routes and people told, and whether it opens an incident |
+| `cairn_observability_silence` | `observability_silences` | A silence: alerts whose labels match are not sent and open no incident, between two times (maintenance) |
 
 <!-- END GENERATED RESOURCES -->
 

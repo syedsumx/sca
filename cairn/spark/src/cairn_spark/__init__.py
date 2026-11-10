@@ -107,6 +107,9 @@ def lakehouse_conf(cairn_url: str, catalog_uri: str, session: str, cairn_token: 
         f"{c}.s3.path-style-access": "true",
         "spark.sql.defaultCatalog": CATALOG,
     }
+    traceparent = os.environ.get("TRACEPARENT", "")
+    if traceparent:          # the trace that submitted this job: Cairn links the run to it by its OpenLineage run id
+        conf["spark.cairn.traceparent"] = traceparent
     if lineage:
         conf.update({
             "spark.extraListeners": "io.openlineage.spark.agent.OpenLineageSparkListener",
@@ -119,7 +122,7 @@ def lakehouse_conf(cairn_url: str, catalog_uri: str, session: str, cairn_token: 
             "spark.openlineage.transport.auth.apiKey": session,
             "spark.openlineage.namespace": os.environ.get("CAIRN_SPARK_NAMESPACE", "spark"),
             # What Cairn prices a run by (cores reserved x wall-clock time).
-            "spark.openlineage.capturedProperties": ",".join(CAPTURED),
+            "spark.openlineage.capturedProperties": ",".join(CAPTURED + (("spark.cairn.traceparent",) if traceparent else ())),
             **({"spark.openlineage.parentJobName": app_name} if app_name else {}),
         })
     return conf

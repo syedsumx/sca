@@ -14,7 +14,9 @@
 {{- $coreEnv = printf "%s\n- name: %s\n  value: %s" $coreEnv $k ($v | quote) }}
 {{- end }}
 {{- end }}
-{{- $ctx := dict "root" $ "component" "core" "cfg" $c.api "image" "core" "env" $coreEnv "port" 8080 "healthPath" "/health" "volumes" (list (dict "name" "tmp" "emptyDir" (dict))) "volumeMounts" (list (dict "name" "tmp" "mountPath" "/tmp")) }}
+{{- $agent := include "cairn.javaAgent" (dict "root" $ "service" "cairn-core") | fromYaml }}
+{{- with $agent.env }}{{- $coreEnv = printf "%s\n%s" $coreEnv (trim .) }}{{- end }}
+{{- $ctx := dict "root" $ "component" "core" "cfg" $c.api "image" "core" "env" $coreEnv "port" 8080 "healthPath" "/health" "volumes" (concat (list (dict "name" "tmp" "emptyDir" (dict))) ($agent.volumes | default list)) "volumeMounts" (concat (list (dict "name" "tmp" "mountPath" "/tmp")) ($agent.volumeMounts | default list)) "initContainers" ($agent.initContainers | default list) }}
 {{ include "cairn.coreDeployment" $ctx }}
 ---
 {{ include "cairn.service" (merge (dict "port" 8080) $ctx) }}
@@ -37,7 +39,9 @@
 {{- $webVolumes = append $webVolumes (dict "name" "mfe-config" "configMap" (dict "name" (printf "%s-mfe-config" (include "cairn.fullname" .)))) }}
 {{- $webMounts = append $webMounts (dict "name" "mfe-config" "mountPath" "/etc/cairn/mfe.config.yaml" "subPath" "mfe.config.yaml" "readOnly" true) }}
 {{- end }}
-{{- $wctx := dict "root" $ "component" "web" "cfg" $c.web "image" "web" "env" $webEnv "port" 9002 "healthPath" "/admin" "volumes" $webVolumes "volumeMounts" $webMounts }}
+{{- $wagent := include "cairn.javaAgent" (dict "root" $ "service" "cairn-web") | fromYaml }}
+{{- with $wagent.env }}{{- $webEnv = printf "%s\n%s" $webEnv (trim .) }}{{- end }}
+{{- $wctx := dict "root" $ "component" "web" "cfg" $c.web "image" "web" "env" $webEnv "port" 9002 "healthPath" "/admin" "volumes" (concat $webVolumes ($wagent.volumes | default list)) "volumeMounts" (concat $webMounts ($wagent.volumeMounts | default list)) "initContainers" ($wagent.initContainers | default list) }}
 {{ include "cairn.coreDeployment" $wctx }}
 ---
 {{ include "cairn.service" (merge (dict "port" 9002) $wctx) }}

@@ -16,11 +16,17 @@ def _setup_logging() -> None:
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 
+_PROCESS = {"name": "cli"}       # the command this process runs (its telemetry's service name)
+
+
 def _services(**kwargs):
     from cairn.common.config import get_settings
+    from cairn.observability.telemetry import setup
     from cairn.services import build_services
 
-    return build_services(get_settings(), **kwargs)
+    s = build_services(get_settings(), **kwargs)
+    setup(_PROCESS["name"], engine=getattr(s, "engine", None))   # workers: traces, metrics and logs (OTEL_*)
+    return s
 
 
 def gateway_tls() -> dict:
@@ -315,7 +321,9 @@ def cmd_core_proxy(a) -> None:
     s.start_background(layer_reload_interval=a.reload_interval)
     identity = ProxyIdentity(s.settings.active.session_signing_key, a.upstream)
     app = create_proxy_app(a.upstream, MaskingService(s.pdp, s.attributes), identity, a.timeout)
-    _serve(app, a.host, a.port)
+    from cairn.observability.telemetry import instrument_asgi
+
+    _serve(instrument_asgi(app), a.host, a.port)
 
 
 def cmd_context_miner(a) -> None:
@@ -372,6 +380,13 @@ def notifier_tick(s) -> dict:
         out["provisioning_retried"] = s.signup.retry_failed()   # hosted tenants whose provisioning failed
     if getattr(s, "status_page", None) is not None:
         out["status_probes"] = len(s.status_page.probe(now_ms))   # every_seconds apart
+    if getattr(s, "observability", None) is not None and \
+            now_ms - _SWEEP_STATE.get("observability_ms", 0) >= OBS_EVALUATE_MS:
+        _SWEEP_STATE["observability_ms"] = now_ms
+        try:                                     # alert rules and SLOs: alerts, notifications, incidents
+            out["observability"] = s.observability.evaluate(now_ms)
+        except Exception as e:  # noqa: BLE001 - the metrics backend may be briefly away
+            out["observability"] = {"error": str(e)[:200]}
     if getattr(s, "usage_reporter", None) is not None and now_ms - _SWEEP_STATE.get("metering_ms", 0) >= 600_000:
         _SWEEP_STATE["metering_ms"] = now_ms
         out["usage_reported"] = s.usage_reporter.report(now_ms)   # a tenant's finished days to the control plane
@@ -442,6 +457,7 @@ def notifier_tick(s) -> dict:
     return out
 
 
+OBS_EVALUATE_MS = int(os.environ.get("CAIRN_OBS_EVALUATE_SECONDS", "30")) * 1000
 TAG_SYNC_EVERY_MS = int(os.environ.get("CAIRN_TAG_SYNC_EVERY_SECONDS", "900")) * 1000
 _SWEEP_STATE = {"synced_ms": 0, "contracts_ms": 0, "automations_ms": 0, "reports_ms": 0, "sources_ms": 0,
                 "ai_lineage_ms": 0, "knowledge_ms": 0,
@@ -1200,6 +1216,8 @@ def main(argv=None) -> None:
         sys.exit(dbt_main(argv[1:]))
     _setup_logging()
     args = build_parser().parse_args(argv)
+    if argv and not argv[0].startswith("-"):
+        _PROCESS["name"] = argv[0]
     if getattr(args, "client_command", False):        # as the signed-in person, over HTTP: exit codes of their own
         from cairn_cli.main import dispatch
 

@@ -36,6 +36,7 @@ FAMILIES = {
     "compute": "Compute and jobs",
     "ai": "AI and agents",
     "workspace": "Workspace",
+    "operations": "Operations and observability",
 }
 PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
 TF_RESERVED = {"connection", "count", "provider", "provisioner", "lifecycle", "depends_on", "for_each", "id"}

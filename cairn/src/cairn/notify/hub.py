@@ -52,6 +52,8 @@ EVENT_TYPES = [
     "flow.failed", "flow.succeeded", "flow.sla_missed", "flow.approval_requested", "flow.notice",
     "iac.change_proposed", "iac.change_approved", "iac.change_rejected", "iac.change_drift", "iac.change_applied",
     "iac.change_failed",
+    "observability.alert_firing", "observability.alert_resolved", "observability.incident_opened",
+    "observability.incident_resolved",
 ]
 CHANNELS = ("in_app", "slack", "teams", "email", "webhook", "push")
 
@@ -137,6 +139,8 @@ class Event:
     url: Optional[str] = None
     actions: list[Action] = field(default_factory=list)
     payload: dict[str, Any] = field(default_factory=dict)
+    # Routes named by what raised the event (an alert rule's routes): they receive it whatever their own filters.
+    routes: list[str] = field(default_factory=list)
 
 
 ActionHandler = Callable[[str, str, str, Optional[str]], str]   # (action, object_id, actor, comment) → message
@@ -283,9 +287,10 @@ class NotificationHub:
                                  status="SENT" if ch == "in_app" else "PENDING"))
         domains = set(self.domains_of(event.entity_urn)) if event.entity_urn else set()
         for route in [*self.list_routes(), *(r for provide in self.route_providers for r in provide())]:
-            if route.event_types and event.type not in route.event_types:
+            named = route.id in event.routes
+            if not named and route.event_types and event.type not in route.event_types:
                 continue
-            if route.domains and not domains & set(route.domains):
+            if not named and route.domains and not domains & set(route.domains):
                 continue
             rows.append(dict(recipient=f"route:{route.id}", channel=route.channel, target=route.target,
                              status="PENDING"))
