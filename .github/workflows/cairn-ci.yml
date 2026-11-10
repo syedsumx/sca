@@ -379,6 +379,17 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_agent_e2e.py | tee "$RUNNER_TEMP/sre.log"
           ! grep -q "skipped" "$RUNNER_TEMP/sre.log"
+
+      - name: Ops dashboards on the bundled stack (L143) - every tile source with real data, privileges, limits, built-ins, Grafana in and out (a real Grafana)
+        working-directory: cairn
+        # Its own pytest too (OpenTelemetry once per process); the stack's images are pulled by the step above.
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q grafana/grafana:12.2.1 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs -s tests/test_ops_dashboards_e2e.py | tee "$RUNNER_TEMP/opsdash.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/opsdash.log"
+          grep -q "real Grafana (grafana/grafana:12.2.1) loaded the export" "$RUNNER_TEMP/opsdash.log"
+          docker rmi grafana/grafana:12.2.1 >/dev/null || true
       - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
         working-directory: cairn
         run: |
@@ -771,6 +782,13 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_ui_e2e.py | tee "$RUNNER_TEMP/sreui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/sreui.log"
+
+      - name: Ops dashboards (one built from the palette with a variable and a previewed PromQL tile on a real Prometheus, exported for Grafana; a built-in copied; refused without VIEW_OPERATIONS; axe)
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q prom/prometheus:v3.15.1 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_ops_dashboards_ui_e2e.py | tee "$RUNNER_TEMP/opsui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/opsui.log"
       - name: Accessibility (axe on the main pages of the built UI, against Cairn)
         run: |
           set -o pipefail

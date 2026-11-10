@@ -124,6 +124,9 @@ export const OBSERVABILITY_EN = {
     'sre.pm.approve': 'Approve the postmortem',
     'sre.pm.draft_status': 'draft',
     'sre.pm.approved': 'approved',
+
+    'palette.newOpsDashboard': 'New ops dashboard',
+    'obs.dashboards': 'Ops dashboards',
 };
 
 export const OBSERVABILITY_DE: Partial<Record<keyof typeof OBSERVABILITY_EN, string>> = {
@@ -251,4 +254,7 @@ export const OBSERVABILITY_DE: Partial<Record<keyof typeof OBSERVABILITY_EN, str
     'sre.pm.approve': 'Postmortem freigeben',
     'sre.pm.draft_status': 'Entwurf',
     'sre.pm.approved': 'freigegeben',
+
+    'palette.newOpsDashboard': 'Neues Betriebs-Dashboard',
+    'obs.dashboards': 'Betriebs-Dashboards',
 };

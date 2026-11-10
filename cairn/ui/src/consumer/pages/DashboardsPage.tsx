@@ -1,12 +1,13 @@
 import { Alert, Button, Checkbox, Empty, Grid, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
 import type { BuiltDashboard, ChartSpec, Dashboard, DashboardAction, Metric, MetricQuery, DashboardControl, DashboardState, DashboardTile, RenderedDashboard, SavedQuery, SqlAlert, Workbook } from '../api/types';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { BiFolders, BiUsageOverview } from '../components/BiCollab';
+import { OpsDashboardEditor, OpsTileView, RANGES, REFRESHES, sourceOf } from '../components/OpsTiles';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
@@ -52,6 +53,24 @@ function Control({ board, control, value, onChange }: {
     }
     return <Input aria-label={label} placeholder={`${label} contains`} allowClear style={{ width: 200 }} value={(value as string) ?? ''}
         onChange={(e) => onChange(e.target.value || null)} />;
+}
+
+/** An ops dashboard's $variable: its choices from Prometheus, Loki, the instances or the SLOs (as the viewer). */
+function Variable({ board, control, value, onChange }: {
+    board: string; control: DashboardControl; value: unknown; onChange: (v: unknown) => void;
+}) {
+    const options = useDheQuery<unknown[]>(`/sql/dashboards/${board}/controls/${control.id}/values`,
+        (c, signal) => c.dashboardControlValues(board, control.id, { signal }));
+    const label = control.label || control.id;
+    const multi = !!control.multi;
+    const list = Array.isArray(value) ? (value as string[]) : typeof value === 'string' && value ? (multi ? value.split('|') : [value]) : [];
+    return (
+        <Select aria-label={label} showSearch allowClear mode={multi ? 'multiple' : undefined} placeholder={`$${control.id}`}
+            style={{ minWidth: 180 }} loading={options.loading} value={multi ? list : (list[0] ?? undefined)}
+            onChange={(v: string | string[] | undefined) => onChange(Array.isArray(v) ? (v.length ? v : null) : v ?? null)}
+            notFoundContent={options.error ? 'Could not list the choices' : undefined}
+            options={(options.data ?? []).map((o) => ({ value: String(o), label: String(o) }))} />
+    );
 }
 
 /** The dashboard's actions: buttons (a form when they ask for fields) run as the person clicking. */
@@ -161,20 +180,60 @@ function ScheduleExport({ board, name }: { board: string; name: string }) {
 }
 
 /** One dashboard, every tile run as the viewer, filtered by the controls, cross-filtered by clicks and drilled. */
-function Board({ id }: { id: string }) {
+function Board({ id, onOpen }: { id: string; onOpen?: (id: string) => void }) {
     // On a phone (narrower than antd's md, 768px) tiles stack in one column.
     const wide = Grid.useBreakpoint().md !== false;
+    const { client } = useConsumerApi();
     const [state, setState] = useState<DashboardState>({});
     const [refresh, setRefresh] = useState(0);
     const [row, setRow] = useState<Record<string, unknown> | null>(null);
+    const [every, setEvery] = useState<number | null>(null);          // the viewer's auto-refresh (seconds; 0: off)
+    const [editing, setEditing] = useState<Dashboard | null>(null);
+    const [last, setLast] = useState<RenderedDashboard | null>(null);
+    const timeControl = last?.controls?.find((c) => c.kind === 'time');
+    const pollMs = (every ?? timeControl?.refresh ?? 0) * 1000 || undefined;
     const key = JSON.stringify(state);
     const q = useDheQuery<RenderedDashboard>(`/sql/dashboards/${id}/render#${key}#${refresh}`, (c, signal) =>
-        c.renderDashboard(id, { signal }, key === '{}' ? undefined : state));
-    const [last, setLast] = useState<RenderedDashboard | null>(null);
+        c.renderDashboard(id, { signal }, key === '{}' ? undefined : state), { pollMs });
     useEffect(() => { if (q.data) setLast(q.data); }, [q.data]);
     const board = q.data ?? last;
     if (q.error) return <ErrorNotice error={q.error} />;
     if (!board) return <Muted>Loading…</Muted>;
+    const ops = board.tiles.some((t) => sourceOf(t) !== null) || (board.controls ?? []).some((c) => c.kind === 'time' || c.kind === 'variable');
+    const setControl = (cid: string, v: unknown) => setState({ ...state, controls: { ...(state.controls ?? {}), [cid]: v } });
+    const copy = async () => {
+        try {
+            const d = await client.request<Dashboard>('POST', `/sql/dashboards/${encodeURIComponent(id)}/copy`, {});
+            message.success(`Copied as ${d.name}`);
+            onOpen?.(d.id);
+        } catch (e) {
+            notifyError(e, { action: 'Copy the dashboard' });
+        }
+    };
+    const exportGrafana = async () => {
+        try {
+            const doc = await client.request<Record<string, unknown>>('GET', `/sql/dashboards/${encodeURIComponent(id)}/grafana`);
+            const blob = new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' });
+            if (typeof URL.createObjectURL === 'function') {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = `${board.name.replace(/[^\w.-]+/g, '-')}.grafana.json`;
+                a.click();
+                URL.revokeObjectURL(a.href);
+            }
+            const skipped = ((doc.cairn as { skipped?: unknown[] } | undefined)?.skipped ?? []).length;
+            message.success(skipped ? `Exported; ${skipped} tile(s) run only in Cairn and are text panels there` : 'Exported for Grafana');
+        } catch (e) {
+            notifyError(e, { action: 'Export to Grafana' });
+        }
+    };
+    const edit = async () => {
+        try {
+            setEditing(await client.request<Dashboard>('GET', `/sql/dashboards/${encodeURIComponent(id)}`));
+        } catch (e) {
+            notifyError(e);
+        }
+    };
     const selection = state.selection ?? [];
     const select = (from: number, column: string, value: unknown) => {
         const same = selection.some((x) => x.from === from && x.column === column && x.value === value);
@@ -192,10 +251,34 @@ function Board({ id }: { id: string }) {
                         <BiAssetButtons kind="dashboard" id={id} name={board.name} role={board.role}
                             tiles={board.tiles.map((t, i) => t.title || `Tile ${i + 1}`)}
                             onRestored={() => setRefresh((r) => r + 1)} />
-                        {(board.controls ?? []).map((c) => (
+                        <Button onClick={() => void copy()}>{board.builtin ? 'Copy to edit' : 'Copy'}</Button>
+                        {ops && <Button onClick={() => void exportGrafana()}>Export to Grafana</Button>}
+                        {ops && (board.role === 'OWNER' || board.role === 'EDITOR') && <Button onClick={() => void edit()}>Edit</Button>}
+                        {(board.controls ?? []).filter((c) => c.kind !== 'time' && c.kind !== 'variable').map((c) => (
                             <Control key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
-                                onChange={(v) => setState({ ...state, controls: { ...(state.controls ?? {}), [c.id]: v } })} />
+                                onChange={(v) => setControl(c.id, v)} />
                         ))}
+                    </Space>
+                    {ops && (
+                        <Space wrap style={{ marginTop: 8 }} data-testid="ops-controls">
+                            {(board.controls ?? []).filter((c) => c.kind === 'variable').map((c) => (
+                                <Variable key={c.id} board={id} control={c} value={state.controls?.[c.id] ?? c.default}
+                                    onChange={(v) => setControl(c.id, v)} />
+                            ))}
+                            <Select aria-label="Time range" style={{ width: 110 }} value={(state.controls?.time as string) ?? (timeControl?.default as string) ?? '1h'}
+                                onChange={(v) => setControl(timeControl?.id ?? 'time', v)}
+                                options={RANGES.map((r) => ({ value: r, label: `Last ${r}` }))} />
+                            <Select aria-label="Auto-refresh" style={{ width: 120 }} value={every ?? timeControl?.refresh ?? 0} onChange={setEvery}
+                                options={REFRESHES.map((r) => ({ ...r, label: r.value ? `Every ${r.label}` : 'No refresh' }))} />
+                            <Button onClick={() => void q.refresh()}>Refresh now</Button>
+                            {board.window && <Muted>{new Date(board.window.start_ms).toLocaleString()} – {new Date(board.window.end_ms).toLocaleTimeString()}</Muted>}
+                        </Space>
+                    )}
+                    <Space wrap>
+                        {editing && (
+                            <OpsDashboardEditor open board={editing} onCancel={() => setEditing(null)}
+                                onSaved={(did) => { setEditing(null); message.success('Saved'); onOpen?.(did); }} />
+                        )}
                         {selection.map((x) => (
                             <Tag key={`${x.from}-${x.column}`} closable onClose={() => setState({ ...state, selection: selection.filter((y) => y !== x) })}>
                                 {x.column} = {String(x.value)}
@@ -232,6 +315,8 @@ function Board({ id }: { id: string }) {
                             )}
                             {t.error ? (
                                 <Alert type="warning" message={t.error} style={{ marginTop: 8 }} />
+                            ) : t.ops ? (
+                                <OpsTileView tile={{ ...t, ops: t.ops }} />
                             ) : t.result && t.chart && t.chart.type !== 'table' ? (
                                 <ResultChart columns={t.result.columns} rows={t.result.rows} chart={t.chart} height={220}
                                     selected={mine?.value} onSelect={x ? (v) => select(i, x, v) : undefined} />
@@ -257,7 +342,60 @@ function Board({ id }: { id: string }) {
 
 type ControlDraft = { column: string; kind: DashboardControl['kind']; label: string };
 
-function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | null }) {
+/** A Grafana dashboard's JSON (pasted or from a file) as a dashboard of yours: PromQL, LogQL and TraceQL panels. */
+function GrafanaImport({ open, onClose, onImported }: { open: boolean; onClose: () => void; onImported: (id: string) => void }) {
+    const { client } = useConsumerApi();
+    const [text, setText] = useState('');
+    const [busy, setBusy] = useState(false);
+    const [skipped, setSkipped] = useState<{ panel?: string; variable?: string; reason: string }[] | null>(null);
+    const [made, setMade] = useState<string | null>(null);
+    const go = async () => {
+        let doc: unknown;
+        try {
+            doc = JSON.parse(text);
+        } catch {
+            message.error('That is not JSON: paste the dashboard’s JSON model (Dashboard settings → JSON Model in Grafana)');
+            return;
+        }
+        setBusy(true);
+        try {
+            const out = await client.request<{ dashboard: Dashboard; skipped: { panel?: string; variable?: string; reason: string }[] }>(
+                'POST', '/sql/dashboards/import/grafana', doc);
+            if (out.skipped.length) {
+                setSkipped(out.skipped);
+                setMade(out.dashboard.id);
+            } else {
+                setText('');
+                onImported(out.dashboard.id);
+            }
+        } catch (e) {
+            notifyError(e, { action: 'Import from Grafana' });
+        } finally {
+            setBusy(false);
+        }
+    };
+    const file = async (f: File | undefined) => { if (f) setText(await f.text()); };
+    const close = () => { setSkipped(null); setMade(null); onClose(); };
+    return (
+        <Modal title="Import a Grafana dashboard" open={open} onCancel={close} width={720} confirmLoading={busy}
+            okText={made ? 'Open it' : 'Import'} okButtonProps={{ disabled: !made && !text.trim() }}
+            onOk={() => (made ? (setSkipped(null), setMade(null), setText(''), onImported(made)) : void go())}>
+            <Space direction="vertical" style={{ width: '100%' }}>
+                <Muted>Panels on Prometheus, Loki and Tempo (TraceQL) become tiles; query and custom variables, the time range and the refresh come too. Queries run through Cairn, as each viewer.</Muted>
+                <input type="file" accept=".json,application/json" aria-label="Grafana dashboard file" onChange={(e) => void file(e.target.files?.[0])} />
+                <Input.TextArea aria-label="Grafana dashboard JSON" rows={8} value={text} onChange={(e) => setText(e.target.value)}
+                    placeholder='{"title": "...", "panels": [...]}' style={{ fontFamily: 'ui-monospace, monospace' }} />
+                {skipped && (
+                    <Alert type="info" showIcon message={`Imported; ${skipped.length} left out:`}
+                        description={<ul style={{ margin: 0 }}>{skipped.map((s, i) => <li key={i}>{s.panel ?? (s.variable ? `$${s.variable}` : 'a panel')}: {s.reason}</li>)}</ul>} />
+                )}
+            </Space>
+        </Modal>
+    );
+}
+
+function Dashboards({ saved, openId, newOps, onNewOpsClosed }: { saved: SavedQuery[]; openId?: string | null; newOps?: boolean;
+    onNewOpsClosed?: () => void }) {
     const { client } = useConsumerApi();
     const [tick, setTick] = useState(0);
     const list = useDheQuery<Dashboard[]>(`/sql/dashboards#${tick}`, (c, signal) => c.dashboards({ signal }));
@@ -265,6 +403,10 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
     const metricList = useDheQuery<Metric[]>('/sql/metrics', (c, signal) => c.metrics({ signal }));
     const [open, setOpen] = useState<string | null>(openId ?? null);
     useEffect(() => { if (openId) setOpen(openId); }, [openId]);
+    const [opsNew, setOpsNew] = useState(!!newOps);
+    useEffect(() => { if (newOps) setOpsNew(true); }, [newOps]);
+    const [importing, setImporting] = useState(false);
+    const opened = (id: string) => { setTick((t) => t + 1); setOpen(id); };
     const [editing, setEditing] = useState(false);
     const [asking, setAsking] = useState(false);
     const [question, setQuestion] = useState('');
@@ -325,12 +467,20 @@ function Dashboards({ saved, openId }: { saved: SavedQuery[]; openId?: string | 
         <>
             <Space style={{ marginBottom: 12 }} wrap>
                 <Select aria-label="Dashboard" placeholder="Open a dashboard" style={{ minWidth: 260 }} value={open ?? undefined}
-                    onChange={setOpen} options={(list.data ?? []).map((d) => ({ value: d.id, label: d.shared ? `${d.name} (shared)` : d.name }))} />
+                    onChange={setOpen} options={(list.data ?? []).map((d) => ({ value: d.id,
+                        label: d.builtin ? `${d.name} (built-in)` : d.shared ? `${d.name} (shared)` : d.name }))} />
                 <Button onClick={() => { setBuilt(null); setAsking(true); }}>Build from a question</Button>
                 <Button onClick={() => setEditing(true)} disabled={!saved.length && !(books.data ?? []).length && !(metricList.data ?? []).length}>New dashboard</Button>
+                <Button onClick={() => setOpsNew(true)}>New ops dashboard</Button>
+                <Button onClick={() => setImporting(true)}>Import from Grafana</Button>
                 {!saved.length && !(books.data ?? []).length && <Muted>Save queries in SQL, or workbooks, first; a dashboard shows them.</Muted>}
             </Space>
-            {open ? <Board key={`${open}-${tick}`} id={open} /> : <Empty description="Pick or create a dashboard" />}
+            {open ? <Board key={`${open}-${tick}`} id={open} onOpen={opened} /> : <Empty description="Pick or create a dashboard" />}
+            {opsNew && (
+                <OpsDashboardEditor open onCancel={() => { setOpsNew(false); onNewOpsClosed?.(); }}
+                    onSaved={(id) => { setOpsNew(false); onNewOpsClosed?.(); message.success('Ops dashboard created'); opened(id); }} />
+            )}
+            <GrafanaImport open={importing} onClose={() => setImporting(false)} onImported={(id) => { setImporting(false); opened(id); }} />
             <Modal title="Build a dashboard from a question" open={asking} onCancel={() => setAsking(false)} onOk={() => void build()}
                 okText="Build" confirmLoading={building} okButtonProps={{ disabled: question.trim().length < 3 }}>
                 <Space direction="vertical" style={{ width: '100%' }}>
@@ -476,15 +626,24 @@ function Alerts({ saved }: { saved: SavedQuery[] }) {
 export function DashboardsPage() {
     const saved = useDheQuery<SavedQuery[]>('/sql/saved', (c, signal) => c.savedQueries({ signal }));
     // A link from a folder or the usage list opens its dashboard (`/dashboards?open=<id>`).
-    const openId = new URLSearchParams(useLocation().search).get('open');
+    // `?new=ops` (the command palette's "New ops dashboard") opens the ops dashboard editor.
+    const location = useLocation();
+    const history = useHistory();
+    const params = new URLSearchParams(location.search);
+    const openId = params.get('open');
+    const newOps = params.get('new') === 'ops';
     const [tab, setTab] = useState('boards');
-    useEffect(() => { if (openId) setTab('boards'); }, [openId]);
+    useEffect(() => { if (openId || newOps) setTab('boards'); }, [openId, newOps]);
+    const clearNew = () => {
+        params.delete('new');
+        history.replace({ pathname: location.pathname, search: params.toString() ? `?${params.toString()}` : '' });
+    };
     return (
         <Page>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Dashboards</h1><HelpButton /></div>
-            <Muted>Saved queries and workbooks with their charts, filters and drill-down, and alerts. Every tile and check runs as a person, under their policies.</Muted>
+            <Muted>Saved queries and workbooks with their charts, filters and drill-down, ops dashboards of metrics, logs, traces, SLOs and alerts, and alerts on queries. Every tile and check runs as a person, under their policies.</Muted>
             <Tabs style={{ marginTop: 12 }} activeKey={tab} onChange={setTab} items={[
-                { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} /> },
+                { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} newOps={newOps} onNewOpsClosed={clearNew} /> },
                 { key: 'alerts', label: 'Alerts', children: <Alerts saved={saved.data ?? []} /> },
                 { key: 'folders', label: 'Folders', children: <BiFolders /> },
                 { key: 'usage', label: 'Usage', children: <BiUsageOverview /> },

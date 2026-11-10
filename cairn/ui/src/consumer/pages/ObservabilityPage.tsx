@@ -1,6 +1,6 @@
 import { Alert, Button, Checkbox, Descriptions, Drawer, Empty, Input, List, Popconfirm, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useState } from 'react';
-import { useHistory, useLocation } from 'react-router-dom';
+import { Link, useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
@@ -660,6 +660,7 @@ export function ObservabilityPage() {
                         <Tag color={firing ? 'red' : 'green'}>{t('obs.firing', { n: firing })}</Tag>
                         <Tag color={o.open_incidents ? 'orange' : 'default'}>{t('obs.openIncidents', { n: o.open_incidents })}</Tag>
                         <Muted>{backends.length ? t('obs.backends', { list: backends.join(', ') }) : t('obs.backends.none')}</Muted>
+                        <Link to="/dashboards?open=ops-platform-overview">{t('obs.dashboards')}</Link>
                     </Space>
                 )}
             </PageHeader>

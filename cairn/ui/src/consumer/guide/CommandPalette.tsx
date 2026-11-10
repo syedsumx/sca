@@ -131,6 +131,9 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             { id: 'act:ask-sre', kind: 'action' as const, label: t('palette.askSre'), detail: t('nav.observability'),
                 keywords: 'sre agent incident investigate diagnose postgres runbook postmortem on-call remediation',
                 to: '/observability?tab=incidents' },
+
+            { id: 'act:new-ops-dashboard', kind: 'action' as const, label: t('palette.newOpsDashboard'), detail: t('nav.observability'),
+                keywords: 'dashboard grafana promql logql traceql metrics panel monitoring operations sre', to: '/dashboards?new=ops' },
         ] : []),
         { id: 'act:shortcuts', kind: 'action', label: t('palette.shortcuts'), keywords: 'keys keyboard help', shortcut: '?',
             run: openShortcuts },

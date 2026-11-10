@@ -783,10 +783,13 @@ export interface Dashboard {
     tiles: DashboardTile[];
     controls?: DashboardControl[];
     updated_ms: number;
+    /** One of the built-in ops dashboards (Cairn's; copy it to change it). */
+    builtin?: boolean;
 }
 
-/** A dashboard tile: a saved query, or a workbook element (which may drill down through ``drill``). */
-export interface DashboardTile {
+/** A dashboard tile: a saved query, a workbook element (which may drill down through ``drill``), a metric, or an
+ * ops tile (cairn.observability.dashboards). */
+export interface DashboardTile extends Partial<Omit<OpsTile, 'title' | 'width'>> {
     query?: string;
     metric?: MetricQuery;
     element?: WorkbookElement;
@@ -797,16 +800,66 @@ export interface DashboardTile {
     chart?: ChartSpec;
 }
 
-/** A dashboard control: filters every tile with ``column`` (or the tiles in ``targets``). */
+/** A dashboard control: filters every tile with ``column`` (or the tiles in ``targets``); or, for ops tiles, a
+ * ``variable`` ($id in their queries) or the ``time`` range and auto-refresh. */
 export interface DashboardControl {
     id: string;
     label: string;
     column: string;
-    kind: 'values' | 'range' | 'date_range' | 'text';
+    kind: 'values' | 'range' | 'date_range' | 'text' | 'variable' | 'time';
     targets?: number[] | null;
     source?: { connection: string; table: string } | null;
     default?: unknown;
+    /** time: seconds between refreshes (0: off). */
+    refresh?: number;
+    /** variable: a fixed list of choices, or where they come from. */
+    options?: string[] | null;
+    query?: { source: 'label_values' | 'loki_label_values' | 'postgres_instances' | 'slos'; label?: string; match?: string } | null;
+    multi?: boolean;
 }
+
+// ---- ops tiles (cairn.observability.dashboards) ------------------------------------------------------------------
+export type OpsSource = 'promql' | 'logql' | 'traces' | 'slo' | 'alerts' | 'postgres';
+export type OpsView = 'timeseries' | 'area' | 'bars' | 'stat' | 'gauge' | 'table' | 'logs' | 'heatmap';
+export interface OpsDisplay {
+    unit?: string;
+    decimals?: number;
+    min?: number;
+    max?: number;
+    thresholds?: { value: number | null; color: string }[];
+}
+export interface OpsTile {
+    title: string;
+    width: 1 | 2;
+    view?: OpsView;
+    display?: OpsDisplay;
+    promql?: { queries: { expr: string; legend?: string }[]; instant?: boolean; step?: string | null };
+    logql?: { queries: { expr: string; legend?: string }[]; mode?: 'logs' | 'metric'; limit?: number; step?: string | null };
+    traces?: { query: string; limit?: number };
+    slo?: { id: string };
+    alerts?: { state?: 'open' | 'pending' | 'firing' | 'resolved'; labels?: Record<string, string>; severity?: 'critical' | 'warning' | 'info' | null };
+    postgres?: { instance: string };
+}
+export interface OpsSeries {
+    name: string;
+    labels: Record<string, string>;
+    points: [number, number | null][];
+}
+export interface OpsAlert {
+    id: string; name: string; severity: string; state: string; labels: Record<string, string>; value: number | null;
+    summary: string; firing_since: string | null; silenced_by: string | null; acknowledged_by: string | null; incident_id: string | null;
+}
+export type OpsResult =
+    | { kind: 'series'; instant: boolean; series: OpsSeries[]; step_s: number; start_ms: number; end_ms: number }
+    | { kind: 'logs'; lines: { ts_ms: number; service: string | null; level: string | null; trace_id: string | null; line: string }[]; truncated: boolean }
+    | { kind: 'traces'; traces: { trace_id: string; root_service: string | null; root_name: string | null; start_ms: number; duration_ms: number; journey: string }[] }
+    | { kind: 'slo'; slo: { id: string; name: string; service?: string }; firing: number; series: OpsSeries[]; start_ms: number; end_ms: number;
+        status: { objective: number; window: string; sli: number | null; budget_consumed: number | null; budget_remaining: number | null;
+            burn: { long: string; short: string; factor: number; long_burn: number | null; short_burn: number | null; burning: boolean }[] } }
+    | { kind: 'alerts'; alerts: OpsAlert[]; total: number }
+    | { kind: 'postgres'; instance: string; values: { name: string; value: number | null; unit?: string }[];
+        databases: { database: string; connections: number | null; commits: number | null; rollbacks: number | null; cache_hit_ratio: number | null; size_bytes: number | null }[];
+        series: OpsSeries[]; at_ms?: number };
 
 /** What the viewer chose: control values, values clicked in tiles, and each tile's drill path. */
 export interface DashboardState {
@@ -817,8 +870,10 @@ export interface DashboardState {
 
 /** A dashboard with every tile run as the viewer (GET /sql/dashboards/{id}/render). */
 export interface RenderedDashboard extends Omit<Dashboard, 'tiles'> {
-    tiles: (DashboardTile & { result?: DataResult; error?: string; applied?: WorkbookFilter[];
-        level?: { path: unknown[]; column: string | null } })[];
+    tiles: (DashboardTile & { result?: DataResult; error?: string; status?: number; applied?: WorkbookFilter[];
+        level?: { path: unknown[]; column: string | null }; ops?: OpsResult })[];
+    /** With ops tiles: the range they show and the variables' values. */
+    window?: { start_ms: number; end_ms: number; variables: Record<string, string> };
 }
 
 /** An alert on a saved query (GET /sql/alerts). */
