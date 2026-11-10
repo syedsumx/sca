@@ -1,5 +1,5 @@
-// The Capabilities page's data, read from ROADMAP.md: the platform's layers ("The platform today") and every
-// numbered item ("Next"), with its status. `node scripts/capabilities.mjs` rewrites
+// The platform map's data, read from ROADMAP.md: the platform's layers ("The platform today") and every
+// numbered item ("Next"), with its status, and `new` on the rows the "In this release" line names. `node scripts/capabilities.mjs` rewrites
 // src/consumer/resources/capabilities.json; a test fails when that file and ROADMAP.md disagree.
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -36,7 +36,14 @@ export function parseRoadmap(md) {
         layers.push({ layer: plain(layer), compare: plain(compare), cairn: plain(cairn), ...status(st || '') });
     }
     const items = [];
-    for (const line of section(md, 'Next').split('\n')) {
+    const next = section(md, 'Next');
+    // "**In this release:** L139 to L146." marks the newest rows; the platform map flags them as new.
+    const release = /\*\*In this release:\*\*\s*L(\d+)\s*(?:to|–|-)\s*L(\d+)/.exec(next);
+    const isNew = (id) => {
+        const n = Number(id.slice(1));
+        return !!release && n >= Number(release[1]) && n <= Number(release[2]);
+    };
+    for (const line of next.split('\n')) {
         const m = /^\| (L\d+) \|/.exec(line);
         if (!m) continue;
         const [id, item, done, st] = cells(line);
@@ -47,6 +54,7 @@ export function parseRoadmap(md) {
             summary: plain(title ? item.replace(title[0], '') : ''),
             done: plain(done || ''),
             ...status(st || ''),
+            ...(isNew(id) ? { new: true } : {}),
         });
     }
     return { layers, items };
