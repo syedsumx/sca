@@ -78,6 +78,8 @@ class Services:
     ai_workspace: Optional[Any] = None
     checked_queries: Optional[Any] = None
     databases: Optional[Any] = None
+    pg_instances: Optional[Any] = None     # managed PostgreSQL instances (cairn.databases.instances)
+    pg_backups: Optional[Any] = None       # the same, when their backups have a store (CAIRN_PG_BACKUP_STORE)
     mirrors: Optional[Any] = None
     app_packages: Optional[Any] = None
     finetunes: Optional[Any] = None
@@ -1848,9 +1850,11 @@ def _secret_env(name: str) -> str:
 
 
 def _build_databases(s: Services) -> None:
-    """Operational PostgreSQL databases made and handed out through Cairn (cairn.dataaccess.databases)."""
+    """Operational PostgreSQL databases made and handed out through Cairn (cairn.dataaccess.databases), on the server
+    given to Cairn (the instance ``default``) and on the instances Cairn runs (cairn.databases.instances)."""
     admin = _secret_env("CAIRN_DATABASES_ADMIN_URL")
-    if not admin:
+    instances = _build_pg_instances(s, admin)
+    if not admin and instances is None:
         return
     from cairn.dataaccess.databases import Databases
 
@@ -1858,7 +1862,79 @@ def _build_databases(s: Services) -> None:
         return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
     s.databases = Databases(s.engine, admin, os.environ.get("CAIRN_DATABASES_HOST", "localhost"),
                             int(os.environ.get("CAIRN_DATABASES_PORT", "5432")), allowed, s.audit,
-                            os.environ.get("CAIRN_DATABASES_SSLMODE", "require"))
+                            os.environ.get("CAIRN_DATABASES_SSLMODE", "require"), instances=instances)
+    if instances is not None:
+        instances.databases = s.databases
+
+
+def _build_pg_instances(s: Services, admin: str):
+    """Managed Postgres (L140): instances on Docker or CloudNativePG (CAIRN_PG_RUNTIME), backed up to the store
+    (CAIRN_PG_BACKUP_STORE). Without a runtime, the default instance alone (health and metrics of the server given)."""
+    runtime_kind = os.environ.get("CAIRN_PG_RUNTIME", "").strip()
+    if not runtime_kind and not admin:
+        return None
+    import json
+
+    from cairn.databases.instances import BackupStore, InstanceError, Instances
+
+    def allowed(actor: str, privilege: str, urn: Optional[str]) -> bool:
+        return s.authorize(Principal(urn=actor, via="delegated"), privilege, urn, raise_on_deny=False)
+
+    store_cfg, store = None, None
+    raw = os.environ.get("CAIRN_PG_BACKUP_STORE", "")
+    if raw and runtime_kind:
+        cfg = json.loads(raw)
+        ak, sk = _secret_env("CAIRN_PG_BACKUP_ACCESS_KEY"), _secret_env("CAIRN_PG_BACKUP_SECRET_KEY")
+        if not (cfg.get("endpoint") and cfg.get("bucket") and ak and sk):
+            logger.error("CAIRN_PG_BACKUP_STORE needs endpoint and bucket, and CAIRN_PG_BACKUP_ACCESS_KEY(_FILE) and "
+                         "CAIRN_PG_BACKUP_SECRET_KEY(_FILE): managed instances are off")
+            return None
+        store = BackupStore(cfg["endpoint"], cfg["bucket"], ak, sk, cfg.get("region") or "us-east-1")
+        # The instances' sidecars may reach the store at another address (endpoint_for_instances).
+        store_cfg = {"endpoint": cfg.get("endpoint_for_instances") or cfg["endpoint"], "bucket": cfg["bucket"],
+                     "region": cfg.get("region") or "us-east-1", "access_key": ak, "secret_key": sk,
+                     "endpoint_in_cluster": cfg.get("endpoint_for_instances") or cfg["endpoint"]}
+    runtime = None
+    try:
+        if runtime_kind == "docker":
+            from cairn.databases.docker_runtime import DockerRuntime
+
+            images = os.environ.get("CAIRN_PG_DOCKER_IMAGES", "")
+            lo, _, hi = os.environ.get("CAIRN_PG_DOCKER_PORTS", "15432-15999").partition("-")
+            runtime = DockerRuntime(os.environ.get("CAIRN_PG_DOCKER_SOCKET", "/var/run/docker.sock"),
+                                    os.environ.get("CAIRN_PG_DOCKER_BIND", "127.0.0.1"),
+                                    os.environ.get("CAIRN_PG_DOCKER_HOST", "127.0.0.1"),
+                                    json.loads(images) if images else None,
+                                    os.environ.get("CAIRN_PG_DOCKER_AGENT_IMAGE", "python:3.12-slim"),
+                                    os.environ.get("CAIRN_PG_DOCKER_NETWORK", ""), store_cfg,
+                                    ports=(int(lo), int(hi or lo)))
+        elif runtime_kind == "kubernetes":
+            from cairn.databases.cnpg import CnpgRuntime
+
+            images = os.environ.get("CAIRN_PG_K8S_IMAGES", "")
+            store_k8s = None
+            if store_cfg:
+                store_k8s = {k: v for k, v in store_cfg.items() if k not in ("access_key", "secret_key")}
+            runtime = CnpgRuntime(os.environ.get("CAIRN_PG_K8S_NAMESPACE", "cairn-postgres"),
+                                  os.environ.get("CAIRN_PG_K8S_API", ""), os.environ.get("CAIRN_PG_K8S_TOKEN_FILE", ""),
+                                  os.environ.get("CAIRN_PG_K8S_CA_FILE", ""), json.loads(images) if images else None,
+                                  store_k8s, os.environ.get("CAIRN_PG_K8S_BACKUP_SECRET", ""),
+                                  os.environ.get("CAIRN_PG_K8S_ACCESS", "cluster-ip"),
+                                  os.environ.get("CAIRN_PG_K8S_NODE_ADDRESS", ""),
+                                  os.environ.get("CAIRN_PG_K8S_STORAGE_CLASS", ""))
+        elif runtime_kind:
+            logger.error("CAIRN_PG_RUNTIME is docker or kubernetes, not %r: managed instances are off", runtime_kind)
+            return None
+        key = _secret_env("CAIRN_PG_INSTANCE_KEY").encode()
+        inst = Instances(s.engine, allowed, s.audit, key, runtime, store if runtime else None,
+                         default_admin_url=admin, default_host=os.environ.get("CAIRN_DATABASES_HOST", "localhost"),
+                         default_port=int(os.environ.get("CAIRN_DATABASES_PORT", "5432")))
+    except Exception as e:  # noqa: BLE001 - a misconfiguration: managed instances are off, said loudly
+        logger.error("managed Postgres is off: %s", e if isinstance(e, InstanceError) else repr(e))
+        return None
+    s.pg_instances = inst
+    s.pg_backups = inst if inst.store is not None else None
+    return inst
 
 
 def _build_data_access(s: Services) -> None:

@@ -54,6 +54,11 @@ _INBOUND = "an event sent to Cairn by another system (a webhook), handled as it 
 _CHECK = "checks, previews, plans or validates: nothing is changed"
 _SYNC = "syncs or imports now from what is already configured"
 ACTIONS: dict[str, str] = {
+    # managed Postgres: operated now; what it is (size, parameters, schedules) is its resource types'
+    "POST /v1/databases/instances/{}/switchover": "promotes a standby now (the instance's shape is postgres_instances)",
+    "POST /v1/databases/instances/{}/restart": "restarts the instance now (a rolling restart on Kubernetes)",
+    "POST /v1/databases/instances/{}/apply-pending": "applies changes waiting for the maintenance window, now",
+    "POST /v1/databases/instances/{}/backups/{}/verify": _CHECK,
     # running and refreshing what is declared
     "POST /sources/{}/run": _RUN, "POST /sources/{}/cancel": _RUN, "POST /v1/jobs/{}/run": _RUN,
     "POST /v1/derived/{}/refresh": _RUN, "POST /v1/vectors/{}/refresh": _RUN, "POST /v1/pipes/{}/sweep": _RUN,
@@ -193,6 +198,11 @@ EXCLUDED: dict[str, str] = {
                      "declare who may create them with policies",
     "/v1/databases/{}": "runtime state: a database provisioned on demand (declare who may create them with policies)",
     "POST /v1/databases/{}/branches": "runtime state: a branch of a database, made on demand",
+    "POST /v1/databases/instances/{}/backups": "runtime state: a base backup taken now (its schedule is the "
+                                               "postgres_backup_schedules resource)",
+    "DELETE /v1/databases/instances/{}/backups/{}": "runtime state: a base backup deleted before its retention ends",
+    "POST /v1/databases/instances/{}/restore": "runtime state: a new instance restored from backups on demand (it is "
+                                               "then a postgres_instances resource like any other)",
     "/v1/ml/finetunes": "runtime state: a fine-tuning run", "/v1/ml/finetunes/{}": "runtime state: a fine-tuning run",
     "/v1/tables/{}/refs": "runtime state: branches and tags of a table's data, like git refs",
     "/v1/tables/{}/refs/{}": "runtime state: branches and tags of a table's data, like git refs",

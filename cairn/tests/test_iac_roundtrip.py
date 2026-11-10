@@ -117,7 +117,11 @@ def test_every_kind_round_trips_through_export_and_a_bundle(world, tmp_path):
     b.apply(c, b.load(str(path)), changes, state, log=lambda _: None)
     for k in kinds:
         if k.name not in keep and not k.singleton and k.delete is not None:
-            left = e.records(k, {p: k.example[p] for p in k.parents} if k.parents else None)
+            try:
+                left = e.records(k, {p: k.example[p] for p in k.parents} if k.parents else None)
+            except b.ApiError as err:                  # its parent was pruned too (an instance's parameters)
+                assert k.parents and " 404 " in str(err), (k.name, err)
+                left = []
             assert [b.key_of(k, {**k.defaults, **b.declared(k, r)}) for r in left] == (
                 ["finance-db/" + ADMIN] if k.name == "secret_scope_acls" else []), k.name
 

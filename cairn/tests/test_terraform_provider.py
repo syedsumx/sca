@@ -448,7 +448,12 @@ def mine(e, k, spec):
     """The example's resource in Cairn (a setting: the one there is)."""
     from cairn.iac import bundle
 
-    rows = e.records(k, {p: spec[p] for p in k.parents} if k.parents else None)
+    try:
+        rows = e.records(k, {p: spec[p] for p in k.parents} if k.parents else None)
+    except bundle.ApiError as err:            # its parent is gone too (an instance's parameters)
+        if k.parents and err.status == 404:
+            return []
+        raise
     return [r for r in rows if k.singleton or bundle._rec_key(k, r) == bundle.key_of(k, spec)]
 
 

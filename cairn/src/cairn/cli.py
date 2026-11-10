@@ -154,6 +154,8 @@ def cmd_scheduler(a) -> None:
         sch.extra.append(s.cowork.run_due)          # people's scheduled assistant tasks; outbox items expire
     if getattr(s, "databases", None) is not None:
         sch.extra.append(s.databases.expire)        # database logins that have expired
+    if getattr(s, "pg_instances", None) is not None:
+        sch.extra.append(s.pg_instances.run_due)    # managed Postgres: backups, retention, maintenance windows
     if getattr(s, "mirrors", None) is not None:
         sch.extra.append(s.mirrors.run_due)         # PostgreSQL tables mirrored into the lakehouse
     if getattr(s, "saas", None) is not None:

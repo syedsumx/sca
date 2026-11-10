@@ -20,8 +20,7 @@ The full platform guide (architecture, capabilities, hosting, CI, roadmap queue,
 | `src/cairn/iac/` | Everything as code: the resource registry (`registry.py`, `kinds.py`), `cairn bundle`, `cairn export`, `/v1/iac`, the provider's generator (`terraform.py`) | Python |
 | `src/cairn/ml/`, `ai/`, `agent/`, `context/` | MLflow integration, feature tables, AI functions, assistants, context agents | Python |
 | `src/cairn/quality/`, `marketplace/`, `identity/`, `notify/`, `export/` | Quality, access requests, SSO/SCIM, notifications, metadata export | Python |
-| `src/cairn/observability/` | OpenTelemetry for every process (with redaction), health map, journeys, logs, SLOs, alerts, incidents | Python |
-| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0139) | Python |
+| `src/cairn/migrations/versions/` | Alembic migrations, numbered `00NN_*.py` (latest: 0140) | Python |
 | `store/` | Cairn Store: S3-compatible object store | Rust |
 | `catalog/` | Cairn Catalog: Iceberg REST catalog | Rust |
 | `ontology/` | Cairn Ontology: the ontology compiler (a port of NVIDIA Auto Ontology's; see `ontology/NOTICE`) | Rust |

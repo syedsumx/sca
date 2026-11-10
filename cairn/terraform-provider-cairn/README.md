@@ -54,6 +54,9 @@ permissions and audit apply:
 | `cairn_external_location` | `external_locations` | A URL prefix on the customer's storage (abfss://, wasbs://, s3://, gs://) and the storage credential for it |
 | `cairn_external_location_grant` | `external_location_grants` | CREATE_TABLE, READ_FILES and WRITE_FILES on an external location for a person or a group (policies in the decision point's storage layer) |
 | `cairn_system_table_retention` | `system_table_retention` | How many days one of Cairn's system tables keeps (older rows are deleted) |
+| `cairn_postgres_instance` | `postgres_instances` | A managed PostgreSQL instance (Managed Postgres): its major version, size, standbys (Kubernetes), PgBouncer pooling (Kubernetes) and maintenance window |
+| `cairn_postgres_parameter` | `postgres_parameters` | One allow-listed PostgreSQL parameter of a managed instance (work_mem, max_connections, ...) |
+| `cairn_postgres_backup_schedule` | `postgres_backup_schedules` | A backup schedule of a managed instance: a base backup every few hours (WAL is archived continuously), kept for retention_days (the newest always), each optionally checked by a restore |
 
 **SQL and BI**
 

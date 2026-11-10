@@ -29,6 +29,10 @@ ENV = {
     "CAIRN_MLFLOW_URL": "http://127.0.0.1:1",
     "CAIRN_TOKENS_KEY": base64.b64encode(b"t" * 32).decode(),          # tokenisation domains
 }
+# Managed Postgres instances on Docker, where there is Docker (real PostgreSQL containers; no backup store here).
+if os.path.exists("/var/run/docker.sock"):
+    ENV.update({"CAIRN_PG_RUNTIME": "docker", "CAIRN_PG_INSTANCE_KEY": base64.b64encode(b"p" * 32).decode(),
+                "CAIRN_PG_DOCKER_PORTS": "16432-16499"})
 
 
 def build(tmp, with_ai: bool = False):

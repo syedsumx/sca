@@ -21,6 +21,12 @@ a role with ``CREATEDB`` and ``CREATEROLE``) and say where clients reach it (``C
   to: a busy source answers 409.
 * ``DELETE /v1/databases/<name>`` ends its sessions and drops it, its roles and its logins (``MANAGE_DATABASE``).
 
+Databases live on an instance (``cairn.databases.instances``): ``POST /v1/databases`` ``{"name", "instance"}`` puts
+one on a managed instance (``USE_DATABASE_INSTANCE`` or ``MANAGE_DATABASE_INSTANCE`` on it, besides
+``CREATE_DATABASE``); without ``instance`` it goes on the server above, the instance ``default``. A branch
+``{"name", "at": "<ISO time>"}`` or ``{"name", "backup": "<id>"}`` is the database as it was then, restored from
+its instance's backups into a new instance (``"instance"``: its name, default the branch's with ``-`` for ``_``).
+
 People never get the administrator's role; nothing here takes SQL from a caller, and every name is checked and
 quoted.
 """
@@ -46,6 +52,7 @@ databases_table = Table(
     Column("created_by", String(512), nullable=False),
     Column("branch_of", String(31), nullable=True),
     Column("created_ms", BigInteger, nullable=False),
+    Column("instance", String(31), nullable=True),          # None: the default instance (the server above)
 )
 logins_table = Table(
     "cairn_database_logins", metadata,
@@ -60,7 +67,7 @@ logins_table = Table(
 
 NAME = re.compile(r"^[a-z][a-z0-9_]{0,30}$")
 MAX_TTL_MINUTES = 24 * 60
-RESERVED = {"postgres", "template0", "template1"}
+RESERVED = {"postgres", "template0", "template1", "instances"}
 
 
 class DatabaseError(Exception):
@@ -77,21 +84,40 @@ class Databases:
     """Databases on one PostgreSQL server Cairn administers. ``allowed(actor, privilege, urn_or_None)`` is the PDP."""
 
     def __init__(self, engine, admin_url: str, host: str, port: int, allowed: Callable[[str, str, Optional[str]], bool],
-                 audit=None, sslmode: str = "require", clock: Callable[[], int] = lambda: int(time.time() * 1000)):
-        if not admin_url.startswith(("postgresql://", "postgres://")):
+                 audit=None, sslmode: str = "require", clock: Callable[[], int] = lambda: int(time.time() * 1000),
+                 instances=None):
+        if admin_url and not admin_url.startswith(("postgresql://", "postgres://")):
             raise DatabaseError("CAIRN_DATABASES_ADMIN_URL is a postgresql:// URL", 503)
         self.engine, self.admin_url, self.host, self.port = engine, admin_url, host, port
         self.allowed, self.audit, self.sslmode, self.clock = allowed, audit, sslmode, clock
+        self.instances = instances            # cairn.databases.instances.Instances (managed instances), or None
 
     # ---- the server --------------------------------------------------------------------------
-    def _admin(self, dbname: Optional[str] = None):
+    def _admin(self, dbname: Optional[str] = None, instance: Optional[str] = None):
         import psycopg
         from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-        info = conninfo_to_dict(self.admin_url)
-        if dbname:
-            info["dbname"] = dbname
+        if instance:
+            if self.instances is None:
+                raise DatabaseError("managed instances are not enabled here", 503)
+            try:
+                info = conninfo_to_dict(self.instances.admin_conninfo(instance, dbname))
+            except Exception as e:  # noqa: BLE001 - an InstanceError: its status and message
+                raise DatabaseError(str(e), getattr(e, "status", 503)) from e
+        else:
+            if not self.admin_url:
+                raise DatabaseError("there is no default instance (CAIRN_DATABASES_ADMIN_URL): name an instance", 400)
+            info = conninfo_to_dict(self.admin_url)
+            if dbname:
+                info["dbname"] = dbname
         return psycopg.connect(make_conninfo(**info), autocommit=True, connect_timeout=10)
+
+    def _where(self, instance: Optional[str]) -> tuple:
+        """Where clients reach an instance (host, port, sslmode)."""
+        if instance and self.instances is not None:
+            host, port = self.instances.client_endpoint(instance)
+            return host, int(port), "require"
+        return self.host, self.port, self.sslmode
 
     @staticmethod
     def _roles(name: str) -> tuple[str, str]:
@@ -122,12 +148,12 @@ class Databases:
         if self.audit is not None:
             self.audit.record("data", action, actor, urn(name), details)
 
-    def _setup(self, name: str, template: Optional[str] = None) -> None:
+    def _setup(self, name: str, template: Optional[str] = None, instance: Optional[str] = None) -> None:
         """Makes the database (as a copy of ``template`` if given) with its owner and reader roles."""
         from psycopg import errors, sql
 
         owner, reader = self._roles(name)
-        with self._admin() as conn:
+        with self._admin(instance=instance) as conn:
             for role in (owner, reader):
                 try:
                     conn.execute(sql.SQL("CREATE ROLE {} NOLOGIN").format(sql.Identifier(role)))
@@ -149,7 +175,7 @@ class Databases:
             conn.execute(sql.SQL("REVOKE ALL ON DATABASE {} FROM PUBLIC").format(sql.Identifier(name)))
             conn.execute(sql.SQL("GRANT CONNECT, TEMPORARY ON DATABASE {} TO {}, {}").format(
                 sql.Identifier(name), sql.Identifier(owner), sql.Identifier(reader)))
-        with self._admin(name) as conn:
+        with self._admin(name, instance) as conn:
             conn.execute("REVOKE ALL ON SCHEMA public FROM PUBLIC")
             conn.execute(sql.SQL("ALTER SCHEMA public OWNER TO {}").format(sql.Identifier(owner)))
             conn.execute(sql.SQL("GRANT USAGE ON SCHEMA public TO {}").format(sql.Identifier(reader)))
@@ -226,38 +252,129 @@ class Databases:
             conn.execute(sql.SQL("ALTER TYPE {} OWNER TO {}").format(sql.SQL(typ), sql.Identifier(new)))
 
     # ---- what people do --------------------------------------------------------------------------
-    def create(self, actor: str, name: str) -> dict:
+    def _on(self, instance: Optional[str], actor: str) -> Optional[str]:
+        """The instance a new database goes on (None: the default), checked."""
+        if instance in (None, "", "default"):
+            if not self.admin_url:
+                raise DatabaseError("there is no default instance (CAIRN_DATABASES_ADMIN_URL): name an instance", 400)
+            return None
+        if self.instances is None:
+            raise DatabaseError("managed instances are not enabled here", 503)
+        from cairn.databases.instances import urn as instance_urn
+
+        target = instance_urn(instance)
+        ok = False
+        for p in ("USE_DATABASE_INSTANCE", "MANAGE_DATABASE_INSTANCE"):
+            try:
+                ok = ok or bool(self.allowed(actor, p, target))
+            except Exception:  # noqa: BLE001 - fail closed
+                logger.warning("database decision failed (%s %s %s)", actor, p, target, exc_info=True)
+        if not ok:
+            raise DatabaseError(f"USE_DATABASE_INSTANCE is needed on {target}", 403)
+        try:
+            row = self.instances._row(instance)
+        except Exception:  # noqa: BLE001 - InstanceError 404
+            raise DatabaseError("no such instance", 404)
+        if row.state not in ("ready", "updating"):
+            raise DatabaseError(f"{instance} is {row.state}", 409)
+        return instance
+
+    def create(self, actor: str, name: str, instance: Optional[str] = None) -> dict:
         self._check(name)
         self._need(actor, "CREATE_DATABASE", None)
+        on = self._on(instance, actor)
         with self.engine.connect() as c:
             if c.execute(select(databases_table.c.name).where(databases_table.c.name == name)).first():
                 raise DatabaseError(f"{name} exists", 409)
-        self._setup(name)
+        self._setup(name, instance=on)
         with self.engine.begin() as c:
-            c.execute(insert(databases_table).values(name=name, created_by=actor, branch_of=None, created_ms=self.clock()))
-        self._audit("database.created", actor, name, {})
+            c.execute(insert(databases_table).values(name=name, created_by=actor, branch_of=None, created_ms=self.clock(),
+                                                     instance=on))
+        self._audit("database.created", actor, name, {"instance": on or "default"})
         return self.get(actor, name)
 
-    def branch(self, actor: str, source: str, name: str) -> dict:
+    def branch(self, actor: str, source: str, name: str, at: Optional[str] = None, backup: Optional[str] = None,
+               instance: Optional[str] = None) -> dict:
         self._check(name)
-        self._row(source)
+        src = self._row(source)
         self._need(actor, "MANAGE_DATABASE", urn(source))
         self._need(actor, "CREATE_DATABASE", None)
         with self.engine.connect() as c:
             if c.execute(select(databases_table.c.name).where(databases_table.c.name == name)).first():
                 raise DatabaseError(f"{name} exists", 409)
-        self._setup(name, template=source)
+        if at or backup:
+            # As it was then: its instance's backups restored into a new instance holding only this database.
+            if not src.instance or self.instances is None:
+                raise DatabaseError("a branch from a point in time needs the database on a managed instance "
+                                    "(with backups)", 409)
+            body: dict = {"name": instance or name.replace("_", "-"), "databases": {source: name}}
+            if at:
+                body["target_time"] = at
+            else:
+                body["backup"] = backup
+            try:
+                self.instances.restore(actor, src.instance, body)
+            except Exception as e:  # noqa: BLE001 - an InstanceError: its status and message
+                raise DatabaseError(str(e), getattr(e, "status", 502)) from e
+            self._audit("database.branched", actor, name, {"from": source, "at": at, "backup": backup,
+                                                            "instance": body["name"]})
+            return self.get(actor, name)
+        self._setup(name, template=source, instance=src.instance)
         with self.engine.begin() as c:
-            c.execute(insert(databases_table).values(name=name, created_by=actor, branch_of=source, created_ms=self.clock()))
+            c.execute(insert(databases_table).values(name=name, created_by=actor, branch_of=source, created_ms=self.clock(),
+                                                     instance=src.instance))
         self._audit("database.branched", actor, name, {"from": source})
         return self.get(actor, name)
+
+    # ---- for managed instances (cairn.databases.instances) ------------------------------------------------------
+    def on_instance(self, instance: str, include_dropped: bool = False) -> list:
+        with self.engine.connect() as c:
+            return [r.name for r in c.execute(select(databases_table.c.name).where(databases_table.c.instance == instance)
+                                              .order_by(databases_table.c.name))]
+
+    def check_new_names(self, instance: str, mapping: dict) -> None:
+        """A restore's {database on the source: its new name}: sources on that instance, new names free."""
+        mine = set(self.on_instance(instance))
+        seen = set()
+        for old, new in mapping.items():
+            if old not in mine:
+                raise DatabaseError(f"{old} is not a Cairn database on {instance}", 400)
+            self._check(new)
+            if new in seen:
+                raise DatabaseError(f"{new} is named twice", 400)
+            seen.add(new)
+            with self.engine.connect() as c:
+                if c.execute(select(databases_table.c.name).where(databases_table.c.name == new)).first():
+                    raise DatabaseError(f"{new} exists", 409)
+
+    def forget_roles_on(self, instance: str, databases: list, roles: list) -> None:
+        """A restored instance: the roles of a database it dropped, forgotten in the ones it kept, then dropped."""
+        from psycopg import sql
+
+        for db in databases:
+            with self._admin(db, instance) as conn:
+                self._forget_roles(conn, roles)
+        with self._admin(instance=instance) as conn:
+            for role in roles:
+                conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+    def register_restored(self, name: str, instance: str, source: str, actor: str) -> None:
+        with self.engine.begin() as c:
+            c.execute(insert(databases_table).values(name=name, created_by=actor, branch_of=source,
+                                                     created_ms=self.clock(), instance=instance))
+        self._audit("database.restored", actor, name, {"from": source, "instance": instance})
 
     def get(self, actor: str, name: str) -> dict:
         row = self._row(name)
         if not any(self.allowed(actor, p, urn(name)) for p in ("VIEW_DATABASE", "USE_DATABASE", "MANAGE_DATABASE")):
             raise DatabaseError("no such database", 404)
+        try:
+            host, port, sslmode = self._where(row.instance)
+        except Exception:  # noqa: BLE001 - the instance is not answering: shown without where it is
+            host, port, sslmode = None, None, "require"
         return {"name": row.name, "urn": urn(row.name), "created_by": row.created_by, "branch_of": row.branch_of,
-                "created_ms": row.created_ms, "host": self.host, "port": self.port, "database": row.name}
+                "created_ms": row.created_ms, "instance": row.instance or "default", "host": host, "port": port,
+                "sslmode": sslmode, "database": row.name}
 
     def list(self, actor: str) -> list[dict]:
         with self.engine.connect() as c:
@@ -273,7 +390,7 @@ class Databases:
     def credentials(self, actor: str, name: str, access: str = "read", ttl_minutes: int = 60) -> dict:
         from psycopg import sql
 
-        self._row(name)
+        row = self._row(name)
         if access not in ("read", "write"):
             raise DatabaseError("access is read or write")
         if not isinstance(ttl_minutes, int) or not 5 <= ttl_minutes <= MAX_TTL_MINUTES:
@@ -285,7 +402,8 @@ class Databases:
         now = self.clock()
         expires = now + ttl_minutes * 60_000
         until = time.strftime("%Y-%m-%d %H:%M:%S+00", time.gmtime(expires / 1000))
-        with self._admin() as conn:
+        with self._admin(instance=row.instance) as conn:
+            conn.execute("SET log_statement = 'none'")       # the statement carries the password
             conn.execute(sql.SQL("CREATE ROLE {} LOGIN PASSWORD {} VALID UNTIL {} IN ROLE {} CONNECTION LIMIT 20").format(
                 sql.Identifier(role), sql.Literal(password), sql.Literal(until),
                 sql.Identifier(owner if access == "write" else reader)))
@@ -298,8 +416,9 @@ class Databases:
             c.execute(insert(logins_table).values(role=role, database=name, actor=actor, access=access, created_ms=now,
                                                   expires_ms=expires, dropped=False))
         self._audit("database.credentials", actor, name, {"role": role, "access": access, "ttl_minutes": ttl_minutes})
-        return {"host": self.host, "port": self.port, "database": name, "user": role, "password": password,
-                "sslmode": self.sslmode, "access": access, "expires_ms": expires}
+        host, port, sslmode = self._where(row.instance)
+        return {"host": host, "port": port, "database": name, "user": role, "password": password,
+                "sslmode": sslmode, "access": access, "expires_ms": expires, "instance": row.instance or "default"}
         # No connection URL: a password in a URL ends up in shell history and logs.
 
     def _drop_login(self, conn, role: str) -> None:
@@ -312,22 +431,33 @@ class Databases:
         """Drops the logins that have expired (their sessions ended). Run by the scheduler."""
         now = self.clock()
         with self.engine.connect() as c:
-            roles = [r.role for r in c.execute(select(logins_table.c.role).where(
-                logins_table.c.expires_ms <= now, logins_table.c.dropped.is_(False)))]
-        if not roles:
+            rows = c.execute(select(logins_table.c.role, databases_table.c.instance)
+                             .select_from(logins_table.outerjoin(databases_table,
+                                                                 databases_table.c.name == logins_table.c.database))
+                             .where(logins_table.c.expires_ms <= now, logins_table.c.dropped.is_(False))).all()
+        if not rows:
             return 0
+        by_instance: dict = {}
+        for r in rows:
+            by_instance.setdefault(r.instance, []).append(r.role)
         done: list[str] = []
-        with self._admin() as conn:
-            for role in roles:                         # one login that cannot be dropped does not hold up the rest
-                try:
-                    self._drop_login(conn, role)
-                except Exception as e:  # noqa: BLE001 - kept, unable to log in, and tried again next time
-                    logger.warning("expired database login %s could not be dropped: %s", role, type(e).__name__)
-                    self._disable_login(conn, role)
-                    continue
-                done.append(role)
-                with self.engine.begin() as c:
-                    c.execute(update(logins_table).where(logins_table.c.role == role).values(dropped=True))
+        for instance, roles in by_instance.items():
+            try:
+                conn = self._admin(instance=instance)
+            except Exception as e:  # noqa: BLE001 - one instance down does not hold up the others; tried next time
+                logger.warning("database logins on %s could not be expired: %s", instance or "default", e)
+                continue
+            with conn:
+                for role in roles:                     # one login that cannot be dropped does not hold up the rest
+                    try:
+                        self._drop_login(conn, role)
+                    except Exception as e:  # noqa: BLE001 - kept, unable to log in, and tried again next time
+                        logger.warning("expired database login %s could not be dropped: %s", role, type(e).__name__)
+                        self._disable_login(conn, role)
+                        continue
+                    done.append(role)
+                    with self.engine.begin() as c:
+                        c.execute(update(logins_table).where(logins_table.c.role == role).values(dropped=True))
         return len(done)
 
     def _disable_login(self, conn, role: str) -> None:
@@ -348,7 +478,7 @@ class Databases:
             raise DatabaseError("no such login", 404)
         if row.actor != actor:
             self._need(actor, "MANAGE_DATABASE", urn(name))
-        with self._admin() as conn:
+        with self._admin(instance=self._row(name).instance) as conn:
             self._drop_login(conn, role)
         with self.engine.begin() as c:
             c.execute(update(logins_table).where(logins_table.c.role == role).values(dropped=True))
@@ -367,27 +497,28 @@ class Databases:
     def drop(self, actor: str, name: str) -> None:
         from psycopg import sql
 
-        self._row(name)
+        on = self._row(name).instance
         self._need(actor, "MANAGE_DATABASE", urn(name))
         owner, reader = self._roles(name)
         with self.engine.connect() as c:
             roles = [r.role for r in c.execute(select(logins_table.c.role).where(
                 logins_table.c.database == name, logins_table.c.dropped.is_(False)))]
-        with self._admin() as conn:
+        with self._admin(instance=on) as conn:
             conn.execute("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = %s", (name,))
             conn.execute(sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(sql.Identifier(name)))
             for role in roles:
                 self._drop_login(conn, role)
         # Branches made before their source cleaned up may still grant to its roles: forgotten there first.
         with self.engine.connect() as c:
-            others = [r.name for r in c.execute(select(databases_table.c.name).where(databases_table.c.name != name))]
+            same = (databases_table.c.instance == on) if on else databases_table.c.instance.is_(None)
+            others = [r.name for r in c.execute(select(databases_table.c.name).where(databases_table.c.name != name, same))]
         for other in others:
             try:
-                with self._admin(other) as oc:
+                with self._admin(other, on) as oc:
                     self._forget_roles(oc, [owner, reader])
             except Exception:  # noqa: BLE001 - a database gone from the server: nothing to forget there
                 logger.warning("database %s: could not clear grants to %s's roles", other, name, exc_info=True)
-        with self._admin() as conn:
+        with self._admin(instance=on) as conn:
             for role in (owner, reader):
                 conn.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
         with self.engine.begin() as c:
@@ -418,18 +549,21 @@ def build_databases_router(dbs: Databases, current_principal) -> Any:
         return {"databases": await call(lambda: dbs.list(p.urn))}
 
     @router.post("", status_code=201)
-    async def create(name: str = Body(..., embed=True), p=Depends(current_principal)):
+    async def create(name: str = Body(..., embed=True), instance: Optional[str] = Body(None, embed=True),
+                     p=Depends(current_principal)):
         u = person(p)
-        return await call(lambda: dbs.create(u, name))
+        return await call(lambda: dbs.create(u, name, instance))
 
     @router.get("/{name}")
     async def get(name: str, p=Depends(current_principal)):
         return await call(lambda: dbs.get(p.urn, name))
 
     @router.post("/{name}/branches", status_code=201)
-    async def branch(name: str, new: str = Body(..., embed=True, alias="name"), p=Depends(current_principal)):
+    async def branch(name: str, new: str = Body(..., embed=True, alias="name"), at: Optional[str] = Body(None, embed=True),
+                     backup: Optional[str] = Body(None, embed=True), instance: Optional[str] = Body(None, embed=True),
+                     p=Depends(current_principal)):
         u = person(p)
-        return await call(lambda: dbs.branch(u, name, new))
+        return await call(lambda: dbs.branch(u, name, new, at, backup, instance))
 
     @router.post("/{name}/credentials", status_code=201)
     async def credentials(name: str, access: str = Body("read", embed=True), ttl_minutes: int = Body(60, embed=True),

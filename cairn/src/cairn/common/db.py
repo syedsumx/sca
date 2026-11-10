@@ -68,6 +68,7 @@ def load_models() -> MetaData:
     from cairn.ai import workspace as _ai_workspace  # noqa: F401
     from cairn.governance import aggregation as _aggregation  # noqa: F401
     from cairn.dataaccess import databases as _databases  # noqa: F401
+    from cairn.databases import instances as _pg_instances  # noqa: F401
     from cairn.pipelines import mirror as _mirror  # noqa: F401
     from cairn.dataaccess import app_packages as _app_packages  # noqa: F401
     from cairn.ml import finetune as _finetune  # noqa: F401
