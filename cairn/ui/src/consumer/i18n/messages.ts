@@ -2,6 +2,7 @@ import { GUIDE_DE, GUIDE_EN, GUIDE_ES, GUIDE_FR, GUIDE_JA } from './guide';
 import { OBSERVABILITY_DE, OBSERVABILITY_EN } from './observability';
 import { PIPELINES_DE, PIPELINES_EN } from './pipelines';
 import { PEOPLE_DE, PEOPLE_EN, PEOPLE_ES, PEOPLE_FR, PEOPLE_JA } from './people';
+import { DESIGN_DE, DESIGN_EN, DESIGN_ES, DESIGN_FR, DESIGN_JA } from './design';
 
 /**
  * UI message catalogs. English is the source; other locales may leave keys out, and `t()` falls back
@@ -299,6 +300,7 @@ const en = {
     ...PEOPLE_EN,
     ...OBSERVABILITY_EN,
     ...PIPELINES_EN,
+    ...DESIGN_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -588,6 +590,7 @@ const de: Catalog = {
     ...PEOPLE_DE,
     ...OBSERVABILITY_DE,
     ...PIPELINES_DE,
+    ...DESIGN_DE,
 };
 
 const fr: Catalog = {
@@ -804,6 +807,7 @@ const fr: Catalog = {
     'form.requiredSr': 'obligatoire',
     ...GUIDE_FR,
     ...PEOPLE_FR,
+    ...DESIGN_FR,
 };
 
 const es: Catalog = {
@@ -1020,6 +1024,7 @@ const es: Catalog = {
     'form.requiredSr': 'obligatorio',
     ...GUIDE_ES,
     ...PEOPLE_ES,
+    ...DESIGN_ES,
 };
 
 const ja: Catalog = {
@@ -1235,6 +1240,7 @@ const ja: Catalog = {
     'form.requiredSr': '必須',
     ...GUIDE_JA,
     ...PEOPLE_JA,
+    ...DESIGN_JA,
 };
 
 export const CATALOGS: Record<Locale, Catalog> = { en, de, fr, es, ja };

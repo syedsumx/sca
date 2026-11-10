@@ -1,6 +1,6 @@
 import { Badge, Input, InputRef, Select, Tooltip } from 'antd';
 import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
-import { NavLink, useHistory, useLocation } from 'react-router-dom';
+import { Link, NavLink, useHistory, useLocation } from 'react-router-dom';
 import styled, { css } from 'styled-components';
 
 import { useDheQuery } from '../api/hooks';
@@ -21,7 +21,7 @@ import { AssistantSlideOver } from './Assistant';
 import { useExtensionSections } from './Extensions';
 import { Icon, IconName } from './Icons';
 import { LicenceBanner } from './Licence';
-import { ConsumerTheme, focusRing, tokens } from './tokens';
+import { ConsumerTheme, ThemeVariables, focusRing, tokens } from './tokens';
 
 export interface NavItem {
     to: string;
@@ -136,9 +136,10 @@ const Side = styled.aside<{ $collapsed: boolean; $open: boolean }>`
     top: 0;
     flex: none;
     height: 100vh;
-    width: ${(p) => (p.$collapsed ? '68px' : '244px')};
+    width: ${(p) => (p.$collapsed ? '76px' : '248px')};
     background: ${tokens.color.sidebar};
     color: ${tokens.color.sidebarText};
+    border-right: 1px solid ${tokens.color.border};
     display: flex;
     flex-direction: column;
     transition: width 0.18s ease;
@@ -146,61 +147,75 @@ const Side = styled.aside<{ $collapsed: boolean; $open: boolean }>`
     @media (max-width: 960px) {
         position: fixed;
         left: 0;
-        width: 260px;
+        width: 272px;
         transform: translateX(${(p) => (p.$open ? '0' : '-100%')});
         transition: transform 0.2s ease;
-        box-shadow: ${(p) => (p.$open ? '0 0 0 100vmax rgba(15,18,34,.45)' : 'none')};
+        box-shadow: ${(p) => (p.$open ? '0 0 0 100vmax rgba(15,23,42,.45)' : 'none')};
+    }
+    @media (prefers-reduced-motion: reduce) {
+        transition: none;
     }
 `;
 
-const Brand = styled.div`
+/** The Cairn mark: a cairn's outline, in the accent colour. */
+export function CairnMark({ size = 22 }: { size?: number }) {
+    return (
+        <svg width={size} height={size} viewBox="0 0 28 28" aria-hidden="true" focusable="false">
+            <path d="M14 3 L24 23 H4 Z" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinejoin="round" />
+            <path d="M9 17 H19" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+        </svg>
+    );
+}
+
+const Brand = styled(Link)<{ $collapsed: boolean }>`
     display: flex;
     align-items: center;
-    gap: 10px;
-    height: 60px;
-    padding: 0 18px;
-    color: #fff;
+    gap: 9px;
+    min-height: 60px;
+    padding: 0 ${(p) => (p.$collapsed ? '0' : '20px')};
+    justify-content: ${(p) => (p.$collapsed ? 'center' : 'flex-start')};
+    flex: none;
+    && {
+        color: ${tokens.color.text};
+    }
+    font-family: ${tokens.fontHeading};
     font-weight: 700;
-    font-size: 16px;
+    font-size: 17px;
+    text-decoration: none;
     letter-spacing: -0.01em;
-    flex: none;
-`;
-
-const Mark = styled.span`
-    display: inline-grid;
-    place-items: center;
-    width: 30px;
-    height: 30px;
-    border-radius: 9px;
-    background: linear-gradient(135deg, #7c6cf6, #4f46e5 55%, #2f8ee5);
-    color: #fff;
-    flex: none;
+    svg {
+        color: ${tokens.color.primary};
+    }
+    ${focusRing}
+    &&:hover {
+        color: ${tokens.color.primaryHover};
+    }
 `;
 
 const NavScroll = styled.nav`
     flex: 1;
     overflow-y: auto;
-    padding: 4px 10px 16px;
+    padding: 0 12px 16px;
     scrollbar-width: thin;
-    scrollbar-color: #2a2f4a transparent;
+    scrollbar-color: ${tokens.color.borderStrong} transparent;
 `;
 
 const Group = styled.div<{ $collapsed: boolean }>`
-    margin-top: 14px;
+    margin-top: 12px;
     h2 {
-        margin: 0 0 4px;
-        padding: 0 10px;
+        margin: 0 0 2px;
+        padding: 0 12px;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
-        color: #8b91b0;
+        color: ${tokens.color.textMuted};
         ${(p) =>
             p.$collapsed &&
             css`
                 height: 1px;
                 overflow: hidden;
-                background: #232843;
+                background: ${tokens.color.border};
                 margin: 0 8px 8px;
                 padding: 0;
                 color: transparent;
@@ -217,34 +232,36 @@ const Item = styled(NavLink)<{ $collapsed: boolean }>`
     && {
         color: ${tokens.color.sidebarText};
     }
-    &&:hover,
+    &&:hover {
+        color: ${tokens.color.text};
+    }
     &&.active {
-        color: #fff;
+        color: ${tokens.color.sidebarActive};
     }
     .ant-badge {
         color: inherit;
     }
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 11px;
-    height: 36px;
-    padding: 0 10px;
-    border-radius: 9px;
-    color: ${tokens.color.sidebarText};
-    font-size: 13.5px;
+    gap: 10px;
+    min-height: ${tokens.control}px;
+    padding: 0 12px;
+    border-radius: ${tokens.radius.sm};
+    font-size: 14px;
     font-weight: 500;
+    text-decoration: none;
     white-space: nowrap;
     overflow: hidden;
     ${(p) => p.$collapsed && 'justify-content: center; padding: 0;'}
     ${focusRing}
     &:hover {
-        color: #fff;
-        background: rgba(255, 255, 255, 0.06);
+        background: #F1F5F9;
     }
     &.active {
-        color: ${tokens.color.sidebarActive};
-        background: linear-gradient(90deg, rgba(109, 99, 240, 0.32), rgba(109, 99, 240, 0.12));
-        box-shadow: inset 2px 0 0 #8b80ff;
+        font-weight: 600;
+        background: ${tokens.color.primarySoft};
+        box-shadow: inset 3px 0 0 ${tokens.color.primary};
     }
     .label {
         flex: 1;
@@ -255,8 +272,8 @@ const Item = styled(NavLink)<{ $collapsed: boolean }>`
 
 const SideFoot = styled.div`
     flex: none;
-    border-top: 1px solid #1f2440;
-    padding: 10px;
+    border-top: 1px solid ${tokens.color.border};
+    padding: 8px 10px;
     display: flex;
     gap: 4px;
     align-items: center;
@@ -264,18 +281,19 @@ const SideFoot = styled.div`
     .more {
         flex: 1;
         min-width: 0;
+        min-height: ${tokens.control}px;
         border: 0;
         background: transparent;
         color: ${tokens.color.sidebarText};
         text-align: left;
-        padding: 6px 8px;
-        border-radius: 8px;
+        padding: 0 10px;
+        border-radius: ${tokens.radius.sm};
         cursor: pointer;
-        font-size: 12.5px;
+        font-size: 13px;
         ${focusRing}
         &:hover {
-            color: #fff;
-            background: rgba(255, 255, 255, 0.06);
+            color: ${tokens.color.text};
+            background: #F1F5F9;
         }
     }
 `;
@@ -284,23 +302,28 @@ const PaletteButton = styled.button`
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    height: 34px;
-    padding: 0 10px;
-    border: 1px solid ${tokens.color.border};
-    border-radius: 10px;
-    background: ${tokens.color.surface};
+    min-height: ${tokens.control}px;
+    padding: 0 12px;
+    border: 1px solid ${tokens.color.borderStrong};
+    border-radius: ${tokens.radius.md};
+    background: ${tokens.color.surfaceSunken};
     color: ${tokens.color.textMuted};
+    font: inherit;
+    font-size: 13px;
     cursor: pointer;
     white-space: nowrap;
     ${focusRing}
     &:hover {
         color: ${tokens.color.text};
+        border-color: ${tokens.color.primary};
     }
     kbd {
-        font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
-        border: 1px solid ${tokens.color.border};
+        font: 12px ${tokens.font};
+        color: ${tokens.color.textMuted};
+        border: 1px solid ${tokens.color.borderStrong};
         border-radius: 5px;
-        padding: 0 5px;
+        padding: 0 6px;
+        background: ${tokens.color.surface};
     }
     @media (max-width: 720px) {
         .text,
@@ -313,16 +336,17 @@ const PaletteButton = styled.button`
 const IconButton = styled.button`
     display: inline-grid;
     place-items: center;
-    width: 34px;
-    height: 34px;
+    width: ${tokens.control}px;
+    height: ${tokens.control}px;
     border: 0;
-    border-radius: 9px;
+    border-radius: ${tokens.radius.sm};
     background: transparent;
     color: inherit;
     cursor: pointer;
+    flex: none;
     ${focusRing}
     &:hover {
-        background: rgba(127, 127, 160, 0.14);
+        background: #F1F5F9;
     }
 `;
 
@@ -339,18 +363,26 @@ const Top = styled.header`
     z-index: 20;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px 12px;
     height: 60px;
-    padding: 0 24px;
-    background: rgba(255, 255, 255, 0.86);
-    backdrop-filter: saturate(160%) blur(10px);
+    padding: 0 32px;
+    box-sizing: border-box;
+    /* On a phone the bar wraps: the search box gets a row of its own. */
+    @media (max-width: 720px) {
+        flex-wrap: wrap;
+        height: auto;
+        min-height: 60px;
+        padding: 8px 16px;
+    }
+    background: ${tokens.color.surface};
     border-bottom: 1px solid ${tokens.color.border};
     .menu {
         display: none;
         color: ${tokens.color.text};
     }
     @media (max-width: 960px) {
-        padding: 0 12px;
+        padding-left: 16px;
+        padding-right: 16px;
         .menu {
             display: inline-grid;
         }
@@ -359,25 +391,31 @@ const Top = styled.header`
 
 const SearchBox = styled(Input)`
     max-width: 520px;
-    flex: 1;
+    flex: 1 1 240px;
     && {
-        border-radius: 10px;
-        background: ${tokens.color.surfaceAlt};
-        border-color: transparent;
+        min-height: ${tokens.control}px;
+        border-radius: ${tokens.radius.md};
+        background: ${tokens.color.surface};
+        border-color: ${tokens.color.borderStrong};
     }
     &&:hover {
-        border-color: ${tokens.color.border};
+        border-color: ${tokens.color.primary};
     }
     && input {
         background: transparent;
     }
     kbd {
-        font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+        font: 12px ${tokens.font};
         color: ${tokens.color.textMuted};
-        border: 1px solid ${tokens.color.border};
+        border: 1px solid ${tokens.color.borderStrong};
         border-radius: 5px;
-        padding: 0 5px;
-        background: #fff;
+        padding: 0 6px;
+        background: ${tokens.color.surface};
+    }
+    @media (max-width: 720px) {
+        order: 10;
+        flex-basis: 100%;
+        max-width: none;
     }
 `;
 
@@ -385,32 +423,34 @@ const AskButton = styled.button`
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    height: 34px;
-    padding: 0 14px;
-    border: 0;
-    border-radius: 10px;
-    color: #fff;
-    font-weight: 600;
+    min-height: ${tokens.control}px;
+    padding: 0 16px;
+    border: 1px solid ${tokens.color.borderStrong};
+    border-radius: ${tokens.radius.md};
+    color: ${tokens.color.text};
+    background: ${tokens.color.surface};
+    font: inherit;
+    font-size: 14px;
+    font-weight: 500;
     cursor: pointer;
-    background: linear-gradient(135deg, #6d63f0, #4f46e5);
-    box-shadow: 0 4px 14px rgba(79, 70, 229, 0.28);
     white-space: nowrap;
     ${focusRing}
     &:hover {
-        filter: brightness(1.06);
+        border-color: ${tokens.color.primary};
+        color: ${tokens.color.primaryHover};
     }
 `;
 
 const Avatar = styled.span`
     display: inline-grid;
     place-items: center;
-    width: 32px;
-    height: 32px;
+    width: 36px;
+    height: 36px;
     border-radius: 50%;
-    background: ${tokens.color.primarySoft};
-    color: ${tokens.color.primary};
-    font-weight: 700;
-    font-size: 12px;
+    background: ${tokens.color.primary};
+    color: #fff;
+    font-weight: 600;
+    font-size: 13px;
     flex: none;
 `;
 
@@ -418,23 +458,36 @@ const Avatar = styled.span`
 const HostedBar = styled.nav`
     display: flex;
     gap: 4px;
-    padding: 8px 24px;
+    padding: 6px 24px;
     overflow-x: auto;
     background: ${tokens.color.surface};
     border-bottom: 1px solid ${tokens.color.border};
     a {
-        padding: 6px 12px;
+        display: inline-flex;
+        align-items: center;
+        min-height: ${tokens.control}px;
+        padding: 0 12px;
         border-radius: ${tokens.radius.sm};
-        color: ${tokens.color.textMuted};
+        color: ${tokens.color.textSubtle};
         font-weight: 500;
         white-space: nowrap;
+        text-decoration: none;
         ${focusRing}
     }
+    a:hover {
+        background: #F1F5F9;
+    }
     a.active {
-        color: ${tokens.color.primary};
+        color: ${tokens.color.primaryHover};
+        font-weight: 600;
         background: ${tokens.color.primarySoft};
     }
 `;
+
+/** The palette's shortcut as this computer writes it. */
+export function paletteKeys(platform: string = typeof navigator !== 'undefined' ? navigator.platform || '' : ''): string {
+    return /mac|iphone|ipad/i.test(platform) ? '⌘ K' : 'Ctrl K';
+}
 
 function initials(name: string | undefined): string {
     const parts = (name || '').trim().split(/\s+/).filter(Boolean);
@@ -488,6 +541,10 @@ function Shell0({ children }: { children?: React.ReactNode }) {
         },
     });
     useEffect(() => setOpen(false), [location.pathname]);
+    // A new page starts at its top (the hash router keeps the old page's scroll otherwise, under the sticky top bar).
+    useEffect(() => {
+        if (typeof window.scrollTo === 'function' && !/jsdom/i.test(navigator.userAgent)) window.scrollTo(0, 0);
+    }, [location.pathname]);
     const unread = inbox.data?.length ?? 0;
     const hasExtensions = useExtensionSections('workspace').length > 0;
     const visible = (n: NavItem) => (!n.feature || session.feature(n.feature)) && routeAllowed(n.to, HUBS, guide.caps);
@@ -542,10 +599,11 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     const askAndSearch = (
         <>
             <PaletteButton type="button" onClick={() => guide.setPalette(true)} aria-haspopup="dialog"
-                aria-keyshortcuts="Control+K Meta+K" aria-label={t('palette.open')}>
+                aria-keyshortcuts="Control+K Meta+K" aria-label={t('palette.open')}
+                title={t('nav.searchShortcut', { keys: paletteKeys() })}>
                 <Icon name="search" size={16} />
                 <span className="text">{t('palette.open')}</span>
-                <kbd>⌘K</kbd>
+                <kbd>{paletteKeys()}</kbd>
             </PaletteButton>
             <SearchBox
                 ref={searchRef}
@@ -583,6 +641,7 @@ function Shell0({ children }: { children?: React.ReactNode }) {
         return (
             <div className="cairn-shell" style={{ minHeight: '100%', background: tokens.color.surfaceAlt }}>
                 <ConsumerTheme />
+                <ThemeVariables />
                 <Top>{askAndSearch}</Top>
                 <HostedBar aria-label={t('nav.sections')}>
                     {[...(guide.enabled ? [GET_STARTED] : []), ...usable].map((n) => (
@@ -610,11 +669,10 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     return (
         <Shell className="cairn-shell">
             <ConsumerTheme />
+            <ThemeVariables />
             <Side $collapsed={collapsed} $open={open}>
-                <Brand>
-                    <Mark>
-                        <Icon name="sparkle" size={17} />
-                    </Mark>
+                <Brand to="/discover" $collapsed={collapsed} aria-label={t('nav.home')} onClick={onNav('/discover')}>
+                    <CairnMark />
                     {!collapsed && <span>Cairn</span>}
                 </Brand>
                 <NavScroll aria-label={t('nav.sections')}>

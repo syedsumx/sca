@@ -478,7 +478,7 @@ def test_the_palette_finds_pages_and_actions_and_the_sidebar_fits_the_person(wor
             page.keyboard.press("Escape")
             expect(page.get_by_role("tab", name="Saved queries", selected=True)).to_be_visible()
             # "?" lists the shortcuts.
-            page.locator("body").click(position={"x": 700, "y": 20})
+            page.get_by_role("heading", level=1).first.click()   # somewhere that is not a field
             page.keyboard.press("?")
             expect(page.get_by_role("dialog", name="Keyboard shortcuts")).to_be_visible()
             page.keyboard.press("Escape")
