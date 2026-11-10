@@ -1,6 +1,6 @@
 """Pipeline observability: the runs of Airflow DAGs, flows, dbt, jobs and OpenLineage pipelines
 
-Revision ID: 0143
+Revision ID: 0142
 Revises: 0141
 Create Date: 2026-11-10 22:00:00.000000
 
@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlalchemy as sa
 from alembic import op
 
-revision = '0143'
+revision = '0142'
 down_revision = '0141'
 branch_labels = None
 depends_on = None
