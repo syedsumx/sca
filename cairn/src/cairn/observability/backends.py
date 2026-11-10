@@ -93,17 +93,34 @@ class Prometheus(_Backend):
         doc = self._get("/api/v1/query", {"query": expr, **({"time": f"{at:.3f}"} if at else {})})
         return _samples(doc, self.name)
 
-    def query_range(self, expr: str, start: float, end: float, step: float) -> list[dict]:
-        doc = self._get("/api/v1/query_range", {"query": expr, "start": f"{start:.3f}", "end": f"{end:.3f}",
-                                                "step": f"{max(step, 1):.0f}s"})
-        if not doc or doc.get("status") != "success":
-            raise BackendError(f"{self.name}: {(doc or {}).get('error', 'no answer')}"[:300], 422)
-        return [{"labels": r.get("metric", {}), "values": [(float(t), _num(v)) for t, v in r.get("values", [])]}
-                for r in doc["data"]["result"]]
+    def query_range(self, expr: str, start: float, end: float, step: float, timeout: Optional[str] = None) -> list[dict]:
+        params = {"query": expr, "start": f"{start:.3f}", "end": f"{end:.3f}", "step": f"{max(step, 1):.0f}s"}
+        if timeout:
+            params["timeout"] = timeout
+        return _matrix(self._get("/api/v1/query_range", params), self.name)
+
+    def label_values(self, label: str, match: str = "", start: Optional[float] = None) -> list[str]:
+        """The values a label takes (in series matching ``match``, when given): a dashboard variable's choices."""
+        params: dict[str, Any] = {}
+        if match:
+            params["match[]"] = match
+        if start:
+            params["start"] = f"{start:.3f}"
+        return _values(self._get(f"/api/v1/label/{label}/values", params), self.name)
 
 
 class Loki(_Backend):
     name = "loki"
+
+    def query_range(self, expr: str, start: float, end: float, step: float) -> list[dict]:
+        """A LogQL metric query over a range: [{labels, values: [(t, v)]}] (as Prometheus answers)."""
+        return _matrix(self._get("/loki/api/v1/query_range", {"query": expr, "start": str(int(start * 1e9)),
+                                                              "end": str(int(end * 1e9)), "step": f"{max(step, 1):.0f}s"}),
+                       self.name)
+
+    def label_values(self, label: str, start: Optional[float] = None) -> list[str]:
+        return _values(self._get(f"/loki/api/v1/label/{label}/values",
+                                 {"start": str(int(start * 1e9))} if start else None), self.name)
 
     def query(self, expr: str, at: Optional[float] = None) -> list[dict]:
         """A LogQL metric query, instant: [{labels, value}]."""
@@ -151,6 +168,34 @@ class Tempo(_Backend):
         return [{"trace_id": t.get("traceID", "").rjust(32, "0"), "root_service": t.get("rootServiceName"),
                  "root_name": t.get("rootTraceName"), "start_ms": int(t.get("startTimeUnixNano", 0)) // 1_000_000,
                  "duration_ms": t.get("durationMs", 0)} for t in doc.get("traces", [])]
+
+
+    def traceql(self, q: str, start: float, end: float, limit: int = 20) -> list[dict]:
+        """A TraceQL search: [{trace_id, root_service, root_name, start_ms, duration_ms}], newest first."""
+        doc = self._get("/api/search", {"q": q, "start": str(int(start)), "end": str(int(end) + 1), "limit": str(limit)})
+        if doc is None:
+            raise BackendError(f"{self.name} has no TraceQL search here", 501)
+        out = [{"trace_id": t.get("traceID", "").rjust(32, "0"), "root_service": t.get("rootServiceName"),
+                "root_name": t.get("rootTraceName"), "start_ms": int(t.get("startTimeUnixNano", 0)) // 1_000_000,
+                "duration_ms": t.get("durationMs", 0)} for t in doc.get("traces", [])]
+        out.sort(key=lambda t: t["start_ms"], reverse=True)
+        return out
+
+
+def _matrix(doc: Any, name: str) -> list[dict]:
+    if not doc or doc.get("status") != "success":
+        raise BackendError(f"{name}: {(doc or {}).get('error', 'no answer')}"[:300], 422)
+    data = doc["data"]
+    if data.get("resultType", "matrix") != "matrix":
+        raise BackendError(f"{name}: a range query answers a matrix, not a {data.get('resultType')}", 422)
+    return [{"labels": r.get("metric", {}), "values": [(float(t), _num(v)) for t, v in r.get("values", [])]}
+            for r in data.get("result", [])]
+
+
+def _values(doc: Any, name: str) -> list[str]:
+    if not doc or doc.get("status") != "success":
+        raise BackendError(f"{name}: {(doc or {}).get('error', 'no answer')}"[:300], 422)
+    return [str(v) for v in doc.get("data") or []]
 
 
 def _logfmt(v: str) -> str:

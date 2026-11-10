@@ -58,12 +58,14 @@ try:
     AI_INJECTIONS = Counter("cairn_ai_injection_flagged_total",
                             "Catalog strings flagged as instructions to an AI in tool results", ["channel"])
     INGESTION_SOURCES = Gauge("cairn_ingestion_sources", "Ingestion sources by health", ["state"])
+    PDP_CACHE = Counter("cairn_pdp_cache_lookups_total", "Policy decision cache lookups", ["result"])
+    RUNS = Counter("cairn_runs_total", "Job and flow runs that ended", ["kind", "status"])
     ENABLED = True
 except ImportError:  # pragma: no cover
     PDP_DECISIONS = PDP_SECONDS = QUALITY_EVALUATIONS = QUALITY_INCIDENTS = NOTIFICATIONS = _Noop()
     NOTIFICATIONS_PENDING = TRINO_LINEAGE_HELD = AI_TOKENS = AI_COST = AI_BUDGET_REFUSALS = AUDIT_EVENTS = SIEM_SENT = _Noop()
     WORKER_LAST_SUCCESS = WORKER_ERRORS = LICENCE_DAYS_LEFT = LICENCE_SEATS = LICENCE_READ_ONLY = _Noop()
-    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = _Noop()
+    AGENT_TOOL_CALLS = AGENT_TOOL_SECONDS = AI_INJECTIONS = INGESTION_SOURCES = PDP_CACHE = RUNS = _Noop()
     ENABLED = False
 
 

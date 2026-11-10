@@ -240,7 +240,9 @@ class PolicyDecisionPoint:
                 hit = self._cache.get(key)
                 if hit and hit[0] > time.monotonic():
                     metrics.PDP_DECISIONS.labels(hit[1].decision, self.mode).inc()
+                    metrics.PDP_CACHE.labels("hit").inc()
                     return hit[1]
+            metrics.PDP_CACHE.labels("miss").inc()
 
         started = time.perf_counter()
         decision = self._evaluate(req, explain)

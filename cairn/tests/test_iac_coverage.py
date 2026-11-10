@@ -38,6 +38,8 @@ COVERED_BY: dict[str, str] = {
     "PUT /notify/routes": "notification_routes",           # every route at once
     "POST /sql/dashboards/{}/actions": "dashboards",       # a dashboard's actions are its `actions`
     "DELETE /sql/dashboards/{}/actions/{}": "dashboards",
+    "POST /sql/dashboards/import/grafana": "dashboards",   # a Grafana dashboard made a dashboard (the kind keeps it)
+    "POST /sql/dashboards/{}/copy": "dashboards",          # a copy is a new dashboard of the person's
     "PUT /v1/flows/{}/sharing": "flows",                   # editors and viewers
     "POST /v1/flows/{}/enabled": "flows",
     "POST /v1/flows/{}/publish": "flows",                  # a flow declared as code is published as it is saved
@@ -117,6 +119,7 @@ ACTIONS: dict[str, str] = {
     "POST /sql/run": _QUERY, "POST /sql/saved/{}/run": _QUERY, "POST /sql/builder": _QUERY,
     "POST /sql/metrics/query": _QUERY, "POST /sql/workbooks/compile": _QUERY, "POST /sql/workbooks/run": _QUERY,
     "POST /sql/dashboards/{}/render": _QUERY, "POST /embed/v1/dashboards/{}/render": _QUERY,
+    "POST /v1/observability/tiles/preview": _QUERY, "POST /v1/observability/tiles/options": _QUERY,
     "POST /sql/dashboards/{}/actions/{}/run": "a person clicking a dashboard action (the action is the dashboard's)",
     "POST /v1/statements": _QUERY, "POST /v1/statements/next": _QUERY, "POST /v1/statements/cancel": _QUERY,
     "POST /v1/vectors/{}/answer": _QUERY, "POST /v1/serving/{}/lookup": _QUERY,

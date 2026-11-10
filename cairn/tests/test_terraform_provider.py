@@ -253,6 +253,11 @@ resource "cairn_vector_index" "articles" {
 """
 
 
+def mine_boards(s) -> list:
+    """The admin's own dashboards (not the built-in ops dashboards Cairn shares with operators)."""
+    return [d for d in s.sql_boards.dashboards(ADMIN) if not d["builtin"]]
+
+
 def test_terraform_manages_sql_resources_and_vector_indexes(world):
     from pyiceberg.exceptions import NoSuchTableError
 
@@ -268,7 +273,7 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     tf(w, "apply", "-auto-approve")
     q = next(x for x in s.sql_workspace.saved(ADMIN) if x["name"] == "revenue-by-region")
     assert q["chart"] == {"type": "bar", "x": "region", "y": ["total"]}
-    board = s.sql_boards.dashboards(ADMIN)[0]
+    board = mine_boards(s)[0]
     assert [(t.get("query"), t["title"], t["width"]) for t in board["tiles"]] == [
         (q["id"], "revenue-by-region", 2), (hand["id"], "Hand", 1), (None, "Revenue", 1)]   # the data source found the hand-made query
     assert board["tiles"][2]["metric"]["metrics"] == ["tf_revenue"]
@@ -284,7 +289,7 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     config2(value=500, title="By hand")
     out = tf(w, "apply", "-auto-approve").stdout
     assert "0 added, 2 changed, 0 destroyed" in out, out
-    assert s.sql_boards.dashboards(ADMIN)[0]["id"] == board["id"] and s.sql_boards.alerts(ADMIN)[0]["value"] == 500
+    assert mine_boards(s)[0]["id"] == board["id"] and s.sql_boards.alerts(ADMIN)[0]["value"] == 500
     # Destroy removes what Terraform made; the hand-made query stays. (This world has no catalog: the
     # index's vectors table, which destroy also drops, was never built.)
     class NoCatalog:
@@ -293,7 +298,7 @@ def test_terraform_manages_sql_resources_and_vector_indexes(world):
     s.vectors._catalog = NoCatalog
     tf(w, "destroy", "-auto-approve")
     assert [x["name"] for x in s.sql_workspace.saved(ADMIN)] == ["by-hand"]
-    assert not s.sql_boards.dashboards(ADMIN) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
+    assert not mine_boards(s) and not s.sql_boards.alerts(ADMIN) and not s.sql_workflows.list(ADMIN)
     assert not s.workbooks.list(ADMIN) and not [m for m in s.metrics.list() if m["name"] == "tf_revenue"]
     assert s.vectors.list() == []
 

@@ -341,17 +341,36 @@ CORE: list[Kind] = [
              {"source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}]}},
          example_update={"description": "Orders by region"}),
     Kind("dashboards", "dashboard", "bi",
-         "Saved queries, metrics and workbook elements shown together, each run as its viewer; with its controls "
-         "and its actions (forms and buttons that change things, run as the person clicking).",
+         "Saved queries, metrics and workbook elements shown together, each run as its viewer; ops tiles (PromQL, "
+         "LogQL, TraceQL, SLOs, alerts, PostgreSQL instances) next to them; with its controls (filters, $variables, "
+         "the time range) and its actions (forms and buttons that change things, run as the person clicking).",
          (R("name"), F("description", default=""), F("shared", "bool", default=False),
-          R("tiles", "json", description='[{"query": "<saved query id>", "title": "...", "width": 1}]'),
-          F("controls", "json", default=[], only_set=True),
+          R("tiles", "json", description='[{"query": "<saved query id>", "title": "...", "width": 1}] or an ops tile: '
+                                         '{"promql": {"queries": [{"expr", "legend"}]}, "view", "display"}; also '
+                                         "logql, traces, slo, alerts, postgres"),
+          F("controls", "json", default=[], only_set=True,
+            description='filters (values, range, date_range, text), {"kind": "variable"} ($name in ops queries) and '
+                        '{"kind": "time", "default": "1h", "refresh": 30}'),
           F("actions", "json", default=[], only_set=True,
             description='[{"name": "approve", "kind": "input_update", "input_table": "<id>", "set": {...}}]: '
                         "input_row, input_update, workflow or webhook; matched by name")),
          **crud("/sql/dashboards"), mine=True, order=120, service="sql_boards",
-         example={"name": "sales", "tiles": [{"connection": "wh", "title": "Orders by region", "element": {
-             "source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}}],
+         example={"name": "sales", "tiles": [
+             {"connection": "wh", "title": "Orders by region", "element": {
+                 "source": {"table": "main.orders"}, "group_by": ["region"], "aggregates": [{"name": "n", "formula": "Count()"}]}},
+             {"title": "Requests / s", "view": "timeseries", "display": {"unit": "reqps"}, "promql": {"queries": [
+                 {"expr": 'sum by (service_name) (rate(traces_span_metrics_calls_total{service_name="$service"}'
+                          "[$__rate_interval]))", "legend": "{{service_name}}"}]}},
+             {"title": "Error logs", "view": "logs", "logql": {"queries": [
+                 {"expr": '{service_name="$service"} |= "error"'}], "limit": 50}},
+             {"title": "Slow requests", "traces": {"query": '{ resource.service.name = "$service" && duration > 500ms }',
+                                                   "limit": 10}},
+             {"title": "API availability", "view": "stat", "slo": {"id": "api-availability"}},
+             {"title": "Firing", "alerts": {"state": "firing", "labels": {"service": "$service"}}},
+             {"title": "Database", "postgres": {"instance": "default"}}],
+             "controls": [{"id": "time", "kind": "time", "default": "1h", "refresh": 30},
+                          {"id": "service", "kind": "variable", "label": "Service", "default": "cairn-api",
+                           "query": {"source": "label_values", "label": "service_name"}}],
              "actions": [{"name": "flag", "kind": "webhook", "label": "Flag a problem",
                           "url": "https://hooks.example.com/cairn/flag", "fields": [{"name": "note", "type": "text"}]}]},
          example_update={"description": "Sales, by region"}),

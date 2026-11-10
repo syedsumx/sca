@@ -1165,6 +1165,9 @@ class Flows:
                                         wake_ms=None)).rowcount
         if not done:
             return
+        from cairn.common import metrics
+
+        metrics.RUNS.labels("flow", status).inc()
         run = self._run_row(rid)
         try:
             row = self._row(run["flow_id"])

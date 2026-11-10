@@ -512,6 +512,9 @@ class Jobs:
             conn.execute(delete(job_runs).where(and_(job_runs.c.job_id == j["id"],
                                                      job_runs.c.started_ms < _now() - self.keep_days * 86_400_000)))
         self._audit(owner, f"job.run_{status}", j["name"], {"run": rid, "trigger": trigger})
+        from cairn.common import metrics
+
+        metrics.RUNS.labels("job", status).inc()
         if status == "failed" or j["notify"] == "always":
             who = [owner, *[r for r in j["recipients"] if r != owner]]
             kind = "job.failed" if status == "failed" else "job.finished"

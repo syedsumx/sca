@@ -77,10 +77,18 @@ def _board(r, level: int = 0) -> dict:
     from cairn.sqlworkspace.sharing import role_name
 
     return {"id": r.id, "owner": r.owner, "role": role_name(level), "name": r.name, "description": r.description, "shared": bool(r.shared),
-            "tiles": json.loads(r.tiles), "controls": json.loads(r.controls or "[]"), "updated_ms": r.updated_ms}
+            "tiles": json.loads(r.tiles), "controls": json.loads(r.controls or "[]"), "updated_ms": r.updated_ms,
+            "builtin": r.owner == BUILTIN_OWNER}
 
 
-CONTROL_KINDS = ("values", "range", "date_range", "text")
+def is_ops(tile: dict) -> bool:
+    return any(tile.get(k) is not None for k in OPS_SOURCES)
+
+
+CONTROL_KINDS = ("values", "range", "date_range", "text", "variable", "time")
+OPS_CONTROLS = ("variable", "time")                 # ops dashboards' $variables and time range (not filters)
+OPS_SOURCES = ("promql", "logql", "traces", "slo", "alerts", "postgres")
+BUILTIN_OWNER = "urn:li:corpuser:cairn-observability"   # the built-in ops dashboards (cairn.observability.builtin)
 CONTROL_ID = re.compile(r"^[a-z0-9_-]{1,40}$")
 
 
@@ -125,9 +133,11 @@ class Boards:
         self.on_change = None        # (kind, id, actor) after a save or delete
         self.on_view = None          # (kind, id, actor) when someone looks at a dashboard
         self.actions = None          # cairn.sqlworkspace.actions.Actions: a dashboard's forms and buttons
+        self.ops = None              # cairn.observability.dashboards.OpsTiles: PromQL, LogQL, TraceQL, SLO... tiles
 
     # ---- dashboards ---------------------------------------------------------------------
-    def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None) -> dict:
+    def save_dashboard(self, actor: str, body: dict, did: Optional[str] = None, keep: Optional[set] = None) -> dict:
+        """``keep``: saved queries already on a dashboard the person opened (a copy keeps them)."""
         name = str(body.get("name") or "").strip()
         tiles = body.get("tiles") or []
         if not name or not isinstance(tiles, list) or not tiles:
@@ -144,7 +154,9 @@ class Boards:
                     WorkspaceError("only its owner and editors change a dashboard", 403)
         # Tiles already on the board stay (an editor need not be able to open the owner's queries); new ones
         # are checked as the person saving.
-        keep = {t.get("query") for t in json.loads(current.tiles)} - {None} if current is not None else set()
+        keep = set(keep or ())
+        if current is not None:
+            keep |= {t.get("query") for t in json.loads(current.tiles)} - {None}
         clean = [self._tile(actor, t, keep) for t in tiles[:24]]
         controls = self._controls(body.get("controls") or [], len(clean))
         actions = None                   # declared with the dashboard (as code): its actions are exactly these
@@ -185,7 +197,12 @@ class Boards:
             visible.append(dashboards.c.id.in_(self.sharing.ids(actor, "dashboard")))
         with self.engine.connect() as conn:
             rows = conn.execute(select(dashboards).where(or_(*visible)).order_by(dashboards.c.updated_ms.desc())).all()
+        if any(r.owner == BUILTIN_OWNER for r in rows) and not self._ops_allowed(actor):
+            rows = [r for r in rows if r.owner != BUILTIN_OWNER]       # the built-in ops dashboards: operators only
         return [self._with_actions(actor, _board(r, access(self.sharing, actor, "dashboard", r))) for r in rows]
+
+    def _ops_allowed(self, actor: str) -> bool:
+        return self.ops is not None and self.ops.allowed(actor)
 
     def _with_actions(self, actor: str, board: dict) -> dict:
         if self.actions is not None:
@@ -198,9 +215,65 @@ class Boards:
         with self.engine.connect() as conn:
             r = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
         level = access(self.sharing, actor, "dashboard", r)
-        if not level:
+        if not level or (r.owner == BUILTIN_OWNER and not self._ops_allowed(actor)):
             raise WorkspaceError("no such dashboard", 404)
         return self._with_actions(actor, _board(r, level))
+
+    def copy_dashboard(self, actor: str, did: str, body: Optional[dict] = None) -> dict:
+        """The person's own copy of a dashboard they may open (a built-in one, someone's shared one), to change."""
+        board = self.dashboard(actor, did)
+        body = body if isinstance(body, dict) else {}
+        keep = {t.get("query") for t in board["tiles"]} - {None}
+        return self.save_dashboard(actor, {"name": str(body.get("name") or f"{board['name']} (copy)"),
+                                           "description": board["description"], "shared": False,
+                                           "tiles": board["tiles"], "controls": board["controls"]}, keep=keep)
+
+    def grafana(self, actor: str, did: str) -> dict:
+        """The dashboard as Grafana dashboard JSON (cairn.observability.grafana)."""
+        from cairn.observability.grafana import to_grafana
+
+        return to_grafana(self.dashboard(actor, did))
+
+    def import_grafana(self, actor: str, raw: Any) -> dict:
+        """A Grafana dashboard as a new dashboard of the person's: ``{"dashboard", "skipped"}``."""
+        from cairn.observability.dashboards import OpsError
+        from cairn.observability.grafana import from_grafana
+
+        try:
+            body, skipped = from_grafana(raw)
+        except OpsError as e:
+            raise WorkspaceError(str(e), e.status)
+        return {"dashboard": self.save_dashboard(actor, body), "skipped": skipped}
+
+    def put_builtin(self, did: str, name: str, description: str, tiles: list[dict], controls: list[dict]) -> bool:
+        """A built-in ops dashboard as code: made, or brought up to date when its definition changed (True then).
+        Owned by Cairn and shared, but listed only to operators; people copy it to change it."""
+        from sqlalchemy.exc import IntegrityError
+
+        from cairn.observability.dashboards import OpsError, validate_tile
+
+        try:
+            clean = [{"width": 2 if t.get("width") == 2 else 1, **validate_tile(t), "title": str(t["title"])[:256]}
+                     for t in tiles]
+        except OpsError as e:
+            raise WorkspaceError(f"{did}: {e}", e.status)
+        values = {"name": name, "description": description, "shared": True, "tiles": json.dumps(clean),
+                  "controls": json.dumps(self._controls(controls, len(clean)))}
+        with self.engine.begin() as conn:
+            r = conn.execute(select(dashboards).where(dashboards.c.id == did)).first()
+            if r is not None and r.owner != BUILTIN_OWNER:
+                raise WorkspaceError(f"{did} is someone's dashboard, not a built-in one", 409)
+            if r is not None and all(getattr(r, k) == v for k, v in values.items()):
+                return False
+            if r is None:
+                try:
+                    with conn.begin_nested():
+                        conn.execute(dashboards.insert().values(id=did, owner=BUILTIN_OWNER, updated_ms=_now(), **values))
+                except IntegrityError:          # another process seeded it first
+                    return False
+            else:
+                conn.execute(update(dashboards).where(dashboards.c.id == did).values(updated_ms=_now(), **values))
+        return True
 
     def delete_dashboard(self, actor: str, did: str) -> None:
         with self.engine.begin() as conn:
@@ -217,6 +290,18 @@ class Boards:
         if not isinstance(t, dict):
             raise WorkspaceError("a tile is an object")
         out: dict[str, Any] = {"width": 2 if t.get("width") == 2 else 1}
+        if is_ops(t):
+            from cairn.observability.dashboards import OpsError, source_of, validate_tile
+
+            if self.ops is None:
+                raise WorkspaceError("ops tiles are not available here")
+            try:
+                self.ops.require(actor)                     # saving an ops tile: the same privilege as seeing one
+                clean = validate_tile(t)
+                src = source_of(t)
+            except OpsError as e:
+                raise WorkspaceError(f"tile: {e}", e.status)
+            return {**out, **clean, "title": str(t.get("title") or src)[:256]}
         if t.get("chart") is not None:
             out["chart"] = json.loads(_chart(t.get("chart")))
         if t.get("metric") is not None:
@@ -262,6 +347,16 @@ class Boards:
             if not CONTROL_ID.match(cid) or cid in seen:
                 raise WorkspaceError("control id: a new short name (a-z, 0-9, _ and -)")
             seen.add(cid)
+            if c.get("kind") in OPS_CONTROLS:
+                from cairn.observability.dashboards import OpsError, validate_control
+
+                if c["kind"] == "time" and any(x["kind"] == "time" for x in out):
+                    raise WorkspaceError("one time control per dashboard")
+                try:
+                    out.append(validate_control(c, cid))
+                except OpsError as e:
+                    raise WorkspaceError(str(e), e.status)
+                continue
             column = str(c.get("column") or "").strip()
             if not column or len(column) > 128 or '"' in column:
                 raise WorkspaceError(f"{cid}: column is a column name")
@@ -303,6 +398,8 @@ class Boards:
             raise WorkspaceError("selection: up to 12 {column, value, from}")
         wanted: list[tuple[dict, Optional[list]]] = []          # (filter, tiles it is for; None: every tile)
         for c in board["controls"]:
+            if c["kind"] in OPS_CONTROLS:
+                continue
             v = values.get(c["id"], c.get("default"))
             wanted += [(f, c["targets"]) for f in control_filters(c, v)]
         for sel in selection:
@@ -313,10 +410,13 @@ class Boards:
             frm = sel.get("from")
             wanted.append((f, [i for i in range(len(board["tiles"])) if i != frm]))
         tiles = []
+        ops, span = self._run_ops(actor, board, values, [t for t in board["tiles"] if is_ops(t)])
         for i, t in enumerate(board["tiles"]):
             filters = [f for f, only in wanted if only is None or i in only]
             try:
-                if t.get("metric") is not None:
+                if is_ops(t):
+                    tiles.append(ops.pop(0))
+                elif t.get("metric") is not None:
                     tiles.append(self._run_metric(actor, t, filters))
                 elif t.get("element") is not None:
                     tiles.append(self._run_element(actor, t, filters, drill.get(str(i)) or [], cache))
@@ -326,7 +426,34 @@ class Boards:
                 if not hasattr(e, "status"):
                     raise
                 tiles.append({**t, "error": str(e), "status": e.status})
-        return {**board, "tiles": tiles}
+        return {**board, "tiles": tiles, **({"window": span} if span else {})}
+
+    def _run_ops(self, actor: str, board: dict, values: dict, tiles: list[dict]) -> tuple[list[dict], Optional[dict]]:
+        """The ops tiles, run at once (each as the viewer; one tile's refusal or error shows in that tile), and the
+        range they show."""
+        if not tiles:
+            return [], None
+        if self.ops is None:
+            return [{**t, "error": "ops tiles are not available here", "status": 501} for t in tiles], None
+        from concurrent.futures import ThreadPoolExecutor
+
+        from cairn.observability.dashboards import OpsError, variables, window
+
+        try:
+            vars_ = variables(board["controls"], values)
+            start, end = window(board["controls"], values)
+        except OpsError as e:
+            return [{**t, "error": str(e), "status": e.status} for t in tiles], None
+
+        def one(t: dict) -> dict:
+            try:
+                return {**t, "ops": self.ops.run(actor, t, vars_, start, end)}
+            except OpsError as e:
+                return {**t, "error": str(e), "status": e.status}
+
+        with ThreadPoolExecutor(max_workers=min(len(tiles), self.ops.limits.max_concurrent)) as ex:
+            out = list(ex.map(one, tiles))
+        return out, {"start_ms": int(start * 1000), "end_ms": int(end * 1000), "variables": vars_}
 
     def _run_element(self, actor: str, t: dict, filters: list[dict], path: list, cache: bool = True) -> dict:
         el = json.loads(json.dumps(t["element"]))
@@ -393,6 +520,15 @@ class Boards:
         """A values control's choices: the column's values in its source, as the viewer sees them."""
         board = self._granted(did) if granted else self.dashboard(actor, did)
         c = next((x for x in board["controls"] if x["id"] == cid), None)
+        if c is not None and c["kind"] == "variable":
+            from cairn.observability.dashboards import OpsError
+
+            if self.ops is None:
+                raise WorkspaceError("ops dashboards are not available here", 501)
+            try:
+                return self.ops.options(actor, c)
+            except OpsError as e:
+                raise WorkspaceError(str(e), e.status)
         if c is None or c["kind"] != "values":
             raise WorkspaceError("no such values control", 404)
         if self.wb is None:
@@ -533,6 +669,23 @@ def build_boards_router(boards: Boards, current_principal) -> Any:
     @router.delete("/dashboards/{did}", status_code=204)
     def delete_board(did: str, p=Depends(current_principal)):
         wrap(lambda: boards.delete_dashboard(person(p), did))
+
+    @router.post("/dashboards/import/grafana", status_code=201)
+    async def import_grafana(body: dict = Body(...), p=Depends(current_principal)):
+        """A Grafana dashboard JSON (or the {"dashboard": ...} its API answers) as a new dashboard of yours."""
+        actor = person(p)
+        return await run_in_threadpool(lambda: wrap(lambda: boards.import_grafana(actor, body)))
+
+    @router.get("/dashboards/{did}/grafana")
+    def export_grafana(did: str, p=Depends(current_principal)):
+        """The dashboard as Grafana dashboard JSON (PromQL, LogQL and TraceQL tiles; others as text panels)."""
+        return wrap(lambda: boards.grafana(person(p), did))
+
+    @router.post("/dashboards/{did}/copy", status_code=201)
+    async def copy_board(did: str, body: Optional[dict] = Body(None), p=Depends(current_principal)):
+        """Your own copy of a dashboard you may open (``{"name"}`` optional), to change."""
+        actor = person(p)
+        return await run_in_threadpool(lambda: wrap(lambda: boards.copy_dashboard(actor, did, body)))
 
     @router.get("/dashboards/{did}/render")
     async def render(did: str, p=Depends(current_principal)):

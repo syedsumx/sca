@@ -123,6 +123,7 @@ def test_every_kind_round_trips_through_export_and_a_bundle(world, tmp_path):
             except b.ApiError as err:                  # its parent was pruned too (an instance's parameters)
                 assert k.parents and " 404 " in str(err), (k.name, err)
                 left = []
+            left = [r for r in left if not k.mine or r.get(k.owner_field) == ADMIN]   # not others' (the built-in ones)
             assert [b.key_of(k, {**k.defaults, **b.declared(k, r)}) for r in left] == (
                 ["finance-db/" + ADMIN] if k.name == "secret_scope_acls" else []), k.name
 

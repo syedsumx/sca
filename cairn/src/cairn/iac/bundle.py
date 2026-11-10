@@ -200,9 +200,11 @@ def desired(kind: str, spec: dict) -> dict:
         d["chart"] = {**CHART, **(d.get("chart") or {})}
     if kind == "dashboards":
         if not isinstance(d["tiles"], list) or not all(
-                isinstance(t, dict) and sum(1 for k in ("query", "element", "metric") if t.get(k)) == 1 for t in d["tiles"]):
+                isinstance(t, dict) and sum(1 for k in ("query", "element", "metric", "promql", "logql", "traces", "slo",
+                                                        "alerts", "postgres") if t.get(k)) == 1 for t in d["tiles"]):
             raise BundleError(f"dashboards/{d['name']}: tiles is a list of tiles, each with one of query (a saved query "
-                              "of yours), element (a workbook element, with connection) or metric (a metric query)")
+                              "of yours), element (a workbook element, with connection), metric (a metric query) or "
+                              "an ops source (promql, logql, traces, slo, alerts, postgres)")
         tiles = []
         for t in d["tiles"]:
             one = {"width": 2 if t.get("width") == 2 else 1}
@@ -215,8 +217,16 @@ def desired(kind: str, spec: dict) -> dict:
                     raise BundleError(f"dashboards/{d['name']}: an element tile names its connection")
                 one.update(element=t["element"], connection=str(t["connection"]), drill=list(t.get("drill") or []),
                            title=t.get("title") or str((t["element"].get("source") or {}).get("table") or "Tile"))
-            else:
+            elif t.get("metric"):
                 one.update(metric=t["metric"], title=t.get("title") or ", ".join(t["metric"].get("metrics") or []))
+            else:                                       # an ops tile, as Cairn keeps it (its defaults filled in)
+                from cairn.observability.dashboards import OpsError, source_of, validate_tile
+
+                try:
+                    one.pop("chart", None)
+                    one.update(validate_tile(t), title=t.get("title") or source_of(t))
+                except OpsError as e:
+                    raise BundleError(f"dashboards/{d['name']}: {e}")
             tiles.append(one)
         d["tiles"] = tiles
     if kind == "workbooks":

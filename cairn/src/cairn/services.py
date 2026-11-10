@@ -204,6 +204,7 @@ class Services:
     people: Optional[Any] = None            # People & roles (cairn.identity.people)
     observability: Optional[Any] = None     # Observability: health map, journeys, logs, SLOs, alerts, incidents
     sre: Optional[Any] = None               # the SRE agent (cairn.sre): investigates, proposes; people approve
+    ops_tiles: Optional[Any] = None         # ops dashboards: PromQL, LogQL, TraceQL, SLO, alert, PostgreSQL tiles
     store_admin: Optional[Any] = None
     # Trino access control (the OPA plugin's requests), with the key Trino servers must present.
     trino_access: Optional[Any] = None
@@ -646,6 +647,7 @@ def build_services(settings: Settings, graph: Optional[MetadataGraph] = None, ll
     _build_split_compute(services)
     _build_people(services)
     _build_observability(services)
+    _build_ops_dashboards(services)
     _build_iac_changes(services)
     _build_sre(services)
     return services
@@ -740,6 +742,27 @@ def _build_observability(s: Services) -> None:
     hub = getattr(s, "notify", None)
     s.observability = ObservabilityService(s.engine, Backends(), hub, s.audit,
                                            public_url=getattr(hub, "public_url", "") or "", version=__version__)
+
+
+def _build_ops_dashboards(s: Services) -> None:
+    """Ops dashboards (L143, cairn.observability.dashboards): PromQL, LogQL, TraceQL, SLO, alert and PostgreSQL tiles
+    in the dashboards (sql_boards), run as the viewer (VIEW_OPERATIONS or MANAGE_SYSTEM_OPERATIONS), and the built-in
+    ops dashboards seeded as code. Built after observability and the dashboards."""
+    if getattr(s, "observability", None) is None or getattr(s, "sql_boards", None) is None:
+        return
+    from cairn.observability import builtin
+    from cairn.observability.dashboards import OpsTiles
+
+    def decide(actor: str, privilege: str) -> bool:
+        return bool(s.authorize(Principal(urn=actor, via="delegated"), privilege, None, raise_on_deny=False))
+
+    s.ops_tiles = OpsTiles(s.observability, decide, pg=lambda: getattr(s, "pg_instances", None))
+    s.sql_boards.ops = s.ops_tiles
+    if os.environ.get("CAIRN_OPS_BUILTIN_DASHBOARDS", "true").lower() not in ("0", "false", "no"):
+        try:
+            builtin.seed(s.sql_boards)
+        except Exception:  # noqa: BLE001 - a dashboard that cannot be seeded never stops Cairn starting
+            logger.exception("the built-in ops dashboards could not be seeded")
 
 
 def _build_iac_changes(s: Services) -> None:

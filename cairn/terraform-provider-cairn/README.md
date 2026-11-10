@@ -69,7 +69,7 @@ permissions and audit apply:
 | `cairn_metric` | `metrics` | A business measure defined once (a workbook aggregate over one table), the same number in every query, workbook and dashboard; run as the person asking |
 | `cairn_procedure` | `procedures` | A stored procedure: SQL statements with typed parameters, called by people allowed to (CALL_PROCEDURE) |
 | `cairn_workbook` | `workbooks` | A spreadsheet workbook: elements compiled to SQL and run as the person looking |
-| `cairn_dashboard` | `dashboards` | Saved queries, metrics and workbook elements shown together, each run as its viewer; with its controls and its actions (forms and buttons that change things, run as the person clicking) |
+| `cairn_dashboard` | `dashboards` | Saved queries, metrics and workbook elements shown together, each run as its viewer; ops tiles (PromQL, LogQL, TraceQL, SLOs, alerts, PostgreSQL instances) next to them; with its controls (filters, $variables, the time range) and its actions (forms and buttons that change things, run as the person clicking) |
 | `cairn_sql_share` | `sql_shares` | One of the token user's saved queries, workbooks or dashboards shared with a person or group, as a viewer or an editor |
 | `cairn_sql_alert` | `alerts` | A saved query checked on a schedule as its owner; its owner and recipients are told when the condition starts and stops holding |
 | `cairn_metric_alert` | `metric_alerts` | An alert on a metric: a change, a range or a threshold, checked on a schedule as its owner |

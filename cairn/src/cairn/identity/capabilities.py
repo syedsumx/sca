@@ -17,6 +17,7 @@ PLATFORM_PRIVILEGES = (
     "MANAGE_POLICIES",            # policies, personas, governance studio; Cairn's operators (is_admin)
     "MANAGE_GLOBAL_SETTINGS",     # workspace settings, budgets, limits, SIEM, residency, the AI gateway's models
     "MANAGE_SYSTEM_OPERATIONS",   # warehouses, maintenance, storage, external catalogs, chargeback
+    "VIEW_OPERATIONS",            # read-only telemetry: ops dashboards (MANAGE_SYSTEM_OPERATIONS also lets one in)
     "MANAGE_INGESTION",           # mirrors, document sources, SaaS and reverse syncs, pipes, remote agents
     "MANAGE_GLOSSARIES",
     "MANAGE_DATABASE",

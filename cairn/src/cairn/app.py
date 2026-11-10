@@ -260,6 +260,10 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         from cairn.sre.api import build_router as sre_router
 
         app.include_router(sre_router(services.sre, cp, authz))
+    if getattr(services, "ops_tiles", None) is not None:      # ops dashboards: the tile editor's preview and choices
+        from cairn.observability.dashboards import build_ops_router
+
+        app.include_router(build_ops_router(services.ops_tiles, cp))
     if getattr(services, "people", None) is not None:          # People & roles: the directory, who holds what and why
         from cairn.identity.people import build_router as people_router
 
