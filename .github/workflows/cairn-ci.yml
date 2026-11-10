@@ -396,6 +396,17 @@ jobs:
           ! grep -q "skipped" "$RUNNER_TEMP/opsdash.log"
           grep -q "real Grafana (grafana/grafana:12.2.1) loaded the export" "$RUNNER_TEMP/opsdash.log"
           docker rmi grafana/grafana:12.2.1 >/dev/null || true
+      - name: Pipeline observability and OpenTelemetry export (L145) - Airflow 3.3's own traces and metrics, Cairn's runs, an SLA, the SRE agent's rerun, a customer's Collector
+        working-directory: cairn
+        # Its own pytest (OpenTelemetry once per process): the stack's images (pulled above), a real Airflow 3.3.2
+        # set up by airflow_otel_env, a second Collector as the customer's backend, the AI gateway in front of the
+        # deterministic stand-in model.
+        run: |
+          set -o pipefail
+          for t in 1 2 3; do docker pull -q apache/airflow:slim-3.3.2-python3.12 && break; sleep 15; done
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pipeline_observability_e2e.py | tee "$RUNNER_TEMP/pipeobs.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/pipeobs.log"
+          grep -q "7 passed" "$RUNNER_TEMP/pipeobs.log"
       - name: Split control and data plane, and egress rules for user code, on separate Docker networks (L135, L136)
         working-directory: cairn
         run: |
@@ -788,6 +799,11 @@ jobs:
           set -o pipefail
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_sre_ui_e2e.py | tee "$RUNNER_TEMP/sreui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/sreui.log"
+      - name: Observability's Pipelines and Export tabs (a run's Gantt, impact, quality and causes; a data product and an SLA with the forms; an OTLP destination applied; axe; built UI against Cairn)
+        run: |
+          set -o pipefail
+          pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_pipeline_observability_ui_e2e.py | tee "$RUNNER_TEMP/pipeui.log"
+          ! grep -q "skipped" "$RUNNER_TEMP/pipeui.log"
 
       - name: Ops dashboards (one built from the palette with a variable and a previewed PromQL tile on a real Prometheus, exported for Grafana; a built-in copied; refused without VIEW_OPERATIONS; axe)
         run: |
@@ -1194,6 +1210,14 @@ jobs:
               | kubeconform -strict -summary -kubernetes-version 1.30.0 \
                   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
           done
+          # OTLP destinations rendered by Cairn (L145) load next to the bundled pipelines, their header values from a
+          # Secret, Airflow's namespace may send to the Collector; a fragment that skips Cairn's redaction is refused.
+          helm template cairn helm/cairn --set cairn.observability.enabled=true --set cairn.networkPolicy.enabled=true \
+              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters.yaml \
+              --set cairn.observability.exportersSecret=otel-exporters --set 'cairn.observability.collectorFromNamespaces={airflow}' \
+            | kubeconform -strict -summary -ignore-missing-schemas -kubernetes-version 1.30.0
+          ! helm template cairn helm/cairn --set cairn.observability.enabled=true \
+              --set-file cairn.observability.exportersConfig=helm/cairn/ci/otel-exporters-unredacted.yaml >/dev/null 2>&1
           # Gateway API routes and an Ingress both exposing Cairn are refused.
           ! helm template cairn helm/cairn --set core.ingress.enabled=true --set core.gateway.enabled=true \
               --set core.gateway.create.enabled=true --set core.gateway.create.className=eg >/dev/null 2>&1

@@ -1,5 +1,6 @@
 import { GUIDE_DE, GUIDE_EN, GUIDE_ES, GUIDE_FR, GUIDE_JA } from './guide';
 import { OBSERVABILITY_DE, OBSERVABILITY_EN } from './observability';
+import { PIPELINES_DE, PIPELINES_EN } from './pipelines';
 import { PEOPLE_DE, PEOPLE_EN, PEOPLE_ES, PEOPLE_FR, PEOPLE_JA } from './people';
 
 /**
@@ -297,6 +298,7 @@ const en = {
     ...GUIDE_EN,
     ...PEOPLE_EN,
     ...OBSERVABILITY_EN,
+    ...PIPELINES_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -585,6 +587,7 @@ const de: Catalog = {
     ...GUIDE_DE,
     ...PEOPLE_DE,
     ...OBSERVABILITY_DE,
+    ...PIPELINES_DE,
 };
 
 const fr: Catalog = {

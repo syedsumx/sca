@@ -101,7 +101,12 @@ def test_exporters_render_through_redaction_and_anything_else_is_refused():
     assert hc["headers"] == {"x-honeycomb-team": "${env:CAIRN_EXPORTER_HONEYCOMB_0}"}   # never the value
     assert cfg["exporters"]["otlp_grpc/own"]["tls"] == {"insecure": True}
     ex.check_redaction(ex.merge(base, cfg))
-    bad = {"service": {"pipelines": {"traces/leak": {"receivers": ["otlp"], "processors": ["batch"],
+    ci = os.path.join(ROOT, "helm", "cairn", "ci")                    # what the chart's CI renders, and refuses
+    with open(os.path.join(ci, "otel-exporters.yaml")) as fh:
+        ex.check_redaction(yaml.safe_load(fh))
+    with open(os.path.join(ci, "otel-exporters-unredacted.yaml")) as fh, pytest.raises(ex.ExporterError):
+        ex.check_redaction(yaml.safe_load(fh))
+    bad ={"service": {"pipelines": {"traces/leak": {"receivers": ["otlp"], "processors": ["batch"],
                                                      "exporters": ["otlp_http/x"]}}}}
     with pytest.raises(ex.ExporterError, match="redaction"):
         ex.check_redaction(ex.merge(base, bad))

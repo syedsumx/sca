@@ -488,7 +488,10 @@ def test_the_collector_redacts_what_others_send(world):
         "endTimeUnixNano": str(now), "status": {"code": 2, "message": msg},
         "events": [{"name": "exception", "timeUnixNano": str(now),
                     "attributes": [attr("exception.type", "OperationalError"), attr("exception.message", msg),
-                                   attr("exception.stacktrace", "Traceback ...\n" + msg)]}]}]}]}]}
+                                   attr("exception.stacktrace", "Traceback ...\n" + msg)]}]},
+        {"traceId": tid, "spanId": uuid.uuid4().hex[:16], "parentSpanId": sid, "name": "POST", "kind": 3,   # no events
+         "startTimeUnixNano": str(now - 10**8), "endTimeUnixNano": str(now - 10**7),
+         "attributes": [attr("url.full", f"http://cairn:8800/v1/trino/{TOKEN}/allow?x=1")]}]}]}]}
     logs = {"resourceLogs": [{"resource": res, "scopeLogs": [{"scope": {"name": "t"}, "logRecords": [{
         "timeUnixNano": str(now), "severityText": "ERROR", "body": {"stringValue": "raw-sender failed: " + msg},
         "traceId": tid, "spanId": sid}]}]}]}
@@ -544,7 +547,6 @@ def test_cairn_reads_airflow_and_emits_each_run(world, runs):
 
 
 def test_an_sla_fires_and_the_sre_agent_finds_why_and_proposes_a_rerun(world, runs):
-    s = world["s"]
     assert api(world, "PUT", "/notify/routes/pipes", json={"id": "pipes", "channel": "webhook",
                                                            "target": world["receiver"],
                                                            "event_types": ["job.failed"]}).status_code in (200, 201)

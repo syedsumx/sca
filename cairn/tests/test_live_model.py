@@ -565,3 +565,65 @@ def test_l142_the_sre_agent_investigates_cites_evidence_and_applies_nothing(live
         twice(live, "L142", check)
     finally:
         httpx.put(f"{url}/v1/sre/settings", json={"max_steps": steps_before}, headers=admin, timeout=30)
+
+
+def test_l145_the_sre_agent_explains_a_failed_pipeline_and_proposes_only_from_the_allow_list(live):
+    """L145 with the real model: an Airflow DAG's run fails (reported through OpenLineage, its task out of memory), the
+    pipeline's SLA opens an incident; the agent reads the run's diagnosis, writes what failed citing it, and proposes
+    nothing outside the allow-list (a rerun at most), all pending."""
+    import uuid as _uuid
+
+    s, url = live.s, live.url
+    admin = {"X-Cairn-Actor": ADMIN}
+    s.sre.env_model = MODEL
+    steps_before = s.sre.settings()["max_steps"]
+    assert httpx.put(f"{url}/v1/sre/settings", json={"max_steps": MAX_TURNS}, headers=admin, timeout=30).status_code == 200
+
+    def check(attempt):
+        dag, run = f"live_orders_{attempt}", f"manual__{_uuid.uuid4().hex[:8]}"
+        ol, task = str(_uuid.uuid4()), str(_uuid.uuid4())
+        now = time.time()
+        iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(t)) + ".000Z"  # noqa: E731
+        job = lambda name, kind: {"namespace": "airflow://prod", "name": name,  # noqa: E731
+                                  "facets": {"jobType": {"integration": "AIRFLOW", "jobType": kind}}}
+        err = {"errorMessage": {"message": "MemoryError: out of memory while loading orders", "programmingLanguage": "python"}}
+        parent = {"parent": {"job": {"namespace": "airflow://prod", "name": dag}, "run": {"runId": ol}},
+                  "airflow": {"dagRun": {"run_id": run}}}
+        base = {"producer": "https://github.com/apache/airflow", "schemaURL": "https://openlineage.io/spec/2-0-2/OpenLineage.json"}
+        s.openlineage.handle_many([
+            {**base, "eventType": "START", "eventTime": iso(now - 120), "job": job(dag, "DAG"),
+             "run": {"runId": ol, "facets": {"airflowDagRun": {"dagRun": {"run_id": run}}}}},
+            {**base, "eventType": "START", "eventTime": iso(now - 110), "job": job(f"{dag}.load", "TASK"),
+             "run": {"runId": task, "facets": parent}},
+            {**base, "eventType": "FAIL", "eventTime": iso(now - 60), "job": job(f"{dag}.load", "TASK"),
+             "run": {"runId": task, "facets": {**parent, **err}}},
+            {**base, "eventType": "FAIL", "eventTime": iso(now - 59), "job": job(dag, "DAG"),
+             "run": {"runId": ol, "facets": {"airflowDagRun": {"dagRun": {"run_id": run}}, **err}}}])
+        r = httpx.post(f"{url}/v1/observability/pipeline-slas", headers=admin, timeout=30, json={
+            "id": f"live-orders-{attempt}", "name": "Orders load", "pipeline": f"airflow:{dag}", "severity": "critical"})
+        assert r.status_code == 201, r.text
+        s.observability.evaluate()
+        alert = next(a for a in s.observability.alerts(state="firing") if a["source"] == f"sla:live-orders-{attempt}")
+        r = httpx.post(f"{url}/v1/sre/incidents/{alert['incident_id']}/investigate", params={"wait": "true"},
+                       headers=admin, timeout=900)
+        assert r.status_code == 202, r.text
+        result = r.json()
+        assert result["status"] == "done", result
+        tools = {x["tool"] for x in result["steps"] if x["ok"]}
+        assert tools & {"pipeline_diagnose", "pipeline_run", "task_log", "pipeline_runs"}, result["steps"]
+        timeline = httpx.get(f"{url}/v1/observability/incidents/{alert['incident_id']}", headers=admin,
+                             timeout=30).json()["timeline"]
+        notes = [e for e in timeline if e.get("by_agent") and e["kind"] in ("finding", "hypothesis")]
+        assert notes and any((e.get("detail") or {}).get("evidence") for e in notes), notes
+        ids = {x["id"] for x in result["steps"] if x["ok"]}
+        for e in notes:
+            assert {ev["id"] for ev in (e.get("detail") or {}).get("evidence") or []} <= ids
+        view = httpx.get(f"{url}/v1/sre/incidents/{alert['incident_id']}", headers=admin, timeout=30).json()
+        assert all(a["status"] == "pending" for a in view["actions"]), view["actions"]
+        assert all(a["kind"] == "change_request" or a["action"] in ACTIONS for a in view["actions"])
+    from cairn.sre.agent import ACTIONS
+
+    try:
+        twice(live, "L145", check)
+    finally:
+        httpx.put(f"{url}/v1/sre/settings", json={"max_steps": steps_before}, headers=admin, timeout=30)
