@@ -43,7 +43,7 @@ and why (named directly, through a group, by an attribute rule or by a grant), w
 from (your identity provider through SCIM or single sign-on, or made in Cairn). **Access check** answers "can this
 person do this to this asset?" with yes or no and the policies, personas and purposes behind the answer. Without SCIM,
 administrators make people and groups there; people from SCIM are changed only in the identity provider. See
-[People and roles](administration.md#people-and-roles) for the details.
+the operator manual's "People and roles" section for the details.
 
 ## PII and masking
 
