@@ -232,12 +232,23 @@ def test_killing_the_task_cancels_the_flow_run(airflow, dag_id):
     run_id = trigger(af, dag_id)
     want = "deferred" if dag_id == "drive_cairn_kill" else "running"
     until(lambda: tis(af, dag_id, run_id)["run"]["state"] == want, 300, f"{dag_id} {want}")
-    new = until(lambda: [r for r in runs_of(af, "af-long") if r["id"] not in before and r["status"] == "waiting"],
-                120, "the flow run waiting")
+    def why() -> str:      # what Airflow said, for a failure: the task's log and the triggerer's/scheduler's tail
+        logs = subprocess.run(["docker", "logs", "--tail", "60", af["name"]], capture_output=True, text=True)
+        return (f"; runs: {runs_of(af, 'af-long')}; task log: {task_log(af, dag_id, run_id, 'run')[-2000:]}; "
+                f"airflow: {(logs.stdout + logs.stderr)[-3000:]}")
+    # A shared CI runner is slow: the waits are generous, and a timeout says what Airflow and Cairn were doing.
+    try:
+        new = until(lambda: [r for r in runs_of(af, "af-long") if r["id"] not in before and r["status"] == "waiting"],
+                    300, "the flow run waiting")
+    except AssertionError as e:
+        raise AssertionError(str(e) + why()) from None
     af["client"].call("PATCH", f"/dags/{dag_id}/dagRuns/{run_id}/taskInstances/run", {"new_state": "failed"})
-    gone = until(lambda: (lambda r: r if r["status"] in ("cancelled", "failed", "succeeded") else None)(
-        httpx.get(f"{af['api']}/v1/flows/runs/{new[0]['id']}", headers={"X-Cairn-Actor": ANA}, timeout=30).json()),
-        180, "the flow run cancelled")
+    try:
+        gone = until(lambda: (lambda r: r if r["status"] in ("cancelled", "failed", "succeeded") else None)(
+            httpx.get(f"{af['api']}/v1/flows/runs/{new[0]['id']}", headers={"X-Cairn-Actor": ANA}, timeout=30).json()),
+            420, "the flow run cancelled")
+    except AssertionError as e:
+        raise AssertionError(str(e) + why()) from None
     assert gone["status"] == "cancelled", (gone["status"], task_log(af, dag_id, run_id, "run")[-3000:])
     started = [e for e in af["s"].audit.entries(category="flows", limit=2000)
                if e["action"] == "flow.run_cancel_requested" and e["details"].get("run") == new[0]["id"]]
