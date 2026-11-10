@@ -37,7 +37,8 @@ DS = f"urn:li:dataset:(urn:li:dataPlatform:postgres,auth_{RUN}.public.accounts,P
 SERVICE_TOKEN = os.environ.get("CAIRN_E2E_PDP_TOKEN", "")
 TAG_PRIVILEGES = ["CREATE_TAGS", "MANAGE_TAGS"]
 CREATE_TAG = "mutation($i: CreateTagInput!) { createTag(input: $i) }"
-VIEW = "query($u: String!) { dataset(urn: $u) { urn properties { name } } }"
+VIEW = "query($u: String!) { dataset(urn: $u) { urn properties { name description } } }"
+DESCRIPTION = "E2E accounts (authoritative mode)."
 
 
 def decision(actor: str, privilege: str, urn: str | None = None) -> dict:
@@ -57,14 +58,17 @@ def creates_tag(token: str) -> bool:
 
 
 def views(token: str) -> bool:
+    """Core answers a refused view with a *restricted* entity (its urn and name kept, every other field blanked:
+    upstream ``AuthorizationUtils.restrictEntity``), so the description, not the name, says the view was allowed."""
     body = frontend_gql(token, VIEW, {"u": DS}).json()
-    return bool(((body.get("data") or {}).get("dataset") or {}).get("properties")) and not body.get("errors")
+    props = ((body.get("data") or {}).get("dataset") or {}).get("properties") or {}
+    return props.get("description") == DESCRIPTION and not body.get("errors")
 
 
 @pytest.fixture(scope="module")
 def bob():
     emit(BOB, "corpUserInfo", {"active": True, "displayName": "Bob Authoritative", "email": f"bob-{RUN}@example.com"})
-    emit(DS, "datasetProperties", {"name": "accounts", "description": "E2E accounts (authoritative mode)."})
+    emit(DS, "datasetProperties", {"name": "accounts", "description": DESCRIPTION})
     return mint_token(BOB)
 
 

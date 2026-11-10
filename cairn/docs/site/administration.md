@@ -1569,6 +1569,8 @@ Secrets (`CAIRN_*_SECRET`, `*_KEY`, `*_PASSWORD`) must be long random values
   into the PDP (every 2 minutes, and at once on a policy change), where a Cairn deny overrides them; and when the PDP
   cannot be reached, Core refuses (fail closed). Only the break-glass users in the authorizer's `rootUsers`
   (`urn:li:corpuser:admin`) are let in without the PDP, so keep that account's password in your break-glass process.
+  A refused view of an entity comes back *restricted*, as Core does it: its URN, type and name are kept and every
+  other field is blanked (the description, owners, schema, properties).
 - **Switching** from additive to authoritative changes nothing anyone may do that a native policy grants (it is
   imported), but every Cairn deny starts to hold. Check the posture report's `authz_mode` finding, and try the
   policies in the access simulator first.
