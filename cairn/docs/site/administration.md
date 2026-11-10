@@ -3385,7 +3385,9 @@ Cairn itself and the lakehouse.
   egress proxy) and the workspace's CIDR rules on their ports. Host rules need layer 7: runs get `HTTP(S)_PROXY`
   pointing at Cairn's egress proxy with a credential. Agent apps' pods get the same egress (global rules) in their
   NetworkPolicy; with egress enforced, agent apps run only on Kubernetes. Sandboxes keep their own per-run proxy;
-  the egress rules add to the hosts an operator allows them (`CAIRN_SANDBOX_ALLOWED_HOSTS`).
+  the egress rules add to the hosts an operator allows them (`CAIRN_SANDBOX_ALLOWED_HOSTS`). The CNI enforces the
+  NetworkPolicy: use one that holds a pod from its first packet (Calico, Cilium). kindnet (kind, for tests) holds a
+  pod only once it has seen its IP, so a pod's first connections in its first moments can pass.
 - **Docker.** Runs join only `CAIRN_EGRESS_DOCKER_NETWORK`, an internal network (`docker network create --internal`)
   that the egress proxy also joins; the proxy is their only way out.
 - **The egress proxy** (`cairn egress-proxy`, `docker/egress-proxy.Dockerfile`, chart `cairn.egress.proxy`) lets
