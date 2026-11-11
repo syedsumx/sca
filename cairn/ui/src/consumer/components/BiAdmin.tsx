@@ -33,8 +33,8 @@ export function ShareDialog({ kind, id, name, role, open, onClose }: {
     };
     const principal = who.startsWith('urn:li:') ? who : who.startsWith('group:') ? `urn:li:corpGroup:${who.slice(6)}` : `urn:li:corpuser:${who}`;
     return (
-        <Modal title={`Share ${KIND_NAME[kind]} “${name}”`} open={open} onCancel={onClose} footer={null} destroyOnClose>
-            <Muted>Sharing never shares data: everyone sees only the rows their own policies allow.</Muted>
+        <Modal title={`Permissions: ${KIND_NAME[kind]} “${name}”`} open={open} onCancel={onClose} footer={null} destroyOnClose>
+            <Muted>Who may open or edit it. Permissions never share data: everyone sees only the rows their own policies allow. (Sharing data outside the organisation is External sharing.)</Muted>
             {q.error && <ErrorNotice error={q.error} style={{ marginTop: 8 }} />}
             {owner && (
                 <Space style={{ margin: '12px 0' }} wrap>
@@ -42,12 +42,12 @@ export function ShareDialog({ kind, id, name, role, open, onClose }: {
                         style={{ width: 240 }} />
                     <Select aria-label="Role" value={as} onChange={setAs} style={{ width: 120 }}
                         options={[{ value: 'VIEWER', label: 'Viewer' }, { value: 'EDITOR', label: 'Editor' }]} />
-                    <Button type="primary" disabled={!who.trim()} onClick={() => change(principal, as)}>Share</Button>
+                    <Button type="primary" disabled={!who.trim()} onClick={() => change(principal, as)}>Add</Button>
                 </Space>
             )}
             <Table size="small" rowKey="principal" pagination={false} loading={q.loading}
                 dataSource={q.data?.shares ?? []}
-                locale={{ emptyText: 'Not shared with anyone yet' }}
+                locale={{ emptyText: 'Only its owner so far' }}
                 columns={[
                     { title: 'Who', dataIndex: 'principal', render: (p: string) => short(p) },
                     { title: 'Role', dataIndex: 'role', render: (r: string) => <Tag>{r.toLowerCase()}</Tag> },
@@ -128,7 +128,7 @@ export function BiAssetButtons({ kind, id, name, role, onRestored, tiles }: {
     const [open, setOpen] = useState<'share' | 'history' | null>(null);
     return (
         <>
-            {(role === 'OWNER' || role === 'EDITOR') && <Button onClick={() => setOpen('share')}>Share</Button>}
+            {(role === 'OWNER' || role === 'EDITOR') && <Button onClick={() => setOpen('share')}>Permissions</Button>}
             <Button onClick={() => setOpen('history')}>History</Button>
             <BiCollabButtons kind={kind} id={id} name={name} role={role} tiles={tiles} />
             <ShareDialog kind={kind} id={id} name={name} role={role} open={open === 'share'} onClose={() => setOpen(null)} />

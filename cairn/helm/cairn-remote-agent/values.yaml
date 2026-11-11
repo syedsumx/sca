@@ -25,6 +25,8 @@ enrollment:
   existingSecret: ""          # Secret with key `token`; preferred
   token: ""                   # only for testing; rendered into a chart-managed Secret
 
+# The collector's own settings (collectors were called remote agents before L149). `collector:` is the new name of
+# this block and is read too; a key set under `collector` wins over the same key here.
 agent:
   # Keys also rotate when the gateway asks (CAIRN_AGENT_KEY_MAX_AGE_DAYS there); set days to rotate sooner.
   keyRotateDays: null
@@ -37,6 +39,8 @@ agent:
 
 # Where ${NAME} secret references in recipes are resolved. Nothing here ever leaves the VPC.
 # Backends are tried in order (schema: cairn.agent.secrets.SecretResolver).
+collector: {}
+
 secretStores:
   - type: env
   - type: directory

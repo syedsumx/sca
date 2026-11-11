@@ -40,5 +40,5 @@ ENV PATH="/opt/cairn/bin:${PATH}" \
 USER 10001:10001
 VOLUME ["/var/lib/cairn-agent", "/tmp/cairn"]
 # No EXPOSE: the agent never listens on a port.
-ENTRYPOINT ["/opt/cairn/bin/dumb-init", "--", "cairn", "agent"]
+ENTRYPOINT ["/opt/cairn/bin/dumb-init", "--", "cairn", "collectors"]
 CMD ["run", "--config", "/etc/cairn-agent/agent.yml"]

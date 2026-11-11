@@ -74,7 +74,7 @@ export function CertificationInbox({ defaultState = 'IN_REVIEW', defaultKind }: 
     return (
         <PageContainer>
             <PageHeader>
-                <h1>Certification &amp; review inbox</h1>
+                <h1>Approvals: certification &amp; documentation</h1>
                 <Space wrap>
                     <Select
                         aria-label="Filter by state"
