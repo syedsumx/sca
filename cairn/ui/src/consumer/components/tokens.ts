@@ -184,6 +184,12 @@ export const SectionTitle = styled.h2`
 
 export const Muted = styled.span`
     color: ${tokens.color.textMuted};
+    /* A link in a line of muted text is told apart by its underline, not only by its colour (WCAG 1.4.1). */
+    a {
+        text-decoration: underline;
+        text-decoration-thickness: 1px;
+        text-underline-offset: 2px;
+    }
 `;
 
 export const CardGrid = styled.div`
