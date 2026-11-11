@@ -17,7 +17,8 @@ a = Analysis(  # noqa: F821
     hiddenimports=["keyring.backends.macOS", "keyring.backends.Windows", "keyring.backends.SecretService",
                    "keyring.backends.kwallet", "keyring.backends.chainer", "keyring.backends.fail",
                    "cairn.flows.cli", "cairn.flows.model", "cairn.flows.expr", "cairn.flows.airflow_dag",
-                   "cairn.iac.bundle", "cairn.iac.export", "cairn.iac.kinds", "cairn.governance.abac"],
+                   "cairn.iac.bundle", "cairn.iac.export", "cairn.iac.kinds", "cairn.governance.abac",
+                   "cairn.marketplace.catalog_cli"],
     hookspath=[],
     runtime_hooks=[],
     # The server never goes in: if one of these is imported, the client imported server code (a bug).

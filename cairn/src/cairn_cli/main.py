@@ -130,6 +130,12 @@ def register(sub, ontology: bool = True, flows: bool = True) -> None:
 
         flows_parser(sub)
         sub.choices["flows"].set_defaults(fn=commands.cmd_flows, client_command=True)
+        # The glossary and domains in Cairn Core (cairn.marketplace.catalog_cli), beside the flows here too.
+        from cairn.marketplace.catalog_cli import add_parser as catalog_parser, domains_main, glossary_main
+
+        catalog_parser(sub)
+        sub.choices["glossary"].set_defaults(fn=glossary_main, client_command=True)
+        sub.choices["domains"].set_defaults(fn=domains_main, client_command=True)
     mark_flow_names(sub)
 
     c = add("completion", completion.cmd_completion, "print a shell completion script (bash, zsh, fish, powershell)")

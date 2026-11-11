@@ -65,6 +65,13 @@ def build(tmp, with_ai: bool = False):
     s.data_access.registry = ConnectionRegistry({"wh": {"url": f"sqlite:///{tmp}/wh.db", "catalog": {"platform": "sqlite"}}})
     for urn, cols in ((DS, ("id", "region", "amount")), (WH, ("id", "region", "amount", "day"))):
         s.graph.aspects[(urn, "schemaMetadata")] = {"fields": [{"fieldPath": c} for c in cols]}
+    # Cairn Core's search and mutations over the in-memory graph (what is in a domain, what carries a term, deleteDomain).
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from core_standin import CoreStandIn
+
+    s.graph.graphql_handler = CoreStandIn(s.graph)
 
     class NoCatalog:   # this world has no Iceberg catalog: a vector index's table was never built
         def purge_table(self, ident):

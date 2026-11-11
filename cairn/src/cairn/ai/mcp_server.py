@@ -348,6 +348,36 @@ class CairnTools:
                 raise ValueError(str(e))
             raise RuntimeError(str(e))
 
+    # ---- the glossary and domains in Cairn Core, as the caller (cairn.marketplace.glossary, .domains) -----------
+    def _catalog_edit(self, fn):
+        from cairn.marketplace.glossary import EditError
+
+        if getattr(self.s, "glossary", None) is None:
+            raise RuntimeError("the glossary is not set up in this Cairn (it needs Cairn Core)")
+        try:
+            return fn()
+        except EditError as e:
+            if e.status in (403, 404):
+                raise Forbidden(str(e))
+            raise ValueError(str(e))
+
+    def glossary_search(self, query: str = "", limit: int = 20) -> dict:
+        p = self.principal()
+        q = query.lower().strip()
+        terms = self._catalog_edit(lambda: self.s.glossary.list_terms(p))
+        hits = [t for t in terms if not q or q in f"{t['id']} {t['name']} {t['definition']}".lower()]
+        return {"terms": [{"id": t["id"], "urn": t["urn"], "name": t["name"], "definition": t["definition"][:1000],
+                           "group": t["parent"], "stewards": t["stewards"], "deprecated": t["deprecated"],
+                           "deprecation_note": t["deprecation_note"]} for t in hits[:max(1, min(int(limit), 100))]]}
+
+    def apply_term(self, asset: str, term: str, column: Optional[str] = None, remove: bool = False) -> dict:
+        p = self.principal()
+        return self._catalog_edit(lambda: self.s.glossary.apply(p, asset, term, column, on=not remove))
+
+    def set_domain(self, asset: str, domain: Optional[str] = None) -> dict:
+        p = self.principal()
+        return self._catalog_edit(lambda: self.s.domains.set_domain(p, asset, domain))
+
     # ---- Cairn Flows: the caller's flows, as the caller (owner, editor, viewer or admin) -----------------
     def _flows(self):
         if getattr(self.s, "flows", None) is None:
@@ -766,6 +796,30 @@ def build_mcp_server(services: Services):
         flow's owner, under their grants. ``params``: the flow's parameters by name. Returns the run id; follow it
         with get_flow_run."""
         return tools.run_flow(flow, params)
+
+    @server.tool(annotations=read_only, structured_output=True, title="Search the glossary")
+    @_safe
+    def glossary_search(query: str = "", limit: int = 20) -> dict[str, Any]:
+        """Business glossary terms (Cairn Core) whose id, name or definition holds ``query``: definition, group,
+        stewards and whether the term is deprecated (and what to use instead)."""
+        return tools.glossary_search(query, limit)
+
+    labels = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+
+    @server.tool(annotations=labels, structured_output=True, title="Apply a glossary term")
+    @_safe
+    def apply_term(asset: str, term: str, column: Optional[str] = None, remove: bool = False) -> dict[str, Any]:
+        """Put a glossary term (its id or URN) on an asset, or on one of a dataset's columns; ``remove``: take it off.
+        Needs EDIT_ENTITY_GLOSSARY_TERMS on the asset (EDIT_DATASET_COL_GLOSSARY_TERMS for a column) and seeing it; a
+        deprecated term is not applied."""
+        return tools.apply_term(asset, term, column, remove)
+
+    @server.tool(annotations=labels, structured_output=True, title="Set an asset's domain")
+    @_safe
+    def set_domain(asset: str, domain: Optional[str] = None) -> dict[str, Any]:
+        """Put an asset in a domain (its id or URN), or with no domain take it out of its domain. Needs
+        EDIT_ENTITY_DOMAINS on the asset and seeing it; a data product's domain is changed on the product."""
+        return tools.set_domain(asset, domain)
 
     @server.tool(annotations=read_only, structured_output=True, title="Get a flow run")
     @_safe

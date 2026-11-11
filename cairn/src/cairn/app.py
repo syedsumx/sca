@@ -853,6 +853,11 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
             from cairn.marketplace.products_api import build_router as products_router
 
             app.include_router(products_router(services.data_products, cp, authz, services.can_view))
+        if getattr(services, "glossary", None) is not None:      # the glossary and domains in Cairn Core, edited here
+            from cairn.marketplace.glossary_api import build_router as glossary_router
+
+            app.include_router(glossary_router(services.glossary, services.domains, cp,
+                                               lambda: getattr(services, "iac_changes", None)))
         if getattr(services, "listings", None) is not None:     # agents and skills beside data products
             from cairn.marketplace.listings import build_listings_router
 

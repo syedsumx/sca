@@ -965,6 +965,9 @@ def build_parser() -> argparse.ArgumentParser:
     from cairn.airflow_deploy.cli import add_parser as airflow_parser
 
     airflow_parser(sub)
+    from cairn.marketplace.catalog_cli import add_parser as catalog_parser
+
+    catalog_parser(sub)
 
     # One `export` command: on its own it writes a live Cairn as code; `export metadata` writes the catalog's
     # metadata to the customer's storage. A subcommand's options and handler take precedence over these.

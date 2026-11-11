@@ -2787,6 +2787,74 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "catalog-glossary-nodes": {
+        "key": "catalog-glossary-nodes",
+        "iac": {"kind": "glossary_nodes", "id": "id"},
+        "title": "Term groups",
+        "path": "/catalog/glossary/nodes",
+        "listKey": "nodes",
+        "description": "The business glossary's term groups in Cairn Core, maybe inside one another, with their owners.",
+        "docs": "administration.html#glossary-and-domains",
+        "rowKey": "id",
+        "columns": ["name", "parent", "owners"],
+        "actions": [
+            {"label": "New term group", "method": "POST", "path": "/catalog/glossary/nodes",
+             "body": {"id": "finance", "name": "Finance", "description": "Money in and out", "parent": null,
+                      "owners": ["urn:li:corpGroup:finance-team"], "custom_properties": {}}},
+            {"label": "Edit term group", "method": "PUT", "path": "/catalog/glossary/nodes/{id}",
+             "body": {"name": "Finance", "description": "Money in and out", "parent": null,
+                      "owners": ["urn:li:corpGroup:finance-team"], "custom_properties": {}}},
+            {"label": "Delete", "method": "DELETE", "path": "/catalog/glossary/nodes/{id}", "body": null}
+        ]
+    },
+    "catalog-glossary-terms": {
+        "key": "catalog-glossary-terms",
+        "iac": {"kind": "glossary_terms", "id": "id"},
+        "title": "Glossary terms",
+        "path": "/catalog/glossary/terms",
+        "listKey": "terms",
+        "description": "The business glossary's terms in Cairn Core: definition, group, related terms, owners and stewards, deprecation.",
+        "docs": "administration.html#glossary-and-domains",
+        "rowKey": "id",
+        "columns": ["name", "parent", "stewards", "deprecated"],
+        "actions": [
+            {"label": "New term", "method": "POST", "path": "/catalog/glossary/terms",
+             "body": {"id": "net-revenue", "name": "Net revenue", "definition": "Revenue after refunds and discounts",
+                      "parent": "finance", "is_a": [], "has_a": [], "related": [], "owners": [],
+                      "stewards": ["urn:li:corpuser:olga"], "custom_properties": {}, "source_url": null,
+                      "deprecated": false, "deprecation_note": ""}},
+            {"label": "Edit term", "method": "PUT", "path": "/catalog/glossary/terms/{id}",
+             "body": {"name": "Net revenue", "definition": "Revenue after refunds and discounts", "parent": "finance",
+                      "is_a": [], "has_a": [], "related": [], "owners": [], "stewards": ["urn:li:corpuser:olga"],
+                      "custom_properties": {}, "source_url": null, "deprecated": false, "deprecation_note": ""}},
+            {"label": "Propose a change", "method": "POST", "path": "/catalog/glossary/proposals",
+             "body": {"id": "net-revenue", "name": "Net revenue", "definition": "Revenue after refunds and discounts",
+                      "parent": "finance", "is_a": [], "has_a": [], "related": [], "owners": [],
+                      "stewards": ["urn:li:corpuser:olga"], "custom_properties": {}, "source_url": null,
+                      "deprecated": false, "deprecation_note": "", "intent": "Why the change is wanted"}},
+            {"label": "Delete", "method": "DELETE", "path": "/catalog/glossary/terms/{id}", "body": null}
+        ]
+    },
+    "catalog-domains": {
+        "key": "catalog-domains",
+        "iac": {"kind": "domains", "id": "id"},
+        "title": "Domains",
+        "path": "/catalog/domains",
+        "listKey": "domains",
+        "description": "Domains in Cairn Core, maybe inside one another, with their owners; assets and data products are put in them.",
+        "docs": "administration.html#glossary-and-domains",
+        "rowKey": "id",
+        "columns": ["name", "parent", "owners"],
+        "actions": [
+            {"label": "New domain", "method": "POST", "path": "/catalog/domains",
+             "body": {"id": "customer-success", "name": "Customer success", "description": "Support, onboarding and retention",
+                      "parent": null, "owners": ["urn:li:corpGroup:cs-team"]}},
+            {"label": "Edit domain", "method": "PUT", "path": "/catalog/domains/{id}",
+             "body": {"name": "Customer success", "description": "Support, onboarding and retention", "parent": null,
+                      "owners": ["urn:li:corpGroup:cs-team"]}},
+            {"label": "Delete", "method": "DELETE", "path": "/catalog/domains/{id}", "body": null}
+        ]
+    },
     "contracts": {
         "key": "contracts",
         "title": "Data contracts",

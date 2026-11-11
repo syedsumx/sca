@@ -73,6 +73,8 @@ class Services:
     collab: Optional[Any] = None
     marketplace: Optional[Any] = None
     data_products: Optional[Any] = None
+    glossary: Optional[Any] = None
+    domains: Optional[Any] = None
     context: Optional[Any] = None
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
@@ -1205,6 +1207,19 @@ def _build_active_metadata(s: Services) -> None:
         from cairn.marketplace.products import DataProducts
 
         s.data_products = DataProducts(s.graph, s.audit)
+        # The glossary and domains, edited through Cairn and written to Cairn Core (cairn.marketplace.glossary,
+        # cairn.marketplace.domains): every decision is the policy engine's, and one it cannot make is a no.
+        from cairn.marketplace.domains import Domains
+        from cairn.marketplace.glossary import Glossary
+
+        def may(p: Principal, privilege: str, urn: Optional[str]) -> bool:
+            try:
+                return bool(s.authorize(p, privilege, urn, raise_on_deny=False))
+            except Exception:
+                logger.exception("authorization failed for %s on %s", privilege, urn)
+                return False
+        s.glossary = Glossary(s.graph, s.audit, may, s.can_view)
+        s.domains = Domains(s.graph, s.audit, may, s.can_view)
         # Agents and skills listed beside data products (cairn.marketplace.listings); the agent and extension
         # services are built later, so they are looked up when a listing is published.
         from cairn.marketplace.listings import Listings

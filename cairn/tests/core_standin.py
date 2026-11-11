@@ -56,6 +56,10 @@ class CoreStandIn:
     def _terms_of(self, urn: str) -> list[str]:
         return [t["urn"] for t in self._aspect(urn, "glossaryTerms").get("terms") or []]
 
+    def _field_terms_of(self, urn: str) -> list[str]:
+        return [t["urn"] for f in self._aspect(urn, "editableSchemaMetadata").get("editableSchemaFieldInfo") or []
+                for t in ((f.get("glossaryTerms") or {}).get("terms") or [])]
+
     def _entity(self, urn: str) -> dict:
         kind = _kind(urn)
         props = self._aspect(urn, PROPS.get(kind, ""))
@@ -82,12 +86,15 @@ class CoreStandIn:
         q = (inp.get("query") or "*").strip("* ").lower()
         if q and q not in self._name(urn).lower() and q not in urn.lower():
             return False
-        for clause in ((inp.get("orFilters") or [{}])[0].get("and") or []):
-            have = {"domains": self._domains_of(urn), "glossaryTerms": self._terms_of(urn),
-                    "platform": [f"urn:li:dataPlatform:{_platform(urn)}"]}.get(clause["field"], [])
-            if not set(have) & set(clause["values"]):
-                return False
-        return True
+        def holds(conjunction: dict) -> bool:
+            for clause in conjunction.get("and") or []:
+                have = {"domains": self._domains_of(urn), "glossaryTerms": self._terms_of(urn),
+                        "fieldGlossaryTerms": self._field_terms_of(urn),
+                        "platform": [f"urn:li:dataPlatform:{_platform(urn)}"]}.get(clause["field"], [])
+                if not set(have) & set(clause["values"]):
+                    return False
+            return True
+        return any(holds(c) for c in (inp.get("orFilters") or [{}]))
 
     def _search(self, inp: dict) -> dict:
         hits = [u for u in self._urns() if self._matches(u, inp)]
@@ -110,7 +117,16 @@ class CoreStandIn:
     def __call__(self, query: str, variables: dict) -> dict:
         op = (re.search(r"query\s+(\w+)", query) or [None, ""])[1]
         v = variables or {}
-        if op in ("cairnConsumerSearch", "cairnProducts"):
+        mutation = (re.search(r"mutation\s+(\w+)", query) or [None, ""])[1]
+        if mutation == "cairnDeleteDomain":             # Core's deleteDomain: refused with domains inside, else gone
+            urn = v["urn"]
+            if urn not in self._urns() or any(self._aspect(u, "domainProperties").get("parentDomain") == urn
+                                               for u in self._urns()):
+                return {"deleteDomain": False}
+            for key in [k for k in self.graph.aspects if k[0] == urn]:
+                del self.graph.aspects[key]
+            return {"deleteDomain": True}
+        if op in ("cairnConsumerSearch", "cairnProducts", "cairnCatalogAssets"):
             return {"searchAcrossEntities": self._search(v.get("input") or {})}
         if op == "cairnProduct":
             urn = v["urn"]
@@ -153,8 +169,11 @@ class CoreStandIn:
             d = v["urn"]
             if d not in domains:
                 return {"domain": None}
+            up = self._aspect(d, "domainProperties").get("parentDomain")
+            kids = [u for u in domains if self._aspect(u, "domainProperties").get("parentDomain") == d]
             return {"domain": {**self._entity(d), "ownership": self._owners(d), "entities": {"total": len(in_domain(d))},
-                               "parentDomains": {"domains": []}, "children": {"relationships": []}}}
+                               "parentDomains": {"domains": [self._entity(up)] if up else []},
+                               "children": {"relationships": [{"entity": self._entity(k)} for k in kids]}}}
         if op == "cairnColumnLineage":
             up = self._aspect(v["urn"], "upstreamLineage")
             return {"dataset": {"urn": v["urn"], "fineGrainedLineages": [

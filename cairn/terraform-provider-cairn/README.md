@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-95 resources, each also a data source:
+98 resources, each also a data source:
 
 **Identity and access**
 
@@ -81,9 +81,12 @@ permissions and audit apply:
 | Resource | Bundle section | What it is |
 |---|---|---|
 | `cairn_quality_monitor` | `quality_monitors` | A data quality monitor on a dataset (freshness, volume, field metrics, schema or SQL), on a schedule |
+| `cairn_glossary_node` | `glossary_nodes` | A term group of the business glossary in Cairn Core (glossaryNode), maybe inside another |
 | `cairn_slo` | `slos` | A data product's service level objective: the share of its monitors' evaluations that must pass |
 | `cairn_data_contract` | `data_contracts` | A data contract: what a dataset promises (schema, freshness, volume, quality rules), versioned; a change of terms is a new version |
+| `cairn_glossary_term` | `glossary_terms` | A business glossary term in Cairn Core (glossaryTerm): definition, group, related terms (is a, has a, related), owners and stewards, deprecation |
 | `cairn_retention_policy` | `retention_policies` | How long data with a label (tag, term or classification) is kept; with enforce, older rows are deleted |
+| `cairn_domain` | `domains` | A domain in Cairn Core, maybe inside another, with its owners; assets and data products are put in it |
 | `cairn_automation` | `automations` | A governance automation: assets that match a condition get actions (tags, owners, domains, ...), on a schedule or on events |
 | `cairn_form` | `forms` | A governance form: questions asked of the owners of the assets that match a condition |
 | `cairn_budget` | `budgets` | A cost budget for a scope (all, a domain, an owner, a platform, tables, a warehouse or AI), with alerts at thresholds and on the forecast |

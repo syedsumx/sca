@@ -65,6 +65,14 @@ def _hint(**kw) -> dict:
 _PRODUCT_HINTS = {"assets": _hint(type="picker", picker="dataset", multiple=True),
                   "output_ports": _hint(type="picker", picker="dataset", multiple=True),
                   "domain": _hint(pattern=r"^urn:li:domain:.+$")}
+# Glossary terms and groups, domains (cairn.marketplace.glossary, .domains): ids, people pickers, Markdown definitions.
+_ID = _hint(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,199}$")
+_PEOPLE = _hint(type="picker", picker="principal", multiple=True)
+_NODE_HINTS = {"id": _ID, "parent": _ID, "owners": _PEOPLE, "custom_properties": _hint(type="keyvalue")}
+_TERM_HINTS = {**_NODE_HINTS, "definition": _hint(type="textarea"), "stewards": _PEOPLE,
+               "is_a": _hint(type="list"), "has_a": _hint(type="list"), "related": _hint(type="list"),
+               "deprecation_note": _hint(type="textarea"), "intent": _hint(type="textarea")}
+_DOMAIN_HINTS = {"id": _ID, "parent": _ID, "owners": _PEOPLE}
 
 # Observability (cairn.observability): severities and languages to choose from, conditions as text.
 _SEVERITY = _hint(type="select", enum=["critical", "warning", "info"])
@@ -142,6 +150,10 @@ HINTS: dict[str, dict[str, dict]] = {
     "POST /quality/contracts/check": {"dataset": _hint(picker="dataset")},
     "POST /catalog/products": _PRODUCT_HINTS,
     "PUT /catalog/products/{id}": _PRODUCT_HINTS,
+    "POST /catalog/glossary/nodes": _NODE_HINTS, "PUT /catalog/glossary/nodes/{id}": _NODE_HINTS,
+    "POST /catalog/glossary/terms": _TERM_HINTS, "PUT /catalog/glossary/terms/{id}": _TERM_HINTS,
+    "POST /catalog/glossary/proposals": _TERM_HINTS,
+    "POST /catalog/domains": _DOMAIN_HINTS, "PUT /catalog/domains/{id}": _DOMAIN_HINTS,
     "POST /v1/people/users": {"manager": _hint(picker="user"), "attributes": _hint(type="keyvalue")},
     "PUT /v1/people/users/{id}": {"manager": _hint(picker="user"), "attributes": _hint(type="keyvalue")},
     "POST /v1/people/groups/{group}/members": {"person": _hint(picker="user")},

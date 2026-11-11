@@ -753,7 +753,7 @@ def tool_scope(tool: str) -> str:
     if tool == "iac_apply":
         return "never"                                   # a person applies what they approved; no agent scope does
     return {"ask_data": "query_data", "query_metric": "query_data", "run_python": "query_data",
-            "run_flow": "write"}.get(tool, "read")
+            "run_flow": "write", "apply_term": "write", "set_domain": "write"}.get(tool, "read")
 
 
 def describe(scopes: list[str]) -> list[dict[str, Any]]:
