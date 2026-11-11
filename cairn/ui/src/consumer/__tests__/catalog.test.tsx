@@ -281,6 +281,10 @@ describe('Glossary and domains', () => {
         expect(await screen.findByRole('link', { name: /orders/ })).toBeTruthy();
         const search = calls.find((c) => c.path === '/graphql#cairnConsumerSearch')!.body as { variables: { input: { orFilters: unknown } } };
         expect(search.variables.input.orFilters).toEqual([{ and: [{ field: 'glossaryTerms', values: [TERM] }] }]);
+        // Related terms are Core's edges of glossaryRelatedTerms (GlossaryRelatedTerms.pdl): IsA, HasA and IsRelatedTo.
+        const term = (calls.find((c) => c.path === '/graphql#cairnGlossaryTerm')!.body as { query: string }).query;
+        for (const edge of ['IsA', 'HasA', 'IsRelatedTo']) expect(term).toContain(`types: ["${edge}"], direction: OUTGOING`);
+        expect(term).not.toContain('"RelatedTo"');
     });
 
     it("an asset's terms and domain: changed by someone who may, read-only with the reason otherwise", async () => {

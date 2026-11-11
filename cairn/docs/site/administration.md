@@ -1251,7 +1251,8 @@ every other reader see it at once.
     is changed on the product (`MANAGE_DATA_PRODUCTS`).
 * **What is written:** a group's `glossaryNodeInfo` and `ownership`; a term's `glossaryTermInfo` (`termSource`
   `INTERNAL` unless Core already had one), `glossaryRelatedTerms` (`isRelatedTerms`, `hasRelatedTerms`,
-  `relatedTerms`), `ownership` (owners `TECHNICAL_OWNER`, stewards `DATA_STEWARD`) and `deprecation`; a domain's
+  `relatedTerms`; in Core's graph these are the `IsA`, `HasA` and `IsRelatedTo` edges, which a term's page and
+  GraphQL `relationships` read), `ownership` (owners `TECHNICAL_OWNER`, stewards `DATA_STEWARD`) and `deprecation`; a domain's
   `domainProperties` (with `parentDomain`) and `ownership`. On an asset: a JSON-patch of `glossaryTerms` (or of the
   column's entry in `editableSchemaMetadata`) that Cairn Core applies atomically, and `domains`. What Cairn does not
   manage on an entry made in Core's own UI (its source and raw schema, related-term values, an owner's ownership type

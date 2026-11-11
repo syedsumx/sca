@@ -171,7 +171,7 @@ def test_glossary_and_domains_made_through_cairn_are_in_core():
         assert t["properties"]["name"] == f"Invoice {RUN}" and t["properties"]["definition"] == "A bill sent to a customer."
         assert {"key": "standard", "value": "e-invoicing"} in t["properties"]["customProperties"]
         assert [n["urn"] for n in t["parentNodes"]["nodes"]] == [f"urn:li:glossaryNode:{node}"]
-        related = """query($u: String!) { glossaryTerm(urn: $u) { related: relationships(input: { types: ["RelatedTo"],
+        related = """query($u: String!) { glossaryTerm(urn: $u) { related: relationships(input: { types: ["IsRelatedTo"],
                      direction: OUTGOING, start: 0, count: 10 }) { relationships { entity { urn } } } } }"""
         eventually(lambda: [x["entity"]["urn"] for x in gql(related, {"u": f"urn:li:glossaryTerm:{term}"})[
             "glossaryTerm"]["related"]["relationships"]] == [TERM], timeout=120, interval=3)   # the graph index is async

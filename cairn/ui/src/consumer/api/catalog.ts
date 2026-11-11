@@ -105,6 +105,8 @@ export interface GlossaryTermDetail extends NamedEntity {
     related?: Related;
 }
 
+// The edges come from Core's glossaryRelatedTerms aspect: isRelatedTerms is "IsA", hasRelatedTerms is "HasA" and
+// relatedTerms is "IsRelatedTo" (the @Relationship names in GlossaryRelatedTerms.pdl).
 export const GLOSSARY_TERM_QUERY = `
 query cairnGlossaryTerm($urn: String!) {
   glossaryTerm(urn: $urn) {
@@ -118,7 +120,7 @@ query cairnGlossaryTerm($urn: String!) {
     hasA: relationships(input: { types: ["HasA"], direction: OUTGOING, start: 0, count: 100 }) {
       relationships { entity { urn type ... on GlossaryTerm { name properties { name } } } }
     }
-    related: relationships(input: { types: ["RelatedTo"], direction: OUTGOING, start: 0, count: 100 }) {
+    related: relationships(input: { types: ["IsRelatedTo"], direction: OUTGOING, start: 0, count: 100 }) {
       relationships { entity { urn type ... on GlossaryTerm { name properties { name } } } }
     }
   }
