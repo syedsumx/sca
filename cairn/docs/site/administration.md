@@ -1093,6 +1093,66 @@ Flows are registered in the catalog too: a flow's first publish writes the `data
 (`urn:li:dataFlow:(cairn-flows,<flow>,<env>)`, with `CAIRN_OPENLINEAGE_ENV`) with its owner, description, runner and
 published version; deleting the flow marks it removed. A failure to write it is logged and never fails the publish.
 
+## Glossary and domains
+
+The business glossary (term groups and terms) and the domains are Cairn Core entities (`urn:li:glossaryNode:<id>`,
+`urn:li:glossaryTerm:<id>`, `urn:li:domain:<id>`). Besides Cairn Core's own UI they are made and changed through Cairn:
+the workspace's **Catalog › Glossary** and **Catalog › Domains** pages (and the term and domain pickers on an asset's
+page), `/catalog/glossary`, `/catalog/domains` and `/catalog/assets`, the Terraform resources `cairn_glossary_node`,
+`cairn_glossary_term` and `cairn_domain`, the bundle sections `glossary_nodes`, `glossary_terms` and `domains`, the
+`cairn glossary` and `cairn domains` commands, and the MCP tools `glossary_search`, `apply_term` and `set_domain`.
+Cairn keeps no copy: every change is an aspect written to Cairn Core, so search, the asset pages, the Marketplace and
+every other reader see it at once.
+
+| Call | What it does |
+|---|---|
+| `GET/POST /catalog/glossary/nodes`, `GET/PUT/DELETE /catalog/glossary/nodes/{id}` | Term groups: `id`, `name`, `description`, `parent` (a group's id), `owners`, `custom_properties`. |
+| `GET/POST /catalog/glossary/terms`, `GET/PUT/DELETE /catalog/glossary/terms/{id}[?force=true]` | Terms: `id`, `name`, `definition` (Markdown), `parent`, `is_a`, `has_a`, `related` (term ids), `owners`, `stewards`, `custom_properties`, `source_url`, `deprecated`, `deprecation_note`. |
+| `GET /catalog/glossary/terms/{id}/assets` | The assets that carry the term, on themselves or on a column (Cairn Core's search), that the caller may see. |
+| `GET /catalog/glossary/rights[?urn=…]` | Whether the caller may change an entry (or add at the top of the glossary), why not, and whether they may propose a change instead. |
+| `POST /catalog/glossary/proposals` | A term (new or changed) plus `intent` (why), proposed as a change request. |
+| `GET/POST /catalog/domains`, `GET/PUT/DELETE /catalog/domains/{id}[?force=true]` | Domains: `id`, `name`, `description`, `parent` (a domain's id), `owners`. |
+| `GET /catalog/domains/{id}/assets` | The domain's `assets` and `products` the caller may see, and how many are `hidden`. |
+| `GET /catalog/domains/rights[?urn=…]` | As for the glossary. |
+| `GET /catalog/assets/labels?urn=…` | An asset's terms, its columns' terms and its domain, with what the caller may change (`may`) and why not (`why`). |
+| `POST /catalog/assets/terms`, `POST /catalog/assets/terms/remove` | `{asset, term, field?}`: a term put on (taken off) an asset, or one of a dataset's columns. |
+| `PUT /catalog/assets/domain` | `{asset, domain}`: the asset put in a domain; `domain: null` takes it out. |
+
+* **Privileges** (Cairn Core's names, so Core's native policies import as they are; deny by default, and a decision
+  that cannot be made is a refusal):
+  * `MANAGE_GLOSSARIES` on the term or group, or on any group above it. A policy whose resources are a term group
+    (`urn:li:glossaryNode:finance`) lets its holders manage everything under that group; one without resources covers
+    the whole glossary and is needed to add at the top. Moving an entry needs it where the entry is and where it goes.
+  * `MANAGE_DOMAINS` on the domain or a domain above it; without resources for a top-level domain.
+  * On an asset: `EDIT_ENTITY_GLOSSARY_TERMS` (`EDIT_DATASET_COL_GLOSSARY_TERMS` for a column) and
+    `EDIT_ENTITY_DOMAINS`, and the caller must be able to see the asset (`VIEW_ENTITY_PAGE`). A data product's domain
+    is changed on the product (`MANAGE_DATA_PRODUCTS`).
+* **What is written:** a group's `glossaryNodeInfo` and `ownership`; a term's `glossaryTermInfo` (`termSource`
+  `INTERNAL` unless Core already had one), `glossaryRelatedTerms` (`isRelatedTerms`, `hasRelatedTerms`,
+  `relatedTerms`), `ownership` (owners `TECHNICAL_OWNER`, stewards `DATA_STEWARD`) and `deprecation`; a domain's
+  `domainProperties` (with `parentDomain`) and `ownership`. On an asset: a JSON-patch of `glossaryTerms` (or of the
+  column's entry in `editableSchemaMetadata`) that Cairn Core applies atomically, and `domains`. What Cairn does not
+  manage on an entry made in Core's own UI (its source and raw schema, related-term values, an owner's ownership type
+  and source) is kept. A term that came with ingestion (`schemaMetadata`) is removed at the source, not here.
+* **Deleting:** a term or group is marked removed (Core's `status` aspect): it leaves search and the glossary, and
+  making it again with the same id brings it back. A group with terms or groups in it is refused (409). A term still on
+  assets is refused unless `force=true`, which takes it off them first (each removal is checked as above). A domain
+  with domains inside it is refused; one with assets or data products in it is refused unless `force=true` and the
+  caller may take each out (`EDIT_ENTITY_DOMAINS` on each asset, `MANAGE_DATA_PRODUCTS` on the domain); then Cairn
+  Core's own `deleteDomain` deletes it (Core has no soft delete for domains). What a domain holds is read from Core's
+  search, which is fed asynchronously: an asset put in a domain a moment ago may not count yet.
+* **Deprecated terms** are not put on more assets (409 with the deprecation note); they can still be taken off.
+* **Proposals:** someone who may not change a term proposes the change (the term page's **Propose a change**, or
+  `POST /catalog/glossary/proposals`). It becomes an infrastructure-as-code change request of kind `glossary_terms`
+  (see *Agents and infrastructure as code*): a person with `APPROVE_IAC_CHANGE` on `urn:li:iacKind:glossary_terms`, who may make the
+  change themselves (`MANAGE_GLOSSARIES` there), approves and applies it; the proposer cannot approve their own. The
+  term's stewards are not notified separately: the change request's approvers are.
+* **Audit:** every change is in the audit log (categories `glossary` and `domains`: `glossary.term_created`,
+  `glossary.term_applied`, `domains.asset_set`, `domains.deleted`, …) once Cairn Core confirmed it. A write Core
+  refused is answered 502 and audited as `…_failed`; nothing is half-written by Cairn.
+* **The Cairn Core service account** needs `MANAGE_GLOSSARIES` and `MANAGE_DOMAINS` (the bootstrap grants both) for
+  Core's `deleteDomain`; the other writes are ordinary aspect writes.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.
