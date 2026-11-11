@@ -61,6 +61,11 @@ def _hint(**kw) -> dict:
     return kw
 
 
+# A data product's assets and output ports: catalog assets, searched (another asset's URN can be typed).
+_PRODUCT_HINTS = {"assets": _hint(type="picker", picker="dataset", multiple=True),
+                  "output_ports": _hint(type="picker", picker="dataset", multiple=True),
+                  "domain": _hint(pattern=r"^urn:li:domain:.+$")}
+
 # Observability (cairn.observability): severities and languages to choose from, conditions as text.
 _SEVERITY = _hint(type="select", enum=["critical", "warning", "info"])
 # An SLO's indicator: a ratio of bad to all events (PromQL over [$window]), or a latency threshold on a histogram.
@@ -135,6 +140,8 @@ HINTS: dict[str, dict[str, dict]] = {
     "PUT /quality/contracts": {"dataset": _hint(picker="dataset"), "owner": _hint(picker="user"),
                                "version": _hint(pattern=r"^\d+\.\d+\.\d+$")},
     "POST /quality/contracts/check": {"dataset": _hint(picker="dataset")},
+    "POST /catalog/products": _PRODUCT_HINTS,
+    "PUT /catalog/products/{id}": _PRODUCT_HINTS,
     "POST /v1/people/users": {"manager": _hint(picker="user"), "attributes": _hint(type="keyvalue")},
     "PUT /v1/people/users/{id}": {"manager": _hint(picker="user"), "attributes": _hint(type="keyvalue")},
     "POST /v1/people/groups/{group}/members": {"person": _hint(picker="user")},

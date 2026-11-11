@@ -5,7 +5,7 @@ permissions and audit apply:
 
 <!-- BEGIN GENERATED RESOURCES -->
 
-94 resources, each also a data source:
+95 resources, each also a data source:
 
 **Identity and access**
 
@@ -88,6 +88,7 @@ permissions and audit apply:
 | `cairn_form` | `forms` | A governance form: questions asked of the owners of the assets that match a condition |
 | `cairn_budget` | `budgets` | A cost budget for a scope (all, a domain, an owner, a platform, tables, a warehouse or AI), with alerts at thresholds and on the forecast |
 | `cairn_cost_centre` | `cost_centres` | A chargeback cost centre: the teams (groups) whose use it pays for |
+| `cairn_data_product` | `data_products` | A data product in Cairn Core: a named set of assets with a domain and owners, some of them its output ports (what consumers read) |
 | `cairn_product_request_policy` | `product_request_policies` | How access to a data product is requested and granted: approvers, purposes, how long, automatic approval and what an approval provisions |
 | `cairn_notification_route` | `notification_routes` | A notification route: events of these types (in these domains) to Slack, Teams, a webhook, a ticketing system, Kafka, EventBridge or Pub/Sub |
 | `cairn_marketplace_listing` | `marketplace_listings` | An agent or skill listed in the marketplace, with who approves access requests and for which purposes |

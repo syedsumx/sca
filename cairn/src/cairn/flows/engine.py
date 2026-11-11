@@ -197,6 +197,9 @@ class Flows:
         self.dag_folder = None
         # Called with (run, flow name, top-level step rows) when a run ends (pipeline observability, L145).
         self.observers: list = []
+        # Registers the flow in the catalog (a Cairn Core dataFlow with its owner): called with (name, owner, the
+        # published definition) on publish, and (name, owner, None) when the flow is deleted. Never fails the change.
+        self.register: Optional[Callable[[str, str, Optional[dict]], Any]] = None
         self.airflow_poll_ms =_int_env("CAIRN_FLOWS_AIRFLOW_POLL_SECONDS", 10, 2, 600) * 1000
         self.airflow_deploy_ms = _int_env("CAIRN_FLOWS_AIRFLOW_DEPLOY_TIMEOUT_SECONDS", 300, 10, 7200) * 1000
         self.airflow_unreachable_ms = _int_env("CAIRN_FLOWS_AIRFLOW_UNREACHABLE_MINUTES", 30, 1, 1440) * 60_000
@@ -446,6 +449,7 @@ class Flows:
                 seen_change=seen, next_run_ms=next_fire(sched["cron"], sched["timezone"], now) if sched else None))
         self._audit(actor, "flow.published", row["name"], {"version": version, "steps": len(defn["steps"]),
                                                              **({"airflow": deployed} if deployed else {})})
+        self._register(row["name"], row["owner"], {**defn, "version": version})
         return {"flow": row["name"], "version": version, **({"airflow": deployed} if deployed else {})}
 
     # ---- Airflow (cairn.flows.airflow_dag, cairn.flows.airflow_interop) -------------------------------------
@@ -548,7 +552,17 @@ class Flows:
                 self.dag_folder.write(row["name"], None, f"Cairn: remove flow {row['name']}")
             except FlowError as e:
                 logger.warning("flow %s: could not remove its DAG: %s", row["name"], e)
+        if row["published_version"]:
+            self._register(row["name"], row["owner"], None)
         self._audit(actor, "flow.deleted", row["name"], {})
+
+    def _register(self, name: str, owner: str, defn: Optional[dict]) -> None:
+        if self.register is None:
+            return
+        try:
+            self.register(name, owner, defn)
+        except Exception:  # noqa: BLE001 - the catalog being away never fails a publish or a delete
+            logger.warning("flow %s: could not register it in the catalog", name, exc_info=True)
 
     def _version(self, fid: str, version: int) -> dict:
         with self.engine.connect() as conn:

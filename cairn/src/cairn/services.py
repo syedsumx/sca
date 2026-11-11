@@ -72,6 +72,7 @@ class Services:
     slack: Optional[Any] = None
     collab: Optional[Any] = None
     marketplace: Optional[Any] = None
+    data_products: Optional[Any] = None
     context: Optional[Any] = None
     embed: Optional[Any] = None
     assistant: Optional[Any] = None
@@ -958,6 +959,31 @@ def _build_medallion(s: Services) -> None:
             getattr(s, name).medallion = s.medallion
 
 
+
+def flow_registrar(graph, env: str):
+    """A flow in the catalog: the Cairn Core dataFlow its steps' lineage already lands on (OpenLineage namespace
+    ``cairn-flows://<flow>``), with its owner and description, from its first publish, before any run; removed when
+    the flow is deleted."""
+    from cairn.common.proposals import make_mcp
+    from cairn.flows.engine import LINEAGE_NS
+    from cairn.sources.openlineage import job_urns
+
+    def register(name: str, owner: str, defn: Optional[dict]) -> None:
+        urn = job_urns(f"{LINEAGE_NS}://{name}", "flow", env)[1]
+        if defn is None:
+            graph.emit([make_mcp(urn, "status", {"removed": True})])
+            return
+        info = {"name": name, "description": str(defn.get("description") or "")[:5000],
+                "customProperties": {"cairn.kind": "flow", "cairn.flow": name, "runner": str(defn.get("runner") or "cairn"),
+                                     "version": str(defn.get("version") or ""),
+                                     "openlineage_namespace": f"{LINEAGE_NS}://{name}"}}
+        graph.emit([make_mcp(urn, "dataFlowInfo", info),
+                    make_mcp(urn, "ownership", {"owners": [{"owner": owner, "type": "DATAOWNER"}],
+                                                "lastModified": {"time": int(time.time() * 1000), "actor": owner}}),
+                    make_mcp(urn, "status", {"removed": False})])
+    return register
+
+
 def _build_flows(s: Services) -> None:
     """Cairn Flows (cairn.flows): DAGs of any steps, run as their owner; built last, on every service steps use."""
     from cairn.flows.engine import Flows
@@ -1010,6 +1036,9 @@ def _build_flows(s: Services) -> None:
                         secrets=getattr(s, "secret_scopes", None), egress=getattr(s, "egress", None))
     s.flows = Flows(s.engine, backends, s.audit, tell, s.is_admin, groups_of, getattr(s, "dataset_changes", None),
                     table_urn, (lambda event: ol.handle(event)) if ol is not None else None, may_run)
+    if s.graph is not None:
+        s.flows.register = flow_registrar(s.graph, ol.env if ol is not None else os.environ.get("CAIRN_OPENLINEAGE_ENV",
+                                                                                               "PROD"))
     # Airflow both ways (cairn.flows.airflow_interop): the DAG folder runner-airflow flows deploy to (a bad setting
     # stops Cairn at start), and Airflow's DAGs shown to the people they belong to.
     from cairn.flows.airflow_interop import AirflowDags, DagFolder
@@ -1172,6 +1201,10 @@ def _build_active_metadata(s: Services) -> None:
     if s.graph is not None:
         s.marketplace = MarketplaceService(s.engine, s.graph, s.personas, hub, s.audit, s.attributes, s.trust,
                                            s.is_admin)
+        # Data products made and changed through Cairn, as Cairn Core entities (cairn.marketplace.products).
+        from cairn.marketplace.products import DataProducts
+
+        s.data_products = DataProducts(s.graph, s.audit)
         # Agents and skills listed beside data products (cairn.marketplace.listings); the agent and extension
         # services are built later, so they are looked up when a listing is published.
         from cairn.marketplace.listings import Listings

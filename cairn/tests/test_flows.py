@@ -656,6 +656,24 @@ def test_the_mcp_tools_run_as_the_caller(api):
     assert tool_scope("run_flow") == "write" and tool_scope("list_flows") == "read"
 
 
+def test_a_published_flow_is_a_catalog_entity_with_its_owner(api, graph):
+    """L147: a flow is in Cairn Core from its first publish (the dataFlow its steps' lineage lands on), owned by its
+    owner; a draft is not; deleting the flow removes it from the catalog."""
+    s, _, _ = api
+    urn = "urn:li:dataFlow:(cairn-flows,orders-daily,PROD)"
+    s.flows.create(ANA, {"name": "orders-daily", "description": "Orders, every day",
+                         "steps": [{"name": "n", "type": "notify", "message": "hi"}]})
+    assert (urn, "dataFlowInfo") not in graph.aspects                     # a draft is not in the catalog
+    s.flows.publish(ANA, "orders-daily")
+    info = graph.aspects[(urn, "dataFlowInfo")]
+    assert info["name"] == "orders-daily" and info["description"] == "Orders, every day"
+    assert info["customProperties"]["cairn.kind"] == "flow" and info["customProperties"]["version"] == "1"
+    assert graph.aspects[(urn, "ownership")]["owners"] == [{"owner": ANA, "type": "DATAOWNER"}]
+    assert graph.aspects[(urn, "status")] == {"removed": False}
+    s.flows.delete(ANA, "orders-daily")
+    assert graph.aspects[(urn, "status")] == {"removed": True}
+
+
 def test_the_cli_validates_here_and_needs_cairn_for_the_rest(tmp_path, monkeypatch, capsys):
     import argparse
 

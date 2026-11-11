@@ -849,6 +849,10 @@ def _include_active_metadata(app: FastAPI, services: Services, modules: set, cp,
     if "marketplace" in modules and services.marketplace is not None:
         app.include_router(marketplace_router(services.marketplace, cp, services.can_view,
                                               lambda p: services.subject_of(p.urn)))
+        if getattr(services, "data_products", None) is not None:   # data products in Cairn Core, made here
+            from cairn.marketplace.products_api import build_router as products_router
+
+            app.include_router(products_router(services.data_products, cp, authz, services.can_view))
         if getattr(services, "listings", None) is not None:     # agents and skills beside data products
             from cairn.marketplace.listings import build_listings_router
 
