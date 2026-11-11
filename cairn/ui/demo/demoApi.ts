@@ -6,6 +6,7 @@
 
 import { installAirflowIacDemo } from './airflowIacSamples';
 import { installFlowsDemo } from './flowSamples';
+import { installOpsDemo } from './opsSamples';
 import { DEMO_GROUNDED, installOntologyDemo } from './ontologySamples';
 import { ACTION_SAMPLES, RESOURCE_SAMPLES } from './resourceSamples';
 
@@ -56,6 +57,7 @@ const PII_EMAIL = 'urn:li:glossaryTerm:Classification.PII.Email';
 const PII_PHONE = 'urn:li:glossaryTerm:Classification.PII.Phone';
 const T_REVENUE = 'urn:li:glossaryTerm:Finance.NetRevenue';
 const T_CUSTOMER = 'urn:li:glossaryTerm:Customer.ActiveCustomer';
+const T_ORDER = 'urn:li:glossaryTerm:Sales.Order';
 
 const ORDERS = ds('snowflake', 'analytics.core.orders');
 const CUSTOMERS = ds('snowflake', 'analytics.core.customers');
@@ -76,9 +78,9 @@ const ASSETS: Asset[] = [
     {
         urn: ORDERS, type: 'DATASET', name: 'orders', platform: 'snowflake', domain: FINANCE,
         description: 'One row per customer order, loaded hourly from the commerce platform. Source of truth for order counts and gross merchandise value.',
-        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Tier1'], terms: [], certification: 'CERTIFIED', quality: 'HEALTHY', views: 41,
+        owners: ['urn:li:corpuser:raj'], tags: ['urn:li:tag:Tier1'], terms: [T_ORDER], certification: 'CERTIFIED', quality: 'HEALTHY', views: 41,
         columns: [
-            { fieldPath: 'order_id', nativeDataType: 'VARCHAR', description: 'Order identifier' },
+            { fieldPath: 'order_id', nativeDataType: 'VARCHAR', description: 'Order identifier', terms: [T_ORDER] },
             { fieldPath: 'customer_id', nativeDataType: 'VARCHAR', description: 'Joins to customers.id' },
             { fieldPath: 'order_ts', nativeDataType: 'TIMESTAMP_NTZ', description: 'When the order was placed (UTC)' },
             { fieldPath: 'amount', nativeDataType: 'NUMBER(12,2)', description: 'Order total before discounts', terms: [] },
@@ -452,6 +454,84 @@ function gqlAsset(urn: string) {
             editableSchemaMetadata: null,
         },
     };
+}
+
+// ------------------------------------------------------------------------------- glossary and domains (Cairn Core)
+// The terms the assets above use, in groups, with the definitions the asset pages and the assistant rely on.
+const G_FINANCE = 'urn:li:glossaryNode:Finance';
+const G_SALES = 'urn:li:glossaryNode:Sales';
+const G_CUSTOMER = 'urn:li:glossaryNode:Customer';
+const G_CLASS = 'urn:li:glossaryNode:Classification';
+const GLOSSARY_NODES: { urn: string; name: string; description: string; owner: string }[] = [
+    { urn: G_FINANCE, name: 'Finance', description: 'Revenue, margin and the numbers finance reports on.', owner: 'urn:li:corpuser:raj' },
+    { urn: G_SALES, name: 'Sales', description: 'Orders and what customers buy.', owner: 'urn:li:corpuser:raj' },
+    { urn: G_CUSTOMER, name: 'Customer', description: 'Who our customers are and how we count them.', owner: 'urn:li:corpuser:mei' },
+    { urn: G_CLASS, name: 'Classification', description: 'Sensitivity labels that masking and access policies read.', owner: 'urn:li:corpuser:mei' },
+];
+const GLOSSARY_TERMS: { urn: string; name: string; parent: string; definition: string; related?: string[] }[] = [
+    { urn: T_REVENUE, name: 'NetRevenue', parent: G_FINANCE,
+        definition: 'Order amount minus discounts and refunds, in the order’s currency converted at the day’s rate. Excludes tax and shipping. Reported in revenue_daily as net_revenue.',
+        related: [T_ORDER] },
+    { urn: 'urn:li:glossaryTerm:Finance.GrossMerchandiseValue', name: 'GrossMerchandiseValue', parent: G_FINANCE,
+        definition: 'The total value of orders before discounts and refunds.', related: [T_ORDER] },
+    { urn: T_ORDER, name: 'Order', parent: G_SALES,
+        definition: 'A purchase a customer completed at checkout: one row in orders, identified by order_id. A cancelled order stays an order with status cancelled.' },
+    { urn: T_CUSTOMER, name: 'ActiveCustomer', parent: G_CUSTOMER,
+        definition: 'A customer with at least one order in the last 90 days whose status is active. Paused customers become churned after 60 days.',
+        related: [T_ORDER] },
+    { urn: PII_EMAIL, name: 'Email', parent: G_CLASS, definition: 'A personal email address. Masked unless your purpose allows PII.' },
+    { urn: PII_PHONE, name: 'Phone', parent: G_CLASS, definition: 'A personal phone number. Masked unless your purpose allows PII.' },
+];
+const termEntity = (t: (typeof GLOSSARY_TERMS)[number]) => ({ urn: t.urn, type: 'GLOSSARY_TERM', name: t.name,
+    properties: { name: t.name, description: t.definition, definition: t.definition } });
+const nodeEntity = (n: (typeof GLOSSARY_NODES)[number]) => ({ urn: n.urn, type: 'GLOSSARY_NODE', properties: { name: n.name, description: n.description } });
+const ownersOf = (urn: string) => ({ owners: [{ owner: { urn, username: urn.split(':').pop(), properties: { displayName: PEOPLE[urn] ?? null } } }] });
+
+function gqlGlossaryRoot() {
+    return {
+        getRootGlossaryNodes: { nodes: GLOSSARY_NODES.map((n) => ({ ...nodeEntity(n),
+            childrenCount: { termsCount: GLOSSARY_TERMS.filter((t) => t.parent === n.urn).length, nodesCount: 0 } })) },
+        getRootGlossaryTerms: { terms: [] },
+    };
+}
+
+function gqlGlossaryNode(urn: string) {
+    const n = GLOSSARY_NODES.find((x) => x.urn === urn);
+    if (!n) return null;
+    const children = GLOSSARY_TERMS.filter((t) => t.parent === urn);
+    return { ...nodeEntity(n), parentNodes: { nodes: [] }, ownership: ownersOf(n.owner),
+        children: { total: children.length, relationships: children.map((t) => ({ entity: termEntity(t) })) } };
+}
+
+function gqlGlossaryTerm(urn: string) {
+    const t = GLOSSARY_TERMS.find((x) => x.urn === urn);
+    if (!t) return null;
+    const parent = GLOSSARY_NODES.find((n) => n.urn === t.parent)!;
+    const rel = (urns: string[]) => ({ relationships: urns.map((u) => GLOSSARY_TERMS.find((x) => x.urn === u)).filter(Boolean)
+        .map((x) => ({ entity: { urn: x!.urn, type: 'GLOSSARY_TERM', name: x!.name, properties: { name: x!.name } } })) });
+    return { ...termEntity(t), hierarchicalName: `${parent.name}.${t.name}`,
+        properties: { name: t.name, description: t.definition, definition: t.definition, termSource: 'INTERNAL', sourceUrl: null },
+        parentNodes: { nodes: [{ urn: parent.urn, properties: { name: parent.name } }] }, ownership: ownersOf(parent.owner),
+        isA: rel([]), hasA: rel([]), related: rel(t.related ?? []) };
+}
+
+const DOMAIN_INFO: Record<string, { description: string; owner: string }> = {
+    [FINANCE]: { description: 'Revenue, invoices and the numbers finance reports on.', owner: 'urn:li:corpuser:raj' },
+    [MARKETING]: { description: 'Customers, campaigns and spend.', owner: 'urn:li:corpuser:mei' },
+    [SUPPLY]: { description: 'Shipments and inventory.', owner: 'urn:li:corpuser:tom' },
+};
+
+function gqlDomains() {
+    const domains = Object.entries(DOMAINS).map(([urn, name]) => ({ urn, type: 'DOMAIN', properties: { name, description: DOMAIN_INFO[urn].description },
+        ownership: ownersOf(DOMAIN_INFO[urn].owner), entities: { total: ASSETS.filter((a) => a.domain === urn).length } }));
+    return { listDomains: { total: domains.length, domains } };
+}
+
+function gqlDomain(urn: string) {
+    if (!DOMAINS[urn]) return null;
+    return { urn, type: 'DOMAIN', properties: { name: DOMAINS[urn], description: DOMAIN_INFO[urn].description },
+        ownership: ownersOf(DOMAIN_INFO[urn].owner), entities: { total: ASSETS.filter((a) => a.domain === urn).length },
+        parentDomains: { domains: [] }, children: { relationships: [] } };
 }
 
 // ------------------------------------------------------------------------------- assistant
@@ -1599,6 +1679,11 @@ export async function demoFetch(input: RequestInfo | URL, init?: RequestInit): P
         const q: string = body.query;
         if (q.includes('cairnConsumerSearch')) return json({ data: gqlSearch(body.variables.input) });
         if (q.includes('cairnConsumerAsset')) return json({ data: gqlAsset(body.variables.urn) });
+        if (q.includes('cairnGlossaryRoot')) return json({ data: gqlGlossaryRoot() });
+        if (q.includes('cairnGlossaryNode')) return json({ data: { glossaryNode: gqlGlossaryNode(body.variables.urn) } });
+        if (q.includes('cairnGlossaryTerm')) return json({ data: { glossaryTerm: gqlGlossaryTerm(body.variables.urn) } });
+        if (q.includes('cairnDomains')) return json({ data: gqlDomains() });
+        if (q.includes('cairnDomain')) return json({ data: { domain: gqlDomain(body.variables.urn) } });
         return json({ data: {} });
     }
     const path = url.pathname.replace(/^\/cairn\/api/, '');
@@ -1857,6 +1942,9 @@ installAirflowIacDemo(on, (status, msg) => {
     throw new HttpError(status, msg);
 }, ME, flowsDemo.addFlow);
 installOntologyDemo(on, (status, msg) => {
+    throw new HttpError(status, msg);
+}, ME);
+installOpsDemo(on, (status, msg) => {
     throw new HttpError(status, msg);
 }, ME);
 
