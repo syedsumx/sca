@@ -32,15 +32,42 @@ export interface NavItem {
     exact?: boolean;
 }
 
-/** The workspace's sections, grouped as they appear in the sidebar. */
+/**
+ * The workspace's sections, grouped as they appear in the sidebar. Cairn Core (the catalog: assets, data products,
+ * contracts, glossary, domains and lineage) comes first; every other group is built around it: governing it, keeping
+ * it healthy, analysing it, building what feeds it, AI on top of it, and the platform itself.
+ */
 export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
     {
-        label: 'nav.group.find',
+        label: 'nav.group.catalog',
         items: [
             { to: '/discover', label: 'nav.discover', icon: 'home' },
-            { to: '/search', label: 'nav.search', icon: 'search' },
+            { to: '/catalog', label: 'nav.catalog', icon: 'catalog' },
+            { to: '/products', label: 'nav.products', icon: 'cube' },
+            { to: '/contracts', label: 'nav.contracts', icon: 'contract' },
+            { to: '/glossary', label: 'nav.glossary', icon: 'tag' },
+            { to: '/domains', label: 'nav.domains', icon: 'domain' },
+            { to: '/lineage', label: 'nav.lineage', icon: 'lineage' },
             { to: '/marketplace', label: 'nav.marketplace', icon: 'store' },
             { to: '/requests', label: 'nav.requests', icon: 'inbox', badge: true },
+        ],
+    },
+    {
+        label: 'nav.group.govern',
+        items: [
+            { to: '/governance', label: 'nav.governance', icon: 'shield', feature: 'governance' },
+            { to: '/people', label: 'nav.people', icon: 'user' },
+            { to: '/trust', label: 'nav.trust', icon: 'lock' },
+            { to: '/sharing', label: 'nav.sharing', icon: 'share' },
+            { to: '/reports', label: 'nav.reports', icon: 'report', feature: 'governance' },
+            { to: '/usage', label: 'nav.usage', icon: 'coin' },
+        ],
+    },
+    {
+        label: 'nav.group.quality',
+        items: [
+            { to: '/quality', label: 'nav.quality', icon: 'shield' },
+            { to: '/observability', label: 'nav.observability', icon: 'pulse' },
         ],
     },
     {
@@ -50,8 +77,6 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
             { to: '/sql/workbooks', label: 'nav.workbooks', icon: 'sheet' },
             { to: '/dashboards', label: 'nav.dashboards', icon: 'chart' },
             { to: '/sql/metrics', label: 'nav.metrics', icon: 'metric' },
-            { to: '/semantic', label: 'nav.semantic', icon: 'cube' },
-            { to: '/ontology', label: 'nav.ontology', icon: 'layers' },
             { to: '/sql/input-tables', label: 'nav.inputTables', icon: 'table' },
             { to: '/queries', label: 'nav.queries', icon: 'pulse' },
         ],
@@ -74,29 +99,26 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
             { to: '/agents', label: 'nav.agents', icon: 'bot' },
             { to: '/ml', label: 'nav.ml', icon: 'brain' },
             { to: '/context', label: 'nav.context', icon: 'book', feature: 'context' },
-        ],
-    },
-    {
-        label: 'nav.group.govern',
-        items: [
-            { to: '/governance', label: 'nav.governance', icon: 'shield', feature: 'governance' },
-            { to: '/people', label: 'nav.people', icon: 'user' },
-            { to: '/trust', label: 'nav.trust', icon: 'lock' },
-            { to: '/sharing', label: 'nav.sharing', icon: 'share' },
-            { to: '/reports', label: 'nav.reports', icon: 'report', feature: 'governance' },
-            { to: '/usage', label: 'nav.usage', icon: 'coin' },
+            { to: '/ontology', label: 'nav.ontology', icon: 'layers' },
+            { to: '/semantic', label: 'nav.semantic', icon: 'cube' },
         ],
     },
     {
         label: 'nav.group.platform',
         items: [
-            { to: '/observability', label: 'nav.observability', icon: 'pulse' },
             { to: '/capabilities', label: 'nav.capabilities', icon: 'grid' },
             { to: '/profile', label: 'nav.profile', icon: 'user' },
             { to: '/settings', label: 'nav.settings', icon: 'gear' },
         ],
     },
 ];
+
+/**
+ * Routes of earlier layouts that are no longer sidebar entries of their own, or moved group: every one still opens
+ * (old links and bookmarks work); a test checks none of them is a 404.
+ */
+export const KEPT_ROUTES = ['/search', '/marketplace', '/requests', '/ontology', '/semantic', '/observability',
+    '/assistant', '/get-started', '/extensions', '/device'];
 
 /** Every section, in sidebar order. */
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
@@ -566,6 +588,8 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     const usable = allGroups.flatMap((g) => g.items).filter(visible);
     const paletteNav = useMemo(() => [
         ...(guide.enabled ? [GET_STARTED] : []), ...usable,
+        // Search across everything (not only assets) is no sidebar entry of its own; the palette and the top bar have it.
+        { to: '/search', label: 'nav.search' as MessageKey, icon: 'search' as IconName },
         { to: '/assistant', label: 'nav.ask' as MessageKey, icon: 'sparkle' as IconName },
     ].map((n) => ({ to: n.to, label: n.to === '/assistant' ? t('palette.askAssistant') : t(n.label) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps

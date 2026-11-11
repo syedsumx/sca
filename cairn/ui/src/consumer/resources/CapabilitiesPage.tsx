@@ -240,6 +240,119 @@ const Areas = styled.div`
     }
 `;
 
+const Hub = styled.div`
+    display: grid;
+    grid-template-columns: 1fr minmax(220px, 1.1fr) 1fr;
+    grid-template-areas: '. catalog .' 'govern core activate' '. extend .';
+    gap: 16px;
+    align-items: stretch;
+    position: relative;
+    .core {
+        grid-area: core;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        gap: 8px;
+        padding: 24px;
+        border-radius: 50%;
+        aspect-ratio: 1;
+        background: ${tokens.color.primarySoft};
+        border: 3px solid ${tokens.color.primary};
+        color: ${tokens.color.text};
+        h3 {
+            margin: 0;
+            font-family: ${tokens.fontHeading};
+            font-size: 20px;
+            display: flex;
+            gap: 8px;
+            align-items: center;
+            color: ${tokens.color.primary};
+        }
+        p {
+            margin: 0;
+            font-size: 13px;
+            line-height: 1.45;
+            color: ${tokens.color.textMuted};
+        }
+    }
+    ul {
+        display: contents;
+        list-style: none;
+    }
+    li {
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 6px;
+        padding: 16px 18px;
+        border-radius: ${tokens.radius.lg};
+        background: ${tokens.color.surface};
+        border: 1px solid ${tokens.color.border};
+        strong {
+            font-size: 15px;
+        }
+        span {
+            font-size: 13px;
+            line-height: 1.45;
+            color: ${tokens.color.textMuted};
+        }
+    }
+    li[data-tier='catalog'] {
+        grid-area: catalog;
+        border-color: ${tokens.color.primary};
+    }
+    li[data-tier='govern'] {
+        grid-area: govern;
+    }
+    li[data-tier='activate'] {
+        grid-area: activate;
+    }
+    li[data-tier='extend'] {
+        grid-area: extend;
+    }
+    @media (max-width: 760px) {
+        grid-template-columns: 1fr;
+        grid-template-areas: 'core' 'catalog' 'govern' 'activate' 'extend';
+        .core {
+            aspect-ratio: auto;
+            border-radius: ${tokens.radius.lg};
+        }
+    }
+`;
+
+const TIERS: { key: 'catalog' | 'govern' | 'activate' | 'extend'; to: string }[] = [
+    { key: 'catalog', to: '/catalog' },
+    { key: 'govern', to: '/governance' },
+    { key: 'activate', to: '/quality' },
+    { key: 'extend', to: '/lakehouse' },
+];
+
+/** Cairn Core drawn at the centre of the platform, the tiers around it (catalog, govern, activate, extend). */
+export function CoreMap() {
+    const t = useT();
+    return (
+        <Section aria-labelledby="map-centre" data-core-map="">
+            <H2 id="map-centre">{t('map.centre')}</H2>
+            <Hub>
+                <article className="core" aria-labelledby="map-core">
+                    <h3 id="map-core"><CairnMark size={22} />{t('map.core')}</h3>
+                    <p>{t('map.core.body')}</p>
+                </article>
+                <ul>
+                    {TIERS.map((tier) => (
+                        <li key={tier.key} data-tier={tier.key}>
+                            <strong><Link to={tier.to}>{t(`map.tier.${tier.key}` as MessageKey)}</Link></strong>
+                            <span>{t(`map.tier.${tier.key}.body` as MessageKey)}</span>
+                        </li>
+                    ))}
+                </ul>
+            </Hub>
+        </Section>
+    );
+}
+
 /** Title of a roadmap item with its marks: status, "partly", "new". */
 function ItemTitle({ item }: { item: CapabilityItem }) {
     const t = useT();
@@ -291,6 +404,8 @@ export function CapabilitiesPage() {
                     <li><Chip><NewTag>{t('map.new')}</NewTag>{t('map.legend.new')}</Chip></li>
                 </ul>
             </header>
+
+            <CoreMap />
 
             <Section aria-labelledby="map-flow">
                 <H2 id="map-flow">{t('map.flow')}</H2>

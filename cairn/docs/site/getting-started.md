@@ -89,6 +89,49 @@ tab you used last.
 * Discover shows what is trending in your domain, your bookmarks, recently viewed assets and the
   featured data products.
 
+## The catalog
+
+Cairn is built around **Cairn Core**, its metadata graph: every asset, who owns it, where it comes from,
+what it means and how it is grouped. The sidebar's first group, **Catalog**, is that graph; every other group
+(Govern, Quality & observability, Analyze, Build, AI & context, Platform) reads from it and writes back to it.
+
+### Browse the catalog
+
+**Catalog** lists every asset in Cairn Core: datasets, dashboards, charts, pipelines and their tasks, ML models
+and groups, feature tables and containers. The entity types across the top show how many of each there are;
+choose one, then narrow by platform, domain, owner, tag or business term on the left, or search. The page's
+address keeps the choice, so a view can be shared. Each result opens its asset page.
+
+Flows made in Cairn are in the catalog from their first publish (as pipelines, with their owner); dashboards,
+saved queries, workbooks, ML models and feature tables made in Cairn are registered when they are saved.
+
+### Data products and contracts
+
+**Data products** lists every data product with its domain, owners, assets, health and contract. A product's
+page has its assets (with the **output ports**, the assets consumers are meant to read), the contracts on its
+datasets, its lineage, its service levels, and access: request it, or subscribe to its changes. Owners and
+people with the `MANAGE_DATA_PRODUCTS` privilege on the product's domain make and change products here
+(**New data product**, **Edit**, **Delete**); they are kept in Cairn Core, so search and the Marketplace show
+them at once.
+
+**Contracts** lists every data contract you may see, **passing**, **failing** or **not checked yet**, with
+its dataset, version and owner. A contract's page shows its terms (schema, freshness, volume, quality rules)
+and whether each holds now; **New contract** and **Publish a new version** use the same form as
+`cairn contract publish`.
+
+### Glossary and domains
+
+**Glossary** shows Cairn Core's business terms in their groups; a term's page has its definition, related
+terms, stewards and the assets that use it. **Domains** shows each domain with its owners, subdomains, data
+products and assets. Both are read here and changed in Cairn Core (the page links there); terms are added to
+assets with bulk edit, and new terms are proposed by the ontology.
+
+### Lineage
+
+**Lineage** draws where data comes from and where it goes for any asset you pick: upstream on the left,
+downstream on the right, one to three hops away (assets you may not see are left out and counted). For a
+dataset it also lists which upstream columns feed each of its columns, when that is recorded.
+
 ## Understand an asset
 
 An asset page has tabs for **Summary** (description, owners, business terms, downstream use),

@@ -44,6 +44,11 @@ const P: Record<string, React.ReactNode> = {
     plus: <path d="M12 5v14M5 12h14" />,
     minus: <path d="M5 12h14" />,
     layers: (<><path d="M12 4l8 4-8 4-8-4z" /><path d="M4 12l8 4 8-4M4 16l8 4 8-4" /></>),
+    catalog: (<><rect x="4" y="4" width="16" height="16" rx="2" /><path d="M8 8h8M8 12h8M8 16h5" /></>),
+    tag: (<><path d="M4 12V4h8l8 8-8 8z" /><path d="M8 8h.01" /></>),
+    lineage: (<><circle cx="5" cy="12" r="2" /><circle cx="19" cy="6" r="2" /><circle cx="19" cy="18" r="2" /><path d="M7 12h4M11 12c2 0 3-6 6-6M11 12c2 0 3 6 6 6" /></>),
+    contract: (<><path d="M7 3h7l5 5v13H7z" /><path d="M14 3v5h5M10 14l2 2 4-4" /></>),
+    domain: (<><circle cx="12" cy="12" r="8" /><path d="M4 12h16M12 4c2.5 2.5 2.5 13.5 0 16M12 4c-2.5 2.5-2.5 13.5 0 16" /></>),
     moon: <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />,
     sparkle: (<><path d="M12 4l1.6 4.4L18 10l-4.4 1.6L12 16l-1.6-4.4L6 10l4.4-1.6z" /><path d="M18.5 15l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" /></>),
 };

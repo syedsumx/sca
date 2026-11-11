@@ -165,11 +165,11 @@ describe('navigation', () => {
         expect(plain.forYou).toEqual([]);
         expect(plain.folded).toBe(0);
         const analyst = arrangeNav(groups, all, 'analyst', none);
-        expect(analyst.forYou.map((i) => i.to)).toEqual(['/search', '/sql', '/dashboards', '/sql/metrics']);
+        expect(analyst.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/sql/metrics']);
         expect(analyst.groups.map((g) => g.label)).not.toContain('nav.group.build');
         expect(analyst.folded).toBeGreaterThan(0);
         const mine = arrangeNav(groups, all, 'analyst', togglePin({ ...none, hidden: ['/sql/metrics'] }, '/flows'));
-        expect(mine.forYou.map((i) => i.to)).toEqual(['/search', '/sql', '/dashboards', '/flows']);
+        expect(mine.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/flows']);
         expect(mine.groups.flatMap((g) => g.items).map((i) => i.to)).not.toContain('/sql/metrics');
         const everything = arrangeNav(groups, all, 'analyst', { pinned: [], hidden: ['/sql/metrics'], show_all: true });
         expect(everything.folded).toBe(0);
@@ -188,6 +188,18 @@ describe('navigation', () => {
         expect(crumbsFor('/trust', '', labels, title)).toBeNull();
         expect(crumbsFor(`/asset/${encodeURIComponent('urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)')}`, '', labels, title))
             .toEqual([{ label: 'Search', to: '/search' }, { label: 'main.orders' }]);
+        // With the Catalog section (L147): an asset sits in the catalog; the section's deep pages have their crumbs.
+        const core = { ...labels, catalog: 'Catalog', products: 'Data products', contracts: 'Contracts', glossary: 'Glossary',
+            domains: 'Domains' };
+        expect(crumbsFor(`/asset/${encodeURIComponent('urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)')}`, '', core, title))
+            .toEqual([{ label: 'Catalog', to: '/catalog' }, { label: 'main.orders' }]);
+        expect(crumbsFor(`/products/${encodeURIComponent('urn:li:dataProduct:orders-360')}`, '', core, title))
+            .toEqual([{ label: 'Data products', to: '/products' }, { label: 'orders-360' }]);
+        expect(crumbsFor(`/contracts/${encodeURIComponent('urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)')}`, '', core,
+            title)).toEqual([{ label: 'Contracts', to: '/contracts' }, { label: 'main.orders' }]);
+        expect(crumbsFor(`/glossary/${encodeURIComponent('urn:li:glossaryTerm:Revenue')}`, '', core, title))
+            .toEqual([{ label: 'Glossary', to: '/glossary' }, { label: 'Revenue' }]);
+        expect(crumbsFor('/products', '', core, title)).toBeNull();
         expect(crumbsFor('/sql', '', labels, title)).toBeNull();
     });
 });

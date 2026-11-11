@@ -51,6 +51,11 @@ export function entityTypeLabel(type: string | null | undefined): string {
         DATA_PRODUCT: 'Data product',
         GLOSSARY_TERM: 'Business term',
         DOMAIN: 'Domain',
+        MLMODEL: 'ML model',
+        MLMODEL_GROUP: 'ML model group',
+        MLFEATURE_TABLE: 'Feature table',
+        CONTAINER: 'Container',
+        GLOSSARY_NODE: 'Term group',
     };
     return map[type.toUpperCase()] ?? type.charAt(0).toUpperCase() + type.slice(1).toLowerCase().replace(/_/g, ' ');
 }

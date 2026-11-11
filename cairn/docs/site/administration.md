@@ -1064,6 +1064,35 @@ each run's token revoked; `RUN_CODE`, the per-person cap, records, usage and aud
 agent's scopes; SQL over DuckDB. The Kubernetes pod and the proxy's credentials are checked without a cluster
 (`tests/test_sandboxes.py`).
 
+## Data products
+
+Data products are Cairn Core entities (`urn:li:dataProduct:<id>`). Besides Cairn Core's own UI, they are made and
+changed through Cairn: the workspace's **Catalog › Data products** page, `/catalog/products`, the
+`cairn_data_product` Terraform resource and the `data_products` section of a bundle (`cairn bundle`, `cairn export`).
+
+| Call | What it does |
+|---|---|
+| `GET /catalog/products` | The products the caller may see: `id`, `urn`, `name`, `description`, `domain`, `owners`, `assets`, `output_ports`, `managed_by_cairn`. |
+| `GET /catalog/products/{id}` | One product (404 when it is not there or the caller may not see it). |
+| `POST /catalog/products` | Makes one (409 when the id is taken). |
+| `PUT /catalog/products/{id}` | Changes one (everything but the id). |
+| `DELETE /catalog/products/{id}` | Removes it from the catalog (Cairn Core's `status` aspect: it leaves search and the Marketplace; making it again brings it back). |
+
+* **Who may:** `MANAGE_DATA_PRODUCTS` on the product's domain (on the product itself when it has none), for the
+  domain it is in and, when it moves, the domain it moves to. Every asset of a product must be one the caller can see
+  (403 names them otherwise).
+* **What is written:** the product's `dataProductProperties` (name, description, its assets), `domains`, `ownership`
+  (each owner a `DATAOWNER`) and `status`. **Output ports** (the assets consumers are meant to read; a subset of the
+  assets) are kept in the custom property `cairn.output_ports`, a JSON list, which every Cairn Core version stores; an
+  output port set in Cairn Core's own UI is read too. `cairn.managed: "true"` marks products Cairn has written.
+* **Products made in Cairn Core** are listed and changed the same way; what Cairn does not manage (other custom
+  properties, an asset's association details) is kept.
+* Access requests, request policies and service levels of a product are the Marketplace's (`/marketplace`), as before.
+
+Flows are registered in the catalog too: a flow's first publish writes the `dataFlow` its steps' lineage lands on
+(`urn:li:dataFlow:(cairn-flows,<flow>,<env>)`, with `CAIRN_OPENLINEAGE_ENV`) with its owner, description, runner and
+published version; deleting the flow marks it removed. A failure to write it is logged and never fails the publish.
+
 ## Agents and skills in the marketplace
 
 Agents and skills are listed in the marketplace beside data products, and requested the same way.

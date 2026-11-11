@@ -1605,7 +1605,11 @@ const SUMMARY = `
   ... on Dashboard { platform { name } properties { name description } }
   ... on Chart { platform { name } properties { name description } }
   ... on DataJob { properties { name description } }
-  ... on DataFlow { properties { name description } }
+  ... on DataFlow { platform { name } properties { name description } }
+  ... on MLModel { name platform { name } properties { description } }
+  ... on MLModelGroup { name platform { name } properties { description } }
+  ... on MLFeatureTable { name platform { name } properties { description } }
+  ... on Container { platform { name } properties { name description } }
   ... on DataProduct { properties { name description } }
   ... on GlossaryTerm { properties { name description } }
   ... on Domain { properties { name description } }

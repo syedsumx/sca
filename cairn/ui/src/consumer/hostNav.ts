@@ -10,6 +10,9 @@
 /** Workspace route → shell path (without the `/mfe` prefix). Keep in sync with mfe.config.yaml. */
 export const HOST_SECTIONS: { route: string; hostPath: string }[] = [
     { route: '/discover', hostPath: '/cairn' },
+    { route: '/catalog', hostPath: '/cairn-catalog' },
+    { route: '/products', hostPath: '/cairn-products' },
+    { route: '/contracts', hostPath: '/cairn-contracts' },
     { route: '/marketplace', hostPath: '/cairn-marketplace' },
     { route: '/requests', hostPath: '/cairn-requests' },
     { route: '/governance', hostPath: '/cairn-governance' },

@@ -54,7 +54,7 @@ it('the sidebar groups every section and collapses', async () => {
     for (const label of ['Agents', 'Ingestion', 'Trust & security', 'Capabilities', 'Settings']) {
         expect(within(nav).getByText(label)).toBeTruthy();
     }
-    expect(within(nav).getByText('AI & ML')).toBeTruthy();
+    expect(within(nav).getByText('AI & context')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeTruthy();
     expect(within(nav).queryByText('Ingestion')).toBeNull();

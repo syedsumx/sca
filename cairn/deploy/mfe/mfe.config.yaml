@@ -21,6 +21,33 @@ microFrontends:
       enabled: true
       showInNav: true
     navIcon: Compass
+  - id: CairnCatalog
+    label: Catalog
+    path: /cairn-catalog
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Books
+  - id: CairnProducts
+    label: Data products
+    path: /cairn-products
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Package
+  - id: CairnContracts
+    label: Data contracts
+    path: /cairn-contracts
+    remoteEntry: /cairn-ui/remoteEntry.js
+    module: cairnConsumer/mount
+    flags:
+      enabled: true
+      showInNav: true
+    navIcon: Handshake
   - id: CairnMarketplace
     label: Data marketplace
     path: /cairn-marketplace
