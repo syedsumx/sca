@@ -140,7 +140,7 @@ jobs:
       - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
         run: |
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
-          sudo apt-get update -q && sudo apt-get install -y -q litmus  # the WebDAV protocol test suite (test_dav.py)
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" litmus  # the WebDAV protocol test suite (test_dav.py)
       - name: Conformance (S3 clients, Iceberg via pyiceberg + pyarrow, Hadoop S3A, crash safety)
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -180,7 +180,7 @@ jobs:
       - name: Allow FUSE mounts for other users (the CSI driver's mounts use allow_other); install litmus
         run: |
           grep -q '^user_allow_other' /etc/fuse.conf 2>/dev/null || echo user_allow_other | sudo tee -a /etc/fuse.conf
-          sudo apt-get update -q && sudo apt-get install -y -q litmus  # the WebDAV protocol test suite (test_dav.py)
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" litmus  # the WebDAV protocol test suite (test_dav.py)
       - name: Conformance on PostgreSQL metadata
         env:
           CAIRN_STORE_BIN: ${{ github.workspace }}/cairn/store/target/release/cairn-store
@@ -340,15 +340,15 @@ jobs:
           cairn transcribe-model download                       # the model files pipes transcribe with
           # The runner's package index can be older than the mirror (404 on a superseded package): refresh it first.
           sudo apt-get update -q >/dev/null
-          sudo apt-get install -y -q tesseract-ocr tesseract-ocr-eng >/dev/null   # OCR of scanned documents (pipes)
-          sudo apt-get install -y -q poppler-utils >/dev/null   # pdftoppm: PDF pages rendered for chart parsing
-          sudo apt-get install -y -q espeak-ng ffmpeg >/dev/null   # speech for the transcription test, and its MP3/MP4
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" tesseract-ocr tesseract-ocr-eng   # OCR of scanned documents (pipes)
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" poppler-utils   # pdftoppm: PDF pages rendered for chart parsing
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" espeak-ng ffmpeg   # speech for the transcription test, and its MP3/MP4
           # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
-          sudo apt-get install -y -q bind9 >/dev/null
+          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" bind9
           sudo systemctl stop named 2>/dev/null || true
           sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.named 2>/dev/null || true
           pip install -q "playwright>=1.50"              # the embedded-dashboard test frames a dashboard in Chromium
-          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; [ "$i" = 3 ] && exit 1; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
           docker pull -q redpandadata/redpanda:v25.2.9   # Kafka + Schema Registry: Avro streams
           docker pull -q keycloak/keycloak:26.0.7        # SAML sign-in against a real identity provider
           docker pull -q postgres:16-alpine            # the DR drill (primary and streaming standby)
@@ -757,7 +757,7 @@ jobs:
           python -m venv "$RUNNER_TEMP/streamlit"
           "$RUNNER_TEMP/streamlit/bin/pip" install -q "streamlit>=1.40"
           pip install -q "playwright>=1.50"
-          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; [ "$i" = 3 ] && exit 1; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
           CAIRN_STREAMLIT_BIN="$RUNNER_TEMP/streamlit/bin/streamlit" \
             pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_data_apps_e2e.py | tee "$RUNNER_TEMP/apps.log"
           ! grep -q "skipped" "$RUNNER_TEMP/apps.log"
@@ -937,7 +937,7 @@ jobs:
           set -o pipefail
           (cd ui && npm ci --silent && npm run build:mfe)
           pip install -q "playwright>=1.50"
-          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; [ "$i" = 3 ] && exit 1; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          for i in 1 2 3; do python -m playwright install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; python -m playwright install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
           pytest -q -p no:cacheprovider -o addopts="" -rs tests/test_airflow_deployments_ui_e2e.py | tee "$RUNNER_TEMP/airflowui.log"
           ! grep -q "skipped" "$RUNNER_TEMP/airflowui.log"
       - name: Spark training (pyspark.ml in the cairn/spark image) tracked in MLflow through Cairn
@@ -1416,7 +1416,7 @@ jobs:
         run: |
           pip install -e ".[test]" "boto3>=1.36" "pyiceberg[pyarrow]>=0.10"
           npm install --prefix "$RUNNER_TEMP/pw" "playwright@${PLAYWRIGHT_VERSION}"
-          for i in 1 2 3; do "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium && break; [ "$i" = 3 ] && exit 1; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
+          for i in 1 2 3; do "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install --with-deps chromium && break; if [ "$i" = 3 ]; then echo "browser dependencies: the package mirror is still failing; installing the browser alone"; "$RUNNER_TEMP/pw/node_modules/.bin/playwright" install chromium || exit 1; break; fi; echo "browser dependencies: the package mirror failed, retry $i"; sudo apt-get update -q || true; sleep 30; done
           KEEP_SINK=1 NODE_PATH="$RUNNER_TEMP/pw/node_modules" CAIRN_E2E_SCREENSHOT_DIR="$RUNNER_TEMP/shots" tests/e2e/run.sh -v
 
       - name: Kubernetes token path (real kube-apiserver, chart RBAC)
