@@ -483,7 +483,6 @@ def _into_real_grafana(doc: dict, stack: dict, cairn) -> None:
                 "query": 'sum(rate(traces_span_metrics_calls_total{service_name="cairn-api"}[1m]))'})
             return bool(r.json()["data"]["result"])
         until(fresh_rate, 120, 5, "cairn-api's request rate in Prometheus")
-        now = int(time.time() * 1000)
         checked = []
         for p in stored["panels"]:
             if p["type"] == "text" or p["datasource"]["type"] == "tempo":
@@ -494,8 +493,22 @@ def _into_real_grafana(doc: dict, stack: dict, cairn) -> None:
                         "expr": t["expr"].replace("$service", "cairn-api").replace("$__rate_interval", "1m")
                         .replace("$__interval", "30s"), "intervalMs": 30000, "maxDataPoints": 100}
                        for t in p["targets"]]
-            r = httpx.post(f"{g}/api/ds/query", timeout=60, json={"queries": queries, "from": str(now - 900_000),
-                                                                   "to": str(now)})
+            def ask(qs=queries):
+                end = int(time.time() * 1000)
+                return httpx.post(f"{g}/api/ds/query", timeout=60, json={"queries": qs, "from": str(end - 900_000),
+                                                                         "to": str(end)})
+
+            def points(resp):
+                return any(f["data"]["values"] for res in resp.json()["results"].values() for f in res.get("frames", []))
+            r = ask()
+            # Grafana evaluates a range query on step-aligned times: a series only seconds old can have no point on
+            # them yet even though Prometheus answers the instant query, so the panels that must show data are asked
+            # again until a step lands on it (a real absence still fails, with Grafana's answer).
+            if p["title"] in ("Requests / s", "Logs") and r.status_code == 200 and not points(r):
+                end_by = time.time() + 120
+                while time.time() < end_by and not points(r):
+                    time.sleep(10)
+                    r = ask()
             assert r.status_code == 200, (p["title"], r.text[:500])
             frames = [f for res in r.json()["results"].values() for f in res.get("frames", [])]
             assert all(res.get("status", 200) == 200 and not res.get("error") for res in r.json()["results"].values()), \
