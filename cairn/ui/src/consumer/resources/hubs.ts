@@ -3,6 +3,17 @@ import type { Hub } from './types';
 /** The platform hub pages (kept apart from the area specs so the route table stays small). */
 export const HUBS: Hub[] = [
     {
+        "route": "/quality",
+        "title": "Data quality",
+        "icon": "shield",
+        "description": "Whether the catalog's data can be trusted: quality monitors on datasets (freshness, volume, field metrics, schema, SQL), the data contracts producers publish, and data products' service level objectives.",
+        "tabs": [
+            "quality-monitors",
+            "contracts",
+            "slos"
+        ]
+    },
+    {
         "route": "/semantic",
         "title": "Semantic models",
         "icon": "cube",

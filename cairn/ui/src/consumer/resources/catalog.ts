@@ -2720,6 +2720,73 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             }
         ]
     },
+    "catalog-products": {
+        "key": "catalog-products",
+        "iac": {
+            "kind": "data_products",
+            "id": "id"
+        },
+        "title": "Data products",
+        "path": "/catalog/products",
+        "listKey": "products",
+        "description": "Data products in Cairn Core: a named set of assets with a domain and owners, some of them output ports (what consumers read). They appear in search, lineage and the Marketplace at once.",
+        "docs": "administration.html#data-products",
+        "rowKey": "id",
+        "columns": [
+            "name",
+            "domain",
+            "owners",
+            "assets",
+            "output_ports"
+        ],
+        "actions": [
+            {
+                "label": "New data product",
+                "method": "POST",
+                "path": "/catalog/products",
+                "body": {
+                    "id": "orders-360",
+                    "name": "Orders 360",
+                    "description": "Every order, by region and channel",
+                    "domain": "urn:li:domain:sales",
+                    "owners": [
+                        "urn:li:corpGroup:orders-team"
+                    ],
+                    "assets": [
+                        "urn:li:dataset:(urn:li:dataPlatform:iceberg,lakehouse.sales.orders,PROD)"
+                    ],
+                    "output_ports": [
+                        "urn:li:dataset:(urn:li:dataPlatform:iceberg,lakehouse.sales.orders,PROD)"
+                    ]
+                }
+            },
+            {
+                "label": "Edit data product",
+                "method": "PUT",
+                "path": "/catalog/products/{id}",
+                "body": {
+                    "name": "Orders 360",
+                    "description": "Every order, by region and channel",
+                    "domain": "urn:li:domain:sales",
+                    "owners": [
+                        "urn:li:corpGroup:orders-team"
+                    ],
+                    "assets": [
+                        "urn:li:dataset:(urn:li:dataPlatform:iceberg,lakehouse.sales.orders,PROD)"
+                    ],
+                    "output_ports": [
+                        "urn:li:dataset:(urn:li:dataPlatform:iceberg,lakehouse.sales.orders,PROD)"
+                    ]
+                }
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/catalog/products/{id}",
+                "body": null
+            }
+        ]
+    },
     "contracts": {
         "key": "contracts",
         "title": "Data contracts",

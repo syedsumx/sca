@@ -29,6 +29,19 @@ const AssetPage = React.lazy(() => import('./pages/AssetPage').then((m) => ({ de
 const MarketplacePage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.MarketplacePage })));
 const ProductPage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.ProductPage })));
 const RequestsPage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.RequestsPage })));
+// The Catalog section (Cairn Core at the centre, L147).
+const CatalogPage = React.lazy(() => import('./pages/CatalogPage').then((m) => ({ default: m.CatalogPage })));
+const LineagePage = React.lazy(() => import('./pages/CatalogPage').then((m) => ({ default: m.LineagePage })));
+const DataProductsPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.DataProductsPage })));
+const DataProductPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.DataProductPage })));
+const ContractsPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.ContractsPage })));
+const ContractPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.ContractPage })));
+const GlossaryPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.GlossaryPage })));
+const GlossaryEntryPage = React.lazy(() =>
+    import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.GlossaryEntryPage })),
+);
+const DomainsPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.DomainsPage })));
+const DomainPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.DomainPage })));
 const AssistantPage = React.lazy(() => import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })));
 const ContextInboxPage = React.lazy(() => import('./pages/ContextInboxPage').then((m) => ({ default: m.ContextInboxPage })));
 const ReportsPage = React.lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
@@ -64,6 +77,16 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/discover', component: DiscoverPage, exact: true },
     { path: '/get-started', component: GetStartedPage, exact: true },
     { path: '/search', component: SearchPage, exact: true },
+    { path: '/catalog', component: CatalogPage, exact: true },
+    { path: '/products', component: DataProductsPage, exact: true },
+    { path: '/products/:urn', component: DataProductPage },
+    { path: '/contracts', component: ContractsPage, exact: true },
+    { path: '/contracts/:dataset', component: ContractPage },
+    { path: '/glossary', component: GlossaryPage, exact: true },
+    { path: '/glossary/:urn', component: GlossaryEntryPage },
+    { path: '/domains', component: DomainsPage, exact: true },
+    { path: '/domains/:urn', component: DomainPage },
+    { path: '/lineage', component: LineagePage, exact: true },
     { path: '/asset/:urn', component: AssetPage },
     { path: '/marketplace', component: MarketplacePage, exact: true },
     { path: '/marketplace/:urn', component: ProductPage },

@@ -16,11 +16,15 @@ import threading
 import time
 
 import pytest
+from fastapi import Request     # at module level: with postponed annotations FastAPI must resolve it here
+
+from core_standin import CoreStandIn
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BUNDLE = os.path.join(ROOT, "ui", "dist", "mfe")
 AXE = os.path.join(ROOT, "ui", "node_modules", "axe-core", "axe.min.js")
 ANA = "urn:li:corpuser:ana"
+PRODUCT, TERM, FINANCE = "urn:li:dataProduct:orders-360", "urn:li:glossaryTerm:Revenue", "urn:li:domain:finance"
 DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requests", "/assistant", "/context",
          "/governance", "/reports", "/pipelines", "/sql", "/sql/workflows", "/sql/workbooks", "/sql/input-tables",
@@ -36,9 +40,14 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
          "/observability", "/observability?tab=journey", "/observability?tab=logs", "/observability?tab=slos",
          "/observability?tab=alerts", "/observability?tab=incidents",
          # The platform design (L146): the platform map and the Airflow environments tab; the home page is above.
-         "/capabilities", "/compute?tab=airflow-deployments", "/observability?tab=pipelines"]
+         "/capabilities", "/compute?tab=airflow-deployments", "/observability?tab=pipelines",
+         # The Catalog section (L147), with Core's GraphQL answered from the same graph (tests/core_standin.py).
+         "/catalog", "/catalog?f._entityType=DATASET", "/products", f"/products/{PRODUCT}", "/contracts",
+         f"/contracts/{DS}", "/glossary", f"/glossary/{TERM}", "/domains", f"/domains/{FINANCE}", "/lineage",
+         f"/lineage?urn={DS}", "/quality"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
 FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
+         ("/products", "New data product"), ("/contracts", "New contract", "Publish contract"),
          ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person"),
          ("/observability?tab=slos", "New SLO"), ("/observability?tab=alerts", "New alert rule")]
 BLOCKING = {"serious", "critical"}
@@ -74,7 +83,7 @@ def _port():
 @pytest.fixture
 def cairn(settings, graph, tmp_path, monkeypatch):
     import uvicorn
-    from fastapi.responses import HTMLResponse
+    from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
     from sqlalchemy import create_engine, text
 
@@ -93,6 +102,12 @@ def cairn(settings, graph, tmp_path, monkeypatch):
                                                         for c in ("id", "region", "amount")]}
     graph.aspects[(DS, "datasetProperties")] = {"name": "orders", "description": "One row per order."}
     graph.aspects[(ANA, "corpUserInfo")] = {"active": True, "displayName": "Ana Lima", "departmentName": "Sales"}
+    graph.aspects[(DS, "domains")] = {"domains": [FINANCE]}
+    graph.aspects[(DS, "glossaryTerms")] = {"terms": [{"urn": TERM}]}
+    graph.aspects[(FINANCE, "domainProperties")] = {"name": "Finance"}
+    graph.aspects[(TERM, "glossaryTermInfo")] = {"name": "Revenue", "definition": "Money in from sales"}
+    core = CoreStandIn(graph)
+    graph.graphql_handler = core
     s = build_services(settings, graph=graph, with_ai=False, with_gateway=False)
     s.pdp.set_bundle(PolicyBundle(policies=[Policy(id="all", effect="allow", actions=["*"])]))
     s.sql_workspace.save(ANA, {"name": "Revenue by region", "connection": "wh",
@@ -101,7 +116,19 @@ def cairn(settings, graph, tmp_path, monkeypatch):
         {"name": "count", "type": "sql", "sql": "SELECT count(*) AS n FROM main.orders", "connection": "wh"},
         {"name": "big", "type": "branch", "after": ["count"], "condition": "steps.count.rows > 0", "then": ["ask"]},
         {"name": "ask", "type": "approval", "after": ["big"], "approvers": [ANA]}]}, publish=True)
+    from cairn.marketplace.products import ProductIn
+    from cairn.quality.contracts import ContractSpec
+
+    s.data_products.save(ANA, ProductIn(id="orders-360", name="Orders 360", domain=FINANCE, owners=[ANA], assets=[DS],
+                                        output_ports=[DS]), create=True)
+    s.contracts.upsert(ContractSpec.model_validate({"dataset": DS, "version": "1.0.0", "freshness": {"max_age_hours": 24},
+                                                    "schema": {"columns": [{"name": "id"}]}}), ANA)
     app = create_api_app(s)
+
+    async def graphql(request: Request):
+        body = await request.json()
+        return JSONResponse({"data": core(body.get("query") or "", body.get("variables") or {})})
+    app.add_api_route("/api/v2/graphql", graphql, methods=["POST"])
     app.mount("/ui", StaticFiles(directory=BUNDLE), name="ui")
     app.add_api_route("/host", lambda: HTMLResponse(HOST), methods=["GET"])
     p = _port()
@@ -150,7 +177,7 @@ def test_the_main_pages_pass_axe(cairn):
                 bad = audit(page)
                 if bad:
                     found[path] = bad
-            for path, button in FORMS:
+            for path, button, *submit in FORMS:
                 page.goto(f"{cairn}/host#{path}", wait_until="networkidle")
                 page.get_by_role("button", name=button, exact=True).first.click()
                 dialog = page.get_by_role("dialog").last
@@ -158,7 +185,7 @@ def test_the_main_pages_pass_axe(cairn):
                 more = dialog.get_by_role("button", name=re.compile("Advanced options"))
                 if more.count():
                     more.click()
-                dialog.get_by_role("button", name=button, exact=True).last.click()     # empty: required fields say so
+                dialog.get_by_role("button", name=(submit or [button])[0], exact=True).last.click()   # empty: required fields say so
                 dialog.get_by_role("alert").first.wait_for()
                 bad = audit(page)
                 if bad:

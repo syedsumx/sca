@@ -11,20 +11,24 @@ export interface NavGroupOf<T extends NavEntry> {
 
 /** The pages each role reaches for first: the "For you" group. */
 export const ROLE_PINS: Record<Role, string[]> = {
-    analyst: ['/search', '/sql', '/dashboards', '/sql/metrics'],
+    analyst: ['/catalog', '/sql', '/dashboards', '/sql/metrics'],
     engineer: ['/ingestion', '/flows', '/pipelines', '/lakehouse'],
-    steward: ['/ontology', '/requests', '/semantic', '/trust'],
+    steward: ['/glossary', '/contracts', '/requests', '/trust'],
     admin: ['/settings', '/trust', '/governance', '/usage'],
-    explorer: ['/discover', '/search', '/marketplace'],
+    explorer: ['/discover', '/catalog', '/products'],
 };
 
-/** The sidebar groups a role needs (the rest fold away until "Show everything"). Every role keeps Find and Platform. */
+/**
+ * The sidebar groups a role needs (the rest fold away until "Show everything"). Every role keeps the Catalog (Cairn
+ * Core, the centre of the workspace) and Platform.
+ */
 export const ROLE_GROUPS: Record<Role, string[] | null> = {
-    analyst: ['nav.group.find', 'nav.group.analyze', 'nav.group.ai', 'nav.group.platform'],
-    engineer: ['nav.group.find', 'nav.group.analyze', 'nav.group.build', 'nav.group.ai', 'nav.group.platform'],
-    steward: ['nav.group.find', 'nav.group.analyze', 'nav.group.govern', 'nav.group.platform'],
+    analyst: ['nav.group.catalog', 'nav.group.analyze', 'nav.group.ai', 'nav.group.platform'],
+    engineer: ['nav.group.catalog', 'nav.group.quality', 'nav.group.analyze', 'nav.group.build', 'nav.group.ai',
+        'nav.group.platform'],
+    steward: ['nav.group.catalog', 'nav.group.govern', 'nav.group.quality', 'nav.group.ai', 'nav.group.platform'],
     admin: null,
-    explorer: ['nav.group.find', 'nav.group.analyze', 'nav.group.platform'],
+    explorer: ['nav.group.catalog', 'nav.group.analyze', 'nav.group.platform'],
 };
 
 export interface SidebarPrefs {

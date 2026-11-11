@@ -9,6 +9,7 @@ const ENTITY_PATHS: Record<string, string> = {
   dataFlow: "pipelines",
   dataProduct: "dataProduct",
   glossaryTerm: "glossaryTerm",
+  glossaryNode: "glossaryNode",
   domain: "domain",
   container: "container",
   corpuser: "user",

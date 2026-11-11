@@ -17,6 +17,7 @@ import { serializeSearchState } from '../utils/urlState';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
 import { Card, GetStartedCard, PipelinesCard } from '../components/HomeCards';
+import { CatalogHome } from '../components/CatalogHome';
 import { useT } from '../i18n';
 
 const Hero = styled.section`
@@ -88,12 +89,15 @@ export function greeting(hour: number = new Date().getHours()): string {
     return 'Good evening';
 }
 
-const QUICK_FILTERS: { label: string; filters: Record<string, string[]>; query?: string }[] = [
-    { label: 'Datasets', filters: { _entityType: ['DATASET'] } },
-    { label: 'Dashboards', filters: { _entityType: ['DASHBOARD'] } },
-    { label: 'Business terms', filters: { _entityType: ['GLOSSARY_TERM'] } },
-    { label: 'Data products', filters: { _entityType: ['DATA_PRODUCT'] } },
-    { label: 'Certified', filters: { tags: ['urn:li:tag:Certified'] } },
+/** Ways into the catalog from home: an entity type in the Catalog, or a section of it. */
+const QUICK_FILTERS: { label: string; to: string }[] = [
+    { label: 'Datasets', to: `/catalog${serializeSearchState({ query: '', filters: { _entityType: ['DATASET'] }, page: 1 })}` },
+    { label: 'Dashboards', to: `/catalog${serializeSearchState({ query: '', filters: { _entityType: ['DASHBOARD'] }, page: 1 })}` },
+    { label: 'Pipelines', to: `/catalog${serializeSearchState({ query: '', filters: { _entityType: ['DATA_FLOW'] }, page: 1 })}` },
+    { label: 'ML models', to: `/catalog${serializeSearchState({ query: '', filters: { _entityType: ['MLMODEL'] }, page: 1 })}` },
+    { label: 'Data products', to: '/products' },
+    { label: 'Business terms', to: '/glossary' },
+    { label: 'Certified', to: `/search${serializeSearchState({ query: '', filters: { tags: ['urn:li:tag:Certified'] }, page: 1 })}` },
 ];
 
 function SkeletonCards({ n = 4 }: { n?: number }) {
@@ -136,7 +140,7 @@ export function DiscoverPage() {
             <Hero>
                 <PageHeader
                     title={`${greeting()}${name ? `, ${name}` : ''}`}
-                    description="Find data you may use, see what it means and whether to trust it, and ask for access."
+                    description="The catalog first: find data you may use, see what it means and whether to trust it, and ask for access."
                     help={pageHelp('/discover')}
                     actions={(personas.data?.length ?? 0) > 0 && (
                         <Select
@@ -157,9 +161,7 @@ export function DiscoverPage() {
                         <Tag.CheckableTag
                             key={q.label}
                             checked={false}
-                            onChange={() =>
-                                history.push(`/search${serializeSearchState({ query: q.query ?? '', filters: q.filters, page: 1 })}`)
-                            }
+                            onChange={() => history.push(q.to)}
                             style={{ border: `1px solid ${tokens.color.border}`, borderRadius: 999, padding: '2px 12px' }}
                         >
                             {q.label}
@@ -170,6 +172,7 @@ export function DiscoverPage() {
 
             <div style={{ display: 'grid', gap: 16, marginTop: 20 }}>
                 <GetStartedCard />
+                <CatalogHome />
                 <Columns style={{ gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', marginTop: 0 }}>
                     <Card aria-labelledby="home-recent">
                         <header><h2 id="home-recent">{t('home.recent')}</h2></header>
@@ -192,7 +195,7 @@ export function DiscoverPage() {
 
             <SectionTitle>
                 <span>Trending{persona ? ` for ${persona.name}` : ''}</span>
-                <Link to="/search">See all →</Link>
+                <Link to="/catalog">{t('home.browse')} →</Link>
             </SectionTitle>
             {trending.loading && <SkeletonCards />}
             {trending.error && <Muted role="alert">Trending is unavailable right now.</Muted>}

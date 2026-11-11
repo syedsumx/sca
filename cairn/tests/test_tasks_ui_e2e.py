@@ -534,7 +534,7 @@ def test_the_catalog_shells_compact_bar(workspace):
             expect(page.get_by_role("heading", level=1, name="Data Marketplace")).to_be_visible()
             expect(bar.get_by_role("link", name="Marketplace")).to_have_attribute("aria-current", "page")
             expect(page.get_by_role("button", name="Collapse sidebar")).to_have_count(0)      # the shell has the sidebar
-            for name in ("Discover", "Search", "Requests", "Settings"):
+            for name in ("Discover", "Catalog", "Data products", "Requests", "Settings"):
                 expect(bar.get_by_role("link", name=re.compile(rf"^{name}"))).to_be_visible()
             # The top bar above it: the palette, search, ask and help.
             expect(page.get_by_role("button", name="Search or jump to…")).to_be_visible()
@@ -546,9 +546,9 @@ def test_the_catalog_shells_compact_bar(workspace):
             page.reload(wait_until="domcontentloaded")                                         # what the shell does
             expect(page.get_by_role("heading", level=1, name="Requests")).to_be_visible(timeout=30_000)
             expect(bar.get_by_role("link", name=re.compile("^Requests"))).to_have_attribute("aria-current", "page")
-            # Search has no entry of its own: it opens in place.
-            bar.get_by_role("link", name="Search").click()
-            expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/search"))
+            # Lineage has no entry of its own: it opens in place (Search, no sidebar entry since L147, is in the top bar).
+            bar.get_by_role("link", name="Lineage").click()
+            expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/lineage"))
             # The palette and the help, as everywhere.
             page.keyboard.press("Control+k")
             expect(page.get_by_role("combobox", name="Type a page, an action or a dataset…")).to_be_focused(timeout=10_000)

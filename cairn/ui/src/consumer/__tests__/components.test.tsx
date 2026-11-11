@@ -181,8 +181,8 @@ describe('mount() inside the catalog shell', () => {
         const tab = await screen.findByRole('link', { name: 'Marketplace' });
         fireEvent.click(tab);
         expect(popped).toEqual(['/mfe/cairn-marketplace#/marketplace']);
-        // Search has no shell entry of its own: it stays inside the workspace.
-        fireEvent.click(screen.getByRole('link', { name: 'Search' }));
+        // Lineage has no shell entry of its own: it stays inside the workspace.
+        fireEvent.click(screen.getByRole('link', { name: 'Lineage' }));
         expect(popped).toHaveLength(1);
         window.removeEventListener('popstate', onPop);
         cleanup();

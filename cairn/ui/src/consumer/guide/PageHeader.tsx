@@ -152,7 +152,27 @@ export interface Crumb {
 }
 
 /** Where a deep page sits: a hub's tab, an asset, a data product, an ontology term. Null for top-level pages. */
-export function crumbsFor(pathname: string, search: string, labels: { search: string; marketplace: string; ontology: string },
+export interface CrumbLabels {
+    search: string;
+    marketplace: string;
+    ontology: string;
+    /** The Catalog section's pages (L147): an asset sits in the catalog when these are given. */
+    catalog?: string;
+    products?: string;
+    contracts?: string;
+    glossary?: string;
+    domains?: string;
+}
+
+/** The Catalog section's deep pages: `/products/<urn>` → Data products › <name>. */
+const CORE_PAGES: [RegExp, keyof CrumbLabels, string][] = [
+    [/^\/products\/(.+)$/, 'products', '/products'],
+    [/^\/contracts\/(.+)$/, 'contracts', '/contracts'],
+    [/^\/glossary\/(.+)$/, 'glossary', '/glossary'],
+    [/^\/domains\/(.+)$/, 'domains', '/domains'],
+];
+
+export function crumbsFor(pathname: string, search: string, labels: CrumbLabels,
     tabTitle: (key: string) => string | undefined): Crumb[] | null {
     const hub = HUBS.find((h) => h.route === pathname);
     if (hub) {
@@ -171,7 +191,16 @@ export function crumbsFor(pathname: string, search: string, labels: { search: st
     if (m) {
         const urn = decode(m[1]);
         const name = /^urn:li:dataset:\([^,]+,(.+),[^,]+\)$/.exec(urn)?.[1] ?? urn.split(':').pop() ?? urn;
-        return [{ label: labels.search, to: '/search' }, { label: name }];
+        return [labels.catalog ? { label: labels.catalog, to: '/catalog' } : { label: labels.search, to: '/search' }, { label: name }];
+    }
+    for (const [re, key, to] of CORE_PAGES) {
+        const hit = re.exec(pathname);
+        const label = labels[key];
+        if (hit && label) {
+            const urn = decode(hit[1]);
+            const tail = /^urn:li:dataset:\([^,]+,(.+),[^,]+\)$/.exec(urn)?.[1] ?? urn.split(':').pop() ?? urn;
+            return [{ label, to }, { label: tail }];
+        }
     }
     m = /^\/marketplace\/(.+)$/.exec(pathname);
     if (m) return [{ label: labels.marketplace, to: '/marketplace' }, { label: decode(m[1]).split(':').pop() ?? m[1] }];
@@ -185,7 +214,9 @@ export function Breadcrumbs({ tabTitle }: { tabTitle: (key: string) => string | 
     const t = useT();
     const location = useLocation();
     const crumbs = crumbsFor(location.pathname, location.search,
-        { search: t('nav.search'), marketplace: t('nav.marketplace'), ontology: t('nav.ontology') }, tabTitle);
+        { search: t('nav.search'), marketplace: t('nav.marketplace'), ontology: t('nav.ontology'), catalog: t('nav.catalog'),
+            products: t('nav.products'), contracts: t('nav.contracts'), glossary: t('nav.glossary'), domains: t('nav.domains') },
+        tabTitle);
     if (!crumbs) return null;
     return (
         <Crumbs aria-label={t('nav.breadcrumb')}>
