@@ -6,10 +6,11 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiComment, BiFolder, BiFolderDetail, BiKind, BiPopular, BiRole, BiStale, BiUsage, Dashboard, SavedQuery, Workbook } from '../api/types';
 import { Muted } from './tokens';
 import { ErrorNotice, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
 
 const KIND_NAME: Record<BiKind, string> = { query: 'saved query', workbook: 'workbook', dashboard: 'dashboard' };
 const PAGE: Record<BiKind, string> = { query: '/sql', workbook: '/sql/workbooks', dashboard: '/dashboards' };
-const when = (ms: number) => new Date(ms).toLocaleString();
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const short = (urn: string) => urn.replace(/^urn:li:corpuser:/, '');
 const fail = (e: unknown) => notifyError(e);
 

@@ -6,6 +6,7 @@ import type { DbtRun } from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
 import { Muted, Surface } from './tokens';
 import { StatusBadge } from './StatusBadge';
+import { When } from '../utils/time';
 
 export const DBT_STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -98,7 +99,7 @@ export function DbtRuns() {
                         {
                             title: 'Finished',
                             dataIndex: 'finished_ms',
-                            render: (ms: number) => new Date(ms).toLocaleString(),
+                            render: (ms: number) => <When value={ms} />,
                         },
                     ]}
                 />

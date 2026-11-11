@@ -52,11 +52,11 @@ export function installOpsDemo(on: On, fail: Fail, me: string) {
         const limit = Number(q.get('limit') ?? 50);
         return { total: items.length, offset, limit, items: items.slice(offset, offset + limit) };
     };
+    const match = (want: string | null, value: string) => !want || want === 'all' || want === value;
     on('GET', '/v1/people/users', (_b, q) => {
         const text = (q.get('q') ?? '').toLowerCase();
         return page(users.filter((u) => (!text || `${u.display_name} ${u.id} ${u.email ?? ''} ${u.department ?? ''}`.toLowerCase().includes(text))
-            && (!q.get('status') || u.status === q.get('status')) && (!q.get('source') || u.source === q.get('source'))
-            && (!q.get('type') || u.type === q.get('type'))), q);
+            && match(q.get('status'), u.status) && match(q.get('source'), u.source) && match(q.get('type'), u.type)), q);
     });
     const userById = (id: string) => users.find((u) => u.id === id) ?? fail(404, 'no such person');
     on('GET', '/v1/people/users/:id', (_b, _q, [id]) => {

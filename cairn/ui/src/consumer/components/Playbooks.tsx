@@ -6,6 +6,7 @@ import type { Playbook, PlaybookRun } from '../api/types';
 import { Muted } from './tokens';
 import { describeError } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
+import { When } from '../utils/time';
 
 const TRIGGER: Record<string, string> = {
     'quality.incident.raised': 'when a quality incident is raised',
@@ -126,7 +127,7 @@ export function PlaybooksAdmin() {
                                 title: 'State',
                                 render: (_, r) => <StatusBadge state={r.state} />,
                             },
-                            { title: 'When', render: (_, r) => new Date(r.created_ms).toLocaleString() },
+                            { title: 'When', render: (_, r) => <When value={r.created_ms} /> },
                         ]}
                     />
                 )}

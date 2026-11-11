@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { SnapshotRows, TableSnapshot } from '../api/types';
 import { Muted } from './tokens';
 import { ErrorNotice, describeError } from './ErrorNotice';
+import { When } from '../utils/time';
 
 /** A lakehouse table's snapshots: look at the table as it was, and restore an earlier snapshot (L59).
  * Everything runs on Trino as the person: they see their own masks and row filters, and a restore needs
@@ -57,7 +58,7 @@ export function TableSnapshots({ table }: { table: string }) {
                 dataSource={snaps}
                 pagination={{ pageSize: 20, hideOnSinglePage: true }}
                 columns={[
-                    { title: 'Committed', dataIndex: 'committed_at', render: (v: string) => new Date(v).toLocaleString() },
+                    { title: 'Committed', dataIndex: 'committed_at', render: (v: string) => <When value={v} /> },
                     { title: 'Operation', dataIndex: 'operation' },
                     { title: 'Rows', dataIndex: 'records', render: (v: number | null) => (v === null ? <Muted>?</Muted> : v) },
                     { title: 'Added', dataIndex: 'added' },

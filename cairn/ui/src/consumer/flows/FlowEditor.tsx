@@ -14,6 +14,7 @@ import { describeError } from '../components/ErrorNotice';
 import { Picker } from '../resources/pickers';
 import { useT } from '../i18n';
 import { StatusBadge } from '../components/StatusBadge';
+import { When } from '../utils/time';
 
 // ---- the definition, with undo and redo ------------------------------------------------------------------------
 interface History {
@@ -129,7 +130,7 @@ interface Props {
 }
 
 const ACTIVE = ['queued', 'running', 'waiting'];
-const fmt = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const fmt = (ms: number | null | undefined) => <When value={ms} />;
 const took = (a: number | null, b: number | null) => (a && b ? `${((b - a) / 1000).toFixed(1)} s` : '');
 
 function apiProblems(e: unknown): Problem[] {

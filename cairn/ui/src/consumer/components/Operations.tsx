@@ -205,7 +205,7 @@ export function AllRuns() {
             </Space>
             {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<RunRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
+            <Table<RunRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 aria-label="Runs"
                 locale={{ emptyText: 'No runs yet' }}
                 columns={[
@@ -339,7 +339,7 @@ export function AllIncidents() {
             )}
             {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<IncidentRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
+            <Table<IncidentRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 locale={{ emptyText: 'No open incidents' }}
                 columns={[
                     { title: 'Source', dataIndex: 'source', render: (s: IncidentSource) => <Tag>{INCIDENT_SOURCE_LABEL[s]}</Tag> },
@@ -424,7 +424,7 @@ export function AllAlerts() {
             </Space>
             {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<AlertDefRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows}
+            <Table<AlertDefRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows}
                 pagination={rows.length > 25 ? { pageSize: 25, showSizeChanger: false } : false} locale={{ emptyText: 'No alerts yet' }}
                 columns={[
                     { title: 'Kind', dataIndex: 'kind', render: (k: AlertKind) => <Tag>{ALERT_KIND_LABEL[k]}</Tag> },
@@ -498,7 +498,7 @@ export function StatusAnnouncements() {
                     </Space>
                 </Surface>
             )}
-            <Table<StatusIncident> size="small" rowKey="id" dataSource={rows} loading={q.loading && !q.data} pagination={false}
+            <Table<StatusIncident> size="middle" rowKey="id" dataSource={rows} loading={q.loading && !q.data} pagination={false}
                 locale={{ emptyText: 'Nothing announced' }}
                 columns={[
                     { title: 'Announcement', dataIndex: 'title' },

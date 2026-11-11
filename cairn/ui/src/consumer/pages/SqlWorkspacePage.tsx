@@ -8,10 +8,34 @@ import { ResultChart, toCsv } from '../components/ResultChart';
 import { CHART_TYPES } from '../api/types';
 import { SqlEditor } from '../components/SqlEditor';
 import { Muted, Page, Surface } from '../components/tokens';
+import styled from 'styled-components';
 import { TitleRow } from '../guide/PageHeader';
 import { describeError, notifyError } from '../components/ErrorNotice';
+import { When } from '../utils/time';
+import { StatusBadge } from '../components/StatusBadge';
 
-const ago = (ms: number) => new Date(ms).toLocaleString();
+/** The schema browser beside the editor; on a narrow screen it stacks above it, and the editor keeps to the viewport. */
+const SqlGrid = styled.div`
+    display: grid;
+    grid-template-columns: minmax(220px, 1fr) 3fr;
+    gap: 16px;
+    margin-top: 16px;
+    > * {
+        min-width: 0;
+    }
+    .sql-main textarea {
+        max-width: 100%;
+    }
+    @media (max-width: 900px) {
+        grid-template-columns: minmax(0, 1fr);
+        .sql-schema {
+            max-height: 260px;
+            overflow: auto;
+        }
+    }
+`;
+
+const ago = (ms: number) => <When value={ms} />;
 
 /** The SQL workspace: browse what you may query, run read-only SQL as yourself, chart and download the
  * result, keep a history, and save queries for yourself or everyone. */
@@ -101,8 +125,8 @@ export function SqlWorkspacePage() {
         <Page>
             <TitleRow title="SQL" />
             <Muted>Read-only SQL as you: every table is checked and masked for you, as on its page.</Muted>
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) 3fr', gap: 16, marginTop: 16 }}>
-                <Surface>
+            <SqlGrid>
+                <Surface className="sql-schema">
                     <Select
                         style={{ width: '100%', marginBottom: 8 }}
                         aria-label="Connection"
@@ -168,7 +192,7 @@ export function SqlWorkspacePage() {
                         </div>
                     )}
                 </Surface>
-                <div>
+                <div className="sql-main">
                     <Surface>
                         {current && (
                             <div style={{ marginBottom: 8 }}>
@@ -315,7 +339,8 @@ export function SqlWorkspacePage() {
                                                 {
                                                     title: 'Result',
                                                     render: (_, h) =>
-                                                        h.status === 'ok' ? <Tag color="green">{h.rows} row(s)</Tag> : <Tag color="red" title={h.error ?? ''}>error</Tag>,
+                                                        h.status === 'ok' ? <StatusBadge state="succeeded" label={`${h.rows} row(s)`} plain />
+                                                            : <StatusBadge state="failed" title={h.error ?? ''} plain />,
                                                 },
                                                 { title: 'When', render: (_, h) => ago(h.at_ms) },
                                             ]}
@@ -326,7 +351,7 @@ export function SqlWorkspacePage() {
                         />
                     </Surface>
                 </div>
-            </div>
+            </SqlGrid>
             <Modal title={current ? 'Save changes' : 'Save query'} open={saving} onOk={() => void save()} onCancel={() => setSaving(false)}
                 okText="Save" okButtonProps={{ disabled: !form.name.trim() }}>
                 <Space direction="vertical" style={{ width: '100%' }}>

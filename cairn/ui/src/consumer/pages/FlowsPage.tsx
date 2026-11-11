@@ -20,6 +20,7 @@ import { SqlWorkflowsPage } from './SqlWorkflowsPage';
 import { pageHelp } from '../guide/help';
 import { StatusBadge } from '../components/StatusBadge';
 import { useTheme } from '../utils/theme';
+import { When } from '../utils/time';
 
 
 /** Orchestration (L149): flows, SQL workflows, scheduled jobs and Airflow (managed deployments and DAGs) in one place. */
@@ -205,7 +206,7 @@ export function FlowsPage() {
                                             </td>
                                             <td>{f.published_version ? `v${f.published_version}` : 'draft'}{!f.enabled ? ' (off)' : ''}</td>
                                             <td>{f.last_run ? <StatusBadge state={f.last_run.status} /> : <span className="fl-muted">{'—'}</span>}</td>
-                                            <td>{f.next_run_ms ? new Date(f.next_run_ms).toLocaleString() : <span className="fl-muted">{'—'}</span>}</td>
+                                            <td>{f.next_run_ms ? <When value={f.next_run_ms} /> : <span className="fl-muted">{'—'}</span>}</td>
                                             <td>{f.owner.split(':').pop()}</td>
                                             <td>{f.role}</td>
                                         </tr>

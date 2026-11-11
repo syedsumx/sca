@@ -27,6 +27,7 @@ import type {
 } from '../api/types';
 import { useT } from '../i18n';
 import { ErrorNotice, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
 
 const BUCKETS = '/storage/buckets';
 const AUDIT = '/storage/audit';
@@ -256,7 +257,7 @@ function AccessKeys() {
                     {
                         title: t('storage.created'),
                         dataIndex: 'created',
-                        render: (v?: string | null) => (v ? new Date(v).toLocaleString() : ''),
+                        render: (v?: string | null) => <When value={v} empty={''} />,
                     },
                     {
                         title: '',
@@ -486,7 +487,7 @@ function AuditTrail() {
                     {
                         title: t('storage.when'),
                         dataIndex: 'ts',
-                        render: (v: string) => new Date(v).toLocaleString(),
+                        render: (v: string) => <When value={v} />,
                     },
                     {
                         title: t('storage.action'),

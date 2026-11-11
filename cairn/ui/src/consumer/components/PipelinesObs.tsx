@@ -9,6 +9,7 @@ import type { ResourceAction, ResourceSpec } from '../resources/types';
 import { ErrorNotice, notifyError } from './ErrorNotice';
 import { StatusBadge, StatusTone, useStatusLabel } from './StatusBadge';
 import { Muted, SectionTitle, Surface, tokens } from './tokens';
+import { When } from '../utils/time';
 
 // ---- what the API answers (cairn.observability.pipelines) ---------------------------------------------------------
 export interface PipelineTask {
@@ -233,7 +234,7 @@ function RunView({ pipeline, runId, openTrace }: { pipeline: string; runId: stri
         <Space direction="vertical" style={{ width: '100%' }} size="middle">
             <Descriptions size="small" column={3} bordered>
                 <Descriptions.Item label={t('pipe.run.state')}><StatusBadge state={r.state} /></Descriptions.Item>
-                <Descriptions.Item label={t('pipe.run.started')}>{r.start ? new Date(r.start).toLocaleString() : '–'}</Descriptions.Item>
+                <Descriptions.Item label={t('pipe.run.started')}><When value={r.start} empty="–" /></Descriptions.Item>
                 <Descriptions.Item label={t('pipe.run.duration')}>{duration(r.duration_ms)}</Descriptions.Item>
             </Descriptions>
             {r.anomaly && <Alert type="warning" showIcon message={t('pipe.run.anomaly', { ms: duration(r.anomaly.duration_ms), mean: duration(r.anomaly.mean_ms) })} />}
@@ -315,7 +316,7 @@ function PipelineView({ pipeline, run, setRun, openTrace }: { pipeline: string; 
                         { title: t('pipe.run.state'), dataIndex: 'state', render: (v: string, r) => (
                             <Space size={4}><StatusBadge state={v} />
                                 {r.anomaly && <Tag color="gold">{t('pipe.health.anomalous')}</Tag>}</Space>) },
-                        { title: t('pipe.run.started'), dataIndex: 'start', render: (v: string | null) => (v ? new Date(v).toLocaleString() : '–') },
+                        { title: t('pipe.run.started'), dataIndex: 'start', render: (v: string | null) => <When value={v} empty={'–'} /> },
                         { title: t('pipe.run.duration'), dataIndex: 'duration_ms', render: (v: number | null) => duration(v) },
                     ]} />
             </section>
@@ -338,7 +339,7 @@ function ProductStatusView({ id, name }: { id: string; name: string }) {
             <List size="small" dataSource={s.table_status} renderItem={(x) => (
                 <List.Item>{x.name}{' '}
                     {x.fresh !== null && <StatusBadge tone={x.fresh ? 'ok' : 'error'} label={t(x.fresh ? 'pipe.product.fresh' : 'pipe.product.stale')} />}
-                    <Muted>{x.last_update ? new Date(x.last_update).toLocaleString() : '–'}</Muted></List.Item>
+                    <Muted><When value={x.last_update} empty="–" /></Muted></List.Item>
             )} />
         </section>
     );

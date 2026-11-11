@@ -7,6 +7,7 @@ import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 import { StatusBadge } from '../components/StatusBadge';
+import { When } from '../utils/time';
 
 const OPS = ['>', '>=', '<', '<=', '==', '!='];
 type Draft = {
@@ -157,7 +158,7 @@ function Runs({ id, tick }: { id: string; tick: number }) {
             dataSource={runs.data ?? []}
             locale={{ emptyText: 'Not run yet.' }}
             columns={[
-                { title: 'Started', dataIndex: 'started_ms', render: (v: number) => new Date(v).toLocaleString() },
+                { title: 'Started', dataIndex: 'started_ms', render: (v: number) => <When value={v} /> },
                 { title: 'Trigger', dataIndex: 'trigger' },
                 { title: 'Status', dataIndex: 'status', render: (s: string) => <StatusBadge state={s} /> },
                 {
@@ -269,7 +270,7 @@ export function SqlWorkflowsPage() {
                         {
                             title: 'Next run',
                             dataIndex: 'next_run_ms',
-                            render: (v: number | null, r) => (r.enabled && v ? new Date(v).toLocaleString() : <Muted>—</Muted>),
+                            render: (v: number | null, r) => (r.enabled && v ? <When value={v} /> : <Muted>—</Muted>),
                         },
                         {
                             title: 'Last run',

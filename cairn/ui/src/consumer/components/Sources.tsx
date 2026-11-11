@@ -31,6 +31,7 @@ import { GitRepositories } from './GitDocs';
 import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
+import { When } from '../utils/time';
 
 const CATEGORY: Record<SourceConnector['category'], string> = {
     warehouse: 'Warehouses',
@@ -42,7 +43,7 @@ const CATEGORY: Record<SourceConnector['category'], string> = {
     ml: 'Machine learning',
     other: 'Other',
 };
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function TestResult({ test }: { test: SourceTest }) {

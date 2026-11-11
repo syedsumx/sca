@@ -7,6 +7,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 import { DiagnoseButton } from '../components/SreAgent';
 import { Muted } from '../components/tokens';
+import { When } from '../utils/time';
 
 /** A managed PostgreSQL instance as `GET /v1/databases/instances` lists it. */
 export interface PgInstance {
@@ -224,7 +225,7 @@ function Backups({ inst, list }: { inst: PgInstance; list: PgList }) {
                     columns={[
                         { title: 'Backup', dataIndex: 'id' }, { title: 'Schedule', dataIndex: 'schedule' },
                         { title: 'State', dataIndex: 'state' },
-                        { title: 'Finished', dataIndex: 'finished_ms', render: (v) => (v ? new Date(v).toLocaleString() : '—') },
+                        { title: 'Finished', dataIndex: 'finished_ms', render: (v) => <When value={v} empty={'—'} /> },
                         { title: 'Size', dataIndex: 'bytes', render: (v) => bytes(v) },
                         { title: 'Restore check', dataIndex: 'verified', render: (v, b) => v ?? (b.state === 'completed' ? (
                             <Button size="small" onClick={() => run(() => client.request('POST', `${BASE}/${name}/backups/${b.id}/verify`, {}),

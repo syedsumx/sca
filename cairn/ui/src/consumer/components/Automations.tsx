@@ -28,6 +28,7 @@ import type {
 import { datasetName, describeChange } from './BulkEdit';
 import { Muted } from './tokens';
 import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
 
 const ACTIONS: { value: AutomationActionType; label: string; placeholder: string }[] = [
     { value: 'set_domain', label: 'Set domain', placeholder: 'finance' },
@@ -333,7 +334,7 @@ function RunsDrawer({ automation, onClose }: { automation: Automation | null; on
                 dataSource={runs.data ?? []}
                 loading={runs.loading}
                 columns={[
-                    { title: 'When', dataIndex: 'started_ms', render: (ms: number) => new Date(ms).toLocaleString() },
+                    { title: 'When', dataIndex: 'started_ms', render: (ms: number) => <When value={ms} /> },
                     { title: 'Trigger', dataIndex: 'trigger' },
                     { title: 'Matched', dataIndex: 'matched' },
                     { title: 'Changed', dataIndex: 'changed' },

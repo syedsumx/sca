@@ -7,6 +7,7 @@ import { DatasetsRead } from './AiUsage';
 import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
+import { When } from '../utils/time';
 
 const SCOPES: { value: AgentScope; label: string }[] = [
     { value: 'read', label: 'Read the catalog' },
@@ -15,7 +16,7 @@ const SCOPES: { value: AgentScope; label: string }[] = [
     { value: 'write', label: 'Change metadata directly' },
 ];
 
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : 'never');
+const when = (ms: number | null | undefined) => <When value={ms} empty="never" />;
 /** An agent's recent tool calls: all of them for administrators, the caller's own otherwise. */
 function ActivityButton({ agent, all }: { agent: AiAgent; all: boolean }) {
     const [open, setOpen] = useState(false);
@@ -59,7 +60,7 @@ function ActivityButton({ agent, all }: { agent: AiAgent; all: boolean }) {
                                     pagination={{ pageSize: 15, hideOnSinglePage: true }}
                                     locale={{ emptyText: 'No tool calls yet.' }}
                                     columns={[
-                                        { title: 'When', render: (_, c) => new Date(c.created_ms).toLocaleString() },
+                                        { title: 'When', render: (_, c) => <When value={c.created_ms} /> },
                                         { title: 'Tool', dataIndex: 'tool' },
                                         ...(all
                                             ? [{ title: 'For', render: (_: unknown, c: AgentCall) => c.actor.split(':').pop() }]

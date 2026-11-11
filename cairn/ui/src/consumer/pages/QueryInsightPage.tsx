@@ -7,6 +7,7 @@ import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { StatusBadge } from '../components/StatusBadge';
+import { When } from '../utils/time';
 
 export const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`);
 
@@ -124,7 +125,7 @@ export function QueryInsightPage() {
                     locale={{ emptyText: 'No queries yet.' }}
                     onRow={(r) => ({ onClick: () => setOpen(r.query_id), style: { cursor: 'pointer' } })}
                     columns={[
-                        { title: 'When', dataIndex: 'create_ms', render: (v: number) => new Date(v).toLocaleString(), width: 170 },
+                        { title: 'When', dataIndex: 'create_ms', render: (v: number) => <When value={v} />, width: 170 },
                         {
                             title: 'State',
                             dataIndex: 'state',

@@ -17,6 +17,7 @@ import { ActionDialog } from '../resources/ResourceView';
 import type { ResourceAction, ResourceSpec } from '../resources/types';
 import { errorStatus } from '../utils/errors';
 import { actorName } from '../utils/format';
+import { When } from '../utils/time';
 
 // ---- what the API answers (cairn.observability) ------------------------------------------------------------------
 interface Overview {
@@ -270,7 +271,7 @@ function JourneyTab({ initial, service, showLogs }: { initial: string; service: 
                             { title: t('obs.journey.service'), dataIndex: 'root_service' },
                             { title: 'Operation', dataIndex: 'root_name' },
                             { title: 'ms', dataIndex: 'duration_ms' },
-                            { title: 'Started', dataIndex: 'start_ms', render: (v: number) => new Date(v).toLocaleString() },
+                            { title: 'Started', dataIndex: 'start_ms', render: (v: number) => <When value={v} /> },
                         ]} />
                 )}
             </section>
@@ -558,7 +559,7 @@ export function IncidentDrawer({ id, onClose }: { id: string; onClose: () => voi
                         renderItem={(e) => (
                             <List.Item>
                                 <Space align="start">
-                                    <Muted style={{ minWidth: 150 }}>{new Date(e.at).toLocaleString()}</Muted>
+                                    <Muted style={{ minWidth: 150 }}><When value={e.at} /></Muted>
                                     <Tag>{e.kind}</Tag>
                                     <span><span style={{ whiteSpace: 'pre-wrap' }}>{e.text}</span>
                                         {e.by_agent && <Tag color="purple" style={{ marginLeft: 6 }}>{t('obs.incidents.agent')}</Tag>}

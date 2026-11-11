@@ -6,9 +6,10 @@ import type { BiImpact, BiKind, BiRole, BiShares, BiVersion, BiVersionDiff } fro
 import { BiCollabButtons } from './BiCollab';
 import { Muted } from './tokens';
 import { ErrorNotice, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
 
 const KIND_NAME: Record<BiKind, string> = { query: 'saved query', workbook: 'workbook', dashboard: 'dashboard' };
-const when = (ms: number) => new Date(ms).toLocaleString();
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const short = (urn: string) => urn.replace(/^urn:li:corp(user|Group):/, (_, k) => (k === 'Group' ? 'group:' : ''));
 
 /** Who an asset is shared with (owner and editors see it; only the owner changes it). */

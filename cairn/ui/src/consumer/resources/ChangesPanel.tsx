@@ -7,6 +7,7 @@ import { Muted } from '../components/tokens';
 import { describeError } from '../components/ErrorNotice';
 import { Picker } from './pickers';
 import { StatusBadge } from '../components/StatusBadge';
+import { When } from '../utils/time';
 
 /** One resource of a change's plan: what happens to it, field by field. */
 export interface PlanItem {
@@ -237,7 +238,7 @@ function ChangeDetail({ id, onChanged }: { id: string; onChanged: () => void }) 
             </Space>
             <Descriptions size="small" column={2} style={{ marginTop: 8, maxWidth: 900 }}>
                 <Descriptions.Item label="Proposed by">{cr.agent ? `${cr.agent} for ${who(cr.sponsor)}` : who(cr.author)}</Descriptions.Item>
-                <Descriptions.Item label="When">{new Date(cr.created_ms).toLocaleString()}</Descriptions.Item>
+                <Descriptions.Item label="When"><When value={cr.created_ms} /></Descriptions.Item>
                 <Descriptions.Item label="Why" span={2}>{cr.intent}</Descriptions.Item>
                 {cr.approved_by && <Descriptions.Item label="Approved by">{who(cr.approved_by)}{cr.comment ? `: ${cr.comment}` : ''}</Descriptions.Item>}
                 {cr.applied_by && <Descriptions.Item label="Applied by">{who(cr.applied_by)}</Descriptions.Item>}
@@ -352,7 +353,7 @@ export function ChangesPanel({ initial }: { initial?: string | null }) {
                     },
                     { title: 'Resources', dataIndex: 'kinds', key: 'kinds', render: (v: string[]) => v.map((k) => <Tag key={k}>{k}</Tag>) },
                     { title: 'Proposed by', key: 'who', render: (_: unknown, r) => (r.agent ? `${r.agent} for ${who(r.sponsor)}` : who(r.author)) },
-                    { title: 'When', dataIndex: 'created_ms', key: 'when', render: (v: number) => new Date(v).toLocaleString() },
+                    { title: 'When', dataIndex: 'created_ms', key: 'when', render: (v: number) => <When value={v} /> },
                 ]}
             />
             {current && (

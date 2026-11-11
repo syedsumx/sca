@@ -693,16 +693,28 @@ export const FlowsRoot = styled.div`
         background: var(--fl-warn);
         clip-path: polygon(50% 0, 100% 100%, 0 100%);
     }
+    /* The same table look as the rest of the workspace (antd's tables): 14 px cells, quiet uppercase headings. */
     .fl-table {
         width: 100%;
         border-collapse: collapse;
-        font-size: 13px;
+        font-size: 14px;
     }
     .fl-table th,
     .fl-table td {
         border-bottom: 1px solid var(--fl-border);
-        padding: 6px 8px;
+        padding: 10px 12px;
         text-align: left;
+    }
+    .fl-table th {
+        font-size: 12px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--fl-muted);
+        background: var(--cairn-sunken, #F8FAFC);
+    }
+    .fl-table td .fl-muted {
+        font-size: 13px;
     }
     .fl-pre {
         background: var(--fl-canvas);
