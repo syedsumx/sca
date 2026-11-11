@@ -1,5 +1,5 @@
 import { ConfigProvider, Result, Spin } from 'antd';
-import React, { Suspense } from 'react';
+import React, { Suspense, useEffect } from 'react';
 import { BrowserRouter, HashRouter, Redirect, Route, Switch, useLocation } from 'react-router-dom';
 
 import { ConsumerClient } from './api/client';
@@ -162,6 +162,17 @@ export function ConsumerRoutes() {
     );
 }
 
+/** While the workspace is mounted the page carries `cairn-ui`, so antd's dialogs and popups (rendered in <body>, outside
+ * the workspace's element) use the Cairn accent too (tokens.ts, PRIMARY_CSS). */
+export function useWorkspaceBodyClass(): void {
+    useEffect(() => {
+        const body = typeof document !== 'undefined' ? document.body : null;
+        if (!body) return undefined;
+        body.classList.add('cairn-ui');
+        return () => body.classList.remove('cairn-ui');
+    }, []);
+}
+
 export interface ConsumerAppProps {
     /**
      * `hash` (default) when hosted as a Cairn Core MFE: the host registers `/mfe<path>` as an *exact*
@@ -189,6 +200,7 @@ export function ConsumerApp({
     cache,
     catalogUrl = '',
 }: ConsumerAppProps) {
+    useWorkspaceBodyClass();
     const content = (
         <div className="cairn-consumer" style={{ fontFamily: 'inherit', color: tokens.color.text }}>
             <ConsumerRoutes />

@@ -223,10 +223,72 @@ export const Skeleton = styled.div<{ h?: number; w?: string }>`
 `;
 
 /**
+ * antd's primary colour is the Cairn accent everywhere antd draws it: buttons, switches, checkboxes, radios, pagination,
+ * links, spinners, steps and pickers. antd 4's own primary (#1890ff) is only 3.2:1 on white, below WCAG AA. Popups and
+ * dialogs render outside the workspace's element (in <body>), so the rules also apply under \`body.cairn-ui\`, the class
+ * the workspace sets on the page while it is mounted (ConsumerApp).
+ */
+const PRIMARY_SCOPES = ['.cairn-consumer', 'body.cairn-ui'];
+const inScope = (selectors: string) =>
+    PRIMARY_SCOPES.flatMap((scope) => selectors.split(',').map((x) => `${scope} ${x.trim()}`)).join(', ');
+export const PRIMARY_CSS = `
+    ${inScope('.ant-btn-primary:not([disabled])')} {
+        color: #fff; background: ${tokens.color.primary}; border-color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-btn-primary:not([disabled]) > span')} { color: #fff; }
+    ${inScope('.ant-btn-primary:not([disabled]):hover, .ant-btn-primary:not([disabled]):focus')} {
+        color: #fff; background: ${tokens.color.primaryHover}; border-color: ${tokens.color.primaryHover};
+    }
+    ${inScope('.ant-btn-primary[disabled]')} { background: #f1f2f6; border-color: ${tokens.color.border}; }
+    ${inScope('.ant-btn-default:not([disabled]):hover, .ant-btn-default:not([disabled]):focus, .ant-btn-dashed:not([disabled]):hover')} {
+        color: ${tokens.color.primaryHover}; border-color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-btn-link:not(.ant-btn-dangerous):not([disabled])')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-btn-link:not(.ant-btn-dangerous):not([disabled]):hover')} { color: ${tokens.color.primaryHover}; }
+    ${inScope('.ant-switch-checked')} { background: ${tokens.color.primary}; }
+    ${inScope('.ant-checkbox-checked .ant-checkbox-inner, .ant-checkbox-indeterminate .ant-checkbox-inner::after')} {
+        background-color: ${tokens.color.primary}; border-color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-checkbox-wrapper:hover .ant-checkbox-inner, .ant-checkbox:hover .ant-checkbox-inner, .ant-radio-wrapper:hover .ant-radio-inner')} {
+        border-color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-radio-checked .ant-radio-inner')} { border-color: ${tokens.color.primary}; }
+    ${inScope('.ant-radio-inner::after')} { background-color: ${tokens.color.primary}; }
+    ${inScope('.ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled)')} {
+        color: ${tokens.color.primary}; border-color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled)::before')} { background-color: ${tokens.color.primary}; }
+    ${inScope('.ant-radio-group-solid .ant-radio-button-wrapper-checked:not(.ant-radio-button-wrapper-disabled)')} {
+        color: #fff; background: ${tokens.color.primary};
+    }
+    ${inScope('.ant-pagination-item-active')} { border-color: ${tokens.color.primary}; }
+    ${inScope('.ant-pagination-item-active a, .ant-pagination-item:hover a')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-spin, .ant-spin-dot-item')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-spin-dot-item')} { background-color: ${tokens.color.primary}; }
+    ${inScope('.ant-steps-item-process .ant-steps-item-icon')} { background: ${tokens.color.primary}; border-color: ${tokens.color.primary}; }
+    ${inScope('.ant-steps-item-finish .ant-steps-item-icon')} { border-color: ${tokens.color.primary}; }
+    ${inScope('.ant-steps-item-finish .ant-steps-item-icon > .ant-steps-icon')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-select-item-option-selected:not(.ant-select-item-option-disabled) .ant-select-item-option-state')} {
+        color: ${tokens.color.primary};
+    }
+    ${inScope('.ant-picker-cell-in-view.ant-picker-cell-selected .ant-picker-cell-inner, .ant-slider-track')} {
+        background: ${tokens.color.primary};
+    }
+    ${inScope('.ant-slider-handle')} { border-color: ${tokens.color.primary}; }
+    ${inScope('.ant-dropdown-menu-item-selected, .ant-menu-item-selected, .ant-menu-item-selected a')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-progress-bg')} { background-color: ${tokens.color.primary}; }
+    ${inScope('.ant-progress-success-bg, .ant-progress-status-success .ant-progress-bg')} { background-color: ${tokens.status.ok.mark}; }
+    ${inScope('.ant-typography a, a.ant-typography, .ant-modal a, .ant-drawer a, .ant-popover a')} { color: ${tokens.color.primary}; }
+    ${inScope('.ant-tabs-ink-bar')} { background: ${tokens.color.primary}; }
+    ${inScope('.ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn, .ant-tabs-tab:hover')} { color: ${tokens.color.primary}; }
+`;
+
+/**
  * A modern look for the antd components inside the workspace only (scoped to `.cairn-consumer`, so a host shell
  * keeps its own styles): softer radii, quieter borders, clearer table headers and tabs.
  */
 export const ConsumerTheme = createGlobalStyle`
+    ${PRIMARY_CSS}
     .cairn-consumer {
         font-family: ${tokens.font};
         -webkit-font-smoothing: antialiased;
@@ -256,13 +318,6 @@ export const ConsumerTheme = createGlobalStyle`
         height: ${tokens.control}px; line-height: ${tokens.control - 2}px;
     }
     .cairn-consumer .ant-tabs-tab { min-height: ${tokens.control}px; }
-    .cairn-consumer .ant-btn-primary:not([disabled]) { color: #fff; background: ${tokens.color.primary}; border-color: ${tokens.color.primary}; }
-    .cairn-consumer .ant-btn-primary:not([disabled]) > span { color: #fff; }
-    .cairn-consumer .ant-btn-primary:not([disabled]):hover, .cairn-consumer .ant-btn-primary:not([disabled]):focus {
-        color: #fff;
-        background: ${tokens.color.primaryHover}; border-color: ${tokens.color.primaryHover};
-    }
-    .cairn-consumer .ant-btn-primary[disabled] { background: #f1f2f6; border-color: ${tokens.color.border}; }
     .cairn-consumer .ant-input, .cairn-consumer .ant-input-affix-wrapper, .cairn-consumer .ant-input-number,
     .cairn-consumer .ant-select:not(.ant-select-customize-input) .ant-select-selector, .cairn-consumer .ant-picker {
         border-radius: ${tokens.radius.sm};
