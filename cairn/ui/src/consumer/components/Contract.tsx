@@ -7,8 +7,10 @@ import type { Contract, ContractPart, ContractStatus } from '../api/types';
 import { actorName, relativeTime } from '../utils/format';
 import { Muted } from './tokens';
 import { ErrorNotice } from './ErrorNotice';
+import { StatusBadge, StatusTone } from './StatusBadge';
 
-const COLOR: Record<ContractStatus, string> = { MET: 'green', BROKEN: 'red', PENDING: 'default' };
+const TONE: Record<ContractStatus, StatusTone> = { MET: 'ok', BROKEN: 'error', PENDING: 'waiting' };
+const WORD: Record<ContractStatus, string> = { MET: 'Met', BROKEN: 'Broken', PENDING: 'Pending' };
 const PART: Record<ContractPart['part'], string> = {
     schema: 'Schema',
     freshness: 'Freshness',
@@ -37,9 +39,8 @@ export function ContractPanel({ urn }: { urn: string }) {
     return (
         <section aria-label="Data contract">
             <p>
-                <Tag color={COLOR[c.status]}>
-                    {c.status === 'MET' ? 'Met' : c.status === 'BROKEN' ? 'Broken' : 'Pending'}
-                </Tag>
+                <StatusBadge tone={c.status === 'MET' ? 'ok' : c.status === 'BROKEN' ? 'error' : 'waiting'}
+                    label={c.status === 'MET' ? 'Met' : c.status === 'BROKEN' ? 'Broken' : 'Pending'} style={{ marginRight: 8 }} />
                 Version <strong>{c.version}</strong>
                 {c.owner && <> · owned by {actorName(c.owner)}</>}
                 <Muted> · checked {relativeTime(new Date(c.checked_ms).toISOString())}</Muted>
@@ -54,7 +55,7 @@ export function ContractPanel({ urn }: { urn: string }) {
                     {
                         title: 'Status',
                         dataIndex: 'status',
-                        render: (s: ContractStatus) => <Tag color={COLOR[s]}>{s}</Tag>,
+                        render: (s: ContractStatus) => <StatusBadge tone={TONE[s]} label={WORD[s]} />,
                     },
                     { title: 'Detail', dataIndex: 'detail' },
                 ]}

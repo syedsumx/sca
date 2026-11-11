@@ -22,6 +22,7 @@ import { useT } from '../i18n';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
+import { StatusBadge } from '../components/StatusBadge';
 
 /**
  * Data products › Browse (L149: what was the Marketplace): consumer-oriented product cards with filters and access
@@ -132,15 +133,6 @@ export function ProductBrowse() {
     );
 }
 
-const STATE_COLOR: Record<string, string> = {
-    PENDING: 'blue',
-    APPROVED: 'green',
-    REJECTED: 'red',
-    CANCELLED: 'default',
-    EXPIRED: 'orange',
-    REVOKED: 'red',
-};
-
 export function RequestsPage() {
     const t = useT();
     const { client, cache } = useConsumerApi();
@@ -185,14 +177,16 @@ export function RequestsPage() {
             dataIndex: 'state',
             render: (v: string, r: AccessRequest) => (
                 <span>
-                    <Tag color={STATE_COLOR[v]}>{v}</Tag>
+                    <StatusBadge state={v} />
                     {r.auto_approved && <Muted>auto</Muted>}
                     {r.expires_at && v === 'APPROVED' && <Muted> until {new Date(r.expires_at).toLocaleDateString()}</Muted>}
                     {(r.provisioning ?? []).map((p) => (
                         <div key={`${p.target}${p.what}`} style={{ fontSize: 12 }}>
-                            <Tag color={p.status === 'failed' ? 'red' : p.status === 'granted' ? 'green' : 'default'} title={p.error}>
-                                {p.what} on {p.target}: {p.status === 'failed' ? `${p.action ?? 'grant'} failed` : p.status}
-                            </Tag>
+                            <span title={p.error}>
+                                {p.what} on {p.target}:{' '}
+                                <StatusBadge state={p.status} plain
+                                    label={p.status === 'failed' ? `${p.action ?? 'grant'} failed` : undefined} />
+                            </span>
                         </div>
                     ))}
                 </span>

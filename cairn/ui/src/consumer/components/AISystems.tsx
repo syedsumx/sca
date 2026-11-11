@@ -7,6 +7,7 @@ import { useDheSession } from '../context/CairnProvider';
 import { download } from './BulkEdit';
 import { Surface } from './tokens';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
 
 export const TIER_COLOR: Record<AITier, string> = {
     unacceptable: 'red',
@@ -14,14 +15,6 @@ export const TIER_COLOR: Record<AITier, string> = {
     limited: 'gold',
     minimal: 'green',
 };
-const STATE_COLOR: Record<string, string> = {
-    DRAFT: 'default',
-    IN_REVIEW: 'blue',
-    APPROVED: 'green',
-    REJECTED: 'red',
-    RETIRED: 'default',
-};
-
 const lines = (s: string) =>
     s
         .split(/\s+/)
@@ -310,7 +303,7 @@ export function AISystemsAdmin() {
                             title={
                                 <span>
                                     {s.name} <Tag color={TIER_COLOR[s.tier]}>{s.tier} risk</Tag>
-                                    <Tag color={STATE_COLOR[s.state]}>{s.state.replace('_', ' ').toLowerCase()}</Tag>
+                                    <StatusBadge state={s.state} />
                                     {s.violations.length > 0 && <Tag color="red">restricted data without purpose</Tag>}
                                     {(s.undeclared_datasets ?? []).length > 0 && (
                                         <Tag color="orange" title={(s.undeclared_datasets ?? []).join('\n')}>

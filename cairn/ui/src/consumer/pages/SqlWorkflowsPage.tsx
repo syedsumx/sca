@@ -6,10 +6,9 @@ import type { DerivedTable, SavedQuery, SqlWorkflow, SqlWorkflowRun, SqlWorkflow
 import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
+import { StatusBadge } from '../components/StatusBadge';
 
 const OPS = ['>', '>=', '<', '<=', '==', '!='];
-const STATUS_COLOR: Record<string, string> = { ok: 'green', failed: 'red', error: 'red', skipped: 'default' };
-
 type Draft = {
     id?: string;
     name: string;
@@ -160,7 +159,7 @@ function Runs({ id, tick }: { id: string; tick: number }) {
             columns={[
                 { title: 'Started', dataIndex: 'started_ms', render: (v: number) => new Date(v).toLocaleString() },
                 { title: 'Trigger', dataIndex: 'trigger' },
-                { title: 'Status', dataIndex: 'status', render: (s: string) => <Tag color={STATUS_COLOR[s]}>{s}</Tag> },
+                { title: 'Status', dataIndex: 'status', render: (s: string) => <StatusBadge state={s} /> },
                 {
                     title: 'Steps',
                     dataIndex: 'steps',
@@ -168,7 +167,7 @@ function Runs({ id, tick }: { id: string; tick: number }) {
                         <Space direction="vertical" size={0}>
                             {steps.map((s) => (
                                 <span key={s.name}>
-                                    <Tag color={STATUS_COLOR[s.status]}>{s.status}</Tag>
+                                    <StatusBadge state={s.status} />
                                     {s.name}
                                     {s.error ? <Muted> — {s.error}</Muted> : s.detail ? <Muted> — {s.detail}</Muted> : s.rows != null ? <Muted> — {s.rows} rows</Muted> : null}
                                 </span>
@@ -275,7 +274,7 @@ export function SqlWorkflowsPage() {
                         {
                             title: 'Last run',
                             dataIndex: 'last_status',
-                            render: (s: string | null) => (s ? <Tag color={STATUS_COLOR[s]}>{s}</Tag> : <Muted>never</Muted>),
+                            render: (s: string | null) => (s ? <StatusBadge state={s} /> : <Muted>never</Muted>),
                         },
                         {
                             title: '',

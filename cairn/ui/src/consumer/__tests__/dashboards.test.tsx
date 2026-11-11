@@ -54,7 +54,8 @@ it('shows a dashboard tile by tile, as the viewer, and manages alerts', async ()
             </CairnProvider>
         </MemoryRouter>,
     );
-    expect(await screen.findByText('triggered (2)')).toBeTruthy();
+    expect(await screen.findByText('Triggered')).toBeTruthy();
+    expect(screen.getByText('(2)')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(calls.some((c) => c.path === '/sql/alerts/a1/check')).toBe(true));
 });

@@ -6,6 +6,7 @@ import { useConsumerApi } from '../api/hooks';
 import { Muted } from '../components/tokens';
 import { describeError } from '../components/ErrorNotice';
 import { Picker } from './pickers';
+import { StatusBadge } from '../components/StatusBadge';
 
 /** One resource of a change's plan: what happens to it, field by field. */
 export interface PlanItem {
@@ -65,9 +66,6 @@ interface Draft {
     tool_calls: { name: string; ok: boolean; error?: string }[];
 }
 
-const STATUS_COLOR: Record<string, string> = {
-    proposed: 'gold', approved: 'blue', applied: 'green', failed: 'red', rejected: 'default', withdrawn: 'default',
-};
 const ACTION_COLOR: Record<string, string> = { create: 'green', update: 'blue', replace: 'orange', delete: 'red' };
 const enc = encodeURIComponent;
 
@@ -89,7 +87,7 @@ export function PlanDiff({ plan, changeId }: { plan: ChangePlan; changeId?: stri
             {plan.changes.map((c) => (
                 <section key={`${c.kind}/${c.key}`} style={{ marginBottom: 12 }} aria-label={`${c.action} ${c.kind}/${c.key}`}>
                     <Space wrap>
-                        <Tag color={ACTION_COLOR[c.action]}>{c.action}</Tag>
+                        <StatusBadge state={c.action} />
                         <code>{c.kind}/{c.key}</code>
                         <Muted>{c.terraform_type}</Muted>
                         {c.kind === 'flows' && c.action !== 'delete' && changeId && (
@@ -235,7 +233,7 @@ function ChangeDetail({ id, onChanged }: { id: string; onChanged: () => void }) 
         <section aria-label={`Change ${cr.title}`}>
             <Space align="center" wrap>
                 <Typography.Title level={4} style={{ margin: 0 }}>{cr.title}</Typography.Title>
-                <Tag color={STATUS_COLOR[cr.status]}>{cr.status}</Tag>
+                <StatusBadge state={cr.status} />
             </Space>
             <Descriptions size="small" column={2} style={{ marginTop: 8, maxWidth: 900 }}>
                 <Descriptions.Item label="Proposed by">{cr.agent ? `${cr.agent} for ${who(cr.sponsor)}` : who(cr.author)}</Descriptions.Item>
@@ -347,7 +345,7 @@ export function ChangesPanel({ initial }: { initial?: string | null }) {
                 onRow={(r) => ({ onClick: () => setCurrent(r.id) })}
                 columns={[
                     { title: 'Change', dataIndex: 'title', key: 'title', render: (v: string, r) => <Button type="link" style={{ padding: 0 }} onClick={() => setCurrent(r.id)}>{v}</Button> },
-                    { title: 'Status', dataIndex: 'status', key: 'status', render: (v: string) => <Tag color={STATUS_COLOR[v]}>{v}</Tag> },
+                    { title: 'Status', dataIndex: 'status', key: 'status', render: (v: string) => <StatusBadge state={v} /> },
                     {
                         title: 'What', key: 'counts',
                         render: (_: unknown, r) => Object.entries(r.plan?.counts ?? {}).filter(([k, n]) => n && k !== 'unchanged').map(([k, n]) => `${n} to ${k}`).join(', ') || '—',

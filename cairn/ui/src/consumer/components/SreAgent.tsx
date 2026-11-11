@@ -6,6 +6,7 @@ import { ErrorNotice, notifyError } from './ErrorNotice';
 import { Muted, SectionTitle } from './tokens';
 import { useT } from '../i18n';
 import { actorName } from '../utils/format';
+import { StatusBadge } from './StatusBadge';
 
 // ---- what /v1/sre answers (cairn.sre) ------------------------------------------------------------------------------
 export interface Evidence { id: string; tool: string; input: Record<string, unknown>; result: string }
@@ -25,11 +26,6 @@ export interface SreIncident {
     runs: SreRun[]; actions: SreAction[]; postmortem: Postmortem | null;
     status: { ready: boolean; why: string | null; model: string | null; enabled: boolean };
 }
-
-const STATUS_COLOR: Record<string, string> = {
-    pending: 'gold', executed: 'green', applied: 'green', rejected: 'default', failed: 'red',
-    running: 'blue', done: 'green', refused: 'orange',
-};
 
 /** The evidence a note or a proposal cites: each tool call's input and (part of) its result. */
 export function EvidenceList({ items }: { items: Evidence[] }) {
@@ -73,7 +69,7 @@ function Proposal({ a, onDone }: { a: SreAction; onDone: () => void }) {
                     <Tag color={a.kind === 'change_request' ? 'geekblue' : 'purple'}>
                         {a.kind === 'change_request' ? t('sre.kind.change') : t('sre.kind.action')}</Tag>
                     <strong>{a.title}</strong>
-                    <Tag color={STATUS_COLOR[a.status]}>{t(`sre.status.${a.status}` as never)}</Tag>
+                    <StatusBadge state={a.status} label={t(`sre.status.${a.status}` as never)} />
                     {a.decided_by && <Muted>{actorName(a.decided_by)}</Muted>}
                 </Space>
                 <p style={{ margin: '4px 0' }}>{a.rationale}</p>
@@ -165,7 +161,7 @@ export function SreIncidentPanel({ id, resolved, onChange }: { id: string; resol
             {!v.status.ready && <Alert type="info" showIcon message={t('sre.notReady')} description={v.status.why} style={{ marginBottom: 8 }} />}
             <Space wrap style={{ marginBottom: 8 }}>
                 <Button onClick={investigate} disabled={!v.status.enabled || running} loading={running}>{t('sre.investigate')}</Button>
-                {last && <Tag color={STATUS_COLOR[last.status]}>{t(`sre.run.${last.status}` as never)}</Tag>}
+                {last && <StatusBadge state={last.status} label={t(`sre.run.${last.status}` as never)} />}
                 {last?.error && <Muted>{last.error}</Muted>}
             </Space>
             <Typography.Text strong>{t('sre.proposals')}</Typography.Text>

@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { Playbook, PlaybookRun } from '../api/types';
 import { Muted } from './tokens';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
 
 const TRIGGER: Record<string, string> = {
     'quality.incident.raised': 'when a quality incident is raised',
@@ -13,14 +14,12 @@ const TRIGGER: Record<string, string> = {
     'dataset.created': 'when a dataset appears',
 };
 const COLOR = { ok: 'green', skipped: 'gray', failed: 'red' } as const;
-const STATE = { DONE: 'green', PARTIAL: 'orange', FAILED: 'red' } as const;
-
 function Steps({ run }: { run: PlaybookRun }) {
     return (
         <Timeline>
             {run.steps.map((s) => (
                 <Timeline.Item key={s.name} color={COLOR[s.status]}>
-                    <b>{s.name}</b> <Tag color={COLOR[s.status]}>{s.status}</Tag>
+                    <b>{s.name}</b> <StatusBadge state={s.status} />
                     <Muted>{s.summary}</Muted>
                 </Timeline.Item>
             ))}
@@ -125,7 +124,7 @@ export function PlaybooksAdmin() {
                             },
                             {
                                 title: 'State',
-                                render: (_, r) => <Tag color={STATE[r.state]}>{r.state.toLowerCase()}</Tag>,
+                                render: (_, r) => <StatusBadge state={r.state} />,
                             },
                             { title: 'When', render: (_, r) => new Date(r.created_ms).toLocaleString() },
                         ]}

@@ -19,6 +19,7 @@ import {
     termHref,
 } from './api';
 import { describeError } from '../components/ErrorNotice';
+import { StatusBadge } from '../components/StatusBadge';
 
 const Section = styled.section`
     margin-top: 16px;
@@ -41,10 +42,8 @@ const Section = styled.section`
     }
 `;
 
-export const STATUS_COLOUR: Record<ElementStatus, string> = { accepted: 'green', proposed: 'gold', rejected: 'red', compiled: 'default' };
-
 export function StatusTag({ status }: { status: ElementStatus }) {
-    return <Tag color={STATUS_COLOUR[status]}>{status}</Tag>;
+    return <StatusBadge state={status} />;
 }
 
 function who(urn?: string | null): string {

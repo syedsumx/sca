@@ -6,6 +6,7 @@ import type { AgentCall, AgentScope, AIDatasetRead, AiAgent } from '../api/types
 import { DatasetsRead } from './AiUsage';
 import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
 
 const SCOPES: { value: AgentScope; label: string }[] = [
     { value: 'read', label: 'Read the catalog' },
@@ -15,8 +16,6 @@ const SCOPES: { value: AgentScope; label: string }[] = [
 ];
 
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : 'never');
-const STATUS_COLOR = { ok: 'green', error: 'red', refused: 'orange', forbidden: 'orange' } as const;
-
 /** An agent's recent tool calls: all of them for administrators, the caller's own otherwise. */
 function ActivityButton({ agent, all }: { agent: AiAgent; all: boolean }) {
     const [open, setOpen] = useState(false);
@@ -69,7 +68,7 @@ function ActivityButton({ agent, all }: { agent: AiAgent; all: boolean }) {
                                             title: 'Outcome',
                                             render: (_, c) => (
                                                 <>
-                                                    <Tag color={STATUS_COLOR[c.status]}>{c.status}</Tag>
+                                                    <StatusBadge state={c.status} />
                                                     {c.flagged > 0 && <Tag color="volcano">flagged text</Tag>}
                                                 </>
                                             ),

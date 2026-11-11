@@ -6,6 +6,7 @@ import { useAsync, useDheClient } from '../api/hooks';
 import type { DatasetHealth } from '../api/types';
 import { formatRelative, statusColor } from '../common/format';
 import { describeError } from '../consumer/components/ErrorNotice';
+import { StatusBadge } from '../consumer/components/StatusBadge';
 
 const List = styled.ul`
     list-style: none;
@@ -65,7 +66,7 @@ export function DatasetHealthBadge({ datasetUrn, health: provided, onClick }: Da
                     <li key={monitor.id}>
                         <span>{monitor.name}</span>
                         <span>
-                            <Tag color={statusColor(ev?.status)}>{ev?.status ?? 'PENDING'}</Tag>
+                            <StatusBadge state={ev?.status ?? 'PENDING'} />
                             <small>{formatRelative(ev?.ts)}</small>
                         </span>
                     </li>

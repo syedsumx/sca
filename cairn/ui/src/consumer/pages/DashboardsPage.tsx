@@ -14,8 +14,7 @@ import { HelpButton } from '../guide/PageHeader';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
-
-const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
+import { StatusBadge } from '../components/StatusBadge';
 
 /** One control: a list of values to pick from, a range, a date range or text. */
 function Control({ board, control, value, onChange }: {
@@ -583,10 +582,10 @@ export function Alerts({ saved }: { saved: SavedQuery[] }) {
                     {
                         title: 'State',
                         render: (_, a) => (
-                            <Tag color={STATE[a.state]} title={a.last_error ?? ''}>
-                                {a.state}
-                                {a.last_value !== null ? ` (${a.last_value})` : ''}
-                            </Tag>
+                            <span title={a.last_error ?? ''}>
+                                <StatusBadge state={a.state} />
+                                {a.last_value !== null ? <Muted>{` (${a.last_value})`}</Muted> : ''}
+                            </span>
                         ),
                     },
                     {

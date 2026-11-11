@@ -6,6 +6,7 @@ import type { QueryProfile, QueryRecord } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice } from '../components/ErrorNotice';
+import { StatusBadge } from '../components/StatusBadge';
 
 export const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`);
 
@@ -19,8 +20,6 @@ export function bytes(n: number): string {
     }
     return `${v.toFixed(i ? 1 : 0)} ${units[i]}`;
 }
-
-const STATE_COLOR: Record<string, string> = { FINISHED: 'green', FAILED: 'red', RUNNING: 'blue', QUEUED: 'gold' };
 
 /** One query: its statistics, the tables it read, its SQL and why it was slow. */
 function Profile({ id }: { id: string }) {
@@ -41,7 +40,7 @@ function Profile({ id }: { id: string }) {
             )}
             <Descriptions size="small" column={2} bordered>
                 <Descriptions.Item label="State">
-                    <Tag color={STATE_COLOR[p.state]}>{p.state}</Tag>
+                    <StatusBadge state={p.state} />
                 </Descriptions.Item>
                 <Descriptions.Item label="By">{p.user}</Descriptions.Item>
                 <Descriptions.Item label="Elapsed">{seconds(p.wall_ms)}</Descriptions.Item>
@@ -130,7 +129,7 @@ export function QueryInsightPage() {
                             title: 'State',
                             dataIndex: 'state',
                             width: 100,
-                            render: (s: string) => <Tag color={STATE_COLOR[s]}>{s}</Tag>,
+                            render: (s: string) => <StatusBadge state={s} />,
                         },
                         { title: 'User', dataIndex: 'user', width: 140 },
                         {

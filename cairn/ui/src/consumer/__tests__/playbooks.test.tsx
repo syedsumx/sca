@@ -65,6 +65,6 @@ it('turns a playbook on, tries it on an asset and shows each step', async () => 
     fireEvent.change(screen.getByLabelText('Try Incident triage on'), { target: { value: DS } });
     fireEvent.click(screen.getByRole('button', { name: 'Run now' }));
     expect(await screen.findByText('raw.orders (row count dropped 41%)')).toBeTruthy();
-    expect(screen.getAllByText('skipped').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Skipped').length).toBeGreaterThan(0);
     expect(calls.find((c) => c.path.endsWith('/run'))?.body).toEqual({ urn: DS });
 });

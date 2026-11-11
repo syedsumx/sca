@@ -16,7 +16,8 @@ import { Alerts as SqlAlerts } from '../pages/DashboardsPage';
 import { AlertsTab, IncidentDrawer, SEVERITY_COLOR, useSearchParam } from '../pages/ObservabilityPage';
 import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
 import { PipelinesTab } from './PipelinesObs';
-import { StatusBadge, StatusTone } from './StatusBadge';
+import { StatusBadge, StatusTone, useStatusLabel } from './StatusBadge';
+import { When } from '../utils/time';
 import { Muted, Surface } from './tokens';
 import { shortUrn } from '../utils/format';
 import { isNotConnected } from '../utils/errors';
@@ -157,8 +158,8 @@ export async function loadRuns(c: ConsumerClient, signal?: AbortSignal): Promise
     return out;
 }
 
-const STATE_TONE: Record<RunState, StatusTone> = { succeeded: 'ok', failed: 'error', running: 'waiting', other: 'warn' };
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const STATE_TONE: Record<RunState, StatusTone> = { succeeded: 'ok', failed: 'error', running: 'running', other: 'warn' };
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const took = (a: number | null, b: number | null) => (a && b && b >= a ? `${((b - a) / 1000).toFixed(1)}s` : '');
 
 function Problems({ problems }: { problems: Problem[] }) {
@@ -186,6 +187,7 @@ export function AllRuns() {
     const [source, setSource] = useState<RunSource | ''>('');
     const [state, setState] = useState<RunState | ''>('');
     const rows = (q.data?.rows ?? []).filter((r) => (!source || r.source === source) && (!state || r.state === state));
+    const words = useStatusLabel();
     return (
         <section aria-label="All runs">
             <Muted style={{ display: 'block', marginBottom: 12 }}>
@@ -198,7 +200,7 @@ export function AllRuns() {
                     options={(Object.keys(RUN_SOURCE_LABEL) as RunSource[]).map((k) => ({ value: k, label: RUN_SOURCE_LABEL[k] }))} />
                 <Select aria-label="Result" allowClear placeholder="Any result" style={{ minWidth: 160 }} value={state || undefined}
                     onChange={(v) => setState((v ?? '') as RunState | '')}
-                    options={['succeeded', 'failed', 'running', 'other'].map((v) => ({ value: v, label: v }))} />
+                    options={(['succeeded', 'failed', 'running', 'other'] as const).map((v) => ({ value: v, label: words(v) }))} />
                 <Button onClick={() => q.refresh()} loading={q.loading}>Refresh</Button>
             </Space>
             {q.error && <ErrorNotice error={q.error} />}
@@ -209,7 +211,7 @@ export function AllRuns() {
                 columns={[
                     { title: 'Kind', dataIndex: 'source', render: (s: RunSource) => <Tag>{RUN_SOURCE_LABEL[s]}</Tag> },
                     { title: 'What', dataIndex: 'name', render: (n: string, r) => <Link to={r.link}>{n}</Link> },
-                    { title: 'Result', dataIndex: 'state', render: (s: RunState, r) => <StatusBadge tone={STATE_TONE[s]} label={r.raw || s} plain /> },
+                    { title: 'Result', dataIndex: 'state', render: (s: RunState, r) => <StatusBadge state={s} tone={STATE_TONE[s]} title={r.raw || undefined} plain /> },
                     { title: 'Started', dataIndex: 'started_ms', render: when },
                     { title: 'Took', render: (_, r) => took(r.started_ms, r.finished_ms) },
                     { title: 'Why', dataIndex: 'trigger', render: (v?: string | null) => v ?? '' },
@@ -345,7 +347,7 @@ export function AllIncidents() {
                     { title: 'Incident', dataIndex: 'title', render: (v: string, r) => (r.id
                         ? <Button type="link" size="small" style={{ padding: 0 }} aria-label={`Open ${v}`} onClick={() => setIncident(r.id!)}>{v}</Button>
                         : r.link ? <Link to={r.link}>{v}</Link> : v) },
-                    { title: 'Status', dataIndex: 'status', render: (v: string) => <Tag>{v}</Tag> },
+                    { title: 'Status', dataIndex: 'status', render: (v: string) => <StatusBadge state={v} plain /> },
                     { title: 'About', dataIndex: 'about' },
                     { title: 'Since', dataIndex: 'at_ms', render: when },
                 ]} />

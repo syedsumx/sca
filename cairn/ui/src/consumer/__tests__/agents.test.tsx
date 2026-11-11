@@ -80,7 +80,7 @@ describe('Collectors (formerly remote agents) in Ingestion', () => {
         fireEvent.click(within(row).getByRole('button', { name: 'Cancel' }));
         fireEvent.click(await screen.findByRole('button', { name: 'OK' }));
         await waitFor(() => expect(calls.some((c) => c.method === 'POST' && c.path === '/agents/tasks/task_1/cancel')).toBe(true));
-        await waitFor(() => expect(within(row).getByText('CANCELLED')).toBeTruthy());
+        await waitFor(() => expect(within(row).getByText('Cancelled')).toBeTruthy());
         expect(within(row).queryByRole('button', { name: 'Cancel' })).toBeNull();
         fireEvent.click(within(row).getByRole('button', { name: 'Logs' }));
         expect((await screen.findByLabelText('Run log')).textContent).toContain('started');
@@ -112,6 +112,6 @@ describe('RunLogs', () => {
         expect(afters).toEqual(['0', '2', '3']);
         await new Promise((r) => setTimeout(r, 30));
         expect(afters).toHaveLength(3);                       // done: no more polling
-        expect(screen.getByText('SUCCESS')).toBeTruthy();
+        expect(screen.getByText('Succeeded')).toBeTruthy();
     });
 });

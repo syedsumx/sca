@@ -18,6 +18,7 @@ import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
 import { SqlWorkflowsPage } from './SqlWorkflowsPage';
 import { pageHelp } from '../guide/help';
+import { StatusBadge } from '../components/StatusBadge';
 
 const THEME_KEY = 'cairn.flows.theme';
 
@@ -224,7 +225,7 @@ export function FlowsPage() {
                                                 <div className="fl-muted">{f.description || `${f.steps} steps`}{f.draft_errors ? ` · draft has ${f.draft_errors} problem(s)` : ''}</div>
                                             </td>
                                             <td>{f.published_version ? `v${f.published_version}` : 'draft'}{!f.enabled ? ' (off)' : ''}</td>
-                                            <td>{f.last_run ? <span className={`fl-badge ${f.last_run.status}`}>{f.last_run.status}</span> : <span className="fl-muted">{'—'}</span>}</td>
+                                            <td>{f.last_run ? <StatusBadge state={f.last_run.status} /> : <span className="fl-muted">{'—'}</span>}</td>
                                             <td>{f.next_run_ms ? new Date(f.next_run_ms).toLocaleString() : <span className="fl-muted">{'—'}</span>}</td>
                                             <td>{f.owner.split(':').pop()}</td>
                                             <td>{f.role}</td>

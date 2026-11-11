@@ -7,6 +7,7 @@ import { useDheQuery } from '../api/hooks';
 import type { AIDatasetRead, AIReader } from '../api/types';
 import { assetPath } from './Assets';
 import { Muted } from './tokens';
+import { StatusBadge } from './StatusBadge';
 
 const when = (ms: number) => new Date(ms).toLocaleString();
 const CHANNEL = { mcp: 'MCP', assistant: 'Assistant', api: 'API key' } as const;
@@ -51,9 +52,7 @@ export function UsedByAi({ urn }: { urn: string }) {
                                 <span>
                                     {r.ai_system.name ?? r.ai_system.id}{' '}
                                     {r.ai_system.state && (
-                                        <Tag color={r.ai_system.state === 'APPROVED' ? 'green' : 'orange'}>
-                                            {r.ai_system.state.toLowerCase().replace('_', ' ')}
-                                        </Tag>
+                                        <StatusBadge state={r.ai_system.state.toLowerCase()} plain />
                                     )}
                                 </span>
                             ) : (
