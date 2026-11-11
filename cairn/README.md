@@ -1,8 +1,10 @@
 # Cairn
 
 Cairn is a self-hosted active-metadata and data-governance platform. **Cairn Core** is its metadata
-system of record (typed metadata graph, search, lineage, catalog UI and APIs); the Cairn control plane
-adds these modules on top:
+system of record (typed metadata graph, search, lineage, catalog UI and APIs): data assets, the catalog,
+glossary, domains, data products and contracts all live there, and every other capability revolves around
+it, feeding the graph, acting on it, or running work that registers back into it (see *Cairn Core at the
+centre* in [ROADMAP.md](ROADMAP.md)). The Cairn control plane adds these modules on top:
 
 | Module | What you get |
 |---|---|

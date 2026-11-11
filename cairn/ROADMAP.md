@@ -1,6 +1,6 @@
 # Cairn Roadmap
 
-**Goal.** Cairn is the one data platform an enterprise runs, the way teams use Snowflake or Databricks. It covers storage, tables, SQL, transformation, orchestration, Python and Spark, governance, discovery, quality and AI. It is built from open-source engines and runs in the customer's own network. Every engine signs in as a Cairn identity and is governed by the same Cairn policy.
+**Goal.** Cairn is an active-metadata and governance platform built on **Cairn Core**, its metadata graph: data assets, the catalog, lineage, glossary, domains, data products and contracts. Every other capability revolves around Core: it feeds the graph (ingestion, lineage from every engine and pipeline), acts on it (policies, access, quality, automations) or runs work that registers back into it (the lakehouse, engines, flows, managed Airflow and Postgres, BI, ML and agents). Together they cover what teams otherwise buy from a catalog vendor, Snowflake or Databricks and an orchestrator, built from open-source engines and run in the customer's own network. Every engine signs in as a Cairn identity and is governed by the same Cairn policy.
 
 Principles every item is held to:
 
@@ -10,6 +10,18 @@ Principles every item is held to:
 - **Tested for real.** Each capability has end-to-end tests against the real binaries and the images as shipped, run in CI.
 
 Status: ✅ shipped and tested end to end in CI · 🟡 shipped, partly validated · ⬜ planned.
+
+## Cairn Core at the centre
+
+Every capability belongs to one of four rings around Cairn Core. A new capability must say which ring it is in and how it uses the graph: what it reads, what it writes back (entities, owners, lineage, quality, usage) and which policies decide for it.
+
+| Ring | What it does with the graph | Capabilities |
+|---|---|---|
+| **Core** | Is the graph | Data assets and the catalog, search, lineage (table and column), glossary, domains, data products, data contracts, ownership, documentation, the marketplace and access requests |
+| **Govern** | Decides on the graph | The policy decision point (ABAC, personas, purposes, masking, row filters, authoritative mode), people and roles, classification and propagation, certification, access reviews, residency, tokenisation, audit |
+| **Activate** | Keeps the graph alive and useful | Ingestion connectors and in-VPC agents, data quality and monitors, automations, observability and pipeline observability, the SRE agent, AI context (assistant, MCP, ontology, semantic search), Slack, Teams and embeds |
+| **Extend** | Runs work that registers back into the graph | Cairn Store and Cairn Catalog (lakehouse), Trino, Spark, dbt, SQL and BI, flows and managed Airflow, managed Postgres, ML and agents, everything as code, CLI, Desktop and SDKs |
+
 
 ## The platform today
 

@@ -9,6 +9,12 @@ data quality, governance (ABAC + RBAC, PII, certification), in-VPC remote ingest
 context and discovery. The consumer workspace, marketplace, personas and purposes, context agents,
 notifications and embeds are specified in [UX_ACTIVE_METADATA_SPEC.md](UX_ACTIVE_METADATA_SPEC.md).
 
+Everything else in Cairn, from the lakehouse and engines to flows, managed Airflow and Postgres, BI, ML and
+agents, is arranged around Cairn Core in four rings: **Core** (the graph: assets, catalog, lineage, glossary,
+domains, data products, contracts), **Govern** (decisions on the graph), **Activate** (connectors, quality,
+observability, AI context) and **Extend** (runtimes whose objects and runs are registered back into the graph).
+The rule for new work: say how it reads, writes and is governed by the graph.
+
 Every control-plane component talks to Cairn Core through its public contracts: typed aspects,
 the REST/OpenAPI/GraphQL APIs, the metadata change-log topics, the authorizer plugin interface and
 the ingestion sink interface. Maintainer notes on Cairn Core internals live in `core/`.
