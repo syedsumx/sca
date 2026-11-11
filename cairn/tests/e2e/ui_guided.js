@@ -33,7 +33,7 @@ const { chromium } = require('playwright');
       await notNow.waitFor({ state: 'hidden', timeout: 15000 });
     }
     await page.keyboard.press('Control+k');
-    const box = page.getByRole('combobox', { name: 'Type a page, an action or a dataset…' });
+    const box = page.getByRole('combobox', { name: 'Search data or jump to a page' });   // the header's one search (L150)
     await box.waitFor({ timeout: 30000 });
     await box.fill(DS_NAME);
     // The catalog's result (its detail says "dataset · <platform>"), not "Ask: …" or a page.

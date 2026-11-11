@@ -202,7 +202,10 @@ export function HeaderSearch({ nav }: { nav: PaletteNavEntry[] }) {
                         setOpen(true);
                         setLoaded(true);
                     }}
-                    onBlur={() => setTimeout(() => setOpen(false), 150)}
+                    // Closes after a click on an entry has been handled, unless the box has the focus again by then.
+                    onBlur={() => setTimeout(() => {
+                        if (document.activeElement !== input.current) setOpen(false);
+                    }, 150)}
                     onKeyDown={(e) => {
                         if (e.key === 'Escape') {
                             e.preventDefault();

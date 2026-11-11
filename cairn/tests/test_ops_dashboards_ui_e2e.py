@@ -197,9 +197,8 @@ def test_an_operator_builds_an_ops_dashboard_in_the_browser(cairn):
         page.on("pageerror", lambda e: errors.append(str(e)))
         try:
             # ---- from the command palette ------------------------------------------------------------------------
-            page.keyboard.press("Control+k")
-            palette = page.get_by_role("dialog").last
-            palette.get_by_role("combobox").fill("New ops dashboard")
+            page.keyboard.press("Control+k")       # the header's one search (L150) finds the command
+            page.get_by_role("combobox", name="Search data or jump to a page").fill("New ops dashboard")
             page.get_by_role("option", name=re.compile("New ops dashboard")).first.click()
             editor = page.get_by_role("dialog", name="New ops dashboard")
             expect(editor).to_be_visible(timeout=20_000)

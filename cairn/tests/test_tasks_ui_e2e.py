@@ -223,14 +223,23 @@ class Person:
     def nav(self):
         return self.page.get_by_role("navigation", name="Workspace sections")
 
+    def open_group(self, name: str):
+        """Opens a sidebar group (L150: groups outside the person's role and the current page start closed)."""
+        group = self.nav().get_by_role("button", name=name, exact=True)
+        self.expect(group).to_be_visible(timeout=20_000)
+        if group.get_attribute("aria-expanded") != "true":
+            group.click()
+        self.expect(group).to_have_attribute("aria-expanded", "true")
+
     def palette(self, typed: str, option: str | re.Pattern, keyboard: bool = True):
-        """⌘K, type, then the option: with the arrow keys and Enter, or a click."""
+        """⌘K focuses the header's one search (L150), type, then the option: with the arrow keys and Enter, or a click."""
         page = self.page
         page.keyboard.press("Control+k")
-        box = page.get_by_role("combobox", name="Type a page, an action or a dataset…")
+        box = page.get_by_role("combobox", name="Search data or jump to a page")
         self.expect(box).to_be_focused(timeout=10_000)
         box.fill(typed)
-        listbox = page.get_by_role("listbox", name="Command palette")
+        listbox = page.get_by_role("listbox", name="Search results")
+        self.expect(box).to_have_attribute("aria-activedescendant", re.compile(r"\S"))    # the first entry is highlighted
         target = listbox.get_by_role("option", name=option).first
         self.expect(target).to_be_visible(timeout=15_000)
         if not keyboard:
@@ -244,7 +253,8 @@ class Person:
             box.press("ArrowDown")
         assert box.get_attribute("aria-activedescendant") == want
         box.press("Enter")
-        self.expect(box).to_be_hidden()
+        self.expect(listbox).to_be_hidden()                 # the list closes; the box stays in the header
+        self.expect(box).to_have_attribute("aria-expanded", "false")
 
     def dialog(self):
         d = self.page.get_by_role("dialog").last
@@ -364,7 +374,7 @@ def test_the_common_tasks_end_to_end(workspace):
             d.get_by_role("button", name="Publish").click()
             expect(page.get_by_text("Published version 1")).to_be_visible(timeout=20_000)
             page.get_by_role("button", name="Run", exact=True).click()
-            expect(page.locator(".fl-badge.succeeded").first).to_be_visible(timeout=60_000)
+            expect(page.locator('.cairn-status[data-state="succeeded"]').first).to_be_visible(timeout=60_000)   # StatusBadge (L150)
             assert s.flows.runs(ANA, "hello-team")[0]["status"] == "succeeded"
 
             # ---- 8. A notification route (the form the palette opens) ----------------------------------------------
@@ -447,7 +457,8 @@ def test_the_common_tasks_end_to_end(workspace):
             assert sum(g["calls"] for g in usage["groups"]) >= 1
 
             # ---- 15. Their profile's language -------------------------------------------------------------------------
-            page.get_by_role("link", name=re.compile("^Your profile")).click()       # in the top bar (L149)
+            page.get_by_role("button", name="Your profile and settings").click()     # the avatar's menu (L150)
+            page.get_by_role("menuitem", name="Your profile").click()
             page.get_by_role("main").get_by_role("combobox", name="Language").click()     # the profile's, not this browser's
             page.locator(".ant-select-dropdown:visible .ant-select-item-option", has_text="Deutsch").first.click()
             page.get_by_role("button", name="Save").last.click()
@@ -492,13 +503,16 @@ def test_the_palette_finds_pages_and_actions_and_the_sidebar_fits_the_person(wor
             page.keyboard.press("Escape")
             # Bob can't administer Cairn: those areas are not offered (the API refuses them anyway).
             nav = bob.nav()
-            expect(nav.get_by_role("link", name="SQL").first).to_be_visible()
+            expect(nav.get_by_role("link", name="SQL").first).to_be_visible()      # the current page's group is open
+            bob.open_group("Govern")                                                 # the rest is one click away
             expect(nav.get_by_role("link", name="Access policies")).to_have_count(0)
             nav.get_by_role("link", name="Usage & cost").click()
             expect(page.get_by_role("tab", name="Your usage")).to_be_visible(timeout=20_000)
             expect(page.get_by_role("tab", name="AI usage")).to_have_count(0)
             assert _api(url, BOB).get("/ai/usage").status_code == 403
             # Customise the sidebar: hide a page; it follows Bob (kept in his profile); Undo puts it back.
+            bob.open_group("Analyze")
+            expect(nav.get_by_role("link", name="Workbooks")).to_be_visible()
             page.get_by_role("button", name="Customise sidebar").click()
             d = page.get_by_role("dialog", name="Customise sidebar")
             d.get_by_role("button", name="Hide Workbooks").click()
@@ -538,10 +552,10 @@ def test_the_catalog_shells_compact_bar(workspace):
             expect(page.get_by_role("button", name="Collapse sidebar")).to_have_count(0)      # the shell has the sidebar
             for name in ("Home", "Search", "Data products", "Requests", "Settings"):
                 expect(bar.get_by_role("link", name=re.compile(rf"^{name}"))).to_be_visible()
-            # The top bar above it: the palette, search, ask and help.
-            expect(page.get_by_role("button", name="Search or jump to…")).to_be_visible()
-            expect(page.get_by_role("textbox", name="Search", exact=True)).to_be_visible()
-            expect(page.get_by_role("button", name="✨ Ask")).to_be_visible()
+            # The top bar above it: one search (data, pages and commands), ask and help.
+            expect(page.get_by_role("combobox", name="Search data or jump to a page")).to_be_visible()
+            expect(page.get_by_role("textbox", name="Search", exact=True)).to_have_count(0)
+            expect(page.get_by_role("button", name="Ask", exact=True)).to_be_visible()
             # Requests belongs to another shell entry: the shell's URL moves (the shell then mounts the entry there).
             bar.get_by_role("link", name=re.compile("^Requests")).click()
             expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/requests$"))
@@ -553,7 +567,7 @@ def test_the_catalog_shells_compact_bar(workspace):
             expect(page).to_have_url(re.compile(r"/mfe/cairn-requests#/lineage"))
             # The palette and the help, as everywhere.
             page.keyboard.press("Control+k")
-            expect(page.get_by_role("combobox", name="Type a page, an action or a dataset…")).to_be_focused(timeout=10_000)
+            expect(page.get_by_role("combobox", name="Search data or jump to a page")).to_be_focused(timeout=10_000)
             page.keyboard.press("Escape")
             page.goto(f"{url}/mfe/cairn-settings", wait_until="domcontentloaded")
             header = page.locator("[data-page-header]")

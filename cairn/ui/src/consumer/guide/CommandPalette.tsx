@@ -250,8 +250,12 @@ export const SearchPanel = React.forwardRef<SearchPanelHandle, SearchPanelProps>
     const found = activeId === null ? -1 : results.findIndex((r) => r.id === activeId);
     // The first entry is highlighted until the person moves (Enter opens it), as a combobox's list does.
     const active = results.length ? Math.max(0, found) : -1;
-    const setActive = (i: number) => setActiveId(results[i]?.id ?? null);
     const optionId = (i: number) => `cairn-search-option-${i}`;
+    // The box's aria-activedescendant moves in the same update as the highlight (a key press is answered at once).
+    const setActive = (i: number) => {
+        setActiveId(results[i]?.id ?? null);
+        onActive(results[i] ? optionId(i) : undefined);
+    };
     useEffect(() => onActive(active >= 0 ? optionId(active) : undefined), [active, onActive]);
     useEffect(() => onCount(results.length), [results.length, onCount]);
 
@@ -300,9 +304,11 @@ export const SearchPanel = React.forwardRef<SearchPanelHandle, SearchPanelProps>
             <div style={SR_ONLY} aria-live="polite">{t('palette.results', { n: results.length })}</div>
             {results.length > 0 && (
                 <List id={SEARCH_LIST_ID} role="listbox" aria-label={t('search.results')}>
-                    {results.map((item, i) => (
+                    {/* The pointer highlights an entry only when it moves: a list opening (or scrolling) under a resting
+                    pointer must not steal the keyboard's highlight. */}
+                {results.map((item, i) => (
                         <li key={item.id} id={optionId(i)} role="option" aria-selected={i === active} data-kind={item.kind}
-                            onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => void choose(item)}>
+                            onMouseMove={() => i !== active && setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => void choose(item)}>
                             <span className="label">
                                 {item.label}
                                 {item.detail && <span className="detail">{item.detail}</span>}

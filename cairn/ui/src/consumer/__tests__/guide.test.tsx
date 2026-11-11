@@ -377,7 +377,7 @@ describe('the guided workspace', () => {
         expect(box.getAttribute('aria-expanded')).toBe('false');
         // An action: a form in a hub, opened from the search.
         const box2 = screen.getByRole('combobox', { name: 'Search data or jump to a page' });
-        fireEvent.focus(box2);
+        act(() => box2.focus());
         fireEvent.change(box2, { target: { value: 'create scope' } });
         const first = await screen.findByRole('option', { name: /Create scope/ });
         fireEvent.keyDown(box2, { key: 'ArrowDown' });
@@ -387,7 +387,7 @@ describe('the guided workspace', () => {
         await waitFor(() => expect(nav.where()).toBe('/security?tab=secret-scopes&action=Create%20scope'));
         // "Search all data" opens the catalog's results; the last entry hands the text to the assistant.
         const box3 = screen.getByRole('combobox', { name: 'Search data or jump to a page' });
-        fireEvent.focus(box3);
+        act(() => box3.focus());
         fireEvent.change(box3, { target: { value: 'revenue by region last week' } });
         fireEvent.click(await screen.findByRole('option', { name: /Search all data for “revenue by region last week”/ }));
         await waitFor(() => expect(nav.where()).toBe('/catalog?q=revenue%20by%20region%20last%20week'));

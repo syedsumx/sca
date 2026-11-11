@@ -321,7 +321,7 @@ def test_a_workbook_is_built_in_the_browser_and_runs_as_the_viewer(cairn):
             page.get_by_role("button", name="Save", exact=True).click()
             page.get_by_label("Workbook name").fill("Revenue by region")
             page.get_by_role("dialog").get_by_role("button", name="Save").click()
-            page.get_by_role("button", name="Revenue by region").wait_for(timeout=15_000)
+            page.get_by_role("button", name="Revenue by region", exact=True).wait_for(timeout=15_000)   # its row also has a menu (L150)
             assert errors == [], errors
         finally:
             browser.close()
