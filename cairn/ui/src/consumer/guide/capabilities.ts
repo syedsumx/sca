@@ -28,6 +28,17 @@ export const TAB_REQUIRES: Record<string, string[]> = {
     maintenance: ['MANAGE_SYSTEM_OPERATIONS'],
     'maintenance-runs': ['MANAGE_SYSTEM_OPERATIONS'],
     'notification-routes': ['MANAGE_GLOBAL_SETTINGS'],
+    // Moved out of Observability (L149): its page needed MANAGE_SYSTEM_OPERATIONS; pipelines also open to VIEW_OPERATIONS.
+    'platform-rules': ['MANAGE_SYSTEM_OPERATIONS'],
+    pipelines: ['MANAGE_SYSTEM_OPERATIONS', 'VIEW_OPERATIONS'],
+    audit: ['MANAGE_POLICIES'],
+    publications: ['MANAGE_GLOBAL_SETTINGS'],
+    // Moved out of the Governance studio (MANAGE_POLICIES).
+    automations: ['MANAGE_POLICIES'],
+    playbooks: ['MANAGE_POLICIES'],
+    'tag-sync': ['MANAGE_POLICIES'],
+    forms: ['MANAGE_POLICIES'],
+    'ai-systems': ['MANAGE_POLICIES'],
 };
 
 /** Purpose-built pages that are for Cairn's operators only. */

@@ -1,45 +1,96 @@
 import type { Hub } from './types';
 
-/** The platform hub pages (kept apart from the area specs so the route table stays small). */
+/**
+ * The platform hub pages (kept apart from the area specs so the route table stays small). Since L149 each concept has
+ * one home: no tab appears in two hubs (a test checks it), and a tab is either an area of `catalog.ts` or a
+ * purpose-built view of `customTabs.tsx`.
+ */
 export const HUBS: Hub[] = [
+    {
+        "route": "/semantics",
+        "title": "Semantics",
+        "icon": "layers",
+        "description": "What the data means: governed metrics, the ontology Cairn Ontology compiles, the review queue of everything proposed about meaning, and where definitions are imported from.",
+        "tabs": ["metrics", "ontology", "review", "imports"]
+    },
+    {
+        "route": "/automation",
+        "title": "Automation",
+        "icon": "repeat",
+        "description": "Rules that act when something happens in the catalog: automations, agent playbooks, warehouse tag sync and compliance forms.",
+        "tabs": ["automations", "playbooks", "tag-sync", "forms"]
+    },
+    {
+        "route": "/security",
+        "title": "Security & compliance",
+        "icon": "lock",
+        "description": "Security posture, passkeys, secret scopes, SIEM export, API limits, the AI systems register and the audit log.",
+        "tabs": ["posture", "passkeys", "secret-scopes", "siem", "limits", "ai-systems", "audit"]
+    },
+    {
+        "route": "/sharing",
+        "title": "External sharing",
+        "icon": "share",
+        "description": "Data shared outside the organisation: Cairn-hosted shares (Iceberg REST and Delta Sharing), data packages, clean rooms and how shares are used. A product's own publications to Snowflake and Databricks are on its Distribution tab.",
+        "tabs": ["shares", "publications", "share-packages", "clean-rooms", "share-usage"]
+    },
+    {
+        "route": "/usage",
+        "title": "Usage & cost",
+        "icon": "coin",
+        "description": "What the platform costs and who uses it: tables, Spark and Trino cost, AI usage, budgets and monthly chargeback.",
+        "tabs": ["compute-cost", "my-ai-usage", "ai-usage", "budgets", "chargeback", "chargeback-cost-centres"]
+    },
     {
         "route": "/quality",
         "title": "Data quality",
         "icon": "shield",
-        "description": "Whether the catalog's data can be trusted: quality monitors on datasets (freshness, volume, field metrics, schema, SQL), the data contracts producers publish, and data products' service level objectives.",
-        "tabs": [
-            "quality-monitors",
-            "contracts",
-            "slos"
-        ]
+        "description": "Whether the catalog's data can be trusted: quality monitors on datasets, the data contracts producers publish, data products' service levels and drift monitors on served models.",
+        "tabs": ["quality-monitors", "contracts", "slos", "model-monitors"]
     },
     {
-        "route": "/semantic",
-        "title": "Semantic models",
-        "icon": "cube",
-        "description": "Governed metric layers drafted from your tables and query history, reviewed before they go live, and the ontology Cairn Ontology compiles from them: business terms, relationships, metrics and proposals.",
-        "tabs": [
-            "semantic-models",
-            "ontology-terms",
-            "ontology-relationships",
-            "ontology-graph",
-            "ontology-proposals",
-            "ontology-runs"
-        ]
+        "route": "/runs",
+        "title": "Runs",
+        "icon": "play",
+        "description": "Every run of every orchestrator in one list (flows, SQL workflows, jobs, dbt, derived tables, pipes, Airflow), each pipeline's health and SLAs, and dbt runs.",
+        "tabs": ["all-runs", "pipelines", "dbt"]
+    },
+    {
+        "route": "/incidents",
+        "title": "Incidents",
+        "icon": "bell",
+        "description": "Data quality, platform and status page incidents in one list, each labelled with its source; platform incidents open with the SRE agent.",
+        "tabs": ["all-incidents"]
+    },
+    {
+        "route": "/alerts",
+        "title": "Alerts & routing",
+        "icon": "bell",
+        "description": "Every kind of alert (on saved queries, metrics, platform telemetry and budgets), silences, where notifications go and the public status page's announcements.",
+        "tabs": ["all-alerts", "sql-alerts", "metric-alerts", "platform-rules", "notification-routes", "status-announcements"]
+    },
+    {
+        "route": "/sql",
+        "title": "SQL",
+        "icon": "code",
+        "description": "Write and run SQL as yourself, your saved queries, the history of what ran with tuning hints, stored procedures and git folders.",
+        "tabs": ["editor", "saved-queries", "insight", "procedures", "git"]
     },
     {
         "route": "/ingestion",
         "title": "Ingestion",
         "icon": "download",
-        "description": "Everything that brings data into the lakehouse: database mirrors, document sources, SaaS and reverse syncs, file pipes, parsed documents and streams.",
+        "description": "Everything that brings metadata and data in: metadata sources and the collectors that run them in other networks, database mirrors (Cairn replicates a database for you), SaaS syncs, files and documents, streams (you already publish change events to Kafka), reverse syncs and samples.",
         "tabs": [
+            "sources",
+            "collectors",
             "mirrors",
-            "document-sources",
             "saas-syncs",
-            "reverse-syncs",
-            "pipes",
+            "document-sources",
             "parsed-documents",
+            "pipes",
             "streams",
+            "reverse-syncs",
             "samples"
         ]
     },
@@ -47,50 +98,50 @@ export const HUBS: Hub[] = [
         "route": "/lakehouse",
         "title": "Lakehouse",
         "icon": "database",
-        "description": "Tables kept by Cairn: derived tables and materialized views, Parquet registered in place, tables on your own storage (external locations and storage credentials), vector indexes, volumes, storage buckets, maintenance, stored procedures and quality monitors.",
+        "description": "Tables kept by Cairn: derived tables and materialized views, the medallion, Parquet registered in place, external catalogs, locations and storage credentials, volumes, storage buckets, vector indexes, maintenance and synthetic data.",
         "tabs": [
             "derived",
+            "medallion",
+            "parquet-tables",
             "external-catalogs",
             "external-locations",
             "storage-credentials",
-            "medallion",
-            "parquet-tables",
-            "vectors",
             "volumes",
             "storage",
+            "vectors",
             "maintenance",
             "maintenance-runs",
-            "procedures",
-            "quality-monitors"
+            "synthetic"
         ]
     },
     {
         "route": "/compute",
-        "title": "Compute & jobs",
+        "title": "Compute",
         "icon": "server",
-        "description": "Where work runs: SQL warehouses that start on demand, saved queries, Postgres databases and branches, managed Postgres instances (backups, point-in-time restore, failover), managed Airflow deployments, serving tables for lookups by key, scheduled jobs, data apps and Spark applications.",
+        "description": "Where work runs: SQL warehouses that start on demand, Spark, managed Postgres instances and their databases, serving tables for lookups by key, data apps and app packages, and data planes with their network rules.",
         "tabs": [
             "warehouses",
-            "saved-queries",
-            "databases",
+            "spark-history",
             "postgres-instances",
-            "airflow-deployments",
+            "databases",
             "serving-tables",
-            "jobs",
             "apps",
-            "spark-history"
+            "app-installs",
+            "dataplanes",
+            "workspace-compute",
+            "egress-rules"
         ]
     },
     {
         "route": "/agents",
         "title": "Agents",
         "icon": "bot",
-        "description": "Agents that work for people in Cairn, each with its own identity and scopes: code-first agent apps, custom agents, scheduled tasks and their outbox, what their traces say, intent denials, abuse findings, what they remember about you, the pipeline agent and the AI steward.",
+        "description": "AI agents that work for people in Cairn, each with its own identity and scopes: agent apps, custom agents, identities, sandboxes, scheduled tasks and their outbox, what their traces say, intent denials, abuse findings, memories and the pipeline agent.",
         "tabs": [
             "agent-apps",
             "custom-agents",
+            "agents",
             "sandbox-runs",
-            "agent-listings",
             "scheduled-tasks",
             "outbox",
             "agent-insights",
@@ -98,10 +149,7 @@ export const HUBS: Hub[] = [
             "agent-intent-denials",
             "agent-abuse-findings",
             "agent-memories",
-            "pipeline-agent",
-            "ai-steward",
-            "agents",
-            "remote-agents"
+            "pipeline-agent"
         ]
     },
     {
@@ -117,53 +165,22 @@ export const HUBS: Hub[] = [
         ]
     },
     {
-        "route": "/trust",
-        "title": "Trust & security",
-        "icon": "lock",
-        "description": "Controls that keep data safe and auditable: access reviews, data residency, tokenisation, security posture, consent, data contracts, passkeys, secrets, network egress for user code, data planes, SIEM export, where notifications go, and limits.",
-        "tabs": [
-            "access-reviews",
-            "residency",
-            "posture",
-            "tokens",
-            "consent",
-            "contracts",
-            "passkeys",
-            "secret-scopes",
-            "egress-rules",
-            "dataplanes",
-            "workspace-compute",
-            "siem",
-            "notification-routes",
-            "limits",
-            "workspaces"
-        ]
-    },
-    {
-        "route": "/sharing",
-        "title": "Sharing",
-        "icon": "share",
-        "description": "Data shared outside the platform and the promises made about it: Delta shares and data product service levels.",
-        "tabs": [
-            "shares",
-            "share-packages",
-            "share-usage",
-            "slos"
-        ]
-    },
-    {
-        "route": "/usage",
-        "title": "Cost & usage",
-        "icon": "coin",
-        "description": "What the platform costs and who uses it: AI usage and budgets, the models the AI gateway serves and its routes, and monthly chargeback.",
-        "tabs": [
-            "my-ai-usage",
-            "ai-usage",
-            "budgets",
-            "ai-gateway-models",
-            "gateway-routes",
-            "chargeback",
-            "chargeback-cost-centres"
-        ]
+        "route": "/ai/gateway",
+        "title": "AI gateway",
+        "icon": "sparkle",
+        "description": "The models the AI gateway serves and the routes that pick one for each request.",
+        "tabs": ["ai-gateway-models", "gateway-routes"]
     }
+];
+
+/**
+ * Areas shown as a tab of a purpose-built page rather than a hub (L149): the command palette offers them and their
+ * create forms like a hub's (`<route>?tab=<tab>&action=<label>`).
+ */
+export const PAGE_AREAS: { route: string; title: string; areas: { tab: string; spec: string }[] }[] = [
+    { route: '/flows', title: 'Flows', areas: [{ tab: 'jobs', spec: 'jobs' }, { tab: 'airflow', spec: 'airflow-deployments' }] },
+    { route: '/governance', title: 'Access policies', areas: [{ tab: 'consent', spec: 'consent' }, { tab: 'tokens', spec: 'tokens' },
+        { tab: 'residency', spec: 'residency' }] },
+    { route: '/people', title: 'People & roles', areas: [{ tab: 'access-reviews', spec: 'access-reviews' }] },
+    { route: '/dashboards', title: 'Dashboards', areas: [{ tab: 'exports', spec: 'scheduled-exports' }] },
 ];

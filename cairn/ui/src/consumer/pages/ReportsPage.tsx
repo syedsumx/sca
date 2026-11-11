@@ -260,6 +260,20 @@ function CostTable({ kind }: { kind: 'idle' | 'expensive' }) {
 }
 
 /** Is the catalog used, and is the estate getting governed? */
+/** What tables, Spark jobs and Trino cost (L149: their home is Govern › Usage & cost; the governance report links there). */
+export function CostReports() {
+    return (
+        <Tabs
+            items={[
+                { key: 'idle', label: 'Idle tables', children: <CostTable kind="idle" /> },
+                { key: 'expensive', label: 'Expensive per read', children: <CostTable kind="expensive" /> },
+                { key: 'jobs', label: 'Spark jobs', children: <JobCostTable /> },
+                { key: 'trino', label: 'Trino', children: <TrinoCostTable /> },
+            ]}
+        />
+    );
+}
+
 export function ReportsPage() {
     const { client, cache } = useConsumerApi();
     const q = useDheQuery<ReportSnapshot>('/reports', (c, signal) => c.report({ signal }));
@@ -283,7 +297,7 @@ export function ReportsPage() {
         <Page>
             <Space style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' }}>
                 <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Reports</h1><HelpButton /></div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Governance report</h1><HelpButton /></div>
                     {s && (
                         <Muted>
                             {s.assets.toLocaleString()} datasets · computed {new Date(s.computed_ms).toLocaleString()}
@@ -372,15 +386,9 @@ export function ReportsPage() {
                     </Grid>
                     <SectionTitle>Data product SLOs</SectionTitle>
                     <SloDashboard />
-                    <SectionTitle>Cost</SectionTitle>
-                    <Tabs
-                        items={[
-                            { key: 'idle', label: 'Idle tables', children: <CostTable kind="idle" /> },
-                            { key: 'expensive', label: 'Expensive per read', children: <CostTable kind="expensive" /> },
-                            { key: 'jobs', label: 'Spark jobs', children: <JobCostTable /> },
-                            { key: 'trino', label: 'Trino', children: <TrinoCostTable /> },
-                        ]}
-                    />
+                    <Muted style={{ display: 'block', marginTop: 16 }}>
+                        Table, Spark and Trino costs are in <Link to="/usage?tab=compute-cost">Usage &amp; cost</Link>.
+                    </Muted>
                     {s.governance.personas !== undefined && (
                         <>
                             <SectionTitle>Governance</SectionTitle>

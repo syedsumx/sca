@@ -1,12 +1,7 @@
 import { Alert, Button, Checkbox, Empty, Input, List, Popconfirm, Radio, Select, Space, Switch, Tabs, Tag, message } from 'antd';
-import { FormsAdmin } from '../components/Forms';
-import { TagSyncAdmin } from '../components/TagSync';
-import { AutomationsAdmin } from '../components/Automations';
-import { PlaybooksAdmin } from '../components/Playbooks';
-import { AISystemsAdmin } from '../components/AISystems';
 import { PrivacyAdmin } from '../components/Privacy';
-import { StewardReview } from '../components/Steward';
 import React, { useEffect, useState } from 'react';
+import { Link, useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
@@ -25,6 +20,8 @@ import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens
 import { actorName } from '../utils/format';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { errorStatus } from '../utils/errors';
+import { RESOURCE_SPECS } from '../resources/catalog';
+import { ResourceView } from '../resources/ResourceView';
 
 const Split = styled.div`
     display: grid;
@@ -412,8 +409,15 @@ function PurposeEditor({ purpose, bundles, personas, onSaved, onDeleted }: { pur
     );
 }
 
+const GOVERNANCE_TABS = ['personas', 'purposes', 'consent', 'tokens', 'residency', 'privacy'];
+
+/** Govern › Access policies (L149: the Governance studio, with consent, tokenisation and residency from Trust). */
 export function GovernanceStudioPage() {
     const { cache } = useConsumerApi();
+    const location = useLocation();
+    const history = useHistory();
+    const asked = new URLSearchParams(location.search).get('tab') ?? '';
+    const tab = GOVERNANCE_TABS.includes(asked) ? asked : 'personas';
     const personas = useDheQuery<Persona[]>('/governance/personas', (c, signal) => c.listPersonas({ signal }));
     const purposes = useDheQuery<Purpose[]>('/governance/purposes', (c, signal) => c.listPurposes({ signal }));
     const bundles = useDheQuery<PermissionBundles>('/governance/personas/permission-bundles', (c, signal) => c.permissionBundles({ signal }));
@@ -429,11 +433,17 @@ export function GovernanceStudioPage() {
     return (
         <Page>
             <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Persona & Purpose Studio
+                Access policies
             </SectionTitle>
-            <Muted>Personas grant what a role can do; purposes protect sensitive data. Both compile to access policies automatically.</Muted>
+            <Muted>
+                Personas grant what a role can do; purposes protect sensitive data; both compile to access policies. Consent
+                rules, tokenisation, residency and privacy shape what each person sees. Automations and compliance forms are
+                in <Link to="/automation">Automation</Link>, the AI systems register in <Link to="/security">Security &amp; compliance</Link>.
+            </Muted>
             <Tabs
                 style={{ marginTop: 12 }}
+                activeKey={tab}
+                onChange={(k) => history.replace({ pathname: location.pathname, search: `?tab=${k}` })}
                 items={[
                     {
                         key: 'personas',
@@ -481,13 +491,7 @@ export function GovernanceStudioPage() {
                             </Split>
                         ),
                     },
-                    { key: 'forms', label: 'Compliance forms', children: <FormsAdmin /> },
-                    { key: 'steward', label: 'AI steward', children: <StewardReview /> },
-                    { key: 'automations', label: 'Automations', children: <AutomationsAdmin /> },
-                    { key: 'playbooks', label: 'Playbooks', children: <PlaybooksAdmin /> },
-                    { key: 'tag-sync', label: 'Warehouse tags', children: <TagSyncAdmin /> },
-                    { key: 'ai-systems', label: 'AI systems', children: <AISystemsAdmin /> },
-                    { key: 'privacy', label: 'Privacy', children: <PrivacyAdmin /> },
+
                     {
                         key: 'purposes',
                         label: 'Purposes',
@@ -531,6 +535,10 @@ export function GovernanceStudioPage() {
                             </Split>
                         ),
                     },
+                    { key: 'consent', label: 'Consent rules', children: <ResourceView spec={RESOURCE_SPECS.consent} /> },
+                    { key: 'tokens', label: 'Tokenisation', children: <ResourceView spec={RESOURCE_SPECS.tokens} /> },
+                    { key: 'residency', label: 'Residency', children: <ResourceView spec={RESOURCE_SPECS.residency} /> },
+                    { key: 'privacy', label: 'Privacy & records', children: <PrivacyAdmin /> },
                 ]}
             />
         </Page>

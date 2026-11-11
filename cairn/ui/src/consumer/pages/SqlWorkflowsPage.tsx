@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DerivedTable, SavedQuery, SqlWorkflow, SqlWorkflowRun, SqlWorkflowStep } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 
 const OPS = ['>', '>=', '<', '<=', '==', '!='];
@@ -243,7 +243,7 @@ export function SqlWorkflowsPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>SQL workflows</h1><HelpButton /></div>
+            <TitleRow title="SQL workflows" />
             <Muted>
                 Refresh tables, check them and send reports, in order and on a schedule. Each runs as you, so your access applies; a
                 failed check stops what comes after and tells you.

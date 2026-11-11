@@ -5,7 +5,7 @@
 //   node scripts/build-help.mjs --check    fail when it is out of date (CI, and `npm test` checks it too)
 //
 // The sections wanted are the help topics of purpose-built pages (src/consumer/guide/help-topics.json) and the
-// `docs` anchor of every platform area (src/consumer/resources/catalog.ts). Fails when one names a page or a heading
+// `docs` anchor of every platform area (src/consumer/resources/catalog.ts) and purpose-built hub tab (customTabs.tsx). Fails when one names a page or a heading
 // the docs do not have.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -64,7 +64,10 @@ export function wantedAnchors(root) {
     const topics = JSON.parse(fs.readFileSync(path.join(root, 'src/consumer/guide/help-topics.json'), 'utf8'));
     const catalog = fs.readFileSync(path.join(root, 'src/consumer/resources/catalog.ts'), 'utf8');
     const fromCatalog = [...catalog.matchAll(/"docs": "([^"]+)"/g)].map((m) => m[1]);
-    return [...new Set([...Object.values(topics), ...fromCatalog])].sort();
+    // The hubs' purpose-built tabs (L149) name their docs section too.
+    const custom = fs.readFileSync(path.join(root, 'src/consumer/resources/customTabs.tsx'), 'utf8');
+    const fromCustom = [...custom.matchAll(/'([a-z-]+\.html#[a-z0-9-]+)'/g)].map((m) => m[1]);
+    return [...new Set([...Object.values(topics), ...fromCatalog, ...fromCustom])].sort();
 }
 
 export function buildHelp(docsDir, anchors) {

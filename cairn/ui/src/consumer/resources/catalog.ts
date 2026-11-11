@@ -2266,10 +2266,10 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     },
     "remote-agents": {
         "key": "remote-agents",
-        "title": "Remote ingestion agents",
+        "title": "Collectors",
         "path": "/agents",
         "listKey": null,
-        "description": "Ingestion agents installed in customer networks that enrolled with Cairn and pull metadata-ingestion tasks from a pool.",
+        "description": "Collectors (formerly remote ingestion agents): ingestion agents installed in customer networks that enrolled with Cairn and pull metadata-ingestion tasks from a pool.",
         "docs": "remote-agents.html#set-up-a-pool",
         "columns": [
             "hostname",
@@ -2650,10 +2650,10 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     "consent": {
         "key": "consent",
         "iac": {"kind": "consent_purposes", "id": "id"},
-        "title": "Consent purposes",
+        "title": "Consent rules",
         "path": "/governance/consent/purposes",
         "listKey": null,
-        "description": "Processing purposes (such as marketing) that need a data subject's consent; rows of people who withdrew (opt-out) or never granted (opt-in) are filtered out for the purpose's members.",
+        "description": "Consent rules (the API and IaC call them consent purposes; they are not access purposes): processing purposes (such as marketing) that need a data subject's consent; rows of people who withdrew (opt-out) or never granted (opt-in) are filtered out for the purpose's members.",
         "docs": "governance.html#consent",
         "columns": [
             "name",
@@ -3394,7 +3394,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
     "slos": {
         "key": "slos",
         "iac": {"kind": "slos", "id": "id"},
-        "title": "Service levels",
+        "title": "Data product service levels",
         "path": "/marketplace/slos",
         "listKey": null,
         "description": "Service level objectives for data products (percent of freshness, volume or quality checks that pass over a window), with the error budget left.",
@@ -3847,7 +3847,7 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
             "kind": "observability_slos",
             "id": "id"
         },
-        "title": "SLOs",
+        "title": "Platform SLOs",
         "path": "/v1/observability/slos",
         "listKey": "items",
         "description": "Service level objectives: the share of a component's requests that must be good over a window, with error-budget burn alerts (two windows each) sent to notification routes; a burning SLO opens an incident.",
@@ -4212,7 +4212,274 @@ export const RESOURCE_SPECS: Record<string, ResourceSpec> = {
                 "body": null
             }
         ]
+    },
+    "scheduled-exports": {
+        "key": "scheduled-exports",
+        "iac": {"kind": "report_schedules", "id": "id"},
+        "title": "Scheduled exports",
+        "path": "/sql/reports",
+        "listKey": null,
+        "description": "A dashboard or workbook sent as CSV or PDF on a schedule to its owner and recipients, each copy rendered as its recipient (formerly scheduled reports; the API is still /sql/reports).",
+        "docs": "administration.html#sql-workspace",
+        "columns": [
+            "name",
+            "target",
+            "format",
+            "every_minutes",
+            "recipients",
+            "enabled"
+        ],
+        "actions": [
+            {
+                "label": "Edit",
+                "method": "PUT",
+                "path": "/sql/reports/{id}",
+                "body": {"name": "weekly revenue", "target": {"dashboard": "<id>"}, "format": "pdf", "every_minutes": 10080}
+            },
+            {
+                "label": "Send now",
+                "method": "POST",
+                "path": "/sql/reports/{id}/run",
+                "body": {},
+                "fixed": true
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/sql/reports/{id}",
+                "body": null
+            },
+            {
+                "label": "New scheduled export",
+                "method": "POST",
+                "path": "/sql/reports",
+                "body": {"name": "weekly revenue", "target": {"dashboard": "<id>"}, "format": "pdf", "every_minutes": 10080}
+            }
+        ]
+    },
+    "metric-alerts": {
+        "key": "metric-alerts",
+        "iac": {"kind": "metric_alerts", "id": "id"},
+        "title": "Metric alerts",
+        "path": "/sql/metric-alerts",
+        "listKey": null,
+        "description": "Alerts on a governed metric (Semantics › Metrics): a change, a range learned from its history, or a threshold, checked on a schedule as its owner, who and the recipients are told.",
+        "docs": "administration.html#sql-workspace",
+        "columns": [
+            "name",
+            "metric",
+            "grain",
+            "rule",
+            "state",
+            "every_minutes",
+            "enabled"
+        ],
+        "actions": [
+            {
+                "label": "Edit",
+                "method": "PUT",
+                "path": "/sql/metric-alerts/{id}",
+                "body": {"name": "revenue drop", "metric": "revenue", "grain": "day", "rule": {"kind": "change", "drop_pct": 20}}
+            },
+            {
+                "label": "Check now",
+                "method": "POST",
+                "path": "/sql/metric-alerts/{id}/check",
+                "body": {},
+                "fixed": true
+            },
+            {
+                "label": "Delete",
+                "method": "DELETE",
+                "path": "/sql/metric-alerts/{id}",
+                "body": null
+            },
+            {
+                "label": "New metric alert",
+                "method": "POST",
+                "path": "/sql/metric-alerts",
+                "body": {"name": "revenue drop", "metric": "revenue", "grain": "day", "rule": {"kind": "change", "drop_pct": 20}}
+            }
+        ]
+    },
+    "model-monitors": {
+        "key": "model-monitors",
+        "iac": {"kind": "model_monitors", "id": "model"},
+        "title": "Model monitors",
+        "path": "/v1/ml/monitors",
+        "listKey": "monitors",
+        "description": "Drift on a served model's inputs, compared with a baseline table or time window and checked on a schedule; the people it names are told when it drifts.",
+        "docs": "administration.html#machine-learning-mlflow-behind-cairn",
+        "columns": [
+            "model",
+            "baseline",
+            "drift_threshold",
+            "window_minutes",
+            "every_minutes",
+            "notify"
+        ],
+        "rowKey": "model",
+        "actions": [
+            {
+                "label": "Edit",
+                "method": "PUT",
+                "path": "/v1/ml/models/{model}/monitor",
+                "body": {"baseline": {"table": "ml.training_rows"}, "drift_threshold": 0.2}
+            },
+            {
+                "label": "Check now",
+                "method": "POST",
+                "path": "/v1/ml/models/{model}/monitor/run",
+                "body": {},
+                "fixed": true
+            },
+            {
+                "label": "Stop monitoring",
+                "method": "DELETE",
+                "path": "/v1/ml/models/{model}/monitor",
+                "body": null
+            },
+            {
+                "label": "Monitor a model",
+                "method": "PUT",
+                "path": "/v1/ml/models/{model}/monitor",
+                "scope": "page",
+                "body": {"model": "churn", "baseline": {"table": "ml.training_rows"}, "drift_threshold": 0.2}
+            }
+        ]
+    },
+    "synthetic": {
+        "key": "synthetic",
+        "title": "Synthetic data",
+        "path": null,
+        "listKey": null,
+        "description": "A lakehouse table shaped like another (its columns, value distributions and relationships), with none of its sensitive values, for tests and demos. Generated as you, from a table you may read.",
+        "docs": "administration.html#synthetic-test-data",
+        "notes": "A synthetic table is an ordinary lakehouse table: once generated it is in the Catalog. Generate one here.",
+        "columns": [],
+        "actions": [
+            {
+                "label": "Generate synthetic table",
+                "method": "POST",
+                "path": "/v1/synthetic",
+                "body": {"source": "sales.orders", "target": "sandbox.orders_synthetic", "rows": 1000, "replace": false}
+            }
+        ]
+    },
+    "app-installs": {
+        "key": "app-installs",
+        "title": "App packages",
+        "path": "/v1/app-installs",
+        "listKey": "installs",
+        "description": "Data apps packaged from git and installed by others on their own data: the installs you may see, with their package and version. Package, release and install here; the data apps themselves are in the Apps tab.",
+        "docs": "administration.html#app-packages-apps-others-install-on-their-own-data",
+        "columns": [
+            "name",
+            "package",
+            "version",
+            "installed_by"
+        ],
+        "rowKey": "name",
+        "actions": [
+            {
+                "label": "Upgrade",
+                "method": "POST",
+                "path": "/v1/app-installs/{name}/upgrade",
+                "body": {"version": "1.1.0"}
+            },
+            {
+                "label": "Uninstall",
+                "method": "DELETE",
+                "path": "/v1/app-installs/{name}",
+                "body": null
+            },
+            {
+                "label": "New app package",
+                "method": "POST",
+                "path": "/v1/app-packages",
+                "body": {"name": "churn_explorer", "git": {"url": "https://git.example.com/apps/churn.git", "branch": "main", "path": "app"}}
+            },
+            {
+                "label": "Release a version",
+                "method": "POST",
+                "path": "/v1/app-packages/{name}/versions",
+                "scope": "page",
+                "body": {"version": "1.0.0"}
+            },
+            {
+                "label": "Install",
+                "method": "POST",
+                "path": "/v1/app-installs",
+                "body": {"name": "churn_finance", "package": "churn_explorer", "version": "1.0.0", "references": {}}
+            }
+        ]
+    },
+    "clean-rooms": {
+        "key": "clean-rooms",
+        "title": "Clean rooms",
+        "path": null,
+        "listKey": null,
+        "description": "Two or more parties join their tables in aggregate, and none of them sees the others' rows: answers only through templates every party approved, and only for groups of at least min_group.",
+        "docs": "administration.html#cairn-catalog",
+        "notes": "Open a clean room you are a party of by its name, or make one.",
+        "columns": [],
+        "actions": [
+            {
+                "label": "New clean room",
+                "method": "POST",
+                "path": "/v1/clean-rooms",
+                "body": {"name": "ad_overlap", "parties": ["urn:li:corpuser:ana", "partner:acme"], "min_group": 10}
+            },
+            {
+                "label": "Bring a table",
+                "method": "POST",
+                "path": "/v1/clean-rooms/{name}/tables",
+                "scope": "page",
+                "body": {"table": "crm.customers"}
+            },
+            {
+                "label": "Propose a template",
+                "method": "PUT",
+                "path": "/v1/clean-rooms/{name}/templates/{tname}",
+                "scope": "page",
+                "body": {"sql": "SELECT region, count(*) AS n FROM a JOIN b USING (email_hash) GROUP BY region"}
+            }
+        ]
+    },
+    "publications": {
+        "key": "publications",
+        "title": "Publications",
+        "path": "/marketplace/publications",
+        "listKey": null,
+        "description": "Data products published outside Cairn as Snowflake listings or Databricks Delta Sharing shares, and whether each still matches its product. A product's owners publish from its Distribution tab.",
+        "docs": "marketplace.html#sharing-outside-the-company",
+        "columns": [
+            "product",
+            "target",
+            "share",
+            "tables",
+            "in_sync",
+            "published_by",
+            "published_ms"
+        ],
+        "rowKey": "share"
+    },
+    "audit": {
+        "key": "audit",
+        "title": "Audit log",
+        "path": "/governance/audit",
+        "listKey": "entries",
+        "description": "Every change and decision Cairn records, newest first, in a tamper-evident hash chain (GET /governance/audit/verify checks it; GET /governance/audit/export streams it, and SIEM export sends it).",
+        "docs": "administration.html#audit-log",
+        "columns": [
+            "ts",
+            "category",
+            "action",
+            "actor",
+            "subject"
+        ],
+        "rowKey": "id"
     }
 };
 
-export { HUBS } from './hubs';
+export { HUBS, PAGE_AREAS } from './hubs';

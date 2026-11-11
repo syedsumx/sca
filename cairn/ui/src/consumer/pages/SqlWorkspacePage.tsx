@@ -8,7 +8,7 @@ import { ResultChart, toCsv } from '../components/ResultChart';
 import { CHART_TYPES } from '../api/types';
 import { SqlEditor } from '../components/SqlEditor';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { TitleRow } from '../guide/PageHeader';
 import { describeError, notifyError } from '../components/ErrorNotice';
 
 const ago = (ms: number) => new Date(ms).toLocaleString();
@@ -99,7 +99,7 @@ export function SqlWorkspacePage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>SQL</h1><HelpButton /></div>
+            <TitleRow title="SQL" />
             <Muted>Read-only SQL as you: every table is checked and masked for you, as on its page.</Muted>
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(220px, 1fr) 3fr', gap: 16, marginTop: 16 }}>
                 <Surface>

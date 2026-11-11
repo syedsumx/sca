@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { GitFolder, GitPullResult, GitPushResult, SavedQuery } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 
 type Outcome = { kind: 'pull'; folder: string; result: GitPullResult } | { kind: 'push'; folder: string; result: GitPushResult };
@@ -148,7 +148,7 @@ export function GitFoldersPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Git folders</h1><HelpButton /></div>
+            <TitleRow title="Git folders" />
             <Muted>
                 Keep your saved queries and notebooks in git and review them like code. Pull brings in what was merged; push proposes
                 your changes on a new branch, never on the folder's own.
