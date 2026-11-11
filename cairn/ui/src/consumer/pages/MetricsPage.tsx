@@ -5,7 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DataResult, Metric, MetricQuery } from '../api/types';
 import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { TitleRow } from '../guide/PageHeader';
 import { describeError, notifyError } from '../components/ErrorNotice';
 
 const GRAINS: NonNullable<MetricQuery['grain']>[] = ['day', 'week', 'month', 'quarter', 'year'];
@@ -88,7 +88,7 @@ export function MetricsPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Metrics</h1><HelpButton /></div>
+            <TitleRow title="Metrics" />
             <Muted>Measures defined once and used in dashboards and workbooks. They run as you: your masks and row filters apply.</Muted>
             <Surface style={{ marginTop: 16 }}>
                 <Space style={{ marginBottom: 12 }}>

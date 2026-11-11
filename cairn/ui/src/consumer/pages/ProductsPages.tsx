@@ -1,4 +1,4 @@
-import { Button, Empty, Input, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd';
+import { Button, Empty, Input, Radio, Select, Space, Switch, Table, Tabs, Tag, message } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { Link, useHistory, useLocation, useParams } from 'react-router-dom';
 
@@ -11,9 +11,10 @@ import { ContractPanel } from '../components/Contract';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { LineageGraphView } from '../components/LineageGraph';
 import { RequestAccessDrawer, accessLabel } from '../components/Marketplace';
+import { ProductPublish } from '../components/ProductPublish';
 import { ProductSlos } from '../components/Slos';
 import { StatusBadge, StatusTone } from '../components/StatusBadge';
-import { Muted, Page, Skeleton, Surface } from '../components/tokens';
+import { Muted, Page, SectionTitle, Skeleton, Surface } from '../components/tokens';
 import { TrustBadges } from '../components/TrustBadges';
 import { useDheSession } from '../context/CairnProvider';
 import { PageHeader } from '../guide/PageHeader';
@@ -24,6 +25,7 @@ import { ActionDialog, createAction } from '../resources/ResourceView';
 import type { ResourceAction } from '../resources/types';
 import { actorName, entityTypeLabel, platformName, relativeTime, shortUrn } from '../utils/format';
 import { MarkdownView } from '../utils/markdown';
+import { ProductBrowse } from './MarketplacePages';
 
 const PRODUCTS = RESOURCE_SPECS['catalog-products'];
 const CONTRACTS = RESOURCE_SPECS.contracts;
@@ -71,7 +73,8 @@ export function DataProductsPage() {
     const params = new URLSearchParams(location.search);
     const q = params.get('q') ?? '';
     const domain = params.get('domain') ?? '';
-    const cards = useDheQuery<ProductCard[]>(`/marketplace/products?q=${q}&domain=${domain}&sort=name`, (c, signal) =>
+    const browse = params.get('view') === 'browse';
+    const cards = useDheQuery<ProductCard[]>(browse ? null : `/marketplace/products?q=${q}&domain=${domain}&sort=name`, (c, signal) =>
         c.listProducts({ q: q || undefined, domain: domain || undefined, sort: 'name' }, { signal }));
     const mine = useDheQuery<{ products: CatalogProduct[] }>('/catalog/products', (c, signal) => catalogProducts(c, { signal }));
     const ports = useMemo(() => new Map((mine.data?.products ?? []).map((p) => [p.urn, p])), [mine.data]);
@@ -93,6 +96,10 @@ export function DataProductsPage() {
         <Page>
             <PageHeader title={t('products.title')} description={t('products.description')} help={pageHelp('/products')}
                 actions={create && <Button type="primary" onClick={() => actions.open(create)}>{t('products.new')}</Button>} />
+            <Radio.Group optionType="button" aria-label="View" value={browse ? 'browse' : 'all'}
+                onChange={(e) => history.replace(e.target.value === 'browse' ? '/products?view=browse' : '/products')}
+                options={[{ label: 'All products', value: 'all' }, { label: 'Browse', value: 'browse' }]} />
+            {browse ? <div style={{ marginTop: 16 }}><ProductBrowse /></div> : (<>
             <Space wrap style={{ margin: '16px 0' }}>
                 <Input.Search aria-label={t('products.search')} placeholder={t('products.search')} defaultValue={q} allowClear
                     onSearch={(v) => set('q', v.trim() || null)} style={{ width: 300 }} />
@@ -141,12 +148,44 @@ export function DataProductsPage() {
                     ]}
                 />
             )}
+            </>)}
             {actions.dialog}
         </Page>
     );
 }
 
-/** A data product: its assets and output ports, contracts, lineage, service levels and access, from Core and Cairn. */
+const PRODUCT_TABS = ['overview', 'assets', 'contracts', 'health', 'lineage', 'access', 'distribution'];
+
+interface ObsProduct { id: string; name: string; tables: string[]; pipelines: string[]; catalog_urn?: string }
+
+/** Pipelines & health: the product's quality and contracts at a glance, and the pipelines that build it (from
+ * pipeline observability's data products linked to this one; they merge into the product in a later step). */
+function ProductHealth({ urn, product }: { urn: string; product: ProductDetail }) {
+    const obs = useDheQuery<{ items: ObsProduct[] }>('/v1/observability/data-products', (c, signal) =>
+        c.request('GET', '/v1/observability/data-products', undefined, { signal }));
+    const mine = (obs.data?.items ?? []).filter((o) => o.catalog_urn === urn);
+    const pipelines = [...new Set(mine.flatMap((o) => o.pipelines))];
+    return (
+        <Surface style={{ padding: 18 }}>
+            <SectionTitle style={{ marginTop: 0 }}>Health</SectionTitle>
+            <TrustBadges certification={product.certification} qualityStatus={product.quality_status} />
+            <p style={{ marginTop: 8 }}>
+                <Link to="/quality">Data quality</Link> has its monitors and contracts; <Link to="/incidents">Incidents</Link> lists
+                what is open now.
+            </p>
+            <SectionTitle>Pipelines that build it</SectionTitle>
+            {obs.error ? <Muted>Pipeline observability is not available to you here.</Muted>
+                : pipelines.length ? (
+                    <ul>
+                        {pipelines.map((k) => <li key={k}><Link to={`/runs?tab=pipelines&pipeline=${encodeURIComponent(k)}`}>{k}</Link></li>)}
+                    </ul>
+                ) : <Muted>No pipelines are linked to this product yet (pipeline data products name it by its URN).</Muted>}
+        </Surface>
+    );
+}
+
+/** A data product (L149: its one page; /marketplace/:urn redirects here). Overview · Assets & ports · Contracts &
+ * service levels · Pipelines & health · Lineage · Access · Distribution, from Core and Cairn's existing APIs. */
 export function DataProductPage() {
     const { urn: raw } = useParams<{ urn: string }>();
     const urn = decodeURIComponent(raw);
@@ -161,6 +200,10 @@ export function DataProductPage() {
     const [requesting, setRequesting] = useState(false);
     const [lineageOf, setLineageOf] = useState<string | null>(null);
     const actions = useProductActions();
+    const location = useLocation();
+    const history = useHistory();
+    const asked = new URLSearchParams(location.search).get('tab') ?? '';
+    const tab = PRODUCT_TABS.includes(asked) ? asked : 'overview';
     const p = product.data;
     if (product.loading && !p) return <Page><Skeleton h={28} w="40%" /></Page>;
     if (product.error || !p) return <Page>{product.error && <ErrorNotice error={product.error} area={t('products.title')} />}</Page>;
@@ -168,6 +211,7 @@ export function DataProductPage() {
     const portSet = new Set(record?.output_ports ?? []);
     const me = session.config?.user.urn;
     const canEdit = !!record && (!!session.config?.is_admin || (!!me && p.owners.includes(me)));
+    const canPublish = !!session.config?.is_admin || (!!me && p.owners.includes(me));
     const requestable = ['NONE', 'EXPIRED', 'REJECTED'].includes(p.access.status);
     const access = accessLabel(p.access.status, p.access.expires_at);
     const assetUrns = new Set(p.assets.map((a) => a.urn));
@@ -217,47 +261,60 @@ export function DataProductPage() {
             </Surface>
             <Tabs
                 style={{ marginTop: 12 }}
+                activeKey={tab}
+                onChange={(k) => history.replace({ pathname: location.pathname, search: `?tab=${k}` })}
                 items={[
                     {
-                        key: 'assets',
-                        label: t('products.tab.assets', { n: p.assets.length }),
+                        key: 'overview',
+                        label: 'Overview',
                         children: (
-                            <Table
-                                rowKey="urn"
-                                size="small"
-                                dataSource={p.assets}
-                                pagination={false}
-                                columns={[
-                                    { title: t('products.name'), dataIndex: 'name', render: (v: string, r) => <Link to={assetPath(r.urn)}>{v}</Link> },
-                                    { title: t('products.type'), dataIndex: 'type', render: (v: string) => entityTypeLabel(v) },
-                                    { title: t('products.platform'), dataIndex: 'platform', render: (v: string | null) => platformName(v) },
-                                    { title: t('products.outputPort'), render: (_, r) => (portSet.has(r.urn)
-                                        ? <StatusBadge tone="ok" label={t('products.outputPort')} plain /> : null) },
-                                ]}
-                            />
+                            <Surface style={{ padding: 18 }}>
+                                {p.readme_md ? <MarkdownView source={p.readme_md} /> : <Muted>{t('products.noReadme')}</Muted>}
+                            </Surface>
                         ),
                     },
                     {
-                        key: 'ports',
-                        label: t('products.tab.ports', { n: portSet.size }),
-                        children: portSet.size ? (
-                            <ul>
-                                {[...portSet].map((u) => <li key={u}><Link to={assetPath(u)}>{shortUrn(u)}</Link></li>)}
-                            </ul>
-                        ) : <Muted>{t('products.noPorts')}</Muted>,
+                        key: 'assets',
+                        label: `Assets & ports (${p.assets.length})`,
+                        children: (
+                            <>
+                                <Table
+                                    rowKey="urn"
+                                    size="small"
+                                    dataSource={p.assets}
+                                    pagination={false}
+                                    columns={[
+                                        { title: t('products.name'), dataIndex: 'name', render: (v: string, r) => <Link to={assetPath(r.urn)}>{v}</Link> },
+                                        { title: t('products.type'), dataIndex: 'type', render: (v: string) => entityTypeLabel(v) },
+                                        { title: t('products.platform'), dataIndex: 'platform', render: (v: string | null) => platformName(v) },
+                                        { title: t('products.outputPort'), render: (_, r) => (portSet.has(r.urn)
+                                            ? <StatusBadge tone="ok" label={t('products.outputPort')} plain /> : null) },
+                                    ]}
+                                />
+                                {!portSet.size && <Muted style={{ display: 'block', marginTop: 8 }}>{t('products.noPorts')}</Muted>}
+                            </>
+                        ),
                     },
                     {
                         key: 'contracts',
-                        label: t('products.tab.contracts', { n: productContracts.length }),
-                        children: productContracts.length ? (
-                            <Table<Contract> rowKey="dataset" size="small" pagination={false} dataSource={productContracts}
-                                columns={[
-                                    { title: t('contracts.dataset'), render: (_, c) => <Link to={contractHref(c.dataset)}>{shortUrn(c.dataset)}</Link> },
-                                    { title: t('contracts.status'), render: (_, c) => <ContractState status={c.status} /> },
-                                    { title: t('contracts.version'), dataIndex: 'version' },
-                                ]} />
-                        ) : <Muted>{promises.error ? t('contracts.unavailable') : t('products.noContracts')}</Muted>,
+                        label: `Contracts & service levels (${productContracts.length})`,
+                        children: (
+                            <>
+                                <SectionTitle>{t('products.tab.contracts', { n: productContracts.length })}</SectionTitle>
+                                {productContracts.length ? (
+                                    <Table<Contract> rowKey="dataset" size="small" pagination={false} dataSource={productContracts}
+                                        columns={[
+                                            { title: t('contracts.dataset'), render: (_, c) => <Link to={contractHref(c.dataset)}>{shortUrn(c.dataset)}</Link> },
+                                            { title: t('contracts.status'), render: (_, c) => <ContractState status={c.status} /> },
+                                            { title: t('contracts.version'), dataIndex: 'version' },
+                                        ]} />
+                                ) : <Muted>{promises.error ? t('contracts.unavailable') : t('products.noContracts')}</Muted>}
+                                <SectionTitle>Service levels</SectionTitle>
+                                <ProductSlos urn={urn} canEdit={canEdit} />
+                            </>
+                        ),
                     },
+                    { key: 'health', label: 'Pipelines & health', children: <ProductHealth urn={urn} product={p} /> },
                     {
                         key: 'lineage',
                         label: t('nav.lineage'),
@@ -271,22 +328,38 @@ export function DataProductPage() {
                         ) : <Muted>{t('products.noAssets')}</Muted>,
                     },
                     {
-                        key: 'readme',
-                        label: t('products.tab.about'),
+                        key: 'access',
+                        label: 'Access',
                         children: (
                             <Surface style={{ padding: 18 }}>
-                                {p.readme_md ? <MarkdownView source={p.readme_md} /> : <Muted>{t('products.noReadme')}</Muted>}
-                                <p style={{ marginTop: 12 }}>
+                                <p>
                                     {p.request_policy.auto_approve ? t('products.autoApprove')
                                         : t('products.reviewedBy', { who: p.request_policy.approvers.map(actorName).join(', ') || '—' })}
                                     {' '}{t('products.maxDays', { n: p.request_policy.max_duration_days })}
                                 </p>
-                                <Link to={`/marketplace/${encodeURIComponent(urn)}`}>{t('products.inMarketplace')}</Link>
+                                <p>Approved purposes: {p.request_policy.purposes.join(', ') || 'any (with justification)'}</p>
+                                {(p.request_policy.grants ?? []).length > 0 && (
+                                    <p>Approval grants: {p.request_policy.grants?.join(', ')}. It is taken away when access ends.</p>
+                                )}
+                                <p>{t('products.ownersLine', { owners: p.owners.map(actorName).join(', ') || '—', n: p.consumers })}</p>
+                                <Link to="/requests">Access requests: yours and those waiting for you</Link>
                             </Surface>
                         ),
                     },
-                    { key: 'slos', label: t('products.tab.slos'), children: <ProductSlos urn={urn} canEdit={canEdit} /> },
-                ]}
+                    {
+                        key: 'distribution',
+                        label: 'Distribution',
+                        children: (
+                            <>
+                                <Muted style={{ display: 'block', marginBottom: 12 }}>
+                                    How this product reaches people outside Cairn. Shares, data packages and clean rooms of every
+                                    product are in <Link to="/sharing">External sharing</Link>.
+                                </Muted>
+                                {canPublish ? <ProductPublish urn={urn} /> : <Muted>Only the product&apos;s owners publish it.</Muted>}
+                            </>
+                        ),
+                    },
+                ].map((it) => ({ ...it, children: it.key === tab ? it.children : null }))}
             />
             {!record && ours.error instanceof CairnApiError && ours.error.status !== 404 && (
                 <ErrorNotice error={ours.error} area={t('products.title')} />
@@ -319,7 +392,12 @@ export function ContractsPage() {
                     ['BROKEN', `${t('contracts.failing')} ${n('BROKEN')}`], ['PENDING', `${t('contracts.pending')} ${n('PENDING')}`]] as const)
                     .map(([v, label]) => (
                         <Button key={v || 'all'} type={status === v ? 'primary' : 'default'} aria-pressed={status === v}
-                            onClick={() => history.replace(v ? `/contracts?status=${v}` : '/contracts')}>{label}</Button>
+                            onClick={() => {
+                                const next = new URLSearchParams(location.search);
+                                if (v) next.set('status', v);
+                                else next.delete('status');
+                                history.replace({ pathname: location.pathname, search: next.toString() ? `?${next}` : '' });
+                            }}>{label}</Button>
                     ))}
             </Space>
             {list.error && <ErrorNotice error={list.error} area={t('contracts.title')} />}

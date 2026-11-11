@@ -1,6 +1,6 @@
 import { Alert, Radio } from 'antd';
 import React, { useMemo, useState } from 'react';
-import { useHistory } from 'react-router-dom';
+import { Link, useHistory, useLocation } from 'react-router-dom';
 import { useDheQuery } from '../api/hooks';
 import type { LineageGraph as Graph, LineageGraphNode } from '../api/types';
 import { platformName } from '../utils/format';
@@ -80,6 +80,7 @@ function label(n: LineageGraphNode) {
 /** The lineage around an asset, drawn: what feeds it on the left, what it feeds on the right. Assets the
  *  signed-in user may not see are left out and counted. */
 export function LineageGraphView({ urn }: { urn: string }) {
+    const location = useLocation();
     const [depth, setDepth] = useState(2);
     const history = useHistory();
     const q = useDheQuery(`/embed/v1/graph?urn=${urn}&depth=${depth}`, (c, signal) => c.lineageGraph(urn, depth, { signal }));
@@ -101,6 +102,10 @@ export function LineageGraphView({ urn }: { urn: string }) {
                 aria-label="How far to follow lineage"
             />
             <Muted>Sources on the left, what uses this asset on the right. Select an asset to open it.</Muted>
+            {/* One lineage view everywhere (L149): its home, Catalog › Lineage, adds column lineage and impact. */}
+            {location.pathname !== '/lineage' && (
+                <Link to={`/lineage?urn=${encodeURIComponent(urn)}`}>Open in Lineage (columns and impact)</Link>
+            )}
         </div>
     );
     if (q.loading || !drawn || !q.data) return <>{header}<Skeleton h={160} /></>;

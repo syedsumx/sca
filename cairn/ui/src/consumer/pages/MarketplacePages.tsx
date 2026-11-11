@@ -15,18 +15,19 @@ import { assetPath } from '../components/Assets';
 import { ProductCard, RequestAccessDrawer, accessLabel } from '../components/Marketplace';
 import { CardGrid, Muted, Page, SectionTitle, Skeleton, Surface, tokens } from '../components/tokens';
 import { FormTasksList } from '../components/Forms';
-import { ProductSlos } from '../components/Slos';
-import { ProductPublish } from '../components/ProductPublish';
-import { TrustBadges } from '../components/TrustBadges';
-import { useDheSession } from '../context/CairnProvider';
 import { actorName, entityTypeLabel, platformName, relativeTime } from '../utils/format';
-import { MarkdownView } from '../utils/markdown';
+import { RESOURCE_SPECS } from '../resources/catalog';
+import { ResourceView } from '../resources/ResourceView';
 import { useT } from '../i18n';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
 
-export function MarketplacePage() {
+/**
+ * Data products › Browse (L149: what was the Marketplace): consumer-oriented product cards with filters and access
+ * requests, and the agents and skills listed for others to use. Its state is in the URL (`/products?view=browse&q=…`).
+ */
+export function ProductBrowse() {
     const t = useT();
     const location = useLocation();
     const history = useHistory();
@@ -46,7 +47,8 @@ export function MarketplacePage() {
         const next = new URLSearchParams(location.search);
         if (v) next.set(k, v);
         else next.delete(k);
-        history.replace(`/marketplace?${next.toString()}`);
+        next.set('view', 'browse');
+        history.replace(`/products?${next.toString()}`);
     };
     const domains = useMemo(
         () => Array.from(new Set((products.data ?? []).map((p) => p.domain?.name).filter(Boolean) as string[])),
@@ -56,8 +58,8 @@ export function MarketplacePage() {
     const shown = (products.data ?? []).filter((p) => !domain || p.domain?.name === domain);
 
     return (
-        <Page>
-            <PageHeader title={t('page.marketplace')} description={t('page.marketplaceIntro')} help={pageHelp('/marketplace')} />
+        <section aria-label={t('page.marketplace')}>
+            <Muted style={{ display: 'block' }}>{t('page.marketplaceIntro')}</Muted>
             <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', margin: '16px 0', alignItems: 'center' }}>
                 <Input.Search
                     aria-label="Search data products"
@@ -122,132 +124,11 @@ export function MarketplacePage() {
                 ))}
             </CardGrid>
             <RequestAccessDrawer product={requesting} open={!!requesting} onClose={() => setRequesting(null)} />
-        </Page>
-    );
-}
-
-export function ProductPage() {
-    const { urn: raw } = useParams<{ urn: string }>();
-    const urn = decodeURIComponent(raw);
-    const { client, cache } = useConsumerApi();
-    const key = `/marketplace/products/${urn}`;
-    const product = useDheQuery<ProductDetail>(key, (c, signal) => c.getProduct(urn, { signal }));
-    const [requesting, setRequesting] = useState(false);
-    const session = useDheSession();
-    const p = product.data;
-
-    const toggleSubscribe = async (on: boolean) => {
-        cache.set<ProductDetail>(key, (prev) => ({ ...(prev as ProductDetail), subscribed: on }));
-        try {
-            await client.subscribe(urn, on);
-            message.success(on ? 'Subscribed — you will hear about schema changes, incidents and deprecations.' : 'Unsubscribed');
-        } catch (e) {
-            cache.set<ProductDetail>(key, (prev) => ({ ...(prev as ProductDetail), subscribed: !on }));
-            notifyError(e);
-        }
-    };
-
-    if (product.loading) {
-        return (
-            <Page>
-                <Skeleton h={28} w="40%" />
-            </Page>
-        );
-    }
-    if (product.error || !p) return <Page>{product.error && <ErrorNotice error={product.error} />}</Page>;
-    const access = accessLabel(p.access.status, p.access.expires_at);
-    const me = session.config?.user.urn;
-    const canPublish = !!session.config?.is_admin || (!!me && p.owners.includes(me));
-    const requestable = ['NONE', 'EXPIRED', 'REJECTED'].includes(p.access.status);
-    return (
-        <Page>
-            <Link to="/marketplace">← Marketplace</Link>
-            <Surface style={{ padding: 20, marginTop: 12 }}>
-                <PageHeader title={p.name} description={p.domain?.name ?? 'Data product'} help={pageHelp('/marketplace')} />
-                <TrustBadges certification={p.certification} qualityStatus={p.quality_status} />
-                <p style={{ marginTop: 10 }}>{p.description}</p>
-                <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-                    {requestable ? (
-                        <Button type="primary" onClick={() => setRequesting(true)}>
-                            Request access
-                        </Button>
-                    ) : (
-                        <Tag color={access.color}>{access.text}</Tag>
-                    )}
-                    <span>
-                        <Switch checked={p.subscribed} onChange={(v) => void toggleSubscribe(v)} aria-label="Subscribe to updates" /> Subscribe to
-                        updates
-                    </span>
-                    <Muted>
-                        Owners: {p.owners.map(actorName).join(', ') || '—'} · {p.consumers} consumers
-                        {p.sla.availability ? ` · SLA ${p.sla.availability}` : ''}
-                        {p.sla.freshness ? ` · fresh ${p.sla.freshness}` : ''}
-                    </Muted>
-                </div>
-            </Surface>
-            <Tabs
-                style={{ marginTop: 12 }}
-                items={[
-                    {
-                        key: 'readme',
-                        label: 'Overview',
-                        children: (
-                            <Surface style={{ padding: 18 }}>
-                                {p.readme_md ? <MarkdownView source={p.readme_md} /> : <Muted>No README yet.</Muted>}
-                            </Surface>
-                        ),
-                    },
-                    {
-                        key: 'assets',
-                        label: `Assets (${p.assets.length})`,
-                        children: (
-                            <Table
-                                rowKey="urn"
-                                size="small"
-                                dataSource={p.assets}
-                                pagination={false}
-                                columns={[
-                                    { title: 'Name', dataIndex: 'name', render: (v: string, r) => <Link to={assetPath(r.urn)}>{v}</Link> },
-                                    { title: 'Type', dataIndex: 'type', render: (v: string) => entityTypeLabel(v) },
-                                    { title: 'Platform', dataIndex: 'platform', render: (v: string | null) => platformName(v) },
-                                ]}
-                            />
-                        ),
-                    },
-                    {
-                        key: 'policy',
-                        label: 'Access policy',
-                        children: (
-                            <Surface style={{ padding: 18 }}>
-                                <p>
-                                    {p.request_policy.auto_approve
-                                        ? '✅ Eligible requests are approved automatically.'
-                                        : `Requests are reviewed by ${p.request_policy.approvers.map(actorName).join(', ') || 'the owners'}.`}
-                                </p>
-                                <p>Approved purposes: {p.request_policy.purposes.join(', ') || 'any (with justification)'}</p>
-                                <p>Maximum duration: {p.request_policy.max_duration_days} days — access ends automatically.</p>
-                                {(p.request_policy.grants ?? []).length > 0 && (
-                                    <p>
-                                        Approval grants: {p.request_policy.grants?.join(', ')}. It is taken away when access
-                                        ends.
-                                    </p>
-                                )}
-                            </Surface>
-                        ),
-                    },
-                    { key: 'slos', label: 'SLOs', children: <ProductSlos urn={urn} canEdit={canPublish} /> },
-                    ...(canPublish
-                        ? [{ key: 'publish', label: 'Share outside', children: <ProductPublish urn={urn} /> }]
-                        : []),
-                ]}
-            />
-            <RequestAccessDrawer
-                product={p}
-                open={requesting}
-                onClose={() => setRequesting(false)}
-                onSubmitted={() => cache.invalidate(key)}
-            />
-        </Page>
+            <section aria-label="Agents and skills" style={{ marginTop: 32 }}>
+                <SectionTitle>Agents and skills</SectionTitle>
+                <ResourceView spec={RESOURCE_SPECS['agent-listings']} />
+            </section>
+        </section>
     );
 }
 
@@ -294,7 +175,7 @@ export function RequestsPage() {
         {
             title: 'Product',
             dataIndex: 'product_name',
-            render: (v: string, r: AccessRequest) => <Link to={`/marketplace/${encodeURIComponent(r.product_urn)}`}>{v}</Link>,
+            render: (v: string, r: AccessRequest) => <Link to={`/products/${encodeURIComponent(r.product_urn)}`}>{v}</Link>,
         },
         ...(scope === 'inbox' ? [{ title: 'Requester', dataIndex: 'requester', render: (v: string) => actorName(v) }] : []),
         { title: 'Purpose', dataIndex: 'purpose' },
@@ -393,7 +274,7 @@ export function RequestsPage() {
                                 loading={mine.loading}
                                 dataSource={mine.data ?? []}
                                 columns={columns('mine')}
-                                locale={{ emptyText: <Link to="/marketplace">Browse the marketplace to request data →</Link> }}
+                                locale={{ emptyText: <Link to="/products?view=browse">Browse data products to request data →</Link> }}
                             />
                         ),
                     },

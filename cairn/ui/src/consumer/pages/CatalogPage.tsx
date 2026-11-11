@@ -7,12 +7,15 @@ import { ASSET_TYPES, ColumnLineage, catalogCounts, catalogPage, columnLineage }
 import { useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, SearchEntity, SearchResponse } from '../api/types';
 import { AssetRow, assetPath } from '../components/Assets';
+import { BulkEdit } from '../components/BulkEdit';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { FacetPanel } from '../components/FacetPanel';
 import { LineageGraphView } from '../components/LineageGraph';
+import { RelatedByMeaning } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, focusRing, tokens } from '../components/tokens';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
+import { TermSearchResults } from '../ontology/Embeds';
 import { useT } from '../i18n';
 import { entityTypeLabel, platformName, shortUrn } from '../utils/format';
 import { parseSearchState, serializeSearchState, toggleFilter } from '../utils/urlState';
@@ -134,9 +137,13 @@ export function CatalogPage() {
                     )}
                 </aside>
                 <section aria-label={t('catalog.results')} aria-busy={page.loading}>
-                    <Muted aria-live="polite" style={{ display: 'block', marginBottom: 8 }}>
-                        {page.data ? t('catalog.count', { n: page.data.total.toLocaleString() }) : ''}
-                    </Muted>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
+                        <Muted aria-live="polite">
+                            {page.data ? t('catalog.count', { n: page.data.total.toLocaleString() }) : ''}
+                        </Muted>
+                        {page.data && page.data.total > 0 && state.query && <BulkEdit query={state.query} />}
+                    </div>
+                    {state.query && state.page === 1 && <TermSearchResults query={state.query} />}
                     {page.loading && !page.data && <Skeleton h={120} />}
                     {page.error && <ErrorNotice error={page.error} area={t('catalog.title')} />}
                     {page.data && page.data.results.length === 0 && <Empty description={t('catalog.none')} />}
@@ -145,6 +152,10 @@ export function CatalogPage() {
                         <Pagination style={{ marginTop: 16 }} current={state.page} pageSize={PAGE_SIZE}
                             total={Math.min(page.data.total, 10_000)} showSizeChanger={false}
                             onChange={(p) => go({ ...state, page: p })} />
+                    )}
+                    {/* By meaning as well as by words (what /search added; L149 merged it here). */}
+                    {page.data && state.query && state.page === 1 && !Object.keys(state.filters).length && (
+                        <RelatedByMeaning query={state.query} exclude={urns} enrichment={enrichment.data} />
                     )}
                 </section>
             </Body>
