@@ -27,6 +27,8 @@ import type {
 } from '../api/types';
 import { useT } from '../i18n';
 import { ErrorNotice, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 const BUCKETS = '/storage/buckets';
 const AUDIT = '/storage/audit';
@@ -256,21 +258,18 @@ function AccessKeys() {
                     {
                         title: t('storage.created'),
                         dataIndex: 'created',
-                        render: (v?: string | null) => (v ? new Date(v).toLocaleString() : ''),
+                        render: (v?: string | null) => <When value={v} empty={''} />,
                     },
                     {
                         title: '',
                         render: (_: unknown, k) =>
                             k.source === 'api' && (
                                 <Space>
-                                    <Popconfirm title={t('storage.rotateConfirm')} onConfirm={() => rotate(k)}>
-                                        <Button size="small">{t('storage.rotate')}</Button>
-                                    </Popconfirm>
-                                    <Popconfirm title={t('storage.deleteKeyConfirm')} onConfirm={() => remove(k)}>
-                                        <Button size="small" danger>
-                                            {t('storage.deleteKey')}
-                                        </Button>
-                                    </Popconfirm>
+                                    <RowActions name={k.access_key} actions={[
+                                        { key: 'rotate', label: t('storage.rotate'), confirm: t('storage.rotateConfirm'), onSelect: () => rotate(k) },
+                                        { key: 'delete', label: t('storage.deleteKey'), danger: true, confirm: t('storage.deleteKeyConfirm'),
+                                            onSelect: () => remove(k) },
+                                    ]} />
                                 </Space>
                             ),
                     },
@@ -486,7 +485,7 @@ function AuditTrail() {
                     {
                         title: t('storage.when'),
                         dataIndex: 'ts',
-                        render: (v: string) => new Date(v).toLocaleString(),
+                        render: (v: string) => <When value={v} />,
                     },
                     {
                         title: t('storage.action'),

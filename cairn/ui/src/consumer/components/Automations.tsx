@@ -28,6 +28,8 @@ import type {
 import { datasetName, describeChange } from './BulkEdit';
 import { Muted } from './tokens';
 import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
+import { When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 const ACTIONS: { value: AutomationActionType; label: string; placeholder: string }[] = [
     { value: 'set_domain', label: 'Set domain', placeholder: 'finance' },
@@ -333,7 +335,7 @@ function RunsDrawer({ automation, onClose }: { automation: Automation | null; on
                 dataSource={runs.data ?? []}
                 loading={runs.loading}
                 columns={[
-                    { title: 'When', dataIndex: 'started_ms', render: (ms: number) => new Date(ms).toLocaleString() },
+                    { title: 'When', dataIndex: 'started_ms', render: (ms: number) => <When value={ms} /> },
                     { title: 'Trigger', dataIndex: 'trigger' },
                     { title: 'Matched', dataIndex: 'matched' },
                     { title: 'Changed', dataIndex: 'changed' },
@@ -458,14 +460,8 @@ export function AutomationsAdmin() {
                                     <Button size="small" onClick={() => setViewing(a)}>
                                         Runs
                                     </Button>
-                                    <Popconfirm
-                                        title="Delete this automation? What it changed stays."
-                                        onConfirm={() => void act(() => client.deleteAutomation(a.id), 'Deleted')}
-                                    >
-                                        <Button size="small" danger>
-                                            Delete
-                                        </Button>
-                                    </Popconfirm>
+                                    <RowActions name={a.name} actions={[{ key: 'delete', label: 'Delete', danger: true, confirm: 'Delete this automation? What it changed stays.',
+    onSelect: () => void act(() => client.deleteAutomation(a.id), 'Deleted') }]} />
                                 </Space>
                             ),
                         },

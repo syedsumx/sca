@@ -24,8 +24,7 @@ import type { Agent, AgentPool, AgentPoolInput, AgentRun, AgentStatus, Enrollmen
 import { formatRelative, formatTimestamp } from '../common/format';
 import { EmptyState, ErrorState, LoadingState, Mono, PageContainer, PageHeader } from '../common/States';
 import { ErrorNotice, describeError, notifyError } from '../consumer/components/ErrorNotice';
-
-const AGENT_STATUS_COLOR: Record<AgentStatus, string> = { ONLINE: 'green', OFFLINE: 'default', REVOKED: 'red' };
+import { StatusBadge } from '../consumer/components/StatusBadge';
 
 export function runStatusColor(status: string): string {
     switch (status.toUpperCase()) {
@@ -123,7 +122,7 @@ export function RunLogs({ taskId, pollIntervalMs = 2000 }: { taskId: string; pol
     return (
         <Space direction="vertical" style={{ width: '100%' }}>
             <Space>
-                {state.status && <Tag color={runStatusColor(state.status)}>{state.status}</Tag>}
+                {state.status && <StatusBadge state={state.status} />}
                 {!state.done && state.status && <Typography.Text type="secondary">following live…</Typography.Text>}
             </Space>
             {error && <Alert type="warning" showIcon message={`Could not refresh: ${error}`} />}
@@ -273,7 +272,7 @@ export function AgentFleet({
                         title: 'Status',
                         dataIndex: 'status',
                         width: 110,
-                        render: (s: AgentStatus) => <Tag color={AGENT_STATUS_COLOR[s]}>{s}</Tag>,
+                        render: (s: AgentStatus) => <StatusBadge state={s} />,
                     },
                     { title: 'Version', dataIndex: 'version', width: 100 },
                     {
@@ -329,7 +328,7 @@ export function AgentFleet({
                         title: 'Status',
                         dataIndex: 'status',
                         width: 120,
-                        render: (s: string) => <Tag color={runStatusColor(s)}>{s}</Tag>,
+                        render: (s: string) => <StatusBadge state={s} />,
                     },
                     { title: 'Started', dataIndex: 'started_at', render: (v: string | null) => formatTimestamp(v) },
                     { title: 'Finished', dataIndex: 'finished_at', render: (v: string | null) => formatTimestamp(v) },

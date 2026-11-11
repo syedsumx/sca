@@ -201,6 +201,11 @@ def test_without_manage_policies_the_section_is_not_offered_and_is_refused(cairn
             nav = page.get_by_role("navigation", name="Workspace sections")
             expect(nav).to_be_visible()
             page.wait_for_load_state("networkidle")
+            # L150: open the Govern group, so the absence below means "not offered", not "folded away".
+            govern = nav.get_by_role("button", name="Govern", exact=True)
+            if govern.count() and govern.get_attribute("aria-expanded") != "true":
+                govern.click()
+                expect(govern).to_have_attribute("aria-expanded", "true")
             assert nav.get_by_role("link", name="People & roles").count() == 0
         finally:
             browser.close()

@@ -15,6 +15,7 @@ import { RelatedByMeaning } from '../components/Semantic';
 import { Muted, Page, Skeleton, Surface, focusRing, tokens } from '../components/tokens';
 import { PageHeader } from '../guide/PageHeader';
 import { pageHelp } from '../guide/help';
+import { readRecent } from '../guide/palette';
 import { TermSearchResults } from '../ontology/Embeds';
 import { useT } from '../i18n';
 import { entityTypeLabel, platformName, shortUrn } from '../utils/format';
@@ -217,6 +218,68 @@ function ColumnLevel({ urn }: { urn: string }) {
 }
 
 /** Lineage as a section: pick any asset (Core's search), then its upstream and downstream graph and column lineage. */
+/**
+ * Before an asset is picked (L150: no blank page): the assets the person opened lately, then the catalog's datasets,
+ * one click from their lineage.
+ */
+function LineageStart({ choose }: { choose: (urn: string) => void }) {
+    const t = useT();
+    const some = useDheQuery<SearchResponse>('gql:lineage-start', (c, signal) => catalogPage(c, '*', { _entityType: ['DATASET'] }, 0, 8,
+        signal), { staleMs: 60_000 });
+    const recent = readRecent().filter((r) => r.to.startsWith('/asset/')).map((r) => ({
+        urn: decodeURIComponent(r.to.slice('/asset/'.length)), name: r.label, detail: '' }));
+    const seen = new Set(recent.map((r) => r.urn));
+    const rest = (some.data?.results ?? []).filter((r) => !seen.has(r.urn)).map((r) => ({ urn: r.urn, name: r.name,
+        detail: [entityTypeLabel(r.type), r.platform ? platformName(r.platform) : ''].filter(Boolean).join(' · ') }));
+    const picks = [...recent, ...rest].slice(0, 8);
+    return (
+        <section aria-labelledby="lineage-start" style={{ marginTop: 16 }}>
+            <h2 id="lineage-start" style={{ fontSize: 16, margin: '0 0 4px' }}>{t('page.recentAssets')}</h2>
+            <Muted style={{ display: 'block', marginBottom: 12 }}>{t('page.pickAsset')}</Muted>
+            {some.loading && !picks.length && <Muted>{t('lineage.searching')}</Muted>}
+            <PickGrid>
+                {picks.map((p) => (
+                    <button key={p.urn} type="button" onClick={() => choose(p.urn)}>
+                        <strong>{p.name}</strong>
+                        {p.detail && <span>{p.detail}</span>}
+                    </button>
+                ))}
+            </PickGrid>
+            {!some.loading && !picks.length && <Muted>{t('lineage.empty')}</Muted>}
+        </section>
+    );
+}
+
+const PickGrid = styled.div`
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 12px;
+    button {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 2px;
+        min-height: 64px;
+        padding: 12px 14px;
+        text-align: left;
+        border: 1px solid ${tokens.color.border};
+        border-radius: ${tokens.radius.md};
+        background: ${tokens.color.surface};
+        box-shadow: ${tokens.shadow.card};
+        color: ${tokens.color.text};
+        font: inherit;
+        cursor: pointer;
+        ${focusRing}
+        &:hover {
+            border-color: ${tokens.color.primary};
+        }
+        span {
+            color: ${tokens.color.textMuted};
+            font-size: 13px;
+        }
+    }
+`;
+
 export function LineagePage() {
     const t = useT();
     const location = useLocation();
@@ -245,7 +308,7 @@ export function LineagePage() {
                 notFoundContent={found.loading ? t('lineage.searching') : typed.trim().length >= 2 ? t('catalog.none') : null}
                 options={urn && !options.some((o) => o.value === urn) ? [{ value: urn, label: shortUrn(urn) }, ...options] : options}
             />
-            {!urn && <Muted style={{ display: 'block', marginTop: 16 }}>{t('lineage.empty')}</Muted>}
+            {!urn && <LineageStart choose={choose} />}
             {urn && (
                 <>
                     <Surface style={{ padding: 18, marginTop: 16 }}>

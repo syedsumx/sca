@@ -9,6 +9,7 @@ import { HUBS } from '../resources/hubs';
 import { MarkdownView } from '../utils/markdown';
 import { useGuide } from './GuideProvider';
 import { HelpSnippet, docsHref, helpAnchorFor, helpFor, pageTitleFor } from './help';
+import { introFor } from './pageIcons';
 
 /** The docs' section about the page on screen, beside it: bundled with the app, so it opens offline too. */
 export function HelpPanel({ pageTitle }: { pageTitle: (pathname: string) => string | undefined }) {
@@ -48,6 +49,9 @@ export function HelpPanel({ pageTitle }: { pageTitle: (pathname: string) => stri
                 </Space>
             }
         >
+            {g.help && introFor(location.pathname) && (
+                <p className="cairn-help-intro" style={{ marginTop: 0 }}>{introFor(location.pathname)}</p>
+            )}
             {g.help && (
                 <div aria-live="polite">
                     {snippet === undefined ? (

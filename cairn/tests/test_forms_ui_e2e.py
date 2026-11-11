@@ -22,6 +22,13 @@ BOB = "urn:li:corpuser:bob"          # may do what a person does, but is no oper
 DS = "urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)"
 
 
+
+def row_menu(page, name: str, label: str):
+    """A row's action from its "More actions for <name>" menu (L150: the main action stays on the row; the rest, and
+    every delete, are in the menu)."""
+    page.get_by_role("button", name=f"More actions for {name}").click()
+    page.get_by_role("menuitem", name=label, exact=True).click()
+
 def _ready():
     try:
         import playwright.sync_api  # noqa: F401
@@ -169,7 +176,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             submit(d, "Edit")
             closed(d)
             assert api.get("/sql/saved").json()[0]["description"] == "Revenue per region, all time"
-            page.get_by_role("button", name="Delete: Revenue by region").click()
+            row_menu(page, "Revenue by region", "Delete")
             d = dialog()
             expect(d.get_by_text("Delete Revenue by region? This cannot be undone.")).to_be_visible()
             submit(d, "Delete")
@@ -204,7 +211,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             submit(d, "Edit")
             closed(d)
             assert api.get("/v1/jobs/nightly-export").json()["cron"] == "30 6 * * 1-5"
-            page.get_by_role("button", name="Delete: nightly-export").click()
+            row_menu(page, "nightly-export", "Delete")
             d = dialog()
             expect(d.get_by_text("Delete nightly-export? This cannot be undone.")).to_be_visible()
             submit(d, "Delete")
@@ -232,7 +239,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             submit(d, "Edit")
             closed(d)
             assert api.get("/quality/monitors").json()[0]["severity"] == "HIGH"
-            page.get_by_role("button", name="Delete: Orders checked").click()
+            row_menu(page, "Orders checked", "Delete")
             submit(dialog(), "Delete")
             expect(page.get_by_role("region", name="No Quality monitors yet")).to_be_visible(timeout=20_000)
             assert api.get("/quality/monitors").json() == []
@@ -268,7 +275,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             expect(drawer.get_by_role("button", name="View JSON")).to_be_visible()
             expect(drawer.get_by_text("#finance-data")).to_have_count(0)            # sensitive: masked
             page.keyboard.press("Escape")
-            page.get_by_role("button", name="Delete: finance-alerts").click()
+            row_menu(page, "finance-alerts", "Delete")
             submit(dialog(), "Delete")
             expect(page.get_by_role("region", name="No Notification routes yet")).to_be_visible(timeout=20_000)
             assert api.get("/notify/routes").json() == []
@@ -289,7 +296,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             submit(d, "Put secret")
             closed(d)
             assert "sk_live_never_shown" not in page.content()
-            page.get_by_role("button", name="Grant access: payments").click()
+            row_menu(page, "payments", "Grant access")
             d = dialog()
             choose(d, "Principal", ("data-eng", "data-eng (group)"))
             choose(d, "Permission", "READ")
@@ -299,7 +306,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             assert [k["key"] for k in scope["secrets"]] == ["api-key"]
             assert {"principal": "urn:li:corpGroup:data-eng", "permission": "READ"} in scope["acl"]
             assert s.secret_scopes.read(ANA, "payments", "api-key") == "sk_live_never_shown"
-            page.get_by_role("button", name="Delete scope: payments").click()
+            row_menu(page, "payments", "Delete scope")
             d = dialog()
             expect(d.get_by_text("Delete payments? This cannot be undone.")).to_be_visible()
             submit(d, "Delete scope")
@@ -323,7 +330,7 @@ def test_resources_created_changed_and_deleted_with_forms(cairn):
             submit(d, "Edit")
             closed(d)
             assert api.get("/v1/budgets").json()[0]["amount_usd"] == 2500
-            page.get_by_role("button", name="Delete: AI spend").click()
+            row_menu(page, "AI spend", "Delete")
             d = dialog()
             submit(d, "Delete")
             closed(d)

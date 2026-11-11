@@ -104,6 +104,17 @@ def until(fn, timeout=20.0):
         time.sleep(0.2)
 
 
+def _open_group(nav, name):
+    """Opens a sidebar group if it is closed (L150: groups outside the person's role start closed)."""
+    from playwright.sync_api import expect
+
+    group = nav.get_by_role("button", name=name, exact=True)
+    expect(group).to_be_visible(timeout=20_000)
+    if group.get_attribute("aria-expanded") != "true":
+        group.click()
+    expect(group).to_have_attribute("aria-expanded", "true")
+
+
 def _signed_in(pw, url, who):
     from playwright.sync_api import expect
 
@@ -129,6 +140,7 @@ def test_slos_rules_incidents_and_journeys_in_the_browser(cairn):
         page.on("pageerror", lambda e: errors.append(str(e)))
         try:
             nav = page.get_by_role("navigation", name="Workspace sections")
+            _open_group(nav, "Quality & operations")           # L150: groups outside the role start closed
             nav.get_by_role("link", name="Platform health").first.click()       # Observability is Platform health (L149)
             expect(page.get_by_role("heading", name="Observability", level=1)).to_be_visible(timeout=20_000)
             expect(page.get_by_text("1 firing")).to_be_visible(timeout=20_000)
@@ -214,6 +226,7 @@ def test_without_system_operations_the_section_is_not_offered_and_is_refused(cai
         try:
             nav = page.get_by_role("navigation", name="Workspace sections")
             expect(nav).to_be_visible(timeout=20_000)
+            _open_group(nav, "Quality & operations")           # open, so the absence below means "not offered"
             expect(nav.get_by_role("link", name="Platform health")).to_have_count(0)
             page.goto(f"{url}/host#/observability", wait_until="domcontentloaded")
             expect(page.get_by_text("Observability is for operators (MANAGE_SYSTEM_OPERATIONS).")).to_be_visible(

@@ -16,6 +16,7 @@ import { ActionDialog, ResourceView } from '../resources/ResourceView';
 import type { ResourceAction, ResourceSpec } from '../resources/types';
 import { errorStatus } from '../utils/errors';
 import { actorName } from '../utils/format';
+import { When } from '../utils/time';
 
 // ---- what the API answers (cairn.identity.people) ----------------------------------------------------------------
 export interface PersonRow {
@@ -325,7 +326,7 @@ function PersonDrawer({ id, onClose, onCheck }: { id: string; onClose: () => voi
                     <Table size="small" rowKey="seq" pagination={false} dataSource={p.recent_audit}
                         locale={{ emptyText: 'Nothing recorded yet.' }}
                         columns={[
-                            { title: 'When', key: 'ts', render: (_: unknown, e: PersonDetail['recent_audit'][number]) => new Date(e.ts).toLocaleString() },
+                            { title: 'When', key: 'ts', render: (_: unknown, e: PersonDetail['recent_audit'][number]) => <When value={e.ts} /> },
                             { title: 'What', dataIndex: 'action' },
                             { title: 'By', key: 'actor', render: (_: unknown, e: PersonDetail['recent_audit'][number]) => actorName(e.actor) },
                         ]} />
@@ -504,7 +505,7 @@ function PrincipalsTab() {
                     { title: 'Owner / acts as', key: 'owner', render: (_: unknown, r: Principal) => (r.owner ? actorName(r.owner) : r.purpose ?? '') },
                     { title: 'Scopes', key: 'scopes', render: (_: unknown, r: Principal) => r.scopes.join(', ') },
                     { title: 'Enabled', key: 'enabled', render: (_: unknown, r: Principal) => (r.enabled ? 'yes' : 'no') },
-                    { title: 'Last used', key: 'used', render: (_: unknown, r: Principal) => when(r.last_used_ms) },
+                    { title: 'Last used', key: 'used', render: (_: unknown, r: Principal) => <When value={r.last_used_ms} empty="" /> },
                 ]} />
         </>
     );

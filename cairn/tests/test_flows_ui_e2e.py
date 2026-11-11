@@ -166,14 +166,15 @@ def test_build_save_publish_and_run_a_flow_on_the_canvas(cairn):
             dialog.get_by_role("button", name="Publish").click()
             expect(page.get_by_text("Published version 1")).to_be_visible(timeout=20_000)
             page.get_by_role("button", name="Run", exact=True).click()
-            expect(page.locator(".fl-badge.succeeded").first).to_be_visible(timeout=60_000)
+            expect(page.locator('.cairn-status[data-state="succeeded"]').first).to_be_visible(timeout=60_000)   # StatusBadge (L150)
             for name in ("start", "sql-1", "notify-1"):            # each step coloured by its status
                 expect(page.locator(f'[data-step="{name}"].st-ok')).to_have_count(1)
             # A step's output, as the run kept it.
             page.locator('[data-step="sql-1"]').click()
             expect(page.get_by_role("region", name="Run of step sql-1").locator("pre")).to_contain_text('"rows": 1')
-            # Dark theme.
-            page.get_by_label("Theme").first.select_option("dark")
+            # Dark theme, from the profile menu (L150: one theme setting for the workspace).
+            page.get_by_role("button", name="Your profile and settings").click()
+            page.get_by_role("menuitem", name="Dark").click()
             expect(page.locator('[data-theme="dark"]')).to_have_count(1)
         finally:
             browser.close()

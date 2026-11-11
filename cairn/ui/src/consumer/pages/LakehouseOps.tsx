@@ -10,8 +10,9 @@ import { Muted, Surface } from '../components/tokens';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
+import { When } from '../utils/time';
 
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const who = (urn: string) => urn.replace('urn:li:corpuser:', '');
 const ok = (s: string | null | undefined) => (
     <Tag color={s === 'ok' || s === 'running' ? 'green' : s === 'error' ? 'red' : 'default'}>{s ?? 'not started'}</Tag>
@@ -228,7 +229,7 @@ export function SharesTab() {
                         { title: 'Tables', dataIndex: 'tables', render: (t: string[]) => t.join(', ') },
                         { title: 'State', dataIndex: 'state', render: (s: string) => <Tag color={SHARE_COLOR[s]}>{s}</Tag> },
                         { title: 'Expires', dataIndex: 'expires_at', render: day },
-                        { title: 'Last used', dataIndex: 'last_used_at', render: (s: number | null) => (s ? new Date(s * 1000).toLocaleString() : 'never') },
+                        { title: 'Last used', dataIndex: 'last_used_at', render: (s: number | null) => <When value={s} empty="never" /> },
                         { title: 'By', dataIndex: 'created_by', render: who },
                         {
                             title: '',

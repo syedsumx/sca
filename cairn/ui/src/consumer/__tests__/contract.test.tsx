@@ -51,7 +51,7 @@ it('shows each promise and which one is broken', async () => {
     });
     expect(await screen.findByText('column email is missing')).toBeTruthy();
     expect(screen.getByText('orders freshness')).toBeTruthy();
-    expect(screen.getByText('Broken')).toBeTruthy();
+    expect(screen.getAllByText('Broken')[0].closest('[data-tone]')?.getAttribute('data-tone')).toBe('error');
     expect(screen.getByText(/Versions: 2.0.0/)).toBeTruthy();
 });
 

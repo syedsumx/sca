@@ -56,8 +56,9 @@ it('shows the navigation in the chosen language and remembers a switch', async (
     expect(await screen.findByText('Start')).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Bereiche' })).toBeTruthy();
     expect(document.documentElement.lang).toBe('de');
-    fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Sprache' }));
-    fireEvent.click(await screen.findByText('日本語'));
+    // The language is in the profile menu (L150).
+    fireEvent.click(await screen.findByRole('button', { name: 'Ihr Profil und Ihre Einstellungen' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: '日本語' }));
     await waitFor(() => expect(screen.getByText('ホーム')).toBeTruthy());
     expect(window.localStorage.getItem('cairn.locale')).toBe('ja');
 });
@@ -65,5 +66,5 @@ it('shows the navigation in the chosen language and remembers a switch', async (
 it('stays English by default', async () => {
     layout();
     expect(await screen.findByText('Home')).toBeTruthy();
-    expect(screen.getByRole('button', { name: '✨ Ask' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Ask' })).toBeTruthy();
 });

@@ -11,6 +11,7 @@ import { useT } from '../i18n';
 import { actorName } from '../utils/format';
 import { RESOURCE_SPECS } from './catalog';
 import { ActionDialog, createAction } from './ResourceView';
+import { When } from '../utils/time';
 
 /** A managed Airflow deployment as `GET /v1/airflow/deployments` lists it. */
 export interface AirflowDeployment {
@@ -319,7 +320,7 @@ function Deploys({ dep, list, onChange }: { dep: AirflowDeployment; list: Airflo
                             { title: 'Result', dataIndex: 'state', render: (v) => <StatusBadge tone={airflowTone(v)} state={v} /> },
                             { title: 'From', render: (_, d) => deploySource(d) },
                             { title: 'By', dataIndex: 'created_by', render: (v) => actorName(v) },
-                            { title: 'When', dataIndex: 'created_ms', render: (v) => new Date(v).toLocaleString() },
+                            { title: 'When', dataIndex: 'created_ms', render: (v) => <When value={v} /> },
                             { title: 'Note', dataIndex: 'note', render: (v, d) => v ?? (d.checked?.import_errors &&
                                 Object.keys(d.checked.import_errors).length ? `does not import: ${Object.keys(d.checked.import_errors).join(', ')}` : '') },
                             { title: <span className="sr-only">Actions</span>, render: (_, d) => (d.state === 'superseded' ? (

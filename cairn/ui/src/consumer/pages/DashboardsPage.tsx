@@ -1,6 +1,6 @@
 import { Alert, Button, Checkbox, Empty, Grid, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
-import { Link, useHistory, useLocation } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
@@ -9,13 +9,16 @@ import { BiAssetButtons } from '../components/BiAdmin';
 import { BiFolders, BiUsageOverview } from '../components/BiCollab';
 import { OpsDashboardEditor, OpsTileView, RANGES, REFRESHES, sourceOf } from '../components/OpsTiles';
 import { ResultChart } from '../components/ResultChart';
-import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { Muted, Page, Surface, focusRing, tokens } from '../components/tokens';
+import styled from 'styled-components';
+import { useT } from '../i18n';
+import { When } from '../utils/time';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
-
-const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
+import { StatusBadge } from '../components/StatusBadge';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 /** One control: a list of values to pick from, a range, a date range or text. */
 function Control({ board, control, value, onChange }: {
@@ -399,6 +402,7 @@ function GrafanaImport({ open, onClose, onImported }: { open: boolean; onClose: 
 function Dashboards({ saved, openId, newOps, onNewOpsClosed }: { saved: SavedQuery[]; openId?: string | null; newOps?: boolean;
     onNewOpsClosed?: () => void }) {
     const { client } = useConsumerApi();
+    const t = useT();
     const [tick, setTick] = useState(0);
     const list = useDheQuery<Dashboard[]>(`/sql/dashboards#${tick}`, (c, signal) => c.dashboards({ signal }));
     const books = useDheQuery<Workbook[]>('/sql/workbooks', (c, signal) => c.workbooks({ signal }));
@@ -477,7 +481,27 @@ function Dashboards({ saved, openId, newOps, onNewOpsClosed }: { saved: SavedQue
                 <Button onClick={() => setImporting(true)}>Import from Grafana</Button>
                 {!saved.length && !(books.data ?? []).length && <Muted>Save queries in SQL, or workbooks, first; a dashboard shows them.</Muted>}
             </Space>
-            {open ? <Board key={`${open}-${tick}`} id={open} onOpen={opened} /> : <Empty description="Pick or create a dashboard" />}
+            {open ? <Board key={`${open}-${tick}`} id={open} onOpen={opened} /> : (
+                // No blank page (L150): the dashboards, most recently changed first, as cards.
+                (list.data ?? []).length ? (
+                    <section aria-labelledby="dash-recent">
+                        <h2 id="dash-recent" style={{ fontSize: 16, margin: '4px 0 12px' }}>{t('page.recentDashboards')}</h2>
+                        <DashCards>
+                            {[...(list.data ?? [])].sort((a, b) => (b.updated_ms ?? 0) - (a.updated_ms ?? 0)).slice(0, 12).map((d) => (
+                                <button key={d.id} type="button" onClick={() => setOpen(d.id)}>
+                                    <strong>{d.name}</strong>
+                                    {d.description && <span className="desc">{d.description}</span>}
+                                    <span className="meta">
+                                        {d.tiles.length} tile{d.tiles.length === 1 ? '' : 's'}
+                                        {d.builtin ? ' · built-in' : d.shared ? ' · shared' : ''}
+                                        {d.updated_ms ? <> · <When value={d.updated_ms} /></> : null}
+                                    </span>
+                                </button>
+                            ))}
+                        </DashCards>
+                    </section>
+                ) : list.loading ? null : <Empty description="No dashboards yet: build one from a question, or from saved queries" />
+            )}
             {opsNew && (
                 <OpsDashboardEditor open onCancel={() => { setOpsNew(false); onNewOpsClosed?.(); }}
                     onSaved={(id) => { setOpsNew(false); onNewOpsClosed?.(); message.success('Ops dashboard created'); opened(id); }} />
@@ -583,10 +607,10 @@ export function Alerts({ saved }: { saved: SavedQuery[] }) {
                     {
                         title: 'State',
                         render: (_, a) => (
-                            <Tag color={STATE[a.state]} title={a.last_error ?? ''}>
-                                {a.state}
-                                {a.last_value !== null ? ` (${a.last_value})` : ''}
-                            </Tag>
+                            <span title={a.last_error ?? ''}>
+                                <StatusBadge state={a.state} />
+                                {a.last_value !== null ? <Muted>{` (${a.last_value})`}</Muted> : ''}
+                            </span>
                         ),
                     },
                     {
@@ -625,6 +649,45 @@ export function Alerts({ saved }: { saved: SavedQuery[] }) {
 }
 
 /** Dashboards of saved queries, and alerts on them. */
+const DashCards = styled.div`
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 12px;
+    button {
+        display: flex;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        min-height: 96px;
+        padding: 14px 16px;
+        text-align: left;
+        border: 1px solid ${tokens.color.border};
+        border-radius: ${tokens.radius.md};
+        background: ${tokens.color.surface};
+        box-shadow: ${tokens.shadow.card};
+        color: ${tokens.color.text};
+        font: inherit;
+        cursor: pointer;
+        ${focusRing}
+        &:hover {
+            border-color: ${tokens.color.primary};
+        }
+        .desc {
+            color: ${tokens.color.textMuted};
+            font-size: 13px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .meta {
+            margin-top: auto;
+            color: ${tokens.color.textMuted};
+            font-size: 12px;
+        }
+    }
+`;
+
 export function DashboardsPage() {
     const saved = useDheQuery<SavedQuery[]>('/sql/saved', (c, signal) => c.savedQueries({ signal }));
     // A link from a folder or the usage list opens its dashboard (`/dashboards?open=<id>`).
@@ -643,8 +706,8 @@ export function DashboardsPage() {
     };
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Dashboards</h1><HelpButton /></div>
-            <Muted>Saved queries and workbooks with their charts, filters and drill-down, ops dashboards of metrics, logs, traces, SLOs and alerts, and scheduled exports. Every tile and export runs as a person, under their policies. Alerts on queries are in <Link to="/alerts?tab=sql-alerts">Alerts &amp; routing</Link>.</Muted>
+            <PageHeader title="Dashboards" help={pageHelp('/dashboards')}
+                description="Charts of saved queries and workbooks, and ops dashboards of metrics, logs, traces, SLOs and alerts. Every tile and export runs as a person, under their policies; alerts on queries are in Alerts & routing." />
             <Tabs style={{ marginTop: 12 }} activeKey={tab} onChange={setTab} items={[
                 { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} newOps={newOps} onNewOpsClosed={clearNew} /> },
                 { key: 'folders', label: 'Folders', children: <BiFolders /> },

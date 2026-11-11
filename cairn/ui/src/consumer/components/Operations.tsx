@@ -14,11 +14,14 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { SavedQuery } from '../api/types';
 import { Alerts as SqlAlerts } from '../pages/DashboardsPage';
 import { AlertsTab, IncidentDrawer, SEVERITY_COLOR, useSearchParam } from '../pages/ObservabilityPage';
-import { describeError, notifyError } from './ErrorNotice';
+import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
 import { PipelinesTab } from './PipelinesObs';
-import { StatusBadge, StatusTone } from './StatusBadge';
+import { StatusBadge, StatusTone, useStatusLabel } from './StatusBadge';
+import { When } from '../utils/time';
 import { Muted, Surface } from './tokens';
 import { shortUrn } from '../utils/format';
+import { isNotConnected } from '../utils/errors';
+import { useT } from '../i18n';
 
 /** How many objects of one kind are asked for their runs (the newest few runs each). */
 export const FANOUT = 20;
@@ -26,6 +29,8 @@ export const FANOUT = 20;
 export interface Problem {
     source: string;
     error: string;
+    /** The source's service is not set up here (its API is not mounted): shown as not connected, not as a problem. */
+    notConnected?: boolean;
 }
 
 export interface Gathered<T> {
@@ -45,7 +50,7 @@ async function gather<T>(sources: [string, () => Promise<T[]>][]): Promise<Gathe
     const problems: Problem[] = [];
     settled.forEach((s, i) => {
         if (s.status === 'fulfilled') rows.push(...s.value);
-        else problems.push({ source: sources[i][0], error: describeError(s.reason) });
+        else problems.push({ source: sources[i][0], error: describeError(s.reason), notConnected: isNotConnected(s.reason) });
     });
     return { rows, problems };
 }
@@ -153,15 +158,26 @@ export async function loadRuns(c: ConsumerClient, signal?: AbortSignal): Promise
     return out;
 }
 
-const STATE_TONE: Record<RunState, StatusTone> = { succeeded: 'ok', failed: 'error', running: 'waiting', other: 'warn' };
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const STATE_TONE: Record<RunState, StatusTone> = { succeeded: 'ok', failed: 'error', running: 'running', other: 'warn' };
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const took = (a: number | null, b: number | null) => (a && b && b >= a ? `${((b - a) / 1000).toFixed(1)}s` : '');
 
 function Problems({ problems }: { problems: Problem[] }) {
-    if (!problems.length) return null;
+    const t = useT();
+    const failing = problems.filter((p) => !p.notConnected);
+    const absent = problems.filter((p) => p.notConnected).map((p) => p.source);
     return (
-        <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Some sources are not shown"
-            description={<ul style={{ margin: 0, paddingLeft: 18 }}>{problems.map((p) => <li key={p.source}><strong>{p.source}</strong>: {p.error}</li>)}</ul>} />
+        <>
+            {absent.length > 0 && (
+                <Muted style={{ display: 'block', marginBottom: 12 }} data-error-kind="notConnected">
+                    {t('err.notConnected.sources', { sources: absent.join(', ') })}
+                </Muted>
+            )}
+            {failing.length > 0 && (
+                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Some sources are not shown"
+                    description={<ul style={{ margin: 0, paddingLeft: 18 }}>{failing.map((p) => <li key={p.source}><strong>{p.source}</strong>: {p.error}</li>)}</ul>} />
+            )}
+        </>
     );
 }
 
@@ -171,30 +187,27 @@ export function AllRuns() {
     const [source, setSource] = useState<RunSource | ''>('');
     const [state, setState] = useState<RunState | ''>('');
     const rows = (q.data?.rows ?? []).filter((r) => (!source || r.source === source) && (!state || r.state === state));
+    const words = useStatusLabel();
     return (
         <section aria-label="All runs">
-            <Muted style={{ display: 'block', marginBottom: 12 }}>
-                Every run of flows, SQL workflows, jobs, dbt, derived tables, pipes and Airflow DAGs, newest first. Each row
-                opens the place its runs are managed; pipeline SLAs and run details are in the Pipelines tab.
-            </Muted>
             <Space wrap style={{ marginBottom: 12 }}>
                 <Select aria-label="Kind" allowClear placeholder="Every kind" style={{ minWidth: 180 }} value={source || undefined}
                     onChange={(v) => setSource((v ?? '') as RunSource | '')}
                     options={(Object.keys(RUN_SOURCE_LABEL) as RunSource[]).map((k) => ({ value: k, label: RUN_SOURCE_LABEL[k] }))} />
                 <Select aria-label="Result" allowClear placeholder="Any result" style={{ minWidth: 160 }} value={state || undefined}
                     onChange={(v) => setState((v ?? '') as RunState | '')}
-                    options={['succeeded', 'failed', 'running', 'other'].map((v) => ({ value: v, label: v }))} />
+                    options={(['succeeded', 'failed', 'running', 'other'] as const).map((v) => ({ value: v, label: words(v) }))} />
                 <Button onClick={() => q.refresh()} loading={q.loading}>Refresh</Button>
             </Space>
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<RunRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
+            <Table<RunRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 aria-label="Runs"
                 locale={{ emptyText: 'No runs yet' }}
                 columns={[
                     { title: 'Kind', dataIndex: 'source', render: (s: RunSource) => <Tag>{RUN_SOURCE_LABEL[s]}</Tag> },
                     { title: 'What', dataIndex: 'name', render: (n: string, r) => <Link to={r.link}>{n}</Link> },
-                    { title: 'Result', dataIndex: 'state', render: (s: RunState, r) => <StatusBadge tone={STATE_TONE[s]} label={r.raw || s} plain /> },
+                    { title: 'Result', dataIndex: 'state', render: (s: RunState, r) => <StatusBadge state={s} tone={STATE_TONE[s]} title={r.raw || undefined} plain /> },
                     { title: 'Started', dataIndex: 'started_ms', render: when },
                     { title: 'Took', render: (_, r) => took(r.started_ms, r.finished_ms) },
                     { title: 'Why', dataIndex: 'trigger', render: (v?: string | null) => v ?? '' },
@@ -320,9 +333,9 @@ export function AllIncidents() {
                     </Space>
                 </Surface>
             )}
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<IncidentRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
+            <Table<IncidentRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 locale={{ emptyText: 'No open incidents' }}
                 columns={[
                     { title: 'Source', dataIndex: 'source', render: (s: IncidentSource) => <Tag>{INCIDENT_SOURCE_LABEL[s]}</Tag> },
@@ -330,7 +343,7 @@ export function AllIncidents() {
                     { title: 'Incident', dataIndex: 'title', render: (v: string, r) => (r.id
                         ? <Button type="link" size="small" style={{ padding: 0 }} aria-label={`Open ${v}`} onClick={() => setIncident(r.id!)}>{v}</Button>
                         : r.link ? <Link to={r.link}>{v}</Link> : v) },
-                    { title: 'Status', dataIndex: 'status', render: (v: string) => <Tag>{v}</Tag> },
+                    { title: 'Status', dataIndex: 'status', render: (v: string) => <StatusBadge state={v} plain /> },
                     { title: 'About', dataIndex: 'about' },
                     { title: 'Since', dataIndex: 'at_ms', render: when },
                 ]} />
@@ -405,9 +418,9 @@ export function AllAlerts() {
                     options={(Object.keys(ALERT_KIND_LABEL) as AlertKind[]).map((k) => ({ value: k, label: ALERT_KIND_LABEL[k] }))} />
                 <Button onClick={() => q.refresh()} loading={q.loading}>Refresh</Button>
             </Space>
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
-            <Table<AlertDefRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows}
+            <Table<AlertDefRow> size="middle" rowKey="key" loading={q.loading && !q.data} dataSource={rows}
                 pagination={rows.length > 25 ? { pageSize: 25, showSizeChanger: false } : false} locale={{ emptyText: 'No alerts yet' }}
                 columns={[
                     { title: 'Kind', dataIndex: 'kind', render: (k: AlertKind) => <Tag>{ALERT_KIND_LABEL[k]}</Tag> },
@@ -456,7 +469,7 @@ export function StatusAnnouncements() {
                 What the public status page (<a href="/status" target="_blank" rel="noreferrer">/status</a>) tells people: incidents
                 and maintenance, announced by operators. Platform incidents you work on are in Incidents.
             </Muted>
-            {q.error && <Alert type="info" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {q.data && (
                 <Space wrap style={{ marginBottom: 12 }}>
                     <Tag>{q.data.state}</Tag>
@@ -481,7 +494,7 @@ export function StatusAnnouncements() {
                     </Space>
                 </Surface>
             )}
-            <Table<StatusIncident> size="small" rowKey="id" dataSource={rows} loading={q.loading && !q.data} pagination={false}
+            <Table<StatusIncident> size="middle" rowKey="id" dataSource={rows} loading={q.loading && !q.data} pagination={false}
                 locale={{ emptyText: 'Nothing announced' }}
                 columns={[
                     { title: 'Announcement', dataIndex: 'title' },

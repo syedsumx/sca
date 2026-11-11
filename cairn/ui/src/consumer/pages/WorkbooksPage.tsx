@@ -6,8 +6,9 @@ import type { DataResult, SchemaTable, Workbook, WorkbookElement, WorkbookFilter
 import { toCsv } from '../components/ResultChart';
 import { BiAssetButtons } from '../components/BiAdmin';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
 import { describeError, notifyError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const OPS: { value: WorkbookFilter['op']; label: string; arity: 0 | 1 | 2 | 'list' }[] = [
     { value: '=', label: '=', arity: 1 }, { value: '!=', label: '≠', arity: 1 }, { value: '>', label: '>', arity: 1 },
@@ -137,20 +138,22 @@ export function WorkbooksPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Workbooks</h1><HelpButton /></div>
-            <Muted>Explore a table like a spreadsheet. It runs as you: your masks and row filters apply.</Muted>
+            <PageHeader title="Workbooks" help={pageHelp('/sql/workbooks')}
+                description="Explore a table like a spreadsheet. It runs as you: your masks and row filters apply." />
             <div style={{ display: 'grid', gridTemplateColumns: 'minmax(260px, 1fr) 3fr', gap: 16, marginTop: 16 }}>
                 <Surface>
                     <strong>Saved</strong>
                     {!(saved.data ?? []).length && <Empty description="No workbooks yet" image={Empty.PRESENTED_IMAGE_SIMPLE} />}
-                    <ul style={{ paddingLeft: 16 }}>
+                    {/* A compact row per workbook: its name opens it, the rest is in its menu (L150). */}
+                    <ul style={{ listStyle: 'none', padding: 0, margin: '8px 0 0' }}>
                         {(saved.data ?? []).map((w) => (
-                            <li key={w.id}>
-                                <a onClick={() => open(w)} role="button">{w.name}</a> {w.shared && <Tag color="blue">shared</Tag>}
+                            <li key={w.id} style={{ display: 'flex', alignItems: 'center', gap: 6, minHeight: 36 }}>
+                                <a onClick={() => open(w)} role="button" tabIndex={0} style={{ flex: 1, minWidth: 0, overflow: 'hidden',
+                                    textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(w); } }}>{w.name}</a>
+                                {w.shared && <Tag color="blue">shared</Tag>}
                                 {w.role && w.role !== 'OWNER' && <Tag>{w.role.toLowerCase()}</Tag>}
-                                <span style={{ marginLeft: 6 }}>
-                                    <BiAssetButtons kind="workbook" id={w.id} name={w.name} role={w.role} onRestored={() => setTick((x) => x + 1)} />
-                                </span>
+                                <BiAssetButtons compact kind="workbook" id={w.id} name={w.name} role={w.role} onRestored={() => setTick((x) => x + 1)} />
                             </li>
                         ))}
                     </ul>

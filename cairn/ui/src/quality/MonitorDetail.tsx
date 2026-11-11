@@ -7,6 +7,7 @@ import { formatNumber, formatTimestamp, statusColor } from '../common/format';
 import { ErrorState, LoadingState } from '../common/States';
 import { EvaluationChart } from './EvaluationChart';
 import { notifyError } from '../consumer/components/ErrorNotice';
+import { StatusBadge } from '../consumer/components/StatusBadge';
 
 export interface MonitorDetailProps {
     monitor: Monitor;
@@ -58,7 +59,7 @@ export function MonitorDetail({ monitor, limit = 200, refreshKey = 0 }: MonitorD
                         title: 'Status',
                         dataIndex: 'status',
                         width: 100,
-                        render: (s: Evaluation['status']) => <Tag color={statusColor(s)}>{s}</Tag>,
+                        render: (s: Evaluation['status']) => <StatusBadge state={s} />,
                     },
                     { title: 'Value', dataIndex: 'metric_value', render: (v: number | null) => formatNumber(v) },
                     {

@@ -9,8 +9,10 @@ import { assetPath } from '../components/Assets';
 import { download } from '../components/BulkEdit';
 import { SloDashboard } from '../components/Slos';
 import { Muted, Page, SectionTitle, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
+import { When } from '../utils/time';
 
 const FACETS: { key: CoverageFacet; label: string }[] = [
     { key: 'description', label: 'Described' },
@@ -297,12 +299,13 @@ export function ReportsPage() {
         <Page>
             <Space style={{ display: 'flex', justifyContent: 'space-between', flexWrap: 'wrap' }}>
                 <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Governance report</h1><HelpButton /></div>
-                    {s && (
-                        <Muted>
-                            {s.assets.toLocaleString()} datasets · computed {new Date(s.computed_ms).toLocaleString()}
-                        </Muted>
-                    )}
+                    <PageHeader title="Governance report" help={pageHelp('/reports')}>
+                        {s && (
+                            <Muted>
+                                {s.assets.toLocaleString()} datasets · computed <When value={s.computed_ms} />
+                            </Muted>
+                        )}
+                    </PageHeader>
                 </div>
                 <Space>
                     <Button

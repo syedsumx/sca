@@ -23,20 +23,40 @@
     margin: 0;
     overflow-x: hidden;
   }
+  /* One line, dismissible: the note says what this is, then gets out of the way (on a phone too). */
   .demo-banner {
-    display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: baseline;
-    padding-block: 8px;
+    display: flex; gap: 10px; align-items: center;
+    min-height: 36px;
     padding-left: max(16px, env(safe-area-inset-left, 0px));
-    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-right: max(4px, env(safe-area-inset-right, 0px));
     background: var(--banner-bg); color: var(--banner-ink);
     border-bottom: 1px solid var(--banner-rule); font-size: 13px; line-height: 1.4;
   }
-  .demo-banner strong { font-weight: 600; letter-spacing: 0.02em; }
+  .demo-banner[hidden] { display: none; }
+  .demo-banner strong { font-weight: 600; letter-spacing: 0.02em; color: #fff; flex: none; }
+  .demo-banner span { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .demo-banner button {
+    flex: none; display: inline-grid; place-items: center; width: 36px; height: 36px; border: 0; border-radius: 8px;
+    background: transparent; color: var(--banner-ink); font: inherit; font-size: 18px; line-height: 1; cursor: pointer;
+  }
+  .demo-banner button:hover { color: #fff; background: var(--banner-rule); }
+  .demo-banner button:focus-visible { outline: 2px solid #93B4FF; outline-offset: -2px; }
   #cairn-root { min-height: 100%; }
 </style>
-<div class="demo-banner" role="note">
+<div class="demo-banner" role="note" id="demo-banner">
   <strong>Cairn demo</strong>
-  <span>Sample data for a fictional retailer. You are signed in as Alice Moreno (Finance analyst, admin). Changes you make last until you reload.</span>
+  <span title="Sample data for a fictional retailer. You are signed in as Alice Moreno (Finance analyst, admin). Changes you make last until you reload.">Sample data for a fictional retailer, signed in as Alice Moreno (Finance analyst, admin). Changes last until you reload.</span>
+  <button type="button" aria-label="Hide this note" title="Hide this note">&times;</button>
 </div>
+<script>
+  (function () {
+    var key = 'cairn.demo.banner.hidden', el = document.getElementById('demo-banner');
+    try { if (window.localStorage.getItem(key) === '1') el.hidden = true; } catch (e) { /* storage blocked: shown */ }
+    el.querySelector('button').addEventListener('click', function () {
+      el.hidden = true;
+      try { window.localStorage.setItem(key, '1'); } catch (e) { /* storage blocked: hidden until reload */ }
+    });
+  })();
+</script>
 <div id="cairn-root"></div>
 <script>/*APP_JS*/</script>

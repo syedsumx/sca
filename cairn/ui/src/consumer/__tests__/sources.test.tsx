@@ -99,7 +99,7 @@ it('lists sources with their health and shows a run log', async () => {
         },
     });
     expect(await screen.findByText('Finance DB')).toBeTruthy();
-    expect(screen.getByText('failing')).toBeTruthy();
+    expect(screen.getByText('Failing')).toBeTruthy();
     expect(screen.getByText('1 source needs attention')).toBeTruthy();
     expect(screen.getByText('pool finance')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Runs' }));

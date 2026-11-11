@@ -30,20 +30,10 @@ import type {
 import { GitRepositories } from './GitDocs';
 import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
+import { Schedule, When } from '../utils/time';
+import { RowActions } from './RowActions';
 
-const HEALTH_COLOR: Record<SourceHealthState, string> = {
-    healthy: 'green',
-    running: 'blue',
-    failing: 'red',
-    stale: 'orange',
-    never_run: 'default',
-};
-const STATUS_COLOR: Record<string, string> = {
-    SUCCESS: 'green',
-    FAILURE: 'red',
-    RUNNING: 'blue',
-    CANCELLED: 'default',
-};
 const CATEGORY: Record<SourceConnector['category'], string> = {
     warehouse: 'Warehouses',
     database: 'Databases',
@@ -54,7 +44,7 @@ const CATEGORY: Record<SourceConnector['category'], string> = {
     ml: 'Machine learning',
     other: 'Other',
 };
-const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const when = (ms: number | null | undefined) => <When value={ms} />;
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function TestResult({ test }: { test: SourceTest }) {
@@ -299,7 +289,7 @@ function History({ source, onClose }: { source: IngestionSource; onClose: () => 
                 locale={{ emptyText: 'No runs yet.' }}
                 columns={[
                     { title: 'Started', render: (_, r) => when(r.started_ms ?? r.requested_ms) },
-                    { title: 'Status', render: (_, r) => <Tag color={STATUS_COLOR[r.status]}>{r.status}</Tag> },
+                    { title: 'Status', render: (_, r) => <StatusBadge state={r.status} /> },
                     {
                         title: 'Time',
                         render: (_, r) => (r.duration_ms ? `${Math.round(r.duration_ms / 1000)} s` : '—'),
@@ -390,7 +380,7 @@ export function SourcesSettings() {
                         title: 'Health',
                         render: (_, s) => (
                             <span title={s.health.reason}>
-                                <Tag color={HEALTH_COLOR[s.health.state]}>{s.health.state.replace('_', ' ')}</Tag>
+                                <StatusBadge state={s.health.state} />
                             </span>
                         ),
                     },
@@ -399,9 +389,7 @@ export function SourcesSettings() {
                         title: 'Schedule',
                         render: (_, s) =>
                             s.schedule ? (
-                                <code>
-                                    {s.schedule.interval} {s.schedule.timezone !== 'UTC' && s.schedule.timezone}
-                                </code>
+                                <Schedule cron={s.schedule.interval} tz={s.schedule.timezone} />
                             ) : (
                                 <Muted>manual</Muted>
                             ),
@@ -411,7 +399,7 @@ export function SourcesSettings() {
                         render: (_, s) =>
                             s.last_run ? (
                                 <span>
-                                    <Tag color={STATUS_COLOR[s.last_run.status]}>{s.last_run.status}</Tag>
+                                    <StatusBadge state={s.last_run.status} />
                                     {when(s.last_run.started_ms ?? s.last_run.requested_ms)}
                                 </span>
                             ) : (
@@ -442,17 +430,11 @@ export function SourcesSettings() {
                                 >
                                     Edit
                                 </Button>
-                                <Popconfirm
-                                    title={`Delete ${s.name}? The metadata it brought in stays.`}
-                                    onConfirm={async () => {
+                                <RowActions name={s.name} actions={[{ key: 'delete', label: 'Delete', danger: true, confirm: `Delete ${s.name}? The metadata it brought in stays.`,
+    onSelect: async () => {
                                         await client.deleteSource(s.urn);
                                         sources.refresh();
-                                    }}
-                                >
-                                    <Button size="small" danger>
-                                        Delete
-                                    </Button>
-                                </Popconfirm>
+                                    } }]} />
                             </Space>
                         ),
                     },

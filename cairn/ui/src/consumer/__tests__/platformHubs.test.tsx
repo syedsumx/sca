@@ -56,10 +56,14 @@ it('every hub tab names a known area or view, and every hub is in the sidebar', 
 it('the sidebar groups every section and collapses', async () => {
     wrap(<ConsumerLayout />, {});
     const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
+    // Every group is listed; the closed ones open with their heading (L150).
+    for (const b of within(nav).getAllByRole('button', { expanded: false })) fireEvent.click(b);
     for (const label of ['Agents', 'Ingestion', 'Security & compliance', 'Platform map', 'Settings']) {
         expect(within(nav).getByText(label)).toBeTruthy();
     }
-    expect(within(nav).getByText('AI')).toBeTruthy();
+    expect(within(nav).getByRole('button', { name: 'AI' }).getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(within(nav).getByRole('button', { name: 'Build' }));
+    expect(within(nav).queryByRole('link', { name: 'Ingestion' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeTruthy();
     expect(within(nav).queryByText('Ingestion')).toBeNull();
@@ -76,7 +80,7 @@ it('a resource view lists an area from the API, shows a row, and runs a row acti
         'POST /ai/outbox/ob_1/approve': { ...item, status: 'approved' },
     }, calls);
     expect(await screen.findByText('Weekly revenue')).toBeTruthy();
-    expect(screen.getByText('pending')).toBeTruthy();
+    expect(screen.getByText('Pending').closest('[data-tone]')?.getAttribute('data-state')).toBe('pending');
     fireEvent.click(screen.getByText('Weekly revenue'));
     expect(await screen.findByText('cfo@northwind.example', { selector: '.ant-drawer *' })).toBeTruthy();
     fireEvent.click(within(document.querySelector('.ant-drawer') as HTMLElement).getByRole('button', { name: 'Approve and send' }));

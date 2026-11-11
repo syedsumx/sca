@@ -13,6 +13,8 @@ import { parse as parseYaml, stringify } from './yaml';
 import { describeError } from '../components/ErrorNotice';
 import { Picker } from '../resources/pickers';
 import { useT } from '../i18n';
+import { StatusBadge } from '../components/StatusBadge';
+import { When } from '../utils/time';
 
 // ---- the definition, with undo and redo ------------------------------------------------------------------------
 interface History {
@@ -123,11 +125,12 @@ interface Props {
     onSaved: (d: FlowDetail) => void;
     onDeleted: () => void;
     theme: string;
-    onTheme: (t: string) => void;
+    /** Unused since the theme moved to the profile menu (L150); kept for callers. */
+    onTheme?: (t: string) => void;
 }
 
 const ACTIVE = ['queued', 'running', 'waiting'];
-const fmt = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
+const fmt = (ms: number | null | undefined) => <When value={ms} />;
 const took = (a: number | null, b: number | null) => (a && b ? `${((b - a) / 1000).toFixed(1)} s` : '');
 
 function apiProblems(e: unknown): Problem[] {
@@ -136,7 +139,7 @@ function apiProblems(e: unknown): Problem[] {
     return [{ path: '', message: describeError(e) }];
 }
 
-export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme }: Props) {
+export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme }: Props) {
     const [h, dispatch] = useReducer(reduce, undefined, () => ({ def: withLayout(detail.draft), past: [], future: [] }));
     const def = h.def;
     const [saved, setSaved] = useState(() => JSON.stringify(withLayout(detail.draft)));
@@ -422,11 +425,6 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
                 <label className="fl-muted" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
                     <input type="checkbox" checked={snapOn} onChange={(e) => setSnapOn(e.target.checked)} /> Snap to grid
                 </label>
-                <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => onTheme(e.target.value)}>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                    <option value="auto">System</option>
-                </select>
                 {canEdit && (
                     <button type="button" className="fl-btn" disabled={busy || !dirty} onClick={() => void save()}>
                         Save draft
@@ -455,7 +453,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
             {run && (
                 <div className="fl-top" style={{ background: 'var(--fl-primary-soft)' }} aria-live="polite">
                     <strong>Run {run.id.slice(0, 8)}</strong>
-                    <span className={`fl-badge ${run.status}`}>{run.status}</span>
+                    <StatusBadge state={run.status} />
                     <span className="fl-muted">v{run.version || 'draft'} · {run.trigger} · as {run.run_as.split(':').pop()} · started {fmt(run.started_ms ?? run.created_ms)}</span>
                     {run.error && <span className="fl-err">{run.error}</span>}
                     <span style={{ flex: 1 }} />
@@ -606,7 +604,7 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
                                 {runs.map((r) => (
                                     <tr key={r.id}>
                                         <td><button type="button" className="fl-list-item" style={{ padding: 0 }} onClick={() => void openRun(r.id)}>{r.id.slice(0, 8)}</button></td>
-                                        <td><span className={`fl-badge ${r.status}`}>{r.status}</span></td>
+                                        <td><StatusBadge state={r.status} /></td>
                                         <td>{r.trigger}{r.triggered_by ? ` (${r.triggered_by.split(':').pop()})` : ''}</td>
                                         <td>{r.version || 'draft'}</td>
                                         <td>{fmt(r.started_ms ?? r.created_ms)}</td>
@@ -709,7 +707,7 @@ function StepList({ def, problems, run, onPick, edge, onDeleteEdge, readOnly, on
                             <span className="fl-chip" style={{ background: GROUPS.find((g) => g.name === TYPE_BY[s.type]?.group)?.color ?? '#888', width: 18, height: 18 }} aria-hidden="true" />
                             <span style={{ flex: 1 }}>{s.name}</span>
                             {(s.after ?? []).length > 0 && <span className="fl-muted">after {(s.after ?? []).join(', ')}</span>}
-                            {st[s.name] && <span className={`fl-badge ${st[s.name]}`}>{st[s.name]}</span>}
+                            {st[s.name] && <StatusBadge state={st[s.name]} />}
                         </button>
                     </li>
                 ))}
@@ -733,7 +731,7 @@ function StepRunPanel({ step, run, me, canEdit, log, onLog, onRerun, onDecide }:
     const mayDecide = waitingApproval && ((step.approvers ?? []).includes(me) || (step.groups ?? []).length > 0);
     return (
         <section aria-label={`Run of step ${step.key}`}>
-            <h3 style={{ fontSize: 15, margin: '0 0 6px' }}>{step.key} <span className={`fl-badge ${step.status}`}>{step.status}</span></h3>
+            <h3 style={{ fontSize: 15, margin: '0 0 6px' }}>{step.key} <StatusBadge state={step.status} /></h3>
             <div className="fl-muted">
                 Attempt {step.attempt || 0} · {took(step.started_ms, step.finished_ms) || fmt(step.started_ms)}
                 {step.reused ? ' · kept from the run it reran' : ''}
@@ -758,7 +756,7 @@ function StepRunPanel({ step, run, me, canEdit, log, onLog, onRerun, onDecide }:
                 <>
                     <h4 style={{ fontSize: 13 }}>Items</h4>
                     <ul className="fl-list">
-                        {step.items.map((i) => <li key={i.key}><span className={`fl-badge ${i.status}`}>{i.status}</span> {i.key}{i.error ? ` — ${i.error}` : ''}</li>)}
+                        {step.items.map((i) => <li key={i.key}><StatusBadge state={i.status} /> {i.key}{i.error ? ` — ${i.error}` : ''}</li>)}
                     </ul>
                 </>
             )}

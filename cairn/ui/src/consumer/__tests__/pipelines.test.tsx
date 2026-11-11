@@ -39,7 +39,7 @@ test('Runs › dbt runs lists dbt runs, their nodes and links to the project doc
             </CairnProvider>
         </MemoryRouter>,
     );
-    expect(await screen.findByText('error · 1 test(s) failed')).toBeTruthy();
+    expect((await screen.findByText('· 1 test(s) failed')).parentElement?.querySelector('[data-tone="error"]')).toBeTruthy();
     expect(screen.getByText('1m 15s')).toBeTruthy();
     expect(screen.getByText('svc-dbt')).toBeTruthy();
     // A run's nodes, one by one.

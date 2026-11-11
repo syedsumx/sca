@@ -353,7 +353,7 @@ describe('the Flows page', () => {
             </MemoryRouter>,
         );
         expect(await screen.findByRole('button', { name: 'nightly' })).toBeTruthy();
-        expect(screen.getByText('failed')).toBeTruthy();
+        expect(screen.getByText('Failed')).toBeTruthy();
         expect(screen.getByText(/gate \/ ok/)).toBeTruthy();
         fireEvent.click(screen.getAllByRole('button', { name: /New flow/ })[0]);
         fireEvent.click(screen.getByRole('radio', { name: /Agent triage with approval/ }));

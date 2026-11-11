@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { LicenceState } from '../api/types';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
 
 const KEY = '/admin/licence';
 
@@ -44,15 +45,6 @@ export function LicenceBanner() {
     return <Alert banner role="status" type={banner.type} message={banner.text} />;
 }
 
-const STATUS_COLOR: Record<string, string> = {
-    evaluation: 'blue',
-    valid: 'green',
-    expiring: 'orange',
-    expired: 'red',
-    invalid: 'red',
-    missing: 'red',
-};
-
 /** Administration: the installed licence, seats, and installing or removing a key. */
 export function LicenceSettings() {
     const { client } = useConsumerApi();
@@ -83,7 +75,7 @@ export function LicenceSettings() {
             {st && (
                 <Descriptions size="small" column={2} bordered style={{ marginBottom: 16 }}>
                     <Descriptions.Item label="Status">
-                        <Tag color={STATUS_COLOR[st.status]}>{st.status}</Tag>
+                        <StatusBadge state={st.status} />
                         {st.read_only && <Tag color="red">read-only</Tag>}
                     </Descriptions.Item>
                     <Descriptions.Item label="Seats">

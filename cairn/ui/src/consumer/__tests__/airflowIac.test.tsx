@@ -151,7 +151,7 @@ describe('change requests', () => {
         fireEvent.change(await screen.findByLabelText('Value of PW'), { target: { value: 's3cret-value' } });
         fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
         await waitFor(() => expect(calls.find((c) => c.path === '/v1/iac/changes/c1/apply')?.body).toEqual({ variables: { PW: 's3cret-value' } }));
-        expect((await screen.findAllByText('applied')).length).toBeGreaterThan(0);
+        expect((await screen.findAllByText('Applied')).length).toBeGreaterThan(0);
     });
 
     it('asks an agent for a flow and opens it in the canvas; without a model it says why', async () => {

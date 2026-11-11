@@ -1589,6 +1589,43 @@ checklist ticking steps from the API, the palette, help, shortcuts, the sidebar 
 sidebar without the operators' areas, and the fifteen common tasks; axe on the role question, **Get started**, the
 open palette, the help panel and the shortcuts (`tests/test_accessibility_e2e.py`).
 
+## A calmer workspace: services not connected yet, the sidebar and the one search
+
+**Services that are not connected yet.** A part of Cairn that is not set up on a deployment (Airflow, platform
+observability, the people directory, MLflow, scheduled jobs, the audit log, system tables, compute) has no API mounted,
+so its calls answer FastAPI's own `404 Not Found`. The web UI shows that as a neutral note, "Airflow isn't connected
+yet", with a link to the section of this manual that connects it ([Managed Airflow](#managed-airflow),
+[Observability](#observability), [User provisioning (SCIM)](#user-provisioning-scim) and so on), instead of a red "It
+was not found". A list that gathers several sources (Runs, Incidents, Alerts) names the sources that are not connected
+in one quiet line and still shows the rest. Only the wording changes: a `404` with the API's own reason (a workflow or
+a person that does not exist) is still "It was not found", a `403` is still "You don't have permission", and nothing is
+shown that the API did not return.
+
+**The sidebar follows the person's role.** Each group of the sidebar (Catalog, Govern, Quality & operations, Analyze,
+Build, AI, Platform) opens and closes from its heading. By default the groups of the person's role are open (the role
+chosen on first sign-in, or the one their profile's role suggests): Catalog for everyone; Analyze and AI for analysts;
+Quality & operations and Build for engineers; Govern and Quality & operations for stewards; Govern and Platform for
+admins. The group of the page on screen is always open. A person's own open and closed choices are remembered on
+their device (per person, in the browser's storage; when storage is blocked they last while the page is open), and
+**Show everything** at the foot of the sidebar opens every group and shows hidden entries. Capabilities still decide
+what is listed at all (see above): a closed group hides nothing a person may use, it is one click away, and every page
+is also found by the search.
+
+**One search.** The header has one search box: typing searches the catalog as the person (Cairn Core answers only what
+they may see) and also finds pages, tabs and actions, with **Search all data** (the catalog's results page) and **Ask**
+at the end. Ctrl K (⌘ K on a Mac) and `/` focus it; on a phone it is an icon that opens over the header.
+
+**Personal settings** are in the profile menu (the avatar): the person's profile, the language and the theme (light,
+dark, or as the system prefers; the canvas pages follow it). Rows keep their main action (Edit, Run now) and put the
+rest, and every delete, in a **More actions** menu that asks before deleting. Times read "5 h ago" with the exact time
+on hover, schedules read "Every day at 02:00 UTC" with the cron on hover, and a page's API paths are behind a
+collapsed **API** note.
+
+Tested: `ui/src/consumer/__tests__/calm.test.tsx` (not connected, not found and refused told apart; the status
+vocabulary; the row menu's confirmation; cron and relative times; the sidebar's role and current-page groups, a choice
+remembered per person and Show everything; icon tiles), `guide.test.tsx` (the header search), and in Chromium
+`tests/test_accessibility_e2e.py` and `tests/test_tasks_ui_e2e.py`.
+
 ## Excel and Google Sheets
 
 Cairn for Excel (an Office add-in) and Cairn for Google Sheets (an Apps Script add-on) put governed answers in

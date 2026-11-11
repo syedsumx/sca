@@ -5,11 +5,12 @@ import styled from 'styled-components';
 
 import type { CairnApiError } from '../../api/client';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
+import { ApiDisclosure, RowActions } from '../components/RowActions';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { tokens } from '../components/tokens';
 import { useT } from '../i18n';
 import { DetailPanel } from './DetailPanel';
-import { formatValue, humanize, shortUrn } from './format';
+import { columnTitle, formatValue, humanize, shortUrn } from './format';
 import {
     FORMS, FieldValueError, FormSchema, Problem, Values, fillPath, formFor, initialValues, mapServerErrors, needsForm, toBody,
     validate,
@@ -322,7 +323,7 @@ export function ResourceView({ spec, extra, actions }: {
 
     const columns = [
         ...columnKeys.map((k, i) => ({
-            title: humanize(k),
+            title: columnTitle(k),
             dataIndex: k,
             key: k,
             render: (v: unknown, r: Row) =>
@@ -343,16 +344,16 @@ export function ResourceView({ spec, extra, actions }: {
                 title: '',
                 key: '__actions',
                 align: 'right' as const,
-                render: (_: unknown, r: Row) => (
-                    <Space size={4} wrap>
-                        {rowActions.map((a) => (
-                            <Button key={a.label} size="small" danger={a.method === 'DELETE'} type={a.method === 'DELETE' ? 'text' : 'default'}
-                                aria-label={`${a.label}: ${thingName(spec, r)}`} onClick={() => setDialog({ action: a, row: r })}>
-                                {a.label}
-                            </Button>
-                        ))}
-                    </Space>
-                ),
+                render: (_: unknown, r: Row) => {
+                    // The main action stays visible; the rest, and every delete, is in the row's menu (L150).
+                    const main = rowActions.find((x) => x.method !== 'DELETE');
+                    const toItem = (x: ResourceAction) => ({ key: x.label, label: x.label, danger: x.method === 'DELETE',
+                        confirm: false, onSelect: () => setDialog({ action: x, row: r }) });
+                    return (
+                        <RowActions name={thingName(spec, r)} primary={main ? [toItem(main)] : []}
+                            actions={rowActions.filter((x) => x !== main).map(toItem)} />
+                    );
+                },
             }]
             : []),
     ];
@@ -365,7 +366,7 @@ export function ResourceView({ spec, extra, actions }: {
                         {spec.description}
                         {docs && <> <a href={docs} target="_blank" rel="noreferrer">{t('empty.learnMore')}</a></>}
                     </p>
-                    {spec.path && <code className="cairn-path">GET {spec.path}</code>}
+                    {spec.path && <ApiDisclosure paths={[`GET ${spec.path}`]} />}
                 </div>
                 <Space wrap>
                     {actions}

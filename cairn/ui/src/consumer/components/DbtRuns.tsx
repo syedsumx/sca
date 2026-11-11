@@ -5,6 +5,8 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DbtRun } from '../api/types';
 import { ErrorNotice } from './ErrorNotice';
 import { Muted, Surface } from './tokens';
+import { StatusBadge } from './StatusBadge';
+import { When } from '../utils/time';
 
 export const DBT_STATUS_COLOR: Record<string, string> = {
     success: 'green',
@@ -15,8 +17,6 @@ export const DBT_STATUS_COLOR: Record<string, string> = {
     warn: 'gold',
     skipped: 'default',
 };
-const STATUS_COLOR = DBT_STATUS_COLOR;
-
 function duration(s: number | null | undefined): string {
     if (s == null) return '';
     if (s < 60) return `${s}s`;
@@ -72,7 +72,7 @@ export function DbtRuns() {
                                     {
                                         title: 'Result',
                                         dataIndex: 'status',
-                                        render: (s: string) => <Tag color={STATUS_COLOR[s] ?? 'default'}>{s}</Tag>,
+                                        render: (s: string) => <StatusBadge state={s} />,
                                     },
                                     { title: 'Seconds', dataIndex: 'seconds' },
                                 ]}
@@ -87,10 +87,10 @@ export function DbtRuns() {
                             title: 'Status',
                             dataIndex: 'status',
                             render: (s: string, r) => (
-                                <Tag color={STATUS_COLOR[s]}>
-                                    {s}
-                                    {r.tests_failed ? ` · ${r.tests_failed} test(s) failed` : ''}
-                                </Tag>
+                                <span>
+                                    <StatusBadge state={s} />
+                                    {r.tests_failed ? <Muted>{` · ${r.tests_failed} test(s) failed`}</Muted> : ''}
+                                </span>
                             ),
                         },
                         { title: 'Nodes', dataIndex: 'nodes' },
@@ -99,7 +99,7 @@ export function DbtRuns() {
                         {
                             title: 'Finished',
                             dataIndex: 'finished_ms',
-                            render: (ms: number) => new Date(ms).toLocaleString(),
+                            render: (ms: number) => <When value={ms} />,
                         },
                     ]}
                 />

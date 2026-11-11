@@ -4,13 +4,8 @@ import React from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ProductSlo } from '../api/types';
 import { Muted } from './tokens';
-
-const STATE_COLOR: Record<ProductSlo['state'], string> = {
-    met: 'green',
-    at_risk: 'orange',
-    breached: 'red',
-    no_data: 'default',
-};
+import { StatusBadge } from './StatusBadge';
+import { RowActions } from './RowActions';
 
 function columns(withProduct: boolean, onDelete?: (id: string) => void) {
     return [
@@ -54,18 +49,15 @@ function columns(withProduct: boolean, onDelete?: (id: string) => void) {
         },
         {
             title: 'State',
-            render: (_: unknown, r: ProductSlo) => <Tag color={STATE_COLOR[r.state]}>{r.state.replace('_', ' ')}</Tag>,
+            render: (_: unknown, r: ProductSlo) => <StatusBadge state={r.state} />,
         },
         ...(onDelete
             ? [
                   {
                       title: '',
                       render: (_: unknown, r: ProductSlo) => (
-                          <Popconfirm title={`Remove ${r.name}?`} onConfirm={() => onDelete(r.id)}>
-                              <Button size="small" danger>
-                                  Remove
-                              </Button>
-                          </Popconfirm>
+                          <RowActions name={r.name} actions={[{ key: 'delete', label: 'Remove', danger: true, confirm: `Remove ${r.name}?`,
+    onSelect: () => onDelete(r.id) }]} />
                       ),
                   },
               ]

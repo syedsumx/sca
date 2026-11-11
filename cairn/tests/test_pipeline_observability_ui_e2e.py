@@ -225,7 +225,7 @@ def test_pipelines_runs_definitions_and_export_in_the_browser(cairn):
             assert any(e["action"] == "observability.pipeline_sla_created" and e["actor"] == OPS
                        for e in s.audit.entries("observability", 1000))
             page.keyboard.press("Escape")
-            expect(page.get_by_role("cell", name="Finance by six")).to_be_visible(timeout=20_000)
+            expect(page.get_by_role("cell", name="Finance by six", exact=True)).to_be_visible(timeout=20_000)   # L150: a menu names it
 
             # ---- an OTLP destination, its configuration and apply ----------------------------------------------------
             page.goto(f"{url}/host#/observability?tab=export", wait_until="domcontentloaded")   # Platform health (L149)

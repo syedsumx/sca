@@ -8,6 +8,7 @@ import { EmptyState, ErrorState, LoadingState, PageContainer, PageHeader } from 
 import { MonitorDetail } from './MonitorDetail';
 import { MONITOR_TYPE_LABELS, MonitorEditor } from './MonitorEditor';
 import { notifyError } from '../consumer/components/ErrorNotice';
+import { StatusBadge } from '../consumer/components/StatusBadge';
 
 export interface QualityDashboardProps {
     /** Restrict the dashboard to monitors of one dataset (used by QualityTab). */
@@ -146,7 +147,7 @@ export function QualityDashboard({ datasetUrn, pollIntervalMs = 30000, embedded 
                         render: (_: unknown, m) => {
                             if (!m.enabled || m.status === 'PAUSED') return <Tag>PAUSED</Tag>;
                             const s = m.last_evaluation?.status ?? (m.status === 'TRAINING' ? 'TRAINING' : undefined);
-                            return <Tag color={statusColor(s)}>{s ?? 'PENDING'}</Tag>;
+                            return <StatusBadge state={s ?? 'PENDING'} />;
                         },
                     },
                     { title: 'Severity', dataIndex: 'severity', width: 100 },

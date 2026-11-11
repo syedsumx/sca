@@ -4,8 +4,9 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { InputColumnType, InputTable } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
 import { ErrorNotice, describeError } from '../components/ErrorNotice';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const TYPES: InputColumnType[] = ['text', 'number', 'integer', 'boolean', 'date', 'timestamp'];
 const SYSTEM = ['_row_id', '_updated_by', '_updated_at'];
@@ -131,8 +132,8 @@ export function InputTablesPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Input tables</h1><HelpButton /></div>
-            <p><Muted>Tables you type into, in the lakehouse. Every change runs as you, under your policies, and is audited.</Muted></p>
+            <PageHeader title="Input tables" help={pageHelp('/sql/input-tables')}
+                description="Tables you type into, in the lakehouse. Every change runs as you, under your policies, and is audited." />
             <Surface>
                 <Space wrap style={{ marginBottom: 12 }}>
                     <Select aria-label="Input table" style={{ width: 280 }} value={selected} placeholder="Choose an input table"

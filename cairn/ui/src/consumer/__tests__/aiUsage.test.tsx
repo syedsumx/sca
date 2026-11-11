@@ -55,7 +55,7 @@ it('shows which agents and AI tools read a dataset, with their AI system', async
     );
     expect(await screen.findByText('Revenue bot')).toBeTruthy();
     expect(screen.getByText('Revenue forecasting')).toBeTruthy();
-    expect(screen.getByText('approved')).toBeTruthy();
+    expect(screen.getByText('Approved')).toBeTruthy();
     expect(screen.getByText('Assistant')).toBeTruthy();
     expect(screen.getByText('not registered')).toBeTruthy();
     expect(screen.getByText('A person')).toBeTruthy();

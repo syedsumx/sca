@@ -184,7 +184,7 @@ it('lists access keys, creates one and shows its secret once, rotates and delete
     expect(within(row).getByText('lake-*')).toBeTruthy();
     const fixed = screen.getByText('cairnadmin').closest('tr') as HTMLElement;
     expect(within(fixed).getByText('Configuration')).toBeTruthy();
-    expect(within(fixed).queryByText('Rotate secret')).toBeNull(); // configuration keys are changed there
+    expect(within(fixed).queryByRole('button', { name: 'More actions for cairnadmin' })).toBeNull(); // configuration keys are changed there
     fireEvent.click(screen.getByText('Create key'));
     fireEvent.change(await screen.findByLabelText('Buckets (comma-separated; * allowed; empty for all)'), {
         target: { value: 'lake-a, lake-b' },
@@ -198,8 +198,11 @@ it('lists access keys, creates one and shows its secret once, rotates and delete
         admin: false,
     });
     fireEvent.click(screen.getByText('Close'));
-    fireEvent.click(within(row).getByText('Rotate secret'));
-    fireEvent.click(await screen.findByText('OK'));
+    // Rotate and delete are in the key's row menu (L150), each confirmed first.
+    fireEvent.click(within(row).getByRole('button', { name: 'More actions for ingest' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Rotate secret' }));
+    const ask = (await screen.findAllByRole('dialog')).slice(-1)[0];
+    fireEvent.click(within(ask).getByRole('button', { name: 'Rotate secret' }));
     expect(await screen.findByText('rotated-secret')).toBeTruthy();
 });
 

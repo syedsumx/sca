@@ -5,6 +5,7 @@ import { FlowCanvas } from './FlowCanvas';
 import { positions } from './layout';
 import type { FlowStep, Problem } from './model';
 import { describeError } from '../components/ErrorNotice';
+import { StatusBadge } from '../components/StatusBadge';
 
 /** One of Airflow's DAGs as Cairn lists it (GET /v1/airflow/dags): only those that are the person's. */
 export interface AirflowDagSummary {
@@ -61,8 +62,7 @@ export function airflowApi(client: ConsumerClient) {
 }
 
 function badge(state: string | null | undefined) {
-    const map: Record<string, string> = { success: 'succeeded', failed: 'failed', running: 'running', queued: 'queued' };
-    return <span className={`fl-badge ${map[state ?? ''] ?? 'pending'}`}>{state ?? 'no runs'}</span>;
+    return state ? <StatusBadge state={state} /> : <StatusBadge tone="waiting" label="No runs" />;
 }
 
 /** Airflow's DAGs that are yours, each as a read-only graph on the flow canvas with its live task states. */

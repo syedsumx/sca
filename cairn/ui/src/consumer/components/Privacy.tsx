@@ -6,11 +6,10 @@ import type { PrivacyFinding, PrivacyPart, PrivacyRequest, RetentionPolicy } fro
 import { download } from './BulkEdit';
 import { Muted, SectionTitle, Surface } from './tokens';
 import { describeError } from './ErrorNotice';
+import { StatusBadge } from './StatusBadge';
 
 const datasetName = (urn: string) => urn.split(',')[1] ?? urn;
 const day = (ms: number) => new Date(ms).toLocaleDateString();
-const PART_COLOR: Record<string, string> = { PENDING: 'orange', DONE: 'green', NOT_APPLICABLE: 'default' };
-
 function Findings({ findings, parts }: { findings: PrivacyFinding[]; parts: PrivacyPart[] }) {
     const byDataset = Object.fromEntries(parts.map((p) => [p.dataset, p]));
     return (
@@ -32,9 +31,7 @@ function Findings({ findings, parts }: { findings: PrivacyFinding[]; parts: Priv
                     title: 'Deletion',
                     render: (_, f) =>
                         byDataset[f.dataset] ? (
-                            <Tag color={PART_COLOR[byDataset[f.dataset].state]}>
-                                {byDataset[f.dataset].state.replace('_', ' ').toLowerCase()}
-                            </Tag>
+                            <StatusBadge state={byDataset[f.dataset].state.toLowerCase()} />
                         ) : (
                             <Muted>—</Muted>
                         ),
@@ -142,7 +139,7 @@ function Requests() {
                         title: 'State',
                         render: (_, r) => (
                             <>
-                                <Tag color={r.state === 'COMPLETED' ? 'green' : 'blue'}>{r.state.toLowerCase()}</Tag>
+                                <StatusBadge state={r.state.toLowerCase()} />
                                 {r.overdue && <Tag color="red">overdue</Tag>}
                             </>
                         ),
@@ -234,9 +231,7 @@ function Retention() {
                     {
                         title: 'State',
                         render: (_, r) => (
-                            <Tag color={r.state === 'breach' ? 'red' : r.state === 'ok' ? 'green' : 'default'}>
-                                {r.state}
-                            </Tag>
+                            <StatusBadge state={r.state} tone={r.state === 'breach' ? 'error' : undefined} />
                         ),
                     },
                     { title: 'Detail', dataIndex: 'detail' },

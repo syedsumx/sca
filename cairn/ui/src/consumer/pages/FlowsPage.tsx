@@ -18,21 +18,15 @@ import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
 import { SqlWorkflowsPage } from './SqlWorkflowsPage';
 import { pageHelp } from '../guide/help';
+import { StatusBadge } from '../components/StatusBadge';
+import { useTheme } from '../utils/theme';
+import { When } from '../utils/time';
 
-const THEME_KEY = 'cairn.flows.theme';
 
 /** Orchestration (L149): flows, SQL workflows, scheduled jobs and Airflow (managed deployments and DAGs) in one place. */
 const FLOW_TABS = ['flows', 'sql-workflows', 'jobs', 'airflow'] as const;
 type FlowTab = (typeof FLOW_TABS)[number];
 const FLOW_TAB_LABELS: [FlowTab, string][] = [['flows', 'Flows'], ['sql-workflows', 'SQL workflows'], ['jobs', 'Jobs'], ['airflow', 'Airflow']];
-
-function readTheme(): string {
-    try {
-        return window.localStorage.getItem(THEME_KEY) || 'light';
-    } catch {
-        return 'light';
-    }
-}
 
 /** Cairn Flows: every flow you may see, a gallery to start one, and the canvas editor with its runs. */
 export function FlowsPage() {
@@ -51,7 +45,8 @@ export function FlowsPage() {
     const [error, setError] = useState<string | null>(null);
     const [gallery, setGallery] = useState(() => query.get('new') === '1');      // ?new=1: the command palette's New flow
     const [me, setMe] = useState('');
-    const [theme, setTheme] = useState(readTheme);
+    // The theme is chosen in the profile menu (L150); the canvas follows it.
+    const [theme] = useTheme();
     const [filter, setFilter] = useState('');
 
     const load = useCallback(async () => {
@@ -91,14 +86,6 @@ export function FlowsPage() {
             setError(describeError(e));
         }
     };
-    const changeTheme = (t: string) => {
-        setTheme(t);
-        try {
-            window.localStorage.setItem(THEME_KEY, t);
-        } catch {
-            /* a preference only */
-        }
-    };
 
     if (change && preview) {
         return (
@@ -124,7 +111,6 @@ export function FlowsPage() {
                         api={api}
                         me={me}
                         theme={theme}
-                        onTheme={changeTheme}
                         onSaved={(d) => {
                             setDetail(d);
                             void load();
@@ -142,11 +128,6 @@ export function FlowsPage() {
                             description="Orchestrate SQL, tables, notebooks, Spark, dbt, agents, approvals and more as one DAG, run as its owner; SQL workflows, scheduled jobs and Airflow are here too. Every run is in Runs."
                             actions={
                                 <>
-                                    <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => changeTheme(e.target.value)}>
-                                        <option value="light">Light</option>
-                                        <option value="dark">Dark</option>
-                                        <option value="auto">System</option>
-                                    </select>
                                     <button type="button" className="fl-btn primary" onClick={() => setGallery(true)}>
                                         <Icon name="plus" size={14} /> New flow
                                     </button>
@@ -224,8 +205,8 @@ export function FlowsPage() {
                                                 <div className="fl-muted">{f.description || `${f.steps} steps`}{f.draft_errors ? ` · draft has ${f.draft_errors} problem(s)` : ''}</div>
                                             </td>
                                             <td>{f.published_version ? `v${f.published_version}` : 'draft'}{!f.enabled ? ' (off)' : ''}</td>
-                                            <td>{f.last_run ? <span className={`fl-badge ${f.last_run.status}`}>{f.last_run.status}</span> : <span className="fl-muted">{'—'}</span>}</td>
-                                            <td>{f.next_run_ms ? new Date(f.next_run_ms).toLocaleString() : <span className="fl-muted">{'—'}</span>}</td>
+                                            <td>{f.last_run ? <StatusBadge state={f.last_run.status} /> : <span className="fl-muted">{'—'}</span>}</td>
+                                            <td>{f.next_run_ms ? <When value={f.next_run_ms} /> : <span className="fl-muted">{'—'}</span>}</td>
                                             <td>{f.owner.split(':').pop()}</td>
                                             <td>{f.role}</td>
                                         </tr>

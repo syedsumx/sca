@@ -8,10 +8,12 @@ import { tokens } from './tokens';
 export type StatusTone = 'ok' | 'warn' | 'error' | 'running' | 'waiting';
 
 const OK = ['ok', 'done', 'success', 'succeeded', 'healthy', 'live', 'ready', 'applied', 'active', 'shipped', 'up', 'pass',
-    'passed', 'approved', 'fresh', 'enabled'];
+    'passed', 'approved', 'fresh', 'enabled', 'finished', 'deployed', 'sent', 'accepted', 'granted', 'resolved', 'complete',
+    'completed'];
 const ERROR = ['failed', 'failing', 'error', 'down', 'refused', 'rejected', 'cancelled', 'canceled', 'deactivated', 'fail',
-    'denied', 'stale', 'critical', 'upstream_failed'];
-const WARN = ['warn', 'warning', 'degraded', 'sla_missed', 'anomalous', 'partial', 'at_risk', 'retrying', 'up_for_retry'];
+    'denied', 'stale', 'critical', 'upstream_failed', 'failure', 'unhealthy', 'firing', 'timeout', 'revoked'];
+const WARN = ['warn', 'warning', 'degraded', 'sla_missed', 'anomalous', 'partial', 'at_risk', 'retrying', 'up_for_retry',
+    'open', 'acknowledged', 'expired'];
 const RUNNING = ['running', 'started', 'in_progress', 'deploying', 'promoting', 'restoring'];
 
 /** The tone of a state as the APIs name it (success, failed, healthy, sla_missed, …); anything else is waiting. */

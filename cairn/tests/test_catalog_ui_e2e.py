@@ -389,7 +389,7 @@ def test_the_glossary_and_domains_are_edited_here_and_written_to_core(cairn):
             d.get_by_label("Definition").fill("A signed order")
             d.get_by_label(re.compile("^Intent")).fill("Lines are not part of the term")
             d.get_by_role("button", name=re.compile(r"(^|loading )Propose a change$")).last.click()
-            expect(d.get_by_role("table").get_by_text("proposed", exact=True)).to_be_visible(timeout=20_000)   # the answer
+            expect(d.get_by_role("table").get_by_text("Proposed", exact=True)).to_be_visible(timeout=20_000)   # the answer (L150)
             d.get_by_role("button", name="Close").last.click()
             expect(d).to_be_hidden(timeout=20_000)
             proposed = [c for c in s.iac_changes.list(Principal(urn=ANA, via="session")) if c["kinds"] == ["glossary_terms"]]

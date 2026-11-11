@@ -172,7 +172,10 @@ def test_manifest_service_worker_offline_shell_and_profile(cairn):
         page.reload()
         assert page.get_by_label("Role", exact=True).input_value() == "Financial analyst"
         assert page.get_by_role("link", name="Orders").count() == 1
-        page.get_by_role("link", name="Profile").first.wait_for()                # in the sidebar, under Platform
+        # The profile is one click from anywhere: the avatar's menu (L150), with the language and the theme.
+        page.get_by_role("button", name="Your profile and settings").click()
+        page.get_by_role("menuitem", name="Your profile").wait_for()
+        page.keyboard.press("Escape")
 
         # Offline (Cairn unreachable): opening the app shows the offline page from the service worker's cache, and
         # the API is not answered from any cache.

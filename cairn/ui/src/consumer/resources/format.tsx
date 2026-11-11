@@ -1,15 +1,22 @@
 import { Tag, Tooltip } from 'antd';
 import React from 'react';
+import { Link } from 'react-router-dom';
 
+import { StatusBadge } from '../components/StatusBadge';
 import { Muted } from '../components/tokens';
+import { Schedule, When, exactTime, looksLikeCron } from '../utils/time';
 
-export const STATUS_COLORS: Record<string, string> = {
-    running: 'green', ok: 'green', ready: 'green', active: 'green', approved: 'green', finished: 'green', succeeded: 'green',
-    healthy: 'green', deployed: 'green', enabled: 'green', sent: 'green', accepted: 'green', granted: 'green', passed: 'green',
-    pending: 'gold', proposed: 'gold', draft: 'gold', queued: 'gold', waiting: 'gold', starting: 'gold', review: 'gold',
-    paused: 'default', stopped: 'default', idle: 'default', disabled: 'default', expired: 'default',
-    failed: 'red', error: 'red', rejected: 'red', revoked: 'red', denied: 'red', failing: 'red', unhealthy: 'red',
+/** Column names people read, for API fields whose own names are a developer's (L150). */
+const COLUMN_TITLES: Record<string, string> = {
+    user_id: 'Owner', owner_id: 'Owner', last_updated_timestamp: 'Updated', latest_updated_timestamp: 'Updated',
+    creation_timestamp: 'Created', updated_ms: 'Updated', created_ms: 'Created', dataset_urn: 'Dataset', dataset: 'Dataset',
+    asset_urn: 'Asset',
 };
+
+/** A column's title: a person's word for the field where there is one, else the field made readable. */
+export function columnTitle(key: string): string {
+    return COLUMN_TITLES[key] ?? humanize(key);
+}
 
 export function humanize(key: string): string {
     const s = key.replace(/_ms$/, '').replace(/_usd$/, ' (USD)').replace(/_/g, ' ');
@@ -24,25 +31,20 @@ export function shortUrn(v: string): string {
     return v.length > 64 ? `${v.slice(0, 61)}…` : v;
 }
 
-export function when(ms: number): string {
-    const d = new Date(ms);
-    const diff = Date.now() - ms;
-    const abs = Math.abs(diff);
-    const rel =
-        abs < 60_000 ? 'just now' : abs < 3_600_000 ? `${Math.round(abs / 60_000)} min` : abs < 86_400_000
-            ? `${Math.round(abs / 3_600_000)} h` : `${Math.round(abs / 86_400_000)} d`;
-    const label = rel === 'just now' ? rel : diff >= 0 ? `${rel} ago` : `in ${rel}`;
-    return `${label} · ${d.toLocaleString()}`;
-}
-
 /** A value as a person reads it: times, owners, states, lists and nested objects formatted by field name and type. */
 export function formatValue(key: string, v: unknown, full = false): React.ReactNode {
     if (v === null || v === undefined || v === '') return <Muted>—</Muted>;
-    if (typeof v === 'boolean') return v ? <Tag color="green">yes</Tag> : <Tag>no</Tag>;
+    // On/off settings read as a state (one status vocabulary, L150); other flags as plain words.
+    if (typeof v === 'boolean') {
+        if (/(^|_)(enabled|active|paused|disabled|healthy|ok)$/.test(key)) {
+            const on = /(paused|disabled)$/.test(key) ? !v : v;
+            return <StatusBadge state={on ? 'enabled' : 'disabled'} plain />;
+        }
+        return v ? 'Yes' : 'No';
+    }
     if (typeof v === 'number') {
         if (/(_ms|_at|timestamp|_time)$/.test(key) && v > 1e11) {
-            const [rel, abs] = when(v).split(' · ');
-            return full ? `${rel} (${abs})` : <Tooltip title={abs}>{rel}</Tooltip>;
+            return full ? <><When value={v} /> <Muted>({exactTime(v)})</Muted></> : <When value={v} />;
         }
         if (/(usd|cost|amount|spent)/.test(key)) return `$${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
         if (/bytes$/.test(key)) return v >= 1e9 ? `${(v / 1e9).toFixed(1)} GB` : v >= 1e6 ? `${(v / 1e6).toFixed(1)} MB` : `${v} B`;
@@ -50,11 +52,22 @@ export function formatValue(key: string, v: unknown, full = false): React.ReactN
     }
     if (typeof v === 'string') {
         if (/^\d{4}-\d{2}-\d{2}T/.test(v) && !Number.isNaN(Date.parse(v))) {
-            const [rel, abs] = when(Date.parse(v)).split(' · ');
-            return full ? `${rel} (${abs})` : <Tooltip title={abs}>{rel}</Tooltip>;
+            return full ? <><When value={v} /> <Muted>({exactTime(v)})</Muted></> : <When value={v} />;
         }
-        if (/(^|_)(status|state|kind|type|mode|severity|tier|decision|outcome)$/.test(key) && v.length < 32) {
-            return <Tag color={STATUS_COLORS[v.toLowerCase()] ?? 'blue'}>{v}</Tag>;
+        // Run, health and approval states in the one status vocabulary (StatusBadge); kinds and tiers stay tags.
+        if (/(^|_)(status|state|decision|outcome|result|health|phase)$/.test(key) && v.length < 32) {
+            return <StatusBadge state={v.toLowerCase()} plain={!full} />;
+        }
+        if (/(^|_)(kind|type|mode|severity|tier)$/.test(key) && v.length < 32) {
+            return <Tag>{v}</Tag>;
+        }
+        // A schedule in words, with the cron itself on hover.
+        if (/(^|_)(schedule|cron)(_expr|_expression)?$/.test(key) && looksLikeCron(v)) {
+            return full ? <><Schedule cron={v} /> <Muted><code>{v}</code></Muted></> : <Schedule cron={v} />;
+        }
+        // A dataset is shown by its name and opens its asset page; other URNs by their short name.
+        if (v.startsWith('urn:li:dataset:')) {
+            return <Tooltip title={v}><Link to={`/asset/${encodeURIComponent(v)}`}>{shortUrn(v)}</Link></Tooltip>;
         }
         if (v.startsWith('urn:li:')) return <Tooltip title={v}>{shortUrn(v)}</Tooltip>;
         if (full && (v.includes('\n') || v.length > 120)) {

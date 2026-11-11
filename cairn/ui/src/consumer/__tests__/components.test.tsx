@@ -137,7 +137,7 @@ describe('ConsumerRoutes smoke', () => {
         ['/marketplace', /Customer 360/],
         ['/requests', /request/i],
         ['/governance', /persona/i],
-        ['/settings', /notification/i],
+        ['/settings', /infrastructure as code/i],
     ])('renders %s', async (path, text) => {
         const client = new ConsumerClient({ fetchImpl: mockFetch(routes()) });
         render(
