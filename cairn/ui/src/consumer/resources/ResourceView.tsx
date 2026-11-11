@@ -116,8 +116,10 @@ function secretsOf(spec: ResourceSpec): string[] {
     return [...out];
 }
 
-export function ActionDialog({ spec, action, row, onDone, onClose }: {
+export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow }: {
     spec: ResourceSpec; action: ResourceAction; row: Row | null; onDone: () => void; onClose: () => void;
+    /** The form starts from the row's values (an action about the row, such as proposing a change to it). */
+    startFromRow?: boolean;
 }) {
     const t = useT();
     const { client } = useConsumerApi();
@@ -143,10 +145,10 @@ export function ActionDialog({ spec, action, row, onDone, onClose }: {
     const [initial, setInitial] = useState<Values | undefined>(undefined);
     useEffect(() => {
         if (!form || state || !ready) return;
-        const start = initialValues(form, action, row, record, editing);
+        const start = initialValues(form, action, row, record, editing || (!!startFromRow && !!row));
         setInitial(start);
         setState({ values: start, extra: {}, raw: null });
-    }, [form, state, ready, action, row, record, editing]);
+    }, [form, state, ready, action, row, record, editing, startFromRow]);
     const [rawBody, setRawBody] = useState(action.body ? JSON.stringify(action.body, null, 2) : '');
     const [busy, setBusy] = useState(false);
     const [errors, setErrors] = useState<Record<string, Problem | string>>({});

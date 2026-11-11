@@ -4,7 +4,9 @@ What tests/test_catalog_ui_e2e.py stands in for, done here with Core: the catalo
 search), a data product made through Cairn's /catalog/products and then read back from Core (search, the product's
 GraphQL, the domain's), a data contract published through Cairn, Core's glossary (a term group, a term with its
 definition and steward, the dataset that uses it), Core's domains, and the lineage section with column-level lineage
-from Core. Every GraphQL query the pages send is Core's real schema here.
+from Core. Every GraphQL query the pages send is Core's real schema here. L148: a term group, a term, a domain and a
+subdomain made through Cairn's API, the term put on a dataset's column and the dataset put in the subdomain, all read
+back from Core's own GraphQL; someone without the privileges refused; deletes refused while in use, then done.
 
 Run with the rest of tests/e2e (``CAIRN_E2E=1``, the stack's admin token and UI password; tests/e2e/run.sh)."""
 
@@ -114,3 +116,99 @@ def test_catalog_products_contracts_glossary_domains_and_lineage_from_core():
     assert result["domain"] == {"product": True, "asset": True}, result["domain"]
     # Lineage: the graph from Cairn's lineage API, and column lineage from Core.
     assert result["lineage"] == {"graph": True, "column": True}, result["lineage"]
+
+
+# ---- L148: the glossary and domains edited through Cairn, read back from Cairn Core's own GraphQL ----------------------
+EDIT_DS = f"urn:li:dataset:(urn:li:dataPlatform:postgres,cx_{RUN}.public.invoices_{RUN},PROD)"
+VIEWER = f"urn:li:corpuser:cx-viewer-{RUN}"
+
+
+def _client(token: str):
+    import httpx
+
+    return httpx.Client(base_url=API, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+
+
+def test_glossary_and_domains_made_through_cairn_are_in_core():
+    node, term, dom, sub = f"cx-group-{RUN}", f"cx-invoice-{RUN}", f"cx-billing-{RUN}", f"cx-billing-eu-{RUN}"
+    emit(EDIT_DS, "schemaMetadata", _schema(f"invoices_{RUN}", (("id", "INT"), ("total", "NUMERIC"))))
+    emit(EDIT_DS, "datasetProperties", {"name": f"invoices_{RUN}", "description": "E2E invoices"})
+    emit(VIEWER, "corpUserInfo", {"active": True, "displayName": "CX viewer", "email": f"cx-viewer-{RUN}@example.com"})
+    viewer_token = gql("""mutation($input: CreateAccessTokenInput!) { createAccessToken(input: $input) { accessToken } }""",
+                       {"input": {"type": "PERSONAL", "actorUrn": VIEWER, "duration": "ONE_DAY",
+                                  "name": f"e2e glossary {RUN}"}})["createAccessToken"]["accessToken"]
+    with _client(TOKEN) as root, _client(viewer_token) as viewer:
+        # Someone without MANAGE_GLOSSARIES / MANAGE_DOMAINS / EDIT_ENTITY_*: refused, nothing written.
+        assert viewer.post("/catalog/glossary/nodes", json={"id": node, "name": "nope"}).status_code == 403
+        assert viewer.post("/catalog/domains", json={"id": dom, "name": "nope"}).status_code == 403
+        assert viewer.get("/catalog/glossary/rights").json()["may_manage"] is False
+        # Made through Cairn.
+        r = root.post("/catalog/glossary/nodes", json={"id": node, "name": f"CX billing words {RUN}", "description": "E2E"})
+        assert r.status_code == 201, r.text
+        r = root.post("/catalog/glossary/terms", json={
+            "id": term, "name": f"Invoice {RUN}", "definition": "A bill sent to a customer.", "parent": node,
+            "stewards": ["urn:li:corpuser:admin"], "related": [TERM_ID], "custom_properties": {"standard": "e-invoicing"}})
+        assert r.status_code == 201, r.text
+        r = root.post("/catalog/domains", json={"id": dom, "name": f"CX billing {RUN}", "owners": ["urn:li:corpuser:admin"]})
+        assert r.status_code == 201, r.text
+        r = root.post("/catalog/domains", json={"id": sub, "name": f"CX billing EU {RUN}", "parent": dom})
+        assert r.status_code == 201, r.text
+        # Applied: the term on a column, the dataset in the subdomain.
+        r = root.post("/catalog/assets/terms", json={"asset": EDIT_DS, "term": term, "field": "total"})
+        assert r.status_code == 200 and r.json()["changed"], r.text
+        r = root.put("/catalog/assets/domain", json={"asset": EDIT_DS, "domain": sub})
+        assert r.status_code == 200 and r.json()["changed"], r.text
+        # (404 when the stack's policies do not even let them see the term)
+        assert viewer.post("/catalog/assets/terms", json={"asset": EDIT_DS, "term": term}).status_code in (403, 404)
+        assert viewer.put("/catalog/assets/domain", json={"asset": EDIT_DS, "domain": None}).status_code == 403
+        assert viewer.put(f"/catalog/glossary/terms/{term}", json={"id": term, "name": "Hijacked"}).status_code == 403
+
+        # Read back from Cairn Core's own GraphQL.
+        t = gql("""query($u: String!) { glossaryTerm(urn: $u) { properties { name definition customProperties { key value } }
+                    parentNodes { nodes { urn } }
+                    ownership { owners { owner { ... on CorpUser { urn } } type } } } }""",
+                {"u": f"urn:li:glossaryTerm:{term}"})["glossaryTerm"]
+        assert t["properties"]["name"] == f"Invoice {RUN}" and t["properties"]["definition"] == "A bill sent to a customer."
+        assert {"key": "standard", "value": "e-invoicing"} in t["properties"]["customProperties"]
+        assert [n["urn"] for n in t["parentNodes"]["nodes"]] == [f"urn:li:glossaryNode:{node}"]
+        related = """query($u: String!) { glossaryTerm(urn: $u) { related: relationships(input: { types: ["RelatedTo"],
+                     direction: OUTGOING, start: 0, count: 10 }) { relationships { entity { urn } } } } }"""
+        eventually(lambda: [x["entity"]["urn"] for x in gql(related, {"u": f"urn:li:glossaryTerm:{term}"})[
+            "glossaryTerm"]["related"]["relationships"]] == [TERM], timeout=120, interval=3)   # the graph index is async
+        assert [(o["owner"]["urn"], o["type"]) for o in t["ownership"]["owners"]] == [("urn:li:corpuser:admin", "DATA_STEWARD")]
+        n = gql("query($u: String!) { glossaryNode(urn: $u) { properties { name } } }",
+                {"u": f"urn:li:glossaryNode:{node}"})["glossaryNode"]
+        assert n["properties"]["name"] == f"CX billing words {RUN}"
+        d = gql("query($u: String!) { domain(urn: $u) { properties { name } parentDomains { domains { urn } } } }",
+                {"u": f"urn:li:domain:{sub}"})["domain"]
+        assert d["properties"]["name"] == f"CX billing EU {RUN}"
+        assert [x["urn"] for x in d["parentDomains"]["domains"]] == [f"urn:li:domain:{dom}"]
+        ds = gql("""query($u: String!) { dataset(urn: $u) { domain { domain { urn } }
+                     editableSchemaMetadata { editableSchemaFieldInfo { fieldPath glossaryTerms { terms { term { urn } } } } } } }""",
+                 {"u": EDIT_DS})["dataset"]
+        assert ds["domain"]["domain"]["urn"] == f"urn:li:domain:{sub}"
+        fields = {f["fieldPath"]: [x["term"]["urn"] for x in (f["glossaryTerms"] or {}).get("terms") or []]
+                  for f in ds["editableSchemaMetadata"]["editableSchemaFieldInfo"]}
+        assert fields == {"total": [f"urn:li:glossaryTerm:{term}"]}
+
+        # Read through Cairn too; the term's assets come from Core's search (fed asynchronously).
+        assert root.get(f"/catalog/glossary/terms/{term}").json()["stewards"] == ["urn:li:corpuser:admin"]
+        eventually(lambda: [a["urn"] for a in root.get(f"/catalog/glossary/terms/{term}/assets").json()["assets"]] == [EDIT_DS],
+                   timeout=120, interval=3)
+        eventually(lambda: [a["urn"] for a in root.get(f"/catalog/domains/{sub}/assets").json()["assets"]] == [EDIT_DS],
+                   timeout=120, interval=3)
+        # A domain with an asset is not deleted unless forced; forced, the asset is taken out and Core deletes it.
+        assert root.delete(f"/catalog/domains/{dom}").status_code == 409                  # a domain inside it
+        assert root.delete(f"/catalog/domains/{sub}").status_code == 409                  # an asset in it
+        r = root.delete(f"/catalog/domains/{sub}", params={"force": "true"})
+        assert r.status_code == 204, r.text
+        assert gql("query($u: String!) { dataset(urn: $u) { domain { domain { urn } } } }", {"u": EDIT_DS})["dataset"]["domain"] is None
+        assert root.get(f"/catalog/domains/{sub}").status_code == 404
+        # Core's deleteDomain asks its search whether domains are inside; it may still list the one just deleted.
+        eventually(lambda: root.delete(f"/catalog/domains/{dom}").status_code == 204, timeout=120, interval=3)
+        # The term taken off its column, then deleted (soft: Core's status).
+        assert root.post("/catalog/assets/terms/remove", json={"asset": EDIT_DS, "term": term, "field": "total"}).json()["changed"]
+        # Core's search still lists the dataset until it re-indexes it: refused (409) until then.
+        eventually(lambda: root.delete(f"/catalog/glossary/terms/{term}").status_code == 204, timeout=120, interval=3)
+        assert root.get(f"/catalog/glossary/terms/{term}").status_code == 404
+        assert root.delete(f"/catalog/glossary/nodes/{node}").status_code == 204

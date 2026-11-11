@@ -5,6 +5,7 @@ import { MemoryRouter, Route, Switch, matchPath } from 'react-router-dom';
 import { ASSET_TYPES } from '../api/catalog';
 import { CONSUMER_ROUTES } from '../ConsumerApp';
 import { issuesFor } from '../components/CatalogHome';
+import { AssetLabelsEditor } from '../components/GlossaryEdit';
 import { ConsumerLayout, KEPT_ROUTES, NAV, NAV_GROUPS } from '../components/Layout';
 import { CairnProvider } from '../context/CairnProvider';
 import { HOST_SECTIONS } from '../hostNav';
@@ -242,8 +243,10 @@ describe('Contracts', () => {
 // ---- glossary and domains -------------------------------------------------------------------------------------------
 describe('Glossary and domains', () => {
     const TERM = 'urn:li:glossaryTerm:Revenue';
-    it('shows term groups and terms from Core, read-only here', async () => {
-        wrap(<GlossaryPage />, { 'GQL cairnGlossaryRoot': { data: {
+    it('shows term groups and terms from Core, read-only with the reason for someone who may not change them', async () => {
+        wrap(<GlossaryPage />, {
+            'GET /catalog/glossary/rights': { may_manage: false, reason: 'MANAGE_GLOSSARIES is needed to add to the top of the glossary' },
+            'GQL cairnGlossaryRoot': { data: {
             getRootGlossaryNodes: { nodes: [{ urn: 'urn:li:glossaryNode:Finance', type: 'GLOSSARY_NODE',
                 properties: { name: 'Finance', description: 'Money words' }, childrenCount: { termsCount: 4, nodesCount: 1 } }] },
             getRootGlossaryTerms: { terms: [{ urn: TERM, type: 'GLOSSARY_TERM', name: 'Revenue',
@@ -252,9 +255,74 @@ describe('Glossary and domains', () => {
         expect((await screen.findByRole('link', { name: /Finance/ })).getAttribute('href')).toBe('/glossary/urn%3Ali%3AglossaryNode%3AFinance');
         expect(screen.getByText('4 terms · 1 groups')).toBeTruthy();
         expect(screen.getByRole('link', { name: 'Revenue' })).toBeTruthy();
-        expect(document.querySelector('[data-read-only]')?.textContent).toContain('changed in Cairn Core');
+        await waitFor(() => expect(document.querySelector('[data-read-only]')?.textContent)
+            .toBe('Read-only for you: MANAGE_GLOSSARIES is needed to add to the top of the glossary.'));
+        expect(document.querySelector('[data-in-core]')?.textContent).toContain('Kept in Cairn Core');
+        expect(screen.queryByRole('button', { name: 'New term' })).toBeNull();
         fireEvent.change(screen.getByLabelText('Filter terms and groups'), { target: { value: 'zzz' } });
         expect(screen.queryByRole('link', { name: 'Revenue' })).toBeNull();
+    });
+
+    it('someone who may manage the glossary makes groups and terms with the generated forms', async () => {
+        const calls: MockCall[] = [];
+        wrap(<GlossaryPage />, {
+            'GET /catalog/glossary/rights': { may_manage: true, reason: '' },
+            'GQL cairnGlossaryRoot': { data: { getRootGlossaryNodes: { nodes: [] }, getRootGlossaryTerms: { terms: [] } } },
+            'POST /catalog/glossary/nodes': (body: unknown) => ({ ...(body as object), urn: 'urn:li:glossaryNode:finance' }),
+        }, '/glossary', calls);
+        fireEvent.click(await screen.findByRole('button', { name: 'New term group' }));
+        const dialog = await screen.findByRole('dialog');
+        expect(within(dialog).getAllByText(/New term group/).length).toBeGreaterThan(0);
+        expect(screen.getByRole('button', { name: 'New term' })).toBeTruthy();
+    });
+
+    it('a term: a steward edits or deletes it, applies it to an asset; others propose a change', async () => {
+        const calls: MockCall[] = [];
+        const record = { id: 'Revenue', urn: TERM, name: 'Revenue', definition: 'Money in', parent: 'Finance', is_a: [], has_a: [],
+            related: [], owners: [], stewards: ['urn:li:corpuser:olga'], custom_properties: {}, source_url: null,
+            deprecated: true, deprecation_note: 'use Income' };
+        const routes = {
+            'GQL cairnGlossaryTerm': { data: { glossaryTerm: { urn: TERM, type: 'GLOSSARY_TERM', name: 'Revenue',
+                properties: { name: 'Revenue', definition: 'Money in' }, parentNodes: { nodes: [] }, ownership: { owners: [] },
+                isA: { relationships: [] }, hasA: { relationships: [] }, related: { relationships: [] } } } },
+            'GET /catalog/glossary/terms/Revenue': record, 'GQL cairnConsumerSearch': searchAnswer, 'GET /collab/enrich': {},
+        };
+        wrap(<GlossaryEntryPage />, { ...routes, 'GET /catalog/glossary/rights': { may_manage: true, reason: '', may_propose: true } },
+            `/glossary/${encodeURIComponent(TERM)}`, calls, '/glossary/:urn');
+        expect(await screen.findByRole('button', { name: 'Edit' })).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Delete' })).toBeTruthy();
+        expect(screen.getByText('Deprecated: use Income')).toBeTruthy();
+        expect(screen.getByText('This term is deprecated: it is not put on more assets.')).toBeTruthy();
+        fireEvent.click(screen.getByRole('button', { name: 'Edit' }));
+        const dialog = await screen.findByRole('dialog');
+        expect(within(dialog).getAllByText(/Edit term/).length).toBeGreaterThan(0);
+    });
+
+    it('a term someone may not change: read-only with the reason, and a proposal instead; applying it to an asset', async () => {
+        const calls: MockCall[] = [];
+        const record = { id: 'Revenue', urn: TERM, name: 'Revenue', definition: 'Money in', parent: null, is_a: [], has_a: [],
+            related: [], owners: [], stewards: [], custom_properties: {}, source_url: null, deprecated: false, deprecation_note: '' };
+        wrap(<GlossaryEntryPage />, {
+            'GQL cairnGlossaryTerm': { data: { glossaryTerm: { urn: TERM, type: 'GLOSSARY_TERM', name: 'Revenue',
+                properties: { name: 'Revenue', definition: 'Money in' }, parentNodes: { nodes: [] }, ownership: { owners: [] },
+                isA: { relationships: [] }, hasA: { relationships: [] }, related: { relationships: [] } } } },
+            'GET /catalog/glossary/terms/Revenue': record, 'GQL cairnConsumerSearch': searchAnswer, 'GET /collab/enrich': {},
+            'GET /catalog/glossary/rights': { may_manage: false, reason: 'MANAGE_GLOSSARIES is needed on it or on a term group above it',
+                may_propose: true },
+            'POST /catalog/assets/terms': { changed: true },
+        }, `/glossary/${encodeURIComponent(TERM)}`, calls, '/glossary/:urn');
+        expect(await screen.findByRole('button', { name: 'Propose a change' })).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'Edit' })).toBeNull();
+        expect(document.querySelector('[data-read-only]')?.textContent).toContain('MANAGE_GLOSSARIES is needed on it');
+        // Apply it to an asset: Core's search finds it, Cairn's API puts the term on it (as the person).
+        const apply = screen.getByRole('region', { name: 'Apply to an asset' });
+        const box = within(apply).getByRole('combobox', { name: 'Find an asset' });
+        fireEvent.change(box, { target: { value: 'orders' } });
+        fireEvent.click(await screen.findByText('orders (snowflake)', { selector: '.ant-select-item-option-content' }, { timeout: 3000 }));
+        fireEvent.change(within(apply).getByLabelText('Column (optional)'), { target: { value: 'amount' } });
+        fireEvent.click(within(apply).getByRole('button', { name: 'Apply' }));
+        await waitFor(() => expect(calls.find((c) => c.method === 'POST' && c.path === '/catalog/assets/terms')?.body)
+            .toEqual({ asset: DS, term: TERM, field: 'amount' }));
     });
 
     it('a term: definition, related terms, stewards and the assets that use it', async () => {
@@ -276,6 +344,44 @@ describe('Glossary and domains', () => {
         expect(await screen.findByRole('link', { name: /orders/ })).toBeTruthy();
         const search = calls.find((c) => c.path === '/graphql#cairnConsumerSearch')!.body as { variables: { input: { orFilters: unknown } } };
         expect(search.variables.input.orFilters).toEqual([{ and: [{ field: 'glossaryTerms', values: [TERM] }] }]);
+    });
+
+    it("an asset's terms and domain: changed by someone who may, read-only with the reason otherwise", async () => {
+        const calls: MockCall[] = [];
+        const labels = { asset: DS, terms: [TERM], columns: { amount: ['urn:li:glossaryTerm:Income'], id: [] },
+            domain: 'urn:li:domain:finance', may: { terms: true, column_terms: false, domain: true },
+            why: { terms: '', column_terms: 'EDIT_DATASET_COL_GLOSSARY_TERMS is needed on this dataset', domain: '' } };
+        const terms = { terms: [{ id: 'Revenue', urn: TERM, name: 'Revenue', deprecated: false },
+            { id: 'Income', urn: 'urn:li:glossaryTerm:Income', name: 'Income', deprecated: false }] };
+        const domainsList = { domains: [{ id: 'finance', urn: 'urn:li:domain:finance', name: 'Finance' },
+            { id: 'sales', urn: 'urn:li:domain:sales', name: 'Sales' }] };
+        wrap(<AssetLabelsEditor urn={DS} />, { 'GET /catalog/assets/labels': labels, 'GET /catalog/glossary/terms': terms,
+            'GET /catalog/domains': domainsList, 'POST /catalog/assets/terms/remove': { changed: true },
+            'PUT /catalog/assets/domain': { changed: true, domain: 'urn:li:domain:sales' } }, '/', calls);
+        const list = await screen.findByRole('list', { name: 'Terms on this asset' });
+        await waitFor(() => expect(within(list).getByText('Revenue')).toBeTruthy());
+        expect(screen.getByText('amount', { selector: 'code' })).toBeTruthy();
+        // Taking a term off the asset.
+        fireEvent.click(within(list).getByRole('img', { name: 'close' }));
+        await waitFor(() => expect(calls.find((c) => c.path === '/catalog/assets/terms/remove')?.body)
+            .toEqual({ asset: DS, term: TERM, field: null }));
+        // Its domain: picked from Cairn's list of domains.
+        fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Domain' }));
+        fireEvent.click(await screen.findByText('Sales', { selector: '.ant-select-item-option-content' }));
+        await waitFor(() => expect(calls.find((c) => c.method === 'PUT' && c.path === '/catalog/assets/domain')?.body)
+            .toEqual({ asset: DS, domain: 'urn:li:domain:sales' }));
+    });
+
+    it('an asset someone may not label: the reasons, no controls', async () => {
+        const labels = { asset: DS, terms: [], columns: {}, domain: null, may: { terms: false, column_terms: false, domain: false },
+            why: { terms: 'EDIT_ENTITY_GLOSSARY_TERMS is needed on this asset', column_terms: 'x',
+                domain: 'EDIT_ENTITY_DOMAINS is needed on this asset' } };
+        wrap(<AssetLabelsEditor urn={DS} />, { 'GET /catalog/assets/labels': labels, 'GET /catalog/glossary/terms': { terms: [] },
+            'GET /catalog/domains': { domains: [] } });
+        expect(await screen.findByText('EDIT_ENTITY_GLOSSARY_TERMS is needed on this asset')).toBeTruthy();
+        expect(screen.getByText('EDIT_ENTITY_DOMAINS is needed on this asset')).toBeTruthy();
+        expect(screen.queryByRole('button', { name: 'Add term' })).toBeNull();
+        expect(screen.queryByRole('combobox', { name: 'Domain' })).toBeNull();
     });
 
     it('domains with their owners and asset counts; a domain with its products and assets', async () => {

@@ -18,6 +18,7 @@ import { KnowledgeDocs } from '../components/Knowledge';
 import { LineageGraphView } from '../components/LineageGraph';
 import { DataPreview } from '../components/DataPreview';
 import { WhyPanel } from '../components/WhyPanel';
+import { AssetLabelsEditor } from '../components/GlossaryEdit';
 import { extensionAssetTabs, useExtensionSections } from '../components/Extensions';
 import { TableSnapshots } from '../components/Snapshots';
 import { TrustBadges } from '../components/TrustBadges';
@@ -272,6 +273,7 @@ export function AssetPage() {
                                         </p>
                                     )}
                                 </Surface>
+                                <AssetLabelsEditor urn={urn} />
                                 <BusinessTerms urn={urn} />
                                 <KnowledgeDocs urn={urn} />
                                 <SimilarAssets urn={urn} />

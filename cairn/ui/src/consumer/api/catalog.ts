@@ -235,3 +235,110 @@ export function nameOf(e: NamedEntity | null | undefined): string {
 export function ownerUrns(o: Owners | null | undefined): string[] {
     return (o?.owners ?? []).map((x) => x.owner?.urn).filter((u): u is string => !!u);
 }
+
+// ------------------------------------------------------------- the glossary and domains, edited through Cairn (L148)
+
+/** What the signed-in person may do on a glossary entry or domain (or at the top level), and why not. */
+export interface EditRights {
+    may_manage: boolean;
+    reason: string;
+    /** Glossary terms: a change can be proposed for approval instead. */
+    may_propose?: boolean;
+}
+
+export function glossaryRights(c: ConsumerClient, urn?: string, opts?: RequestOptions) {
+    const q = urn ? `?urn=${encodeURIComponent(urn)}` : '';
+    return c.request<EditRights>('GET', `/catalog/glossary/rights${q}`, undefined, opts);
+}
+
+export function domainRights(c: ConsumerClient, urn?: string, opts?: RequestOptions) {
+    const q = urn ? `?urn=${encodeURIComponent(urn)}` : '';
+    return c.request<EditRights>('GET', `/catalog/domains/rights${q}`, undefined, opts);
+}
+
+/** A glossary term as Cairn writes it to Cairn Core (`/catalog/glossary/terms`). */
+export interface CatalogTerm {
+    id: string;
+    urn: string;
+    name: string;
+    definition: string;
+    parent: string | null;
+    is_a: string[];
+    has_a: string[];
+    related: string[];
+    owners: string[];
+    stewards: string[];
+    custom_properties: Record<string, string>;
+    source_url: string | null;
+    deprecated: boolean;
+    deprecation_note: string;
+}
+
+/** A term group (`/catalog/glossary/nodes`). */
+export interface CatalogNode {
+    id: string;
+    urn: string;
+    name: string;
+    description: string;
+    parent: string | null;
+    owners: string[];
+    custom_properties: Record<string, string>;
+}
+
+/** A domain (`/catalog/domains`). */
+export interface CatalogDomain {
+    id: string;
+    urn: string;
+    name: string;
+    description: string;
+    parent: string | null;
+    owners: string[];
+}
+
+/** The id in a URN (`urn:li:glossaryTerm:<id>`). */
+export const idOf = (urn: string): string => urn.split(':').slice(3).join(':');
+
+export function catalogTerms(c: ConsumerClient, opts?: RequestOptions) {
+    return c.request<{ terms: CatalogTerm[] }>('GET', '/catalog/glossary/terms', undefined, opts);
+}
+
+export function catalogTerm(c: ConsumerClient, urn: string, opts?: RequestOptions) {
+    return c.request<CatalogTerm>('GET', `/catalog/glossary/terms/${encodeURIComponent(idOf(urn))}`, undefined, opts);
+}
+
+export function catalogNode(c: ConsumerClient, urn: string, opts?: RequestOptions) {
+    return c.request<CatalogNode>('GET', `/catalog/glossary/nodes/${encodeURIComponent(idOf(urn))}`, undefined, opts);
+}
+
+export function catalogDomains(c: ConsumerClient, opts?: RequestOptions) {
+    return c.request<{ domains: CatalogDomain[] }>('GET', '/catalog/domains', undefined, opts);
+}
+
+export function catalogDomain(c: ConsumerClient, urn: string, opts?: RequestOptions) {
+    return c.request<CatalogDomain>('GET', `/catalog/domains/${encodeURIComponent(idOf(urn))}`, undefined, opts);
+}
+
+/** An asset's terms (on it and on its columns) and domain, and what the person may change (with reasons). */
+export interface AssetLabels {
+    asset: string;
+    terms: string[];
+    columns: Record<string, string[]>;
+    domain: string | null;
+    may: { terms: boolean; column_terms: boolean; domain: boolean };
+    why: { terms: string; column_terms: string; domain: string };
+}
+
+export function assetLabels(c: ConsumerClient, urn: string, opts?: RequestOptions) {
+    return c.request<AssetLabels>('GET', `/catalog/assets/labels?urn=${encodeURIComponent(urn)}`, undefined, opts);
+}
+
+/** Puts a term on an asset (or one of its columns), or with `on` false takes it off. */
+export function applyTerm(c: ConsumerClient, asset: string, term: string, field: string | null, on: boolean) {
+    return c.request<{ changed: boolean }>('POST', on ? '/catalog/assets/terms' : '/catalog/assets/terms/remove',
+        { asset, term, field: field || null });
+}
+
+/** Puts an asset in a domain, or with none takes it out. */
+export function setAssetDomain(c: ConsumerClient, asset: string, domain: string | null) {
+    return c.request<{ changed: boolean; domain: string | null }>('PUT', '/catalog/assets/domain', { asset, domain });
+}

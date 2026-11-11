@@ -1,16 +1,20 @@
-import { Alert, Empty, Input, Table } from 'antd';
+import { Alert, Button, Empty, Input, Space, Table } from 'antd';
 import React, { useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import styled from 'styled-components';
 
 import {
-    DomainDetail, DomainSummary, GlossaryGroup, GlossaryRoot, GlossaryTermDetail, NamedEntity, domain as loadDomain,
-    domains as loadDomains, glossaryNode, glossaryRoot, glossaryTerm, nameOf, ownerUrns,
+    CatalogDomain, CatalogNode, CatalogTerm, DomainDetail, DomainSummary, EditRights, GlossaryGroup, GlossaryRoot,
+    GlossaryTermDetail, NamedEntity, catalogDomain, catalogNode, catalogTerm, domain as loadDomain, domainRights,
+    domains as loadDomains, glossaryNode, glossaryRights, glossaryRoot, glossaryTerm, nameOf, ownerUrns,
 } from '../api/catalog';
 import { useDheQuery } from '../api/hooks';
 import type { EnrichmentMap, ProductCard, SearchResponse } from '../api/types';
 import { AssetRow } from '../components/Assets';
 import { ErrorNotice } from '../components/ErrorNotice';
+import {
+    AddToDomain, ApplyTerm, DOMAINS, Deprecated, NODES, ReadOnlyReason, TERMS, specAction, useEditDialog,
+} from '../components/GlossaryEdit';
 import { CardGrid, Muted, Page, Skeleton, Surface, focusRing, tokens } from '../components/tokens';
 import { TrustBadges } from '../components/TrustBadges';
 import { useCoreHref } from '../context/NativeLinks';
@@ -52,18 +56,26 @@ const Tile = styled(Link)`
     }
 `;
 
-/** Cairn Core's glossary is changed in Cairn Core (Cairn reads it, adds terms to assets with bulk edit and proposes
- *  ontology terms); this says so, with a link to the page there when a catalog view is configured. */
-function EditInCore({ urn }: { urn?: string }) {
+/** The glossary and domains live in Cairn Core; what is changed here is written there. A link to the entry's page
+ *  in Core when a catalog view is configured. */
+function InCore({ urn }: { urn?: string }) {
     const t = useT();
     const href = useCoreHref(urn ?? '');
     return (
-        <Muted style={{ display: 'block', marginTop: 4 }} data-read-only="">
-            {t('core.readOnly')}{' '}
+        <Muted style={{ display: 'block', marginTop: 4 }} data-in-core="">
+            {t('core.writtenToCore')}{' '}
             {urn && href && <a href={href}>{t('core.openInCore')}</a>}
         </Muted>
     );
 }
+
+/** What the person may do on an entry (or at the top level): the policy engine's answer through Cairn's API. */
+function useRights(kind: 'glossary' | 'domain', urn?: string) {
+    return useDheQuery<EditRights>(`/catalog/${kind === 'glossary' ? 'glossary' : 'domains'}/rights?${urn ?? ''}`, (c, signal) =>
+        (kind === 'glossary' ? glossaryRights : domainRights)(c, urn, { signal }), { staleMs: 60_000 }).data;
+}
+
+const asRow = (r: unknown) => r as Record<string, unknown>;
 
 function owners(o: GlossaryTermDetail['ownership']): string {
     return ownerUrns(o).map(actorName).join(', ');
@@ -95,12 +107,23 @@ export function GlossaryPage() {
     const t = useT();
     const root = useDheQuery<GlossaryRoot>('gql:glossary-root', (c, signal) => glossaryRoot(c, signal), { staleMs: 60_000 });
     const [filter, setFilter] = useState('');
+    const rights = useRights('glossary');
+    const edit = useEditDialog('/glossary');
     const f = filter.trim().toLowerCase();
     const match = (e: NamedEntity) => !f || `${nameOf(e)} ${e.properties?.description ?? ''}`.toLowerCase().includes(f);
     return (
         <Page>
-            <PageHeader title={t('glossary.title')} description={t('glossary.description')} help={pageHelp('/glossary')} />
-            <EditInCore />
+            <PageHeader title={t('glossary.title')} description={t('glossary.description')} help={pageHelp('/glossary')}
+                actions={rights?.may_manage && (
+                    <Space>
+                        <Button onClick={() => edit.show(NODES, specAction(NODES, 'POST'))}>{t('edit.newGroup')}</Button>
+                        <Button type="primary" onClick={() => edit.show(TERMS, specAction(TERMS, 'POST', '/catalog/glossary/terms'))}>
+                            {t('edit.newTerm')}
+                        </Button>
+                    </Space>
+                )} />
+            <InCore />
+            <ReadOnlyReason rights={rights} what="glossary" />
             <Input.Search aria-label={t('glossary.filter')} placeholder={t('glossary.filter')} allowClear value={filter}
                 onChange={(e) => setFilter(e.target.value)} style={{ maxWidth: 420, margin: '16px 0' }} />
             {root.error && <ErrorNotice error={root.error} area={t('glossary.title')} />}
@@ -128,6 +151,7 @@ export function GlossaryPage() {
                     <TermTable terms={root.data.terms.filter(match)} />
                 </section>
             )}
+            {edit.dialog}
         </Page>
     );
 }
@@ -165,6 +189,10 @@ function Parents({ nodes }: { nodes: NamedEntity[] | undefined }) {
 function GlossaryGroupView({ urn }: { urn: string }) {
     const t = useT();
     const q = useDheQuery<GlossaryGroup | null>(`gql:glossary-node:${urn}`, (c, signal) => glossaryNode(c, urn, signal));
+    const rights = useRights('glossary', urn);
+    const record = useDheQuery<CatalogNode>(rights?.may_manage ? `/catalog/glossary/nodes/${urn}` : null, (c, signal) =>
+        catalogNode(c, urn, { signal }));
+    const edit = useEditDialog('/glossary');
     if (q.loading && !q.data) return <Page><Skeleton h={28} w="40%" /></Page>;
     if (q.error) return <Page><ErrorNotice error={q.error} area={t('glossary.title')} /></Page>;
     if (!q.data) return <Page><Alert type="warning" message={t('glossary.notFound')} /></Page>;
@@ -174,9 +202,17 @@ function GlossaryGroupView({ urn }: { urn: string }) {
     return (
         <Page>
             <PageHeader title={nameOf(q.data)} description={q.data.properties?.description || t('glossary.group')}
-                help={pageHelp('/glossary')} />
+                help={pageHelp('/glossary')}
+                actions={rights?.may_manage && record.data && (
+                    <Space wrap>
+                        <Button onClick={() => edit.show(TERMS, specAction(TERMS, 'POST', '/catalog/glossary/terms'))}>{t('edit.newTerm')}</Button>
+                        <Button onClick={() => edit.show(NODES, specAction(NODES, 'PUT'), asRow(record.data))}>{t('edit.edit')}</Button>
+                        <Button danger onClick={() => edit.show(NODES, specAction(NODES, 'DELETE'), asRow(record.data))}>{t('edit.delete')}</Button>
+                    </Space>
+                )} />
             <Parents nodes={q.data.parentNodes?.nodes} />
-            <EditInCore urn={urn} />
+            <InCore urn={urn} />
+            <ReadOnlyReason rights={rights} what="glossary" />
             {groups.length > 0 && (
                 <>
                     <h2 style={{ fontSize: 16, marginTop: 16 }}>{t('glossary.groups')}</h2>
@@ -185,6 +221,7 @@ function GlossaryGroupView({ urn }: { urn: string }) {
             )}
             <h2 style={{ fontSize: 16, marginTop: 16 }}>{t('glossary.terms')}</h2>
             {terms.length ? <TermTable terms={terms} /> : <Muted>{t('glossary.noTerms')}</Muted>}
+            {edit.dialog}
         </Page>
     );
 }
@@ -203,6 +240,9 @@ function TermList({ label, rel }: { label: string; rel: GlossaryTermDetail['isA'
 function GlossaryTermView({ urn }: { urn: string }) {
     const t = useT();
     const q = useDheQuery<GlossaryTermDetail | null>(`gql:glossary-term:${urn}`, (c, signal) => glossaryTerm(c, urn, signal));
+    const rights = useRights('glossary', urn);
+    const record = useDheQuery<CatalogTerm>(`/catalog/glossary/terms/${urn}`, (c, signal) => catalogTerm(c, urn, { signal }));
+    const edit = useEditDialog('/glossary');
     if (q.loading && !q.data) return <Page><Skeleton h={28} w="40%" /></Page>;
     if (q.error) return <Page><ErrorNotice error={q.error} area={t('glossary.title')} /></Page>;
     if (!q.data) return <Page><Alert type="warning" message={t('glossary.notFound')} /></Page>;
@@ -212,9 +252,21 @@ function GlossaryTermView({ urn }: { urn: string }) {
     const hasRelated = [d.isA, d.hasA, d.related].some((r) => (r?.relationships ?? []).length > 0);
     return (
         <Page>
-            <PageHeader title={nameOf(d)} description={t('glossary.termOf')} help={pageHelp('/glossary')} />
+            <PageHeader title={nameOf(d)} description={t('glossary.termOf')} help={pageHelp('/glossary')}
+                actions={record.data && (rights?.may_manage ? (
+                    <Space wrap>
+                        <Button onClick={() => edit.show(TERMS, specAction(TERMS, 'PUT'), asRow(record.data))}>{t('edit.edit')}</Button>
+                        <Button danger onClick={() => edit.show(TERMS, specAction(TERMS, 'DELETE'), asRow(record.data))}>{t('edit.delete')}</Button>
+                    </Space>
+                ) : rights?.may_propose ? (
+                    <Button onClick={() => edit.show(TERMS, specAction(TERMS, 'POST', '/catalog/glossary/proposals'),
+                        asRow({ ...record.data, intent: '' }))}>{t('edit.propose')}</Button>
+                ) : null)} />
             <Parents nodes={d.parentNodes?.nodes} />
-            <EditInCore urn={urn} />
+            {record.data?.deprecated && <Deprecated note={record.data.deprecation_note} />}
+            <InCore urn={urn} />
+            <ReadOnlyReason rights={rights} what="glossary" />
+            {rights && !rights.may_manage && rights.may_propose && <Muted style={{ display: 'block' }}>{t('edit.proposeHint')}</Muted>}
             <Surface as="section" style={{ padding: 18, marginTop: 12 }} aria-label={t('glossary.definition')}>
                 <h2 style={{ fontSize: 16, margin: '0 0 8px' }}>{t('glossary.definition')}</h2>
                 {text ? <MarkdownView source={text} /> : <Muted>{t('glossary.noDefinition')}</Muted>}
@@ -228,7 +280,9 @@ function GlossaryTermView({ urn }: { urn: string }) {
                     </div>
                 )}
             </Surface>
+            <ApplyTerm term={urn} deprecated={!!record.data?.deprecated} />
             <TaggedAssets field="glossaryTerms" urn={urn} label={t('glossary.usedBy')} />
+            {edit.dialog}
         </Page>
     );
 }
@@ -238,12 +292,18 @@ export function DomainsPage() {
     const t = useT();
     const q = useDheQuery<DomainSummary[]>('gql:domains', (c, signal) => loadDomains(c, signal), { staleMs: 60_000 });
     const [filter, setFilter] = useState('');
+    const rights = useRights('domain');
+    const edit = useEditDialog('/domains');
     const shown = useMemo(() => (q.data ?? []).filter((d) => !filter.trim()
         || nameOf(d).toLowerCase().includes(filter.trim().toLowerCase())), [q.data, filter]);
     return (
         <Page>
-            <PageHeader title={t('domains.title')} description={t('domains.description')} help={pageHelp('/domains')} />
-            <EditInCore />
+            <PageHeader title={t('domains.title')} description={t('domains.description')} help={pageHelp('/domains')}
+                actions={rights?.may_manage && (
+                    <Button type="primary" onClick={() => edit.show(DOMAINS, specAction(DOMAINS, 'POST'))}>{t('edit.newDomain')}</Button>
+                )} />
+            <InCore />
+            <ReadOnlyReason rights={rights} what="domain" />
             <Input.Search aria-label={t('domains.filter')} placeholder={t('domains.filter')} allowClear value={filter}
                 onChange={(e) => setFilter(e.target.value)} style={{ maxWidth: 420, margin: '16px 0' }} />
             {q.error && <ErrorNotice error={q.error} area={t('domains.title')} />}
@@ -261,6 +321,7 @@ export function DomainsPage() {
                     </Tile>
                 ))}
             </CardGrid>
+            {edit.dialog}
         </Page>
     );
 }
@@ -273,6 +334,10 @@ export function DomainPage() {
     const q = useDheQuery<DomainDetail | null>(`gql:domain:${urn}`, (c, signal) => loadDomain(c, urn, signal));
     const products = useDheQuery<ProductCard[]>(`/marketplace/products?domain=${urn}`, (c, signal) =>
         c.listProducts({ domain: urn, sort: 'name' }, { signal }));
+    const rights = useRights('domain', urn);
+    const record = useDheQuery<CatalogDomain>(rights?.may_manage ? `/catalog/domains/${urn}` : null, (c, signal) =>
+        catalogDomain(c, urn, { signal }));
+    const edit = useEditDialog('/domains');
     if (q.loading && !q.data) return <Page><Skeleton h={28} w="40%" /></Page>;
     if (q.error) return <Page><ErrorNotice error={q.error} area={t('domains.title')} /></Page>;
     if (!q.data) return <Page><Alert type="warning" message={t('domains.notFound')} /></Page>;
@@ -281,13 +346,20 @@ export function DomainPage() {
     const parents = d.parentDomains?.domains ?? [];
     return (
         <Page>
-            <PageHeader title={nameOf(d)} description={d.properties?.description || t('domains.domain')} help={pageHelp('/domains')} />
+            <PageHeader title={nameOf(d)} description={d.properties?.description || t('domains.domain')} help={pageHelp('/domains')}
+                actions={rights?.may_manage && record.data && (
+                    <Space wrap>
+                        <Button onClick={() => edit.show(DOMAINS, specAction(DOMAINS, 'PUT'), asRow(record.data))}>{t('edit.edit')}</Button>
+                        <Button danger onClick={() => edit.show(DOMAINS, specAction(DOMAINS, 'DELETE'), asRow(record.data))}>{t('edit.delete')}</Button>
+                    </Space>
+                )} />
             {parents.length > 0 && (
                 <Muted style={{ display: 'block' }}>
                     {[...parents].reverse().map((p, i) => <React.Fragment key={p.urn}>{i > 0 && ' › '}<Link to={domainHref(p.urn)}>{nameOf(p)}</Link></React.Fragment>)}
                 </Muted>
             )}
-            <EditInCore urn={urn} />
+            <InCore urn={urn} />
+            <ReadOnlyReason rights={rights} what="domain" />
             <p style={{ marginTop: 8 }}>
                 <strong>{t('domains.owners')}: </strong>
                 {ownerUrns(d.ownership).map(actorName).join(', ') || <Muted>{t('glossary.noStewards')}</Muted>}
@@ -313,7 +385,9 @@ export function DomainPage() {
                     ))}
                 </ul>
             </section>
+            <AddToDomain domain={urn} />
             <TaggedAssets field="domains" urn={urn} label={t('domains.assetsTitle')} />
+            {edit.dialog}
         </Page>
     );
 }

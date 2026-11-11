@@ -264,3 +264,140 @@ def test_the_catalog_section_against_cairns_api(cairn):
         finally:
             browser.close()
     assert not errors, errors
+
+
+VIEWER = "urn:li:corpuser:viewer"
+
+
+def test_the_glossary_and_domains_are_edited_here_and_written_to_core(cairn):
+    """L148: term groups, terms and domains made and changed with the generated forms, a term applied to a column, an
+    asset put in a domain, the asset page's pickers; someone without the privileges sees read-only with the reason and
+    proposes a term change instead."""
+    from playwright.sync_api import expect, sync_playwright
+
+    from cairn.common.security import Principal
+    from cairn.governance.abac import Policy, PolicyBundle
+
+    s, graph, url = cairn
+    s.pdp.set_bundle(PolicyBundle(policies=[
+        Policy(id="ana", effect="allow", actions=["*"], condition={"attr": "subject.urn", "op": "eq", "value": ANA}),
+        Policy(id="view", effect="allow", actions=["VIEW_ENTITY_PAGE"])]))
+    sales_node, deal = "urn:li:glossaryNode:sales", "urn:li:glossaryTerm:deal"
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        errors: list[str] = []
+
+        def open_as(who):
+            ctx = browser.new_context(extra_http_headers={"X-Cairn-Actor": who}, viewport={"width": 1440, "height": 900})
+            page = ctx.new_page()
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            return page
+
+        page = open_as(ANA)
+
+        def go(p, route):
+            p.goto(f"{url}/host#{route}", wait_until="networkidle")
+
+        def dialog():
+            d = page.get_by_role("dialog").last
+            expect(d).to_be_visible()
+            return d
+
+        def raw_submit(name, body):
+            d = dialog()
+            d.get_by_label("Raw JSON").click()
+            d.get_by_label("Request body (JSON)").fill(json.dumps(body))
+            d.get_by_label("Raw JSON").click()
+            d.get_by_role("button", name=re.compile(rf"(^|loading ){re.escape(name)}$")).last.click()
+            expect(d).to_be_hidden(timeout=20_000)
+
+        def pick_asset(region, text):
+            region.get_by_role("combobox", name="Find an asset").fill(text)
+            page.locator(".ant-select-item-option", has_text=re.compile(rf"^{text} \(")).first.click()
+
+        try:
+            # ---- a term group and a term in it, with the generated forms ------------------------------------------
+            go(page, "/glossary")
+            page.get_by_role("button", name="New term group").click()
+            raw_submit("New term group", {"id": "sales", "name": "Sales", "description": "Selling words"})
+            assert graph.aspects[(sales_node, "glossaryNodeInfo")]["name"] == "Sales"
+            go(page, f"/glossary/{sales_node}")
+            expect(page.get_by_role("heading", name="Sales", level=1)).to_be_visible(timeout=20_000)
+            page.get_by_role("button", name="New term").click()
+            raw_submit("New term", {"id": "deal", "name": "Deal", "definition": "A **signed** order", "parent": "sales",
+                                    "stewards": [ANA], "related": ["Revenue"]})
+            info = graph.aspects[(deal, "glossaryTermInfo")]
+            assert info["parentNode"] == sales_node and info["definition"] == "A **signed** order"
+            assert graph.aspects[(deal, "glossaryRelatedTerms")]["relatedTerms"] == [TERM]
+            go(page, f"/glossary/{sales_node}")
+            page.get_by_role("link", name="Deal").click()
+            expect(page.get_by_role("heading", name="Deal", level=1)).to_be_visible(timeout=20_000)
+            expect(page.locator("strong", has_text="signed").first).to_be_visible()
+            # Edited with the form, prefilled from Cairn's record.
+            page.get_by_role("button", name="Edit", exact=True).click()
+            d = dialog()
+            expect(d.get_by_label(re.compile("^Name"))).to_have_value("Deal")
+            d.get_by_label("Definition").fill("A signed order, with its lines")
+            d.get_by_role("button", name=re.compile(r"(^|loading )Edit term$")).last.click()
+            expect(d).to_be_hidden(timeout=20_000)
+            assert graph.aspects[(deal, "glossaryTermInfo")]["definition"] == "A signed order, with its lines"
+            # Applied to a column of the orders, through the term's page.
+            apply = page.get_by_role("region", name="Apply to an asset")
+            pick_asset(apply, "orders")
+            apply.get_by_label("Column (optional)").fill("amount")
+            apply.get_by_role("button", name="Apply").click()
+            expect(page.get_by_text("The term is on the asset now.")).to_be_visible(timeout=20_000)
+            esm = graph.aspects[(DS, "editableSchemaMetadata")]["editableSchemaFieldInfo"]
+            assert [(f["fieldPath"], f["glossaryTerms"]["terms"]) for f in esm] == [("amount", [{"urn": deal}])]
+
+            # ---- a domain, and an asset put in it -----------------------------------------------------------------
+            go(page, "/domains")
+            page.get_by_role("button", name="New domain").click()
+            raw_submit("New domain", {"id": "sales", "name": "Sales domain", "description": "Selling", "owners": [ANA]})
+            assert graph.aspects[("urn:li:domain:sales", "domainProperties")]["name"] == "Sales domain"
+            page.get_by_role("link", name=re.compile("^Sales domain")).click()
+            expect(page.get_by_role("heading", name="Sales domain", level=1)).to_be_visible(timeout=20_000)
+            add = page.get_by_role("region", name="Add assets")
+            pick_asset(add, "raw_orders")
+            add.get_by_role("button", name="Add to the domain").click()
+            expect(page.get_by_text("The asset is in the domain now.")).to_be_visible(timeout=20_000)
+            assert graph.aspects[(RAW, "domains")] == {"domains": ["urn:li:domain:sales"]}
+            expect(page.get_by_role("region", name="Assets").get_by_role("link", name=re.compile("^raw_orders"))).to_be_visible(
+                timeout=20_000)
+
+            # ---- the asset page: its terms (on it and on a column) and its domain, changed here --------------------
+            go(page, f"/asset/{DS}")
+            labels = page.get_by_role("region", name="Glossary terms and domain")
+            expect(labels.get_by_role("list", name="Terms on this asset").get_by_text("Revenue")).to_be_visible(timeout=20_000)
+            expect(labels.get_by_text("Deal")).to_be_visible()
+            labels.get_by_role("combobox", name="Domain").click()
+            page.locator(".ant-select-item-option", has_text="Sales domain").click()
+            expect(page.locator(".ant-select-selection-item", has_text="Sales domain")).to_be_visible(timeout=20_000)
+            assert graph.aspects[(DS, "domains")] == {"domains": ["urn:li:domain:sales"]}
+
+            # ---- someone without the privileges: read-only with the reason; a term change is proposed --------------
+            page = open_as(VIEWER)
+            go(page, "/glossary")
+            expect(page.get_by_text(re.compile("Read-only for you: MANAGE_GLOSSARIES"))).to_be_visible(timeout=20_000)
+            expect(page.get_by_role("button", name="New term")).to_have_count(0)
+            go(page, f"/glossary/{deal}")
+            expect(page.get_by_role("heading", name="Deal", level=1)).to_be_visible(timeout=20_000)
+            expect(page.get_by_role("button", name="Edit", exact=True)).to_have_count(0)
+            page.get_by_role("button", name="Propose a change").click()
+            d = dialog()
+            d.get_by_label("Definition").fill("A signed order")
+            d.get_by_label(re.compile("^Intent")).fill("Lines are not part of the term")
+            d.get_by_role("button", name=re.compile(r"(^|loading )Propose a change$")).last.click()
+            expect(d.get_by_role("table").get_by_text("proposed", exact=True)).to_be_visible(timeout=20_000)   # the answer
+            d.get_by_role("button", name="Close").last.click()
+            expect(d).to_be_hidden(timeout=20_000)
+            proposed = [c for c in s.iac_changes.list(Principal(urn=ANA, via="session")) if c["kinds"] == ["glossary_terms"]]
+            assert proposed and proposed[0]["status"] == "proposed", proposed
+            assert graph.aspects[(deal, "glossaryTermInfo")]["definition"] == "A signed order, with its lines"   # not yet
+            go(page, f"/asset/{DS}")
+            labels = page.get_by_role("region", name="Glossary terms and domain")
+            expect(labels.get_by_text("EDIT_ENTITY_GLOSSARY_TERMS is needed on this asset")).to_be_visible(timeout=20_000)
+            expect(labels.get_by_role("button", name="Add term")).to_have_count(0)
+        finally:
+            browser.close()
+    assert not errors, errors

@@ -49,7 +49,8 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
 FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
          ("/products", "New data product"), ("/contracts", "New contract", "Publish contract"),
          ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person"),
-         ("/observability?tab=slos", "New SLO"), ("/observability?tab=alerts", "New alert rule")]
+         ("/observability?tab=slos", "New SLO"), ("/observability?tab=alerts", "New alert rule"),
+         ("/glossary", "New term"), ("/domains", "New domain")]                       # L148: edited here, kept in Core
 BLOCKING = {"serious", "critical"}
 
 
