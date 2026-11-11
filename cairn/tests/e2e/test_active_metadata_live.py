@@ -500,7 +500,7 @@ def test_13b_workspace_sections_are_catalog_navigation_entries():
     result = json.loads(out.stdout.strip().splitlines()[-1])
     assert not result["missing"] and not result["errors"], result
     assert result["viaShell"] == {"url": "/mfe/cairn-requests#/requests", "active": "#/requests"}, result
-    assert result["viaWorkspace"] == {"url": "/mfe/cairn-marketplace#/marketplace", "active": "#/marketplace"}, result
+    assert result["viaWorkspace"] == {"url": "/mfe/cairn-products#/products", "active": "#/products"}, result
 
 
 # --------------------------------------------------------------------------- authorization mode
@@ -936,7 +936,7 @@ def test_21_compliance_forms_assign_complete_and_verify(users):
 
 def test_21b_forms_in_the_workspace(users):
     """In the browser: the admin completes a form task from Requests → Forms, and the form's
-    progress shows in the governance studio."""
+    progress shows in Automation › Compliance forms (the governance studio's tab before L149)."""
     root = users["root"]
     spec = {"name": f"E2E mart review {RUN}", "select": {"attr": "resource.urn", "op": "eq", "value": DS_DOWN},
             "assignees": {"owners": False, "users": ["urn:li:corpuser:admin"]},

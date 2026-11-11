@@ -57,6 +57,8 @@ const { chromium } = require('playwright');
       result.products.domain = (await row.getByRole('link').nth(1).innerText()).trim();
       await row.getByRole('link', { name: env.PRODUCT_NAME }).click();
       await page.locator('[data-page-header] h1', { hasText: env.PRODUCT_NAME }).waitFor({ timeout: 60000 });
+      // The product's one page (L149) opens on Overview; its assets and output ports are the Assets & ports tab.
+      await page.getByRole('tab', { name: /^Assets & ports/ }).click();
       result.products.port = await seen(page.getByRole('tabpanel').getByRole('row', { name: new RegExp(env.DS_NAME) })
         .getByText('Output port'));
       await shot('catalog-product');

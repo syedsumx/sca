@@ -245,7 +245,8 @@ def test_remote_agent_ingests_private_source(api):
 
 
 def test_remote_agents_in_workspace_settings(api):
-    """People who manage ingestion get a Remote agents tab in Workspace settings: pools, runs, live logs."""
+    """People who manage ingestion get Ingestion › Collectors (formerly Workspace settings › Remote agents): pools,
+    runs, live logs."""
     done = [r for r in api.get("/agents/runs").json() if r["status"] == "SUCCESS" and r["pool"] == "finance"]
     if not done or not os.environ.get("CAIRN_E2E_UI_PASSWORD"):
         pytest.skip("needs a finished remote run and CAIRN_E2E_UI_PASSWORD")

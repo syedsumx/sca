@@ -1,5 +1,5 @@
-// Headless check used by test_remote_agents_in_workspace_settings: Workspace settings → Remote agents
-// shows the pools and runs, and a run's log opens. Prints one JSON line: {tab, pool, run, log, errors}.
+// Headless check used by test_remote_agents_in_workspace_settings: Ingestion → Collectors (formerly Settings → Remote
+// agents) shows the pools and runs, and a run's log opens. Prints one JSON line: {tab, pool, run, log, errors}.
 const { chromium } = require('playwright');
 
 (async () => {
@@ -15,9 +15,12 @@ const { chromium } = require('playwright');
     await page.fill('#password', UI_PASSWORD);
     await page.getByRole('button', { name: /^log ?in$/i }).click();
     await page.waitForURL((u) => !String(u).includes('/login'), { timeout: 60000 });
-    await page.goto(`${EDGE}/mfe/cairn-settings#/settings`, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('tab', { name: 'Remote agents' }).click({ timeout: 90000 });
-    result.tab = true;
+    // L149: remote agents are collectors, and their home is Ingestion › Collectors. The shell's Workspace settings
+    // entry still opens the workspace; its earlier Settings tab (?tab=agents) redirects to the new home.
+    await page.goto(`${EDGE}/mfe/cairn-settings#/settings?tab=agents`, { waitUntil: 'domcontentloaded' });
+    const tab = page.getByRole('tab', { name: 'Collectors', exact: true });
+    await tab.waitFor({ timeout: 90000 });
+    result.tab = (await tab.getAttribute('aria-selected')) === 'true';
     await page.getByText('finance', { exact: true }).first().waitFor({ timeout: 60000 });
     result.pool = true;
     await page.getByRole('tab', { name: 'Runs' }).click();

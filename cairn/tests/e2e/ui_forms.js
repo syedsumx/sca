@@ -1,5 +1,5 @@
 // Headless check used by test_21b: Requests → Forms lists the admin's task; the drawer submits an
-// answer; Governance studio → Compliance forms shows the form at 100%. Prints {submitted, progress, errors}.
+// answer; Automation → Compliance forms shows the form at 100%. Prints {submitted, progress, errors}.
 const { chromium } = require('playwright');
 
 (async () => {
@@ -25,7 +25,9 @@ const { chromium } = require('playwright');
     await page.getByRole('button', { name: 'Submit', exact: true }).click();
     await page.getByText('Answers saved to the catalog').waitFor({ timeout: 30000 });
     result.submitted = true;
-    await page.goto(`${EDGE}/mfe/cairn-governance#/governance`, { waitUntil: 'domcontentloaded' });
+    // L149: compliance forms moved from the Governance studio to Govern › Automation (the studio's ?tab=forms
+    // redirects there); the shell's Governance studio entry hosts it.
+    await page.goto(`${EDGE}/mfe/cairn-governance#/automation`, { waitUntil: 'domcontentloaded' });
     await page.getByRole('tab', { name: 'Compliance forms' }).click({ timeout: 90000 });
     const formRow = page.locator('tr', { hasText: FORM_NAME });
     await formRow.waitFor({ timeout: 60000 });

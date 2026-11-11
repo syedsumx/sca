@@ -10,7 +10,8 @@ const { chromium } = require('playwright');
   const errors = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   const result = { entries: [], viaShell: null, viaWorkspace: null, errors };
-  const want = ['Discover', 'Data marketplace', 'Requests', 'Governance studio', 'Reports', 'Context inbox', 'Assistant',
+  // L149: the shell's Context inbox entry is Semantics (it opens #/semantics); the others keep their labels.
+  const want = ['Discover', 'Data marketplace', 'Requests', 'Governance studio', 'Reports', 'Semantics', 'Assistant',
     'Workspace settings'];
   try {
     await page.goto(`${EDGE}/login`, { waitUntil: 'domcontentloaded' });
@@ -34,13 +35,14 @@ const { chromium } = require('playwright');
     result.viaShell = { url: page.url().replace(EDGE, ''),
       active: (await page.getAttribute('nav[aria-label="Workspace sections"] a.active', 'href')).replace(/^[^#]*/, '') };
 
-    // Workspace → shell: the Marketplace tab moves the shell to its entry.
-    await page.click('nav[aria-label="Workspace sections"] >> text=Marketplace');
-    await page.waitForURL((u) => String(u).includes('/mfe/cairn-marketplace#/marketplace'), { timeout: 60000 });
+    // Workspace → shell: the Data products section (L149: the marketplace is its Browse view) moves the shell to
+    // its entry.
+    await page.click('nav[aria-label="Workspace sections"] >> text="Data products"');
+    await page.waitForURL((u) => String(u).includes('/mfe/cairn-products#/products'), { timeout: 60000 });
     await page.waitForSelector('nav[aria-label="Workspace sections"] a.active', { timeout: 60000 });
     result.viaWorkspace = { url: page.url().replace(EDGE, ''),
       active: (await page.getAttribute('nav[aria-label="Workspace sections"] a.active', 'href')).replace(/^[^#]*/, '') };
-    if (SHOTS) await page.screenshot({ path: `${SHOTS}/nav-marketplace.png` });
+    if (SHOTS) await page.screenshot({ path: `${SHOTS}/nav-products.png` });
   } catch (e) {
     errors.push(`step failed: ${e.message.split('\n')[0]} (at ${page.url()})`);
     if (SHOTS) await page.screenshot({ path: `${SHOTS}/nav-failure.png` }).catch(() => {});
