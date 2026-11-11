@@ -13,6 +13,7 @@ import { Feedback } from './Feedback';
 import { tokens } from './tokens';
 import { guideEvent } from '../guide/onboarding';
 import { describeError } from './ErrorNotice';
+import { Icon } from './Icons';
 
 export interface ChatTurn {
     role: 'user' | 'assistant';
@@ -169,7 +170,7 @@ export function AssistantSlideOver() {
     const session = useDheSession();
     return (
         <Drawer
-            title="✨ Assistant"
+            title={<span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}><Icon name="sparkle" size={18} />Assistant</span>}
             placement="right"
             width={460}
             open={session.assistantOpen}

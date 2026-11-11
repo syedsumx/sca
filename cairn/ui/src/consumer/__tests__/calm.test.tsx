@@ -8,7 +8,8 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { CairnApiError } from '../../api/client';
 import { ConsumerApp } from '../ConsumerApp';
-import { ConsumerLayout } from '../components/Layout';
+import { ConsumerLayout, NAV } from '../components/Layout';
+import { PAGE_ICONS, firstSentence } from '../guide/pageIcons';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ApiDisclosure, RowActions } from '../components/RowActions';
 import { StatusBadge, toneOf } from '../components/StatusBadge';
@@ -260,5 +261,17 @@ describe('a quieter sidebar', () => {
         for (const name of ['Access policies', 'Ingestion', 'Settings', 'Platform map']) {
             expect(within(nav).getByRole('link', { name })).toBeTruthy();
         }
+    });
+});
+
+describe('page headers', () => {
+    it('every main page has the icon of its sidebar entry', () => {
+        for (const n of NAV) expect(PAGE_ICONS[n.to], n.to).toBe(n.icon);
+    });
+
+    it('says a page in one line; the rest of the introduction is for the help', () => {
+        expect(firstSentence('Explore a table like a spreadsheet. It runs as you.')).toBe('Explore a table like a spreadsheet.');
+        expect(firstSentence('Everyone in Cairn and why: who comes from SCIM.')).toBe('Everyone in Cairn and why.');
+        expect(firstSentence('One line only')).toBe('One line only');
     });
 });

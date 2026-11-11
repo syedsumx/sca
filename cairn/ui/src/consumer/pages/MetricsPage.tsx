@@ -7,6 +7,7 @@ import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 import { TitleRow } from '../guide/PageHeader';
 import { describeError, notifyError } from '../components/ErrorNotice';
+import { RowActions } from '../components/RowActions';
 
 const GRAINS: NonNullable<MetricQuery['grain']>[] = ['day', 'week', 'month', 'quarter', 'year'];
 
@@ -110,7 +111,8 @@ export function MetricsPage() {
                                     <Button size="small" onClick={() => void act(() => client.certifyMetric(m.name, !m.certified))}>
                                         {m.certified ? 'Uncertify' : 'Certify'}
                                     </Button>
-                                    <Button size="small" danger onClick={() => void act(() => client.deleteMetric(m.name))}>Delete</Button>
+                                    <RowActions name={m.name} actions={[{ key: 'delete', label: 'Delete', danger: true,
+                                        onSelect: () => act(() => client.deleteMetric(m.name)) }]} />
                                 </Space>
                             ),
                         },

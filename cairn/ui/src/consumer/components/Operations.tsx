@@ -190,10 +190,6 @@ export function AllRuns() {
     const words = useStatusLabel();
     return (
         <section aria-label="All runs">
-            <Muted style={{ display: 'block', marginBottom: 12 }}>
-                Every run of flows, SQL workflows, jobs, dbt, derived tables, pipes and Airflow DAGs, newest first. Each row
-                opens the place its runs are managed; pipeline SLAs and run details are in the Pipelines tab.
-            </Muted>
             <Space wrap style={{ marginBottom: 12 }}>
                 <Select aria-label="Kind" allowClear placeholder="Every kind" style={{ minWidth: 180 }} value={source || undefined}
                     onChange={(v) => setSource((v ?? '') as RunSource | '')}

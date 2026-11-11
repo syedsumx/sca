@@ -307,10 +307,8 @@ export function SqlWorkspacePage() {
                                                 { title: '', render: (_, q) => (q.shared ? <Tag color="blue">shared</Tag> : null) },
                                                 { title: 'Changed', render: (_, q) => ago(q.updated_ms) },
                                                 { title: '', render: (_, q) => (
-                                                    <Space size={4}>
-                                                        <BiAssetButtons kind="query" id={q.id} name={q.name} role={q.role}
-                                                            onRestored={() => setTick((x) => x + 1)} />
-                                                    </Space>
+                                                    <BiAssetButtons compact kind="query" id={q.id} name={q.name} role={q.role}
+                                                        onRestored={() => setTick((x) => x + 1)} />
                                                 ) },
                                             ]}
                                         />

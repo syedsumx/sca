@@ -382,7 +382,9 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
             page.goto(f"{url}/host#/sql", wait_until="domcontentloaded")
             page.get_by_role("tab", name="Saved", exact=True).click()   # SQL also has Saved queries (L149)
             row = page.locator(".ant-table-row", has_text="Totals")
-            row.get_by_role("button", name="History").click()
+            # A saved query's History, Comments and Permissions are in its row's menu (L150).
+            row.get_by_role("button", name="More actions for Totals").click()
+            page.get_by_role("menuitem", name="History").click()
             dialog = page.get_by_role("dialog", name="History of “Totals”")
             dialog.get_by_role("button", name="Changes").click()
             expect(dialog.get_by_test_id("version-diff")).to_contain_text("amount_eur", timeout=15_000)
@@ -391,7 +393,8 @@ def test_history_restore_and_sharing_of_a_saved_query_in_the_browser(cairn):
             assert s.sql_workspace.get(ANA, q["id"])["sql"] == good
             assert [v["version"] for v in s.bi_versions.list(ANA, "query", q["id"])] == [3, 2, 1]
             page.keyboard.press("Escape")
-            row.get_by_role("button", name="Permissions").click()       # "share with people" is Permissions (L149)
+            row.get_by_role("button", name="More actions for Totals").click()
+            page.get_by_role("menuitem", name="Permissions").click()   # "share with people" is Permissions (L149)
             share = page.get_by_role("dialog", name="Permissions: saved query “Totals”")
             share.get_by_label("Share with").fill("bob")
             share.get_by_role("button", name="Add", exact=True).click()

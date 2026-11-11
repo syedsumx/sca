@@ -10,6 +10,7 @@ import { ErrorNotice, notifyError } from './ErrorNotice';
 import { StatusBadge, StatusTone, useStatusLabel } from './StatusBadge';
 import { Muted, SectionTitle, Surface, tokens } from './tokens';
 import { When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 // ---- what the API answers (cairn.observability.pipelines) ---------------------------------------------------------
 export interface PipelineTask {
@@ -372,9 +373,8 @@ function Definitions() {
                             <Space>
                                 <Button size="small" onClick={() => setDialog({ spec: 'observability-data-products', label: 'Edit data product',
                                     row: r as unknown as Record<string, unknown> })}>{t('pipe.product.edit')}</Button>
-                                <Popconfirm title={`${t('pipe.product.delete')} ${r.name}?`}
-                                    onConfirm={() => del(`/v1/observability/data-products/${enc(r.id)}`, products.refresh)}>
-                                    <Button size="small" danger>{t('pipe.product.delete')}</Button></Popconfirm>
+                                <RowActions name={r.name || r.id} actions={[{ key: 'delete', label: t('pipe.product.delete'), danger: true, confirm: `${t('pipe.product.delete')} ${r.name}?`,
+    onSelect: () => del(`/v1/observability/data-products/${enc(r.id)}`, products.refresh) }]} />
                             </Space>) },
                     ]} />
             </section>
@@ -394,9 +394,8 @@ function Definitions() {
                             <Space>
                                 <Button size="small" onClick={() => setDialog({ spec: 'observability-pipeline-slas', label: 'Edit SLA',
                                     row: r as unknown as Record<string, unknown> })}>{t('pipe.sla.edit')}</Button>
-                                <Popconfirm title={`${t('pipe.sla.delete')} ${r.name}?`}
-                                    onConfirm={() => del(`/v1/observability/pipeline-slas/${enc(r.id)}`, slas.refresh)}>
-                                    <Button size="small" danger>{t('pipe.sla.delete')}</Button></Popconfirm>
+                                <RowActions name={r.name || r.id} actions={[{ key: 'delete', label: t('pipe.sla.delete'), danger: true, confirm: `${t('pipe.sla.delete')} ${r.name}?`,
+    onSelect: () => del(`/v1/observability/pipeline-slas/${enc(r.id)}`, slas.refresh) }]} />
                             </Space>) },
                     ]} />
             </section>
@@ -503,9 +502,10 @@ export function ExportTab() {
                                 <Space>
                                     <Button size="small" onClick={() => setDialog({ label: 'Edit destination', row: r as unknown as Record<string, unknown> })}>
                                         {t('export.edit')}</Button>
-                                    <Popconfirm title={`${t('export.delete')} ${r.name || r.id}?`} onConfirm={async () => {
-                                        try { await client.request('DELETE', `/v1/observability/exporters/${enc(r.id)}`); q.refresh(); } catch (e) { notifyError(e); }
-                                    }}><Button size="small" danger>{t('export.delete')}</Button></Popconfirm>
+                                    <RowActions name={r.name || r.id} actions={[{ key: 'delete', label: t('export.delete'), danger: true,
+                                        confirm: `${t('export.delete')} ${r.name || r.id}?`, onSelect: async () => {
+                                            try { await client.request('DELETE', `/v1/observability/exporters/${enc(r.id)}`); q.refresh(); } catch (e) { notifyError(e); }
+                                        } }]} />
                                 </Space>) },
                         ]} />
                 )}

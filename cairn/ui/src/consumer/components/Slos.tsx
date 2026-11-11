@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ProductSlo } from '../api/types';
 import { Muted } from './tokens';
 import { StatusBadge } from './StatusBadge';
+import { RowActions } from './RowActions';
 
 function columns(withProduct: boolean, onDelete?: (id: string) => void) {
     return [
@@ -55,11 +56,8 @@ function columns(withProduct: boolean, onDelete?: (id: string) => void) {
                   {
                       title: '',
                       render: (_: unknown, r: ProductSlo) => (
-                          <Popconfirm title={`Remove ${r.name}?`} onConfirm={() => onDelete(r.id)}>
-                              <Button size="small" danger>
-                                  Remove
-                              </Button>
-                          </Popconfirm>
+                          <RowActions name={r.name} actions={[{ key: 'delete', label: 'Remove', danger: true, confirm: `Remove ${r.name}?`,
+    onSelect: () => onDelete(r.id) }]} />
                       ),
                   },
               ]

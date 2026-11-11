@@ -83,8 +83,8 @@ it('filters tiles by a control, cross-filters on a click and drills down', async
                                                                  level: { path: ['EU'], column: 'country' } }] },
     }, calls);
     render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><DashboardsPage /></CairnProvider></MemoryRouter>);
-    fireEvent.mouseDown((await screen.findAllByRole('combobox'))[0]);
-    fireEvent.click(await screen.findByText('Revenue'));
+    // With none open, the dashboards are cards (L150); one opens with a click.
+    fireEvent.click(await screen.findByRole('button', { name: /^Revenue/ }));
     expect(await screen.findByRole('img', { name: /bar chart of Revenue by region/ })).toBeTruthy();
     // The control's choices come from the data, as the viewer sees it.
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Region' }));
@@ -108,7 +108,7 @@ it('a click on a bar selects its value, and a drillable tile drills into it', as
     }, calls);
     render(<MemoryRouter><CairnProvider client={client} cache={new QueryCache()}><DashboardsPage /></CairnProvider></MemoryRouter>);
     fireEvent.mouseDown((await screen.findAllByRole('combobox'))[0]);
-    fireEvent.click(await screen.findByText('Drill'));
+    fireEvent.click(await waitFor(() => document.querySelector('.ant-select-item-option[title="Drill"]') as HTMLElement));
     fireEvent.click(await screen.findByText('EU: 150'));                 // the bar's tooltip, inside the bar
     await waitFor(() => expect(calls.some((c) => c.method === 'POST')).toBe(true));
     expect(calls.filter((c) => c.method === 'POST').slice(-1)[0].body).toEqual({ selection: [{ column: 'region', value: 'EU', from: 0 }] });

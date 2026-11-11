@@ -1,6 +1,5 @@
 import { Alert, Button, Checkbox, Input, InputNumber, List, Switch, Tabs, Typography, message } from 'antd';
 import React, { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { EmbedScope, EmbedToken, InboxItem, NotifySettings } from '../api/types';
@@ -105,12 +104,6 @@ export function SettingsPage() {
         <Page>
             <PageHeader title={t('settings.title')} help={pageHelp('/settings')}
                 description="The platform's own settings: the guide, infrastructure as code and its change requests, embeds, extensions and the licence." />
-            <Muted style={{ display: 'block', marginBottom: 12 }}>
-                Moved to their own homes: notifications to <Link to="/profile">your profile</Link>, the inbox to{' '}
-                <Link to="/inbox">Inbox</Link>, metadata sources and collectors to <Link to="/ingestion?tab=sources">Ingestion</Link>,
-                AI agents to <Link to="/agents?tab=agents">Agents</Link>, workspaces to <Link to="/people?tab=workspaces">People &amp; roles</Link>{' '}
-                and storage buckets to <Link to="/lakehouse?tab=storage">Lakehouse</Link>.
-            </Muted>
             <Tabs
                 defaultActiveKey={params.get('tab') ?? undefined}
                 items={[

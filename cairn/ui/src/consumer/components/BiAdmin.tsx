@@ -3,7 +3,8 @@ import React, { useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { BiImpact, BiKind, BiRole, BiShares, BiVersion, BiVersionDiff } from '../api/types';
-import { BiCollabButtons } from './BiCollab';
+import { BiCollabButtons, CommentsDrawer, UsageDialog } from './BiCollab';
+import { RowActions } from './RowActions';
 import { Muted } from './tokens';
 import { ErrorNotice, notifyError } from './ErrorNotice';
 import { When } from '../utils/time';
@@ -123,10 +124,30 @@ export function HistoryDialog({ kind, id, name, role, open, onClose, onRestored 
 }
 
 /** The Share and History buttons for an asset. */
-export function BiAssetButtons({ kind, id, name, role, onRestored, tiles }: {
+export function BiAssetButtons({ kind, id, name, role, onRestored, tiles, compact = false }: {
     kind: BiKind; id: string; name: string; role?: BiRole | null; onRestored?: () => void; tiles?: string[];
+    /** In a list (saved workbooks, saved queries): one "More actions for <name>" menu instead of a row of buttons. */
+    compact?: boolean;
 }) {
-    const [open, setOpen] = useState<'share' | 'history' | null>(null);
+    const [open, setOpen] = useState<'share' | 'history' | 'comments' | 'usage' | null>(null);
+    const manages = role === 'OWNER' || role === 'EDITOR';
+    if (compact) {
+        return (
+            <>
+                <RowActions name={name} actions={[
+                    ...(manages ? [{ key: 'share', label: 'Permissions', onSelect: () => setOpen('share') }] : []),
+                    { key: 'history', label: 'History', onSelect: () => setOpen('history') },
+                    { key: 'comments', label: 'Comments', onSelect: () => setOpen('comments') },
+                    ...(manages ? [{ key: 'usage', label: 'Usage', onSelect: () => setOpen('usage') }] : []),
+                ]} />
+                <ShareDialog kind={kind} id={id} name={name} role={role} open={open === 'share'} onClose={() => setOpen(null)} />
+                <HistoryDialog kind={kind} id={id} name={name} role={role} open={open === 'history'} onClose={() => setOpen(null)}
+                    onRestored={onRestored} />
+                <CommentsDrawer kind={kind} id={id} name={name} role={role} tiles={tiles} open={open === 'comments'} onClose={() => setOpen(null)} />
+                <UsageDialog kind={kind} id={id} name={name} open={open === 'usage'} onClose={() => setOpen(null)} />
+            </>
+        );
+    }
     return (
         <>
             {(role === 'OWNER' || role === 'EDITOR') && <Button onClick={() => setOpen('share')}>Permissions</Button>}

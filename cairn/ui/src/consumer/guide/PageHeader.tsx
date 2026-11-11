@@ -9,6 +9,7 @@ import { HUBS } from '../resources/hubs';
 import { useT } from '../i18n';
 import { useGuide } from './GuideProvider';
 import { hubTab } from './help';
+import { firstSentence, iconForPath, rememberIntro } from './pageIcons';
 
 const Head = styled.header`
     display: flex;
@@ -34,6 +35,18 @@ const Head = styled.header`
         margin: 4px 0 0;
         color: ${tokens.color.textMuted};
         max-width: 820px;
+    }
+    /* The introduction is one line (L150); the rest of it is in the page's "?" help. */
+    p.intro {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        @media (max-width: 720px) {
+            white-space: normal;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+        }
     }
     .actions {
         display: flex;
@@ -123,6 +136,14 @@ export const useEmbedded = () => React.useContext(EmbeddedContext);
 /** The same header on every page: title, a short description, the primary action, and help. */
 export function PageHeader({ title, description, icon, actions, children, help, extra }: PageHeaderProps) {
     const embedded = useEmbedded();
+    const location = useLocation();
+    // Every main page has its icon tile (the same icon as its sidebar entry); deep pages have none.
+    const tile = icon ?? iconForPath(location.pathname);
+    const full = typeof description === 'string' ? description : null;
+    const intro = full ? firstSentence(full) : description;
+    React.useEffect(() => {
+        if (full) rememberIntro(location.pathname, full);
+    }, [full, location.pathname]);
     if (embedded) {
         return actions || children || extra ? (
             <Head data-page-header="" data-help-anchor={help}>
@@ -133,10 +154,10 @@ export function PageHeader({ title, description, icon, actions, children, help, 
     }
     return (
         <Head data-page-header="" data-help-anchor={help}>
-            {icon && <IconBadge><Icon name={icon} size={22} /></IconBadge>}
+            {tile && <IconBadge><Icon name={tile} size={22} /></IconBadge>}
             <div className="titles">
                 <div className="title-row"><h1>{title}</h1><HelpButton />{extra}</div>
-                {description && <p>{description}</p>}
+                {intro && <p className={full ? 'intro' : undefined} title={full && full !== intro ? full : undefined}>{intro}</p>}
                 {children}
             </div>
             {actions && <div className="actions">{actions}</div>}
@@ -257,7 +278,8 @@ export function Breadcrumbs({ tabTitle }: { tabTitle: (key: string) => string | 
 }
 
 /** A plain page title with its help, left out when the page is another section's tab (Embedded). */
-export function TitleRow({ title }: { title: string }) {
+/** A page's title alone: the same header as every page (its icon tile, title and help). */
+export function TitleRow({ title, description }: { title: string; description?: string }) {
     if (useEmbedded()) return null;
-    return <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>{title}</h1><HelpButton /></div>;
+    return <PageHeader title={title} description={description} />;
 }

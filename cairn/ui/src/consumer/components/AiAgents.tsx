@@ -8,6 +8,7 @@ import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
 import { When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 const SCOPES: { value: AgentScope; label: string }[] = [
     { value: 'read', label: 'Read the catalog' },
@@ -228,15 +229,9 @@ function AllAgents() {
                                   ]
                                 : []),
                             <ActivityButton key="act" agent={a} all />,
-                            <Popconfirm
-                                key="rm"
-                                title={`Delete ${a.name}? Its credentials stop working.`}
-                                onConfirm={() => void run(() => client.deleteAiAgent(a.id))}
-                            >
-                                <Button danger size="small">
-                                    Delete
-                                </Button>
-                            </Popconfirm>,
+                            <RowActions
+                                key="rm" name={a.name} actions={[{ key: 'delete', label: 'Delete', danger: true, confirm: `Delete ${a.name}? Its credentials stop working.`,
+    onSelect: () => void run(() => client.deleteAiAgent(a.id)) }]} />,
                         ]}
                     >
                         <List.Item.Meta

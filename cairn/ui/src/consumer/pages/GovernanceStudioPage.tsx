@@ -1,7 +1,7 @@
 import { Alert, Button, Checkbox, Empty, Input, List, Popconfirm, Radio, Select, Space, Switch, Tabs, Tag, message } from 'antd';
 import { PrivacyAdmin } from '../components/Privacy';
 import React, { useEffect, useState } from 'react';
-import { Link, useHistory, useLocation } from 'react-router-dom';
+import { useHistory, useLocation } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
@@ -16,12 +16,14 @@ import type {
     Purpose,
     PurposeInput,
 } from '../api/types';
-import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
+import { Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { actorName } from '../utils/format';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
 import { errorStatus } from '../utils/errors';
 import { RESOURCE_SPECS } from '../resources/catalog';
 import { ResourceView } from '../resources/ResourceView';
+import { PageHeader } from '../guide/PageHeader';
+import { pageHelp } from '../guide/help';
 
 const Split = styled.div`
     display: grid;
@@ -423,6 +425,10 @@ export function GovernanceStudioPage() {
     const bundles = useDheQuery<PermissionBundles>('/governance/personas/permission-bundles', (c, signal) => c.permissionBundles({ signal }));
     const [personaSel, setPersonaSel] = useState<PersonaInput | null>(null);
     const [purposeSel, setPurposeSel] = useState<PurposeInput | null>(null);
+    // No blank editor (L150): the first persona is open until the person picks another or starts a new one.
+    useEffect(() => {
+        if (!personaSel && personas.data?.length) setPersonaSel(personas.data[0]);
+    }, [personas.data, personaSel]);
     const refresh = () => {
         cache.invalidate('/governance');
     };
@@ -432,14 +438,8 @@ export function GovernanceStudioPage() {
 
     return (
         <Page>
-            <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                Access policies
-            </SectionTitle>
-            <Muted>
-                Personas grant what a role can do; purposes protect sensitive data; both compile to access policies. Consent
-                rules, tokenisation, residency and privacy shape what each person sees. Automations and compliance forms are
-                in <Link to="/automation">Automation</Link>, the AI systems register in <Link to="/security">Security &amp; compliance</Link>.
-            </Muted>
+            <PageHeader title="Access policies" help={pageHelp('/governance')}
+                description="Personas grant what a role can do and purposes protect sensitive data; both compile to access policies. Consent rules, tokenisation, residency and privacy shape what each person sees; automations and compliance forms are in Automation, the AI systems register in Security & compliance." />
             <Tabs
                 style={{ marginTop: 12 }}
                 activeKey={tab}

@@ -28,6 +28,7 @@ import type {
 import { useT } from '../i18n';
 import { ErrorNotice, notifyError } from './ErrorNotice';
 import { When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 const BUCKETS = '/storage/buckets';
 const AUDIT = '/storage/audit';
@@ -264,14 +265,11 @@ function AccessKeys() {
                         render: (_: unknown, k) =>
                             k.source === 'api' && (
                                 <Space>
-                                    <Popconfirm title={t('storage.rotateConfirm')} onConfirm={() => rotate(k)}>
-                                        <Button size="small">{t('storage.rotate')}</Button>
-                                    </Popconfirm>
-                                    <Popconfirm title={t('storage.deleteKeyConfirm')} onConfirm={() => remove(k)}>
-                                        <Button size="small" danger>
-                                            {t('storage.deleteKey')}
-                                        </Button>
-                                    </Popconfirm>
+                                    <RowActions name={k.access_key} actions={[
+                                        { key: 'rotate', label: t('storage.rotate'), confirm: t('storage.rotateConfirm'), onSelect: () => rotate(k) },
+                                        { key: 'delete', label: t('storage.deleteKey'), danger: true, confirm: t('storage.deleteKeyConfirm'),
+                                            onSelect: () => remove(k) },
+                                    ]} />
                                 </Space>
                             ),
                     },

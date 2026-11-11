@@ -5,6 +5,7 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { ExtensionInstallResult, ExtensionSection, InstalledExtension } from '../api/types';
 import { Page, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
+import { RowActions } from './RowActions';
 
 const SECTIONS = '/extensions/ui';
 
@@ -98,18 +99,12 @@ export function ExtensionsAdmin() {
                                     q.refresh();
                                 }}
                             />,
-                            <Popconfirm
-                                key="rm"
-                                title={`Remove ${x.name}? Its token stops working.`}
-                                onConfirm={async () => {
+                            <RowActions
+                                key="rm" name={x.name} actions={[{ key: 'delete', label: 'Remove', danger: true, confirm: `Remove ${x.name}? Its token stops working.`,
+    onSelect: async () => {
                                     await client.removeExtension(x.name);
                                     q.refresh();
-                                }}
-                            >
-                                <Button danger size="small">
-                                    Remove
-                                </Button>
-                            </Popconfirm>,
+                                } }]} />,
                         ]}
                     >
                         <List.Item.Meta

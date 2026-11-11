@@ -31,7 +31,8 @@ import { GitRepositories } from './GitDocs';
 import { Muted, SectionTitle } from './tokens';
 import { describeError } from './ErrorNotice';
 import { StatusBadge } from './StatusBadge';
-import { When } from '../utils/time';
+import { Schedule, When } from '../utils/time';
+import { RowActions } from './RowActions';
 
 const CATEGORY: Record<SourceConnector['category'], string> = {
     warehouse: 'Warehouses',
@@ -388,9 +389,7 @@ export function SourcesSettings() {
                         title: 'Schedule',
                         render: (_, s) =>
                             s.schedule ? (
-                                <code>
-                                    {s.schedule.interval} {s.schedule.timezone !== 'UTC' && s.schedule.timezone}
-                                </code>
+                                <Schedule cron={s.schedule.interval} tz={s.schedule.timezone} />
                             ) : (
                                 <Muted>manual</Muted>
                             ),
@@ -431,17 +430,11 @@ export function SourcesSettings() {
                                 >
                                     Edit
                                 </Button>
-                                <Popconfirm
-                                    title={`Delete ${s.name}? The metadata it brought in stays.`}
-                                    onConfirm={async () => {
+                                <RowActions name={s.name} actions={[{ key: 'delete', label: 'Delete', danger: true, confirm: `Delete ${s.name}? The metadata it brought in stays.`,
+    onSelect: async () => {
                                         await client.deleteSource(s.urn);
                                         sources.refresh();
-                                    }}
-                                >
-                                    <Button size="small" danger>
-                                        Delete
-                                    </Button>
-                                </Popconfirm>
+                                    } }]} />
                             </Space>
                         ),
                     },
