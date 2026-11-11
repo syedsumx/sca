@@ -24,6 +24,11 @@ import { installMatchMedia } from './setup';
 
 beforeAll(installMatchMedia);
 
+/** Opens every collapsed group of the sidebar (L150: groups other than the role's and the current page's are closed). */
+function openAllGroups(nav: HTMLElement) {
+    for (const b of within(nav).queryAllByRole('button', { expanded: false })) fireEvent.click(b);
+}
+
 function wrap(ui: React.ReactElement, routes: Record<string, unknown>, at = '/', calls: MockCall[] = [], locale: 'en' | 'de' = 'en') {
     const { client, cache } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [], 'GET /v1/me/capabilities': ADMIN,
         ...routes }, calls);
@@ -96,12 +101,18 @@ describe('the consolidated sidebar', () => {
     });
 
     it('names the groups and sections, with Inbox and Profile in the header', async () => {
-        wrap(<ConsumerLayout />, { 'GET /notify/inbox': [{ id: 'n1', title: 'x', body: '', created_at: '2026-01-01T00:00:00Z', read_at: null }] }, '/semantics');
+        const at = wrap(<ConsumerLayout />, { 'GET /notify/inbox': [{ id: 'n1', title: 'x', body: '', created_at: '2026-01-01T00:00:00Z', read_at: null }] }, '/semantics');
         const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
-        await within(nav).findByRole('link', { name: 'Access policies' });   // once the person's privileges are known
+        await within(nav).findByRole('button', { name: 'Govern' });   // once the person's privileges are known
         for (const h of ['Catalog', 'Govern', 'Quality & operations', 'Analyze', 'Build', 'AI', 'Platform']) {
             expect(within(nav).getByRole('heading', { name: h })).toBeTruthy();
         }
+        // Without a role only the Catalog (Cairn Core) and the current page's group are open; every other group is one
+        // click away.
+        expect(within(nav).getByRole('button', { name: 'Catalog' }).getAttribute('aria-expanded')).toBe('true');
+        expect(within(nav).getByRole('button', { name: 'Govern' }).getAttribute('aria-expanded')).toBe('false');
+        expect(within(nav).queryByRole('link', { name: 'Access policies' })).toBeNull();
+        openAllGroups(nav);
         for (const l of ['Home', 'Search', 'Semantics', 'Access policies', 'Automation', 'Security & compliance', 'External sharing',
             'Usage & cost', 'Governance report', 'Runs', 'Incidents', 'Platform health', 'Alerts & routing', 'Assistant', 'AI gateway',
             'Compute', 'Platform map']) {
@@ -112,16 +123,28 @@ describe('the consolidated sidebar', () => {
             expect(within(nav).queryByRole('link', { name: gone })).toBeNull();
         }
         expect((await screen.findByRole('link', { name: 'Inbox, 1 unread' })).getAttribute('href')).toBe('/inbox');
-        expect(screen.getByRole('link', { name: 'Your profile: Ana Analyst' }).getAttribute('href')).toBe('/profile');
+        // The profile, the language and the theme are in the profile menu.
+        fireEvent.click(screen.getByRole('button', { name: 'Your profile and settings' }));
+        expect(await screen.findByRole('menuitem', { name: 'Deutsch' })).toBeTruthy();
+        expect(screen.getByRole('menuitem', { name: 'Dark' })).toBeTruthy();
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Your profile' }));
+        await waitFor(() => expect(at.where()).toBe('/profile'));
     });
 
     it('speaks German in the new sections', async () => {
         wrap(<ConsumerLayout />, {}, '/', [], 'de');
         const nav = screen.getByRole('navigation', { name: 'Bereiche' });
-        await within(nav).findByRole('link', { name: 'Zugriffsrichtlinien' });
-        expect(within(nav).getByRole('heading', { name: 'Qualität & Betrieb' })).toBeTruthy();
+        await within(nav).findByRole('button', { name: 'Steuern' });
+        // antd's German texts load and re-render the page once: open the groups until they stay open.
+        await waitFor(() => {
+            const n = screen.getByRole('navigation', { name: 'Bereiche' });
+            openAllGroups(n);
+            expect(within(n).getByRole('link', { name: 'Zugriffsrichtlinien' })).toBeTruthy();
+        });
+        const open = screen.getByRole('navigation', { name: 'Bereiche' });
+        expect(within(open).getByRole('heading', { name: 'Qualität & Betrieb' })).toBeTruthy();
         for (const l of ['Semantik', 'Zugriffsrichtlinien', 'Läufe', 'Vorfälle', 'Alarme & Weiterleitung', 'Externe Freigabe']) {
-            expect(within(nav).getByRole('link', { name: l })).toBeTruthy();
+            expect(within(open).getByRole('link', { name: l })).toBeTruthy();
         }
     });
 

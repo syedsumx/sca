@@ -128,7 +128,7 @@ const en = {
     'nav.extensions': 'Extensions',
     'nav.workspace': 'Workspace',
     'nav.sections': 'Workspace sections',
-    'nav.ask': '✨ Ask',
+    'nav.ask': 'Ask',
     'nav.askTitle': 'Open assistant (⌘J)',
     'nav.language': 'Language',
     'nav.group.find': "Find",
@@ -175,7 +175,7 @@ const en = {
     'page.marketplaceIntro':
         'Curated, owned and quality-checked data products. Request access in seconds — no tickets.',
     'page.requests': 'Requests',
-    'page.assistant': '✨ Assistant',
+    'page.assistant': 'Assistant',
     'page.assistantIntro':
         'Converse with your metadata: find data, understand metrics, explain lineage and get docs drafted.',
     'page.context': 'Context inbox',
@@ -420,7 +420,7 @@ const de: Catalog = {
     'nav.extensions': 'Erweiterungen',
     'nav.workspace': 'Arbeitsbereich',
     'nav.sections': 'Bereiche',
-    'nav.ask': '✨ Fragen',
+    'nav.ask': 'Fragen',
     'nav.askTitle': 'Assistent öffnen (⌘J)',
     'nav.language': 'Sprache',
     'nav.group.find': "Finden",
@@ -467,7 +467,7 @@ const de: Catalog = {
     'page.marketplaceIntro':
         'Kuratierte, verantwortete und qualitätsgeprüfte Datenprodukte. Zugriff in Sekunden anfragen – ohne Tickets.',
     'page.requests': 'Anfragen',
-    'page.assistant': '✨ Assistent',
+    'page.assistant': 'Assistent',
     'page.assistantIntro':
         'Sprechen Sie mit Ihren Metadaten: Daten finden, Kennzahlen verstehen, Herkunft erklären und Dokumentation entwerfen lassen.',
     'page.context': 'Kontext-Posteingang',
@@ -708,7 +708,7 @@ const fr: Catalog = {
     'nav.extensions': 'Extensions',
     'nav.workspace': 'Espace de travail',
     'nav.sections': 'Sections',
-    'nav.ask': '✨ Demander',
+    'nav.ask': 'Demander',
     'nav.askTitle': 'Ouvrir l’assistant (⌘J)',
     'nav.language': 'Langue',
     'nav.group.find': "Trouver",
@@ -755,7 +755,7 @@ const fr: Catalog = {
     'page.marketplaceIntro':
         'Des produits de données choisis, avec un responsable et une qualité contrôlée. Demandez l’accès en quelques secondes, sans ticket.',
     'page.requests': 'Demandes',
-    'page.assistant': '✨ Assistant',
+    'page.assistant': 'Assistant',
     'page.assistantIntro':
         'Dialoguez avec vos métadonnées : trouvez des données, comprenez les indicateurs, expliquez le lignage et faites rédiger la documentation.',
     'page.context': 'Boîte de contexte',
@@ -927,7 +927,7 @@ const es: Catalog = {
     'nav.extensions': 'Extensiones',
     'nav.workspace': 'Espacio de trabajo',
     'nav.sections': 'Secciones',
-    'nav.ask': '✨ Preguntar',
+    'nav.ask': 'Preguntar',
     'nav.askTitle': 'Abrir el asistente (⌘J)',
     'nav.language': 'Idioma',
     'nav.group.find': "Buscar",
@@ -974,7 +974,7 @@ const es: Catalog = {
     'page.marketplaceIntro':
         'Productos de datos seleccionados, con responsable y calidad comprobada. Solicite acceso en segundos, sin tickets.',
     'page.requests': 'Solicitudes',
-    'page.assistant': '✨ Asistente',
+    'page.assistant': 'Asistente',
     'page.assistantIntro':
         'Converse con sus metadatos: encuentre datos, entienda métricas, explique el linaje y obtenga borradores de documentación.',
     'page.context': 'Bandeja de contexto',
@@ -1145,7 +1145,7 @@ const ja: Catalog = {
     'nav.extensions': '拡張機能',
     'nav.workspace': 'ワークスペース',
     'nav.sections': 'セクション',
-    'nav.ask': '✨ 質問',
+    'nav.ask': '質問',
     'nav.askTitle': 'アシスタントを開く (⌘J)',
     'nav.language': '言語',
     'nav.group.find': "探す",
@@ -1192,7 +1192,7 @@ const ja: Catalog = {
     'page.marketplaceIntro':
         '厳選され、責任者がいて、品質が確認されたデータプロダクト。チケット不要で、数秒でアクセスを申請できます。',
     'page.requests': '申請',
-    'page.assistant': '✨ アシスタント',
+    'page.assistant': 'アシスタント',
     'page.assistantIntro':
         'メタデータと対話できます。データを探し、指標を理解し、リネージを説明し、ドキュメントの下書きを作成します。',
     'page.context': 'コンテキスト受信トレイ',

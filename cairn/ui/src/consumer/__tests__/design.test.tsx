@@ -75,9 +75,14 @@ describe('the shell', () => {
         expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
         const home = screen.getByRole('link', { name: 'Cairn home' });
         expect(home.getAttribute('href')).toBe('/discover');
-        const palette = screen.getByRole('button', { name: 'Search or jump to…' });
-        expect(palette.getAttribute('aria-keyshortcuts')).toContain('Control+K');
-        expect(within(palette).getByText(paletteKeys())).toBeTruthy();
+        // One search in the header (L150): the box searches data and finds pages and commands; Ctrl K and / focus it.
+        const search = screen.getByRole('combobox', { name: 'Search data or jump to a page' });
+        expect(search.getAttribute('aria-keyshortcuts')).toContain('Control+K');
+        expect(search.getAttribute('aria-expanded')).toBe('false');
+        expect(search.hasAttribute('aria-controls')).toBe(false);
+        expect(within(search.parentElement as HTMLElement).getByText(paletteKeys())).toBeTruthy();
+        expect(screen.getAllByRole('combobox', { name: /search/i })).toHaveLength(1);
+        expect(screen.queryByRole('textbox', { name: 'Search' })).toBeNull();
     });
 
     it('writes the palette shortcut the way the computer does', () => {

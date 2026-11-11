@@ -1,4 +1,4 @@
-import { Badge, Input, InputRef, Select, Tooltip } from 'antd';
+import { Badge, Dropdown, Select, Tooltip } from 'antd';
 import React, { Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, NavLink, useHistory, useLocation } from 'react-router-dom';
 import styled, { css } from 'styled-components';
@@ -11,7 +11,8 @@ import { LOCALES, Locale, MessageKey, useI18n, useT } from '../i18n';
 import { useHotkeys } from '../utils/useHotkeys';
 import { routeAllowed } from '../guide/capabilities';
 import { GuideProvider, useGuide } from '../guide/GuideProvider';
-import { arrangeNav } from '../guide/nav';
+import { arrangeNav, readOpenGroups, writeOpenGroups } from '../guide/nav';
+import { HeaderSearch, paletteKeys } from '../guide/HeaderSearch';
 import { RoleDialog } from '../guide/GetStarted';
 import { Breadcrumbs, HelpButton } from '../guide/PageHeader';
 import { pushRecent } from '../guide/palette';
@@ -22,6 +23,7 @@ import { useExtensionSections } from './Extensions';
 import { Icon, IconName } from './Icons';
 import { LicenceBanner } from './Licence';
 import { ConsumerTheme, ThemeVariables, focusRing, tokens } from './tokens';
+import { THEMES, Theme, useTheme } from '../utils/theme';
 
 export interface NavItem {
     to: string;
@@ -121,8 +123,7 @@ export const KEPT_ROUTES = ['/inbox', '/profile', '/get-started', '/extensions',
 /** Every section, in sidebar order. */
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
-// The command palette and the help panel load on first use (their own chunk: they read the areas' catalog).
-const CommandPalette = React.lazy(() => import('../guide/CommandPalette').then((m) => ({ default: m.CommandPalette })));
+// The help panel loads on first use (its own chunk: it reads the areas' catalog). So do the header search's results.
 const HelpPanel = React.lazy(() => import('../guide/HelpPanel').then((m) => ({ default: m.HelpPanel })));
 const GET_STARTED: NavItem = { to: '/get-started', label: 'nav.getStarted', icon: 'sparkle' };
 const noTabs = () => undefined;
@@ -221,15 +222,50 @@ const NavScroll = styled.nav`
 `;
 
 const Group = styled.div<{ $collapsed: boolean }>`
-    margin-top: 12px;
+    margin-top: 8px;
     h2 {
         margin: 0 0 2px;
-        padding: 0 12px;
+        padding: 0;
         font-size: 11px;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         color: ${tokens.color.textMuted};
+        button {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            width: 100%;
+            min-height: 32px;
+            padding: 0 12px;
+            border: 0;
+            border-radius: ${tokens.radius.sm};
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            letter-spacing: inherit;
+            text-transform: inherit;
+            cursor: pointer;
+            text-align: left;
+            ${focusRing}
+            &:hover {
+                color: ${tokens.color.text};
+                background: #F1F5F9;
+            }
+            .chev {
+                display: inline-flex;
+                margin-left: auto;
+                transition: transform 0.15s ease;
+            }
+            &[aria-expanded='true'] .chev {
+                transform: rotate(90deg);
+            }
+            .count {
+                font-weight: 500;
+                letter-spacing: 0;
+                text-transform: none;
+            }
+        }
         ${(p) =>
             p.$collapsed &&
             css`
@@ -318,41 +354,6 @@ const SideFoot = styled.div`
     }
 `;
 
-const PaletteButton = styled.button`
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    min-height: ${tokens.control}px;
-    padding: 0 12px;
-    border: 1px solid ${tokens.color.borderStrong};
-    border-radius: ${tokens.radius.md};
-    background: ${tokens.color.surfaceSunken};
-    color: ${tokens.color.textMuted};
-    font: inherit;
-    font-size: 13px;
-    cursor: pointer;
-    white-space: nowrap;
-    ${focusRing}
-    &:hover {
-        color: ${tokens.color.text};
-        border-color: ${tokens.color.primary};
-    }
-    kbd {
-        font: 12px ${tokens.font};
-        color: ${tokens.color.textMuted};
-        border: 1px solid ${tokens.color.borderStrong};
-        border-radius: 5px;
-        padding: 0 6px;
-        background: ${tokens.color.surface};
-    }
-    @media (max-width: 720px) {
-        .text,
-        kbd {
-            display: none;
-        }
-    }
-`;
-
 const IconButton = styled.button`
     display: inline-grid;
     place-items: center;
@@ -387,12 +388,13 @@ const Top = styled.header`
     height: 60px;
     padding: 0 32px;
     box-sizing: border-box;
-    /* On a phone the bar wraps: the search box gets a row of its own. */
+    /* On a phone: one row of icons (menu, search, Ask, inbox, profile); the search opens over it. */
     @media (max-width: 720px) {
-        flex-wrap: wrap;
-        height: auto;
-        min-height: 60px;
-        padding: 8px 16px;
+        gap: 4px;
+        padding: 0 8px;
+        .help {
+            display: none;
+        }
     }
     background: ${tokens.color.surface};
     border-bottom: 1px solid ${tokens.color.border};
@@ -406,36 +408,6 @@ const Top = styled.header`
         .menu {
             display: inline-grid;
         }
-    }
-`;
-
-const SearchBox = styled(Input)`
-    max-width: 520px;
-    flex: 1 1 240px;
-    && {
-        min-height: ${tokens.control}px;
-        border-radius: ${tokens.radius.md};
-        background: ${tokens.color.surface};
-        border-color: ${tokens.color.borderStrong};
-    }
-    &&:hover {
-        border-color: ${tokens.color.primary};
-    }
-    && input {
-        background: transparent;
-    }
-    kbd {
-        font: 12px ${tokens.font};
-        color: ${tokens.color.textMuted};
-        border: 1px solid ${tokens.color.borderStrong};
-        border-radius: 5px;
-        padding: 0 6px;
-        background: ${tokens.color.surface};
-    }
-    @media (max-width: 720px) {
-        order: 10;
-        flex-basis: 100%;
-        max-width: none;
     }
 `;
 
@@ -454,10 +426,17 @@ const AskButton = styled.button`
     font-weight: 500;
     cursor: pointer;
     white-space: nowrap;
+    flex: none;
+    svg {
+        color: ${tokens.color.primary};
+    }
     ${focusRing}
     &:hover {
         border-color: ${tokens.color.primary};
         color: ${tokens.color.primaryHover};
+    }
+    @media (max-width: 720px) {
+        padding: 0 10px;
     }
 `;
 
@@ -493,12 +472,16 @@ const InboxLink = styled(Link)`
     }
 `;
 
-const ProfileLink = styled(Link)`
+const ProfileButton = styled.button`
     display: inline-grid;
     place-items: center;
     min-width: ${tokens.control}px;
     min-height: ${tokens.control}px;
+    border: 0;
+    padding: 0;
+    background: transparent;
     border-radius: 50%;
+    cursor: pointer;
     flex: none;
     ${focusRing}
 `;
@@ -533,9 +516,42 @@ const HostedBar = styled.nav`
     }
 `;
 
-/** The palette's shortcut as this computer writes it. */
-export function paletteKeys(platform: string = typeof navigator !== 'undefined' ? navigator.platform || '' : ''): string {
-    return /mac|iphone|ipad/i.test(platform) ? '⌘ K' : 'Ctrl K';
+export { paletteKeys };
+
+/** The profile menu: the person's page, the language and the theme (L150: one place for personal settings). */
+export function ProfileMenu({ name }: { name: string }) {
+    const { locale, setLocale, t } = useI18n();
+    const history = useHistory();
+    const [theme, setTheme] = useTheme();
+    const themeKey: Record<Theme, MessageKey> = { light: 'theme.light', dark: 'theme.dark', auto: 'theme.auto' };
+    return (
+        <Dropdown trigger={['click']} placement="bottomRight"
+            menu={{
+                selectable: true,
+                selectedKeys: [`lang:${locale}`, `theme:${theme}`],
+                items: [
+                    { key: 'profile', label: t('profile.open') },
+                    { type: 'divider' },
+                    { type: 'group', label: t('profile.language'),
+                        children: LOCALES.map((l) => ({ key: `lang:${l.code}`, label: l.label })) },
+                    { type: 'group', label: t('profile.theme'),
+                        children: THEMES.map((x) => ({ key: `theme:${x}`, label: t(themeKey[x]) })) },
+                ],
+                onClick: ({ key }) => {
+                    if (key === 'profile') {
+                        pushRecent('/profile', t('nav.profile'));
+                        if (!(typeof window !== 'undefined' && isHosted(window.location.pathname) && navigateHost('/profile'))) {
+                            history.push('/profile');
+                        }
+                    } else if (key.startsWith('lang:')) setLocale(key.slice(5) as Locale);
+                    else if (key.startsWith('theme:')) setTheme(key.slice(6) as Theme);
+                },
+            }}>
+            <ProfileButton type="button" aria-label={t('profile.menu')} aria-haspopup="menu" title={`${name} · ${t('profile.menu')}`}>
+                <Avatar aria-hidden="true">{initials(name)}</Avatar>
+            </ProfileButton>
+        </Dropdown>
+    );
 }
 
 function initials(name: string | undefined): string {
@@ -563,7 +579,6 @@ export function ConsumerLayout({ children }: { children?: React.ReactNode }) {
 function Shell0({ children }: { children?: React.ReactNode }) {
     const session = useDheSession();
     const guide = useGuide();
-    const searchRef = useRef<InputRef>(null);
     const gAt = useRef(0);
     const t = useT();
     const history = useHistory();
@@ -573,15 +588,14 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     });
     const [collapsed, setCollapsed] = useState(readCollapsed);
     const [open, setOpen] = useState(false);
-    const [q, setQ] = useState('');
+    const me = session.config?.user?.urn;
+    const [opened, setOpened] = useState<Record<string, boolean>>(() => readOpenGroups(me));
+    // Once the person is known, their remembered choices join any made while the page was loading.
+    useEffect(() => setOpened((cur) => ({ ...readOpenGroups(me), ...cur })), [me]);
     useHotkeys({
         'mod+j': () => session.setAssistantOpen(!session.assistantOpen),
         'mod+k': () => guide.setPalette(true),
         '?': () => guide.setShortcuts(true),
-        '/': () => {
-            // A page's own search box (Discover, Search) takes it first; elsewhere, the top bar's.
-            if (document.activeElement?.tagName !== 'INPUT') searchRef.current?.focus();
-        },
         g: () => {
             gAt.current = Date.now();
         },
@@ -606,10 +620,18 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                 : []),
         ],
     }));
-    // What the person may use (capabilities), then arranged for their role and their own pins and hidden entries.
-    const arranged = arrangeNav(allGroups, visible, guide.ui.onboarding.role, guide.ui.sidebar);
+    // What the person may use (capabilities), then arranged for their role (the one they chose, else the one their
+    // profile suggests): its groups open, the rest collapsed, the current page's group open, and their own choices.
+    const arranged = arrangeNav(allGroups, visible, guide.ui.onboarding.role, guide.ui.sidebar,
+        { path: location.pathname, opened, suggested: guide.suggestedRole });
+    const toggleGroup = (label: string, isOpen: boolean) => {
+        const next = { ...opened, [label]: !isOpen };
+        setOpened(next);
+        writeOpenGroups(me, next);
+    };
+    const forYouOpen = guide.ui.sidebar.show_all || (opened['nav.forYou'] ?? true);
     const groups = [
-        ...(arranged.forYou.length ? [{ label: 'nav.forYou' as MessageKey, items: arranged.forYou }] : []),
+        ...(arranged.forYou.length ? [{ label: 'nav.forYou' as MessageKey, items: arranged.forYou, open: forYouOpen, current: false }] : []),
         ...arranged.groups,
     ];
     const usable = allGroups.flatMap((g) => g.items).filter(visible);
@@ -621,7 +643,14 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     ].map((n) => ({ to: n.to, label: n.to === '/assistant' ? t('palette.askAssistant') : t(n.label) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [usable.map((n) => n.to).join(), guide.enabled, t]);
-    const toggleEverything = () => void guide.save({ sidebar: { show_all: !guide.ui.sidebar.show_all } });
+    const toggleEverything = () => {
+        // "Show less" goes back to the role's groups: the person's own open/closed choices are forgotten too.
+        if (guide.ui.sidebar.show_all) {
+            setOpened({});
+            writeOpenGroups(me, {});
+        }
+        void guide.save({ sidebar: { show_all: !guide.ui.sidebar.show_all } });
+    };
     const hosted = typeof window !== 'undefined' && isHosted(window.location.pathname);
     // In the catalog shell, sections are shell navigation entries: switching moves the shell along.
     const onNav = (to: string, label?: MessageKey) => (e: React.MouseEvent) => {
@@ -642,27 +671,7 @@ function Shell0({ children }: { children?: React.ReactNode }) {
 
     const askAndSearch = (
         <>
-            <PaletteButton type="button" onClick={() => guide.setPalette(true)} aria-haspopup="dialog"
-                aria-keyshortcuts="Control+K Meta+K" aria-label={t('palette.open')}
-                title={t('nav.searchShortcut', { keys: paletteKeys() })}>
-                <Icon name="search" size={16} />
-                <span className="text">{t('palette.open')}</span>
-                <kbd>{paletteKeys()}</kbd>
-            </PaletteButton>
-            <SearchBox
-                ref={searchRef}
-                aria-label={t('nav.search')}
-                placeholder={t('nav.searchPlaceholder')}
-                prefix={<Icon name="search" size={16} />}
-                suffix={<kbd>/</kbd>}
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                onPressEnter={() => {
-                    // One results page (L149): the top bar searches the catalog; the palette keeps commands.
-                    history.push(`/catalog?q=${encodeURIComponent(q.trim())}`);
-                    setQ('');
-                }}
-            />
+            <HeaderSearch nav={paletteNav} />
             <span style={{ flex: 1 }} />
             <AskButton
                 type="button"
@@ -670,23 +679,17 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                 aria-keyshortcuts="Control+J Meta+J"
                 title={t('nav.askTitle')}
             >
+                <Icon name="sparkle" size={16} />
                 {t('nav.ask')}
             </AskButton>
-            <HelpButton />
+            <span className="help"><HelpButton /></span>
             <Tooltip title={t('nav.inbox')}>
                 <InboxLink to="/inbox" aria-label={unread ? t('nav.inboxCount', { n: unread }) : t('nav.inbox')}
                     onClick={onNav('/inbox', 'nav.inbox')}>
                     <Badge count={unread} size="small" offset={[2, -2]}><Icon name="inbox" size={20} /></Badge>
                 </InboxLink>
             </Tooltip>
-            <LanguagePicker />
-            {name && (
-                <Tooltip title={name}>
-                    <ProfileLink to="/profile" aria-label={t('nav.yourProfile', { name })} onClick={onNav('/profile', 'nav.profile')}>
-                        <Avatar aria-hidden="true">{initials(name)}</Avatar>
-                    </ProfileLink>
-                </Tooltip>
-            )}
+            {name ? <ProfileMenu name={name} /> : <LanguagePicker />}
         </>
     );
 
@@ -710,7 +713,6 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                 <RoleDialog />
                 <ShortcutsSheet />
                 <SidebarCustomiser entries={usable.map((n) => ({ to: n.to, label: t(n.label) }))} />
-                {guide.palette && <Suspense fallback={null}><CommandPalette nav={paletteNav} /></Suspense>}
                 {guide.help && <Suspense fallback={null}><HelpPanel pageTitle={(path) => {
                     const n = usable.find((x) => x.to === path) ?? (path === '/get-started' ? GET_STARTED : undefined);
                     return n ? t(n.label) : undefined;
@@ -743,24 +745,41 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                             </ul>
                         </Group>
                     )}
-                    {groups.map((g) => (
-                        <Group key={g.label} $collapsed={collapsed}>
-                            <h2>{t(g.label as MessageKey)}</h2>
-                            <ul>
-                                {g.items.map((n) => (
-                                    <li key={n.to}>
-                                        <Tooltip title={collapsed ? t(n.label) : ''} placement="right">
-                                            <Item to={n.to} exact={n.exact} $collapsed={collapsed} onClick={onNav(n.to, n.label)}
-                                                aria-label={collapsed ? t(n.label) : undefined}>
-                                                <Icon name={n.icon} />
-                                                {!collapsed && <span className="label">{label(n)}</span>}
-                                            </Item>
-                                        </Tooltip>
-                                    </li>
-                                ))}
-                            </ul>
-                        </Group>
-                    ))}
+                    {groups.map((g) => {
+                        // An icon-only sidebar lists every entry (its headings are rules); otherwise a group is a
+                        // disclosure: its heading opens and closes it.
+                        const listed = collapsed || g.open;
+                        const listId = `cairn-nav-${g.label.replace(/\W+/g, '-')}`;
+                        return (
+                            <Group key={g.label} $collapsed={collapsed} data-open={g.open}>
+                                <h2>
+                                    {collapsed ? t(g.label as MessageKey) : (
+                                        <button type="button" aria-expanded={g.open} aria-controls={listId}
+                                            onClick={() => toggleGroup(g.label, g.open)}>
+                                            <span>{t(g.label as MessageKey)}</span>
+                                            {!g.open && <span className="count" aria-hidden="true">({g.items.length})</span>}
+                                            <span className="chev" aria-hidden="true"><Icon name="chevron" size={14} /></span>
+                                        </button>
+                                    )}
+                                </h2>
+                                {listed && (
+                                    <ul id={listId}>
+                                        {g.items.map((n) => (
+                                            <li key={n.to}>
+                                                <Tooltip title={collapsed ? t(n.label) : ''} placement="right">
+                                                    <Item to={n.to} exact={n.exact} $collapsed={collapsed} onClick={onNav(n.to, n.label)}
+                                                        aria-label={collapsed ? t(n.label) : undefined}>
+                                                        <Icon name={n.icon} />
+                                                        {!collapsed && <span className="label">{label(n)}</span>}
+                                                    </Item>
+                                                </Tooltip>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                )}
+                            </Group>
+                        );
+                    })}
                 </NavScroll>
                 <SideFoot>
                     {!collapsed && guide.available && (
@@ -800,7 +819,6 @@ function Shell0({ children }: { children?: React.ReactNode }) {
             <RoleDialog />
             <ShortcutsSheet />
             <SidebarCustomiser entries={usable.map((n) => ({ to: n.to, label: t(n.label) }))} />
-            {guide.palette && <Suspense fallback={null}><CommandPalette nav={paletteNav} /></Suspense>}
             {guide.help && <Suspense fallback={null}><HelpPanel pageTitle={(path) => {
                 const n = usable.find((x) => x.to === path) ?? (path === '/get-started' ? GET_STARTED : undefined);
                 return n ? t(n.label) : undefined;

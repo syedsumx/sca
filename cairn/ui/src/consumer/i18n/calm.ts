@@ -29,6 +29,8 @@ export const CALM_EN = {
     'search.ask': 'Ask the assistant: “{q}”',
     'search.hint': 'Type to search data; pages and commands are listed too.',
     'search.open': 'Search',
+    'search.results': 'Search results',
+    'search.close': 'Close search',
     // Sidebar groups
     'nav.groupToggle': '{group}, {state}',
     'nav.expanded': 'expanded',
@@ -130,6 +132,8 @@ export const CALM_DE: Record<keyof typeof CALM_EN, string> = {
     'search.ask': 'Den Assistenten fragen: „{q}“',
     'search.hint': 'Tippen Sie, um Daten zu suchen; Seiten und Befehle stehen auch in der Liste.',
     'search.open': 'Suchen',
+    'search.results': 'Suchergebnisse',
+    'search.close': 'Suche schließen',
     'nav.groupToggle': '{group}, {state}',
     'nav.expanded': 'ausgeklappt',
     'nav.collapsed': 'eingeklappt',

@@ -56,10 +56,14 @@ it('every hub tab names a known area or view, and every hub is in the sidebar', 
 it('the sidebar groups every section and collapses', async () => {
     wrap(<ConsumerLayout />, {});
     const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
+    // Every group is listed; the closed ones open with their heading (L150).
+    for (const b of within(nav).getAllByRole('button', { expanded: false })) fireEvent.click(b);
     for (const label of ['Agents', 'Ingestion', 'Security & compliance', 'Platform map', 'Settings']) {
         expect(within(nav).getByText(label)).toBeTruthy();
     }
-    expect(within(nav).getByText('AI')).toBeTruthy();
+    expect(within(nav).getByRole('button', { name: 'AI' }).getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(within(nav).getByRole('button', { name: 'Build' }));
+    expect(within(nav).queryByRole('link', { name: 'Ingestion' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
     expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeTruthy();
     expect(within(nav).queryByText('Ingestion')).toBeNull();

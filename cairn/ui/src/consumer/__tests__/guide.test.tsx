@@ -162,18 +162,37 @@ describe('navigation', () => {
         const groups = NAV_GROUPS.map((g) => ({ label: g.label as string, items: g.items }));
         const all = () => true;
         const none = { pinned: [], hidden: [], show_all: false };
+        const openOf = (a: ReturnType<typeof arrangeNav>) => a.groups.filter((g) => g.open).map((g) => g.label);
+        // No role: only the Catalog (Cairn Core) is open; every group is still listed, one click away.
         const plain = arrangeNav(groups, all, null, none);
         expect(plain.forYou).toEqual([]);
-        expect(plain.folded).toBe(0);
+        expect(plain.groups).toHaveLength(NAV_GROUPS.length);
+        expect(openOf(plain)).toEqual(['nav.group.catalog']);
+        expect(plain.folded).toBe(NAV_GROUPS.slice(1).flatMap((g) => g.items).length);
+        // A role opens its groups; the rest are collapsed.
         const analyst = arrangeNav(groups, all, 'analyst', none);
         expect(analyst.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/semantics']);
-        expect(analyst.groups.map((g) => g.label)).not.toContain('nav.group.build');
+        expect(openOf(analyst)).toEqual(['nav.group.catalog', 'nav.group.analyze', 'nav.group.ai']);
+        expect(analyst.groups.find((g) => g.label === 'nav.group.build')?.open).toBe(false);
         expect(analyst.folded).toBeGreaterThan(0);
+        expect(openOf(arrangeNav(groups, all, null, none, { suggested: 'steward' }))).toContain('nav.group.govern');
+        expect(arrangeNav(groups, all, null, none, { suggested: 'steward' }).forYou).toEqual([]);   // no pins for a guess
+        // The current page's group opens too (the most specific entry: /sql/workbooks is in Analyze).
+        const atFlows = arrangeNav(groups, all, 'analyst', none, { path: '/flows' });
+        expect(atFlows.groups.find((g) => g.label === 'nav.group.build')).toMatchObject({ open: true, current: true });
+        expect(arrangeNav(groups, all, null, none, { path: '/sql/workbooks' }).groups.find((g) => g.current)?.label)
+            .toBe('nav.group.analyze');
+        // The person's own open/closed choice wins.
+        const closed = arrangeNav(groups, all, 'analyst', none, { path: '/flows', opened: { 'nav.group.build': false, 'nav.group.govern': true } });
+        expect(closed.groups.find((g) => g.label === 'nav.group.build')?.open).toBe(false);
+        expect(closed.groups.find((g) => g.label === 'nav.group.govern')?.open).toBe(true);
         const mine = arrangeNav(groups, all, 'analyst', togglePin({ ...none, hidden: ['/semantics'] }, '/flows'));
         expect(mine.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/flows']);
         expect(mine.groups.flatMap((g) => g.items).map((i) => i.to)).not.toContain('/semantics');
-        const everything = arrangeNav(groups, all, 'analyst', { pinned: [], hidden: ['/semantics'], show_all: true });
+        const everything = arrangeNav(groups, all, 'analyst', { pinned: [], hidden: ['/semantics'], show_all: true },
+            { opened: { 'nav.group.catalog': false } });
         expect(everything.folded).toBe(0);
+        expect(everything.groups.every((g) => g.open)).toBe(true);
         expect(everything.groups.flatMap((g) => g.items)).toHaveLength(NAV_GROUPS.flatMap((g) => g.items).length);
         // Show everything never shows what capabilities leave out.
         const noGov = arrangeNav(groups, (i) => i.to !== '/governance', 'admin', { ...none, show_all: true });
@@ -342,17 +361,23 @@ describe('the guided workspace', () => {
         act(() => {
             fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
         });
-        const box = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
-        const list = screen.getByRole('listbox', { name: 'Command palette' });
+        // One search in the header (L150): Ctrl K focuses it, and it finds pages and actions as well as data.
+        const box = await screen.findByRole('combobox', { name: 'Search data or jump to a page' });
+        await waitFor(() => expect(document.activeElement).toBe(box));
         fireEvent.change(box, { target: { value: 'input tables' } });
+        const list = await screen.findByRole('listbox', { name: 'Search results' });
+        expect(box.getAttribute('aria-expanded')).toBe('true');
+        expect(box.getAttribute('aria-controls')).toBe(list.id);
         await waitFor(() => expect(within(list).getAllByRole('option')[0].textContent).toContain('Input tables'));
         expect(box.getAttribute('aria-activedescendant')).toBe(within(list).getAllByRole('option')[0].id);
         expect(within(list).getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box, { key: 'Enter' });
         await waitFor(() => expect(nav.where()).toBe('/sql/input-tables'));
-        // An action: a form in a hub, opened by the palette.
-        fireEvent.click(screen.getByRole('button', { name: 'Search or jump to…' }));
-        const box2 = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
+        await waitFor(() => expect(screen.queryByRole('listbox', { name: 'Search results' })).toBeNull());
+        expect(box.getAttribute('aria-expanded')).toBe('false');
+        // An action: a form in a hub, opened from the search.
+        const box2 = screen.getByRole('combobox', { name: 'Search data or jump to a page' });
+        fireEvent.focus(box2);
         fireEvent.change(box2, { target: { value: 'create scope' } });
         const first = await screen.findByRole('option', { name: /Create scope/ });
         fireEvent.keyDown(box2, { key: 'ArrowDown' });
@@ -360,9 +385,16 @@ describe('the guided workspace', () => {
         expect(first.getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box2, { key: 'Enter' });
         await waitFor(() => expect(nav.where()).toBe('/security?tab=secret-scopes&action=Create%20scope'));
-        // The last entry hands the text to the assistant.
-        fireEvent.click(screen.getByRole('button', { name: 'Search or jump to…' }));
-        const box3 = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
+        // "Search all data" opens the catalog's results; the last entry hands the text to the assistant.
+        const box3 = screen.getByRole('combobox', { name: 'Search data or jump to a page' });
+        fireEvent.focus(box3);
+        fireEvent.change(box3, { target: { value: 'revenue by region last week' } });
+        fireEvent.click(await screen.findByRole('option', { name: /Search all data for “revenue by region last week”/ }));
+        await waitFor(() => expect(nav.where()).toBe('/catalog?q=revenue%20by%20region%20last%20week'));
+        act(() => {
+            fireEvent.keyDown(window, { key: '/' });
+        });
+        await waitFor(() => expect(document.activeElement).toBe(box3));
         fireEvent.change(box3, { target: { value: 'revenue by region last week' } });
         fireEvent.click(await screen.findByRole('option', { name: /Ask: revenue by region last week/ }));
         await waitFor(() => expect(nav.where()).toBe('/assistant?q=revenue%20by%20region%20last%20week'));
@@ -379,7 +411,7 @@ describe('the guided workspace', () => {
         act(() => {
             fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
         });
-        const box = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
+        const box = await screen.findByRole('combobox', { name: 'Search data or jump to a page' });
         fireEvent.change(box, { target: { value: 'orders qx' } });
         const ask = await screen.findByRole('option', { name: /Ask: orders qx/ });
         fireEvent.keyDown(box, { key: 'End' });
@@ -392,7 +424,7 @@ describe('the guided workspace', () => {
                     searchResults: [{ entity: { urn: DS, type: 'DATASET', name: 'orders', platform: { name: 'snowflake' } } }] } } });
             }
         });
-        const list = screen.getByRole('listbox', { name: 'Command palette' });
+        const list = screen.getByRole('listbox', { name: 'Search results' });
         await waitFor(() => expect(within(list).getAllByRole('option').map((o) => o.textContent).join('|')).toContain('snowflake'));
         expect(screen.getByRole('option', { name: /Ask: orders qx/ }).getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box, { key: 'Enter' });

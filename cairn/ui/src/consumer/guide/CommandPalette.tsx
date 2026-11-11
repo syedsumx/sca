@@ -1,5 +1,5 @@
-import { Modal, Spin } from 'antd';
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Spin } from 'antd';
+import React, { useEffect, useImperativeHandle, useMemo, useState } from 'react';
 import { useHistory } from 'react-router-dom';
 import styled from 'styled-components';
 
@@ -16,9 +16,30 @@ import { useGuide } from './GuideProvider';
 import { ROLE_PINS } from './nav';
 import { PaletteItem, moveActive, pushRecent, rank, readRecent } from './palette';
 
+const Panel = styled.div`
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    width: max(100%, min(560px, calc(100vw - 32px)));
+    z-index: 1050;
+    padding: 8px;
+    background: ${tokens.color.surface};
+    border: 1px solid ${tokens.color.border};
+    border-radius: ${tokens.radius.md};
+    box-shadow: ${tokens.shadow.hover};
+    color: ${tokens.color.text};
+    @media (max-width: 720px) {
+        position: fixed;
+        top: 60px;
+        left: 8px;
+        right: 8px;
+        width: auto;
+    }
+`;
+
 const List = styled.ul`
     list-style: none;
-    margin: 8px 0 0;
+    margin: 0;
     padding: 0;
     max-height: min(60vh, 460px);
     overflow-y: auto;
@@ -62,18 +83,6 @@ const List = styled.ul`
     }
 `;
 
-const Field = styled.input`
-    width: 100%;
-    font-size: 16px;
-    padding: 10px 12px;
-    border: 1px solid ${tokens.color.border};
-    border-radius: ${tokens.radius.sm};
-    outline: none;
-    &:focus-visible {
-        border-color: ${tokens.color.primary};
-        box-shadow: 0 0 0 3px ${tokens.color.primarySoft};
-    }
-`;
 
 // The palette is drawn outside the workspace's root (a portal): its own visually-hidden style.
 const SR_ONLY: React.CSSProperties = { position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden',
@@ -81,7 +90,7 @@ const SR_ONLY: React.CSSProperties = { position: 'absolute', width: 1, height: 1
 
 const KIND_KEYS: Record<PaletteItem['kind'], MessageKey> = {
     page: 'palette.kind.page', tab: 'palette.kind.tab', action: 'palette.kind.action', recent: 'palette.kind.recent',
-    catalog: 'palette.kind.catalog', ask: 'palette.kind.ask',
+    catalog: 'palette.kind.catalog', ask: 'palette.kind.ask', search: 'palette.kind.catalog',
 };
 
 export interface PaletteNavEntry {
@@ -89,7 +98,7 @@ export interface PaletteNavEntry {
     label: string;
 }
 
-/** Everything the palette offers before it searches the catalog: pages, hub tabs, actions and recent pages. */
+/** Everything the search offers besides the catalog's answers: pages, hub tabs, actions and recent pages. */
 export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Record<string, string | number>) => string,
     tabsOf: (route: string) => string[], role: keyof typeof ROLE_PINS | null, openShortcuts: () => void): PaletteItem[] {
     const boost = new Set(role ? ROLE_PINS[role] : []);
@@ -157,42 +166,56 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
     return items;
 }
 
-/** ⌘K / Ctrl+K: jump to any page or tab, start an action, open a catalog item, or ask the assistant. */
-export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
+/** What the header's search box asks of its results list (the keys it does not handle itself). */
+export interface SearchPanelHandle {
+    onKey: (e: React.KeyboardEvent) => void;
+}
+
+export interface SearchPanelProps {
+    nav: PaletteNavEntry[];
+    /** What is typed in the header's box. */
+    q: string;
+    setQ: (q: string) => void;
+    /** An entry was chosen (the box closes and clears). */
+    onChosen: () => void;
+    /** The highlighted option's id, for the box's aria-activedescendant (undefined: none yet). */
+    onActive: (id: string | undefined) => void;
+    /** How many options are shown (the box is expanded only when there are some). */
+    onCount: (n: number) => void;
+}
+
+export const SEARCH_LIST_ID = 'cairn-search-list';
+
+/**
+ * The one search's results (L150), under the header's box: what is typed searches the catalog (as the person: Cairn
+ * Core answers only what they may see) and also finds pages, tabs and actions (the palette's commands), with "Search all
+ * data" and "Ask" at the end. Ctrl K or / focuses the box from anywhere; the arrow keys move and Enter opens.
+ */
+export const SearchPanel = React.forwardRef<SearchPanelHandle, SearchPanelProps>(function SearchPanel(
+    { nav, q, setQ, onChosen, onActive, onCount }, ref) {
     const g = useGuide();
     const t = useT();
     const history = useHistory();
     const session = useDheSession();
     const { client } = useConsumerApi();
-    const [q, setQ] = useState('');
     // The highlighted entry, by its id: results re-rank as the person's capabilities and the catalog's answers
     // arrive, and Enter must still choose the entry they moved to, not whatever now sits at its position.
     const [activeId, setActiveId] = useState<string | null>(null);
     const [catalog, setCatalog] = useState<PaletteItem[]>([]);
     const [searching, setSearching] = useState(false);
     const [flows, setFlows] = useState<PaletteItem[] | null>(null);
-    const input = useRef<HTMLInputElement>(null);
     const debounced = useDebounced(q, 250);
     const known = (k: string) => !!RESOURCE_SPECS[k];
-    const base = useMemo(() => (g.palette ? paletteItems(nav, t,
+    const base = useMemo(() => paletteItems(nav, t,
         (route) => visibleTabs(HUBS.find((h) => h.route === route)!, g.caps, known), g.ui.onboarding.role,
-        () => g.setShortcuts(true)) : []),
+        () => g.setShortcuts(true)),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [g.palette, nav, t, g.caps, g.ui.onboarding.role]);
+    [nav, t, g.caps, g.ui.onboarding.role]);
 
-    useEffect(() => {
-        if (!g.palette) {
-            setQ('');
-            setActiveId(null);
-            setCatalog([]);
-            setFlows(null);
-        } else setTimeout(() => input.current?.focus(), 0);
-    }, [g.palette]);
-
-    // The catalog, searched as the person (Cairn Core answers only what they may see), as they pause typing.
+    // The catalog, searched as the person, as they pause typing.
     useEffect(() => {
         const text = debounced.trim();
-        if (!g.palette || text.length < 2 || flows) {
+        if (text.length < 2 || flows) {
             setCatalog([]);
             return undefined;
         }
@@ -205,7 +228,7 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
             .catch(() => setCatalog([]))
             .finally(() => setSearching(false));
         return () => ctl.abort();
-    }, [debounced, g.palette, client, flows]);
+    }, [debounced, client, flows]);
 
     const results = useMemo(() => {
         if (flows) return q.trim() ? rank(flows, q) : flows;
@@ -214,6 +237,9 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
             .slice(0, 12);
         const cat = text ? rank(catalog, text, 6).concat(catalog.filter((c) => !rank([c], text).length)).slice(0, 6) : [];
         const out = [...ranked.slice(0, 30), ...cat];
+        if (text) {
+            out.push({ id: 'search', kind: 'search', label: t('search.all', { q: text }), to: `/catalog?q=${encodeURIComponent(text)}` });
+        }
         if (text && session.feature('assistant', true)) {
             out.push({ id: 'ask', kind: 'ask', label: t('palette.ask', { q: text }), to: `/assistant?q=${encodeURIComponent(text)}` });
         }
@@ -221,9 +247,13 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
     }, [base, catalog, q, flows, t, session]);
 
     useEffect(() => setActiveId(null), [q, flows]);
-    const active = Math.max(0, activeId === null ? 0 : results.findIndex((r) => r.id === activeId));
+    const found = activeId === null ? -1 : results.findIndex((r) => r.id === activeId);
+    // The first entry is highlighted until the person moves (Enter opens it), as a combobox's list does.
+    const active = results.length ? Math.max(0, found) : -1;
     const setActive = (i: number) => setActiveId(results[i]?.id ?? null);
-    const optionId = (i: number) => `cairn-palette-option-${i}`;
+    const optionId = (i: number) => `cairn-search-option-${i}`;
+    useEffect(() => onActive(active >= 0 ? optionId(active) : undefined), [active, onActive]);
+    useEffect(() => onCount(results.length), [results.length, onCount]);
 
     const choose = async (item: PaletteItem | undefined) => {
         if (!item) return;
@@ -238,7 +268,7 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
             }
             return;
         }
-        g.setPalette(false);
+        onChosen();
         if (item.run) {
             item.run();
             return;
@@ -249,57 +279,45 @@ export function CommandPalette({ nav }: { nav: PaletteNavEntry[] }) {
         }
     };
 
-    const onKey = (e: React.KeyboardEvent) => {
-        const next = moveActive(e.key, active, results.length);
-        if (next !== null) {
-            e.preventDefault();
-            setActive(next);
-            document.getElementById(optionId(next))?.scrollIntoView?.({ block: 'nearest' });
-        } else if (e.key === 'Enter') {
-            e.preventDefault();
-            void choose(results[active]);
-        } else if (e.key === 'Backspace' && !q && flows) {
-            setFlows(null);
-        }
-    };
+    useImperativeHandle(ref, () => ({
+        onKey: (e: React.KeyboardEvent) => {
+            const next = moveActive(e.key, active, results.length);
+            if (next !== null) {
+                e.preventDefault();
+                setActive(next);
+                document.getElementById(optionId(next))?.scrollIntoView?.({ block: 'nearest' });
+            } else if (e.key === 'Enter') {
+                e.preventDefault();
+                void choose(results[active]);
+            } else if (e.key === 'Backspace' && !q && flows) {
+                setFlows(null);
+            }
+        },
+    }));
 
     return (
-        <Modal open={g.palette} onCancel={() => g.setPalette(false)} footer={null} title={t('palette.title')} width={640}
-            style={{ top: 80 }} destroyOnClose>
-            <Field
-                ref={input}
-                role="combobox"
-                aria-expanded={results.length > 0}
-                aria-controls="cairn-palette-list"
-                aria-autocomplete="list"
-                aria-activedescendant={results.length ? optionId(active) : undefined}
-                aria-label={t('palette.placeholder')}
-                placeholder={flows ? t('palette.runFlow') : t('palette.placeholder')}
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                onKeyDown={onKey}
-                autoComplete="off"
-                spellCheck={false}
-            />
+        <Panel className="cairn-search-panel">
             <div style={SR_ONLY} aria-live="polite">{t('palette.results', { n: results.length })}</div>
-            <List id="cairn-palette-list" role="listbox" aria-label={t('palette.title')}>
-                {results.map((item, i) => (
-                    <li key={item.id} id={optionId(i)} role="option" aria-selected={i === active}
-                        onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => void choose(item)}>
-                        <span className="label">
-                            {item.label}
-                            {item.detail && <span className="detail">{item.detail}</span>}
-                        </span>
-                        {item.shortcut && <kbd>{item.shortcut}</kbd>}
-                        <span className="kind">{t(KIND_KEYS[item.kind])}</span>
-                    </li>
-                ))}
-            </List>
-            {!results.length && <p style={{ margin: '12px 4px 0', color: tokens.color.textMuted }}>{t('palette.empty')}</p>}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, color: tokens.color.textMuted, fontSize: 12 }}>
+            {results.length > 0 && (
+                <List id={SEARCH_LIST_ID} role="listbox" aria-label={t('search.results')}>
+                    {results.map((item, i) => (
+                        <li key={item.id} id={optionId(i)} role="option" aria-selected={i === active} data-kind={item.kind}
+                            onMouseEnter={() => setActive(i)} onMouseDown={(e) => e.preventDefault()} onClick={() => void choose(item)}>
+                            <span className="label">
+                                {item.label}
+                                {item.detail && <span className="detail">{item.detail}</span>}
+                            </span>
+                            {item.shortcut && <kbd>{item.shortcut}</kbd>}
+                            <span className="kind">{t(KIND_KEYS[item.kind])}</span>
+                        </li>
+                    ))}
+                </List>
+            )}
+            {!results.length && <p style={{ margin: '4px', color: tokens.color.textMuted }}>{t('search.hint')}</p>}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8, color: tokens.color.textMuted, fontSize: 12 }}>
                 <span style={{ flex: 1 }}>{t('palette.keys')}</span>
                 {searching && <><Spin size="small" /> {t('palette.searching')}</>}
             </div>
-        </Modal>
+        </Panel>
     );
-}
+});

@@ -124,7 +124,8 @@ interface Props {
     onSaved: (d: FlowDetail) => void;
     onDeleted: () => void;
     theme: string;
-    onTheme: (t: string) => void;
+    /** Unused since the theme moved to the profile menu (L150); kept for callers. */
+    onTheme?: (t: string) => void;
 }
 
 const ACTIVE = ['queued', 'running', 'waiting'];
@@ -137,7 +138,7 @@ function apiProblems(e: unknown): Problem[] {
     return [{ path: '', message: describeError(e) }];
 }
 
-export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme }: Props) {
+export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme }: Props) {
     const [h, dispatch] = useReducer(reduce, undefined, () => ({ def: withLayout(detail.draft), past: [], future: [] }));
     const def = h.def;
     const [saved, setSaved] = useState(() => JSON.stringify(withLayout(detail.draft)));
@@ -423,11 +424,6 @@ export function FlowEditor({ detail, api, me, onSaved, onDeleted, theme, onTheme
                 <label className="fl-muted" style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
                     <input type="checkbox" checked={snapOn} onChange={(e) => setSnapOn(e.target.checked)} /> Snap to grid
                 </label>
-                <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => onTheme(e.target.value)}>
-                    <option value="light">Light</option>
-                    <option value="dark">Dark</option>
-                    <option value="auto">System</option>
-                </select>
                 {canEdit && (
                     <button type="button" className="fl-btn" disabled={busy || !dirty} onClick={() => void save()}>
                         Save draft

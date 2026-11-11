@@ -1,6 +1,6 @@
 /** The command palette's model: what it can offer, and how what is typed ranks it (no dependency). */
 
-export type PaletteKind = 'page' | 'tab' | 'action' | 'recent' | 'catalog' | 'ask';
+export type PaletteKind = 'page' | 'tab' | 'action' | 'recent' | 'catalog' | 'search' | 'ask';
 
 export interface PaletteItem {
     id: string;
@@ -59,13 +59,13 @@ export function wordsIn(query: string, text: string): boolean {
     return words.length > 0 && words.every((w) => t.includes(` ${w}`));
 }
 
-const KIND_ORDER: Record<PaletteKind, number> = { page: 0, action: 1, tab: 2, recent: 3, catalog: 4, ask: 9 };
+const KIND_ORDER: Record<PaletteKind, number> = { page: 0, action: 1, tab: 2, recent: 3, catalog: 4, search: 8, ask: 9 };
 
 /** The items `query` matches, best first (label first, then detail and keywords, weighed less). */
 export function rank(items: PaletteItem[], query: string, limit = 50): PaletteItem[] {
     const scored: { item: PaletteItem; score: number }[] = [];
     for (const item of items) {
-        if (item.kind === 'ask') continue;
+        if (item.kind === 'ask' || item.kind === 'search') continue;
         const label = fuzzyScore(query, item.label);
         // The detail and keywords count only as whole words typed (letters in order would match almost anything there).
         const rest = wordsIn(query, `${item.label} ${item.detail ?? ''} ${item.keywords ?? ''}`);

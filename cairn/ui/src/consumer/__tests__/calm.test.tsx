@@ -8,6 +8,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { CairnApiError } from '../../api/client';
 import { ConsumerApp } from '../ConsumerApp';
+import { ConsumerLayout } from '../components/Layout';
 import { ErrorNotice } from '../components/ErrorNotice';
 import { ApiDisclosure, RowActions } from '../components/RowActions';
 import { StatusBadge, toneOf } from '../components/StatusBadge';
@@ -200,5 +201,64 @@ describe('one primary colour', () => {
         expect(document.body.classList.contains('cairn-ui')).toBe(true);
         unmount();
         expect(document.body.classList.contains('cairn-ui')).toBe(false);
+    });
+});
+
+describe('a quieter sidebar', () => {
+    const ME = 'urn:li:corpuser:ana';
+    const CAPS = { actor: ME, is_admin: true, privileges: { MANAGE_POLICIES: true, MANAGE_SYSTEM_OPERATIONS: true,
+        MANAGE_GLOBAL_SETTINGS: true }, features: { onboarding: true } };
+    const profileWith = (ui: unknown) => ({ urn: ME, role: 'Financial analyst', team: null, default_persona: null, language: null,
+        pinned: [], instructions: null, notifications: { channels: { in_app: true }, events: {} }, personas: [],
+        push: { enabled: false, subscriptions: 0 }, ui, updated_ms: null });
+    const ui = (role: string | null, showAll = false) => ({ onboarding: { role, done: [], dismissed: false, asked: true },
+        sidebar: { pinned: [], hidden: [], show_all: showAll } });
+
+    function layoutAt(at: string, routes: Record<string, unknown>) {
+        const { client, cache } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [], 'GET /v1/me/capabilities': CAPS,
+            ...routes });
+        render(
+            <MemoryRouter initialEntries={[at]}>
+                <I18nProvider initial="en">
+                    <CairnProvider client={client} cache={cache}><ConsumerLayout /></CairnProvider>
+                </I18nProvider>
+            </MemoryRouter>,
+        );
+        return screen.getByRole('navigation', { name: 'Workspace sections' });
+    }
+    const expanded = (nav: HTMLElement, name: string) => within(nav).getByRole('button', { name }).getAttribute('aria-expanded');
+
+    afterEach(() => window.localStorage.clear());
+
+    it('opens the groups of the person’s role and of the current page; the rest are one click away', async () => {
+        const nav = layoutAt('/flows', { 'GET /v1/me/profile': profileWith(ui('analyst')) });
+        await waitFor(() => expect(expanded(nav, 'Analyze')).toBe('true'));
+        expect(expanded(nav, 'Catalog')).toBe('true');
+        expect(expanded(nav, 'Build')).toBe('true');                  // the current page (Flows) is in Build
+        expect(expanded(nav, 'Govern')).toBe('false');
+        expect(within(nav).queryByRole('link', { name: 'Access policies' })).toBeNull();
+        fireEvent.click(within(nav).getByRole('button', { name: 'Govern' }));
+        expect(within(nav).getByRole('link', { name: 'Access policies' })).toBeTruthy();
+        // Remembered for this person on this device.
+        expect(JSON.parse(window.localStorage.getItem('cairn.sidebar.groups') || '{}')[ME]).toEqual({ 'nav.group.govern': true });
+    });
+
+    it('"Show everything" opens every group', async () => {
+        let stored = profileWith(ui('analyst'));
+        const nav = layoutAt('/discover', {
+            'GET /v1/me/profile': () => stored,
+            'PUT /v1/me/profile': (b: unknown) => {
+                stored = profileWith(ui('analyst', !!(b as { ui: { sidebar: { show_all: boolean } } }).ui.sidebar.show_all));
+                return stored;
+            },
+        });
+        const everything = await screen.findByRole('button', { name: /^Show everything/ });
+        expect(expanded(nav, 'Platform')).toBe('false');
+        fireEvent.click(everything);
+        await waitFor(() => expect(expanded(nav, 'Platform')).toBe('true'));
+        for (const b of within(nav).getAllByRole('button')) expect(b.getAttribute('aria-expanded')).toBe('true');
+        for (const name of ['Access policies', 'Ingestion', 'Settings', 'Platform map']) {
+            expect(within(nav).getByRole('link', { name })).toBeTruthy();
+        }
     });
 });
