@@ -128,7 +128,7 @@ export function OmniSearchBar({ initialQuery = '', autoFocus, placeholder, onAsk
         setOpen(false);
         if (!s) return;
         if (s.kind === 'entity') history.push(assetPath(s.entity.urn));
-        else if (s.kind === 'search') history.push(`/search${serializeSearchState({ query: s.text, filters: {}, page: 1 })}`);
+        else if (s.kind === 'search') history.push(`/catalog${serializeSearchState({ query: s.text, filters: {}, page: 1 })}`);
         else if (onAsk) onAsk(s.text);
         else {
             session.setAssistantOpen(true);

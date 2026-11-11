@@ -11,10 +11,10 @@ export interface NavGroupOf<T extends NavEntry> {
 
 /** The pages each role reaches for first: the "For you" group. */
 export const ROLE_PINS: Record<Role, string[]> = {
-    analyst: ['/catalog', '/sql', '/dashboards', '/sql/metrics'],
-    engineer: ['/ingestion', '/flows', '/pipelines', '/lakehouse'],
-    steward: ['/glossary', '/contracts', '/requests', '/trust'],
-    admin: ['/settings', '/trust', '/governance', '/usage'],
+    analyst: ['/catalog', '/sql', '/dashboards', '/semantics'],
+    engineer: ['/ingestion', '/flows', '/runs', '/lakehouse'],
+    steward: ['/glossary', '/quality', '/requests', '/semantics'],
+    admin: ['/settings', '/security', '/governance', '/usage'],
     explorer: ['/discover', '/catalog', '/products'],
 };
 

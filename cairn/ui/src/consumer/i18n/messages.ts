@@ -4,6 +4,7 @@ import { PIPELINES_DE, PIPELINES_EN } from './pipelines';
 import { PEOPLE_DE, PEOPLE_EN, PEOPLE_ES, PEOPLE_FR, PEOPLE_JA } from './people';
 import { DESIGN_DE, DESIGN_EN, DESIGN_ES, DESIGN_FR, DESIGN_JA } from './design';
 import { CATALOG_DE, CATALOG_EN, CATALOG_ES, CATALOG_FR, CATALOG_JA } from './catalog';
+import { IA_DE, IA_EN, IA_ES, IA_FR, IA_JA } from './ia';
 
 /**
  * UI message catalogs. English is the source; other locales may leave keys out, and `t()` falls back
@@ -132,7 +133,6 @@ const en = {
     'nav.group.find': "Find",
     'nav.group.analyze': "Analyze",
     'nav.group.build': "Build",
-    'nav.group.ai': "AI & context",
     'nav.group.govern': "Govern",
     'nav.group.platform': "Platform",
     'nav.semantic': "Semantic models",
@@ -303,6 +303,7 @@ const en = {
     ...PIPELINES_EN,
     ...DESIGN_EN,
     ...CATALOG_EN,
+    ...IA_EN,
 };
 
 export type MessageKey = keyof typeof en;
@@ -423,7 +424,6 @@ const de: Catalog = {
     'nav.group.find': "Finden",
     'nav.group.analyze': "Analysieren",
     'nav.group.build': "Bauen",
-    'nav.group.ai': "KI & Kontext",
     'nav.group.govern': "Steuern",
     'nav.group.platform': "Plattform",
     'nav.semantic': "Semantische Modelle",
@@ -594,6 +594,7 @@ const de: Catalog = {
     ...PIPELINES_DE,
     ...DESIGN_DE,
     ...CATALOG_DE,
+    ...IA_DE,
 };
 
 const fr: Catalog = {
@@ -710,7 +711,6 @@ const fr: Catalog = {
     'nav.group.find': "Trouver",
     'nav.group.analyze': "Analyser",
     'nav.group.build': "Construire",
-    'nav.group.ai': "IA & contexte",
     'nav.group.govern': "Gouverner",
     'nav.group.platform': "Plateforme",
     'nav.semantic': "Modèles sémantiques",
@@ -812,6 +812,7 @@ const fr: Catalog = {
     ...PEOPLE_FR,
     ...DESIGN_FR,
     ...CATALOG_FR,
+    ...IA_FR,
 };
 
 const es: Catalog = {
@@ -928,7 +929,6 @@ const es: Catalog = {
     'nav.group.find': "Buscar",
     'nav.group.analyze': "Analizar",
     'nav.group.build': "Construir",
-    'nav.group.ai': "IA y contexto",
     'nav.group.govern': "Gobernar",
     'nav.group.platform': "Plataforma",
     'nav.semantic': "Modelos semánticos",
@@ -1030,6 +1030,7 @@ const es: Catalog = {
     ...PEOPLE_ES,
     ...DESIGN_ES,
     ...CATALOG_ES,
+    ...IA_ES,
 };
 
 const ja: Catalog = {
@@ -1145,7 +1146,6 @@ const ja: Catalog = {
     'nav.group.find': "探す",
     'nav.group.analyze': "分析",
     'nav.group.build': "構築",
-    'nav.group.ai': "AI とコンテキスト",
     'nav.group.govern': "ガバナンス",
     'nav.group.platform': "プラットフォーム",
     'nav.semantic': "セマンティックモデル",
@@ -1247,6 +1247,7 @@ const ja: Catalog = {
     ...PEOPLE_JA,
     ...DESIGN_JA,
     ...CATALOG_JA,
+    ...IA_JA,
 };
 
 export const CATALOGS: Record<Locale, Catalog> = { en, de, fr, es, ja };

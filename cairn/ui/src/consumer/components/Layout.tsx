@@ -33,41 +33,46 @@ export interface NavItem {
 }
 
 /**
- * The workspace's sections, grouped as they appear in the sidebar. Cairn Core (the catalog: assets, data products,
- * contracts, glossary, domains and lineage) comes first; every other group is built around it: governing it, keeping
- * it healthy, analysing it, building what feeds it, AI on top of it, and the platform itself.
+ * The workspace's sections, grouped as they appear in the sidebar (L149: one home per concept). Cairn Core (the
+ * catalog: assets, data products, glossary, domains, semantics and lineage) comes first; every other group is built
+ * around it: governing it, keeping it healthy, analysing it, building what feeds it, AI on top of it, and the
+ * platform itself. Search (the palette), Ask, Inbox and Profile are in the header. Every earlier route still opens:
+ * it redirects to its new home (moves.ts).
  */
 export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
     {
         label: 'nav.group.catalog',
         items: [
-            { to: '/discover', label: 'nav.discover', icon: 'home' },
-            { to: '/catalog', label: 'nav.catalog', icon: 'catalog' },
+            { to: '/discover', label: 'nav.homeSection', icon: 'home' },
+            { to: '/catalog', label: 'nav.searchSection', icon: 'catalog' },
             { to: '/products', label: 'nav.products', icon: 'cube' },
-            { to: '/contracts', label: 'nav.contracts', icon: 'contract' },
             { to: '/glossary', label: 'nav.glossary', icon: 'tag' },
             { to: '/domains', label: 'nav.domains', icon: 'domain' },
+            { to: '/semantics', label: 'nav.semantics', icon: 'layers' },
             { to: '/lineage', label: 'nav.lineage', icon: 'lineage' },
-            { to: '/marketplace', label: 'nav.marketplace', icon: 'store' },
-            { to: '/requests', label: 'nav.requests', icon: 'inbox', badge: true },
+            { to: '/requests', label: 'nav.requests', icon: 'inbox' },
         ],
     },
     {
         label: 'nav.group.govern',
         items: [
-            { to: '/governance', label: 'nav.governance', icon: 'shield', feature: 'governance' },
+            { to: '/governance', label: 'nav.accessPolicies', icon: 'shield', feature: 'governance' },
             { to: '/people', label: 'nav.people', icon: 'user' },
-            { to: '/trust', label: 'nav.trust', icon: 'lock' },
-            { to: '/sharing', label: 'nav.sharing', icon: 'share' },
-            { to: '/reports', label: 'nav.reports', icon: 'report', feature: 'governance' },
-            { to: '/usage', label: 'nav.usage', icon: 'coin' },
+            { to: '/automation', label: 'nav.automation', icon: 'repeat', feature: 'governance' },
+            { to: '/security', label: 'nav.security', icon: 'lock' },
+            { to: '/sharing', label: 'nav.externalSharing', icon: 'share' },
+            { to: '/usage', label: 'nav.usageCost', icon: 'coin' },
+            { to: '/reports', label: 'nav.governanceReport', icon: 'report', feature: 'governance' },
         ],
     },
     {
         label: 'nav.group.quality',
         items: [
-            { to: '/quality', label: 'nav.quality', icon: 'shield' },
-            { to: '/observability', label: 'nav.observability', icon: 'pulse' },
+            { to: '/quality', label: 'nav.quality', icon: 'contract' },
+            { to: '/runs', label: 'nav.runs', icon: 'play' },
+            { to: '/incidents', label: 'nav.incidents', icon: 'bell' },
+            { to: '/observability', label: 'nav.platformHealth', icon: 'pulse' },
+            { to: '/alerts', label: 'nav.alerts', icon: 'bell' },
         ],
     },
     {
@@ -76,49 +81,42 @@ export const NAV_GROUPS: { label: MessageKey; items: NavItem[] }[] = [
             { to: '/sql', label: 'nav.sql', icon: 'code', exact: true },
             { to: '/sql/workbooks', label: 'nav.workbooks', icon: 'sheet' },
             { to: '/dashboards', label: 'nav.dashboards', icon: 'chart' },
-            { to: '/sql/metrics', label: 'nav.metrics', icon: 'metric' },
             { to: '/sql/input-tables', label: 'nav.inputTables', icon: 'table' },
-            { to: '/queries', label: 'nav.queries', icon: 'pulse' },
         ],
     },
     {
         label: 'nav.group.build',
         items: [
-            { to: '/pipelines', label: 'nav.pipelines', icon: 'pipes' },
             { to: '/ingestion', label: 'nav.ingestion', icon: 'download' },
             { to: '/lakehouse', label: 'nav.lakehouse', icon: 'database' },
             { to: '/flows', label: 'nav.flows', icon: 'flow' },
-            { to: '/sql/workflows', label: 'nav.workflows', icon: 'repeat' },
-            { to: '/compute', label: 'nav.compute', icon: 'server' },
-            { to: '/sql/git', label: 'nav.gitFolders', icon: 'branch' },
         ],
     },
     {
         label: 'nav.group.ai',
         items: [
+            { to: '/assistant', label: 'nav.assistant', icon: 'sparkle' },
             { to: '/agents', label: 'nav.agents', icon: 'bot' },
             { to: '/ml', label: 'nav.ml', icon: 'brain' },
-            { to: '/context', label: 'nav.context', icon: 'book', feature: 'context' },
-            { to: '/ontology', label: 'nav.ontology', icon: 'layers' },
-            { to: '/semantic', label: 'nav.semantic', icon: 'cube' },
+            { to: '/ai/gateway', label: 'nav.aiGateway', icon: 'server' },
         ],
     },
     {
         label: 'nav.group.platform',
         items: [
-            { to: '/capabilities', label: 'nav.capabilities', icon: 'grid' },
-            { to: '/profile', label: 'nav.profile', icon: 'user' },
+            { to: '/compute', label: 'nav.computeSection', icon: 'server' },
             { to: '/settings', label: 'nav.settings', icon: 'gear' },
+            { to: '/capabilities', label: 'nav.platformMap', icon: 'grid' },
         ],
     },
 ];
 
 /**
- * Routes of earlier layouts that are no longer sidebar entries of their own, or moved group: every one still opens
- * (old links and bookmarks work); a test checks none of them is a 404.
+ * Pages that are no sidebar entry but have a home elsewhere: the header (Inbox, Profile), the guide and devices. Every
+ * route of an earlier layout redirects to its new home instead (moves.ts, MOVED_ROUTES); a test checks each lands on
+ * a page, and that none of these is a 404.
  */
-export const KEPT_ROUTES = ['/search', '/marketplace', '/requests', '/ontology', '/semantic', '/observability',
-    '/assistant', '/get-started', '/extensions', '/device'];
+export const KEPT_ROUTES = ['/inbox', '/profile', '/get-started', '/extensions', '/device'];
 
 /** Every section, in sidebar order. */
 export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
@@ -476,6 +474,35 @@ const Avatar = styled.span`
     flex: none;
 `;
 
+const InboxLink = styled(Link)`
+    display: inline-grid;
+    place-items: center;
+    width: ${tokens.control}px;
+    height: ${tokens.control}px;
+    border-radius: ${tokens.radius.sm};
+    && {
+        color: ${tokens.color.text};
+    }
+    flex: none;
+    ${focusRing}
+    &:hover {
+        background: #F1F5F9;
+    }
+    .ant-badge {
+        color: inherit;
+    }
+`;
+
+const ProfileLink = styled(Link)`
+    display: inline-grid;
+    place-items: center;
+    min-width: ${tokens.control}px;
+    min-height: ${tokens.control}px;
+    border-radius: 50%;
+    flex: none;
+    ${focusRing}
+`;
+
 /** Compact section tabs for when a catalog shell provides the main navigation. */
 const HostedBar = styled.nav`
     display: flex;
@@ -588,9 +615,9 @@ function Shell0({ children }: { children?: React.ReactNode }) {
     const usable = allGroups.flatMap((g) => g.items).filter(visible);
     const paletteNav = useMemo(() => [
         ...(guide.enabled ? [GET_STARTED] : []), ...usable,
-        // Search across everything (not only assets) is no sidebar entry of its own; the palette and the top bar have it.
-        { to: '/search', label: 'nav.search' as MessageKey, icon: 'search' as IconName },
-        { to: '/assistant', label: 'nav.ask' as MessageKey, icon: 'sparkle' as IconName },
+        // The header's Inbox and Profile are pages too.
+        { to: '/inbox', label: 'nav.inbox' as MessageKey, icon: 'inbox' as IconName },
+        { to: '/profile', label: 'nav.profile' as MessageKey, icon: 'user' as IconName },
     ].map((n) => ({ to: n.to, label: n.to === '/assistant' ? t('palette.askAssistant') : t(n.label) })),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [usable.map((n) => n.to).join(), guide.enabled, t]);
@@ -611,14 +638,7 @@ function Shell0({ children }: { children?: React.ReactNode }) {
         }
     };
     const name = session.config?.user?.display_name;
-    const label = (n: NavItem) =>
-        n.badge ? (
-            <Badge count={unread} size="small" offset={[10, 0]}>
-                <span style={{ color: 'inherit' }}>{t(n.label)}</span>
-            </Badge>
-        ) : (
-            t(n.label)
-        );
+    const label = (n: NavItem) => t(n.label);
 
     const askAndSearch = (
         <>
@@ -638,7 +658,8 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                 value={q}
                 onChange={(e) => setQ(e.target.value)}
                 onPressEnter={() => {
-                    history.push(`/search?q=${encodeURIComponent(q.trim())}`);
+                    // One results page (L149): the top bar searches the catalog; the palette keeps commands.
+                    history.push(`/catalog?q=${encodeURIComponent(q.trim())}`);
                     setQ('');
                 }}
             />
@@ -652,10 +673,18 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                 {t('nav.ask')}
             </AskButton>
             <HelpButton />
+            <Tooltip title={t('nav.inbox')}>
+                <InboxLink to="/inbox" aria-label={unread ? t('nav.inboxCount', { n: unread }) : t('nav.inbox')}
+                    onClick={onNav('/inbox', 'nav.inbox')}>
+                    <Badge count={unread} size="small" offset={[2, -2]}><Icon name="inbox" size={20} /></Badge>
+                </InboxLink>
+            </Tooltip>
             <LanguagePicker />
             {name && (
                 <Tooltip title={name}>
-                    <Avatar aria-label={name}>{initials(name)}</Avatar>
+                    <ProfileLink to="/profile" aria-label={t('nav.yourProfile', { name })} onClick={onNav('/profile', 'nav.profile')}>
+                        <Avatar aria-hidden="true">{initials(name)}</Avatar>
+                    </ProfileLink>
                 </Tooltip>
             )}
         </>
@@ -725,9 +754,6 @@ function Shell0({ children }: { children?: React.ReactNode }) {
                                                 aria-label={collapsed ? t(n.label) : undefined}>
                                                 <Icon name={n.icon} />
                                                 {!collapsed && <span className="label">{label(n)}</span>}
-                                                {collapsed && n.badge && unread > 0 && (
-                                                    <Badge dot style={{ position: 'absolute' }} />
-                                                )}
                                             </Item>
                                         </Tooltip>
                                     </li>

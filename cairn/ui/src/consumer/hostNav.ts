@@ -2,7 +2,7 @@
  * Navigation shared with the catalog shell.
  *
  * Each workspace section is its own entry in the shell's left navigation (deploy/mfe/mfe.config.yaml),
- * all mounting this same bundle: `/mfe/cairn-marketplace` opens the workspace on `#/marketplace`.
+ * all mounting this same bundle: `/mfe/cairn-marketplace` opens the workspace on `#/products?view=browse`.
  * Moving between sections inside the workspace moves the shell too, so its navigation always shows
  * where you are, and every section has a URL of its own.
  */
@@ -12,12 +12,14 @@ export const HOST_SECTIONS: { route: string; hostPath: string }[] = [
     { route: '/discover', hostPath: '/cairn' },
     { route: '/catalog', hostPath: '/cairn-catalog' },
     { route: '/products', hostPath: '/cairn-products' },
-    { route: '/contracts', hostPath: '/cairn-contracts' },
-    { route: '/marketplace', hostPath: '/cairn-marketplace' },
+    // L149: the contracts list is a tab of Data quality, the marketplace the Browse view of Data products and the
+    // context inbox a part of Semantics; their shell entries open those homes.
+    { route: '/quality?tab=contracts', hostPath: '/cairn-contracts' },
+    { route: '/products?view=browse', hostPath: '/cairn-marketplace' },
     { route: '/requests', hostPath: '/cairn-requests' },
     { route: '/governance', hostPath: '/cairn-governance' },
     { route: '/reports', hostPath: '/cairn-reports' },
-    { route: '/context', hostPath: '/cairn-context' },
+    { route: '/semantics', hostPath: '/cairn-context' },
     { route: '/assistant', hostPath: '/cairn-assistant' },
     { route: '/settings', hostPath: '/cairn-settings' },
 ];
@@ -35,13 +37,13 @@ function hostPathOf(pathname: string): string | null {
     return HOST_SECTIONS.some((s) => s.hostPath === path) ? path : null;
 }
 
-/** The workspace route a shell path opens on: `/mfe/cairn-marketplace` → `/marketplace`. */
+/** The workspace route a shell path opens on: `/mfe/cairn-marketplace` → `/products?view=browse`. */
 export function sectionForHostPath(pathname: string): string | null {
     const path = hostPathOf(pathname);
     return HOST_SECTIONS.find((s) => s.hostPath === path)?.route ?? null;
 }
 
-/** The shell path that owns a workspace route: `/marketplace/urn:li:…` → `/cairn-marketplace`; `/search` → null. */
+/** The shell path that owns a workspace route: `/products/urn:li:…` → `/cairn-products`; `/lineage` → null. */
 export function hostPathForRoute(route: string): string | null {
     const first = `/${route.replace(/^\/+/, '').split(/[/?#]/)[0]}`;
     return HOST_SECTIONS.find((s) => s.route === first)?.hostPath ?? null;

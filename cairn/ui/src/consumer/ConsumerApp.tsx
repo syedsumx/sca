@@ -1,6 +1,6 @@
 import { ConfigProvider, Result, Spin } from 'antd';
 import React, { Suspense } from 'react';
-import { BrowserRouter, HashRouter, Redirect, Route, Switch } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Redirect, Route, Switch, useLocation } from 'react-router-dom';
 
 import { ConsumerClient } from './api/client';
 import { QueryCache } from './api/cache';
@@ -11,6 +11,7 @@ import { CairnProvider } from './context/CairnProvider';
 import { I18nProvider, useT } from './i18n';
 import { HUBS } from './resources/hubs';
 import { describeError } from './components/ErrorNotice';
+import { movedTarget } from './moves';
 
 // Platform hubs (/agents, /ingestion, …) load one chunk between them; each is a page of ResourceView tabs.
 const HubPage = React.lazy(() => import('./resources/HubPage').then((m) => ({ default: m.HubPage })));
@@ -24,17 +25,13 @@ const HUB_ROUTES = HUBS.map((hub) => ({
 
 // Route-level code splitting keeps the initial MFE payload small (spec Part 9: ≤ 250 kB gz).
 const DiscoverPage = React.lazy(() => import('./pages/DiscoverPage').then((m) => ({ default: m.DiscoverPage })));
-const SearchPage = React.lazy(() => import('./pages/SearchPage').then((m) => ({ default: m.SearchPage })));
 const AssetPage = React.lazy(() => import('./pages/AssetPage').then((m) => ({ default: m.AssetPage })));
-const MarketplacePage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.MarketplacePage })));
-const ProductPage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.ProductPage })));
 const RequestsPage = React.lazy(() => import('./pages/MarketplacePages').then((m) => ({ default: m.RequestsPage })));
 // The Catalog section (Cairn Core at the centre, L147).
 const CatalogPage = React.lazy(() => import('./pages/CatalogPage').then((m) => ({ default: m.CatalogPage })));
 const LineagePage = React.lazy(() => import('./pages/CatalogPage').then((m) => ({ default: m.LineagePage })));
 const DataProductsPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.DataProductsPage })));
 const DataProductPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.DataProductPage })));
-const ContractsPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.ContractsPage })));
 const ContractPage = React.lazy(() => import('./pages/ProductsPages').then((m) => ({ default: m.ContractPage })));
 const GlossaryPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.GlossaryPage })));
 const GlossaryEntryPage = React.lazy(() =>
@@ -43,20 +40,12 @@ const GlossaryEntryPage = React.lazy(() =>
 const DomainsPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.DomainsPage })));
 const DomainPage = React.lazy(() => import('./pages/GlossaryDomainsPages').then((m) => ({ default: m.DomainPage })));
 const AssistantPage = React.lazy(() => import('./pages/AssistantPage').then((m) => ({ default: m.AssistantPage })));
-const ContextInboxPage = React.lazy(() => import('./pages/ContextInboxPage').then((m) => ({ default: m.ContextInboxPage })));
 const ReportsPage = React.lazy(() => import('./pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
-const PipelinesPage = React.lazy(() => import('./pages/PipelinesPage').then((m) => ({ default: m.PipelinesPage })));
 const DashboardsPage = React.lazy(() => import('./pages/DashboardsPage').then((m) => ({ default: m.DashboardsPage })));
-const SqlWorkspacePage = React.lazy(() => import('./pages/SqlWorkspacePage').then((m) => ({ default: m.SqlWorkspacePage })));
-const QueryInsightPage = React.lazy(() => import('./pages/QueryInsightPage').then((m) => ({ default: m.QueryInsightPage })));
-const SqlWorkflowsPage = React.lazy(() => import('./pages/SqlWorkflowsPage').then((m) => ({ default: m.SqlWorkflowsPage })));
 const FlowsPage = React.lazy(() => import('./pages/FlowsPage').then((m) => ({ default: m.FlowsPage })));
-const OntologyPage = React.lazy(() => import('./pages/OntologyPage').then((m) => ({ default: m.OntologyPage })));
 const OntologyTermPage = React.lazy(() => import('./pages/OntologyPage').then((m) => ({ default: m.OntologyTermPage })));
-const MetricsPage = React.lazy(() => import('./pages/MetricsPage').then((m) => ({ default: m.MetricsPage })));
 const InputTablesPage = React.lazy(() => import('./pages/InputTablesPage').then((m) => ({ default: m.InputTablesPage })));
 const WorkbooksPage = React.lazy(() => import('./pages/WorkbooksPage').then((m) => ({ default: m.WorkbooksPage })));
-const GitFoldersPage = React.lazy(() => import('./pages/GitFoldersPage').then((m) => ({ default: m.GitFoldersPage })));
 const GovernanceStudioPage = React.lazy(() =>
     import('./pages/GovernanceStudioPage').then((m) => ({ default: m.GovernanceStudioPage })),
 );
@@ -64,6 +53,7 @@ const PeoplePage = React.lazy(() => import('./pages/PeoplePage').then((m) => ({ 
 const ObservabilityPage = React.lazy(() =>
     import('./pages/ObservabilityPage').then((m) => ({ default: m.ObservabilityPage })),
 );
+const InboxPage = React.lazy(() => import('./pages/InboxPage').then((m) => ({ default: m.InboxPage })));
 const SettingsPage = React.lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 const ProfilePage = React.lazy(() => import('./pages/ProfilePage').then((m) => ({ default: m.ProfilePage })));
 const DevicePage = React.lazy(() => import('./pages/DevicePage').then((m) => ({ default: m.DevicePage })));
@@ -76,11 +66,9 @@ const GetStartedPage = React.lazy(() => import('./guide/GetStarted').then((m) =>
 export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; exact?: boolean }[] = [
     { path: '/discover', component: DiscoverPage, exact: true },
     { path: '/get-started', component: GetStartedPage, exact: true },
-    { path: '/search', component: SearchPage, exact: true },
     { path: '/catalog', component: CatalogPage, exact: true },
     { path: '/products', component: DataProductsPage, exact: true },
     { path: '/products/:urn', component: DataProductPage },
-    { path: '/contracts', component: ContractsPage, exact: true },
     { path: '/contracts/:dataset', component: ContractPage },
     { path: '/glossary', component: GlossaryPage, exact: true },
     { path: '/glossary/:urn', component: GlossaryEntryPage },
@@ -88,30 +76,21 @@ export const CONSUMER_ROUTES: { path: string; component: React.ComponentType; ex
     { path: '/domains/:urn', component: DomainPage },
     { path: '/lineage', component: LineagePage, exact: true },
     { path: '/asset/:urn', component: AssetPage },
-    { path: '/marketplace', component: MarketplacePage, exact: true },
-    { path: '/marketplace/:urn', component: ProductPage },
     { path: '/requests', component: RequestsPage, exact: true },
     { path: '/assistant', component: AssistantPage, exact: true },
-    { path: '/context', component: ContextInboxPage, exact: true },
     { path: '/governance', component: GovernanceStudioPage, exact: true },
     { path: '/people', component: PeoplePage, exact: true },
     { path: '/observability', component: ObservabilityPage, exact: true },
     { path: '/reports', component: ReportsPage, exact: true },
-    { path: '/pipelines', component: PipelinesPage, exact: true },
-    { path: '/sql', component: SqlWorkspacePage, exact: true },
     { path: '/flows', component: FlowsPage, exact: true },
-    { path: '/ontology', component: OntologyPage, exact: true },
     { path: '/ontology/terms/:id', component: OntologyTermPage },
-    { path: '/sql/workflows', component: SqlWorkflowsPage, exact: true },
     { path: '/sql/workbooks', component: WorkbooksPage, exact: true },
     { path: '/sql/input-tables', component: InputTablesPage, exact: true },
-    { path: '/sql/metrics', component: MetricsPage, exact: true },
-    { path: '/sql/git', component: GitFoldersPage, exact: true },
-    { path: '/queries', component: QueryInsightPage, exact: true },
     { path: '/dashboards', component: DashboardsPage, exact: true },
     ...HUB_ROUTES,
     { path: '/capabilities', component: CapabilitiesPage, exact: true },
     { path: '/profile', component: ProfilePage, exact: true },
+    { path: '/inbox', component: InboxPage, exact: true },
     { path: '/device', component: DevicePage, exact: true },
     { path: '/settings', component: SettingsPage, exact: true },
     { path: '/extensions', component: ExtensionsPage, exact: true },
@@ -149,6 +128,13 @@ class ErrorBoundary extends React.Component<{ children?: React.ReactNode }, { er
     }
 }
 
+/** Old links and bookmarks: a route or tab that moved (L149) is redirected to its one home before anything renders. */
+function Moved({ children }: { children: React.ReactNode }) {
+    const location = useLocation();
+    const to = movedTarget(location.pathname, location.search);
+    return to ? <Redirect to={to} /> : <>{children}</>;
+}
+
 /** Routes + layout without a Router (lets tests use MemoryRouter). */
 export function ConsumerRoutes() {
     return (
@@ -161,13 +147,15 @@ export function ConsumerRoutes() {
                         </div>
                     }
                 >
-                    <Switch>
-                        {CONSUMER_ROUTES.map((r) => (
-                            <Route key={r.path} path={r.path} exact={r.exact} component={r.component} />
-                        ))}
-                        <Redirect exact from="/" to="/discover" />
-                        <Route render={() => <NotFound />} />
-                    </Switch>
+                    <Moved>
+                        <Switch>
+                            {CONSUMER_ROUTES.map((r) => (
+                                <Route key={r.path} path={r.path} exact={r.exact} component={r.component} />
+                            ))}
+                            <Redirect exact from="/" to="/discover" />
+                            <Route render={() => <NotFound />} />
+                        </Switch>
+                    </Moved>
                 </Suspense>
             </ErrorBoundary>
         </ConsumerLayout>

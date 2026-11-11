@@ -104,8 +104,33 @@ export interface PageHeaderProps {
     extra?: React.ReactNode;
 }
 
+/**
+ * A page shown as a tab of another section's page (L149: one home per concept): the section's header and tab already
+ * name it, so its own header keeps only its actions and extras, and its page frame adds no second margin.
+ */
+export const EmbeddedContext = React.createContext(false);
+
+export function Embedded({ children }: { children?: React.ReactNode }) {
+    return (
+        <EmbeddedContext.Provider value={true}>
+            <div data-embedded="true">{children}</div>
+        </EmbeddedContext.Provider>
+    );
+}
+
+export const useEmbedded = () => React.useContext(EmbeddedContext);
+
 /** The same header on every page: title, a short description, the primary action, and help. */
 export function PageHeader({ title, description, icon, actions, children, help, extra }: PageHeaderProps) {
+    const embedded = useEmbedded();
+    if (embedded) {
+        return actions || children || extra ? (
+            <Head data-page-header="" data-help-anchor={help}>
+                <div className="titles">{extra}{children}</div>
+                {actions && <div className="actions">{actions}</div>}
+            </Head>
+        ) : null;
+    }
     return (
         <Head data-page-header="" data-help-anchor={help}>
             {icon && <IconBadge><Icon name={icon} size={22} /></IconBadge>}
@@ -167,7 +192,7 @@ export interface CrumbLabels {
 /** The Catalog section's deep pages: `/products/<urn>` → Data products › <name>. */
 const CORE_PAGES: [RegExp, keyof CrumbLabels, string][] = [
     [/^\/products\/(.+)$/, 'products', '/products'],
-    [/^\/contracts\/(.+)$/, 'contracts', '/contracts'],
+    [/^\/contracts\/(.+)$/, 'contracts', '/quality?tab=contracts'],
     [/^\/glossary\/(.+)$/, 'glossary', '/glossary'],
     [/^\/domains\/(.+)$/, 'domains', '/domains'],
 ];
@@ -191,7 +216,7 @@ export function crumbsFor(pathname: string, search: string, labels: CrumbLabels,
     if (m) {
         const urn = decode(m[1]);
         const name = /^urn:li:dataset:\([^,]+,(.+),[^,]+\)$/.exec(urn)?.[1] ?? urn.split(':').pop() ?? urn;
-        return [labels.catalog ? { label: labels.catalog, to: '/catalog' } : { label: labels.search, to: '/search' }, { label: name }];
+        return [labels.catalog ? { label: labels.catalog, to: '/catalog' } : { label: labels.search, to: '/catalog' }, { label: name }];
     }
     for (const [re, key, to] of CORE_PAGES) {
         const hit = re.exec(pathname);
@@ -203,9 +228,9 @@ export function crumbsFor(pathname: string, search: string, labels: CrumbLabels,
         }
     }
     m = /^\/marketplace\/(.+)$/.exec(pathname);
-    if (m) return [{ label: labels.marketplace, to: '/marketplace' }, { label: decode(m[1]).split(':').pop() ?? m[1] }];
+    if (m) return [{ label: labels.marketplace, to: '/products?view=browse' }, { label: decode(m[1]).split(':').pop() ?? m[1] }];
     m = /^\/ontology\/terms\/(.+)$/.exec(pathname);
-    if (m) return [{ label: labels.ontology, to: '/ontology' }, { label: decode(m[1]) }];
+    if (m) return [{ label: labels.ontology, to: '/semantics?tab=ontology' }, { label: decode(m[1]) }];
     return null;
 }
 
@@ -229,4 +254,10 @@ export function Breadcrumbs({ tabTitle }: { tabTitle: (key: string) => string | 
             </ol>
         </Crumbs>
     );
+}
+
+/** A plain page title with its help, left out when the page is another section's tab (Embedded). */
+export function TitleRow({ title }: { title: string }) {
+    if (useEmbedded()) return null;
+    return <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>{title}</h1><HelpButton /></div>;
 }

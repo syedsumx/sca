@@ -86,7 +86,7 @@ microFrontends:
       showInNav: true
     navIcon: ChartBar
   - id: CairnContext
-    label: Context inbox
+    label: Semantics
     path: /cairn-context
     remoteEntry: /cairn-ui/remoteEntry.js
     module: cairnConsumer/mount

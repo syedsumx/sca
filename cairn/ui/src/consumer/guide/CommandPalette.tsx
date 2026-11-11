@@ -8,8 +8,8 @@ import { assetPath } from '../components/Assets';
 import { tokens } from '../components/tokens';
 import { useDheSession } from '../context/CairnProvider';
 import { MessageKey, useT } from '../i18n';
-import { RESOURCE_SPECS } from '../resources/catalog';
-import { HUBS } from '../resources/hubs';
+import { TAB_SPECS as RESOURCE_SPECS } from '../resources/customTabs';
+import { HUBS, PAGE_AREAS } from '../resources/hubs';
 import { createAction } from '../resources/ResourceView';
 import { visibleTabs } from './capabilities';
 import { useGuide } from './GuideProvider';
@@ -108,6 +108,21 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             }
         }
     }
+    // Areas that are tabs of purpose-built pages (L149), where the page is offered.
+    for (const page of PAGE_AREAS.filter((pg) => nav.some((n) => n.to === pg.route))) {
+        for (const { tab, spec: key } of page.areas) {
+            const spec = RESOURCE_SPECS[key];
+            if (!spec) continue;
+            items.push({ id: `tab:${page.route}:${tab}`, kind: 'tab', label: `${page.title} › ${spec.title}`, keywords: spec.description,
+                to: `${page.route}?tab=${tab}` });
+            const make = createAction(spec);
+            if (make) {
+                const label = /^(new|create|add|register|connect)\b/i.test(make.label) ? make.label : t('palette.create', { what: spec.title });
+                items.push({ id: `create:${page.route}:${tab}`, kind: 'action', label, detail: `${page.title} › ${spec.title}`,
+                    keywords: `create new add ${spec.title}`, to: `${page.route}?tab=${tab}&action=${encodeURIComponent(make.label)}` });
+            }
+        }
+    }
     items.push(
         { id: 'act:new-flow', kind: 'action', label: t('palette.newFlow'), keywords: 'create template orchestration', to: '/flows?new=1',
             boost: boost.has('/flows') ? 40 : 0 },
@@ -125,12 +140,12 @@ export function paletteItems(nav: PaletteNavEntry[], t: (k: MessageKey, v?: Reco
             { id: 'act:new-slo', kind: 'action' as const, label: t('palette.newSlo'), detail: t('nav.observability'),
                 keywords: 'service level objective error budget availability latency reliability', to: '/observability?tab=slos&new=slo' },
             { id: 'act:new-alert-rule', kind: 'action' as const, label: t('palette.newAlertRule'), detail: t('nav.observability'),
-                keywords: 'alert alarm promql logql monitor page on-call', to: '/observability?tab=alerts&new=rule' },
+                keywords: 'alert alarm promql logql monitor page on-call', to: '/alerts?tab=platform-rules&new=rule' },
             { id: 'act:find-trace', kind: 'action' as const, label: t('palette.findTrace'), detail: t('nav.observability'),
                 keywords: 'trace span request id latency slow error opentelemetry', to: '/observability?tab=journey' },
             { id: 'act:ask-sre', kind: 'action' as const, label: t('palette.askSre'), detail: t('nav.observability'),
                 keywords: 'sre agent incident investigate diagnose postgres runbook postmortem on-call remediation',
-                to: '/observability?tab=incidents' },
+                to: '/incidents' },
 
             { id: 'act:new-ops-dashboard', kind: 'action' as const, label: t('palette.newOpsDashboard'), detail: t('nav.observability'),
                 keywords: 'dashboard grafana promql logql traceql metrics panel monitoring operations sre', to: '/dashboards?new=ops' },

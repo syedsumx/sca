@@ -90,7 +90,7 @@ export function AssistantChat({ initialQuestion, compact }: { initialQuestion?: 
     const act = async (a: SuggestedAction) => {
         if (a.kind === 'open') history.push(assetPath(a.urn));
         else if (a.kind === 'follow') await client.follow(a.urn).catch(() => undefined);
-        else if (a.kind === 'request_access') history.push(`/marketplace/${encodeURIComponent(a.urn)}`);
+        else if (a.kind === 'request_access') history.push(`/products/${encodeURIComponent(a.urn)}?tab=access`);
         else if (a.kind === 'explain') void send(`Explain the lineage anomaly for ${a.urn}`);
     };
 

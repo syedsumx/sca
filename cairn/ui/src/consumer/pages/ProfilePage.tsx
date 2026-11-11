@@ -1,10 +1,11 @@
-import { Alert, Button, Checkbox, Empty, Input, Select, Space, Tag, message } from 'antd';
+import { Alert, Button, Checkbox, Collapse, Empty, Input, Select, Space, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import styled from 'styled-components';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { PinKind, Profile, ProfileChannel, ProfileLanguage, ProfilePin } from '../api/types';
+import { NotificationSettings } from '../components/Notifications';
 import { SignedInDevices } from '../components/SignedInDevices';
 import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens';
 import { LOCALES, Locale, useI18n } from '../i18n';
@@ -78,7 +79,7 @@ function pinLink(p: ProfilePin): string {
         case 'dashboard':
             return '/dashboards';
         case 'metric':
-            return '/sql/metrics';
+            return '/semantics?tab=metrics';
         case 'workbook':
             return '/sql/workbooks';
         default:
@@ -292,6 +293,15 @@ export function ProfilePage() {
                 <Button type="primary" onClick={save} loading={saving}>Save profile</Button>
                 <Button onClick={() => setDraft(draftOf(p))} disabled={saving}>Discard changes</Button>
             </Space>
+
+            <Section as="section" aria-labelledby="profile-notify-detail" style={{ marginTop: 24 }}>
+                <SectionTitle id="profile-notify-detail" style={{ marginTop: 0 }}>Notification channels and events</SectionTitle>
+                <Muted style={{ display: 'block', marginBottom: 8 }}>
+                    Your Slack member ID, your Teams webhook and which events notify you (the only place for them since
+                    Settings › Notifications moved here). Your notifications themselves are in the <Link to="/inbox">Inbox</Link>.
+                </Muted>
+                <Collapse><Collapse.Panel key="detail" header="Channels and events in detail"><NotificationSettings /></Collapse.Panel></Collapse>
+            </Section>
 
             <Section as="section" aria-labelledby="profile-devices" style={{ marginTop: 24 }}>
                 <SignedInDevices />

@@ -143,14 +143,14 @@ export function PipelinesCard() {
                 <ul style={{ listStyle: 'none', margin: 0, padding: 0, display: 'grid', gap: 10 }}>
                     {rows.map((p) => (
                         <li key={p.key} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
-                            <Link to={`/observability?tab=pipelines&pipeline=${encodeURIComponent(p.key)}`}
+                            <Link to={`/runs?tab=pipelines&pipeline=${encodeURIComponent(p.key)}`}
                                 style={{ fontSize: 14, minHeight: 24, overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</Link>
                             <StatusBadge tone={HEALTH_TONE[p.health] ?? 'waiting'} label={t(`pipe.health.${p.health}` as never)} />
                         </li>
                     ))}
                 </ul>
             )}
-            <Link to="/observability?tab=pipelines" style={{ fontSize: 14, fontWeight: 500 }}>{t('home.pipelinesOpen')}</Link>
+            <Link to="/runs?tab=pipelines" style={{ fontSize: 14, fontWeight: 500 }}>{t('home.pipelinesOpen')}</Link>
         </Card>
     );
 }

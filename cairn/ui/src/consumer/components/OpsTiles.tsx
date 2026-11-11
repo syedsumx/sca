@@ -274,7 +274,7 @@ export function OpsTileView({ tile }: { tile: OpsTile & { ops?: OpsResult } }) {
         return <Table size="small" rowKey="id" pagination={{ pageSize: 10, hideOnSinglePage: true }} dataSource={r.alerts}
             locale={{ emptyText: 'Nothing firing.' }}
             columns={[{ title: '', dataIndex: 'severity', render: (v: string) => <Tag color={SEVERITY[v]}>{v}</Tag> },
-                { title: 'Alert', dataIndex: 'name', render: (v: string, a) => (a.incident_id ? <Link to={`/observability?tab=incidents&incident=${a.incident_id}`}>{v}</Link> : v) },
+                { title: 'Alert', dataIndex: 'name', render: (v: string, a) => (a.incident_id ? <Link to={`/incidents?incident=${a.incident_id}`}>{v}</Link> : v) },
                 { title: 'State', dataIndex: 'state', render: (v: string, a) => <>{v}{a.silenced_by && <Tag>silenced</Tag>}{a.acknowledged_by && <Tag>acknowledged</Tag>}</> },
                 { title: 'Labels', dataIndex: 'labels', render: (v: Record<string, string>) => Object.entries(v).map(([k, x]) => `${k}=${x}`).join(', ') },
                 { title: 'Summary', dataIndex: 'summary' }]} />;
