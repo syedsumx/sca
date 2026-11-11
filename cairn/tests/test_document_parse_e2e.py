@@ -1,16 +1,15 @@
 """Document parsing (L112): tables and charts from PDFs and images as JSON. A generated PDF with a real table (in its
 text layer) and a real bar chart (drawn, embedded as an image) is parsed: the table comes from the text layer with no
-model; the page is rendered (Poppler's pdftoppm) and shown to the deployment's multimodal model, Anthropic's API
+model; the page is rendered (PDFium, in a child process) and shown to the deployment's multimodal model, Anthropic's API
 answered by the stand-in from tests/test_ai_gateway.py scripted to return the chart's data, through Cairn's metered
 provider. Then the same through the API (as the person, metered, kept for them only) and through a files pipe on the
-real Cairn Store and Cairn Catalog (a ``parsed`` column). Needs pypdf, Pillow and pdftoppm; the pipe test also the
+real Cairn Store and Cairn Catalog (a ``parsed`` column). Needs pypdf, Pillow and pypdfium2; the pipe test also the
 store and catalog binaries."""
 
 import base64
 import http.server
 import io
 import json
-import shutil
 import threading
 import zlib
 
@@ -24,7 +23,7 @@ ImageDraw = pytest.importorskip("PIL.ImageDraw")
 from test_ai_gateway import Provider  # noqa: E402
 from test_trino_e2e import CATALOG_TOKEN, STORE_KEY, _ready, lake  # noqa: E402, F401  (fixtures)
 
-pytestmark = pytest.mark.skipif(shutil.which("pdftoppm") is None, reason="needs Poppler's pdftoppm")
+pytest.importorskip("pypdfium2")   # PDF pages rendered by PDFium (the documents extra)
 
 TABLE = [["Region", "Q1", "Q2", "Q3"], ["North", "120", "135", "150"], ["South", "90", "80", "95"],
          ["West", "60", "75", "110"]]
@@ -288,3 +287,22 @@ def test_files_pipes_parse_documents_into_a_column(lake, model, tmp_path):  # no
     assert json.loads(rows["parse-in/chart.png"]["parsed"])["charts"] == 1
     assert rows["parse-in/notes.txt"]["parsed"] is None and rows["parse-in/notes.txt"]["parse_error"] is None
     assert "description" not in rows["parse-in/report.pdf"]        # no enrichment columns asked for
+
+
+def test_an_oversized_page_is_refused_before_it_is_drawn(tmp_path, monkeypatch):
+    """PDFium renders in a child process, and a page whose pixels would pass OCR's limit is refused before any
+    are drawn (a hostile PDF can declare a huge page)."""
+    from pypdf import PdfWriter
+
+    from cairn.pipelines import parse
+
+    w = PdfWriter()
+    w.add_blank_page(width=14400, height=14400)   # 200 x 200 inches: 22,000 x 22,000 pixels at 110 dpi
+    path = tmp_path / "huge.pdf"
+    with open(path, "wb") as f:
+        w.write(f)
+    with pytest.raises(parse.ParseError, match="over the OCR limit"):
+        parse.render_page(str(path), 1)
+    monkeypatch.setenv("CAIRN_PARSE_DPI", "1")   # the same page at 1 dpi is small enough
+    png = parse.render_page(str(path), 1)
+    assert png.startswith(b"\x89PNG")

@@ -7,8 +7,8 @@
   (``{"source": "text_layer", "header": [...], "rows": [[...]]}``, cells as text, a missing cell ``null``). It is
   deterministic: the same document gives the same tables, and no model sees it.
 * **Charts (and tables drawn as pictures) by the deployment's model.** A page that draws something (an image, or
-  vector graphics such as bars and axes) is rendered to an image (``pdftoppm``, Poppler; without it, the images the
-  page embeds) and shown to Cairn's multimodal model, which returns each chart's ``type``, ``title``, axis labels,
+  vector graphics such as bars and axes) is rendered to an image (PDFium through ``pypdfium2``, in a child process; without it, the
+  images the page embeds) and shown to Cairn's multimodal model, which returns each chart's ``type``, ``title``, axis labels,
   category ``labels`` and ``series`` (``{"name", "values"}``, numbers), and any table it sees that the text layer did
   not give (``"source": "model"``). Image files (PNG, JPEG, TIFF, GIF, WebP, BMP) go to the model a frame at a time.
   Calls go through Cairn's metered model, counted against the AI budget as the person (or the pipe's owner); at
@@ -29,7 +29,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import subprocess
 import tempfile
 import time
@@ -203,29 +202,58 @@ def draws(page) -> bool:
     return len(_PAINT.findall(data)) >= 4 and bool(_FILL.search(data))
 
 
+# Renders one page in a child Python process, so a malformed or hostile PDF can only hang or crash that process
+# (it is killed after CAIRN_OCR_TIMEOUT), never the API. The page's size is checked before any pixels are drawn.
+_RENDER = """
+import sys
+import pypdfium2 as pdfium
+path, n, dpi, cap, out = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]), sys.argv[5]
+pdf = pdfium.PdfDocument(path)
+try:
+    page = pdf[n - 1]
+    w, h = page.get_size()
+    scale = dpi / 72
+    pw, ph = int(w * scale), int(h * scale)
+    if pw <= 0 or ph <= 0 or pw * ph > cap:
+        sys.stderr.write(f"a page of {pw}x{ph} pixels is over the OCR limit ({cap:,} pixels)")
+        sys.exit(3)
+    page.render(scale=scale).to_pil().save(out, format="PNG")
+finally:
+    pdf.close()
+"""
+
+
 def renderer() -> Optional[str]:
-    return shutil.which(os.environ.get("CAIRN_PARSE_RENDER_COMMAND", "pdftoppm"))
+    """``"pdfium"`` when pages can be rendered (pypdfium2 is installed, the documents extra), else None."""
+    try:
+        import pypdfium2  # noqa: F401
+    except ImportError:
+        return None
+    return "pdfium"
 
 
 def render_page(pdf_path: str, n: int) -> bytes:
-    """Page ``n`` (1-based) of a PDF as PNG, by Poppler's pdftoppm, at CAIRN_PARSE_DPI, within OCR's pixel limit."""
+    """Page ``n`` (1-based) of a PDF as PNG, by PDFium in a child process, at CAIRN_PARSE_DPI, within OCR's pixel limit."""
+    import sys
+
     from PIL import Image
 
     from cairn.pipelines import ocr
 
-    cmd = renderer()
-    if cmd is None:
-        raise ParseError("pdftoppm is not installed")
+    if renderer() is None:
+        raise ParseError("pypdfium2 is not installed (the documents extra)")
     with tempfile.TemporaryDirectory(prefix="cairn-parse-") as d:
+        out = f"{d}/page.png"
+        args = [sys.executable, "-I", "-c", _RENDER, pdf_path, str(n), str(_int("CAIRN_PARSE_DPI", 110)),
+                str(_int("CAIRN_OCR_MAX_PIXELS", 60_000_000)), out]
         try:
-            r = subprocess.run([cmd, "-f", str(n), "-l", str(n), "-r", str(_int("CAIRN_PARSE_DPI", 110)), "-png",
-                                "-singlefile", pdf_path, f"{d}/page"], capture_output=True,
-                               timeout=_int("CAIRN_OCR_TIMEOUT", 60), env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+            r = subprocess.run(args, capture_output=True, timeout=_int("CAIRN_OCR_TIMEOUT", 60),
+                               env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
         except subprocess.TimeoutExpired as e:
             raise ParseError(f"page {n} took too long to render") from e
         if r.returncode != 0:
             raise ParseError(f"page {n} could not be rendered: {r.stderr.decode('utf-8', 'replace').strip()[-200:]}")
-        with Image.open(f"{d}/page.png") as img:
+        with Image.open(out) as img:
             ocr._pixels_ok(*img.size)
             return _for_model(img)
 

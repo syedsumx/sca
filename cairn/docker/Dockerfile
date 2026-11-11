@@ -32,10 +32,6 @@ RUN if [ -n "${OCR_LANGUAGES}" ]; then \
    && apt-get install -y --no-install-recommends tesseract-ocr $(for l in ${OCR_LANGUAGES}; do printf 'tesseract-ocr-%s ' "$l"; done) \
    && rm -rf /var/lib/apt/lists/*; \
     fi
-# pdftoppm: PDF pages rendered for the model when documents are parsed for charts (cairn.pipelines.parse).
-RUN apt-get update \
- && apt-get install -y --no-install-recommends poppler-utils \
- && rm -rf /var/lib/apt/lists/*
 LABEL org.opencontainers.image.title="cairn" \
       org.opencontainers.image.description="Cairn control plane: DQ engine, PDP, agent gateway, AI/MCP" \
       org.opencontainers.image.licenses="Apache-2.0"

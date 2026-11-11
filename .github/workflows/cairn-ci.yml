@@ -341,7 +341,6 @@ jobs:
           # The runner's package index can be older than the mirror (404 on a superseded package): refresh it first.
           sudo apt-get update -q >/dev/null
           "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" tesseract-ocr tesseract-ocr-eng   # OCR of scanned documents (pipes)
-          "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" poppler-utils   # pdftoppm: PDF pages rendered for chart parsing
           "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" espeak-ng ffmpeg   # speech for the transcription test, and its MP3/MP4
           # The DR drill's DNS server (RFC 2136 updates); its AppArmor profile would keep it from the test's files.
           "$GITHUB_WORKSPACE/.github/scripts/apt-install.sh" bind9

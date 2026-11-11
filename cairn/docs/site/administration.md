@@ -5694,7 +5694,8 @@ Cairn reads the tables and charts in PDFs and images as data (JSON), beside thei
   `{"source": "text_layer", "header": [...], "rows": [[...]]}`, cells as text, a missing cell `null`. The same
   document always gives the same tables. Simple layouts work best; a two-column page of prose can look like a table.
 - **Charts by the deployment's multimodal model.** A page that draws something (an image, or vector graphics such
-  as bars and axes) is rendered to PNG by Poppler's `pdftoppm` (Cairn's image has it; without it, the images the
+  as bars and axes) is rendered to PNG by PDFium (`pypdfium2`, in the documents extra and Cairn's image), in a child process
+  that is killed after `CAIRN_OCR_TIMEOUT`, so a malformed PDF cannot hang or crash Cairn (without it, the images the
   page embeds are sent) and shown to Cairn's model (`CAIRN_LLM_PROVIDER`, `CAIRN_AI_MODEL`). It returns each chart
   as `{"type": "bar" | "line" | "pie" | "scatter" | "area" | "other", "title", "x_label", "y_label", "labels",
   "series": [{"name", "values"}]}` (values are numbers, `null` where unreadable), and tables drawn as pictures
@@ -5713,12 +5714,12 @@ Cairn reads the tables and charts in PDFs and images as data (JSON), beside thei
 - **In files pipes.** `"ai": {"parse": true}` (see [Pipes](#pipes-automatic-file-loading)).
 - **Settings.** `CAIRN_PARSE_MAX_MODEL_PAGES` (20) pages shown to the model per document; `CAIRN_PARSE_DPI` (110)
   and `CAIRN_PARSE_IMAGE_PIXELS` (1,568 on the long side) for what it is shown, within OCR's
-  `CAIRN_OCR_MAX_PIXELS`; `CAIRN_PARSE_DOCUMENT_TIMEOUT` (600 s); `CAIRN_PARSE_MAX_BYTES` (50 MB) for the API;
-  `CAIRN_PARSE_RENDER_COMMAND` (`pdftoppm`).
+  `CAIRN_OCR_MAX_PIXELS` (checked before a page is drawn); `CAIRN_PARSE_DOCUMENT_TIMEOUT` (600 s);
+  `CAIRN_PARSE_MAX_BYTES` (50 MB) for the API.
 - **Tested** in `tests/test_document_parse_e2e.py`: a generated two-page PDF with a table in its text layer and a
   drawn bar chart embedded as an image. With no model, the table came back exactly and the chart page was listed as
   not read. With Anthropic's SDK talking to a scripted stand-in for the model's API, through Cairn's metered
-  provider: only the chart page was rendered by `pdftoppm` and shown (the bars in the picture), the chart's labels
+  provider: only the chart page was rendered by PDFium and shown (the bars in the picture), the chart's labels
   and values came back, the model's copy of the known table was dropped and a table only in the picture was kept,
   and the call was metered under the person. A PNG chart and a three-frame TIFF (held to a one-page budget) were
   read. Through the API: a person without `USE_AI_FUNCTIONS` was refused charts but got the text layer's tables,

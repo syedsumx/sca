@@ -227,6 +227,13 @@ compilation algorithms, catalog ingestion, SQL handling and model prompts were p
 | Alpine Linux | Cairn Store runtime image | per package (MIT, GPL-2.0 for BusyBox) |
 | Python packages (see `pyproject.toml`) | control plane, remote agent | per package (Apache-2.0, BSD, MIT, MPL-2.0) |
 | JavaScript packages (see `ui/package.json`, `ui/package-lock.json`) | consumer UI, embed SDK | per package (MIT, Apache-2.0, ISC, BSD) |
+| PDFium through pypdfium2, with its bundled libraries (FreeType, HarfBuzz, ICU, libjpeg-turbo, libpng, libtiff, OpenJPEG, Little CMS, zlib, ...) | renders PDF pages for document parsing (control-plane image, documents extra) | BSD-3-Clause and Apache-2.0; bundled libraries under their own permissive licences (FreeType under the FreeType License), listed in the wheel's `BUILD_LICENSES` |
+| Tesseract OCR | text from scanned documents (control-plane image) | Apache-2.0 |
+| Python database drivers psycopg, psycopg2 and pymssql | used unmodified as libraries | LGPL-3.0 / LGPL-2.1 |
+| Python libraries certifi and tqdm | used unmodified | MPL-2.0 (tqdm also MIT) |
+| Terraform Plugin Framework, go-plugin and related HashiCorp Go modules | linked unmodified into the Cairn Terraform provider (see `terraform-provider-cairn/go.sum`) | MPL-2.0 |
+| Electron and the desktop app's packages (see `desktop/package-lock.json`) | Cairn Desktop | per package (MIT and other permissive licences) |
+| Grafana Loki and Grafana Tempo (optional, `cairn.observability.enabled`, off by default) | logs and traces backends (containers, unmodified upstream images) | AGPL-3.0 |
 
 ## Apache License, Version 2.0
 
