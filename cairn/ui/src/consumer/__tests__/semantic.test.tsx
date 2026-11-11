@@ -65,7 +65,7 @@ describe('Related by meaning', () => {
 
     it('stands in when keyword search finds nothing', async () => {
         renderAt('/search?q=money%20per%20region', routes(true, []), []);
-        expect(await screen.findByText(/No exact matches/)).toBeTruthy();
+        expect(await screen.findByText(/No assets match/)).toBeTruthy();   // /search is the Catalog's search since L149
         const section = await screen.findByRole('region', { name: 'Related by meaning' });
         expect(within(section).getByText('orders')).toBeTruthy();
     });

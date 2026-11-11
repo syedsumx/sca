@@ -15,7 +15,7 @@ Cairn は、データを見つけ、信頼し、統制するためのセルフ�
 | 誰が何を見られるかを制御し、個人情報をマスクし、アセットを認定する | [Governance](governance.html) |
 | データプロダクトを公開し、チケットなしでアクセスを付与する | [Marketplace](marketplace.html) |
 | エージェントにデータを文書化させ、質問に答えさせる | [Context and AI](context-and-ai.html) |
-| プライベートネットワークから取り込む | [Remote agents](remote-agents.html) |
+| プライベートネットワークから取り込む | [コレクター（リモートエージェント）](remote-agents.html) |
 | Slack、Teams、メール、Webhook、BI ツールと連携する | [Integrations](integrations.html) |
 | Cairn をインストール、設定、運用する | [Administration](administration.html) |
 | API で自動化する | [APIs](api.html) |

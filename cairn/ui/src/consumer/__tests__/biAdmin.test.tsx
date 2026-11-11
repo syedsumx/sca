@@ -28,10 +28,10 @@ it('shares an asset with a person or a group, and stops sharing it', async () =>
         },
     }, calls);
     wrap(client, <BiAssetButtons kind="dashboard" id="d1" name="Sales" role="OWNER" />);
-    fireEvent.click(screen.getByRole('button', { name: 'Share' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Permissions' }));   // "share with people" is Permissions (L149)
     expect(await screen.findByText('group:finance')).toBeTruthy();
     fireEvent.change(screen.getByLabelText('Share with'), { target: { value: 'bob' } });
-    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Share' }));
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Add' }));
     await waitFor(() => expect(calls.some((c) => c.method === 'PUT' && (c.body as { principal: string }).principal === 'urn:li:corpuser:bob'
         && (c.body as { role: string }).role === 'VIEWER')).toBe(true));
     expect(await screen.findByText('bob')).toBeTruthy();
@@ -48,7 +48,7 @@ it('only owners and editors see Share; viewers see the history but cannot restor
         'GET /sql/versions/query/q1/diff': { a: 1, b: 2, changed: ['sql'], diff: '--- version 1\n+++ version 2\n-  "sql": "SELECT 1"\n+  "sql": "SELECT 2"' },
     });
     wrap(client, <BiAssetButtons kind="query" id="q1" name="Revenue" role="VIEWER" />);
-    expect(screen.queryByRole('button', { name: 'Share' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Permissions' })).toBeNull();
     fireEvent.click(screen.getByRole('button', { name: 'History' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Changes' }));
     const diff = await screen.findByTestId('version-diff');

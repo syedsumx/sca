@@ -5,6 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
 import { DashboardsPage } from '../pages/DashboardsPage';
+import { SqlAlertsView } from '../components/Operations';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
@@ -44,7 +45,15 @@ it('shows a dashboard tile by tile, as the viewer, and manages alerts', async ()
     fireEvent.click(await screen.findByText('Sales (shared)'));
     expect(await screen.findByRole('img', { name: /bar chart of orders by region/ })).toBeTruthy();
     expect(screen.getByText('you may not query hr.salaries')).toBeTruthy();
-    fireEvent.click(screen.getByRole('tab', { name: 'Alerts' }));
+    // Alerts on queries moved to Alerts & routing (L149): the same view, there.
+    expect(screen.queryByRole('tab', { name: 'Alerts' })).toBeNull();
+    render(
+        <MemoryRouter>
+            <CairnProvider client={client} cache={new QueryCache()}>
+                <SqlAlertsView />
+            </CairnProvider>
+        </MemoryRouter>,
+    );
     expect(await screen.findByText('triggered (2)')).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Check now' }));
     await waitFor(() => expect(calls.some((c) => c.path === '/sql/alerts/a1/check')).toBe(true));

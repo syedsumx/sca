@@ -1,6 +1,6 @@
 import { Alert, Button, Checkbox, Empty, Grid, Input, InputNumber, Modal, Select, Space, Table, Tabs, Tag, message } from 'antd';
 import React, { useEffect, useState } from 'react';
-import { useHistory, useLocation } from 'react-router-dom';
+import { Link, useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { CHART_TYPES } from '../api/types';
@@ -12,6 +12,8 @@ import { ResultChart } from '../components/ResultChart';
 import { Muted, Page, Surface } from '../components/tokens';
 import { HelpButton } from '../guide/PageHeader';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
+import { RESOURCE_SPECS } from '../resources/catalog';
+import { ResourceView } from '../resources/ResourceView';
 
 const STATE: Record<SqlAlert['state'], string> = { ok: 'green', triggered: 'red', error: 'orange', unknown: 'default' };
 
@@ -549,7 +551,7 @@ function Dashboards({ saved, openId, newOps, onNewOpsClosed }: { saved: SavedQue
     );
 }
 
-function Alerts({ saved }: { saved: SavedQuery[] }) {
+export function Alerts({ saved }: { saved: SavedQuery[] }) {
     const { client } = useConsumerApi();
     const [tick, setTick] = useState(0);
     const list = useDheQuery<SqlAlert[]>(`/sql/alerts#${tick}`, (c, signal) => c.sqlAlerts({ signal }));
@@ -632,7 +634,8 @@ export function DashboardsPage() {
     const params = new URLSearchParams(location.search);
     const openId = params.get('open');
     const newOps = params.get('new') === 'ops';
-    const [tab, setTab] = useState('boards');
+    const [tab, setTab] = useState(params.get('tab') === 'exports' || params.get('tab') === 'folders' || params.get('tab') === 'usage'
+        ? (params.get('tab') as string) : 'boards');
     useEffect(() => { if (openId || newOps) setTab('boards'); }, [openId, newOps]);
     const clearNew = () => {
         params.delete('new');
@@ -641,11 +644,11 @@ export function DashboardsPage() {
     return (
         <Page>
             <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Dashboards</h1><HelpButton /></div>
-            <Muted>Saved queries and workbooks with their charts, filters and drill-down, ops dashboards of metrics, logs, traces, SLOs and alerts, and alerts on queries. Every tile and check runs as a person, under their policies.</Muted>
+            <Muted>Saved queries and workbooks with their charts, filters and drill-down, ops dashboards of metrics, logs, traces, SLOs and alerts, and scheduled exports. Every tile and export runs as a person, under their policies. Alerts on queries are in <Link to="/alerts?tab=sql-alerts">Alerts &amp; routing</Link>.</Muted>
             <Tabs style={{ marginTop: 12 }} activeKey={tab} onChange={setTab} items={[
                 { key: 'boards', label: 'Dashboards', children: <Dashboards saved={saved.data ?? []} openId={openId} newOps={newOps} onNewOpsClosed={clearNew} /> },
-                { key: 'alerts', label: 'Alerts', children: <Alerts saved={saved.data ?? []} /> },
                 { key: 'folders', label: 'Folders', children: <BiFolders /> },
+                { key: 'exports', label: 'Scheduled exports', children: <ResourceView spec={RESOURCE_SPECS['scheduled-exports']} /> },
                 { key: 'usage', label: 'Usage', children: <BiUsageOverview /> },
             ]} />
         </Page>

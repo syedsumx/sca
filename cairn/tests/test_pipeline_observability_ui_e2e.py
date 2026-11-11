@@ -228,7 +228,7 @@ def test_pipelines_runs_definitions_and_export_in_the_browser(cairn):
             expect(page.get_by_role("cell", name="Finance by six")).to_be_visible(timeout=20_000)
 
             # ---- an OTLP destination, its configuration and apply ----------------------------------------------------
-            page.get_by_role("tab", name="Export").click()
+            page.goto(f"{url}/host#/observability?tab=export", wait_until="domcontentloaded")   # Platform health (L149)
             page.get_by_role("button", name="New destination").click()
             d = page.get_by_role("dialog").last
             d.get_by_label(re.compile(r"^ID")).fill("customer")

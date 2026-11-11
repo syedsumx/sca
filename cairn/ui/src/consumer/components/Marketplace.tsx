@@ -11,7 +11,7 @@ import { TrustBadges } from './TrustBadges';
 import { describeError } from './ErrorNotice';
 
 export function productPath(urn: string): string {
-    return `/marketplace/${encodeURIComponent(urn)}`;
+    return `/products/${encodeURIComponent(urn)}`;
 }
 
 export function accessLabel(status: AccessStatus, expiresAt?: string | null): { text: string; color: string } {

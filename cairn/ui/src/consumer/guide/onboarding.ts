@@ -88,7 +88,7 @@ const mine = (r: Record<string, unknown>, me: string) => r.owner === me || r.cre
 
 export const STEPS: Record<Role, Step[]> = {
     analyst: [
-        { id: 'find-dataset', title: 'guide.step.findDataset', hint: 'guide.step.findDatasetHint', to: '/search', visit: '/asset/' },
+        { id: 'find-dataset', title: 'guide.step.findDataset', hint: 'guide.step.findDatasetHint', to: '/catalog', visit: '/asset/' },
         { id: 'run-query', title: 'guide.step.runQuery', hint: 'guide.step.runQueryHint', to: '/sql', detect: any(['/sql/history']) },
         { id: 'save-query', title: 'guide.step.saveQuery', hint: 'guide.step.saveQueryHint', to: '/sql', detect: any(['/sql/saved'], mine) },
         { id: 'build-dashboard', title: 'guide.step.buildDashboard', hint: 'guide.step.buildDashboardHint', to: '/dashboards',
@@ -102,20 +102,20 @@ export const STEPS: Record<Role, Step[]> = {
             detect: any(['/v1/flows', '/v1/pipes'], mine) },
         { id: 'schedule', title: 'guide.step.schedule', hint: 'guide.step.scheduleHint', to: '/flows',
             detect: any(['/v1/flows'], (r, me) => mine(r, me) && r.next_run_ms != null) },
-        { id: 'quality-check', title: 'guide.step.qualityCheck', hint: 'guide.step.qualityCheckHint', to: '/lakehouse?tab=quality-monitors',
+        { id: 'quality-check', title: 'guide.step.qualityCheck', hint: 'guide.step.qualityCheckHint', to: '/quality?tab=quality-monitors',
             detect: any(['/quality/monitors']) },
     ],
     steward: [
-        { id: 'review-proposals', title: 'guide.step.reviewProposals', hint: 'guide.step.reviewProposalsHint', to: '/ontology?tab=review',
+        { id: 'review-proposals', title: 'guide.step.reviewProposals', hint: 'guide.step.reviewProposalsHint', to: '/semantics?tab=review&view=ontology',
             detect: any(['/v1/ontology/proposals?status=ACCEPTED', '/v1/ontology/proposals?status=DISMISSED']) },
-        { id: 'glossary-term', title: 'guide.step.glossaryTerm', hint: 'guide.step.glossaryTermHint', to: '/semantic?tab=ontology-terms' },
-        { id: 'set-owner', title: 'guide.step.setOwner', hint: 'guide.step.setOwnerHint', to: '/search' },
+        { id: 'glossary-term', title: 'guide.step.glossaryTerm', hint: 'guide.step.glossaryTermHint', to: '/semantics?tab=ontology&view=terms' },
+        { id: 'set-owner', title: 'guide.step.setOwner', hint: 'guide.step.setOwnerHint', to: '/catalog' },
         { id: 'review-requests', title: 'guide.step.reviewRequests', hint: 'guide.step.reviewRequestsHint', to: '/requests',
             detect: any(['/marketplace/access-requests?scope=inbox'], (r, me) => r.decided_by === me) },
     ],
     admin: [
         { id: 'sso', title: 'guide.step.sso', hint: 'guide.step.ssoHint', to: '/settings' },
-        { id: 'groups', title: 'guide.step.groups', hint: 'guide.step.groupsHint', to: '/trust?tab=workspaces' },
+        { id: 'groups', title: 'guide.step.groups', hint: 'guide.step.groupsHint', to: '/people?tab=workspaces' },
         { id: 'policies', title: 'guide.step.policies', hint: 'guide.step.policiesHint', to: '/governance' },
         { id: 'ai-gateway', title: 'guide.step.aiGateway', hint: 'guide.step.aiGatewayHint', to: '/usage?tab=gateway-routes',
             detect: any(['/v1/ai/gateway/routes']) },
@@ -123,8 +123,8 @@ export const STEPS: Record<Role, Step[]> = {
     ],
     explorer: [
         { id: 'discover', title: 'guide.step.discover', hint: 'guide.step.discoverHint', to: '/discover', visit: '/discover' },
-        { id: 'find-dataset', title: 'guide.step.findDataset', hint: 'guide.step.findDatasetHint', to: '/search', visit: '/asset/' },
-        { id: 'marketplace', title: 'guide.step.marketplace', hint: 'guide.step.marketplaceHint', to: '/marketplace', visit: '/marketplace' },
+        { id: 'find-dataset', title: 'guide.step.findDataset', hint: 'guide.step.findDatasetHint', to: '/catalog', visit: '/asset/' },
+        { id: 'marketplace', title: 'guide.step.marketplace', hint: 'guide.step.marketplaceHint', to: '/products?view=browse', visit: '/products' },
         { id: 'ask-question', title: 'guide.step.askQuestion', hint: 'guide.step.askQuestionHint', to: '/assistant', event: 'ask' },
     ],
 };

@@ -1,11 +1,15 @@
 ---
-title: Remote agents
+title: Collectors (remote agents)
 order: 6
 ---
-# Remote agents
+# Collectors (remote agents)
 
-Remote agents ingest metadata from networks Cairn cannot reach, such as a private VPC or an
-on-premises data centre.
+Collectors ingest metadata from networks Cairn cannot reach, such as a private VPC or an
+on-premises data centre. They were called *remote agents* before; the UI calls them collectors (Ingestion ›
+Collectors) so that *agent* means only AI agents. Nothing else changed: the API keeps its `/agents` paths (also
+answered at `/collectors`), the Helm chart is still `cairn-remote-agent` (its `collector:` values block is read as
+well as `agent:`), and the command is `cairn collectors run` (`cairn agent run` still works and says the new name).
+Below, *agent* means a collector.
 
 * **Outbound only.** The agent connects out to the Cairn gateway; nothing connects in.
 * **Secrets stay local.** Database passwords and keys are resolved inside the agent's network and
@@ -27,7 +31,7 @@ Manage Ingestion privilege), or through the API.
    the `docker run` and Helm commands to start an agent with it.
 3. Install the agent in the private network with that token (Helm chart `cairn-remote-agent`, or
    the `cairn/remote-agent` container).
-4. In **Settings → Sources**, add a source and choose the pool under **Runs on**. **Test connection**
+4. In **Ingestion › Metadata sources**, add a source and choose the pool under **Runs on**. **Test connection**
    runs on the pool's agents. Runs are picked up by the agents in that pool, and their status,
    numbers and logs appear with the source.
 

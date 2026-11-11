@@ -7,6 +7,7 @@ import { CairnProvider } from '../context/CairnProvider';
 import { routeAllowed } from '../guide/capabilities';
 import { paletteItems } from '../guide/CommandPalette';
 import { translate } from '../i18n';
+import { AllIncidents, PipelineRuns } from '../components/Operations';
 import { ObservabilityPage, Span, waterfall } from '../pages/ObservabilityPage';
 import { HUBS } from '../resources/hubs';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
@@ -64,6 +65,8 @@ function page(path: string, routes: Record<string, unknown>, calls: MockCall[] =
         <MemoryRouter initialEntries={[path]}>
             <CairnProvider client={client} cache={new QueryCache()}>
                 <Route path="/observability" component={ObservabilityPage} />
+                <Route path="/incidents" component={AllIncidents} />
+                <Route path="/runs" component={PipelineRuns} />
             </CairnProvider>
         </MemoryRouter>,
     );
@@ -101,7 +104,7 @@ it('logs of a trace are asked for with its id', async () => {
 
 it('an incident’s timeline holds its alerts, the deploy before it and what an agent found; notes are added', async () => {
     const calls: MockCall[] = [];
-    page('/observability?tab=incidents&incident=inc_1', { ...ROUTES, 'POST /v1/observability/incidents/inc_1/notes': INCIDENT }, calls);
+    page('/incidents?incident=inc_1', { ...ROUTES, 'POST /v1/observability/incidents/inc_1/notes': INCIDENT }, calls);
     const drawer = await screen.findByRole('region', { name: `Incident ${INCIDENT.title}` });
     const timeline = within(drawer).getByRole('region', { name: 'Timeline' });
     expect(within(timeline).getByText('cairn-api 9.9.9 deployed')).toBeTruthy();

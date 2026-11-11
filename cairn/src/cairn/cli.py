@@ -557,6 +557,9 @@ def cmd_agents(a) -> None:
 def cmd_agent_run(a) -> None:
     from cairn.agent.worker import main
 
+    if getattr(a, "cmd", None) == "agent":
+        # Remote ingestion agents are called collectors since L149; the old command keeps working.
+        print("note: `cairn agent` is now `cairn collectors`; the old name still works", file=sys.stderr)
     main(a.config)
 
 
@@ -1085,11 +1088,15 @@ def build_parser() -> argparse.ArgumentParser:
     from cairn.agentkit.tasks import add_parser as tasks_parser
 
     tasks_parser(sub)                                 # cairn tasks: CoWork scheduled tasks and the outbox
-    agent = sub.add_parser("agent", help="in-VPC remote ingestion agent")
-    agent_sub = agent.add_subparsers(dest="agent_command", required=True)
-    run = agent_sub.add_parser("run")
-    run.add_argument("--config", default=os.environ.get("CAIRN_AGENT_CONFIG", "/etc/cairn-agent/agent.yml"))
-    run.set_defaults(fn=cmd_agent_run)
+    # A collector (formerly "remote agent") runs metadata ingestion inside another network. `cairn agent` is the old
+    # name, kept as an alias that says the new one.
+    for name, help_ in (("collectors", "collector: in-VPC metadata ingestion (formerly the remote agent)"),
+                        ("agent", "old name of `cairn collectors` (still works)")):
+        agent = sub.add_parser(name, help=help_)
+        agent_sub = agent.add_subparsers(dest="agent_command", required=True)
+        run = agent_sub.add_parser("run", help="enrol (once) and run the collector")
+        run.add_argument("--config", default=os.environ.get("CAIRN_AGENT_CONFIG", "/etc/cairn-agent/agent.yml"))
+        run.set_defaults(fn=cmd_agent_run, cmd=name)
     dpl = sub.add_parser("dataplane", help="data plane connector: runs in the customer's cluster, outbound only")
     dpl_sub = dpl.add_subparsers(dest="dataplane_command", required=True)
     dpl_sub.add_parser("connect", help="enrol (once) and serve the tunnel; settings from CAIRN_DATAPLANE_*") \

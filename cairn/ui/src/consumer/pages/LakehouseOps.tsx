@@ -8,6 +8,8 @@ import type {
 } from '../api/types';
 import { Muted, Surface } from '../components/tokens';
 import { ErrorNotice, describeError, notifyError } from '../components/ErrorNotice';
+import { RESOURCE_SPECS } from '../resources/catalog';
+import { ResourceView } from '../resources/ResourceView';
 
 const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleString() : '—');
 const who = (urn: string) => urn.replace('urn:li:corpuser:', '');
@@ -15,50 +17,7 @@ const ok = (s: string | null | undefined) => (
     <Tag color={s === 'ok' || s === 'running' ? 'green' : s === 'error' ? 'red' : 'default'}>{s ?? 'not started'}</Tag>
 );
 
-/** Files landing in Cairn Store, loaded into lakehouse tables once each. */
-export function PipesTab() {
-    const { client } = useConsumerApi();
-    const q = useDheQuery<Pipe[]>('/v1/pipes', (c, signal) => c.pipes({ signal }));
-    return (
-        <>
-            <Muted>
-                Each file under a pipe&apos;s prefix is loaded once, as soon as the store announces it (and by a sweep for
-                anything an event missed). A file that does not fit is recorded and the next one still loads.
-            </Muted>
-            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
-            <Surface style={{ marginTop: 12 }}>
-                <Table<Pipe>
-                    rowKey="id"
-                    loading={q.loading}
-                    dataSource={q.data ?? []}
-                    pagination={false}
-                    expandable={{ expandedRowRender: (p) => <><PipeFiles id={p.id} />{p.bad_rows === 'quarantine' && <PipeRejects id={p.id} />}</> }}
-                    columns={[
-                        { title: 'Pipe', dataIndex: 'name' },
-                        { title: 'From', render: (_, p) => <code>{`s3://${p.bucket}/${p.prefix}`}</code> },
-                        { title: 'Format', dataIndex: 'format' },
-                        { title: 'Into', dataIndex: 'target', render: (t: string) => <code>{t}</code> },
-                        { title: 'Bad rows', dataIndex: 'bad_rows', render: (b?: string) => (b === 'quarantine' ? 'set aside' : 'refuse the file') },
-                        { title: 'State', dataIndex: 'enabled', render: (e: boolean) => <Tag color={e ? 'green' : 'default'}>{e ? 'on' : 'paused'}</Tag> },
-                        {
-                            title: '',
-                            render: (_, p) => (
-                                <Button size="small" onClick={async () => {
-                                    const done = await client.sweepPipe(p.id);
-                                    message.success(done.length ? `${done.length} new file(s) loaded` : 'Nothing new to load');
-                                }}>
-                                    Sweep now
-                                </Button>
-                            ),
-                        },
-                    ]}
-                />
-            </Surface>
-        </>
-    );
-}
-
-function PipeFiles({ id }: { id: string }) {
+export function PipeFiles({ id }: { id: string }) {
     const q = useDheQuery<PipeFile[]>(`/v1/pipes/${id}/files`, (c, signal) => c.pipeFiles(id, { signal }));
     return (
         <Table<PipeFile>
@@ -80,7 +39,7 @@ function PipeFiles({ id }: { id: string }) {
 }
 
 /** The rows a pipe set aside (bad_rows: quarantine): fix them and land them as a new file. */
-function PipeRejects({ id }: { id: string }) {
+export function PipeRejects({ id }: { id: string }) {
     const q = useDheQuery<PipeReject[]>(`/v1/pipes/${id}/rejects`, (c, signal) => c.pipeRejects(id, { signal }));
     return (
         <Table<PipeReject>
@@ -102,72 +61,7 @@ function PipeRejects({ id }: { id: string }) {
     );
 }
 
-/** Kafka topics (Debezium change events included) written into lakehouse tables, exactly once. */
-export function StreamsTab() {
-    const { client } = useConsumerApi();
-    const q = useDheQuery<Stream[]>('/v1/streams', (c, signal) => c.streams({ signal }), { pollMs: 15_000 });
-    const [creating, setCreating] = useState(false);
-    return (
-        <>
-            <Space style={{ marginBottom: 8 }}>
-                <Button type="primary" onClick={() => setCreating(true)}>New stream</Button>
-            </Space>
-            {creating && (
-                <NewStream
-                    onClose={() => setCreating(false)}
-                    onCreate={async (body) => {
-                        await client.createStream(body);
-                        message.success(`${String(body.name)}: created; the stream workers start it within a minute`);
-                        setCreating(false);
-                        await q.refresh();
-                    }}
-                />
-            )}
-            <Muted>
-                Each batch is one table commit that also records its Kafka offsets, so nothing is written twice. Messages
-                that cannot be rows are set aside with their offset and the reason.
-            </Muted>
-            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
-            <Surface style={{ marginTop: 12 }}>
-                <Table<Stream>
-                    rowKey="id"
-                    loading={q.loading}
-                    dataSource={q.data ?? []}
-                    pagination={false}
-                    expandable={{ expandedRowRender: (s) => <StreamRejects id={s.id} /> }}
-                    columns={[
-                        { title: 'Stream', dataIndex: 'name' },
-                        { title: 'Topic', dataIndex: 'topic', render: (t: string) => <code>{t}</code> },
-                        { title: 'As', render: (_, s) => `${s.format}, ${s.mode}${s.key.length ? ` on ${s.key.join(', ')}` : ''}` },
-                        { title: 'Into', dataIndex: 'target', render: (t: string) => <code>{t}</code> },
-                        {
-                            title: 'State',
-                            render: (_, s) => (s.enabled ? (
-                                <Tooltip title={s.status.error ?? ''}>{ok(s.status.status)}</Tooltip>
-                            ) : <Tag>paused</Tag>),
-                        },
-                        { title: 'Rows', render: (_, s) => (s.status.rows ?? 0).toLocaleString() },
-                        { title: 'Lag', render: (_, s) => (s.status.lag == null ? '—' : s.status.lag.toLocaleString()) },
-                        { title: 'Last commit', render: (_, s) => when(s.status.last_commit_ms) },
-                        {
-                            title: '',
-                            render: (_, s) => (
-                                <Button size="small" onClick={async () => {
-                                    await client.setStreamEnabled(s.id, !s.enabled);
-                                    await q.refresh();
-                                }}>
-                                    {s.enabled ? 'Pause' : 'Resume'}
-                                </Button>
-                            ),
-                        },
-                    ]}
-                />
-            </Surface>
-        </>
-    );
-}
-
-function StreamRejects({ id }: { id: string }) {
+export function StreamRejects({ id }: { id: string }) {
     const q = useDheQuery<StreamReject[]>(`/v1/streams/${id}/rejects`, (c, signal) => c.streamRejects(id, { signal }));
     if (!q.loading && !(q.data ?? []).length) return <Muted>No messages set aside.</Muted>;
     return (
@@ -188,71 +82,7 @@ function StreamRejects({ id }: { id: string }) {
     );
 }
 
-/** SELECTs kept as lakehouse tables, refreshed on Trino as their owner. */
-export function DerivedTab() {
-    const { client } = useConsumerApi();
-    const q = useDheQuery<DerivedTable[]>('/v1/derived', (c, signal) => c.derivedTables({ signal }));
-    const [busy, setBusy] = useState<string | null>(null);
-    const refresh = async (d: DerivedTable, full: boolean) => {
-        setBusy(d.id);
-        try {
-            const run = await client.refreshDerived(d.id, full);
-            if (run.status === 'ok') message.success(`${d.name}: ${run.kind} done`);
-            else message.error(`${d.name}: ${run.error}`);
-            await q.refresh();
-        } finally {
-            setBusy(null);
-        }
-    };
-    return (
-        <>
-            <Muted>
-                Refreshed fully, by watermark or by merge, on a schedule or when a table they read changes (upstream ones
-                first). Each refresh runs as its owner, so their masks and row filters apply.
-            </Muted>
-            {q.error && <ErrorNotice error={q.error} style={{ marginTop: 12 }} />}
-            <Surface style={{ marginTop: 12 }}>
-                <Table<DerivedTable>
-                    rowKey="id"
-                    loading={q.loading}
-                    dataSource={q.data ?? []}
-                    pagination={false}
-                    expandable={{
-                        expandedRowRender: (d) => (
-                            <>
-                                <pre style={{ whiteSpace: 'pre-wrap', margin: '0 0 8px' }}>{d.sql}</pre>
-                                <DerivedRuns id={d.id} />
-                            </>
-                        ),
-                    }}
-                    columns={[
-                        { title: 'Table', dataIndex: 'target', render: (t: string) => <code>{t}</code> },
-                        { title: 'Name', dataIndex: 'name' },
-                        {
-                            title: 'Refresh',
-                            render: (_, d) => [d.mode + (d.watermark ? ` on ${d.watermark}` : '') + (d.key.length ? ` by ${d.key.join(', ')}` : ''),
-                                d.every_minutes ? `every ${d.every_minutes} min` : null, d.on_change ? 'when upstream changes' : null]
-                                .filter(Boolean).join(' · '),
-                        },
-                        { title: 'Owner', dataIndex: 'owner', render: who },
-                        { title: 'Last run', dataIndex: 'last_run_ms', render: when },
-                        {
-                            title: '',
-                            render: (_, d) => (
-                                <Space>
-                                    <Button size="small" loading={busy === d.id} onClick={() => refresh(d, false)}>Refresh</Button>
-                                    <Button size="small" disabled={busy === d.id} onClick={() => refresh(d, true)}>Rebuild</Button>
-                                </Space>
-                            ),
-                        },
-                    ]}
-                />
-            </Surface>
-        </>
-    );
-}
-
-function DerivedRuns({ id }: { id: string }) {
+export function DerivedRuns({ id }: { id: string }) {
     const q = useDheQuery<DerivedRun[]>(`/v1/derived/${id}/runs`, (c, signal) => c.derivedRuns(id, { signal }));
     return (
         <Table<DerivedRun>
@@ -270,52 +100,6 @@ function DerivedRuns({ id }: { id: string }) {
                 { title: 'Error', dataIndex: 'error', render: (e: string | null) => e ?? '' },
             ]}
         />
-    );
-}
-
-/** Compaction, snapshot expiry and orphan cleanup, by policy. */
-export function MaintenanceTab() {
-    const p = useDheQuery<MaintenancePolicy[]>('/maintenance/policies', (c, signal) => c.maintenancePolicies({ signal }));
-    const r = useDheQuery<MaintenanceRun[]>('/maintenance/runs', (c, signal) => c.maintenanceRuns({ signal }));
-    const days = (d: number | null) => (d == null ? 'off' : `${d} days`);
-    return (
-        <>
-            <Muted>The most specific policy applies to each table: its own, its schema&apos;s, or <code>*</code>.</Muted>
-            {(p.error || r.error) && <Alert type="error" message={(p.error ?? r.error)?.message} showIcon style={{ marginTop: 12 }} />}
-            <Surface style={{ marginTop: 12 }}>
-                <h3>Policies</h3>
-                <Table<MaintenancePolicy>
-                    rowKey="scope"
-                    loading={p.loading}
-                    dataSource={p.data ?? []}
-                    pagination={false}
-                    columns={[
-                        { title: 'Scope', dataIndex: 'scope', render: (s: string) => <code>{s}</code> },
-                        { title: 'Compaction', render: (_, x) => (x.optimize ? `files under ${x.optimize_threshold}` : 'off') },
-                        { title: 'Expire snapshots', dataIndex: 'expire_days', render: days },
-                        { title: 'Remove orphans', dataIndex: 'orphan_days', render: days },
-                        { title: 'Every', dataIndex: 'every_hours', render: (h: number) => `${h} h` },
-                        { title: 'By', dataIndex: 'updated_by', render: who },
-                    ]}
-                />
-            </Surface>
-            <Surface style={{ marginTop: 12 }}>
-                <h3>Recent operations</h3>
-                <Table<MaintenanceRun>
-                    rowKey="id"
-                    loading={r.loading}
-                    dataSource={r.data ?? []}
-                    pagination={{ pageSize: 15 }}
-                    columns={[
-                        { title: 'Table', dataIndex: 'table_name', render: (t: string) => <code>{t}</code> },
-                        { title: 'Operation', dataIndex: 'operation' },
-                        { title: 'Result', dataIndex: 'status', render: ok },
-                        { title: 'When', dataIndex: 'started_ms', render: when },
-                        { title: 'Detail', dataIndex: 'detail' },
-                    ]}
-                />
-            </Surface>
-        </>
     );
 }
 
@@ -503,7 +287,7 @@ function NewShare({ onClose, onCreate }: {
 }
 
 /** The form for a new stream (POST /v1/streams); Cairn checks the definition and says what is wrong. */
-function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) {
+export function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body: Record<string, unknown>) => Promise<void> }) {
     const [form] = Form.useForm();
     const [error, setError] = useState<string | null>(null);
     const [saving, setSaving] = useState(false);
@@ -572,5 +356,28 @@ function NewStream({ onClose, onCreate }: { onClose: () => void; onCreate: (body
                 </Form.Item>
             </Form>
         </Modal>
+    );
+}
+
+/** Ingestion › Streams: the area's table and forms, with each stream's rejects in its details and the Kafka form. */
+export function StreamsView() {
+    const { client, cache } = useConsumerApi();
+    const [creating, setCreating] = useState(false);
+    return (
+        <>
+            <ResourceView spec={RESOURCE_SPECS.streams} extra={(r) => <StreamRejects id={String(r.id)} />}
+                actions={<Button type="primary" onClick={() => setCreating(true)}>New stream</Button>} />
+            {creating && (
+                <NewStream
+                    onClose={() => setCreating(false)}
+                    onCreate={async (body) => {
+                        await client.createStream(body);
+                        message.success(`${String(body.name)}: created; the stream workers start it within a minute`);
+                        setCreating(false);
+                        cache.invalidate('resource:/v1/streams');
+                    }}
+                />
+            )}
+        </>
     );
 }

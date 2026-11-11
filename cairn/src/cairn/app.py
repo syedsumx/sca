@@ -190,6 +190,25 @@ DEFAULT_MODULES = ("quality", "governance", "ai", "agents", "collab", "marketpla
                    "scim")
 
 
+class PathAlias:
+    """Serves ``alias/...`` as ``target/...`` (an old or new name of the same API): the request is routed, authorised
+    and audited exactly as at ``target``. Paths are compared after the app's root path."""
+
+    def __init__(self, app, alias: str, target: str):
+        self.app, self.alias, self.target = app, alias, target
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] in ("http", "websocket"):
+            root = scope.get("root_path", "")
+            path = scope["path"]
+            rel = path[len(root):] if root and path.startswith(root) else path
+            if rel == self.alias or rel.startswith(self.alias + "/"):
+                new = self.target + rel[len(self.alias):]
+                scope = {**scope, "path": (root + new) if rel is not path else new,
+                         "raw_path": ((root + new) if rel is not path else new).encode()}
+        await self.app(scope, receive, send)
+
+
 def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES) -> FastAPI:
     from cairn.agent.api import build_router as agents_router
     from cairn.ai.api import build_router as ai_router
@@ -213,6 +232,9 @@ def create_api_app(services: Services, modules: Iterable[str] = DEFAULT_MODULES)
         app.include_router(ai_router(services, cp))
     if "agents" in modules and services.gateway is not None:
         app.include_router(agents_router(services.gateway, cp, authz, admin=True, protocol=False))
+        # Collectors (L149): the UI's name for remote ingestion agents. The same admin API answers at /collectors too
+        # (the same routes, so the same decisions); /agents stays the documented path.
+        app.add_middleware(PathAlias, alias="/collectors", target="/agents")
     if "scim" in modules and services.graph is not None:
         from cairn.identity.scim import ScimService, install_error_handler
         from cairn.identity.scim import build_router as scim_router

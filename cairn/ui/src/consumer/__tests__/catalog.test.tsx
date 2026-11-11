@@ -1,14 +1,11 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import React from 'react';
-import { MemoryRouter, Route, Switch, matchPath } from 'react-router-dom';
+import { MemoryRouter, Route, Switch } from 'react-router-dom';
 
 import { ASSET_TYPES } from '../api/catalog';
-import { CONSUMER_ROUTES } from '../ConsumerApp';
 import { issuesFor } from '../components/CatalogHome';
 import { AssetLabelsEditor } from '../components/GlossaryEdit';
-import { ConsumerLayout, KEPT_ROUTES, NAV, NAV_GROUPS } from '../components/Layout';
 import { CairnProvider } from '../context/CairnProvider';
-import { HOST_SECTIONS } from '../hostNav';
 import { I18nProvider } from '../i18n';
 import { CatalogPage, LineagePage, columnEdges } from '../pages/CatalogPage';
 import { DomainPage, DomainsPage, GlossaryEntryPage, GlossaryPage } from '../pages/GlossaryDomainsPages';
@@ -40,71 +37,7 @@ function wrap(ui: React.ReactElement, routes: Record<string, unknown>, at = '/',
     return { calls, where: () => where };
 }
 
-// ---- navigation ------------------------------------------------------------------------------------------------
-describe('navigation built around Cairn Core', () => {
-    it('puts the Catalog group first and orders the rest around it', () => {
-        expect(NAV_GROUPS.map((g) => g.label)).toEqual(['nav.group.catalog', 'nav.group.govern', 'nav.group.quality',
-            'nav.group.analyze', 'nav.group.build', 'nav.group.ai', 'nav.group.platform']);
-        expect(NAV_GROUPS[0].items.map((i) => i.to)).toEqual(['/discover', '/catalog', '/products', '/contracts', '/glossary',
-            '/domains', '/lineage', '/marketplace', '/requests']);
-        const group = (label: string) => NAV_GROUPS.find((g) => g.label === label)!.items.map((i) => i.to);
-        expect(group('nav.group.govern')).toEqual(['/governance', '/people', '/trust', '/sharing', '/reports', '/usage']);
-        expect(group('nav.group.quality')).toEqual(['/quality', '/observability']);
-        expect(group('nav.group.build')).toEqual(['/pipelines', '/ingestion', '/lakehouse', '/flows', '/sql/workflows', '/compute',
-            '/sql/git']);
-        expect(group('nav.group.ai')).toEqual(['/agents', '/ml', '/context', '/ontology', '/semantic']);
-        expect(group('nav.group.platform')).toEqual(['/capabilities', '/profile', '/settings']);
-        expect(new Set(NAV.map((n) => n.to)).size).toBe(NAV.length);       // every section once
-    });
-
-    it('keeps every earlier route working: none of them is a 404', () => {
-        const earlier = ['/discover', '/search', '/marketplace', '/requests', '/sql', '/sql/workbooks', '/dashboards', '/sql/metrics',
-            '/semantic', '/ontology', '/sql/input-tables', '/queries', '/pipelines', '/ingestion', '/lakehouse', '/flows',
-            '/sql/workflows', '/compute', '/sql/git', '/agents', '/ml', '/context', '/governance', '/people', '/trust', '/sharing',
-            '/reports', '/usage', '/observability', '/capabilities', '/profile', '/settings', '/extensions', '/assistant',
-            '/get-started', '/device', `/asset/${encodeURIComponent(DS)}`, `/marketplace/${encodeURIComponent(PRODUCT.urn)}`,
-            '/ontology/terms/t1'];
-        const known = (path: string) => CONSUMER_ROUTES.some((r) => matchPath(path, { path: r.path, exact: r.exact }));
-        for (const p of [...earlier, ...KEPT_ROUTES, ...NAV.map((n) => n.to)]) expect(known(p), p).toBe(true);
-        for (const p of ['/catalog', `/products/${encodeURIComponent(PRODUCT.urn)}`, `/contracts/${encodeURIComponent(DS)}`,
-            '/glossary/urn%3Ali%3AglossaryTerm%3ARevenue', '/domains/urn%3Ali%3Adomain%3Afinance', '/lineage']) {
-            expect(known(p), p).toBe(true);
-        }
-    });
-
-    it('gives the catalog sections shell entries, and the sidebar marks the open one', async () => {
-        expect(HOST_SECTIONS.slice(0, 4).map((s) => s.route)).toEqual(['/discover', '/catalog', '/products', '/contracts']);
-        wrap(<ConsumerLayout />, {}, '/glossary');
-        const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
-        expect(within(nav).getByRole('heading', { name: 'Catalog' })).toBeTruthy();
-        expect(within(nav).getByRole('link', { name: 'Glossary' }).getAttribute('aria-current')).toBe('page');
-        expect(within(nav).getByRole('heading', { name: 'Quality & observability' })).toBeTruthy();
-        // The palette offers the new sections.
-        act(() => {
-            fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
-        });
-        const box = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
-        fireEvent.change(box, { target: { value: 'data products' } });
-        const list = screen.getByRole('listbox', { name: 'Command palette' });
-        await waitFor(() => expect(within(list).getAllByRole('option')[0].textContent).toContain('Data products'));
-    });
-
-    it('speaks German in the new sections', async () => {
-        const { client, cache } = makeClient({ 'GET /ui/config': UI_CONFIG, 'GET /notify/inbox': [] });
-        render(
-            <MemoryRouter>
-                <I18nProvider initial="de">
-                    <CairnProvider client={client} cache={cache}><ConsumerLayout /></CairnProvider>
-                </I18nProvider>
-            </MemoryRouter>,
-        );
-        const nav = screen.getByRole('navigation', { name: 'Bereiche' });
-        expect(within(nav).getByRole('heading', { name: 'Katalog' })).toBeTruthy();
-        for (const label of ['Datenprodukte', 'Datenverträge', 'Glossar', 'Domänen', 'Datenherkunft']) {
-            expect(within(nav).getByRole('link', { name: label })).toBeTruthy();
-        }
-    });
-});
+// ---- navigation: the sidebar, the shell entries and every earlier route are tested in ia.test.tsx (L149) ----------
 
 // ---- the catalog -------------------------------------------------------------------------------------------------
 const FACETS = [
@@ -197,12 +130,16 @@ describe('Data products', () => {
                 edges: [], hidden_count: 0 },
         }, `/products/${encodeURIComponent(PRODUCT.urn)}`, [], '/products/:urn');
         expect(await screen.findByRole('heading', { name: 'Customer 360', level: 1 })).toBeTruthy();
-        expect(screen.getByRole('tab', { name: 'Assets (2)' })).toBeTruthy();
+        // One product page (L149): Overview · Assets & ports · Contracts & service levels · Pipelines & health · Lineage ·
+        // Access · Distribution.
+        expect(screen.getAllByRole('tab').map((t) => (t.textContent ?? '').replace(/ \(\d+\)$/, ''))).toEqual(['Overview',
+            'Assets & ports', 'Contracts & service levels', 'Pipelines & health', 'Lineage', 'Access', 'Distribution']);
+        fireEvent.click(screen.getByRole('tab', { name: 'Assets & ports (2)' }));
         const ordersRow = screen.getByRole('link', { name: 'orders' }).closest('tr') as HTMLElement;
         expect(within(ordersRow).getByText('Output port')).toBeTruthy();
         expect(within(screen.getByRole('link', { name: 'Sales' }).closest('tr') as HTMLElement).queryByText('Output port')).toBeNull();
-        await waitFor(() => expect(screen.getByRole('tab', { name: 'Contracts (1)' })).toBeTruthy());
-        fireEvent.click(screen.getByRole('tab', { name: 'Contracts (1)' }));
+        await waitFor(() => expect(screen.getByRole('tab', { name: 'Contracts & service levels (1)' })).toBeTruthy());
+        fireEvent.click(screen.getByRole('tab', { name: 'Contracts & service levels (1)' }));
         expect((await screen.findByRole('link', { name: 'orders' }, {})).getAttribute('href')).toBeTruthy();
         expect(screen.getAllByText('Failing').length).toBeGreaterThan(0);
         fireEvent.click(screen.getByRole('tab', { name: 'Lineage' }));

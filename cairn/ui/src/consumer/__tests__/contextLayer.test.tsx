@@ -5,7 +5,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryCache } from '../api/cache';
 import { DefinitionsView, PastAnswersView } from '../components/ContextLayer';
 import { CairnProvider } from '../context/CairnProvider';
-import { FindingView } from '../pages/ContextInboxPage';
+import { FindingView } from '../pages/ContextFindings';
 import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 

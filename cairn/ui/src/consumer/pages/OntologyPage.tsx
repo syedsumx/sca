@@ -237,13 +237,24 @@ function ListTab({ data }: { data: ExplorerData }) {
 
 /** Cairn Ontology's explorer (`/ontology`): the compiled ontology as a graph and as tables, the review queue, the
  * compile wizard, and exports, over what the signed-in person may see. */
-export function OntologyPage() {
+export interface OntologyViews {
+    /** The query parameter holding the open view (`view` when the explorer is a tab of Semantics). */
+    param?: string;
+    /** Views left out (Semantics shows the review queue in its own tab). */
+    hide?: string[];
+    /** More views after the explorer's own (the ontology's tables, the graph mined from usage). */
+    extra?: { key: string; label: string; children: React.ReactNode }[];
+}
+
+export function OntologyPage({ param = 'tab', hide = [], extra = [] }: OntologyViews = {}) {
     const { client } = useConsumerApi();
     const api = useMemo(() => ontologyApi(client), [client]);
     const location = useLocation();
     const history = useHistory();
     const params = new URLSearchParams(location.search);
-    const tab: Tab = (TABS as readonly string[]).includes(params.get('tab') ?? '') ? (params.get('tab') as Tab) : 'graph';
+    const asked = params.get(param) ?? '';
+    const known = [...TABS.filter((k) => !hide.includes(k)), ...extra.map((x) => x.key)];
+    const tab = (known.includes(asked) ? asked : known[0]) as Tab;
     const [data, setData] = useState<ExplorerData | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [exporting, setExporting] = useState<ExportFormat | null>(null);
@@ -285,7 +296,7 @@ export function OntologyPage() {
                     <>
                         The business terms, relationships, metrics and bridge tables Cairn Ontology compiled from the catalog and the query log
                         {data?.version ? ` (version ${data.version})` : ''}. Only datasets you may see are shown.{' '}
-                        <Link to="/semantic?tab=ontology-terms">Semantic models</Link>
+                        <Link to="/semantics?tab=review&view=drafts">Semantic model drafts</Link>
                     </>
                 }
                 actions={
@@ -300,13 +311,18 @@ export function OntologyPage() {
             {error && <Alert style={{ marginBottom: 8 }} type="warning" showIcon message="The ontology is not available" description={error} />}
             <Tabs
                 activeKey={tab}
-                onChange={(k) => history.replace({ pathname: location.pathname, search: `?tab=${k}` })}
+                onChange={(k) => {
+                    const next = new URLSearchParams(location.search);
+                    next.set(param, k);
+                    history.replace({ pathname: location.pathname, search: `?${next}` });
+                }}
                 items={[
                     { key: 'graph', label: 'Graph', children: tab === 'graph' && (data ? (data.terms.length ? <GraphTab data={data} /> : <Empty description="No compiled terms you may see yet: compile the ontology first" />) : !error && <Spin />) },
                     { key: 'list', label: 'List', children: tab === 'list' && (data ? <ListTab data={data} /> : !error && <Spin />) },
                     { key: 'review', label: `Review${pending ? ` (${pending})` : ''}`, children: tab === 'review' && <ReviewQueue onChanged={() => void load()} /> },
                     { key: 'compile', label: 'Compile', children: tab === 'compile' && <CompileWizard onFinished={() => void load()} /> },
-                ]}
+                    ...extra.map((x) => ({ ...x, children: (tab as string) === x.key && x.children })),
+                ].filter((x) => !hide.includes(x.key))}
             />
         </Page>
     );

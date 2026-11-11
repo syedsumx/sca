@@ -4,7 +4,7 @@ import { Link, useHistory, useLocation } from 'react-router-dom';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import { ErrorNotice, notifyError } from '../components/ErrorNotice';
-import { ExportTab, PipelinesTab } from '../components/PipelinesObs';
+import { ExportTab } from '../components/PipelinesObs';
 import { StatusBadge, StatusTone } from '../components/StatusBadge';
 import { EvidenceList, SreIncidentPanel } from '../components/SreAgent';
 import type { Evidence } from '../components/SreAgent';
@@ -74,16 +74,18 @@ interface AlertRow {
 }
 interface Rule { id: string; name: string; language: string; severity: string; pending_for: string; enabled: boolean; last_evaluation?: { error?: string; matches?: number } | null }
 interface Silence { id: string; comment: string; starts_at: string | null; ends_at: string; active: boolean; matchers: { name: string; value: string; regex?: boolean }[] }
-interface Incident {
+export interface Incident {
     id: string; title: string; severity: string; status: 'open' | 'acknowledged' | 'resolved'; services: string[];
     summary: string | null; assignee: string | null; opened_at: string; resolved_at: string | null;
 }
 interface TimelineEvent { at: string; kind: string; actor: string; by_agent: boolean; text: string; detail?: { evidence?: Evidence[] } }
 interface IncidentDetail extends Incident { alerts: AlertRow[]; timeline: TimelineEvent[] }
 
-const TABS = ['health', 'journey', 'logs', 'pipelines', 'slos', 'alerts', 'incidents', 'export'] as const;
+// Pipelines (runs), alerts and incidents have their own sections since L149 (Runs, Alerts & routing, Incidents); their
+// old tabs redirect there (moves.ts).
+const TABS = ['health', 'journey', 'logs', 'slos', 'export'] as const;
 const STATE_TONE: Record<string, StatusTone> = { up: 'ok', degraded: 'warn', down: 'error', unknown: 'waiting' };
-const SEVERITY_COLOR: Record<string, string> = { critical: 'red', warning: 'orange', info: 'blue' };
+export const SEVERITY_COLOR: Record<string, string> = { critical: 'red', warning: 'orange', info: 'blue' };
 const SPEC = (k: string) => RESOURCE_SPECS[k] as ResourceSpec;
 const action = (k: string, label: string) => SPEC(k).actions!.find((a) => a.label === label) as ResourceAction;
 const fmt = (v: number | null | undefined, digits = 2) => (v === null || v === undefined ? '–' : Number(v.toFixed(digits)).toString());
@@ -108,7 +110,7 @@ export function waterfall(spans: Span[]): (Span & { depth: number; left: number;
         width: Math.max(0.4, (100 * s.duration_ms) / total) }));
 }
 
-function useSearchParam(name: string): [string, (v: string | null, extra?: Record<string, string | null>) => void] {
+export function useSearchParam(name: string): [string, (v: string | null, extra?: Record<string, string | null>) => void] {
     const location = useLocation();
     const history = useHistory();
     const params = new URLSearchParams(location.search);
@@ -418,7 +420,7 @@ function SlosTab({ startNew, onNewClosed }: { startNew: boolean; onNewClosed: ()
 }
 
 // ---- alerts, rules, silences ----------------------------------------------------------------------------------
-function AlertsTab({ startNew, onNewClosed, openIncident }: { startNew: string; onNewClosed: () => void; openIncident: (id: string) => void }) {
+export function AlertsTab({ startNew, onNewClosed, openIncident }: { startNew: string; onNewClosed: () => void; openIncident: (id: string) => void }) {
     const t = useT();
     const { client } = useConsumerApi();
     const [state, setState] = useState('open');
@@ -514,7 +516,7 @@ function AlertsTab({ startNew, onNewClosed, openIncident }: { startNew: string; 
 }
 
 // ---- incidents ----------------------------------------------------------------------------------------------
-function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
+export function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
     const t = useT();
     const { client } = useConsumerApi();
     const q = useDheQuery<IncidentDetail>(`/v1/observability/incidents/${id}`, (c, signal) =>
@@ -583,70 +585,13 @@ function IncidentDrawer({ id, onClose }: { id: string; onClose: () => void }) {
     );
 }
 
-function IncidentsTab({ open }: { open: (id: string) => void }) {
-    const t = useT();
-    const { client } = useConsumerApi();
-    const [status, setStatus] = useState('active');
-    const q = useDheQuery<{ items: Incident[] }>(`/v1/observability/incidents?${status}`, (c, signal) =>
-        c.request('GET', `/v1/observability/incidents?status=${status}`, undefined, { signal }), { pollMs: 30_000 });
-    const [form, setForm] = useState<{ title: string; severity: string; services: string } | null>(null);
-    const create = async () => {
-        if (!form) return;
-        try {
-            const inc = await client.request<Incident>('POST', '/v1/observability/incidents', {
-                title: form.title, severity: form.severity, services: form.services.split(',').map((s) => s.trim()).filter(Boolean) });
-            setForm(null);
-            q.refresh();
-            open(inc.id);
-        } catch (e) {
-            notifyError(e);
-        }
-    };
-    return (
-        <Space direction="vertical" style={{ width: '100%' }}>
-            <Space wrap>
-                <Select aria-label="Status" value={status} onChange={setStatus} style={{ width: 160 }}
-                    options={['active', 'open', 'acknowledged', 'resolved'].map((v) => ({ value: v, label: v }))} />
-                <Button onClick={() => setForm({ title: '', severity: 'warning', services: '' })}>{t('obs.incidents.open')}</Button>
-            </Space>
-            {form && (
-                <Surface>
-                    <Space wrap>
-                        <Input aria-label={t('obs.incidents.title')} placeholder={t('obs.incidents.title')} value={form.title} style={{ width: 280 }}
-                            onChange={(e) => setForm({ ...form, title: e.target.value })} />
-                        <Select aria-label={t('obs.incidents.severity')} value={form.severity} style={{ width: 120 }}
-                            onChange={(v) => setForm({ ...form, severity: v })}
-                            options={['critical', 'warning', 'info'].map((v) => ({ value: v, label: v }))} />
-                        <Input aria-label={t('obs.incidents.services')} placeholder={t('obs.incidents.services')} value={form.services} style={{ width: 200 }}
-                            onChange={(e) => setForm({ ...form, services: e.target.value })} />
-                        <Button type="primary" disabled={!form.title.trim()} onClick={create}>{t('obs.incidents.open')}</Button>
-                    </Space>
-                </Surface>
-            )}
-            {q.error && <ErrorNotice error={q.error} area={t('obs.tab.incidents')} />}
-            <Table size="small" rowKey="id" loading={q.loading} dataSource={q.data?.items ?? []} pagination={{ pageSize: 20 }}
-                columns={[
-                    { title: '', dataIndex: 'severity', render: (v: string) => <Tag color={SEVERITY_COLOR[v]}>{v}</Tag> },
-                    { title: t('obs.incidents.title'), dataIndex: 'title',
-                        render: (v: string, r) => <Button type="link" size="small" aria-label={`Open ${v}`} onClick={() => open(r.id)}>{v}</Button> },
-                    { title: 'Status', dataIndex: 'status', render: (v: string) => <Tag>{t(`obs.incidents.status.${v}` as MessageKey)}</Tag> },
-                    { title: t('obs.incidents.services'), dataIndex: 'services', render: (v: string[]) => v.join(', ') },
-                    { title: 'Opened', dataIndex: 'opened_at', render: (v: string) => new Date(v).toLocaleString() },
-                ]} />
-        </Space>
-    );
-}
-
 // ---- the page --------------------------------------------------------------------------------------------------
 export function ObservabilityPage() {
     const t = useT();
     const [tab, setTab] = useSearchParam('tab');
     const [trace] = useSearchParam('trace');
     const [service] = useSearchParam('service');
-    const [incident, setIncident] = useSearchParam('incident');
     const [isNew, setNew] = useSearchParam('new');
-    const [pipeline] = useSearchParam('pipeline');
-    const [pipeRun] = useSearchParam('run');
     const active = (TABS as readonly string[]).includes(tab) ? tab : 'health';
     const ov = useDheQuery<Overview>('/v1/observability/overview', (c, signal) =>
         c.request('GET', '/v1/observability/overview', undefined, { signal }), { pollMs: 30_000 });
@@ -661,8 +606,8 @@ export function ObservabilityPage() {
             <PageHeader title={t('obs.title')} description={t('obs.description')} icon="pulse" help={pageHelp('/observability')}>
                 {o && (
                     <Space wrap>
-                        <Tag color={firing ? 'red' : 'green'}>{t('obs.firing', { n: firing })}</Tag>
-                        <Tag color={o.open_incidents ? 'orange' : 'default'}>{t('obs.openIncidents', { n: o.open_incidents })}</Tag>
+                        <Link to="/incidents"><Tag color={o.open_incidents ? 'orange' : 'default'}>{t('obs.openIncidents', { n: o.open_incidents })}</Tag></Link>
+                        <Link to="/alerts?tab=platform-rules"><Tag color={firing ? 'red' : 'green'}>{t('obs.firing', { n: firing })}</Tag></Link>
                         <Muted>{backends.length ? t('obs.backends', { list: backends.join(', ') }) : t('obs.backends.none')}</Muted>
                         <Link to="/dashboards?open=ops-platform-overview">{t('obs.dashboards')}</Link>
                     </Space>
@@ -678,21 +623,11 @@ export function ObservabilityPage() {
                         children: active === 'journey' ? <JourneyTab key={trace} initial={trace} service={service}
                             showLogs={(id) => setTab('logs', { trace: id })} /> : null },
                     { key: 'logs', label: t('obs.tab.logs'), children: active === 'logs' ? <LogsTab traceId={trace} service={service} /> : null },
-                    { key: 'pipelines', label: t('obs.tab.pipelines'),
-                        children: active === 'pipelines' ? <PipelinesTab pipeline={pipeline} run={pipeRun}
-                            select={(p, r) => setTab('pipelines', { pipeline: p, run: r ?? null })}
-                            openTrace={(id) => setTab('journey', { trace: id, pipeline: null, run: null })} /> : null },
                     { key: 'slos', label: t('obs.tab.slos'),
                         children: active === 'slos' ? <SlosTab startNew={isNew === 'slo'} onNewClosed={() => setNew(null)} /> : null },
-                    { key: 'alerts', label: t('obs.tab.alerts'),
-                        children: active === 'alerts' ? <AlertsTab startNew={isNew} onNewClosed={() => setNew(null)}
-                            openIncident={(id) => setIncident(id)} /> : null },
-                    { key: 'incidents', label: t('obs.tab.incidents'),
-                        children: active === 'incidents' ? <IncidentsTab open={(id) => setIncident(id)} /> : null },
                     { key: 'export', label: t('obs.tab.export'), children: active === 'export' ? <ExportTab /> : null },
                 ]}
             />
-            {incident && <IncidentDrawer id={incident} onClose={() => setIncident(null)} />}
         </Page>
     );
 }

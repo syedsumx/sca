@@ -152,6 +152,12 @@ export const Page = styled.div`
     @media (max-width: 600px) {
         padding: ${tokens.space(3)} ${tokens.space(4)} ${tokens.space(8)};
     }
+    /* A page shown as another section's tab (Embedded): that section's page frames it. */
+    [data-embedded='true'] && {
+        max-width: none;
+        margin: 0;
+        padding: 0;
+    }
     .cairn-markdown p {
         margin: 0 0 8px;
     }

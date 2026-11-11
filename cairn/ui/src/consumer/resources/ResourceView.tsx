@@ -282,7 +282,13 @@ export function ActionDialog({ spec, action, row, onDone, onClose, startFromRow 
 }
 
 /** One backend area as a table: its list endpoint, each row's details, and its actions as forms, all against the real API. */
-export function ResourceView({ spec }: { spec: ResourceSpec }) {
+export function ResourceView({ spec, extra, actions }: {
+    spec: ResourceSpec;
+    /** What a row's details add (a pipe's files, a stream's rejects). */
+    extra?: (row: Row) => React.ReactNode;
+    /** More page-level actions beside the area's own (a purpose-built form). */
+    actions?: React.ReactNode;
+}) {
     const t = useT();
     const q = useDheQuery<unknown>(spec.path ? `resource:${spec.path}` : null, (c, signal) =>
         c.request<unknown>('GET', spec.path as string, undefined, { signal }),
@@ -362,6 +368,7 @@ export function ResourceView({ spec }: { spec: ResourceSpec }) {
                     {spec.path && <code className="cairn-path">GET {spec.path}</code>}
                 </div>
                 <Space wrap>
+                    {actions}
                     {pageActions.map((a) => (
                         <Button key={a.label} type={a === create ? 'primary' : 'default'} onClick={() => setDialog({ action: a, row: null })}>
                             {a.label}
@@ -410,6 +417,7 @@ export function ResourceView({ spec }: { spec: ResourceSpec }) {
                 {detail && (
                     <>
                         <DetailPanel row={detail} secret={secret} format={show} />
+                        {extra && <div style={{ marginTop: 16 }}>{extra(detail)}</div>}
                         {rowActions.length > 0 && (
                             <Space style={{ marginTop: 16 }} wrap>
                                 {rowActions.map((a) => (

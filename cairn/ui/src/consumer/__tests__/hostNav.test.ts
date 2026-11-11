@@ -8,11 +8,13 @@ describe('catalog-shell navigation', () => {
 
     it('maps shell paths to workspace sections and back', () => {
         expect(sectionForHostPath('/mfe/cairn')).toBe('/discover');
-        expect(sectionForHostPath('/mfe/cairn-marketplace')).toBe('/marketplace');
-        expect(sectionForHostPath('/mfe/cairn-marketplace/')).toBe('/marketplace');
+        // L149: the marketplace entry opens the Browse view of Data products, its one home.
+        expect(sectionForHostPath('/mfe/cairn-marketplace')).toBe('/products?view=browse');
+        expect(sectionForHostPath('/mfe/cairn-marketplace/')).toBe('/products?view=browse');
+        expect(sectionForHostPath('/mfe/cairn-context')).toBe('/semantics');
         expect(sectionForHostPath('/mfe/other-app')).toBeNull();
         expect(sectionForHostPath('/cairn/discover')).toBeNull();
-        expect(hostPathForRoute('/marketplace/urn:li:dataProduct:x')).toBe('/cairn-marketplace');
+        expect(hostPathForRoute('/products/urn:li:dataProduct:x')).toBe('/cairn-products');
         expect(hostPathForRoute('/requests?state=open')).toBe('/cairn-requests');
         expect(hostPathForRoute('/search?q=x')).toBeNull();          // no entry of its own: stays put
         expect(isHosted('/mfe/cairn-requests')).toBe(true);
@@ -33,9 +35,9 @@ describe('catalog-shell navigation', () => {
         const events: string[] = [];
         const onPop = () => events.push(window.location.pathname + window.location.hash);
         window.addEventListener('popstate', onPop);
-        expect(navigateHost('/marketplace')).toBe(true);
-        expect(events).toEqual(['/mfe/cairn-marketplace#/marketplace']);
-        expect(navigateHost('/marketplace/urn:li:dataProduct:p')).toBe(false);   // same entry: in-app
+        expect(navigateHost('/products')).toBe(true);
+        expect(events).toEqual(['/mfe/cairn-products#/products']);
+        expect(navigateHost('/products/urn:li:dataProduct:p')).toBe(false);   // same entry: in-app
         expect(navigateHost('/search')).toBe(false);
         window.removeEventListener('popstate', onPop);
     });

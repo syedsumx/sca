@@ -16,7 +16,7 @@ KI-Assistenten.
 | Steuern, wer was sieht, personenbezogene Daten maskieren, Assets zertifizieren | [Governance](governance.html) |
 | Datenprodukte veröffentlichen und Zugriff ohne Tickets gewähren | [Marketplace](marketplace.html) |
 | Agenten Daten dokumentieren und Fragen beantworten lassen | [Context and AI](context-and-ai.html) |
-| Aus privaten Netzwerken einlesen | [Remote agents](remote-agents.html) |
+| Aus privaten Netzwerken einlesen | [Collectors (Remote-Agenten)](remote-agents.html) |
 | Slack, Teams, E-Mail, Webhooks und BI-Werkzeuge anbinden | [Integrations](integrations.html) |
 | Cairn installieren, konfigurieren und betreiben | [Administration](administration.html) |
 | Mit den APIs automatisieren | [APIs](api.html) |

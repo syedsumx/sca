@@ -4,7 +4,7 @@ import { useHistory, useLocation } from 'react-router-dom';
 
 import { Muted } from '../components/tokens';
 import { useT } from '../i18n';
-import { RESOURCE_SPECS } from '../resources/catalog';
+import { TAB_SPECS as RESOURCE_SPECS } from '../resources/customTabs';
 import { HUBS } from '../resources/hubs';
 import { MarkdownView } from '../utils/markdown';
 import { useGuide } from './GuideProvider';

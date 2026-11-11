@@ -68,10 +68,10 @@ describe('StatusBadge', () => {
 
 describe('the shell', () => {
     it('marks the current area with aria-current="page", and the logo goes home', async () => {
-        wrap(<ConsumerLayout />, {}, '/marketplace');
+        wrap(<ConsumerLayout />, {}, '/products');
         const nav = screen.getByRole('navigation', { name: 'Workspace sections' });
-        expect(within(nav).getByRole('link', { name: 'Marketplace' }).getAttribute('aria-current')).toBe('page');
-        expect(within(nav).getByRole('link', { name: 'Catalog' }).getAttribute('aria-current')).toBeNull();
+        expect(within(nav).getByRole('link', { name: 'Data products' }).getAttribute('aria-current')).toBe('page');
+        expect(within(nav).getByRole('link', { name: 'Search' }).getAttribute('aria-current')).toBeNull();
         expect(nav.querySelectorAll('[aria-current="page"]')).toHaveLength(1);
         const home = screen.getByRole('link', { name: 'Cairn home' });
         expect(home.getAttribute('href')).toBe('/discover');

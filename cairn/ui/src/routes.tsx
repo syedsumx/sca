@@ -40,7 +40,7 @@ export const ENTERPRISE_ROUTES: EnterpriseRoute[] = [
     { path: `${ENTERPRISE_BASE_PATH}/quality`, label: 'Data quality', group: 'Quality', component: QualityPage },
     {
         path: `${ENTERPRISE_BASE_PATH}/governance/inbox`,
-        label: 'Review inbox',
+        label: 'Approvals',
         group: 'Governance',
         component: InboxPage,
     },
@@ -60,7 +60,7 @@ export const ENTERPRISE_ROUTES: EnterpriseRoute[] = [
     },
     {
         path: `${ENTERPRISE_BASE_PATH}/agents`,
-        label: 'Remote agents',
+        label: 'Collectors (remote agents)',
         group: 'Agents',
         privilege: 'MANAGE_INGESTION',
         component: AgentsPage,

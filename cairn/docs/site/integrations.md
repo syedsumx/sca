@@ -144,7 +144,7 @@ Where approvals and on-call already live in Jira, ServiceNow, PagerDuty or Opsge
 
 Airflow, Spark, dbt, Dagster, Flink and other tools that emit OpenLineage can push lineage and runs to Cairn as they happen, without polling.
 
-Point the tool's OpenLineage HTTP transport at `https://<cairn>/cairn/api/openlineage` with a Cairn API key. Create the key under **Settings → AI agents** with the `write` scope; its person needs `EDIT_LINEAGE`. For Airflow:
+Point the tool's OpenLineage HTTP transport at `https://<cairn>/cairn/api/openlineage` with a Cairn API key. Create the key under **AI › Agents › Agent identities** with the `write` scope; its person needs `EDIT_LINEAGE`. For Airflow:
 
 ```
 OPENLINEAGE_URL=https://cairn.example.com/cairn/api/openlineage
@@ -173,7 +173,7 @@ Connect the GitHub, GitLab or Bitbucket repositories that hold your dbt projects
 - where `dbt_project.yml` is in the repository;
 - the warehouse, database and schema the models build into, so Cairn can find the models in the catalog.
 
-Then add a webhook on the repository: `https://<cairn>/cairn/api/integrations/git/<id>/webhook`, with the same secret, for pull request (GitHub, Bitbucket) or merge request (GitLab) events. **Settings → Sources** lists the repositories, and flags a missing token or secret.
+Then add a webhook on the repository: `https://<cairn>/cairn/api/integrations/git/<id>/webhook`, with the same secret, for pull request (GitHub, Bitbucket) or merge request (GitLab) events. **Ingestion › Metadata sources** lists the repositories, and flags a missing token or secret.
 
 **Impact on pull requests.** When a pull request is opened or updated, Cairn reads which dbt models it changes. That covers SQL files, and properties files whose columns change. Cairn posts one comment, updated on every push, showing per model:
 
@@ -188,7 +188,7 @@ A commit status, `cairn/impact`, fails when a removed column (or a removed model
 
 ## Custom connectors (SDK)
 
-For a source no connector covers, write one in Python with the connector SDK (`cairn.sdk`), check it with the test kit, and offer it in **Settings → Sources** like the built-in ones.
+For a source no connector covers, write one in Python with the connector SDK (`cairn.sdk`), check it with the test kit, and offer it in **Ingestion › Metadata sources** like the built-in ones.
 
 ```python
 from pydantic import BaseModel, SecretStr

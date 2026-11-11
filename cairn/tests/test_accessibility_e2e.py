@@ -44,12 +44,24 @@ PAGES = ["/discover", "/search?q=orders", f"/asset/{DS}", "/marketplace", "/requ
          # The Catalog section (L147), with Core's GraphQL answered from the same graph (tests/core_standin.py).
          "/catalog", "/catalog?f._entityType=DATASET", "/products", f"/products/{PRODUCT}", "/contracts",
          f"/contracts/{DS}", "/glossary", f"/glossary/{TERM}", "/domains", f"/domains/{FINANCE}", "/lineage",
-         f"/lineage?urn={DS}", "/quality"]
+         f"/lineage?urn={DS}", "/quality",
+         # One home per concept (L149): every sidebar section, the header's Inbox, and the views that moved into a
+         # section (old routes redirect, so the earlier entries above check the redirects land on accessible pages).
+         "/semantics", "/semantics?tab=ontology", "/semantics?tab=review", "/semantics?tab=review&view=findings",
+         "/semantics?tab=imports", "/requests", "/automation", "/security", "/security?tab=audit", "/sharing",
+         "/sharing?tab=clean-rooms", "/reports", "/runs", "/runs?tab=dbt", "/incidents", "/alerts",
+         "/alerts?tab=metric-alerts", "/alerts?tab=status-announcements", "/sql?tab=insight", "/ingestion",
+         "/ingestion?tab=sources", "/ingestion?tab=collectors", "/lakehouse", "/lakehouse?tab=synthetic",
+         "/flows?tab=sql-workflows", "/flows?tab=jobs", "/flows?tab=airflow", "/agents", "/ml", "/ai/gateway",
+         "/compute", "/compute?tab=app-installs", "/quality?tab=model-monitors", "/people?tab=access-reviews",
+         "/people?tab=workspaces", "/governance?tab=consent", "/inbox", "/products?view=browse",
+         f"/products/{PRODUCT}?tab=health", f"/products/{PRODUCT}?tab=distribution"]
 # Forms (L127): a hub's create form open, with a picker, a cron field, Advanced shown and a field's problem shown.
-FORMS = [("/compute?tab=saved-queries", "New saved query"), ("/compute?tab=jobs", "New job"),
-         ("/products", "New data product"), ("/contracts", "New contract", "Publish contract"),
-         ("/trust?tab=secret-scopes", "Create scope"), ("/people", "New person"),
-         ("/observability?tab=slos", "New SLO"), ("/observability?tab=alerts", "New alert rule"),
+FORMS = [("/sql?tab=saved-queries", "New saved query"), ("/flows?tab=jobs", "New job"),
+         ("/products", "New data product"), ("/quality?tab=contracts", "New contract", "Publish contract"),
+         ("/security?tab=secret-scopes", "Create scope"), ("/people", "New person"),
+         ("/observability?tab=slos", "New SLO"), ("/alerts?tab=platform-rules", "New alert rule"),
+         ("/alerts?tab=metric-alerts", "New metric alert"),
          ("/glossary", "New term"), ("/domains", "New domain")]                       # L148: edited here, kept in Core
 BLOCKING = {"serious", "critical"}
 
@@ -233,7 +245,7 @@ def test_the_guided_experience_passes_axe(cairn):
             box.press("ArrowDown")
             check("command palette")
             box.press("Escape")
-            page.goto(f"{cairn}/host#/trust?tab=secret-scopes", wait_until="networkidle")
+            page.goto(f"{cairn}/host#/security?tab=secret-scopes", wait_until="networkidle")
             page.get_by_role("button", name="Help for this page").first.click()
             expect(page.locator(".ant-drawer-content").last.get_by_role("heading", name="Secret scopes")).to_be_visible(
                 timeout=10_000)

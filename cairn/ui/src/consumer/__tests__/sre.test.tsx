@@ -7,6 +7,7 @@ import { CairnProvider } from '../context/CairnProvider';
 import { DiagnoseButton } from '../components/SreAgent';
 import { paletteItems } from '../guide/CommandPalette';
 import { translate } from '../i18n';
+import { AllIncidents, PipelineRuns } from '../components/Operations';
 import { ObservabilityPage } from '../pages/ObservabilityPage';
 import { MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -49,9 +50,11 @@ const ROUTES = {
 function page(routes: Record<string, unknown>, calls: MockCall[]) {
     const { client } = makeClient({ 'GET /ui/config': UI_CONFIG, ...routes }, calls);
     render(
-        <MemoryRouter initialEntries={['/observability?tab=incidents&incident=inc_1']}>
+        <MemoryRouter initialEntries={['/incidents?incident=inc_1']}>
             <CairnProvider client={client} cache={new QueryCache()}>
                 <Route path="/observability" component={ObservabilityPage} />
+                <Route path="/incidents" component={AllIncidents} />
+                <Route path="/runs" component={PipelineRuns} />
             </CairnProvider>
         </MemoryRouter>,
     );
@@ -120,7 +123,7 @@ it('Diagnose on an instance shows findings and remediations, and proposes one as
 it('the command palette offers asking the SRE agent where Observability is offered', () => {
     const t = (k: Parameters<typeof translate>[1], v?: Record<string, string | number>) => translate('en', k, v);
     const items = paletteItems([{ to: '/observability', label: 'Observability' }], t, () => [], null, () => undefined);
-    expect(items.find((i) => i.id === 'act:ask-sre')?.to).toBe('/observability?tab=incidents');
+    expect(items.find((i) => i.id === 'act:ask-sre')?.to).toBe('/incidents');
     expect(paletteItems([{ to: '/discover', label: 'Discover' }], t, () => [], null, () => undefined).map((i) => i.id))
         .not.toContain('act:ask-sre');
 });

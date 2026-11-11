@@ -1,4 +1,4 @@
-import { Alert, Button, Empty, Radio, Select, Tabs, Tag, message } from 'antd';
+import { Alert, Button, Empty, Radio, Select, Tag, message } from 'antd';
 import { ApproveDefinition, DEFINABLE, DefinitionsView, PastAnswersView } from '../components/ContextLayer';
 import React, { useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
@@ -193,14 +193,13 @@ export function OntologyView({ ontology }: { ontology: Ontology }) {
     );
 }
 
-export function ContextInboxPage() {
-    const t = useT();
+/** Semantics › Review queue › Findings: what context mining found (definitions, drift, joins, terms), to accept or dismiss. */
+export function ContextFindings() {
     const { client, cache } = useConsumerApi();
     const [status, setStatus] = useState<string>('OPEN');
     const [type, setType] = useState<string | undefined>(undefined);
     const key = `/context/findings?status=${status}&type=${type ?? ''}`;
     const findings = useDheQuery<Finding[]>(key, (c, signal) => c.listFindings({ status, type }, { signal }));
-    const ontology = useDheQuery<Ontology>('/context/ontology', (c, signal) => c.ontology({ limit: 150 }, { signal }));
 
     const act = async (f: Finding, action: 'accept' | 'dismiss', edits?: DefinitionEdits) => {
         cache.set<Finding[]>(key, (prev) => (prev ?? []).filter((x) => x.id !== f.id));
@@ -223,75 +222,56 @@ export function ContextInboxPage() {
     }, [findings.data]);
 
     return (
-        <Page>
-            <SectionTitle as="h1" style={{ fontSize: 24 }}>
-                {t('page.context')}
-            </SectionTitle>
-            <Muted>
-                Context Agents continuously mine queries, dbt, BI semantics and pipeline runs to suggest business definitions, detect
+        <>
+            <Muted style={{ display: 'block', marginBottom: 12 }}>
+                Context mining reads queries, dbt, BI semantics and pipeline runs to suggest business definitions, detect
                 drift and keep documentation alive.
             </Muted>
-            <Tabs
-                style={{ marginTop: 12 }}
-                items={[
-                    {
-                        key: 'findings',
-                        label: 'Findings',
-                        children: (
-                            <>
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
-                                    <Radio.Group
-                                        aria-label="Finding status"
-                                        optionType="button"
-                                        value={status}
-                                        onChange={(e) => setStatus(String(e.target.value))}
-                                        options={[
-                                            { label: 'Open', value: 'OPEN' },
-                                            { label: 'Accepted', value: 'ACCEPTED' },
-                                            { label: 'Dismissed', value: 'DISMISSED' },
-                                        ]}
-                                    />
-                                    <Select
-                                        aria-label="Finding type"
-                                        allowClear
-                                        placeholder="All types"
-                                        style={{ minWidth: 220 }}
-                                        value={type}
-                                        onChange={(v) => setType(v)}
-                                        options={Object.entries(FINDING_LABELS).map(([k, v]) => ({ value: k, label: `${v.icon} ${v.label}` }))}
-                                    />
-                                </div>
-                                {findings.loading && <Skeleton h={90} />}
-                                {findings.error && <ErrorNotice error={findings.error} />}
-                                {findings.data?.length === 0 && <Empty description="Inbox zero — no findings with these filters." />}
-                                {Object.entries(grouped).map(([t, items]) => (
-                                    <section key={t} aria-label={FINDING_LABELS[t as FindingType]?.label ?? t}>
-                                        <h3 style={{ fontSize: 14, margin: '12px 0 8px' }}>
-                                            {FINDING_LABELS[t as FindingType]?.icon} {FINDING_LABELS[t as FindingType]?.label ?? t} ({items.length})
-                                        </h3>
-                                        {items.map((f) => (
-                                            <FindingView key={f.id} finding={f} onAct={(a, edits) => void act(f, a, edits)} />
-                                        ))}
-                                    </section>
-                                ))}
-                            </>
-                        ),
-                    },
-                    { key: 'definitions', label: 'Definitions', children: <DefinitionsView /> },
-                    { key: 'answers', label: 'Answered before', children: <PastAnswersView /> },
-                    {
-                        key: 'ontology',
-                        label: 'Ontology',
-                        children: ontology.loading ? (
-                            <Skeleton h={300} />
-                        ) : ontology.error ? (
-                            <ErrorNotice error={ontology.error} />
-                        ) : (
-                            <OntologyView ontology={ontology.data ?? { nodes: [], edges: [] }} />
-                        ),
-                    },
-                ]}
-            />
-        </Page>
+            <div style={{ display: 'flex', gap: 12, marginBottom: 12, flexWrap: 'wrap' }}>
+                <Radio.Group
+                    aria-label="Finding status"
+                    optionType="button"
+                    value={status}
+                    onChange={(e) => setStatus(String(e.target.value))}
+                    options={[
+                        { label: 'Open', value: 'OPEN' },
+                        { label: 'Accepted', value: 'ACCEPTED' },
+                        { label: 'Dismissed', value: 'DISMISSED' },
+                    ]}
+                />
+                <Select
+                    aria-label="Finding type"
+                    allowClear
+                    placeholder="All types"
+                    style={{ minWidth: 220 }}
+                    value={type}
+                    onChange={(v) => setType(v)}
+                    options={Object.entries(FINDING_LABELS).map(([k, v]) => ({ value: k, label: `${v.icon} ${v.label}` }))}
+                />
+            </div>
+            {findings.loading && <Skeleton h={90} />}
+            {findings.error && <ErrorNotice error={findings.error} />}
+            {findings.data?.length === 0 && <Empty description="Inbox zero — no findings with these filters." />}
+            {Object.entries(grouped).map(([t, items]) => (
+                <section key={t} aria-label={FINDING_LABELS[t as FindingType]?.label ?? t}>
+                    <h3 style={{ fontSize: 14, margin: '12px 0 8px' }}>
+                        {FINDING_LABELS[t as FindingType]?.icon} {FINDING_LABELS[t as FindingType]?.label ?? t} ({items.length})
+                    </h3>
+                    {items.map((f) => (
+                        <FindingView key={f.id} finding={f} onAct={(a, edits) => void act(f, a, edits)} />
+                    ))}
+                </section>
+            ))}
+        </>
     );
 }
+
+/** The graph context mining builds from what it found ("from usage"), beside the compiled ontology. */
+export function MinedOntology() {
+    const ontology = useDheQuery<Ontology>('/context/ontology', (c, signal) => c.ontology({ limit: 150 }, { signal }));
+    if (ontology.loading) return <Skeleton h={300} />;
+    if (ontology.error) return <ErrorNotice error={ontology.error} />;
+    return <OntologyView ontology={ontology.data ?? { nodes: [], edges: [] }} />;
+}
+
+export { DefinitionsView, PastAnswersView };

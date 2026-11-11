@@ -7,7 +7,7 @@ order: 5
 ## Context agents
 
 Context agents read query history, dbt models, BI definitions and pipeline runs and turn them into
-**findings** for stewards to review in **Workspace → Context inbox**:
+**findings** for stewards to review in **Semantics › Review queue › Context findings**:
 
 | Finding | Meaning |
 |---|---|
@@ -168,7 +168,7 @@ These tools need the agent's `propose` scope.
 
 Coverage is a catalog's weak point: most tables have no description and no owner, and nobody has time to write ten thousand of them. The AI steward proposes them for people to review.
 
-A run, started from **Governance studio → AI steward → Find gaps now** or `POST /cairn/api/ai/steward/run`, walks the datasets that lack a description, an owner or a classification, most viewed first. Each proposal carries its evidence and a confidence:
+A run, started from **Semantics › Review queue › AI steward → Find gaps now** or `POST /cairn/api/ai/steward/run`, walks the datasets that lack a description, an owner or a classification, most viewed first. Each proposal carries its evidence and a confidence:
 
 - **Owners.** The people who ran most of the recent queries, who last edited the dataset's metadata, and who own its domain and its upstream tables. Service accounts and Cairn's own automation identities never count, and their queries don't dilute anyone's share. With no clear evidence, nobody is proposed.
 - **Classifications.** PII terms for columns, from column names and sampled values. These are the same detectors that label PII during ingestion.
@@ -187,11 +187,11 @@ A run, started from **Governance studio → AI steward → Find gaps now** or `P
 
 Text-to-SQL agents fail mostly on business meaning, not syntax: which revenue, which customer status. Cairn gives them vetted meaning from what your teams already do.
 
-**How was this answered before.** Every mined query is indexed by the question it answers: its name and description, the metrics it computes, what it groups by, and the tables it reads. **Context inbox → Answered before** searches them, and so do agents, through the `how_was_this_answered` MCP tool or `GET /cairn/api/context/answers?question=…`. Results show the SQL people actually ran, with the approved definitions it uses. Only queries over tables the caller may see are returned.
+**How was this answered before.** Every mined query is indexed by the question it answers: its name and description, the metrics it computes, what it groups by, and the tables it reads. **Semantics › Imports & knowledge → Answered before** searches them, and so do agents, through the `how_was_this_answered` MCP tool or `GET /cairn/api/context/answers?question=…`. Results show the SQL people actually ran, with the approved definitions it uses. Only queries over tables the caller may see are returned.
 
-**Approved definitions.** In the Context inbox, **Edit & approve** on a metric or join finding lets the owner set the name, expression and description before accepting. The result is an approved definition. Each change makes a new version, and earlier versions are kept (`GET /cairn/api/context/definitions/{id}/versions`). Agents read them with the `get_definitions` MCP tool.
+**Approved definitions.** In the review queue's context findings, **Edit & approve** on a metric or join finding lets the owner set the name, expression and description before accepting. The result is an approved definition. Each change makes a new version, and earlier versions are kept (`GET /cairn/api/context/definitions/{id}/versions`). Agents read them with the `get_definitions` MCP tool.
 
-**Exports to the warehouse's semantic layer.** **Context inbox → Definitions** exports the approved metrics and joins:
+**Exports to the warehouse's semantic layer.** **Semantics › Metrics** (the semantic layer's definitions) exports the approved metrics and joins:
 
 - **Snowflake:** a `CREATE SEMANTIC VIEW` with tables, relationships and metrics, for Cortex Analyst and Snowflake Intelligence.
 - **Databricks:** a Unity Catalog metric view (`WITH METRICS LANGUAGE YAML`) over the fact table you choose, for Genie.
@@ -210,7 +210,7 @@ Where teams already define metrics in a semantic layer, Cairn imports them so pe
 - **Cube:** each cube's measures (`count`, `sum`, `avg`, `min`, `max`, `count_distinct`, `number`) over its `sql_table`.
 - **LookML:** each view's measures over its `sql_table_name`. Measures that reference other fields (`${total}`) are skipped.
 
-Each metric becomes a metric finding in the **Context inbox**, mapped to the catalog dataset for its table. Approving it makes it a governed, versioned definition that keeps its dimensions and time dimension. Nothing is queryable before it is approved.
+Each metric becomes a metric finding in **Semantics › Review queue**, mapped to the catalog dataset for its table. Approving it makes it a governed, versioned definition that keeps its dimensions and time dimension. Nothing is queryable before it is approved.
 
 **Query.** `GET /cairn/api/context/metrics` lists the approved metrics over datasets you may see. `POST /cairn/api/context/metrics/{name}/query` takes `{"dimensions": [...], "filters": [{"dimension", "op", "value"}], "time_grain": "day|week|month|quarter|year", "limit": 200}`. The SQL is compiled from the definition:
 

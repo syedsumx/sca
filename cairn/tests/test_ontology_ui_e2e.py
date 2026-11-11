@@ -103,7 +103,8 @@ def test_explore_review_compile_and_see_terms_on_an_asset(stack, compiled):  # n
         try:
             # The explorer: search a term, zoom to it, its details beside the graph.
             page.goto(f"{url}/host#/ontology", wait_until="domcontentloaded")
-            expect(page.get_by_role("heading", name="Ontology", exact=True)).to_be_visible(timeout=30_000)
+            # /ontology is Semantics › Ontology (L149)
+            expect(page.get_by_role("heading", name="Semantics", exact=True)).to_be_visible(timeout=30_000)
             canvas = page.get_by_test_id("ontology-canvas")
             expect(canvas).to_be_visible(timeout=30_000)
             expect(canvas.locator('[data-node]').first).to_be_visible()

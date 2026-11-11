@@ -377,7 +377,7 @@ export function AgentFleet({
     );
     const body = (
         <>
-            <Card size="small" extra={embedded ? newPool : undefined} title={embedded ? 'Remote ingestion agents' : undefined}>
+            <Card size="small" extra={embedded ? newPool : undefined} title={embedded ? 'Collectors' : undefined}>
                 <Tabs
                     items={[
                         { key: 'pools', label: `Pools${pools.data ? ` (${pools.data.length})` : ''}`, children: poolsTab() },
@@ -446,7 +446,7 @@ export function AgentFleet({
     return (
         <PageContainer>
             <PageHeader>
-                <h1>Remote ingestion agents</h1>
+                <h1>Collectors (remote ingestion agents)</h1>
                 {newPool}
             </PageHeader>
             {body}

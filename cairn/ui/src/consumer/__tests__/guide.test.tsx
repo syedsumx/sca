@@ -18,6 +18,7 @@ import { fuzzyScore, moveActive, pushRecent, rank, readRecent } from '../guide/p
 import { crumbsFor } from '../guide/PageHeader';
 import { I18nProvider } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
+import { TAB_SPECS } from '../resources/customTabs';
 import { HUBS } from '../resources/hubs';
 import { DS, MockCall, UI_CONFIG, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
@@ -142,18 +143,18 @@ describe('navigation', () => {
     });
 
     it('hides admin-only pages and hub tabs from people without the privilege', () => {
-        const trust = HUBS.find((h) => h.route === '/trust')!;
+        const security = HUBS.find((h) => h.route === '/security')!;
         const usage = HUBS.find((h) => h.route === '/usage')!;
-        expect(visibleTabs(trust, ready(ADMIN_CAPS))).toContain('residency');
-        expect(visibleTabs(trust, ready(PERSON_CAPS))).not.toContain('residency');
-        expect(visibleTabs(trust, ready(PERSON_CAPS))).toContain('secret-scopes');
+        expect(visibleTabs(security, ready(ADMIN_CAPS))).toContain('siem');
+        expect(visibleTabs(security, ready(PERSON_CAPS))).not.toContain('siem');
+        expect(visibleTabs(security, ready(PERSON_CAPS))).toContain('secret-scopes');
         expect(visibleTabs(usage, ready(PERSON_CAPS))).toContain('my-ai-usage');
         expect(visibleTabs(usage, ready(PERSON_CAPS))).not.toContain('ai-usage');
         expect(routeAllowed('/governance', HUBS, ready(PERSON_CAPS))).toBe(false);
         expect(routeAllowed('/governance', HUBS, ready(ADMIN_CAPS))).toBe(true);
         expect(routeAllowed('/sql', HUBS, failed)).toBe(true);
         // A hub with no usable tab is left out.
-        const adminOnly = { ...trust, route: '/x', tabs: ['residency', 'siem'] };
+        const adminOnly = { ...security, route: '/x', tabs: ['residency', 'siem'] };
         expect(routeAllowed('/x', [adminOnly], ready(PERSON_CAPS))).toBe(false);
     });
 
@@ -165,13 +166,13 @@ describe('navigation', () => {
         expect(plain.forYou).toEqual([]);
         expect(plain.folded).toBe(0);
         const analyst = arrangeNav(groups, all, 'analyst', none);
-        expect(analyst.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/sql/metrics']);
+        expect(analyst.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/semantics']);
         expect(analyst.groups.map((g) => g.label)).not.toContain('nav.group.build');
         expect(analyst.folded).toBeGreaterThan(0);
-        const mine = arrangeNav(groups, all, 'analyst', togglePin({ ...none, hidden: ['/sql/metrics'] }, '/flows'));
+        const mine = arrangeNav(groups, all, 'analyst', togglePin({ ...none, hidden: ['/semantics'] }, '/flows'));
         expect(mine.forYou.map((i) => i.to)).toEqual(['/catalog', '/sql', '/dashboards', '/flows']);
-        expect(mine.groups.flatMap((g) => g.items).map((i) => i.to)).not.toContain('/sql/metrics');
-        const everything = arrangeNav(groups, all, 'analyst', { pinned: [], hidden: ['/sql/metrics'], show_all: true });
+        expect(mine.groups.flatMap((g) => g.items).map((i) => i.to)).not.toContain('/semantics');
+        const everything = arrangeNav(groups, all, 'analyst', { pinned: [], hidden: ['/semantics'], show_all: true });
         expect(everything.folded).toBe(0);
         expect(everything.groups.flatMap((g) => g.items)).toHaveLength(NAV_GROUPS.flatMap((g) => g.items).length);
         // Show everything never shows what capabilities leave out.
@@ -183,11 +184,11 @@ describe('navigation', () => {
     it('builds breadcrumbs for deep pages only', () => {
         const labels = { search: 'Search', marketplace: 'Data marketplace', ontology: 'Ontology' };
         const title = (k: string) => RESOURCE_SPECS[k]?.title;
-        expect(crumbsFor('/trust', '?tab=secret-scopes', labels, title)).toEqual([
-            { label: 'Trust & security', to: '/trust' }, { label: 'Secret scopes' }]);
-        expect(crumbsFor('/trust', '', labels, title)).toBeNull();
+        expect(crumbsFor('/security', '?tab=secret-scopes', labels, title)).toEqual([
+            { label: 'Security & compliance', to: '/security' }, { label: 'Secret scopes' }]);
+        expect(crumbsFor('/security', '', labels, title)).toBeNull();
         expect(crumbsFor(`/asset/${encodeURIComponent('urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)')}`, '', labels, title))
-            .toEqual([{ label: 'Search', to: '/search' }, { label: 'main.orders' }]);
+            .toEqual([{ label: 'Search', to: '/catalog' }, { label: 'main.orders' }]);
         // With the Catalog section (L147): an asset sits in the catalog; the section's deep pages have their crumbs.
         const core = { ...labels, catalog: 'Catalog', products: 'Data products', contracts: 'Contracts', glossary: 'Glossary',
             domains: 'Domains' };
@@ -196,30 +197,30 @@ describe('navigation', () => {
         expect(crumbsFor(`/products/${encodeURIComponent('urn:li:dataProduct:orders-360')}`, '', core, title))
             .toEqual([{ label: 'Data products', to: '/products' }, { label: 'orders-360' }]);
         expect(crumbsFor(`/contracts/${encodeURIComponent('urn:li:dataset:(urn:li:dataPlatform:sqlite,main.orders,PROD)')}`, '', core,
-            title)).toEqual([{ label: 'Contracts', to: '/contracts' }, { label: 'main.orders' }]);
+            title)).toEqual([{ label: 'Contracts', to: '/quality?tab=contracts' }, { label: 'main.orders' }]);
         expect(crumbsFor(`/glossary/${encodeURIComponent('urn:li:glossaryTerm:Revenue')}`, '', core, title))
             .toEqual([{ label: 'Glossary', to: '/glossary' }, { label: 'Revenue' }]);
         expect(crumbsFor('/products', '', core, title)).toBeNull();
-        expect(crumbsFor('/sql', '', labels, title)).toBeNull();
+        expect(crumbsFor('/sql/workbooks', '', labels, title)).toBeNull();
     });
 });
 
 // ---- contextual help -----------------------------------------------------------------------------------------
 describe('help lookup', () => {
     it('finds the docs section for a hub tab, a page, and a deep page', () => {
-        expect(helpAnchorFor('/trust', '?tab=secret-scopes', HUBS, RESOURCE_SPECS)).toBe(RESOURCE_SPECS['secret-scopes'].docs);
-        expect(helpAnchorFor('/sql', '', HUBS, RESOURCE_SPECS)).toBe('administration.html#sql-workspace');
+        expect(helpAnchorFor('/security', '?tab=secret-scopes', HUBS, RESOURCE_SPECS)).toBe(RESOURCE_SPECS['secret-scopes'].docs);
+        expect(helpAnchorFor('/sql', '', HUBS, TAB_SPECS)).toBe('administration.html#sql-workspace');
         expect(helpAnchorFor('/asset/urn%3Ax', '', HUBS, RESOURCE_SPECS)).toBe('getting-started.html#understand-an-asset');
         expect(helpAnchorFor('/nowhere', '', HUBS, RESOURCE_SPECS)).toBeNull();
         expect(docsHref('governance.html#consent')).toBe('/docs/governance.html#consent');
     });
 
     it('a hub opens on the tab used last', () => {
-        const trust = HUBS.find((h) => h.route === '/trust')!;
-        expect(hubTab(trust, '')).toBe(trust.tabs[0]);
-        rememberHubTab('/trust', 'secret-scopes');
-        expect(hubTab(trust, '')).toBe('secret-scopes');
-        expect(hubTab(trust, '?tab=siem')).toBe('siem');
+        const security = HUBS.find((h) => h.route === '/security')!;
+        expect(hubTab(security, '')).toBe(security.tabs[0]);
+        rememberHubTab('/security', 'secret-scopes');
+        expect(hubTab(security, '')).toBe('secret-scopes');
+        expect(hubTab(security, '?tab=siem')).toBe('siem');
     });
 
     it('has a bundled snippet for every section the UI points at, and it is up to date with the docs', async () => {
@@ -343,12 +344,12 @@ describe('the guided workspace', () => {
         });
         const box = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
         const list = screen.getByRole('listbox', { name: 'Command palette' });
-        fireEvent.change(box, { target: { value: 'sql workflows' } });
-        await waitFor(() => expect(within(list).getAllByRole('option')[0].textContent).toContain('SQL workflows'));
+        fireEvent.change(box, { target: { value: 'input tables' } });
+        await waitFor(() => expect(within(list).getAllByRole('option')[0].textContent).toContain('Input tables'));
         expect(box.getAttribute('aria-activedescendant')).toBe(within(list).getAllByRole('option')[0].id);
         expect(within(list).getAllByRole('option')[0].getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box, { key: 'Enter' });
-        await waitFor(() => expect(nav.where()).toBe('/sql/workflows'));
+        await waitFor(() => expect(nav.where()).toBe('/sql/input-tables'));
         // An action: a form in a hub, opened by the palette.
         fireEvent.click(screen.getByRole('button', { name: 'Search or jump to…' }));
         const box2 = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });
@@ -358,7 +359,7 @@ describe('the guided workspace', () => {
         fireEvent.keyDown(box2, { key: 'ArrowUp' });
         expect(first.getAttribute('aria-selected')).toBe('true');
         fireEvent.keyDown(box2, { key: 'Enter' });
-        await waitFor(() => expect(nav.where()).toBe('/trust?tab=secret-scopes&action=Create%20scope'));
+        await waitFor(() => expect(nav.where()).toBe('/security?tab=secret-scopes&action=Create%20scope'));
         // The last entry hands the text to the assistant.
         fireEvent.click(screen.getByRole('button', { name: 'Search or jump to…' }));
         const box3 = await screen.findByRole('combobox', { name: 'Type a page, an action or a dataset…' });

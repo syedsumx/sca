@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import { QueryCache } from '../api/cache';
 import { CairnProvider } from '../context/CairnProvider';
-import { PipelinesPage } from '../pages/PipelinesPage';
+import { DbtRuns } from '../components/DbtRuns';
 import { MockCall, makeClient } from './mockApi';
 import { installMatchMedia } from './setup';
 
@@ -29,13 +29,13 @@ const RUN = {
     ],
 };
 
-test('lists dbt runs, their nodes and links to the project docs', async () => {
+test('Runs › dbt runs lists dbt runs, their nodes and links to the project docs', async () => {
     const calls: MockCall[] = [];
     const { client } = makeClient({ 'GET /pipelines/dbt/runs': [RUN] }, calls);
     render(
         <MemoryRouter>
             <CairnProvider client={client} cache={new QueryCache()}>
-                <PipelinesPage />
+                <DbtRuns />
             </CairnProvider>
         </MemoryRouter>,
     );

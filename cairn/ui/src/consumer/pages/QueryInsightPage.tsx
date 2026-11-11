@@ -4,7 +4,7 @@ import React, { useState } from 'react';
 import { useDheQuery } from '../api/hooks';
 import type { QueryProfile, QueryRecord } from '../api/types';
 import { Muted, Page, Surface } from '../components/tokens';
-import { HelpButton } from '../guide/PageHeader';
+import { TitleRow } from '../guide/PageHeader';
 import { ErrorNotice } from '../components/ErrorNotice';
 
 export const seconds = (ms: number) => (ms >= 60_000 ? `${(ms / 60_000).toFixed(1)} min` : `${(ms / 1000).toFixed(ms < 10_000 ? 2 : 1)} s`);
@@ -80,7 +80,7 @@ export function QueryInsightPage() {
 
     return (
         <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Query insight</h1><HelpButton /></div>
+            <TitleRow title="Query insight" />
             <Muted>Your queries on the lakehouse, with what they cost and how to make them faster. Operators see everyone's.</Muted>
             <Surface style={{ marginTop: 16 }}>
                 <Space wrap style={{ marginBottom: 12 }}>

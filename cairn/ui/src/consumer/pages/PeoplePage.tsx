@@ -8,9 +8,11 @@ import { Muted, Page, SectionTitle, Surface, tokens } from '../components/tokens
 import { pageHelp } from '../guide/help';
 import { PageHeader } from '../guide/PageHeader';
 import { StatusBadge } from '../components/StatusBadge';
+import { WorkspacesSettings } from '../components/Workspaces';
+import { useDheSession } from '../context/CairnProvider';
 import { MessageKey, useT } from '../i18n';
 import { RESOURCE_SPECS } from '../resources/catalog';
-import { ActionDialog } from '../resources/ResourceView';
+import { ActionDialog, ResourceView } from '../resources/ResourceView';
 import type { ResourceAction, ResourceSpec } from '../resources/types';
 import { errorStatus } from '../utils/errors';
 import { actorName } from '../utils/format';
@@ -622,8 +624,14 @@ export function CheckResult({ answer }: { answer: CheckAnswer }) {
     );
 }
 
+/** Business units (workspaces): the domains and people each one holds (from Settings and Trust, L149). */
+function WorkspacesView() {
+    const session = useDheSession();
+    return <WorkspacesSettings isAdmin={!!session.config?.is_admin} />;
+}
+
 // ---- the page ------------------------------------------------------------------------------------------------------
-const TABS = ['people', 'groups', 'roles', 'principals', 'access'] as const;
+const TABS = ['people', 'groups', 'roles', 'principals', 'workspaces', 'access', 'access-reviews'] as const;
 
 /** People & roles: the directory, a person's page (what they hold and why), groups, roles, service accounts and agents,
  * and the access check. For administrators (MANAGE_POLICIES); the API decides every request. */
@@ -652,8 +660,11 @@ export function PeoplePage() {
                     { key: 'groups', label: t('people.tab.groups'), children: active === 'groups' ? <GroupsTab openPerson={open} /> : null },
                     { key: 'roles', label: t('people.tab.roles'), children: active === 'roles' ? <RolesTab /> : null },
                     { key: 'principals', label: t('people.tab.principals'), children: active === 'principals' ? <PrincipalsTab /> : null },
+                    { key: 'workspaces', label: 'Business units', children: active === 'workspaces' ? <WorkspacesView /> : null },
                     { key: 'access', label: t('people.tab.access'),
                         children: active === 'access' ? <AccessCheckTab key={checkFor} person={checkFor} /> : null },
+                    { key: 'access-reviews', label: 'Access reviews',
+                        children: active === 'access-reviews' ? <ResourceView spec={SPEC('access-reviews')} /> : null },
                 ]}
             />
             {person && <PersonDrawer id={person} onClose={() => setPerson(null)} onCheck={check} />}

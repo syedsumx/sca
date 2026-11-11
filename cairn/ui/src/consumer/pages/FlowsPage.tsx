@@ -12,10 +12,19 @@ import { FLOW_NAME, FlowDef, Problem } from '../flows/model';
 import { FlowsRoot } from '../flows/styles';
 import { TEMPLATES } from '../flows/templates';
 import { describeError } from '../components/ErrorNotice';
-import { PageHeader } from '../guide/PageHeader';
+import { Embedded, PageHeader } from '../guide/PageHeader';
+import { AirflowDeploymentsView } from '../resources/AirflowDeployments';
+import { RESOURCE_SPECS } from '../resources/catalog';
+import { ResourceView } from '../resources/ResourceView';
+import { SqlWorkflowsPage } from './SqlWorkflowsPage';
 import { pageHelp } from '../guide/help';
 
 const THEME_KEY = 'cairn.flows.theme';
+
+/** Orchestration (L149): flows, SQL workflows, scheduled jobs and Airflow (managed deployments and DAGs) in one place. */
+const FLOW_TABS = ['flows', 'sql-workflows', 'jobs', 'airflow'] as const;
+type FlowTab = (typeof FLOW_TABS)[number];
+const FLOW_TAB_LABELS: [FlowTab, string][] = [['flows', 'Flows'], ['sql-workflows', 'SQL workflows'], ['jobs', 'Jobs'], ['airflow', 'Airflow']];
 
 function readTheme(): string {
     try {
@@ -33,7 +42,7 @@ export function FlowsPage() {
     const location = useLocation();
     const query = new URLSearchParams(location.search);
     const current = query.get('flow');
-    const tab = query.get('tab') === 'airflow' ? 'airflow' : 'flows';
+    const tab = (FLOW_TABS as readonly string[]).includes(query.get('tab') ?? '') ? (query.get('tab') as FlowTab) : 'flows';
     const change = query.get('change');
     const preview = query.get('preview');
     const [flows, setFlows] = useState<FlowSummary[] | null>(null);
@@ -68,7 +77,7 @@ export function FlowsPage() {
     }, [api, current]);
 
     const open = (name: string | null) => history.push(name ? `/flows?flow=${encodeURIComponent(name)}` : '/flows');
-    const showTab = (t: string) => history.push(t === 'airflow' ? '/flows?tab=airflow' : '/flows');
+    const showTab = (t: string) => history.push(t === 'flows' ? '/flows' : `/flows?tab=${t}`);
     const downloadDag = async (name: string) => {
         try {
             const text = await client.request<string>('GET', `/v1/flows/${encodeURIComponent(name)}/airflow`);
@@ -130,7 +139,7 @@ export function FlowsPage() {
                 <>
                     <div style={{ padding: '20px 24px 0' }}>
                         <PageHeader title="Flows" icon="flow" help={pageHelp('/flows')}
-                            description="Orchestrate SQL, tables, notebooks, Spark, dbt, agents, approvals and more as one DAG, run as its owner."
+                            description="Orchestrate SQL, tables, notebooks, Spark, dbt, agents, approvals and more as one DAG, run as its owner; SQL workflows, scheduled jobs and Airflow are here too. Every run is in Runs."
                             actions={
                                 <>
                                     <select aria-label="Theme" className="fl-btn" value={theme} onChange={(e) => changeTheme(e.target.value)}>
@@ -138,21 +147,36 @@ export function FlowsPage() {
                                         <option value="dark">Dark</option>
                                         <option value="auto">System</option>
                                     </select>
-                                    <Link to="/sql/workflows" className="fl-btn">SQL workflows</Link>
                                     <button type="button" className="fl-btn primary" onClick={() => setGallery(true)}>
                                         <Icon name="plus" size={14} /> New flow
                                     </button>
                                 </>
                             } />
                     </div>
-                    <div className="fl-tabs" role="tablist" aria-label="Flows and Airflow" style={{ padding: '0 24px' }}>
-                        {[['flows', 'Flows'], ['airflow', 'Airflow']].map(([k, label]) => (
+                    <div className="fl-tabs" role="tablist" aria-label="Orchestration" style={{ padding: '0 24px' }}>
+                        {FLOW_TAB_LABELS.map(([k, label]) => (
                             <button key={k} type="button" role="tab" aria-selected={tab === k} className="fl-tab" onClick={() => showTab(k)}>{label}</button>
                         ))}
                     </div>
                     {tab === 'airflow' ? (
                         <div className="fl-pane" style={{ maxWidth: 1280 }}>
-                            <AirflowTab client={client} theme={theme} onOpenFlow={(name) => { void load(); open(name); }} />
+                            <section aria-label="Airflow deployments" style={{ marginBottom: 24 }}>
+                                <h2 style={{ fontSize: 16 }}>Managed Airflow deployments</h2>
+                                <AirflowDeploymentsView />
+                            </section>
+                            <section aria-label="Airflow DAGs">
+                                <h2 style={{ fontSize: 16 }}>DAGs</h2>
+                                <AirflowTab client={client} theme={theme} onOpenFlow={(name) => { void load(); open(name); }} />
+                            </section>
+                        </div>
+                    ) : tab === 'sql-workflows' ? (
+                        <div className="fl-pane" style={{ maxWidth: 1280 }}>
+                            <p className="fl-muted">A SQL workflow is a schedule of derived-table refreshes, checks and queries; it runs through the same executors as flows (<code>POST /v1/flows/from-sql-workflow/&lt;id&gt;</code> makes one a flow).</p>
+                            <Embedded><SqlWorkflowsPage /></Embedded>
+                        </div>
+                    ) : tab === 'jobs' ? (
+                        <div className="fl-pane" style={{ maxWidth: 1280 }}>
+                            <ResourceView spec={RESOURCE_SPECS.jobs} />
                         </div>
                     ) : (
                     <div className="fl-pane" style={{ maxWidth: 1280 }}>

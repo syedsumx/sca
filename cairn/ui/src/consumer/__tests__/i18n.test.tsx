@@ -53,17 +53,17 @@ it('uses the saved choice, else the browser language', () => {
 
 it('shows the navigation in the chosen language and remembers a switch', async () => {
     layout('de');
-    expect(await screen.findByText('Entdecken')).toBeTruthy();
+    expect(await screen.findByText('Start')).toBeTruthy();
     expect(screen.getByRole('navigation', { name: 'Bereiche' })).toBeTruthy();
     expect(document.documentElement.lang).toBe('de');
     fireEvent.mouseDown(screen.getByRole('combobox', { name: 'Sprache' }));
     fireEvent.click(await screen.findByText('日本語'));
-    await waitFor(() => expect(screen.getByText('発見')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('ホーム')).toBeTruthy());
     expect(window.localStorage.getItem('cairn.locale')).toBe('ja');
 });
 
 it('stays English by default', async () => {
     layout();
-    expect(await screen.findByText('Discover')).toBeTruthy();
+    expect(await screen.findByText('Home')).toBeTruthy();
     expect(screen.getByRole('button', { name: '✨ Ask' })).toBeTruthy();
 });

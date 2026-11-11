@@ -16,8 +16,9 @@ access governance, a data marketplace, context agents and an AI assistant on top
 | Control who sees what, mask PII, certify assets | [Governance](governance.html) |
 | Publish data products and grant access without tickets | [Marketplace](marketplace.html) |
 | Let agents document data and answer questions | [Context and AI](context-and-ai.html) |
-| Ingest from private networks | [Remote agents](remote-agents.html) |
+| Ingest from private networks | [Collectors (remote agents)](remote-agents.html) |
 | Connect Slack, Teams, email, webhooks, BI tools | [Integrations](integrations.html) |
+| Find where something is in the workspace, and what things are called | [Where things are](administration.html#where-things-are-one-home-per-concept) |
 | Install, configure and operate Cairn | [Administration](administration.html) |
 | Query, search and ask from a terminal (`cairn`) | [Command line](command-line.html) |
 | Use Cairn as an app on macOS, Windows and Linux | [Cairn Desktop](desktop.html) |

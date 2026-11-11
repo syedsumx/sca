@@ -1,14 +1,12 @@
-import { Alert, Select, Space, Table, Tabs, Tag } from 'antd';
+import { Select, Space, Table, Tag } from 'antd';
 import React, { useMemo, useState } from 'react';
 
 import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { DbtRun } from '../api/types';
-import { Muted, Page, Surface } from '../components/tokens';
-import { DerivedTab, MaintenanceTab, PipesTab, SharesTab, StreamsTab, WarehousesTab } from './LakehouseOps';
-import { HelpButton } from '../guide/PageHeader';
-import { ErrorNotice } from '../components/ErrorNotice';
+import { ErrorNotice } from './ErrorNotice';
+import { Muted, Surface } from './tokens';
 
-const STATUS_COLOR: Record<string, string> = {
+export const DBT_STATUS_COLOR: Record<string, string> = {
     success: 'green',
     pass: 'green',
     error: 'red',
@@ -17,6 +15,7 @@ const STATUS_COLOR: Record<string, string> = {
     warn: 'gold',
     skipped: 'default',
 };
+const STATUS_COLOR = DBT_STATUS_COLOR;
 
 function duration(s: number | null | undefined): string {
     if (s == null) return '';
@@ -24,26 +23,8 @@ function duration(s: number | null | undefined): string {
     return `${Math.floor(s / 60)}m ${s % 60}s`;
 }
 
-/** Pipelines: dbt runs, pipes, streams, derived tables and table maintenance. */
-export function PipelinesPage() {
-    return (
-        <Page>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}><h1 style={{ marginBottom: 0 }}>Pipelines</h1><HelpButton /></div>
-            <Tabs defaultActiveKey="dbt" destroyInactiveTabPane>
-                <Tabs.TabPane tab="dbt runs" key="dbt"><DbtRuns /></Tabs.TabPane>
-                <Tabs.TabPane tab="Pipes" key="pipes"><PipesTab /></Tabs.TabPane>
-                <Tabs.TabPane tab="Streams" key="streams"><StreamsTab /></Tabs.TabPane>
-                <Tabs.TabPane tab="Derived tables" key="derived"><DerivedTab /></Tabs.TabPane>
-                <Tabs.TabPane tab="Maintenance" key="maintenance"><MaintenanceTab /></Tabs.TabPane>
-                <Tabs.TabPane tab="Warehouses" key="warehouses"><WarehousesTab /></Tabs.TabPane>
-                <Tabs.TabPane tab="Shares" key="shares"><SharesTab /></Tabs.TabPane>
-            </Tabs>
-        </Page>
-    );
-}
-
 /** dbt runs recorded by `cairn dbt`: what ran where, how it went, node by node, and the project's docs. */
-function DbtRuns() {
+export function DbtRuns() {
     const { client } = useConsumerApi();
     const [project, setProject] = useState<string | undefined>();
     const q = useDheQuery<DbtRun[]>(`/pipelines/dbt/runs?${project ?? ''}`, (c, signal) => c.dbtRuns(project, { signal }));
