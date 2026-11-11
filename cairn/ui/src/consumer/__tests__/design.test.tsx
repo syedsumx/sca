@@ -49,7 +49,7 @@ describe('StatusBadge', () => {
         const failed = screen.getByText('Failed').closest('.cairn-status') as HTMLElement;
         expect(failed.getAttribute('data-tone')).toBe('error');
         expect(failed.querySelector('.mark')?.getAttribute('aria-hidden')).toBe('true');
-        expect(screen.getByText('Sla missed').closest('[data-tone]')?.getAttribute('data-tone')).toBe('warn');
+        expect(screen.getByText('SLA missed').closest('[data-tone]')?.getAttribute('data-tone')).toBe('warn');
         expect(screen.getByText('Healthy').closest('[data-tone]')?.getAttribute('data-tone')).toBe('ok');
     });
 

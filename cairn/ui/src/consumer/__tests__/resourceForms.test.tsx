@@ -437,7 +437,9 @@ it('a delete asks first, naming what goes', async () => {
     const calls: MockCall[] = [];
     wrap(<ResourceView spec={spec} />, { 'GET /v1/secret-scopes': [{ name: 'payments-gateway', description: 'Adyen' }],
         'DELETE /v1/secret-scopes/payments-gateway': undefined }, calls);
-    fireEvent.click(await screen.findByRole('button', { name: 'Delete scope: payments-gateway' }));
+    // A delete is in the row's menu (L150), then asks first.
+    fireEvent.click(await screen.findByRole('button', { name: 'More actions for payments-gateway' }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Delete scope' }));
     const dialog = await lastDialog();
     expect(within(dialog).getByText('Delete payments-gateway? This cannot be undone.')).toBeTruthy();
     expect(calls.some((c) => c.method === 'DELETE')).toBe(false);

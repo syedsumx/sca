@@ -8,8 +8,8 @@ import type { MessageKey } from '../i18n/messages';
 type T = (key: MessageKey, vars?: Record<string, string | number>) => string;
 
 export type ErrorKind =
-    | 'forbidden' | 'unauthorized' | 'notFound' | 'conflict' | 'invalid' | 'rate' | 'unconfigured' | 'unavailable'
-    | 'network' | 'server';
+    | 'forbidden' | 'unauthorized' | 'notFound' | 'notConnected' | 'conflict' | 'invalid' | 'rate' | 'unconfigured'
+    | 'unavailable' | 'network' | 'server';
 
 export interface PresentedError {
     kind: ErrorKind;
@@ -20,6 +20,42 @@ export interface PresentedError {
     docs?: string;
     /** What the API said, with the status and path: for "Details" and to copy. */
     detail: string;
+    /** Not connected: where it is connected (an in-app route, or a docs page under /docs/). */
+    connect?: { to: string; label: string };
+}
+
+/**
+ * The services and integrations an area reads from, by API path. When one is not set up on this Cairn its API is not
+ * mounted, so every call answers FastAPI's own 404 ("Not Found"); that is "not connected yet", not a missing object.
+ * `connect` is where it is connected: a page of the workspace, else its section of the operator manual.
+ */
+export const SERVICES: { path: RegExp; name: MessageKey; connect: string }[] = [
+    { path: /^\/v1\/airflow\b/, name: 'svc.airflow', connect: '/docs/administration.html#managed-airflow' },
+    { path: /^\/v1\/observability\b|^\/status\.json$/, name: 'svc.observability', connect: '/docs/administration.html#observability' },
+    { path: /^\/v1\/people\b|^\/scim\b/, name: 'svc.people', connect: '/docs/administration.html#user-provisioning-scim' },
+    { path: /^\/v1\/ml\b/, name: 'svc.mlflow', connect: '/docs/administration.html#machine-learning-mlflow-behind-cairn' },
+    { path: /^\/v1\/jobs\b/, name: 'svc.jobs', connect: '/docs/administration.html#scheduled-notebook-and-python-jobs' },
+    { path: /^\/governance\/audit\b/, name: 'svc.audit', connect: '/docs/administration.html#audit-log' },
+    { path: /^\/v1\/system-tables\b/, name: 'svc.systemTables', connect: '/docs/administration.html#system-tables' },
+    { path: /^\/v1\/dataplanes\b|^\/v1\/network\b|^\/v1\/compute\b|^\/v1\/app-installs\b/, name: 'svc.compute',
+        connect: '/compute' },
+    { path: /^\/marketplace\/publications\b/, name: 'svc.publications', connect: '/sharing' },
+    { path: /^\/sql\/(reports|metric-alerts)\b/, name: 'svc.sqlWorkspace', connect: '/docs/administration.html#sql-workspace' },
+];
+
+/** The service a request path belongs to, if it is one an admin connects. */
+export function serviceOf(path: string | undefined): (typeof SERVICES)[number] | undefined {
+    const p = (path ?? '').replace(/^\/cairn\/api/, '').split('?')[0];
+    return SERVICES.find((s) => s.path.test(p));
+}
+
+/** A 404 that means "this API is not mounted here" (the service is not set up), not "this object is gone". */
+export function isNotConnected(e: unknown): boolean {
+    const err = (e ?? {}) as ApiErrorLike;
+    if (errorStatus(e) !== 404) return false;
+    const said = apiDetail(err).trim();
+    // FastAPI's own answer for a route nobody mounted, or the demo's for an API it does not carry.
+    return /^not found$/i.test(said) || /^Not available in the demo\b/.test(said);
 }
 
 export interface ErrorContext {
@@ -78,6 +114,14 @@ export function presentError(e: unknown, t: T, ctx: ErrorContext = {}): Presente
         const title = ctx.action ? t('err.forbidden.title', { action: ctx.action }) : t('err.forbidden.view', { area });
         const hint = t('err.forbidden.hint', { area }) + (privilege ? ` ${t('err.forbidden.needs', { privilege })}` : '');
         return { ...base, kind: 'forbidden', title, hint };
+    }
+    if (status === 404 && isNotConnected(e)) {
+        const svc = serviceOf(err.path);
+        const service = svc ? t(svc.name) : ctx.area ?? t('svc.thisService');
+        return { ...base, kind: 'notConnected', title: t('err.notConnected.title', { service }),
+            hint: t('err.notConnected.hint', { service }),
+            connect: { to: svc?.connect ?? (ctx.docs ? `/docs/${ctx.docs}` : '/docs/administration.html'),
+                label: t('err.notConnected.connect') } };
     }
     if (status === 404) return { ...base, kind: 'notFound', title: t('err.notFound.title'), hint: t('err.notFound.hint') };
     if (status === 409) return { ...base, kind: 'conflict', title: t('err.conflict.title'), hint: said || t('err.conflict.hint') };

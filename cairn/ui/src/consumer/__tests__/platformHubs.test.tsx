@@ -76,7 +76,7 @@ it('a resource view lists an area from the API, shows a row, and runs a row acti
         'POST /ai/outbox/ob_1/approve': { ...item, status: 'approved' },
     }, calls);
     expect(await screen.findByText('Weekly revenue')).toBeTruthy();
-    expect(screen.getByText('pending')).toBeTruthy();
+    expect(screen.getByText('Pending').closest('[data-tone]')?.getAttribute('data-state')).toBe('pending');
     fireEvent.click(screen.getByText('Weekly revenue'));
     expect(await screen.findByText('cfo@northwind.example', { selector: '.ant-drawer *' })).toBeTruthy();
     fireEvent.click(within(document.querySelector('.ant-drawer') as HTMLElement).getByRole('button', { name: 'Approve and send' }));

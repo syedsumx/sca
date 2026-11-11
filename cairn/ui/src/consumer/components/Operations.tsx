@@ -14,11 +14,13 @@ import { useConsumerApi, useDheQuery } from '../api/hooks';
 import type { SavedQuery } from '../api/types';
 import { Alerts as SqlAlerts } from '../pages/DashboardsPage';
 import { AlertsTab, IncidentDrawer, SEVERITY_COLOR, useSearchParam } from '../pages/ObservabilityPage';
-import { describeError, notifyError } from './ErrorNotice';
+import { ErrorNotice, describeError, notifyError } from './ErrorNotice';
 import { PipelinesTab } from './PipelinesObs';
 import { StatusBadge, StatusTone } from './StatusBadge';
 import { Muted, Surface } from './tokens';
 import { shortUrn } from '../utils/format';
+import { isNotConnected } from '../utils/errors';
+import { useT } from '../i18n';
 
 /** How many objects of one kind are asked for their runs (the newest few runs each). */
 export const FANOUT = 20;
@@ -26,6 +28,8 @@ export const FANOUT = 20;
 export interface Problem {
     source: string;
     error: string;
+    /** The source's service is not set up here (its API is not mounted): shown as not connected, not as a problem. */
+    notConnected?: boolean;
 }
 
 export interface Gathered<T> {
@@ -45,7 +49,7 @@ async function gather<T>(sources: [string, () => Promise<T[]>][]): Promise<Gathe
     const problems: Problem[] = [];
     settled.forEach((s, i) => {
         if (s.status === 'fulfilled') rows.push(...s.value);
-        else problems.push({ source: sources[i][0], error: describeError(s.reason) });
+        else problems.push({ source: sources[i][0], error: describeError(s.reason), notConnected: isNotConnected(s.reason) });
     });
     return { rows, problems };
 }
@@ -158,10 +162,21 @@ const when = (ms: number | null | undefined) => (ms ? new Date(ms).toLocaleStrin
 const took = (a: number | null, b: number | null) => (a && b && b >= a ? `${((b - a) / 1000).toFixed(1)}s` : '');
 
 function Problems({ problems }: { problems: Problem[] }) {
-    if (!problems.length) return null;
+    const t = useT();
+    const failing = problems.filter((p) => !p.notConnected);
+    const absent = problems.filter((p) => p.notConnected).map((p) => p.source);
     return (
-        <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Some sources are not shown"
-            description={<ul style={{ margin: 0, paddingLeft: 18 }}>{problems.map((p) => <li key={p.source}><strong>{p.source}</strong>: {p.error}</li>)}</ul>} />
+        <>
+            {absent.length > 0 && (
+                <Muted style={{ display: 'block', marginBottom: 12 }} data-error-kind="notConnected">
+                    {t('err.notConnected.sources', { sources: absent.join(', ') })}
+                </Muted>
+            )}
+            {failing.length > 0 && (
+                <Alert type="info" showIcon style={{ marginBottom: 12 }} message="Some sources are not shown"
+                    description={<ul style={{ margin: 0, paddingLeft: 18 }}>{failing.map((p) => <li key={p.source}><strong>{p.source}</strong>: {p.error}</li>)}</ul>} />
+            )}
+        </>
     );
 }
 
@@ -186,7 +201,7 @@ export function AllRuns() {
                     options={['succeeded', 'failed', 'running', 'other'].map((v) => ({ value: v, label: v }))} />
                 <Button onClick={() => q.refresh()} loading={q.loading}>Refresh</Button>
             </Space>
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
             <Table<RunRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 aria-label="Runs"
@@ -320,7 +335,7 @@ export function AllIncidents() {
                     </Space>
                 </Surface>
             )}
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
             <Table<IncidentRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows} pagination={{ pageSize: 25, showSizeChanger: false }}
                 locale={{ emptyText: 'No open incidents' }}
@@ -405,7 +420,7 @@ export function AllAlerts() {
                     options={(Object.keys(ALERT_KIND_LABEL) as AlertKind[]).map((k) => ({ value: k, label: ALERT_KIND_LABEL[k] }))} />
                 <Button onClick={() => q.refresh()} loading={q.loading}>Refresh</Button>
             </Space>
-            {q.error && <Alert type="error" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             <Problems problems={q.data?.problems ?? []} />
             <Table<AlertDefRow> size="small" rowKey="key" loading={q.loading && !q.data} dataSource={rows}
                 pagination={rows.length > 25 ? { pageSize: 25, showSizeChanger: false } : false} locale={{ emptyText: 'No alerts yet' }}
@@ -456,7 +471,7 @@ export function StatusAnnouncements() {
                 What the public status page (<a href="/status" target="_blank" rel="noreferrer">/status</a>) tells people: incidents
                 and maintenance, announced by operators. Platform incidents you work on are in Incidents.
             </Muted>
-            {q.error && <Alert type="info" showIcon message={describeError(q.error)} />}
+            {q.error && <ErrorNotice error={q.error} />}
             {q.data && (
                 <Space wrap style={{ marginBottom: 12 }}>
                     <Tag>{q.data.state}</Tag>
