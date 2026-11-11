@@ -55,7 +55,7 @@ Every capability belongs to one of four rings around Cairn Core. A new capabilit
 
 Ordered by what an enterprise needs first to retire a Snowflake or Databricks contract. Each item has a definition of done that is tested end to end.
 
-**In this release:** L139 to L146. (The platform map in the web UI marks these rows as new; move the range when a release ships.)
+**In this release:** L139 to L147. (The platform map in the web UI marks these rows as new; move the range when a release ships.)
 
 | # | Item | Definition of done | Status |
 |---|---|---|---|
